@@ -21,7 +21,7 @@
 //! (attributes, text) go through `Document::replace_node_data`, which keeps
 //! the NodeId, so wrappers and the identity cache are untouched by them.
 
-use crate::DomDirty;
+use crate::{inner_text, DomDirty};
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::{Cell, RefCell};
@@ -284,6 +284,16 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         }
         // Documents and doctypes ignore textContent writes.
         ("setText", _) => Ok((JsValue::Null, DomDirty::Clean)),
+        // Cloning a document needs a second Document; not yet.
+        ("clone", NodeType::Document) => Err("NotSupportedError"),
+        // The clone is detached, so nothing needs a restyle yet.
+        ("clone", _) => {
+            let deep = matches!(args.get(3), Some(JsValue::Boolean(true)));
+            Ok((
+                node_id(Some(clone_node(document, &node, deep))),
+                DomDirty::Clean,
+            ))
+        }
         // HTML §8.5 innerHTML setter: parse as the element's contents (the
         // fragment parsing algorithm), then replace all children with it.
         ("setHTML", NodeType::Element { tag_name, .. }) => {
@@ -299,8 +309,24 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             }
             Ok((JsValue::Null, DomDirty::Style))
         }
+        ("setInnerText", NodeType::Element { .. }) => {
+            inner_text::set_inner_text(document, &node, string_arg(args, 3).unwrap_or(""));
+            Ok((JsValue::Null, DomDirty::Style))
+        }
         _ => Err("NotSupportedError"),
     }
+}
+
+/// DOM §4.4 "clone a node": a detached copy with fresh NodeIds, its
+/// descendants copied too when `deep`.
+fn clone_node(document: &Document, node: &Rc<Node>, deep: bool) -> Rc<Node> {
+    let copy = document.create_node(node.node_type.clone());
+    if deep {
+        for child in node.children() {
+            copy.append_child(clone_node(document, &child, true));
+        }
+    }
+    copy
 }
 
 fn node_id(node: Option<Rc<Node>>) -> JsValue {
@@ -471,6 +497,16 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
         "next" => node_id(node.next_sibling()),
         "prev" => node_id(node.previous_sibling()),
         "children" => id_list(node.children()),
+        // Space-separated (a name never holds whitespace) and sorted:
+        // rustkit-dom keeps attributes in a HashMap, so source order is gone.
+        "attrNames" => match &node.node_type {
+            NodeType::Element { attributes, .. } => {
+                let mut names: Vec<&str> = attributes.keys().map(String::as_str).collect();
+                names.sort_unstable();
+                JsValue::String(names.join(" "))
+            }
+            _ => JsValue::Null,
+        },
         "innerHTML" => {
             let mut out = String::new();
             serialize_children(node, &mut out);
@@ -481,6 +517,7 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
             serialize_node(node, &mut out);
             JsValue::String(out)
         }
+        "innerText" if node.is_element() => JsValue::String(inner_text::inner_text(node)),
         _ => JsValue::Undefined,
     }
 }
@@ -724,7 +761,8 @@ const WRAPPERS_JS: &str = r#"
         g[name] = ctor;
         return ctor;
     }
-    var Node = iface('Node');
+    var EventTarget = iface('EventTarget');
+    var Node = iface('Node', EventTarget);
     var Document = iface('Document', Node);
     var CharacterData = iface('CharacterData', Node);
     var Text = iface('Text', CharacterData);
@@ -868,9 +906,163 @@ const WRAPPERS_JS: &str = r#"
             if (p) p.removeChild(this);
         };
     });
+    // DOM §4.2.3 replace: validate by inserting `node` first (insertBefore
+    // throws before touching the tree), then take `child` out.
+    Node.prototype.replaceChild = function (node, child) {
+        if (arguments.length < 2) {
+            throw new TypeError("Failed to execute 'replaceChild' on 'Node': 2 arguments required.");
+        }
+        nodeArg(node, 'replaceChild');
+        nodeArg(child, 'replaceChild');
+        if (node === child) {
+            if (child.parentNode !== this) {
+                throw new DOMException("Failed to execute 'replaceChild' on 'Node'.", 'NotFoundError');
+            }
+            return child;
+        }
+        write('insert', this, node, child, 'replaceChild');
+        return write('remove', this, child, null, 'replaceChild');
+    };
+
+    // ParentNode.append/prepend and ChildNode.before/after/replaceWith
+    // (DOM §4.2.6, §4.2.8) take nodes or strings; a string becomes a Text
+    // node. DOM gathers them into a DocumentFragment; there are no
+    // fragments yet, so the nodes are detached first and then inserted one
+    // by one at the same reference point, which gives the same tree. A
+    // failed validity check part-way leaves the earlier nodes inserted.
+    function toNodes(args) {
+        var nodes = Array.prototype.map.call(args, function (a) {
+            return a != null && a[SLOT] ? a : g.document.createTextNode(String(a));
+        });
+        nodes.forEach(function (n) { var p = n.parentNode; if (p) p.removeChild(n); });
+        return nodes;
+    }
+    function insertAll(parent, nodes, ref, method) {
+        nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
+    }
+    function viableSibling(node, field, nodes) {
+        var s = node[field];
+        while (s && nodes.indexOf(s) >= 0) s = s[field];
+        return s;
+    }
+    Element.prototype.append = function () {
+        insertAll(this, toNodes(arguments), null, 'append');
+    };
+    Element.prototype.prepend = function () {
+        var nodes = toNodes(arguments);
+        insertAll(this, nodes, this.firstChild, 'prepend');
+    };
+    Element.prototype.replaceChildren = function () {
+        var nodes = toNodes(arguments);
+        while (this.firstChild) this.removeChild(this.firstChild);
+        insertAll(this, nodes, null, 'replaceChildren');
+    };
+    [Element, CharacterData].forEach(function (C) {
+        C.prototype.before = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var prev = viableSibling(this, 'previousSibling', args);
+            var nodes = toNodes(args);
+            insertAll(p, nodes, prev ? prev.nextSibling : p.firstChild, 'before');
+        };
+        C.prototype.after = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var next = viableSibling(this, 'nextSibling', args);
+            insertAll(p, toNodes(args), next, 'after');
+        };
+        C.prototype.replaceWith = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var next = viableSibling(this, 'nextSibling', args);
+            var nodes = toNodes(args);
+            if (this.parentNode === p) {
+                insertAll(p, nodes, this, 'replaceWith');
+                p.removeChild(this);
+            } else {
+                insertAll(p, nodes, next, 'replaceWith');
+            }
+        };
+    });
     Node.prototype.contains = function (other) {
         for (var n = other; n; n = n.parentNode) if (n === this) return true;
         return false;
+    };
+    Node.prototype.isSameNode = function (other) { return this === other; };
+    Node.prototype.getRootNode = function () {
+        var n = this;
+        while (n.parentNode) n = n.parentNode;
+        return n;
+    };
+    Node.prototype.cloneNode = function (deep) {
+        return wrap(setData(this, 'clone', !!deep, null, 'cloneNode'));
+    };
+    // DOM §4.4 "equals": same type, name, attributes (in any order) and
+    // data, and equal children in order.
+    function equalNodes(a, b) {
+        if (a.nodeType !== b.nodeType || a.nodeName !== b.nodeName) return false;
+        if (a.nodeType === 1) {
+            var names = a.getAttributeNames();
+            if (names.join(' ') !== b.getAttributeNames().join(' ')) return false;
+            for (var k = 0; k < names.length; k++) {
+                if (a.getAttribute(names[k]) !== b.getAttribute(names[k])) return false;
+            }
+        } else if (a.nodeType === 3 || a.nodeType === 7 || a.nodeType === 8) {
+            if (a.textContent !== b.textContent) return false;
+        }
+        var ac = a.childNodes, bc = b.childNodes;
+        if (ac.length !== bc.length) return false;
+        for (var i = 0; i < ac.length; i++) if (!equalNodes(ac[i], bc[i])) return false;
+        return true;
+    }
+    Node.prototype.isEqualNode = function (other) {
+        slotOf(this);
+        if (other === null) return false;
+        nodeArg(other, 'isEqualNode');
+        return equalNodes(this, other);
+    };
+    var positions = { DOCUMENT_POSITION_DISCONNECTED: 1, DOCUMENT_POSITION_PRECEDING: 2,
+                      DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_CONTAINS: 8,
+                      DOCUMENT_POSITION_CONTAINED_BY: 16,
+                      DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC: 32 };
+    Object.keys(positions).forEach(function (k) { Node[k] = Node.prototype[k] = positions[k]; });
+    function ancestry(n) { var out = []; for (; n; n = n.parentNode) out.unshift(n); return out; }
+    // DOM §4.4 compareDocumentPosition, answered for `other` relative to
+    // `this`. Nodes in different trees get a consistent order by NodeId.
+    Node.prototype.compareDocumentPosition = function (other) {
+        var o = nodeArg(other, 'compareDocumentPosition'), s = slotOf(this);
+        if (this === other) return 0;
+        var a = ancestry(this), b = ancestry(other);
+        if (a[0] !== b[0]) return 1 | 32 | (s.id < o.id ? 4 : 2);
+        var i = 0;
+        while (i < a.length && i < b.length && a[i] === b[i]) i++;
+        if (i === a.length) return 16 | 4;
+        if (i === b.length) return 8 | 2;
+        for (var n = a[i]; n; n = n.nextSibling) if (n === b[i]) return 4;
+        return 2;
+    };
+    // DOM §4.4 normalize: merge adjacent Text nodes, drop empty ones.
+    Node.prototype.normalize = function () {
+        for (var n = this.firstChild; n; ) {
+            var next = n.nextSibling;
+            if (n.nodeType === 3) {
+                var data = n.data;
+                while (next && next.nodeType === 3) {
+                    data += next.data;
+                    var after = next.nextSibling;
+                    this.removeChild(next);
+                    next = after;
+                }
+                if (data === '') this.removeChild(n);
+                else if (data !== n.data) n.data = data;
+            } else {
+                n.normalize();
+            }
+            n = next;
+        }
     };
     ['data', 'nodeValue'].forEach(function (k) {
         accessor(CharacterData.prototype, k, function () { return info(this, 'text'); },
@@ -883,6 +1075,8 @@ const WRAPPERS_JS: &str = r#"
         function (v) { setData(this, 'setHTML', text(v), null, 'innerHTML'); });
     getter(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); });
     getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
+    accessor(HTMLElement.prototype, 'innerText', function () { return info(this, 'innerText'); },
+        function (v) { setData(this, 'setInnerText', text(v), null, 'innerText'); });
     [['id', 'id'], ['className', 'class']].forEach(function (p) {
         accessor(Element.prototype, p[0], function () { return this.getAttribute(p[1]) || ''; },
             function (v) { this.setAttribute(p[1], v); });
@@ -891,6 +1085,85 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this);
         return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
     });
+
+    // ParentNode / NonDocumentTypeChildNode element traversal (DOM §4.2.6,
+    // §4.2.7), over the same tree reads as childNodes and the siblings.
+    function elementChildren(o) {
+        return Array.prototype.filter.call(o.childNodes, function (n) { return n.nodeType === 1; });
+    }
+    function elementSibling(o, field) {
+        var n = o[field];
+        while (n && n.nodeType !== 1) n = n[field];
+        return n;
+    }
+    [Element, Document].forEach(function (C) {
+        getter(C.prototype, 'firstElementChild', function () { return elementChildren(this)[0] || null; });
+        getter(C.prototype, 'lastElementChild', function () {
+            var c = elementChildren(this); return c[c.length - 1] || null;
+        });
+        getter(C.prototype, 'childElementCount', function () { return elementChildren(this).length; });
+    });
+    getter(Document.prototype, 'children', function () {
+        var s = slotOf(this);
+        return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
+    });
+    [Element, CharacterData].forEach(function (C) {
+        getter(C.prototype, 'nextElementSibling', function () { return elementSibling(this, 'nextSibling'); });
+        getter(C.prototype, 'previousElementSibling', function () {
+            return elementSibling(this, 'previousSibling');
+        });
+    });
+    // A node is connected when its root is the current document; an old
+    // document's wrappers have no parent and are never connected.
+    getter(Node.prototype, 'isConnected', function () {
+        var n = this;
+        while (n.parentNode) n = n.parentNode;
+        return n === g.document && slotOf(n).gen === gen;
+    });
+
+    // HTMLElement reflected attributes (HTML §3.2.6) and dataset (§3.2.6.6).
+    ['title', 'lang', 'dir'].forEach(function (k) {
+        accessor(HTMLElement.prototype, k, function () { return this.getAttribute(k) || ''; },
+            function (v) { this.setAttribute(k, v); });
+    });
+    accessor(HTMLElement.prototype, 'hidden', function () { return this.hasAttribute('hidden'); },
+        function (v) { this.toggleAttribute('hidden', !!v); });
+    var datasets = new WeakMap();
+    function dataAttr(p) {
+        if (typeof p !== 'string' || /-[a-z]/.test(p)) return null;
+        return 'data-' + p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
+    }
+    getter(HTMLElement.prototype, 'dataset', function () {
+        slotOf(this);
+        var el = this, d = datasets.get(el);
+        if (d) return d;
+        d = new Proxy({}, {
+            get: function (t, p) {
+                var a = dataAttr(p);
+                if (!a) return undefined;
+                var v = el.getAttribute(a);
+                return v === null ? undefined : v;
+            },
+            set: function (t, p, v) {
+                var a = dataAttr(p);
+                if (!a) {
+                    throw new DOMException("Failed to set a named property on 'DOMStringMap': '" +
+                        String(p) + "' is not a valid property name.", 'SyntaxError');
+                }
+                el.setAttribute(a, String(v));
+                return true;
+            },
+            has: function (t, p) { var a = dataAttr(p); return !!a && el.hasAttribute(a); },
+            deleteProperty: function (t, p) {
+                var a = dataAttr(p);
+                if (a) el.removeAttribute(a);
+                return true;
+            }
+        });
+        datasets.set(el, d);
+        return d;
+    });
+
     Element.prototype.getAttribute = function (name) {
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
     };
@@ -910,6 +1183,53 @@ const WRAPPERS_JS: &str = r#"
         if (want && !has) this.setAttribute(name, '');
         if (!want && has) this.removeAttribute(name);
         return want;
+    };
+    Element.prototype.getAttributeNames = function () {
+        var names = info(this, 'attrNames');
+        return names ? names.split(' ') : [];
+    };
+    Element.prototype.hasAttributes = function () { return this.getAttributeNames().length > 0; };
+
+    // DOM "insert adjacent" (insertAdjacentElement/Text) and HTML §8.5
+    // insertAdjacentHTML. Answers the parent and the node to insert before.
+    function adjacentSpot(el, where, method) {
+        var w = String(where).toLowerCase();
+        if (w === 'beforebegin') return [el.parentNode, el];
+        if (w === 'afterbegin') return [el, el.firstChild];
+        if (w === 'beforeend') return [el, null];
+        if (w === 'afterend') return [el.parentNode, el.nextSibling];
+        throw new DOMException("Failed to execute '" + method + "' on 'Element': The value provided ('" +
+            where + "') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.",
+            'SyntaxError');
+    }
+    Element.prototype.insertAdjacentElement = function (where, element) {
+        if (!(element instanceof Element)) {
+            throw new TypeError("Failed to execute 'insertAdjacentElement' on 'Element': " +
+                "parameter 2 is not of type 'Element'.");
+        }
+        var spot = adjacentSpot(this, where, 'insertAdjacentElement');
+        if (!spot[0]) return null;
+        return spot[0].insertBefore(element, spot[1]);
+    };
+    Element.prototype.insertAdjacentText = function (where, data) {
+        var t = g.document.createTextNode(String(data));
+        var spot = adjacentSpot(this, where, 'insertAdjacentText');
+        if (spot[0]) spot[0].insertBefore(t, spot[1]);
+    };
+    Element.prototype.insertAdjacentHTML = function (where, html) {
+        var spot = adjacentSpot(this, where, 'insertAdjacentHTML');
+        if (!spot[0] || spot[0].nodeType === 9) {
+            throw new DOMException("Failed to execute 'insertAdjacentHTML' on 'Element': " +
+                "The element has no parent.", 'NoModificationAllowedError');
+        }
+        // The fragment parses in the context of the element it lands in
+        // (<html> parses as <body>), through a detached holder of that name.
+        var ctx = spot[0].localName === 'html' ? 'body' : spot[0].localName;
+        var holder = create('element', ctx, 'insertAdjacentHTML');
+        holder.innerHTML = String(html);
+        Array.prototype.slice.call(holder.childNodes).forEach(function (n) {
+            spot[0].insertBefore(n, spot[1]);
+        });
     };
 
     // classList: a DOMTokenList over the class attribute, one per element.
@@ -1142,6 +1462,141 @@ const WRAPPERS_JS: &str = r#"
         });
     });
 
+    // EventTarget (DOM §2.7) for node wrappers, document and window: a
+    // JS-side listener registry, and dispatch through capture, target and
+    // bubble phases along the wrapper tree (then document, then window).
+    // Engine input events still dispatch Rust-side (events.rs, pin §4);
+    // this is what page script registers and fires itself.
+    var LISTENERS = new WeakMap();
+    var STOP = Symbol('rustkit.stop'), STOP_NOW = Symbol('rustkit.stopNow');
+    function thisTarget(o) { return o == null ? g : o; }
+    function flag(opts, key) {
+        return typeof opts === 'boolean' ? key === 'capture' && opts : !!(opts && opts[key]);
+    }
+    EventTarget.prototype.addEventListener = function (type, cb, opts) {
+        if (typeof cb !== 'function' && !(cb && typeof cb.handleEvent === 'function')) return;
+        var t = thisTarget(this), all = LISTENERS.get(t);
+        if (!all) { all = {}; LISTENERS.set(t, all); }
+        type = String(type);
+        var list = all[type] || (all[type] = []), capture = flag(opts, 'capture');
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].cb === cb && list[i].capture === capture) return;
+        }
+        list.push({ cb: cb, capture: capture, once: flag(opts, 'once'), removed: false });
+    };
+    EventTarget.prototype.removeEventListener = function (type, cb, opts) {
+        var all = LISTENERS.get(thisTarget(this)), list = all && all[String(type)];
+        if (!list) return;
+        var capture = flag(opts, 'capture');
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].cb === cb && list[i].capture === capture) {
+                list[i].removed = true;
+                list.splice(i, 1);
+                return;
+            }
+        }
+    };
+    // A listener's exception goes to the engine's error log, not to the
+    // dispatcher (as in a browser, where it reaches window.onerror).
+    function callListener(t, cb, event) {
+        try {
+            return typeof cb === 'function' ? cb.call(t, event) : cb.handleEvent(event);
+        } catch (e) {
+            var msg;
+            try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
+            if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
+        }
+    }
+    function invoke(t, event, phase, capture) {
+        event.currentTarget = t;
+        event.eventPhase = phase;
+        var all = LISTENERS.get(t), list = all && all[event.type];
+        if (list) {
+            list = list.slice();
+            for (var i = 0; i < list.length && !event[STOP_NOW]; i++) {
+                var l = list[i];
+                if (l.removed || l.capture !== capture) continue;
+                if (l.once) t.removeEventListener(event.type, l.cb, { capture: l.capture });
+                callListener(t, l.cb, event);
+            }
+        }
+        // The on<type> handler runs with the non-capture listeners.
+        var h = capture || event[STOP_NOW] ? null : t['on' + event.type];
+        if (typeof h === 'function' && callListener(t, h, event) === false && event.cancelable) {
+            event.defaultPrevented = true;
+        }
+    }
+    // A node's parent, then document's is window (except for `load`, which
+    // never reaches window from a node).
+    function eventParent(n, event) {
+        if (n === g) return null;
+        if (n === doc) return event.type === 'load' ? null : g;
+        return n[SLOT] ? n.parentNode : null;
+    }
+    EventTarget.prototype.dispatchEvent = function (event) {
+        if (event == null || typeof event !== 'object' || event.type === undefined) {
+            throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': " +
+                "parameter 1 is not of type 'Event'.");
+        }
+        var t = thisTarget(this), path = [], i;
+        for (var n = t; n; n = eventParent(n, event)) path.push(n);
+        event.target = t;
+        for (i = path.length - 1; i > 0 && !event[STOP]; i--) invoke(path[i], event, 1, true);
+        if (!event[STOP]) invoke(t, event, 2, true);
+        if (!event[STOP]) invoke(t, event, 2, false);
+        if (event.bubbles) {
+            for (i = 1; i < path.length && !event[STOP]; i++) invoke(path[i], event, 3, false);
+        }
+        event[STOP] = event[STOP_NOW] = false;
+        event.currentTarget = null;
+        event.eventPhase = 0;
+        return !event.defaultPrevented;
+    };
+
+    function Event(type, init) {
+        if (!(this instanceof Event)) {
+            throw new TypeError("Failed to construct 'Event': Please use the 'new' operator.");
+        }
+        if (arguments.length < 1) {
+            throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present.");
+        }
+        init = init || {};
+        this.type = String(type);
+        this.bubbles = !!init.bubbles;
+        this.cancelable = !!init.cancelable;
+        this.composed = !!init.composed;
+        this.defaultPrevented = false;
+        this.target = null;
+        this.currentTarget = null;
+        this.eventPhase = 0;
+        this.isTrusted = false;
+        this.timeStamp = Date.now();
+    }
+    Event.prototype.preventDefault = function () { if (this.cancelable) this.defaultPrevented = true; };
+    Event.prototype.stopPropagation = function () { this[STOP] = true; };
+    Event.prototype.stopImmediatePropagation = function () { this[STOP] = this[STOP_NOW] = true; };
+    getter(Event.prototype, 'srcElement', function () { return this.target; });
+    Object.defineProperty(Event.prototype, Symbol.toStringTag, { value: 'Event' });
+    ['NONE', 'CAPTURING_PHASE', 'AT_TARGET', 'BUBBLING_PHASE'].forEach(function (k, i) {
+        Event[k] = Event.prototype[k] = i;
+    });
+    function CustomEvent(type, init) {
+        if (!(this instanceof CustomEvent)) {
+            throw new TypeError("Failed to construct 'CustomEvent': Please use the 'new' operator.");
+        }
+        Event.apply(this, arguments);
+        this.detail = init && init.detail !== undefined ? init.detail : null;
+    }
+    CustomEvent.prototype = Object.create(Event.prototype, {
+        constructor: { value: CustomEvent, writable: true, configurable: true }
+    });
+    Object.defineProperty(CustomEvent.prototype, Symbol.toStringTag, { value: 'CustomEvent' });
+    g.Event = Event;
+    g.CustomEvent = CustomEvent;
+    HTMLElement.prototype.click = function () {
+        this.dispatchEvent(new Event('click', { bubbles: true, cancelable: true }));
+    };
+
     // The global `document` becomes the Document wrapper.
     var doc = g.document;
     Object.setPrototypeOf(doc, Document.prototype);
@@ -1149,6 +1604,12 @@ const WRAPPERS_JS: &str = r#"
     var stubCreateElement = doc.createElement;
     delete doc.createElement;
     delete doc.createTextNode;
+    // Document and window trade the lifecycle's per-object listener lists
+    // for the shared EventTarget, so element events bubble up to them.
+    ['addEventListener', 'removeEventListener', 'dispatchEvent'].forEach(function (k) {
+        delete doc[k];
+        g[k] = EventTarget.prototype[k];
+    });
 
     g.__rustkit_dom_reset = function (newGen) {
         gen = newGen;
@@ -1160,3 +1621,176 @@ const WRAPPERS_JS: &str = r#"
     g.__rustkit_dom_reset(0);
 })(globalThis);
 "#;
+
+#[cfg(test)]
+mod tests {
+    use crate::{DomBindings, DomDirty};
+    use rustkit_dom::Document;
+    use rustkit_js::{JsRuntime, JsValue};
+    use std::rc::Rc;
+
+    const PAGE: &str = r#"<!DOCTYPE html><html><head><title>T</title></head>
+<body><div id="main" class="box"><p class="x">Hello, <b>world</b>!</p><!--c--><p class="x">Two</p></div>
+<p id="outside" class="x">Out</p></body></html>"#;
+
+    fn bound(html: &str) -> (DomBindings, Rc<Document>) {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let document = Rc::new(Document::parse_html(html).unwrap());
+        bindings.set_document(document.clone()).unwrap();
+        (bindings, document)
+    }
+
+    fn eval_string(bindings: &DomBindings, script: &str) -> String {
+        match bindings.evaluate(script).unwrap() {
+            JsValue::String(s) => s,
+            other => panic!("{script} evaluated to {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_node_copies_into_fresh_detached_nodes() {
+        let (b, doc) = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'), s = m.cloneNode(), d = m.cloneNode(true); \
+                 var t = m.firstChild.firstChild.cloneNode(); \
+                 [s.parentNode === null, s.childNodes.length, s.className, s.id, \
+                  d.childNodes.length, d.textContent, d.firstChild !== m.firstChild, \
+                  d.firstChild.className, d.innerHTML === m.innerHTML, \
+                  t.data, t.parentNode === null, document.getElementById('main') === m, \
+                  document.querySelectorAll('.box').length].join('|')"
+            ),
+            "true|0|box|main|3|Hello, world!Two|true|x|true|Hello, |true|true|1"
+        );
+        assert_eq!(
+            b.take_dirty(),
+            DomDirty::Clean,
+            "a detached clone marks nothing"
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "document.body.appendChild(d); \
+                 var r = [document.querySelectorAll('.box').length]; \
+                 try { document.cloneNode(); } catch (e) { r.push(e.name); } r.join('|')"
+            ),
+            "2|NotSupportedError"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        // The clone is in the Rust tree the cascade reads.
+        let body = doc.body().unwrap();
+        assert_eq!(
+            body.last_child().unwrap().text_content(),
+            "Hello, world!Two"
+        );
+    }
+
+    #[test]
+    fn attribute_names_and_node_equality() {
+        let (b, _) = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'), r = []; m.setAttribute('data-z', '1'); \
+                 var i = document.createElement('i'); \
+                 r.push(m.getAttributeNames().join(','), i.getAttributeNames().length, \
+                        i.hasAttributes(), m.hasAttributes()); \
+                 var ps = document.querySelectorAll('.x'), c = m.cloneNode(true); \
+                 r.push(ps[0].isEqualNode(ps[1]), c.isEqualNode(m), m.isEqualNode(null), \
+                        m.isSameNode(m), c.isSameNode(m)); \
+                 c.lastChild.textContent = 'Changed'; r.push(c.isEqualNode(m)); \
+                 var x = document.createElement('a'), y = document.createElement('a'); \
+                 x.setAttribute('p', '1'); x.setAttribute('q', '2'); \
+                 y.setAttribute('q', '2'); y.setAttribute('p', '1'); r.push(x.isEqualNode(y)); \
+                 y.setAttribute('p', '3'); r.push(x.isEqualNode(y)); \
+                 try { m.isEqualNode({}); } catch (e) { r.push(e.name); } \
+                 r.join('|')"
+            ),
+            "class,data-z,id|0|false|true|false|true|false|true|false|false|true|false|TypeError"
+        );
+    }
+
+    #[test]
+    fn compare_document_position_orders_nodes() {
+        let (b, _) = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'), o = document.getElementById('outside'), \
+                     w = document.querySelector('b'); \
+                 [m.compareDocumentPosition(o), o.compareDocumentPosition(m), \
+                  m.compareDocumentPosition(w), w.compareDocumentPosition(m), \
+                  m.compareDocumentPosition(m), document.compareDocumentPosition(w), \
+                  Node.DOCUMENT_POSITION_FOLLOWING, m.DOCUMENT_POSITION_CONTAINED_BY].join('|')"
+            ),
+            "4|2|20|10|0|20|4|16"
+        );
+        // Disconnected nodes: flagged, and ordered one way consistently.
+        assert_eq!(
+            eval_string(
+                &b,
+                "var x = document.createElement('x'), p = m.compareDocumentPosition(x), \
+                     q = x.compareDocumentPosition(m); \
+                 [p & 33, q & 33, (p & 6) + (q & 6)].join('|')"
+            ),
+            "33|33|6"
+        );
+    }
+
+    #[test]
+    fn normalize_merges_adjacent_text_and_drops_empty_text() {
+        let (b, _) = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'); m.textContent = ''; \
+                 ['a', '', 'b'].forEach(function (s) { m.appendChild(document.createTextNode(s)); }); \
+                 var i = document.createElement('i'); i.appendChild(document.createTextNode('')); \
+                 m.appendChild(i); m.appendChild(document.createTextNode('c')); \
+                 var first = m.firstChild; m.normalize(); \
+                 [m.childNodes.length, m.firstChild === first, first.data, \
+                  i.childNodes.length, m.lastChild.data].join('|')"
+            ),
+            "3|true|ab|0|c"
+        );
+    }
+
+    #[test]
+    fn insert_adjacent_html_element_and_text() {
+        let (b, doc) = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'), r = []; \
+                 m.insertAdjacentHTML('beforebegin', '<h1 id=h>T</h1>'); \
+                 m.insertAdjacentHTML('afterBegin', '<span>s1</span><span>s2</span>'); \
+                 m.insertAdjacentHTML('beforeend', 'end<em>!</em>'); \
+                 m.insertAdjacentHTML('afterend', '<hr id=r>'); \
+                 r.push(m.previousSibling.id, m.firstChild.textContent, \
+                        m.firstChild.nextSibling.textContent, m.lastChild.tagName, \
+                        m.lastChild.previousSibling.data, m.nextSibling.id); \
+                 var e = document.createElement('u'), d = document.createElement('div'); \
+                 r.push(m.insertAdjacentElement('afterend', e) === e, m.nextSibling === e, \
+                        d.insertAdjacentElement('beforebegin', e) === null, \
+                        e.parentNode === document.body); \
+                 m.insertAdjacentText('afterbegin', 'txt'); r.push(m.firstChild.data); \
+                 try { m.insertAdjacentHTML('middle', 'x'); } catch (x) { r.push(x.name); } \
+                 try { document.documentElement.insertAdjacentHTML('beforebegin', 'x'); } \
+                 catch (x) { r.push(x.name); } \
+                 try { d.insertAdjacentHTML('afterend', 'x'); } catch (x) { r.push(x.name); } \
+                 try { m.insertAdjacentElement('beforeend', 'str'); } catch (x) { r.push(x.name); } \
+                 document.documentElement.insertAdjacentHTML('beforeend', '<p id=late>L</p>'); \
+                 r.push(document.getElementById('late').parentNode === document.documentElement); \
+                 r.join('|')"
+            ),
+            "h|s1|s2|EM|end|r|true|true|true|true|txt|\
+             SyntaxError|NoModificationAllowedError|NoModificationAllowedError|TypeError|true"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        assert_eq!(
+            doc.get_element_by_id("main").unwrap().text_content(),
+            "txts1s2Hello, world!Twoend!"
+        );
+    }
+}
