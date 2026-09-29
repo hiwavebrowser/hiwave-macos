@@ -314,3 +314,27 @@ Newest section last.
 1. **Unblock rung 1:** allowlist the MDN clone, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. Without it, the 80% exit metric can't be reached by Wednesday.
 2. **Point Pollux (the temporary R2) at #343, #356 and #357.** All three are receipted with 0 changed.
 3. **§3.4 forced-layout pin from Prometheus** (for `getBoundingClientRect`/`offset*`), or pause the lane's cadence. That's the only on-plan work left that doesn't need fixtures.
+
+## 2026-09-29 12:10
+
+**Metric:** still rung 0, and rung 1 is still 0/0 vs Chrome 148, because MDN is still absent. The mutation surface grew by one PR.
+- **#343 landed at 09:52** (747c17a). Develop is now d021be5.
+- **#356 and #357** are unchanged, and both are still MERGEABLE against d021be5 (`merge-tree` is clean). Neither has an R1 or R2 yet.
+
+**PRs** (3 of 3 open, at the cap)
+- **#359 (new)** `atlas/js-dom-fragment` @ **dd997e4**, from develop d021be5. This adds a Rust-backed `DocumentFragment` with a new `NodeType::DocumentFragment`.
+  - Before this, `createDocumentFragment()` returned the legacy stub, so `ul.appendChild(frag)` threw TypeError. That's the standard list-building pattern.
+  - Inserting a fragment moves its children through the existing `mutate` path, so it gets the §3 Style mark and the one flush.
+  - Tests: bindings 59/59, engine headless 272/272.
+  - Receipt: 26/26, **0 changed** vs develop 062f73a and #357. `merge-tree` against #356 and #357 is clean.
+- **Dropped a duplicate:** I started `insertAdjacent*`, then found #356 already ships it, along with `getAttributeNames`, `isEqualNode`, `compareDocumentPosition` and `normalize`. I deleted the branch unpushed.
+
+**Tooling notes**
+- Aleph doesn't index JS inside Rust raw strings (`WRAPPERS_JS`), so API-surface questions need grep on a non-indexed worktree.
+- The permission rules reject the `CARGO_TARGET_DIR=…` env prefix. `cargo test --target-dir …` works.
+- The receipt ran as `parity_test.py`'s own in-worktree release build, because symlinking the lane binary or adding a `.cargo/config` was blocked.
+
+**Decisions for Pete** (end_date is tomorrow)
+1. **Unblock rung 1:** allowlist the MDN clone, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. Without it, the 80% exit metric is out of reach.
+2. **Point Pollux (the temporary R2) and Prometheus R1 at #356, #357 and #359.** None has a review yet, and the lane is at its cap.
+3. **§3.4 forced-layout pin**, or pause the cadence. With the mutation surface in review, layout reads are the last on-plan work that doesn't need fixtures.
