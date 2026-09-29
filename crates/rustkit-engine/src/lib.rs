@@ -4362,21 +4362,36 @@ impl Engine {
         // attribute names or tag (by their base selector), plus the universal
         // ones: github's ~1,000 `::before`/`::after` rules were walked in full
         // for every element, half of all cascade time.
-        let rules: Box<dyn Iterator<Item = (Option<&[SubjectKey]>, &Rule)>> =
-            match (index.as_ref(), indexed) {
-                (Some(ix), Some(buckets)) => Box::new(
-                    buckets
-                        .candidates(tag_name, attributes)
-                        .into_iter()
-                        .map(move |g| {
-                            let keys = ix.pseudo_keys[g as usize].as_deref().map(Vec::as_slice);
-                            (keys, ix.rule(stylesheets, g))
-                        }),
-                ),
-                _ => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).map(|r| (None, r))),
-            };
-
-        for (indexed_keys, rule) in rules {
+        if let (Some(ix), Some(buckets)) = (index.as_ref(), indexed) {
+            // Every rule in these buckets ends in the pseudo, and the index
+            // holds its prepared base selector, base keys and specificity:
+            // the same tests as the string path below, computed once.
+            for g in buckets.candidates(tag_name, attributes) {
+                let gi = g as usize;
+                let Some(prepared) = ix.pseudo_prepared[gi].as_deref() else {
+                    continue;
+                };
+                // No base keys means an empty base, which admits any element.
+                let admitted = ix.pseudo_keys[gi]
+                    .as_deref()
+                    .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes));
+                if admitted
+                    && SelectorMatcher.selector_matches_prepared(
+                        prepared,
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    )
+                {
+                    matching_rules.push((ix.specificity[gi], ix.rule(stylesheets, g)));
+                }
+            }
+        }
+        // Without an index (or for another pseudo), walk every rule.
+        let unindexed = indexed.is_none();
+        for rule in stylesheets.iter().flat_map(|s| s.rules.iter()).filter(|_| unindexed) {
             {
                 let selector = &rule.selector;
 
@@ -4392,12 +4407,7 @@ impl Engine {
                     // subject prefilter first, exactly as the cascade does.
                     // A bare `::before` has no subject to prefilter on.
                     if (base_selector.trim().is_empty()
-                        || match indexed_keys {
-                            Some(keys) => Self::keys_may_match(keys, tag_name, attributes),
-                            None => {
-                                self.rule_may_match(base_selector.trim(), tag_name, attributes)
-                            }
-                        })
+                        || self.rule_may_match(base_selector.trim(), tag_name, attributes))
                         && SelectorMatcher.selector_matches(
                         base_selector.trim(),
                         tag_name,
@@ -7754,6 +7764,7 @@ impl Engine {
             rules: Vec::new(),
             keys: Vec::new(),
             pseudo_keys: Vec::new(),
+            pseudo_prepared: Vec::new(),
             specificity: Vec::new(),
             prepared: Vec::new(),
             main: RuleBuckets::default(),
@@ -7772,6 +7783,7 @@ impl Engine {
                 ix.specificity.push(SelectorMatcher.selector_specificity(&rule.selector));
                 ix.prepared.push(SelectorMatcher.prepared_selector(rule.selector.trim()));
                 let mut pseudo_keys = None;
+                let mut pseudo_prepared = None;
                 // Same test as create_pseudo_element's (the single-colon
                 // form covers the double-colon one). Filed under the keys of
                 // the BASE selector, the one create_pseudo_element prefilters:
@@ -7785,6 +7797,7 @@ impl Engine {
                         continue;
                     }
                     let base = pseudo_base_selector(&rule.selector, pseudo, suffix);
+                    pseudo_prepared = Some(SelectorMatcher.prepared_selector(base.trim()));
                     if base.is_empty() {
                         buckets.universal.push(g);
                     } else {
@@ -7797,6 +7810,7 @@ impl Engine {
                     }
                 }
                 ix.pseudo_keys.push(pseudo_keys);
+                ix.pseudo_prepared.push(pseudo_prepared);
             }
         }
         ix
@@ -18003,6 +18017,73 @@ mod rule_prefilter_tests {
     }
 
     #[test]
+    fn indexed_pseudo_styles_match_the_string_path() {
+        // The indexed path matches each pseudo rule by the index's prepared
+        // base selector and stored specificity; it must pick the same rules,
+        // in the same order, as matching the base selector string.
+        let css = "::before { content: \"bare\"; color: red }\n\
+                   .a::before { content: \"a\" }\n\
+                   div.a:before { color: blue }\n\
+                   #i.a::before { content: \"id\" !important }\n\
+                   .a::before { content: \"late\" }\n\
+                   ul > li.b::after { content: \"child\" }\n\
+                   nav li.b::after { content: \"desc\"; color: green }\n\
+                   li.b + li.b::after { content: \"adj\" }\n\
+                   li:first-child::after { content: \"first\" }\n\
+                   :is(.a, .b)::after { color: purple }\n\
+                   .a:frobnicate::before { content: \"never\" }\n\
+                   [data-x]::after { content: attr(data-x) }\n\
+                   .a , .b::after { content: \"list\" }\n";
+        let sheet = Stylesheet::parse(css).expect("css");
+        let sheets = std::slice::from_ref(&sheet);
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let li = |c: &str| ("li".to_string(), vec![c.to_string()], None::<String>);
+        let ancestors_sets: [Vec<(String, Vec<String>, Option<String>)>; 3] = [
+            vec![],
+            vec![("ul".to_string(), vec![], None), ("nav".to_string(), vec![], None)],
+            vec![li("b"), ("ol".to_string(), vec![], None)],
+        ];
+        let elements = [
+            ("div", attrs(&[("class", "a")])),
+            ("div", attrs(&[("class", "a"), ("id", "i")])),
+            ("li", attrs(&[("class", "b")])),
+            ("li", attrs(&[("class", "b"), ("data-x", "v")])),
+            ("span", attrs(&[])),
+        ];
+        let sibling_sets: [(Vec<SiblingKey>, SiblingContext); 2] = [
+            (vec![], SiblingContext::SOLE),
+            (
+                vec![("li".to_string(), vec!["b".to_string()], None, ElementState::default())],
+                SiblingContext { index: 1, count: 2, type_index: 1, type_count: 2, has_children: false },
+            ),
+        ];
+        let styles = |indexed: bool| {
+            let _scope = indexed.then(|| RuleIndexScope::install(engine.build_rule_index(sheets)));
+            let mut out = Vec::new();
+            for (tag, a) in &elements {
+                for ancestors in &ancestors_sets {
+                    for (siblings, sib) in &sibling_sets {
+                        for pseudo in ["::before", "::after"] {
+                            out.push(format!(
+                                "{tag} {a:?} {ancestors:?} {pseudo}: {:?}",
+                                engine.pseudo_element_style(
+                                    tag, a, sheets, ancestors, siblings, *sib, pseudo,
+                                )
+                            ));
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let (plain, indexed) = (styles(false), styles(true));
+        assert!(plain.iter().any(|s| s.contains("Some(")), "the fixture must generate boxes");
+        for (p, i) in plain.iter().zip(&indexed) {
+            assert_eq!(p, i);
+        }
+    }
+
+    #[test]
     fn rule_index_specificity_matches_selector_specificity() {
         // The cascade sorts matched rules by the index's stored specificity;
         // it must be exactly what `selector_specificity` computes.
@@ -19567,6 +19648,11 @@ struct RuleIndex {
     /// string for every candidate of every element (24% of github's cascade).
     keys: Vec<Rc<Vec<SubjectKey>>>,
     pseudo_keys: Vec<Option<Rc<Vec<SubjectKey>>>>,
+    /// Global rule index -> for a `:before`/`:after` rule, its prepared
+    /// (trimmed) base selector, empty base included. `pseudo_element_style`
+    /// matched the base by string, re-hashing it into the prepared cache for
+    /// every candidate of every element (~20% of wikipedia's cascade).
+    pseudo_prepared: Vec<Option<Rc<PreparedSelector>>>,
     /// Global rule index -> `selector_specificity` of its selector, so a
     /// matched rule doesn't re-scan its selector string on every element.
     specificity: Vec<(usize, usize, usize)>,
