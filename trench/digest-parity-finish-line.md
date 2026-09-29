@@ -13158,3 +13158,55 @@ lane by construction; the ratchet is what to read instead.
   `n69_mutation_sweep.py` (asserts its landing site AND that each guard ran).
 - Decisions 1-3 of this entry are open. Decision 2 (the artifact host) cost the
   same thing it cost on 09-26, 09-27 and 09-28.
+
+### Addendum — #350 MERGED (2026-09-29 12:19 UTC), `develop 939464b`
+
+The night's P-item is on the mainline. Verified from the repository rather than
+from the webhook: `c12a5b2` is an ancestor of `origin/develop`, and the merge
+commit `939464b`'s diff against its first parent is **+187 / −4 across exactly
+two files** (`crates/rustkit-layout/src/grid.rs`,
+`crates/rustkit-layout/src/lib.rs`) — bit-for-bit the PR's diffstat, so nothing
+was lost or re-resolved on the way in. R1 DESIGN CLEAR and R2-STAMP PASS both at
+`c12a5b2`, label `r2-pass`, `mergeable_state: clean`, all 14 check runs green or
+skipped. Check-in cancelled; watch released.
+
+**R2 came from a temporary seat, and that is worth recording.** Pete said at
+~10:10 UTC that the Cursor quota was exhausted until the afternoon, which is why
+R2-STAMP had not run through four quiet check-ins. It then posted at 12:06 from
+**Pollux** as a stand-in R2 ("temporary R2, Cursor quota outage"). So the four
+no-change checks were not the PR being ignored — the reviewing seat was down,
+and the land gate was met within thirteen minutes of a substitute picking it up.
+Worth knowing before a future night reads a stalled `r2-pass` as a problem with
+its own PR.
+
+`develop` also took #348 and #349 just ahead of this, so the next night's board
+is not the tree tonight's numbers were taken against — the same caveat every
+night carries, and the reason the ratchet rather than a control run is the
+regression check.
+
+**State at end of night, for whoever reads this next:**
+
+- Metric **3/26** on macOS, measured on this PR's own lane
+  ([run 36526608129](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36526608129)):
+  geometry 14/26, paint 3/26, stability 26/26, discrete 26/26. Unchanged, and
+  predicted to be — a change where no axis crosses the 0.5px bar cannot move a
+  count-and-fraction receipt.
+- **No macOS case regressed**, per the ratchet's committed floors. `discrete=0`
+  on all 26.
+- **The rem-gap unit is closed.** 09-28's decision 1 (wait for P4 or land with
+  the eleven) was resolved by measurement rather than by ruling: the eleven are
+  a cancellation being removed, and `.btn-group`'s post-fix residual is exactly
+  its two items' own label-advance errors. Pete was told; if he would rather it
+  had waited, the revert is one commit and belongs in tomorrow's entry as a
+  mistake.
+- **Recorded next unit: `own_max_content_width` does not model flex factors.**
+  Chrome clamps each item's max-content contribution by its flex base size and
+  factors (css-flexbox-1 §9.9); RustKit sums the items raw. `settings`'
+  `div.blocklist-add` reads Chrome 266.188 against an item sum of 652, and
+  `div.import-row` 379.531 against 660 — both hold `flex: 1` items. A
+  **300–400px** claim against tonight's 8px one, and the largest single geometry
+  defect on that case. `trench/tools/n69_gap_contribution_probe.mjs` already
+  prints its ground truth: the non-zero `residual` rows are exactly the
+  flexible-item containers.
+- **`own_min_content_width` still has no flex arm at all** — no gap, no item
+  sum. The two functions keep turning out to be one defect apart.
