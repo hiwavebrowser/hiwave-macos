@@ -172,3 +172,23 @@ Newest section last.
 1. **Rung 1 is still blocked (fourth digest running).** `git clone https://github.com/mdn/learning-area` still needs approval in this headless lane. Allowlist it, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. With 3 PRs open and no fixtures, the lane is out of on-plan work until one of these happens.
 2. **Loosen the subresource-budget test's wall-clock cap (2.5s)?** Under three-lane load it fails, which will show up as red engine runs on every lane. The realsite lane owns it.
 3. **Lane cadence:** each release relink cost 13 to 20 min at load ~19, so a develop merge on three branches ate the whole hour. Batching develop merges to once per session would help.
+
+## 2026-09-29 01:35
+
+**Metric:** unchanged at rung 0, but the rung 0 surface grew. **`cloneNode`, `insertAdjacentHTML`/`Element`/`Text`, `getAttributeNames`/`hasAttributes`, `isSameNode`/`isEqualNode`, `compareDocumentPosition`, `getRootNode` and `normalize` all went from absent (a TypeError that killed the script) to Rust-backed.** They're banked on a branch, not in a PR, because the lane is at max_open_prs. **Rung 1 is still 0/0 vs Chrome 148, and fetching MDN is still blocked (decision 1).** I retried `git clone` this session and it still needs approval. I didn't route around the gate.
+
+**PRs** (3 open, at max_open_prs; none merged since 00:20)
+- **#342** @ 6343239 has **R1 CLEAR** (Prometheus re-stamped after the empty R2 re-fire) and CI is green. It's waiting on R2 PASS at this SHA.
+- **#343** @ 89eca75 and **#348** @ 17ea713: CI green, MERGEABLE, waiting on R1 and R2.
+- **Banked, no PR (lane cap):** `atlas/js-dom-node-clone` @ **971689b**, from develop 8f44204.
+  - 2b36293 (bindings): clone is a host write that gives fresh detached NodeIds and marks nothing until inserted. insertAdjacentHTML parses in the landing element's context, with `<html>` parsed as `<body>`. The other methods are the DOM §4.4 algorithms in JS.
+  - 971689b is the engine settle-paint pin.
+  - Tests: bindings **55/55** (5 new), engine headless **254/254**.
+  - Receipt on a verified relink: **26/26, 0 changed** vs the #348 and #339 receipts. Builtins 5/5.
+  - Body: `~/Repos/.worktrees/js-pr-body-node-clone.md`. Open it with `gh pr create` when a slot frees.
+  - **It shouldn't conflict with the open three.** Its tests are in a new `dom::tests` module, not appended to lib.rs; its engine pin is at the module end; and its `WRAPPERS_JS` hunks are clear of theirs. I checked with the new `~/Repos/.worktrees/js-hunks.py`.
+
+**Decisions for Pete**
+1. **Rung 1 is still blocked (fifth digest running).** `git clone https://github.com/mdn/learning-area` still needs approval in this headless lane. Allowlist it, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. The lane has now built most of the DOM API surface the MDN examples use, without being able to score a single fixture. This lane's end_date is Wednesday, so if the clone doesn't land by then, rung 1's 80% exit metric can't be met.
+2. **Raise max_open_prs to 4 (asked at 21:50, still open)?** One receipted branch is idle behind the cap again, and R2 is now the bottleneck: #342 has had R1 CLEAR since 00:06.
+3. **Is `getAttributeNames` returning sorted names acceptable for now?** rustkit-dom keeps attributes in a HashMap, so source order is lost, which also affects outerHTML. Chrome returns source order. Switching rustkit-dom to an ordered map (IndexMap) would fix both, but it's a cross-crate change I kept out of this lane.
