@@ -22246,11 +22246,11 @@ mod grid_fixed_track_tests {
 
     #[test]
     fn a_fixed_column_does_not_grow_to_fit_its_text() {
-        // css-grid-1 §12.5: items size intrinsic tracks only. The text
+        // css-grid-1 §12.5: items size intrinsic tracks only. "Wide" (~36px)
         // overflows its 10px track; the second item starts at x=10.
         for root in laid_out(concat!(
             r#"<body style="margin:0;font:16px Arial"><div style="display:grid;"#,
-            r#"grid-template-columns:10px 10px"><div id="a">a</div><div id="b">b</div>"#,
+            r#"grid-template-columns:10px 10px"><div id="a">Wide</div><div id="b">b</div>"#,
             r#"</div></body>"#,
         )) {
             assert_eq!(rect(&root, "a").width, 10.0);
