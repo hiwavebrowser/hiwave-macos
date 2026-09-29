@@ -2409,6 +2409,9 @@ pub fn layout_grid_container(
             .iter()
             .enumerate()
             .map(|(i, track)| match row_real[i] {
+                // A fixed row (`20px`, `minmax(20px, 20px)`) keeps its size and
+                // the item overflows it (§12.5 sizes intrinsic tracks only).
+                Some(_) if track_is_fixed(track) => 0.0,
                 Some(real) => {
                     let delta = real - track.size;
                     if delta > 0.5 || (delta < -0.5 && row_shrinkable[i]) {
@@ -2927,10 +2930,30 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
     // narrow, then flex-shrink smashed every link to ~2px on re-layout.
     if style.display.is_flex() {
         let is_row = style.flex_direction.is_row();
-        let main_gap = match style.column_gap {
-            Length::Px(g) => g,
-            _ => 0.0,
-        };
+        // Resolved the way LAYOUT resolves it, not matched for `Px`. The old
+        // `match { Length::Px(g) => g, _ => 0.0 }` read a `rem`, `em` or
+        // viewport gap as ZERO here while `layout_grid` and `layout_flex`
+        // resolve the same declaration properly, so a relatively-gapped flex
+        // container's max-content contribution was short by every gap it has
+        // and the two readings of one declaration disagreed. On `settings`,
+        // `.btn-group { gap: 0.5rem }` measured 8px narrow with two buttons,
+        // and a container short of its own items becomes spurious flex shrink
+        // on the items inside it.
+        //
+        // A PERCENTAGE gap resolves against zero: css-sizing-3 §4.1 resolves
+        // percentages against zero when computing an intrinsic size
+        // contribution, and there is no definite container size here to
+        // resolve against in any case — reaching for the box's own used width
+        // would make a contribution depend on the layout it is an input to.
+        // Viewport units are definite and resolve normally.
+        //
+        // Chrome 148 ground truth for the `(n-1) * gap` term, measured on the
+        // corpus pages by `trench/tools/n69_gap_contribution_probe.mjs`: on
+        // every `settings` container whose items are inflexible the sum closes
+        // exactly — `.checkbox-group` 309.719 = 293.719 + 16, `.clear-options`
+        // 377.469 = 353.469 + 24, `.btn-group` 195.375 = 187.375 + 8 and
+        // 346.688 = 330.688 + 16. Those gaps are authored in `rem`.
+        let main_gap = layout_box.length_to_px(&style.column_gap, 0.0);
         let mut sum = 0.0f32;
         let mut widest = 0.0f32;
         let mut item_count = 0usize;
@@ -3121,11 +3144,10 @@ fn distribute_span_contributions(
                 })
                 .collect();
             if growable.is_empty() {
-                // All tracks are fixed: distribute equally anyway.
-                let per_track = extra / (end - start) as f32;
-                for t in &mut tracks[start..end] {
-                    t.base_size += per_track;
-                }
+                // Every spanned track is fixed. §12.5 only lets items size
+                // INTRINSIC tracks, so the item overflows: `10px 10px` with
+                // the text "a" keeps 10px tracks in Chrome. Growing them here
+                // made the first track 11.12px.
                 continue;
             }
             let limits: Vec<f32> = growable
@@ -3391,6 +3413,18 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
         position += track.size;
         prev_was_collapsed = track.size == 0.0;
     }
+}
+
+/// A track with no intrinsic, flexible or percentage sizing function: items
+/// never size it (css-grid-1 §12.5), they overflow it.
+fn track_is_fixed(t: &GridTrack) -> bool {
+    !t.is_min_content
+        && !t.is_max_content
+        && !t.is_flexible
+        && t.percent.is_none()
+        && t.max_percent.is_none()
+        && t.fit_content_limit.is_none()
+        && t.growth_limit <= t.base_size
 }
 
 /// Stretch auto tracks when align-content is stretch.
