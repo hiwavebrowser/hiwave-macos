@@ -441,3 +441,24 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **This lane's permissions (second session running).** Blocked: `cargo`, `git -C <lane worktree>`, `gh run view`/`gh pr diff`, `top`, `shasum`, and multi-command pipes. Without cargo, the trench can only measure and design. This session wrote a finished change it can't compile. Default: the next session hits the same wall and the gate waits.
 2. **Re-baseline the record.** The 18:55 record (24.0×) can't be reproduced: the same binary reads 1.7× slower on a quiet machine now. Proposal: from now on, a record is develop's quiet median *together with* the previous record binary interleaved in the same window, and progress is reported as the ratio between them. Today that's develop = .86× the record binary on wikipedia, 37.4× absolute. Default: keep 24.0× on the books and report the relative number next to it.
 3. (Carried over) #344's red f1, and approving the pinned-snapshot method change.
+
+## 2026-09-29 04:40
+
+**No ratio, no PR, no build: the permissions wall is still there for a third session (`cargo --version`, `git -C`, `gh run view`/`gh run rerun` all need approval), and load was 17–18, so no measurement would count anyway. The record stays 24.0× (wikipedia, 18:55); the last quiet read was develop 37.4× (03:35, see the drift note there). One real finding: a static review of the unbuilt pseudo content-gate caught a correctness bug that would have hidden `::before`/`::after` boxes. It's fixed in the worktree, still unbuilt and uncommitted.**
+
+| site | record (18:55) | this session |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | not measured (load 17–18) |
+| github | 1996 ms → 18.1× | not measured |
+| wikipedia | 480 ms → **24.0×** (worst) | not measured |
+
+- **Content-gate bug (caught before it shipped):** 03:52's design stored `pseudo_sets_content: Vec<bool>` in `RuleIndex`. But `shared_rule_index` reuses one index across builds whose sheets have the *same selectors*, whatever their declarations are (the reuse test `a_relayout_over_the_same_selectors_reuses_the_index` swaps `color: red` for `color: green` on purpose). So a relayout where a pseudo rule gained `content` under an unchanged selector would read the old `false`. The gate would return None, and the box would vanish. **The fix (in `~/Repos/.worktrees/cs-pseudo-content-gate`, uncommitted):** drop the field and read `content` from the rule's own declarations at query time (`ix.rule(stylesheets, g).declarations`, only for pseudo candidates, and usually just a few declarations each). A new test, `the_pseudo_content_gate_reads_a_reused_index_sheets_declarations`, builds the index from `.a::before { color: red }` and reuses it for `.a::before { content: "a"; … }`, then asserts None and then Some. rustfmt was applied by hand, and it has not been compiled.
+- **#344 f1 (red at f5567ea), partial read via the public job page:** the only annotations are "All test targets must COMPILE (F1)", exit 101, and **"Failed to restore: getaddrinfo ENOTFOUND productionresultssa6.blob.core.windows.net"**. So the cache restore hit a DNS failure. That means a cold build, which also has to fetch from crates.io, and 3m29s is short for a cold workspace test compile. Together with the clean local compile (01:40) and the static check (02:55), the most likely cause is network flake, not code. It's not proven, because the step log needs auth. A plain re-run would settle it.
+- **#349** @ 090120b: CLEAN, and every check is green.
+- **Open cs PRs:** 2 (#344, #349), cap 3.
+- **Next session (needs cargo):** (1) in the gate worktree, run `cargo test -p rustkit-engine --lib -- --test-threads=1`, then commit, receipt, B/A vs `pc-pep-090120b`, and a PR stacked on #349. (2) Re-run #344's f1. (3) `subject_keys` caching (github 18%).
+
+**Decisions for Pete**
+1. **This lane's permissions, third session in a row.** No `cargo`, `git -C`, or `gh run view`/`rerun`. Three hourly sessions have now produced designs, reviews and A/Bs, but no builds. Default: the lane keeps doing only that until the permissions are restored. If that's intended, pause the hourly schedule instead of burning it.
+2. **Re-run #344's f1** (`gh run rerun 36519959112 --failed`). The annotation shows a DNS failure on the cache restore. If it goes green, #344 is ready for re-stamps.
+3. (Carried over) Re-baseline the record (develop plus the previous record binary, interleaved in one window), and approve the pinned-snapshot method change.
