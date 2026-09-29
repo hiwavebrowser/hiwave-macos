@@ -4907,30 +4907,35 @@ impl Engine {
                 Some(ix) => Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
                 None => self.rule_may_match(&rule.selector, tag_name, attributes),
             };
-            let matches = may_match
-                && match index.as_ref() {
-                    Some(ix) => SelectorMatcher.selector_matches_prepared(
-                        &ix.prepared[rule_index],
+            if !may_match {
+                continue;
+            }
+            let matched = match index.as_ref() {
+                Some(ix) => SelectorMatcher.matched_specificity(
+                    &ix.prepared[rule_index],
+                    &ix.member_specificity[rule_index],
+                    ix.specificity[rule_index],
+                    tag_name,
+                    attributes,
+                    ancestors,
+                    siblings_before,
+                    sib,
+                ),
+                None => {
+                    let selector = rule.selector.trim();
+                    SelectorMatcher.matched_specificity(
+                        &SelectorMatcher.prepared_selector(selector),
+                        &SelectorMatcher.list_member_specificity(selector),
+                        SelectorMatcher.selector_specificity(&rule.selector),
                         tag_name,
                         attributes,
                         ancestors,
                         siblings_before,
                         sib,
-                    ),
-                    None => SelectorMatcher.selector_matches(
-                        &rule.selector,
-                        tag_name,
-                        attributes,
-                        ancestors,
-                        siblings_before,
-                        sib,
-                    ),
-                };
-            if matches {
-                let specificity = match index.as_ref() {
-                    Some(ix) => ix.specificity[rule_index],
-                    None => SelectorMatcher.selector_specificity(&rule.selector),
-                };
+                    )
+                }
+            };
+            if let Some(specificity) = matched {
                 matching_rules.push((rule, specificity, rule_index));
             }
         }
@@ -7773,6 +7778,7 @@ impl Engine {
             pseudo_keys: Vec::new(),
             pseudo_prepared: Vec::new(),
             specificity: Vec::new(),
+            member_specificity: Vec::new(),
             prepared: Vec::new(),
             main: RuleBuckets::default(),
             before: RuleBuckets::default(),
@@ -7788,6 +7794,8 @@ impl Engine {
                 }
                 ix.keys.push(keys);
                 ix.specificity.push(SelectorMatcher.selector_specificity(&rule.selector));
+                ix.member_specificity
+                    .push(SelectorMatcher.list_member_specificity(rule.selector.trim()));
                 ix.prepared.push(SelectorMatcher.prepared_selector(rule.selector.trim()));
                 let mut pseudo_keys = None;
                 let mut pseudo_prepared = None;
@@ -9067,6 +9075,65 @@ impl SelectorMatcher {
         } else {
             diff <= 0 && diff % a == 0
         }
+    }
+
+    /// For a top-level selector list, each member's `(position, specificity)`,
+    /// highest specificity first (ties keep source order). Positions index the
+    /// members of `prepared_selector(selector)`'s `List`, which splits the same
+    /// way. Empty for a single complex selector.
+    fn list_member_specificity(&self, selector: &str) -> Vec<(usize, (usize, usize, usize))> {
+        if !selector.contains(',') {
+            return Vec::new();
+        }
+        let members = SelectorMatcher::split_top_level_commas(selector);
+        if members.len() < 2 {
+            return Vec::new();
+        }
+        let mut specs: Vec<_> = members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i, self.selector_specificity(m.trim())))
+            .collect();
+        specs.sort_by(|a, b| b.1.cmp(&a.1));
+        specs
+    }
+
+    /// The specificity a matched rule cascades with, or `None` if it doesn't
+    /// match. Selectors 4 §17: a selector list's specificity is that of the
+    /// most specific member THAT MATCHES the element, not of the whole list.
+    /// `a, a:hover { color: blue }` is (0,0,1) on a link that isn't hovered,
+    /// so `.nav-link { color: gray }` beats it. `whole` is the list's (max)
+    /// specificity, used for a single complex selector. Members are tried
+    /// most specific first, so the first match is the answer.
+    #[allow(clippy::too_many_arguments)]
+    fn matched_specificity(
+        &self,
+        prepared: &PreparedSelector,
+        member_specificity: &[(usize, (usize, usize, usize))],
+        whole: (usize, usize, usize),
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+        ancestors: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[SiblingKey],
+        sib: SiblingContext,
+    ) -> Option<(usize, usize, usize)> {
+        if let PreparedSelector::List(members) = prepared {
+            if members.len() == member_specificity.len() {
+                return member_specificity.iter().find_map(|&(i, spec)| {
+                    self.selector_matches_prepared(
+                        &members[i],
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    )
+                    .then_some(spec)
+                });
+            }
+        }
+        self.selector_matches_prepared(prepared, tag_name, attributes, ancestors, siblings_before, sib)
+            .then_some(whole)
     }
 
     /// Calculate selector specificity for ordering.
@@ -18112,6 +18179,58 @@ mod rule_prefilter_tests {
         }
     }
 
+    /// Selectors 4 §17: a list's specificity is its most specific MATCHING
+    /// member's. linkedin's reset `a,a:focus,a:hover{color:#0a66c2}` scored
+    /// (0,1,1) on every link, so it beat `.text-color-text-secondary` (0,1,0)
+    /// and the nav labels came out blue instead of gray. Checked with and
+    /// without the rule index installed (the two cascade paths).
+    #[test]
+    fn a_selector_list_cascades_with_its_matching_members_specificity() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let sheet = Stylesheet::parse(
+            "a, a:focus, a:hover { color: blue; } .sec { color: green; } \
+             i, i.zz#qq { color: blue; } .one { color: green; } \
+             em, #hit { color: green; } .two { color: blue; } \
+             u { color: red; } u, u.x { color: green; }",
+        )
+        .expect("sheet");
+        let vars = HashMap::new();
+        let style = |tag: &str, pairs: &[(&str, &str)]| {
+            engine.compute_style_for_element(
+                tag,
+                &attrs(pairs),
+                std::slice::from_ref(&sheet),
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let green = rustkit_css::Color::new(0, 128, 0, 1.0);
+        let check = |path: &str| {
+            assert_eq!(style("a", &[("class", "sec")]).color, green, "{path}: `a` is (0,0,1)");
+            assert_eq!(style("i", &[("class", "one")]).color, green, "{path}: unmatched `i.zz#qq`");
+            // The matching member is the more specific one: (1,0,0) wins.
+            assert_eq!(style("em", &[("id", "hit"), ("class", "two")]).color, green, "{path}: `#hit`");
+            // Equal specificity: the later rule still wins by source order.
+            assert_eq!(style("u", &[]).color, green, "{path}: source order");
+        };
+        check("string path");
+        let _scope = RuleIndexScope::install(engine.build_rule_index(std::slice::from_ref(&sheet)));
+        check("indexed path");
+    }
+
+    #[test]
+    fn list_member_specificity_splits_at_top_level_only() {
+        let specs = SelectorMatcher.list_member_specificity(":is(a, b) c, #d, .e");
+        let order: Vec<usize> = specs.iter().map(|&(i, _)| i).collect();
+        assert_eq!(order[0], 1, "#d is the most specific member: {specs:?}");
+        assert_eq!(specs.len(), 3, "`:is(a, b)` is one member: {specs:?}");
+        assert!(SelectorMatcher.list_member_specificity(":is(a, b) c").is_empty());
+        assert!(SelectorMatcher.list_member_specificity(".a").is_empty());
+    }
+
     #[test]
     fn rule_index_prepared_selectors_match_like_the_string_path() {
         // The indexed cascade matches through the index's stored prepared
@@ -19663,6 +19782,9 @@ struct RuleIndex {
     /// Global rule index -> `selector_specificity` of its selector, so a
     /// matched rule doesn't re-scan its selector string on every element.
     specificity: Vec<(usize, usize, usize)>,
+    /// Global rule index -> `list_member_specificity` of its selector (empty
+    /// unless it is a top-level list), for `matched_specificity`.
+    member_specificity: Vec<Vec<(usize, (usize, usize, usize))>>,
     /// Global rule index -> its prepared selector, so the cascade doesn't
     /// SipHash the selector string into the prepared cache on every
     /// candidate of every element.
