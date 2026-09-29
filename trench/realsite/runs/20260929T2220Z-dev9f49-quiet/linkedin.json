@@ -1,0 +1,83 @@
+{
+  "id": "linkedin",
+  "url": "https://www.linkedin.com/",
+  "chrome": [
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/linkedin/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/linkedin/chrome-a.png",
+      "elapsed_ms": 18544
+    },
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/linkedin/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/linkedin/chrome-b.png",
+      "elapsed_ms": 16934
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.linkedin.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/linkedin/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/linkedin/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 4,
+      "threw": 3,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 830599,
+      "elapsed_ms": 1307
+    },
+    "elapsed_ms": 3934,
+    "error": null,
+    "wall_ms": 4011,
+    "non_background_fraction": 0.2538
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 36,
+    "rustkit_words": 50,
+    "ratio": 0.9722,
+    "missing_sample": [
+      "google"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0,
+    "diff": 7.51181640625
+  },
+  "points": 3
+}
