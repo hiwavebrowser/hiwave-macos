@@ -22,6 +22,11 @@ fn grow(mut s: ComputedStyle) -> ComputedStyle {
     s
 }
 
+fn grow_only(mut s: ComputedStyle) -> ComputedStyle {
+    s.flex_grow = 1.0;
+    s
+}
+
 fn centring(mut s: ComputedStyle) -> ComputedStyle {
     s.align_items = AlignItems::Center;
     s.justify_content = JustifyContent::Center;
@@ -133,5 +138,47 @@ fn a_flex_item_stretched_in_an_auto_height_row_centres_in_the_stretched_height()
         let root = laid_out(outer, collapse);
         assert_eq!(root.children[1].dimensions.content.height, 300.0);
         assert_at(&root.children[1].children[0], (100.0, 125.0), "auto-row-stretch");
+    }
+}
+
+fn fixed_height(h: f32) -> LayoutBox {
+    let mut s = ComputedStyle::new();
+    s.height = Length::Px(h);
+    LayoutBox::new(BoxType::Block, s)
+}
+
+/// facebook's logged-out shell, delta-debugged: `<div flex col><div flex col
+/// grow><div flex col grow><div flex-basis:100%><730px panels></div></div>
+/// <div><1px hr></div><div><356px footer></div></div></div>`. No main size is definite at any
+/// level, so the 100% basis is `content` (css-flexbox-1 §9.2 step 3) and
+/// Chrome 148 puts the hr at 730, directly under the panels.
+#[test]
+fn a_percentage_basis_under_growing_columns_is_its_content() {
+    for collapse in [false, true] {
+        let mut basis = ComputedStyle::new();
+        basis.flex_basis = FlexBasis::Percent(100.0);
+        let mut m2 = LayoutBox::new(BoxType::Block, basis);
+        m2.children.push(fixed_height(730.0));
+        let mut m = LayoutBox::new(BoxType::Block, grow_only(flex(FlexDirection::Column)));
+        m.children.push(m2);
+        let mut a = LayoutBox::new(BoxType::Block, grow_only(flex(FlexDirection::Column)));
+        a.children.push(m);
+        // The hr and the footer each sit in an auto-height wrapper, as on
+        // the page: their heights are unknown until step 11 lays them out.
+        for h in [1.0, 356.0] {
+            let mut wrapper = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            wrapper.children.push(fixed_height(h));
+            a.children.push(wrapper);
+        }
+        let mut outer = LayoutBox::new(BoxType::Block, flex(FlexDirection::Column));
+        outer.children.push(a);
+        let root = laid_out(outer, collapse);
+        let a = &root.children[0];
+        assert_eq!(
+            a.children[0].dimensions.content.height, 730.0,
+            "the growing column is its 730px content (collapse={collapse})"
+        );
+        assert_at(&a.children[1], (0.0, 730.0), "hr under the panels");
+        assert_at(&a.children[2], (0.0, 731.0), "footer under the hr");
     }
 }

@@ -465,6 +465,17 @@ fn layout_flex_container_at(
         None
     };
 
+    // Whether a percentage flex-basis has something to resolve against.
+    // On the vertical axis `container_main_size` falls back to the pre-pass
+    // stack (or, inside step 11, whatever height a parent flexed this box
+    // to before its siblings had real heights), and neither is a definite
+    // main size. css-flexbox-1 §9.2 step 3 and §7.2.3 treat a percentage
+    // basis against an indefinite main size as `content`.
+    let main_is_definite = match main_axis {
+        Axis::Horizontal => true,
+        Axis::Vertical => style_definite_inner_main.or(inset_inner_main).is_some(),
+    };
+
     // 2. Collect flex items (skip absolutely positioned)
     let mut items: Vec<FlexItem> = Vec::new();
     for child in &mut container.children {
@@ -489,6 +500,7 @@ fn layout_flex_container_at(
             child,
             main_axis,
             container_main_size,
+            main_is_definite,
             container_cross_size,
             definite_inner_cross,
         );
@@ -1318,6 +1330,7 @@ fn create_flex_item<'a>(
     layout_box: &'a mut LayoutBox,
     main_axis: Axis,
     container_main: f32,
+    main_is_definite: bool,
     container_cross: f32,
     definite_inner_cross: Option<f32>,
 ) -> FlexItem<'a> {
@@ -1403,6 +1416,14 @@ fn create_flex_item<'a>(
         }
         FlexBasis::Content => {
             // Use content size - for replaced elements, use intrinsic size
+            main_size_from_content = content_sized_box;
+            get_intrinsic_main_size(layout_box, main_axis) + main_pb
+        }
+        // A percentage with no definite main size to resolve against is
+        // `content` (§9.2 step 3). facebook's shell resolved `flex-basis:
+        // 100%` against a column's pre-flex guess and pushed its footer
+        // 642px down, out of the first viewport.
+        FlexBasis::Percent(_) if !main_is_definite => {
             main_size_from_content = content_sized_box;
             get_intrinsic_main_size(layout_box, main_axis) + main_pb
         }
