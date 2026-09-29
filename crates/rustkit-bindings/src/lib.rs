@@ -2196,4 +2196,72 @@ mod tests {
             "click,true,true,1,true,true,true,true,true,[object Event]"
         );
     }
+
+    #[test]
+    fn inner_and_outer_html_serialize_the_rust_tree() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(&b, "document.getElementById('main').innerHTML"),
+            "<p class=\"x\">Hello, <b>world</b>!</p><!--c--><p class=\"x\">Two</p>"
+        );
+        assert_eq!(
+            eval_string(&b, "document.getElementById('outside').outerHTML"),
+            "<p class=\"x\" id=\"outside\">Out</p>"
+        );
+        // Escaping: text escapes & < > and NBSP; attributes also escape ".
+        // Void elements have no end tag; raw-text elements are not escaped.
+        let b = bound(
+            "<html><body><div id=d title='a\"&lt;b'>1 &amp; 2 &lt;3&gt;&nbsp;<br><img src=x.png></div>\
+             <style id=s>a > b { }</style></body></html>",
+        );
+        assert_eq!(
+            eval_string(&b, "document.getElementById('d').outerHTML"),
+            "<div id=\"d\" title=\"a&quot;&lt;b\">1 &amp; 2 &lt;3&gt;&nbsp;<br><img src=\"x.png\"></div>"
+        );
+        assert_eq!(eval_string(&b, "document.getElementById('s').innerHTML"), "a > b { }");
+        assert_eq!(b.take_dirty(), DomDirty::Clean, "reads mark nothing");
+    }
+
+    #[test]
+    fn inner_html_setter_parses_and_replaces_the_children() {
+        let b = bound(PAGE);
+        // `</li>` is written out: rustkit-html has no implied end tags for
+        // `li` yet (in document parses too).
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'), old = m.firstChild; \
+             m.innerHTML = '<ul id=\"l\"><li class=\"i\">one</li><li class=\"i\">two <b>2</b></li></ul>tail'; \
+             var l = document.getElementById('l'); \
+             old.parentNode === null && m.childNodes.length === 2 && l.parentNode === m && \
+             l.children.length === 2 && document.querySelectorAll('.i').length === 2 && \
+             l.children[1].lastChild.tagName === 'B' && m.lastChild.data === 'tail' && \
+             m.innerHTML === '<ul id=\"l\"><li class=\"i\">one</li><li class=\"i\">two <b>2</b></li></ul>tail'"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        // The Rust DOM holds the parsed nodes (the cascade and layout read it).
+        let doc = b.window.borrow().document.clone().unwrap();
+        assert_eq!(doc.get_element_by_id("main").unwrap().text_content(), "onetwo 2tail");
+        // Empty and null clear the element.
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'); m.innerHTML = ''; \
+             var a = m.firstChild === null; m.innerHTML = '<i>x</i>'; m.innerHTML = null; \
+             a && m.childNodes.length === 0 && m.innerHTML === ''"
+        ));
+    }
+
+    #[test]
+    fn get_element_by_id_finds_an_id_reused_by_new_content() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var main = document.getElementById('main'); \
+             document.body.innerHTML = '<span id=\"main\">again</span>'; \
+             var now = document.getElementById('main'); \
+             main.parentNode === null && now !== main && now.tagName === 'SPAN' && \
+             now.parentNode === document.body && \
+             document.getElementById('outside') === null && \
+             document.getElementById('') === null"
+        ));
+    }
 }
