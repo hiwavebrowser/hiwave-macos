@@ -22294,6 +22294,28 @@ mod script_dom_flush_tests {
         (engine, view)
     }
 
+    // A script that wires a listener goes on to its writes (it used to
+    // throw at addEventListener), and a handler's writes are painted when
+    // the script that fired it settles.
+    #[test]
+    fn a_script_that_wires_listeners_runs_on_and_is_painted() {
+        let (mut engine, view) =
+            loaded("<html><body><p id='b'>go</p><p id='out'>before</p></body></html>");
+        engine
+            .execute_script(
+                view,
+                "var b = document.getElementById('b'), out = document.getElementById('out'); \
+                 b.addEventListener('click', function () { out.textContent = 'clicked'; }); \
+                 out.textContent = 'wired'",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "go wired");
+        engine
+            .execute_script(view, "document.getElementById('b').click()")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "go clicked");
+    }
+
     // Pin §3: a DOM write marked during script reaches the display list
     // when the script settles.
     #[test]

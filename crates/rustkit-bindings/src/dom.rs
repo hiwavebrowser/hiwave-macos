@@ -724,7 +724,8 @@ const WRAPPERS_JS: &str = r#"
         g[name] = ctor;
         return ctor;
     }
-    var Node = iface('Node');
+    var EventTarget = iface('EventTarget');
+    var Node = iface('Node', EventTarget);
     var Document = iface('Document', Node);
     var CharacterData = iface('CharacterData', Node);
     var Text = iface('Text', CharacterData);
@@ -1302,6 +1303,141 @@ const WRAPPERS_JS: &str = r#"
         });
     });
 
+    // EventTarget (DOM §2.7) for node wrappers, document and window: a
+    // JS-side listener registry, and dispatch through capture, target and
+    // bubble phases along the wrapper tree (then document, then window).
+    // Engine input events still dispatch Rust-side (events.rs, pin §4);
+    // this is what page script registers and fires itself.
+    var LISTENERS = new WeakMap();
+    var STOP = Symbol('rustkit.stop'), STOP_NOW = Symbol('rustkit.stopNow');
+    function thisTarget(o) { return o == null ? g : o; }
+    function flag(opts, key) {
+        return typeof opts === 'boolean' ? key === 'capture' && opts : !!(opts && opts[key]);
+    }
+    EventTarget.prototype.addEventListener = function (type, cb, opts) {
+        if (typeof cb !== 'function' && !(cb && typeof cb.handleEvent === 'function')) return;
+        var t = thisTarget(this), all = LISTENERS.get(t);
+        if (!all) { all = {}; LISTENERS.set(t, all); }
+        type = String(type);
+        var list = all[type] || (all[type] = []), capture = flag(opts, 'capture');
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].cb === cb && list[i].capture === capture) return;
+        }
+        list.push({ cb: cb, capture: capture, once: flag(opts, 'once'), removed: false });
+    };
+    EventTarget.prototype.removeEventListener = function (type, cb, opts) {
+        var all = LISTENERS.get(thisTarget(this)), list = all && all[String(type)];
+        if (!list) return;
+        var capture = flag(opts, 'capture');
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].cb === cb && list[i].capture === capture) {
+                list[i].removed = true;
+                list.splice(i, 1);
+                return;
+            }
+        }
+    };
+    // A listener's exception goes to the engine's error log, not to the
+    // dispatcher (as in a browser, where it reaches window.onerror).
+    function callListener(t, cb, event) {
+        try {
+            return typeof cb === 'function' ? cb.call(t, event) : cb.handleEvent(event);
+        } catch (e) {
+            var msg;
+            try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
+            if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
+        }
+    }
+    function invoke(t, event, phase, capture) {
+        event.currentTarget = t;
+        event.eventPhase = phase;
+        var all = LISTENERS.get(t), list = all && all[event.type];
+        if (list) {
+            list = list.slice();
+            for (var i = 0; i < list.length && !event[STOP_NOW]; i++) {
+                var l = list[i];
+                if (l.removed || l.capture !== capture) continue;
+                if (l.once) t.removeEventListener(event.type, l.cb, { capture: l.capture });
+                callListener(t, l.cb, event);
+            }
+        }
+        // The on<type> handler runs with the non-capture listeners.
+        var h = capture || event[STOP_NOW] ? null : t['on' + event.type];
+        if (typeof h === 'function' && callListener(t, h, event) === false && event.cancelable) {
+            event.defaultPrevented = true;
+        }
+    }
+    // A node's parent, then document's is window (except for `load`, which
+    // never reaches window from a node).
+    function eventParent(n, event) {
+        if (n === g) return null;
+        if (n === doc) return event.type === 'load' ? null : g;
+        return n[SLOT] ? n.parentNode : null;
+    }
+    EventTarget.prototype.dispatchEvent = function (event) {
+        if (event == null || typeof event !== 'object' || event.type === undefined) {
+            throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': " +
+                "parameter 1 is not of type 'Event'.");
+        }
+        var t = thisTarget(this), path = [], i;
+        for (var n = t; n; n = eventParent(n, event)) path.push(n);
+        event.target = t;
+        for (i = path.length - 1; i > 0 && !event[STOP]; i--) invoke(path[i], event, 1, true);
+        if (!event[STOP]) invoke(t, event, 2, true);
+        if (!event[STOP]) invoke(t, event, 2, false);
+        if (event.bubbles) {
+            for (i = 1; i < path.length && !event[STOP]; i++) invoke(path[i], event, 3, false);
+        }
+        event[STOP] = event[STOP_NOW] = false;
+        event.currentTarget = null;
+        event.eventPhase = 0;
+        return !event.defaultPrevented;
+    };
+
+    function Event(type, init) {
+        if (!(this instanceof Event)) {
+            throw new TypeError("Failed to construct 'Event': Please use the 'new' operator.");
+        }
+        if (arguments.length < 1) {
+            throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present.");
+        }
+        init = init || {};
+        this.type = String(type);
+        this.bubbles = !!init.bubbles;
+        this.cancelable = !!init.cancelable;
+        this.composed = !!init.composed;
+        this.defaultPrevented = false;
+        this.target = null;
+        this.currentTarget = null;
+        this.eventPhase = 0;
+        this.isTrusted = false;
+        this.timeStamp = Date.now();
+    }
+    Event.prototype.preventDefault = function () { if (this.cancelable) this.defaultPrevented = true; };
+    Event.prototype.stopPropagation = function () { this[STOP] = true; };
+    Event.prototype.stopImmediatePropagation = function () { this[STOP] = this[STOP_NOW] = true; };
+    getter(Event.prototype, 'srcElement', function () { return this.target; });
+    Object.defineProperty(Event.prototype, Symbol.toStringTag, { value: 'Event' });
+    ['NONE', 'CAPTURING_PHASE', 'AT_TARGET', 'BUBBLING_PHASE'].forEach(function (k, i) {
+        Event[k] = Event.prototype[k] = i;
+    });
+    function CustomEvent(type, init) {
+        if (!(this instanceof CustomEvent)) {
+            throw new TypeError("Failed to construct 'CustomEvent': Please use the 'new' operator.");
+        }
+        Event.apply(this, arguments);
+        this.detail = init && init.detail !== undefined ? init.detail : null;
+    }
+    CustomEvent.prototype = Object.create(Event.prototype, {
+        constructor: { value: CustomEvent, writable: true, configurable: true }
+    });
+    Object.defineProperty(CustomEvent.prototype, Symbol.toStringTag, { value: 'CustomEvent' });
+    g.Event = Event;
+    g.CustomEvent = CustomEvent;
+    HTMLElement.prototype.click = function () {
+        this.dispatchEvent(new Event('click', { bubbles: true, cancelable: true }));
+    };
+
     // The global `document` becomes the Document wrapper.
     var doc = g.document;
     Object.setPrototypeOf(doc, Document.prototype);
@@ -1309,6 +1445,12 @@ const WRAPPERS_JS: &str = r#"
     var stubCreateElement = doc.createElement;
     delete doc.createElement;
     delete doc.createTextNode;
+    // Document and window trade the lifecycle's per-object listener lists
+    // for the shared EventTarget, so element events bubble up to them.
+    ['addEventListener', 'removeEventListener', 'dispatchEvent'].forEach(function (k) {
+        delete doc[k];
+        g[k] = EventTarget.prototype[k];
+    });
 
     g.__rustkit_dom_reset = function (newGen) {
         gen = newGen;
