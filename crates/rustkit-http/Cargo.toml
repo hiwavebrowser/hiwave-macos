@@ -6,9 +6,12 @@ description = "HTTP client for RustKit browser engine"
 license = "MIT"
 
 [dependencies]
-# TLS (using native-tls for simplicity on Windows)
-native-tls = "0.2"
-tokio-native-tls = "0.3"
+# TLS: rustls with a browser-typical client profile (network lane,
+# 2026-09-28 diagnosis: every known-library ClientHello is default-denied by
+# Cloudflare/Akamai/DataDome at request one; native-tls sent no ALPN at all).
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-native-certs = "0.8"
 
 # Async runtime
 tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt"] }
