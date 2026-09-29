@@ -1006,3 +1006,30 @@ Per site: google 3, x 3, lyft 2, yahoo 2, apple 2, shopify 2; facebook, instagra
 **Decisions for Pete:**
 1. Still open: **board runs vs the other lanes' builds.** A board takes ~42 min, and this one started at load 3 but ended at 14. A fixed no-build window (e.g. 04:00–05:00), or a one-retry-on-timeout scorer change (which needs your OK)?
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+## 2026-09-29 08:10 — quiet board 26/60 on develop; #354 (UA hiding: [hidden], closed dialog/popover, template) opened; flex-basis % fix pushed (facebook has a second cause)
+
+**Points: 22 → 26/60** (`20260929T0810Z-dev8f44`, contended, → `20260929T1005Z-dev8f44-quiet`; same engine, develop 8f44204). The first board of the day started at load 2.5 (it ended near 13 as the other lanes woke up). The +4 is contention coming off, not engine change: linkedin 1 → 3 (READABLE and LOOKS RIGHT; the 05:55 run had lost a stylesheet to load), wikipedia 1 → 2, netflix 1 → 2, github 0 → 1 (it loaded inside 30 s this time). cnn and squarespace still time out. No full board on #354 (load 11–15 after 06:40).
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260929T0810Z-dev8f44` | develop 8f44204 | 22 | 14 | 5 | 3 | 22/60 |
+| `20260929T1005Z-dev8f44-quiet` | develop 8f44204 | **26** | 15 | 8 | 3 | 26/60 |
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#354 `atlas/rs-ua-hidden` @ 7a24e18.** HTML §15.3.1 UA hiding. RustKit painted `[hidden]`, a `<dialog>` without `open`, closed popovers and `<template>` content, and Chrome hides all four. Applied as UA defaults before the author cascade (author `display` still wins). `hidden=until-found` is left alone. **shopify LOOKS RIGHT 25.92% → 21.41%** (its region-picker popover had covered the hero). facebook stops painting a hidden Submit button and a checkbox, and its login column moves to Chrome's y (62 vs 63; diff 15.51 → 15.87%). All 20 sites A/B'd, with the movers re-run in reverse order; the rest was served drift. Campaign 26/26 identical case for case to develop, ratchet byte-identical, engine 256/256, 3 pins (the main one fails first). No check flipped.
+- Still open: #345, #347, #351, #352, #353.
+
+**Pushed, NO PR: `atlas/rs-flex-basis-indefinite` @ 8cad6aa.** A percentage flex-basis against an indefinite column main size is now `content` (§9.2 step 3). RustKit had resolved it against the height a parent flexed the box to while its siblings still had one-line guesses. Pinned through both layout entry points (fails first: 1372 vs 730), layout 555/555, and x/google are pixel-identical. It fixes the delta-debugged facebook shell but not facebook itself (below), so there's no board delta to put in a PR body yet.
+
+**Found:**
+- **facebook's READABLE point is its footer** (≈23 missing words: the language row and the Meta links). RustKit's main column is 1379 px where Chrome's is 730, which pushes the footer out of the first viewport. 8cad6aa fixes one cause, but the live page still lands at 1411, so the real shell has a second one (a panel row with `height:calc(100vh - 70px)` and `min-height:690/900px` media rules; `min-height:inherit` chains in the footer). `scratch/bing0929/fb-local.html` reproduces it offline (4 s a render; hr at 1411 on the fix, 1379 on develop). My element-level delta-debug of it didn't finish in 50 min over the 1.6 MB document, so I stopped it. Next time, cut the CSS down to the shell's classes first.
+- **RustKit ignores the individual transform properties** (`translate`, and presumably `rotate`/`scale` by the same path). Tailwind v4 writes every `translate-*` utility as `translate: var(--tw-translate-x) var(--tw-translate-y)`, so shopify's "Skip to Content" link (`translate-y-[-200%]`, above the viewport in Chrome) paints top-left. `transform: translate*()` works, including `%` and `var()` (fixture `scratch/bing0929/translate2.html`).
+- **bing's nav is #353's bug.** `.scopes,#idCont{display:none}` beat a later `.scopes{display:inline-block}` on the list's max specificity. With #353's binary the scope bar paints (6/41 words back). Not a point: the rest of bing's first-viewport text is script-rendered. (A comment on #353 needed approval on this seat, so it's recorded here instead.)
+- github is 5 words short of READABLE, all from one React-rendered sentence: JS lane.
+
+**Next:** (1) the standalone `translate`/`rotate`/`scale` properties (shopify's skip link; every Tailwind v4 site). (2) facebook's second cause, then the flex PR with facebook's before/after. (3) shopify's missing header nav. (4) Talos 5 audit.
+
+**Decisions for Pete:**
+1. Still open: **board runs vs the other lanes' builds.** Today's quiet window (06:05, load 2.5) gave the true develop number, 26, four above the contended run on the same engine. A fixed ~06:00 board slot before the lanes start would make the trend trustworthy.
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
