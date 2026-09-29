@@ -99,6 +99,17 @@ fn is_connected(node: &Rc<Node>, document: &Document) -> bool {
     false
 }
 
+/// The first element in tree order whose id is `id`.
+fn first_with_id(document: &Document, id: &str) -> Option<Rc<Node>> {
+    let mut found = None;
+    document.traverse(|n| {
+        if found.is_none() && n.get_attribute("id") == Some(id) {
+            found = Some(n.clone());
+        }
+    });
+    found
+}
+
 /// Is `ancestor` `node` or one of its ancestors?
 fn is_inclusive_ancestor(ancestor: &Rc<Node>, node: &Rc<Node>) -> bool {
     ancestor.id == node.id || is_descendant(node, ancestor)
@@ -273,6 +284,21 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         }
         // Documents and doctypes ignore textContent writes.
         ("setText", _) => Ok((JsValue::Null, DomDirty::Clean)),
+        // HTML §8.5 innerHTML setter: parse as the element's contents (the
+        // fragment parsing algorithm), then replace all children with it.
+        ("setHTML", NodeType::Element { tag_name, .. }) => {
+            let html = string_arg(args, 3).unwrap_or("");
+            let nodes = document
+                .parse_fragment(html, tag_name)
+                .map_err(|_| "SyntaxError")?;
+            for child in node.children() {
+                child.remove_from_parent();
+            }
+            for child in nodes {
+                node.append_child(child);
+            }
+            Ok((JsValue::Null, DomDirty::Style))
+        }
         _ => Err("NotSupportedError"),
     }
 }
@@ -308,6 +334,100 @@ fn is_descendant(node: &Rc<Node>, scope: &Rc<Node>) -> bool {
         current = parent.parent();
     }
     false
+}
+
+/// HTML void elements: serialized with no end tag and no children.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input",
+    "keygen", "link", "meta", "param", "source", "track", "wbr",
+];
+
+/// Elements whose Text children serialize unescaped.
+const RAW_TEXT_ELEMENTS: &[&str] = &[
+    "style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext",
+];
+
+/// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
+/// Attributes come out sorted by name: rustkit-dom keeps them in a
+/// HashMap, so source order is gone.
+fn serialize_node(node: &Rc<Node>, out: &mut String) {
+    match &node.node_type {
+        NodeType::Element {
+            tag_name,
+            attributes,
+            ..
+        } => {
+            out.push('<');
+            out.push_str(tag_name);
+            let mut names: Vec<&String> = attributes.keys().collect();
+            names.sort();
+            for name in names {
+                out.push(' ');
+                out.push_str(name);
+                out.push_str("=\"");
+                escape_into(&attributes[name], true, out);
+                out.push('"');
+            }
+            out.push('>');
+            if !VOID_ELEMENTS.contains(&tag_name.as_str()) {
+                serialize_children(node, out);
+                out.push_str("</");
+                out.push_str(tag_name);
+                out.push('>');
+            }
+        }
+        NodeType::Text(data) => {
+            let raw = node
+                .parent()
+                .and_then(|p| p.tag_name().map(|t| RAW_TEXT_ELEMENTS.contains(&t)))
+                .unwrap_or(false);
+            if raw {
+                out.push_str(data);
+            } else {
+                escape_into(data, false, out);
+            }
+        }
+        NodeType::Comment(data) => {
+            out.push_str("<!--");
+            out.push_str(data);
+            out.push_str("-->");
+        }
+        NodeType::ProcessingInstruction { target, data } => {
+            out.push_str("<?");
+            out.push_str(target);
+            out.push(' ');
+            out.push_str(data);
+            out.push('>');
+        }
+        NodeType::DocumentType { name, .. } => {
+            out.push_str("<!DOCTYPE ");
+            out.push_str(name);
+            out.push('>');
+        }
+        NodeType::Document => serialize_children(node, out),
+    }
+}
+
+/// The children of `node`, serialized (`innerHTML`).
+fn serialize_children(node: &Rc<Node>, out: &mut String) {
+    for child in node.children() {
+        serialize_node(&child, out);
+    }
+}
+
+/// HTML §13.3 "escaping a string": `&`, NBSP, `<` and `>` always, and `"`
+/// in attribute mode. (`<`/`>` in attribute values too, as Chrome 138+ does.)
+fn escape_into(s: &str, attribute: bool, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '\u{a0}' => out.push_str("&nbsp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' if attribute => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
 }
 
 /// `info(gen, id, field)`: one read of one node.
@@ -351,6 +471,16 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
         "next" => node_id(node.next_sibling()),
         "prev" => node_id(node.previous_sibling()),
         "children" => id_list(node.children()),
+        "innerHTML" => {
+            let mut out = String::new();
+            serialize_children(node, &mut out);
+            JsValue::String(out)
+        }
+        "outerHTML" => {
+            let mut out = String::new();
+            serialize_node(node, &mut out);
+            JsValue::String(out)
+        }
         _ => JsValue::Undefined,
     }
 }
@@ -392,10 +522,16 @@ pub(crate) fn install(
                 args.first().and_then(|g| host.document_for(g)),
                 string_arg(args, 1),
             ) {
-                (Some(document), Some(id)) => node_id(
+                // The id table is first-come and keeps removed nodes, so a
+                // stale entry (say, content replaced by innerHTML that
+                // reuses the id) falls back to the first match in tree order.
+                // A connected hit is trusted: with duplicate ids (invalid
+                // HTML) it may not be the first in tree order.
+                (Some(document), Some(id)) if !id.is_empty() => node_id(
                     document
                         .get_element_by_id(id)
-                        .filter(|n| is_connected(n, document)),
+                        .filter(|n| is_connected(n, document))
+                        .or_else(|| first_with_id(document, id)),
                 ),
                 _ => JsValue::Null,
             }
@@ -743,6 +879,9 @@ const WRAPPERS_JS: &str = r#"
     getter(CharacterData.prototype, 'length', function () { return (info(this, 'text') || '').length; });
 
     getter(Element.prototype, 'tagName', function () { return info(this, 'name'); });
+    accessor(Element.prototype, 'innerHTML', function () { return info(this, 'innerHTML'); },
+        function (v) { setData(this, 'setHTML', text(v), null, 'innerHTML'); });
+    getter(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); });
     getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
     [['id', 'id'], ['className', 'class']].forEach(function (p) {
         accessor(Element.prototype, p[0], function () { return this.getAttribute(p[1]) || ''; },

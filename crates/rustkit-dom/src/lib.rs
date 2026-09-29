@@ -642,6 +642,38 @@ impl Document {
         Some(new)
     }
 
+    /// Parse `html` as the contents of a `context` element (the HTML
+    /// fragment parsing algorithm behind `innerHTML`) and adopt the result
+    /// into this document. Returns the top-level nodes in order, detached
+    /// and with fresh NodeIds; ids in the fragment join the id table.
+    pub fn parse_fragment(&self, html: &str, context: &str) -> Result<Vec<Rc<Node>>, DomError> {
+        let sink = rustkit_html::parse_fragment(html, DocumentSink::new(), context)
+            .map_err(|e| DomError::ParseError(e.to_string()))?;
+        Ok(sink
+            .doc
+            .root
+            .children()
+            .iter()
+            .map(|n| self.adopt_subtree(n))
+            .collect())
+    }
+
+    /// Copy `node` and its descendants (from another Document) into this
+    /// one as a detached subtree.
+    fn adopt_subtree(&self, node: &Rc<Node>) -> Rc<Node> {
+        let copy = self.create_node(node.node_type.clone());
+        if let Some(value) = copy.get_attribute("id").filter(|v| !v.is_empty()) {
+            self.elements_by_id
+                .borrow_mut()
+                .entry(value.to_string())
+                .or_insert_with(|| copy.clone());
+        }
+        for child in node.children() {
+            copy.append_child(self.adopt_subtree(&child));
+        }
+        copy
+    }
+
     /// Get the title of the document.
     pub fn title(&self) -> Option<String> {
         let head = self.head()?;
@@ -1169,5 +1201,46 @@ mod node_write_tests {
             .unwrap();
         assert!(new.event_target.has_listeners("click"));
         assert!(!old.event_target.has_listeners("click"));
+    }
+
+    fn shape(node: &Rc<Node>) -> String {
+        match &node.node_type {
+            NodeType::Element { tag_name, .. } => format!(
+                "{}({})",
+                tag_name,
+                node.children().iter().map(shape).collect::<Vec<_>>().join(",")
+            ),
+            NodeType::Text(t) => format!("'{}'", t),
+            NodeType::Comment(c) => format!("!{}", c),
+            _ => "?".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_fragment_parses_as_detached_nodes_of_this_document() {
+        let doc = Document::parse_html("<html><body><p>x</p></body></html>").unwrap();
+        let mut max = 0;
+        doc.traverse(|n| max = max.max(n.id.raw()));
+        let nodes = doc
+            .parse_fragment("a<b id=n class=k>b<i>c</i></b><!--d--><br>e", "div")
+            .unwrap();
+        let shapes: Vec<String> = nodes.iter().map(shape).collect();
+        assert_eq!(shapes, ["'a'", "b('b',i('c'))", "!d", "br()", "'e'"]);
+        for n in &nodes {
+            assert!(n.parent().is_none());
+            assert!(n.id.raw() > max);
+            assert!(Rc::ptr_eq(&doc.get_node(n.id).unwrap(), n));
+        }
+        assert_eq!(nodes[1].get_attribute("class"), Some("k"));
+        assert!(Rc::ptr_eq(&doc.get_element_by_id("n").unwrap(), &nodes[1]));
+    }
+
+    #[test]
+    fn a_fragment_does_not_imply_html_or_body() {
+        let doc = Document::parse_html("<html><body></body></html>").unwrap();
+        let nodes = doc.parse_fragment("<li>1</li><li>2</li>", "ul").unwrap();
+        let shapes: Vec<String> = nodes.iter().map(shape).collect();
+        assert_eq!(shapes, ["li('1')", "li('2')"]);
+        assert!(doc.parse_fragment("", "div").unwrap().is_empty());
     }
 }
