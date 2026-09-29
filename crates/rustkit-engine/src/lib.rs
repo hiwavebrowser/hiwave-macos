@@ -7664,7 +7664,7 @@ impl Engine {
         }
         let mut stack: Vec<&str> = Vec::new();
         let mut budget = VAR_EXPANSION_BUDGET;
-        substitute_css_vars(value, &[css_vars], &mut stack, &mut budget, &mut false)
+        substitute_css_vars(value, &[css_vars], &mut stack, &mut budget, &mut false, &mut false)
     }
 
     /// The custom properties in effect on one element: the inherited map
@@ -7709,9 +7709,16 @@ impl Engine {
             let value = if raw.contains("var(") {
                 let mut stack: Vec<&str> = vec![name.as_str()];
                 let mut budget = VAR_EXPANSION_BUDGET;
-                let mut cycle = false;
-                let v = substitute_css_vars(raw, &[&own, &visible], &mut stack, &mut budget, &mut cycle);
-                (!cycle).then_some(v)
+                let (mut cycle, mut invalid) = (false, false);
+                let v = substitute_css_vars(
+                    raw,
+                    &[&own, &visible],
+                    &mut stack,
+                    &mut budget,
+                    &mut cycle,
+                    &mut invalid,
+                );
+                (!cycle && !invalid).then_some(v)
             } else {
                 Some(raw.clone())
             };
@@ -20952,6 +20959,31 @@ mod windows_a_leg_pins {
     }
 
     #[test]
+    fn a_custom_property_referencing_an_undefined_var_is_invalid() {
+        // CSS Variables 1 §3: `var(--unset)` with no fallback makes the
+        // custom property holding it invalid at computed-value time, so a
+        // use site's own fallback applies. lyft's theme is built on this
+        // "space toggle": `--bg-dark: var(--darkmode) #100f0f` with
+        // `--darkmode` never set, used as `var(--bg-dark, var(--bg-light))`.
+        // Substituting the empty string painted the whole page #100f0f.
+        let e = engine();
+        let html = "<html><head><style>\
+                    :root{--bg-dark:var(--darkmode)#100f0f;--bg-light:#fafafa;\
+                    --bg:var(--bg-dark,var(--bg-light))}\
+                    .t{color:var(--bg)}\
+                    .on{--darkmode: ;color:var(--bg-dark2)}\
+                    .on{--bg-dark2:var(--darkmode)#100f0f}\
+                    .inner{--i:var(--nope, var(--nope2));color:var(--i, #0a0b0c)}\
+                    </style></head><body><p class=\"t\">toggle</p>\
+                    <p class=\"on\">on</p><p class=\"inner\">inner</p></body></html>";
+        let layout = layout_of(&e, html);
+        let rgb = |r, g, b| Some(rustkit_css::Color::from_rgb(r, g, b));
+        assert_eq!(text_color(&layout, "toggle"), rgb(0xfa, 0xfa, 0xfa), "an unset toggle invalidates --bg-dark");
+        assert_eq!(text_color(&layout, "on"), rgb(0x10, 0x0f, 0x0f), "an empty (set) toggle substitutes nothing");
+        assert_eq!(text_color(&layout, "inner"), rgb(0x0a, 0x0b, 0x0c), "an invalid fallback is invalid too");
+    }
+
+    #[test]
     fn inline_and_important_custom_properties_follow_the_cascade() {
         let e = engine();
         let html = "<html><head><style>\
@@ -21371,13 +21403,15 @@ impl VarSource for MaskedVars<'_> {
 ///
 /// `layers` are searched in order, first hit wins (an element's own `--*`
 /// over the ones it inherited). `cycle` is set when a reference was refused
-/// because its variable was already on the stack.
+/// because its variable was already on the stack. `invalid` is set when a
+/// reference to an unset (or itself invalid) variable had no fallback.
 fn substitute_css_vars<'a>(
     value: &str,
     layers: &[&'a dyn VarSource],
     stack: &mut Vec<&'a str>,
     budget: &mut usize,
     cycle: &mut bool,
+    invalid: &mut bool,
 ) -> String {
     fn push(out: &mut String, s: &str, budget: &mut usize) {
         let n = s.len().min(*budget);
@@ -21411,21 +21445,32 @@ fn substitute_css_vars<'a>(
             None => (content.trim(), None),
         };
         let found = layers.iter().find_map(|l| l.var(name));
-        let piece = match found {
+        let resolved = match found {
             Some((key, raw)) if !stack.contains(&key) => {
                 stack.push(key);
-                let r = substitute_css_vars(raw, layers, stack, budget, cycle);
+                let mut raw_invalid = false;
+                let r = substitute_css_vars(raw, layers, stack, budget, cycle, &mut raw_invalid);
                 stack.pop();
-                r
+                // A variable whose own value is invalid counts as unset.
+                (!raw_invalid).then_some(r)
             }
-            // Missing, or part of a cycle: the fallback applies.
-            _ => {
-                if found.is_some() {
-                    *cycle = true;
-                }
-                fallback
-                    .map(|f| substitute_css_vars(f, layers, stack, budget, cycle))
-                    .unwrap_or_default()
+            Some(_) => {
+                *cycle = true;
+                None
+            }
+            None => None,
+        };
+        // Unset, invalid or part of a cycle: the fallback applies. With no
+        // fallback the value is invalid at computed-value time (CSS
+        // Variables 1 §3). A custom property must honour that: the "space
+        // toggle" `--on: var(--unset) red` is how sites switch themes, and
+        // substituting "" turned lyft's dark theme on.
+        let piece = match (resolved, fallback) {
+            (Some(r), _) => r,
+            (None, Some(f)) => substitute_css_vars(f, layers, stack, budget, cycle, invalid),
+            (None, None) => {
+                *invalid = true;
+                String::new()
             }
         };
         // The nested call already charged its bytes; appending is free.
