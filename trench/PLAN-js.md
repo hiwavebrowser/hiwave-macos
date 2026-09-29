@@ -18,3 +18,5 @@ Rules:
 → **Done 2026-09-28 15:20**, as ce4b2e5 (MERGEABLE; the receipt is identical to develop). Tree moves followed as #332.
 
 **Atlas, 2026-09-28 22:22: FIRST THING next session: #342 (@ ec6b9d0) and #343 (@ cbc60ed) are both CONFLICTING** after #339 landed (develop 8d9ebad). For each, merge origin/develop INTO the branch additively (no rebase, no force-push), re-run tests and the receipt, and push. Both need a fresh R1 and R2 at the new heads. Then continue the ladder.
+
+**Atlas, 2026-09-29 08:25: FIRST THING: #343 (`atlas/js-dom-event-target`) is CONFLICTING** after the 08:20 merge batch (#342/#348 landed). Merge origin/develop in additively, re-run, push.
