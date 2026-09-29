@@ -13080,3 +13080,81 @@ untouched, as on 09-28.
   written to avoid it.** `own_min_content_width` and `own_max_content_width` are
   textually identical for six lines, and that is now twice in three nights. It
   is not a lesson that stays learned; it is a property of the file.
+
+### Addendum — the macOS receipt for #350, and a reading trap in it
+
+CI green on `c12a5b2`: 14 check runs, 11 success, 3 skipped (nightly-only and
+`commit-gate`). R1 DESIGN **CLEAR** (COMMENT, Pete-authored seat), no fix asks;
+it ruled the axis/direction seams right for a width contribution and called the
+mutation table "the right land gate for a one-site fix". Its one non-blocking
+note ("comment block is long but house-style for these n6x trenches") carries no
+ask. `mergeable_state: clean`. R2-STAMP absent; the PR waits on that and on a
+person. This seat does not merge.
+
+[Run 36526608129](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36526608129),
+`macos-14`:
+
+```
+  metric:     3/26 cases pass all four conditions
+  measured:   26/26 scored on all four  (0 not fully measured)
+    geometry   14/26 green, 26/26 measured
+    paint       3/26 green, 26/26 measured
+    stability  26/26 green, 26/26 measured
+    discrete   26/26 green, 26/26 measured
+```
+
+**Metric and all four columns unchanged** from 09-28's receipt on #316. The
+Linux A/B predicted exactly this: no axis crosses the 0.5px bar in either
+direction, so a count-and-fraction receipt cannot move.
+
+**The ratchet holds — "23 case(s) absolutely red, none worse than the committed
+floor."** That is worth naming, because it is a better answer than the last two
+nights could get. 09-27 and 09-28 both had to reason about whether an ad-hoc
+control run was fit (09-28's was not: wrong base, edited the same file, merge-ref
+build). The ratchet compares against **committed floors**, so it needs no control
+at all. The instrument for "did any case regress on macOS" already existed and
+two nights went looking for a control instead of reading it.
+
+**And the trap, which I nearly fell into for the third night running.** This run
+reads `settings: geo_fails=246`; #316's read **252**. That is the right
+direction and it is **not mine**: this PR's base is `develop 8f44204` against
+#316's `daa41d0`, i.e. #317..#341 later, and `parity.yml` passes no `ref:` to
+`actions/checkout@v4` so the PR lane builds the *merge ref*. The base-matched
+Linux A/B says this change moves the failure count by exactly zero. Posted on
+the PR as well, since a future night will read that job summary before this file.
+
+Three nights, three versions of the same near-miss: 09-27 a +1 of base drift,
+09-28 a -2 against an unfit control, tonight a -6 across 25 merged PRs. **The
+pattern is not carelessness about controls, it is that the PR lane's number is
+never comparable to the previous PR lane's number**, and every night has
+rediscovered that from scratch. A base-matched control does not exist on this
+lane by construction; the ratchet is what to read instead.
+
+**State at end of night, for whoever reads this next:**
+
+- Metric **3/26** on macOS, measured on this PR's own lane
+  ([run 36526608129](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36526608129)):
+  geometry 14/26, paint 3/26, stability 26/26, discrete 26/26. Unchanged, and
+  predicted to be.
+- **No macOS case regressed**, per the ratchet's own floors rather than per a
+  control. `discrete=0` on all 26.
+- **#350 is ready to land and waits on R2-STAMP and a person.** R1 CLEAR, CI
+  green, merge CLEAN, `crates/` is the two files in the receipt and nothing else.
+- **Recorded next unit: `own_max_content_width` does not model flex factors.**
+  Chrome clamps each item's max-content contribution by its flex base size and
+  factors (css-flexbox-1 §9.9); RustKit sums the items raw. Measured tonight on
+  `settings`: `div.blocklist-add` Chrome 266.188 against items summing to 652,
+  `div.import-row` Chrome 379.531 against 660. Both hold `flex: 1` items. That is
+  a **300-400px** claim sitting next to tonight's 8px one, and it is the largest
+  single geometry defect I have seen on that case. It needs its own guards and
+  its own A/B; `n69_gap_contribution_probe.mjs` already prints the ground truth
+  for it (the non-zero `residual` rows are exactly the flexible-item containers).
+- **`own_min_content_width` has no flex arm at all** — no gap, no item sum. Not
+  touched tonight; noted because the two functions keep turning out to be one
+  defect apart.
+- New instruments on this branch: `n69_gap_contribution_probe.mjs`,
+  `n69_axis_ab.py` (per-axis improved/worsened/**appeared/disappeared** — the
+  last two are what turn "eleven regressions" into "eleven already-failing boxes"),
+  `n69_mutation_sweep.py` (asserts its landing site AND that each guard ran).
+- Decisions 1-3 of this entry are open. Decision 2 (the artifact host) cost the
+  same thing it cost on 09-26, 09-27 and 09-28.
