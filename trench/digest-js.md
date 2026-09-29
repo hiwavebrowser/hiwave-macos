@@ -298,3 +298,19 @@ Newest section last.
 1. **Unblock rung 1:** allowlist the MDN clone, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`.
 2. **Point Pollux at #342, #343 and #348** for R2. They're the oldest items in the stuck-PR queue from this lane.
 3. **Pause this lane's hourly cadence** until 1 or 2 moves.
+
+## 2026-09-29 10:18
+
+**Metric:** still rung 0, and rung 1 is still 0/0 vs Chrome 148. The rung 0 surface that's in review grew: the two banked branches are now PRs. **#342 and #348 landed at 08:18–08:19**, and #343 was merged up by the 08:52 session (db2762d). That left 2 free slots, and I filled both.
+
+**PRs** (3 of 3 open, at the cap)
+- **#356 (new)** `atlas/js-dom-node-clone` @ **26f729d**: 971689b plus an additive merge of develop 42c35d4, with no conflicts. Bindings 60/60, engine headless 265/265. Receipt on a verified relink: 26/26, **0 changed** vs the develop 062f73a receipt.
+- **#357 (new)** `atlas/js-dom-inner-text` @ **1ca30ce**: 7dd53ed plus the same develop merge. Bindings 59/59, engine 265/265. Receipt: 26/26, **0 changed** vs develop 062f73a and #356. `git merge-tree` shows it's clean against #356.
+- **#343** @ db2762d is unchanged. It doesn't include #344 (42c35d4), but GitHub last reported it CLEAN. It needs R1 and R2 at this head.
+
+**MDN:** `~/Repos/.worktrees/mdn-learning-area` is still absent, so rung 1 still can't be scored.
+
+**Decisions for Pete** (end_date is tomorrow)
+1. **Unblock rung 1:** allowlist the MDN clone, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. Without it, the 80% exit metric can't be reached by Wednesday.
+2. **Point Pollux (the temporary R2) at #343, #356 and #357.** All three are receipted with 0 changed.
+3. **§3.4 forced-layout pin from Prometheus** (for `getBoundingClientRect`/`offset*`), or pause the lane's cadence. That's the only on-plan work left that doesn't need fixtures.
