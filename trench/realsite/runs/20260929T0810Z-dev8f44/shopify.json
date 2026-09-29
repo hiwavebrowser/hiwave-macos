@@ -1,0 +1,83 @@
+{
+  "id": "shopify",
+  "url": "https://www.shopify.com/",
+  "chrome": [
+    {
+      "url": "https://www.shopify.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.shopify.com/",
+      "title": "Shopify: The All-in-One Commerce Platform for Businesses - Shopify",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260929T0810Z-dev8f44/shopify/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260929T0810Z-dev8f44/shopify/chrome-a.png",
+      "elapsed_ms": 69273
+    },
+    {
+      "url": "https://www.shopify.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.shopify.com/",
+      "title": "Shopify: The All-in-One Commerce Platform for Businesses - Shopify",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260929T0810Z-dev8f44/shopify/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260929T0810Z-dev8f44/shopify/chrome-b.png",
+      "elapsed_ms": 46859
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.shopify.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260929T0810Z-dev8f44/shopify/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260929T0810Z-dev8f44/shopify/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 3,
+      "threw": 3,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 146758,
+      "elapsed_ms": 89
+    },
+    "elapsed_ms": 14485,
+    "error": null,
+    "wall_ms": 14583,
+    "non_background_fraction": 0.4861
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 28,
+    "rustkit_words": 121,
+    "ratio": 0.9643,
+    "missing_sample": [
+      "we"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.27724609375,
+    "diff": 25.913085937500004
+  },
+  "points": 2
+}

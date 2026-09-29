@@ -1,0 +1,81 @@
+{
+  "id": "lyft",
+  "url": "https://www.lyft.com/",
+  "chrome": [
+    {
+      "url": "https://www.lyft.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.lyft.com/",
+      "title": "Ride or drive with Lyft",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260929T0810Z-dev8f44/lyft/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260929T0810Z-dev8f44/lyft/chrome-a.png",
+      "elapsed_ms": 17040
+    },
+    {
+      "url": "https://www.lyft.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.lyft.com/",
+      "title": "Ride or drive with Lyft",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260929T0810Z-dev8f44/lyft/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260929T0810Z-dev8f44/lyft/chrome-b.png",
+      "elapsed_ms": 16819
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.lyft.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260929T0810Z-dev8f44/lyft/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260929T0810Z-dev8f44/lyft/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 29,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 3523434,
+      "elapsed_ms": 3089
+    },
+    "elapsed_ms": 9605,
+    "error": null,
+    "wall_ms": 9785,
+    "non_background_fraction": 0.4836
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 50,
+    "rustkit_words": 50,
+    "ratio": 1.0,
+    "missing_sample": []
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 88.848046875
+  },
+  "points": 2
+}
