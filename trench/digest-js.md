@@ -93,3 +93,33 @@ Newest section last.
 
    Script queries share the cascade's matcher now, so fixing either in the cascade fixes both. Do they belong to the cascade lane or the realsite lane (`rs-ancestor-pseudo`)? Both are real Chrome mismatches.
 3. Still open: `Bash(cargo:*)` / `Bash(git -C:*)` allowlisting. This hour, two release relinks each ran past the 10-minute tool cap and got moved to the background (load about 17).
+
+## 2026-09-28 20:15
+
+**Metric:** rung 0. **querySelector: toy → the cascade's matcher (merged, #337). innerHTML/outerHTML: absent → Rust-backed (#339, R2 PASS).** The node-or-string ops are pushed with no PR yet. **Rung 1 is still 0/0 vs Chrome 148, still blocked on fetching MDN (decision 1).**
+
+**PRs**
+- **#337 merged** 23:37Z @ **06b305c**, with R1 CLEAR.
+  - I opened it at 18:55 with a 26/26, 0-changed receipt. That receipt turned out to be suspect (see the note below), so I re-ran it on a verified rebuild: **26/26, 0 changed vs d9a57ea**.
+  - R2 had stamped FAIL on `pr-aggregate`. This lane can't read CI logs, download artifacts or rerun jobs; all three need approval. So I reproduced the CI swarm and gate locally on the verified 06b305c build (`js-swarm-gate.py`, CI's flags, unsharded): **GATE PASSED, all 26 within threshold**. The red check didn't reproduce, and it merged meanwhile.
+- **#339 (new)** `atlas/js-dom-inner-html` @ **dc33995**, 2 commits on develop 8567760:
+  - c9ce112 adds `Document::parse_fragment`. It also fixes a **rustkit-html fragment bug**: formatting-element reconstruction skipped stack index 0 when there's no `<body>`, so `a<b>b<i>c</i></b>d` nested a second `<b>`. Document parses are unchanged.
+  - dc33995 adds the innerHTML getter and setter and the outerHTML getter (HTML §13.3 serialization, escaping, void and raw-text elements). The setter parses with the element as context and marks Style. It also adds a `getElementById` fallback for ids reused after the old node was removed.
+  - Tests: dom 65/65, bindings 49/49, engine headless 245/245.
+  - Receipt: 26/26, **0 changed**; builtins 5/5. CI all green, **R2 PASS**. Awaiting R1. It merges clean on top of #337.
+- **Pushed, no PR:** `atlas/js-dom-child-node-ops` @ **10b4769** (develop 8920e24): `replaceChild`, `append`/`prepend`/`replaceChildren`, `before`/`after`/`replaceWith`, all in JS over the existing insert/remove op. Bindings 50/50.
+  - **No receipt yet, so no PR.** Body: `~/Repos/.worktrees/js-pr-body-child-node-ops.md`.
+  - An **uncommitted** engine pin (`child_node_convenience_ops_are_painted…`) sits in that worktree. Its first headless engine run, at load 13, showed **many unrelated failures** (web_font_tests, windows_a_leg_pins, …); I only saw the first 10 lines.
+  - **Next session, first:**
+    1. Rerun `cargo test -p rustkit-engine --features headless --lib` there, and check develop 8920e24 the same way. Is it environmental, or is develop red?
+    2. Commit the pin.
+    3. `js-touch-sources.py`, then `js-receipt.py`, then open the PR.
+
+**Decisions for Pete**
+1. **Rung 1 is still blocked (unchanged since 18:20).** `git clone https://github.com/mdn/learning-area` still needs approval in this headless lane. Allowlist `Bash(git clone https://github.com/mdn/learning-area:*)`, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. Meanwhile I'm building what the MDN pages need: the matcher, innerHTML, and now the convenience ops.
+2. **rustkit-html has no implied end tags for `li`, `dt` or `dd`.** I confirmed it with a probe on a document parse; `p` closed by a block start is fine. `<ul><li>a<li>b</ul>` nests the second `li` inside the first, and `<dt>t<dd>d` does the same. Both are common on real pages and render as nested lists. It's a parser fix with real-site parity impact, so I kept it out of the JS lane. **Which lane takes it?** I recommend realsite, because it'll move their board.
+3. **Lane permissions, now including CI.**
+   - `gh run view --log-failed`, `gh run download` and `gh run rerun` all need approval here, so a red `pr-aggregate` can't be diagnosed or retried from this lane. The workaround was a full local reproduction.
+   - Still open: `Bash(cargo:*)` / `Bash(git -C:*)`.
+
+**Note: a shared-target receipt hazard, fixed.** Every lane worktree builds into one `CARGO_TARGET_DIR`. Cargo's dep-info paths are package-relative and freshness is checked by mtime. So a worktree whose files are older than another worktree's last build looks "fresh" and **reuses that other branch's binary**: `Finished` in 1s. This session caught it on #337. The fix is `~/Repos/.worktrees/js-touch-sources.py <worktree>` before every receipt. A receipt that finishes without a relink after a worktree switch is suspect. The #339 receipt was valid, because its worktree was created after the previous build.
