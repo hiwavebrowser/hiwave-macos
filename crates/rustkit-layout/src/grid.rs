@@ -2409,6 +2409,9 @@ pub fn layout_grid_container(
             .iter()
             .enumerate()
             .map(|(i, track)| match row_real[i] {
+                // A fixed row (`20px`, `minmax(20px, 20px)`) keeps its size and
+                // the item overflows it (§12.5 sizes intrinsic tracks only).
+                Some(_) if track_is_fixed(track) => 0.0,
                 Some(real) => {
                     let delta = real - track.size;
                     if delta > 0.5 || (delta < -0.5 && row_shrinkable[i]) {
@@ -3121,11 +3124,10 @@ fn distribute_span_contributions(
                 })
                 .collect();
             if growable.is_empty() {
-                // All tracks are fixed: distribute equally anyway.
-                let per_track = extra / (end - start) as f32;
-                for t in &mut tracks[start..end] {
-                    t.base_size += per_track;
-                }
+                // Every spanned track is fixed. §12.5 only lets items size
+                // INTRINSIC tracks, so the item overflows: `10px 10px` with
+                // the text "a" keeps 10px tracks in Chrome. Growing them here
+                // made the first track 11.12px.
                 continue;
             }
             let limits: Vec<f32> = growable
@@ -3391,6 +3393,18 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
         position += track.size;
         prev_was_collapsed = track.size == 0.0;
     }
+}
+
+/// A track with no intrinsic, flexible or percentage sizing function: items
+/// never size it (css-grid-1 §12.5), they overflow it.
+fn track_is_fixed(t: &GridTrack) -> bool {
+    !t.is_min_content
+        && !t.is_max_content
+        && !t.is_flexible
+        && t.percent.is_none()
+        && t.max_percent.is_none()
+        && t.fit_content_limit.is_none()
+        && t.growth_limit <= t.base_size
 }
 
 /// Stretch auto tracks when align-content is stretch.
