@@ -4362,21 +4362,36 @@ impl Engine {
         // attribute names or tag (by their base selector), plus the universal
         // ones: github's ~1,000 `::before`/`::after` rules were walked in full
         // for every element, half of all cascade time.
-        let rules: Box<dyn Iterator<Item = (Option<&[SubjectKey]>, &Rule)>> =
-            match (index.as_ref(), indexed) {
-                (Some(ix), Some(buckets)) => Box::new(
-                    buckets
-                        .candidates(tag_name, attributes)
-                        .into_iter()
-                        .map(move |g| {
-                            let keys = ix.pseudo_keys[g as usize].as_deref().map(Vec::as_slice);
-                            (keys, ix.rule(stylesheets, g))
-                        }),
-                ),
-                _ => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).map(|r| (None, r))),
-            };
-
-        for (indexed_keys, rule) in rules {
+        if let (Some(ix), Some(buckets)) = (index.as_ref(), indexed) {
+            // Every rule in these buckets ends in the pseudo, and the index
+            // holds its prepared base selector, base keys and specificity:
+            // the same tests as the string path below, computed once.
+            for g in buckets.candidates(tag_name, attributes) {
+                let gi = g as usize;
+                let Some(prepared) = ix.pseudo_prepared[gi].as_deref() else {
+                    continue;
+                };
+                // No base keys means an empty base, which admits any element.
+                let admitted = ix.pseudo_keys[gi]
+                    .as_deref()
+                    .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes));
+                if admitted
+                    && SelectorMatcher.selector_matches_prepared(
+                        prepared,
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    )
+                {
+                    matching_rules.push((ix.specificity[gi], ix.rule(stylesheets, g)));
+                }
+            }
+        }
+        // Without an index (or for another pseudo), walk every rule.
+        let unindexed = indexed.is_none();
+        for rule in stylesheets.iter().flat_map(|s| s.rules.iter()).filter(|_| unindexed) {
             {
                 let selector = &rule.selector;
 
@@ -4392,12 +4407,7 @@ impl Engine {
                     // subject prefilter first, exactly as the cascade does.
                     // A bare `::before` has no subject to prefilter on.
                     if (base_selector.trim().is_empty()
-                        || match indexed_keys {
-                            Some(keys) => Self::keys_may_match(keys, tag_name, attributes),
-                            None => {
-                                self.rule_may_match(base_selector.trim(), tag_name, attributes)
-                            }
-                        })
+                        || self.rule_may_match(base_selector.trim(), tag_name, attributes))
                         && SelectorMatcher.selector_matches(
                         base_selector.trim(),
                         tag_name,
@@ -4897,30 +4907,35 @@ impl Engine {
                 Some(ix) => Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
                 None => self.rule_may_match(&rule.selector, tag_name, attributes),
             };
-            let matches = may_match
-                && match index.as_ref() {
-                    Some(ix) => SelectorMatcher.selector_matches_prepared(
-                        &ix.prepared[rule_index],
+            if !may_match {
+                continue;
+            }
+            let matched = match index.as_ref() {
+                Some(ix) => SelectorMatcher.matched_specificity(
+                    &ix.prepared[rule_index],
+                    &ix.member_specificity[rule_index],
+                    ix.specificity[rule_index],
+                    tag_name,
+                    attributes,
+                    ancestors,
+                    siblings_before,
+                    sib,
+                ),
+                None => {
+                    let selector = rule.selector.trim();
+                    SelectorMatcher.matched_specificity(
+                        &SelectorMatcher.prepared_selector(selector),
+                        &SelectorMatcher.list_member_specificity(selector),
+                        SelectorMatcher.selector_specificity(&rule.selector),
                         tag_name,
                         attributes,
                         ancestors,
                         siblings_before,
                         sib,
-                    ),
-                    None => SelectorMatcher.selector_matches(
-                        &rule.selector,
-                        tag_name,
-                        attributes,
-                        ancestors,
-                        siblings_before,
-                        sib,
-                    ),
-                };
-            if matches {
-                let specificity = match index.as_ref() {
-                    Some(ix) => ix.specificity[rule_index],
-                    None => SelectorMatcher.selector_specificity(&rule.selector),
-                };
+                    )
+                }
+            };
+            if let Some(specificity) = matched {
                 matching_rules.push((rule, specificity, rule_index));
             }
         }
@@ -7654,7 +7669,7 @@ impl Engine {
         }
         let mut stack: Vec<&str> = Vec::new();
         let mut budget = VAR_EXPANSION_BUDGET;
-        substitute_css_vars(value, &[css_vars], &mut stack, &mut budget, &mut false)
+        substitute_css_vars(value, &[css_vars], &mut stack, &mut budget, &mut false, &mut false)
     }
 
     /// The custom properties in effect on one element: the inherited map
@@ -7699,9 +7714,16 @@ impl Engine {
             let value = if raw.contains("var(") {
                 let mut stack: Vec<&str> = vec![name.as_str()];
                 let mut budget = VAR_EXPANSION_BUDGET;
-                let mut cycle = false;
-                let v = substitute_css_vars(raw, &[&own, &visible], &mut stack, &mut budget, &mut cycle);
-                (!cycle).then_some(v)
+                let (mut cycle, mut invalid) = (false, false);
+                let v = substitute_css_vars(
+                    raw,
+                    &[&own, &visible],
+                    &mut stack,
+                    &mut budget,
+                    &mut cycle,
+                    &mut invalid,
+                );
+                (!cycle && !invalid).then_some(v)
             } else {
                 Some(raw.clone())
             };
@@ -7754,7 +7776,9 @@ impl Engine {
             rules: Vec::new(),
             keys: Vec::new(),
             pseudo_keys: Vec::new(),
+            pseudo_prepared: Vec::new(),
             specificity: Vec::new(),
+            member_specificity: Vec::new(),
             prepared: Vec::new(),
             main: RuleBuckets::default(),
             before: RuleBuckets::default(),
@@ -7770,8 +7794,11 @@ impl Engine {
                 }
                 ix.keys.push(keys);
                 ix.specificity.push(SelectorMatcher.selector_specificity(&rule.selector));
+                ix.member_specificity
+                    .push(SelectorMatcher.list_member_specificity(rule.selector.trim()));
                 ix.prepared.push(SelectorMatcher.prepared_selector(rule.selector.trim()));
                 let mut pseudo_keys = None;
+                let mut pseudo_prepared = None;
                 // Same test as create_pseudo_element's (the single-colon
                 // form covers the double-colon one). Filed under the keys of
                 // the BASE selector, the one create_pseudo_element prefilters:
@@ -7785,6 +7812,7 @@ impl Engine {
                         continue;
                     }
                     let base = pseudo_base_selector(&rule.selector, pseudo, suffix);
+                    pseudo_prepared = Some(SelectorMatcher.prepared_selector(base.trim()));
                     if base.is_empty() {
                         buckets.universal.push(g);
                     } else {
@@ -7797,6 +7825,7 @@ impl Engine {
                     }
                 }
                 ix.pseudo_keys.push(pseudo_keys);
+                ix.pseudo_prepared.push(pseudo_prepared);
             }
         }
         ix
@@ -9046,6 +9075,65 @@ impl SelectorMatcher {
         } else {
             diff <= 0 && diff % a == 0
         }
+    }
+
+    /// For a top-level selector list, each member's `(position, specificity)`,
+    /// highest specificity first (ties keep source order). Positions index the
+    /// members of `prepared_selector(selector)`'s `List`, which splits the same
+    /// way. Empty for a single complex selector.
+    fn list_member_specificity(&self, selector: &str) -> Vec<(usize, (usize, usize, usize))> {
+        if !selector.contains(',') {
+            return Vec::new();
+        }
+        let members = SelectorMatcher::split_top_level_commas(selector);
+        if members.len() < 2 {
+            return Vec::new();
+        }
+        let mut specs: Vec<_> = members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i, self.selector_specificity(m.trim())))
+            .collect();
+        specs.sort_by(|a, b| b.1.cmp(&a.1));
+        specs
+    }
+
+    /// The specificity a matched rule cascades with, or `None` if it doesn't
+    /// match. Selectors 4 §17: a selector list's specificity is that of the
+    /// most specific member THAT MATCHES the element, not of the whole list.
+    /// `a, a:hover { color: blue }` is (0,0,1) on a link that isn't hovered,
+    /// so `.nav-link { color: gray }` beats it. `whole` is the list's (max)
+    /// specificity, used for a single complex selector. Members are tried
+    /// most specific first, so the first match is the answer.
+    #[allow(clippy::too_many_arguments)]
+    fn matched_specificity(
+        &self,
+        prepared: &PreparedSelector,
+        member_specificity: &[(usize, (usize, usize, usize))],
+        whole: (usize, usize, usize),
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+        ancestors: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[SiblingKey],
+        sib: SiblingContext,
+    ) -> Option<(usize, usize, usize)> {
+        if let PreparedSelector::List(members) = prepared {
+            if members.len() == member_specificity.len() {
+                return member_specificity.iter().find_map(|&(i, spec)| {
+                    self.selector_matches_prepared(
+                        &members[i],
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    )
+                    .then_some(spec)
+                });
+            }
+        }
+        self.selector_matches_prepared(prepared, tag_name, attributes, ancestors, siblings_before, sib)
+            .then_some(whole)
     }
 
     /// Calculate selector specificity for ordering.
@@ -18003,6 +18091,73 @@ mod rule_prefilter_tests {
     }
 
     #[test]
+    fn indexed_pseudo_styles_match_the_string_path() {
+        // The indexed path matches each pseudo rule by the index's prepared
+        // base selector and stored specificity; it must pick the same rules,
+        // in the same order, as matching the base selector string.
+        let css = "::before { content: \"bare\"; color: red }\n\
+                   .a::before { content: \"a\" }\n\
+                   div.a:before { color: blue }\n\
+                   #i.a::before { content: \"id\" !important }\n\
+                   .a::before { content: \"late\" }\n\
+                   ul > li.b::after { content: \"child\" }\n\
+                   nav li.b::after { content: \"desc\"; color: green }\n\
+                   li.b + li.b::after { content: \"adj\" }\n\
+                   li:first-child::after { content: \"first\" }\n\
+                   :is(.a, .b)::after { color: purple }\n\
+                   .a:frobnicate::before { content: \"never\" }\n\
+                   [data-x]::after { content: attr(data-x) }\n\
+                   .a , .b::after { content: \"list\" }\n";
+        let sheet = Stylesheet::parse(css).expect("css");
+        let sheets = std::slice::from_ref(&sheet);
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let li = |c: &str| ("li".to_string(), vec![c.to_string()], None::<String>);
+        let ancestors_sets: [Vec<(String, Vec<String>, Option<String>)>; 3] = [
+            vec![],
+            vec![("ul".to_string(), vec![], None), ("nav".to_string(), vec![], None)],
+            vec![li("b"), ("ol".to_string(), vec![], None)],
+        ];
+        let elements = [
+            ("div", attrs(&[("class", "a")])),
+            ("div", attrs(&[("class", "a"), ("id", "i")])),
+            ("li", attrs(&[("class", "b")])),
+            ("li", attrs(&[("class", "b"), ("data-x", "v")])),
+            ("span", attrs(&[])),
+        ];
+        let sibling_sets: [(Vec<SiblingKey>, SiblingContext); 2] = [
+            (vec![], SiblingContext::SOLE),
+            (
+                vec![("li".to_string(), vec!["b".to_string()], None, ElementState::default())],
+                SiblingContext { index: 1, count: 2, type_index: 1, type_count: 2, has_children: false },
+            ),
+        ];
+        let styles = |indexed: bool| {
+            let _scope = indexed.then(|| RuleIndexScope::install(engine.build_rule_index(sheets)));
+            let mut out = Vec::new();
+            for (tag, a) in &elements {
+                for ancestors in &ancestors_sets {
+                    for (siblings, sib) in &sibling_sets {
+                        for pseudo in ["::before", "::after"] {
+                            out.push(format!(
+                                "{tag} {a:?} {ancestors:?} {pseudo}: {:?}",
+                                engine.pseudo_element_style(
+                                    tag, a, sheets, ancestors, siblings, *sib, pseudo,
+                                )
+                            ));
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let (plain, indexed) = (styles(false), styles(true));
+        assert!(plain.iter().any(|s| s.contains("Some(")), "the fixture must generate boxes");
+        for (p, i) in plain.iter().zip(&indexed) {
+            assert_eq!(p, i);
+        }
+    }
+
+    #[test]
     fn rule_index_specificity_matches_selector_specificity() {
         // The cascade sorts matched rules by the index's stored specificity;
         // it must be exactly what `selector_specificity` computes.
@@ -18022,6 +18177,58 @@ mod rule_prefilter_tests {
                 rule.selector
             );
         }
+    }
+
+    /// Selectors 4 §17: a list's specificity is its most specific MATCHING
+    /// member's. linkedin's reset `a,a:focus,a:hover{color:#0a66c2}` scored
+    /// (0,1,1) on every link, so it beat `.text-color-text-secondary` (0,1,0)
+    /// and the nav labels came out blue instead of gray. Checked with and
+    /// without the rule index installed (the two cascade paths).
+    #[test]
+    fn a_selector_list_cascades_with_its_matching_members_specificity() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let sheet = Stylesheet::parse(
+            "a, a:focus, a:hover { color: blue; } .sec { color: green; } \
+             i, i.zz#qq { color: blue; } .one { color: green; } \
+             em, #hit { color: green; } .two { color: blue; } \
+             u { color: red; } u, u.x { color: green; }",
+        )
+        .expect("sheet");
+        let vars = HashMap::new();
+        let style = |tag: &str, pairs: &[(&str, &str)]| {
+            engine.compute_style_for_element(
+                tag,
+                &attrs(pairs),
+                std::slice::from_ref(&sheet),
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let green = rustkit_css::Color::new(0, 128, 0, 1.0);
+        let check = |path: &str| {
+            assert_eq!(style("a", &[("class", "sec")]).color, green, "{path}: `a` is (0,0,1)");
+            assert_eq!(style("i", &[("class", "one")]).color, green, "{path}: unmatched `i.zz#qq`");
+            // The matching member is the more specific one: (1,0,0) wins.
+            assert_eq!(style("em", &[("id", "hit"), ("class", "two")]).color, green, "{path}: `#hit`");
+            // Equal specificity: the later rule still wins by source order.
+            assert_eq!(style("u", &[]).color, green, "{path}: source order");
+        };
+        check("string path");
+        let _scope = RuleIndexScope::install(engine.build_rule_index(std::slice::from_ref(&sheet)));
+        check("indexed path");
+    }
+
+    #[test]
+    fn list_member_specificity_splits_at_top_level_only() {
+        let specs = SelectorMatcher.list_member_specificity(":is(a, b) c, #d, .e");
+        let order: Vec<usize> = specs.iter().map(|&(i, _)| i).collect();
+        assert_eq!(order[0], 1, "#d is the most specific member: {specs:?}");
+        assert_eq!(specs.len(), 3, "`:is(a, b)` is one member: {specs:?}");
+        assert!(SelectorMatcher.list_member_specificity(":is(a, b) c").is_empty());
+        assert!(SelectorMatcher.list_member_specificity(".a").is_empty());
     }
 
     #[test]
@@ -19567,9 +19774,17 @@ struct RuleIndex {
     /// string for every candidate of every element (24% of github's cascade).
     keys: Vec<Rc<Vec<SubjectKey>>>,
     pseudo_keys: Vec<Option<Rc<Vec<SubjectKey>>>>,
+    /// Global rule index -> for a `:before`/`:after` rule, its prepared
+    /// (trimmed) base selector, empty base included. `pseudo_element_style`
+    /// matched the base by string, re-hashing it into the prepared cache for
+    /// every candidate of every element (~20% of wikipedia's cascade).
+    pseudo_prepared: Vec<Option<Rc<PreparedSelector>>>,
     /// Global rule index -> `selector_specificity` of its selector, so a
     /// matched rule doesn't re-scan its selector string on every element.
     specificity: Vec<(usize, usize, usize)>,
+    /// Global rule index -> `list_member_specificity` of its selector (empty
+    /// unless it is a top-level list), for `matched_specificity`.
+    member_specificity: Vec<Vec<(usize, (usize, usize, usize))>>,
     /// Global rule index -> its prepared selector, so the cascade doesn't
     /// SipHash the selector string into the prepared cache on every
     /// candidate of every element.
@@ -20866,6 +21081,31 @@ mod windows_a_leg_pins {
     }
 
     #[test]
+    fn a_custom_property_referencing_an_undefined_var_is_invalid() {
+        // CSS Variables 1 §3: `var(--unset)` with no fallback makes the
+        // custom property holding it invalid at computed-value time, so a
+        // use site's own fallback applies. lyft's theme is built on this
+        // "space toggle": `--bg-dark: var(--darkmode) #100f0f` with
+        // `--darkmode` never set, used as `var(--bg-dark, var(--bg-light))`.
+        // Substituting the empty string painted the whole page #100f0f.
+        let e = engine();
+        let html = "<html><head><style>\
+                    :root{--bg-dark:var(--darkmode)#100f0f;--bg-light:#fafafa;\
+                    --bg:var(--bg-dark,var(--bg-light))}\
+                    .t{color:var(--bg)}\
+                    .on{--darkmode: ;color:var(--bg-dark2)}\
+                    .on{--bg-dark2:var(--darkmode)#100f0f}\
+                    .inner{--i:var(--nope, var(--nope2));color:var(--i, #0a0b0c)}\
+                    </style></head><body><p class=\"t\">toggle</p>\
+                    <p class=\"on\">on</p><p class=\"inner\">inner</p></body></html>";
+        let layout = layout_of(&e, html);
+        let rgb = |r, g, b| Some(rustkit_css::Color::from_rgb(r, g, b));
+        assert_eq!(text_color(&layout, "toggle"), rgb(0xfa, 0xfa, 0xfa), "an unset toggle invalidates --bg-dark");
+        assert_eq!(text_color(&layout, "on"), rgb(0x10, 0x0f, 0x0f), "an empty (set) toggle substitutes nothing");
+        assert_eq!(text_color(&layout, "inner"), rgb(0x0a, 0x0b, 0x0c), "an invalid fallback is invalid too");
+    }
+
+    #[test]
     fn inline_and_important_custom_properties_follow_the_cascade() {
         let e = engine();
         let html = "<html><head><style>\
@@ -21285,13 +21525,15 @@ impl VarSource for MaskedVars<'_> {
 ///
 /// `layers` are searched in order, first hit wins (an element's own `--*`
 /// over the ones it inherited). `cycle` is set when a reference was refused
-/// because its variable was already on the stack.
+/// because its variable was already on the stack. `invalid` is set when a
+/// reference to an unset (or itself invalid) variable had no fallback.
 fn substitute_css_vars<'a>(
     value: &str,
     layers: &[&'a dyn VarSource],
     stack: &mut Vec<&'a str>,
     budget: &mut usize,
     cycle: &mut bool,
+    invalid: &mut bool,
 ) -> String {
     fn push(out: &mut String, s: &str, budget: &mut usize) {
         let n = s.len().min(*budget);
@@ -21325,21 +21567,32 @@ fn substitute_css_vars<'a>(
             None => (content.trim(), None),
         };
         let found = layers.iter().find_map(|l| l.var(name));
-        let piece = match found {
+        let resolved = match found {
             Some((key, raw)) if !stack.contains(&key) => {
                 stack.push(key);
-                let r = substitute_css_vars(raw, layers, stack, budget, cycle);
+                let mut raw_invalid = false;
+                let r = substitute_css_vars(raw, layers, stack, budget, cycle, &mut raw_invalid);
                 stack.pop();
-                r
+                // A variable whose own value is invalid counts as unset.
+                (!raw_invalid).then_some(r)
             }
-            // Missing, or part of a cycle: the fallback applies.
-            _ => {
-                if found.is_some() {
-                    *cycle = true;
-                }
-                fallback
-                    .map(|f| substitute_css_vars(f, layers, stack, budget, cycle))
-                    .unwrap_or_default()
+            Some(_) => {
+                *cycle = true;
+                None
+            }
+            None => None,
+        };
+        // Unset, invalid or part of a cycle: the fallback applies. With no
+        // fallback the value is invalid at computed-value time (CSS
+        // Variables 1 §3). A custom property must honour that: the "space
+        // toggle" `--on: var(--unset) red` is how sites switch themes, and
+        // substituting "" turned lyft's dark theme on.
+        let piece = match (resolved, fallback) {
+            (Some(r), _) => r,
+            (None, Some(f)) => substitute_css_vars(f, layers, stack, budget, cycle, invalid),
+            (None, None) => {
+                *invalid = true;
+                String::new()
             }
         };
         // The nested call already charged its bytes; appending is free.
@@ -21970,6 +22223,26 @@ mod script_dom_flush_tests {
         assert_eq!(painted_text(&engine, view), "ALPHA BETA gamma");
     }
 
+    // The node-or-string convenience ops ride the same insert/remove host
+    // op, so they are painted by the same settle flush.
+    #[test]
+    fn child_node_convenience_ops_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><body><p id='a'>alpha</p><p id='b'>beta</p></body></html>",
+        );
+        engine
+            .execute_script(
+                view,
+                "var a = document.getElementById('a'), b = document.getElementById('b'); \
+                 var p = document.createElement('p'); p.append('gamma'); \
+                 b.after(p); a.before(b); \
+                 var q = document.createElement('p'); q.append('delta'); \
+                 document.body.replaceChild(q, a)",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "beta delta gamma");
+    }
+
     // innerHTML parses into the Rust DOM, so the cascade styles the new
     // elements (class and tag rules both) and the settle flush paints them.
     #[test]
@@ -22369,6 +22642,118 @@ mod flex_relative_length_tests {
             assert_eq!(rect(&root, "b").x, 30.0);
             // Grid: 30 + 20.
             assert_eq!(rect(&root, "g").x, 50.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod flex_zero_size_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.set_viewport(1280.0, 800.0);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.set_viewport(1280.0, 800.0);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    #[test]
+    fn an_authored_zero_width_flex_item_is_zero_wide() {
+        // `width:0` and `width:0px` are sizes, not `auto`: the item is 0
+        // wide and the next sibling starts at x=0.
+        for w in ["0", "0px"] {
+            let html = format!(
+                "<body style=\"margin:0\"><div style=\"display:flex\">\
+                 <div id=\"z\" style=\"width:{w};height:10px\"></div>\
+                 <div id=\"n\" style=\"width:10px;height:10px\"></div></div></body>"
+            );
+            for root in laid_out(&html) {
+                assert_eq!(rect(&root, "z").width, 0.0, "width:{w}");
+                assert_eq!(rect(&root, "n").x, 0.0, "width:{w}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_width_flex_item_with_text_stays_zero_wide() {
+        // css-flexbox §4.5: the automatic minimum is the smaller of the
+        // specified size suggestion (0) and the content size, so the text
+        // overflows a 0-wide box instead of widening it.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:16px Arial"><div style="display:flex">"#,
+            r#"<div id="z" style="width:0">Overflowing</div><div id="n" style="width:10px">b</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "z").width, 0.0);
+            assert_eq!(rect(&root, "n").x, 0.0);
+        }
+    }
+
+    #[test]
+    fn a_specified_width_caps_the_automatic_minimum() {
+        // A 40px item holding a wider unbreakable word keeps its 40px when the
+        // row has room: min(specified 40, content) = 40, not the word's width.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:16px Arial"><div style="display:flex;width:400px">"#,
+            r#"<div id="w" style="width:40px">Supercalifragilistic</div><div id="n">b</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "w").width, 40.0);
+            assert_eq!(rect(&root, "n").x, 40.0);
+        }
+    }
+
+    #[test]
+    fn a_zero_height_column_item_with_content_stays_zero_tall() {
+        // The vertical axis: step 11d's automatic minimum is capped by the
+        // specified height, including an authored 0 (it only honoured Px).
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:flex;flex-direction:column;height:200px">"#,
+            r#"<div id="z" style="height:0"><div style="height:30px"></div></div>"#,
+            r#"<div id="n" style="height:10px"></div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "z").height, 0.0);
+            assert_eq!(rect(&root, "n").y, 0.0);
+        }
+    }
+
+    #[test]
+    fn a_percent_height_in_an_auto_height_column_still_behaves_as_auto() {
+        // Guard: `height:50%` against an indefinite column container has
+        // nothing to resolve against and must stay content-sized.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:flex;flex-direction:column">"#,
+            r#"<div id="p" style="height:50%"><div style="height:30px"></div></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "p").height, 30.0);
         }
     }
 }
