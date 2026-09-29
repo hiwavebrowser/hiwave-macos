@@ -123,3 +123,35 @@ Newest section last.
    - Still open: `Bash(cargo:*)` / `Bash(git -C:*)`.
 
 **Note: a shared-target receipt hazard, fixed.** Every lane worktree builds into one `CARGO_TARGET_DIR`. Cargo's dep-info paths are package-relative and freshness is checked by mtime. So a worktree whose files are older than another worktree's last build looks "fresh" and **reuses that other branch's binary**: `Finished` in 1s. This session caught it on #337. The fix is `~/Repos/.worktrees/js-touch-sources.py <worktree>` before every receipt. A receipt that finishes without a relink after a worktree switch is suspect. The #339 receipt was valid, because its worktree was created after the previous build.
+
+## 2026-09-28 21:50
+
+**Metric:** rung 0 is extended again. **Element `addEventListener`: absent (it threw a TypeError, killing the rest of the script) → a JS-side EventTarget with capture/target/bubble dispatch (#343).** `replaceChild` and the node-or-string ops are in PR #342. **Rung 1 is still 0/0 vs Chrome 148, still blocked on fetching MDN (decision 1).** Every receipt this hour was 26/26 with **0 changed**, and builtins 5/5.
+
+**PRs** (the lane is at max_open_prs 3: #339, #342, #343)
+- **#339** `atlas/js-dom-inner-html` @ dc33995 is all green with R2 PASS and MERGEABLE. It's still waiting on R1.
+- **#342 (new)** `atlas/js-dom-child-node-ops` @ **ec6b9d0**:
+  - 10b4769 adds the ops.
+  - ec6b9d0 is the engine pin that they're painted at settle.
+  - Last session's "many unrelated engine failures" came from **machine load, not develop**. The full run was 250/251, and the one failure was the wall-clock-bound `the_script_budget_covers_fetching` at load 17. It passes on rerun.
+  - Receipt ran on a verified relink (24m55s).
+- **#343 (new)** `atlas/js-dom-event-target` @ **cbc60ed**. I found this while waiting on MDN: **element wrappers had no `addEventListener`**, so any load script that wires a button threw and never reached its DOM writes. That's nearly every MDN DOM example.
+  - a25e7cd: EventTarget under Node.
+    - A WeakMap listener registry supporting `capture`/`once`, dedupe, removal and `handleEvent`.
+    - DOM §2.9 dispatch along parentNode → document → window, with stopPropagation/stopImmediatePropagation, `on<type>` handlers and `return false`.
+    - document and window adopt the shared EventTarget.
+    - `Event`/`CustomEvent` (there were none) and `click()`.
+  - cbc60ed: an engine pin. The wiring script runs on and paints; `click()` paints its handler's write.
+  - Tests: bindings 50/50, engine 251/251.
+- **Pushed, no PR (lane cap):** `atlas/js-dom-element-traversal` @ **c74923a**.
+  - It adds `first/lastElementChild`, `childElementCount`, `next/previousElementSibling`, `isConnected`, `dataset`, and `title`/`lang`/`dir`/`hidden`.
+  - Tests: bindings 49/49, engine 250/250.
+  - **Its receipt is already banked** (26/26, 0 changed), and the body is at `~/Repos/.worktrees/js-pr-body-element-traversal.md`. Open it with `gh pr create` as soon as a slot frees.
+- **Merge note:** #342 and #343 both append tests at the end of the rustkit-bindings test module. Whichever merges second needs an additive develop merge (no rebase, no force-push).
+
+**Decisions for Pete**
+1. **Rung 1 is still blocked (third digest running).** `git clone https://github.com/mdn/learning-area` still needs approval in this headless lane. Allowlist `Bash(git clone https://github.com/mdn/learning-area:*)`, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. Without it, the lane builds the API surface MDN needs blind. The event-target gap shows that works, but it can't produce X/Y.
+2. **Pin §4 reading on #343.** §4 excludes "full JS addEventListener → Rust dispatch wiring". I read that as the engine's *input* events reaching JS listeners. #343 is the JS-side registry and script-fired dispatch only; real mouse clicks still don't reach page listeners. If Prometheus reads §4 as excluding element listeners entirely, #343 holds. Otherwise the next design question is routing events.rs hit-test dispatch into `dispatchEvent`, which the parity screenshots don't need yet.
+3. **Raise max_open_prs to 4 while R1 is the bottleneck?** #339 has waited on R1 alone for about 1.5h. A ready, receipted branch (element-traversal) is sitting idle because of the cap.
+
+**Tooling:** `~/Repos/.worktrees/js-git.py <worktree> <git args>` is the lane's git-in-worktree runner, like js-cargo.py (bare `git -C` needs approval).
