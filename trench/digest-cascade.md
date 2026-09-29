@@ -349,3 +349,27 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. **The absolute ratio isn't measurable on this Mac while three lanes share it.** The same binary drifted 1.3–1.7× between 18:55 and 21:53, even at load 2–3. Proposal: every PR proves itself by interleaved B/A (that works, see #344), and a record is taken only in a standing window with the other lanes paused. Default: keep B/A as the proof, and take records opportunistically with the prior record binary interleaved.
 3. **Merge order: #340 → #341 → #344?** All three are pixel-identical to develop and touch different parts of engine lib.rs (List arm / rule index scope / Complex + compute_style entry). #344 will need a trivial merge after #340 lands (both edit the `Complex` arm neighbourhood). Default: land in PR order. I'll merge develop into #344 additively once #340 lands.
+
+## 2026-09-28 23:55
+
+**No ratio: load was 14–45 all session (three lanes, and this lane's two builds took 15 and 39 min). The record stays 24.0× (wikipedia, 18:55), band 24–30×. #340 and #341 merged. #344 (the ancestor Bloom filter) conflicted after they landed. It's now unconflicted at e02857e (an additive merge of develop), 202/202, and its receipt is pixel-identical on all 26 cases. CI is green and it's MERGEABLE/CLEAN, waiting on the R1/R2 re-stamps. A fresh symbolized github profile of develop + #344 confirms the filter worked and names the next three cuts.**
+
+| site | record (18:55, develop 8567760), median of 5 | this session |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | not measured (load 14–45) |
+| github | 1996 ms → 18.1× | not measured |
+| wikipedia | 480 ms → **24.0×** (worst) | not measured |
+
+- **#344** `atlas/cs-ancestor-bloom` e5d53a9 → **e02857e**. `origin/develop` 8f44204 merged in additively (no rebase, no force-push). The only conflict was two new tests at the same spot (#344's filter test and #340's list test), and both are kept. #340's prepared List members go through the filtered `Complex` arm. Engine lib **202/202** (`--test-threads=1`). Receipt `--scope all`: **26/26, avg 1.2%, builtins 5/5**, **diffPixels identical to #340's receipt (55054c9) on all 26**. The PR body is updated. The earlier B/A (e5d53a9 vs 8920e24, cnn ~.72, github ~.80) stands, since the merge touched nothing on the filter path. The old R1 CLEAR and R2 PASS were for e5d53a9, so it needs re-stamps at e02857e. **Never merged by this lane.**
+- **Profile, github, develop 8f44204 + #344, flag off** (`cascade-target-prof/pc-prof-e02857e`, reports `~/Repos/.worktrees/cascade-prof-github-e02857e-{1..6}.txt`, 27,462 pooled samples under `build_layout_from_document`). **`selector_matches_prepared` fell from 24% to 9.9%, which is the filter working.** What's left:
+  - `compute_style_for_element` 50%. Inside it: **`keys_may_match` 27%** and **`CustomProperties::over` 27%**, then `selector_matches_prepared` 16%, `RuleBuckets::candidates` 8%, a sort 7.5%, plus SipHash `hash_one`/`HashMap::insert` ~9% each.
+  - **`subject_keys` 18% of the whole load, outside the element walk.** That's the rule-index build on github's build 2, which #341 can't reuse because build 1 had one sheet. 64% of it is `keys_for`, with `tokenize_selector` 21% and Vec `grow_one`/`finish_grow` ~50% of its samples (allocation churn).
+- **Instrument:** the plain `cascade-target` release binary is stripped, and `sample` shows no rustkit frames. Profile with `cascade-target-prof` (`--config profile.release.debug="line-tables-only" --config profile.release.strip=false`, as the earlier note says). At load 18–45 it took 39 min.
+- **Saved binaries:** `cascade-target/pc-bloom-e02857e` (#344 merged, stripped) and `cascade-target-prof/pc-prof-e02857e` (the same, symbolized).
+- **Open cs PRs:** 1 (#344), cap 3.
+- **Next session:** (1) cut `subject_keys`: cache keys per selector string across builds (a thread-local keyed by the selector `Rc<str>`/text, like `prepared_selector`), and stop re-tokenizing for keys. This is an 18% root with no per-element work, the cheapest win. (2) `keys_may_match`: FxHash, or precomputed hashes for the element's key set instead of SipHash per candidate. (3) `CustomProperties::over`: share the parent's map when an element declares no custom properties. (4) If quiet, take a record on develop with the 8567760 binary interleaved.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. (Carried over) **A standing quiet window.** This session saw load 45, and a 39-minute incremental build. Three lanes on one Mac make every build and every measurement 3–10× slower. Default: keep B/A as the proof of each PR, and take records opportunistically.
+3. **Re-stamp #344 at e02857e.** R1/R2 stamped e5d53a9, and the merge commit only adds develop and keeps both tests. Default: Prometheus re-runs R1 on the merge diff, and R2 re-runs automatically.
