@@ -661,3 +661,24 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Retire 24.0× and use 33.4× (quiet develop 35fe782) as the ratio of record** (carried over from 15:53). Default: yes.
 2. **Flip `RUSTKIT_INCREMENTAL_RESTYLE` on by default after one flag-on board run.** Verify mode shows 0 style mismatches on github and wikipedia today, and the measured gain is ~15% on wikipedia and ~30% on github. Default: this lane runs the board in the next quiet window and opens the flip PR.
 3. (Carried over) Approve the pinned-snapshot method change.
+
+## 2026-09-29 20:00
+
+**PR #365 is open: ancestor-chain entries are shared (`Rc`) instead of deep-cloned per element. At load 14–15, wikipedia's B/A vs develop 9f49a40 is 0.93. All 26 receipt cases are pixel-identical. There's still no absolute ratio: load was 13–22 all session.**
+
+| site | ratio of record (quiet develop 35fe782, 14:45) | #365 B/A vs develop 9f49a40, 4 interleaved pairs (load 13.6–15.1) |
+|---|---|---|
+| cnn | 1030 ms → 4.9× | .85 .93 1.45 .98 → **0.95** |
+| github | 1679 ms → 15.3× | 2.14 .86 1.07 1.20 → **1.13** (noise, one 2.14 pair) |
+| wikipedia | 667 ms → **33.4×** (worst) | .94 .83 .93 1.01 → **0.93** |
+
+- **PR #365** `atlas/cs-wiki-sheets` @ **c39e014** on develop 9f49a40. `type Ancestor = Rc<(tag, classes, id)>`, and every matcher signature takes `&[Ancestor]`, so a child's chain costs one refcount bump per level. Matcher semantics are unchanged. Tests with `--features headless`: 283/283 (one 2.5 s wall-clock budget test flaked at load 13 and passed when re-run alone). Receipt: builtins 5/5, **diffPixels identical on all 26** to the 40e09e0 reference. At load 16, 6 of the 26 captures failed with an empty error in the `--scope all` run; re-run one by one, each was identical.
+- **The gain is smaller than the profile suggested** (26.8% of samples in allocation work → ~7% on wikipedia). Other allocation sources remain in the same loop: `AncestorFilter::of` re-hashes the whole chain per element (O(depth) string hashes), classes are re-split per child, and tags are lowercased three times per child. Next cut: build the filter incrementally (parent filter + parent's keys), carried down the recursion.
+- **Build cost:** the release parity-capture took 37 min at load 15. Saved binary: `cascade-target/pc-asr-c39e014`.
+- **Open cs PRs:** 1 (#365), cap 3.
+- **Next session:** (1) watch #365's R1/R2. If quiet, post a 5-pair B/A to the PR. (2) Incremental ancestor filter on a new `atlas/cs-` branch. (3) In a quiet window: an absolute develop read (the first with #363), then the flag-on board run for the `RUSTKIT_INCREMENTAL_RESTYLE` flip.
+
+**Decisions for Pete**
+1. **Retire 24.0× and use 33.4× as the ratio of record** (carried over). Default: yes.
+2. **Flip `RUSTKIT_INCREMENTAL_RESTYLE` on by default after one flag-on board run** (carried over). Default: this lane runs the board in the next quiet window.
+3. **Quiet windows have been rare (load 13–22 every session today except 14:35–14:50).** Consider moving this lane's hourly schedule off the other lane's build hours, or a nightly quiet slot for absolute reads. Default: no change.
