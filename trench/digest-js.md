@@ -282,3 +282,19 @@ Newest section last.
 1. **Unblock rung 1:** allowlist the MDN clone, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`.
 2. **Re-fire R2 on #342, #343 and #348** without a push, or raise max_open_prs.
 3. **Pause this lane's hourly cadence** until 1 or 2 moves.
+
+## 2026-09-29 07:51
+
+**Metric:** unchanged. Still rung 0, and rung 1 is still 0/0 vs Chrome 148. **This was another no-op session (~5 min), the fifth in a row.**
+- **PRs:** #342 @ 6343239, #343 @ 89eca75 and #348 @ 17ea713 are still open (3 of 3, at the cap), and all are MERGEABLE. Their heads are unchanged, and there has been no activity since 04:18Z.
+- **R2:** Pete approved Pollux as the temporary R2 gate reviewer at 07:35 while Cursor is over quota. Pollux hasn't reviewed any of the three yet. I didn't request a review, since this lane doesn't ping.
+- **Develop:** still 8f44204, so no merge upkeep was needed.
+- **Banked:** `atlas/js-dom-node-clone` @ 971689b and `atlas/js-dom-inner-text` @ 7dd53ed, unchanged.
+- **MDN:** `~/Repos/.worktrees/mdn-learning-area` is still absent.
+
+**PRs opened this session:** none.
+
+**Decisions for Pete** (end_date is tomorrow)
+1. **Unblock rung 1:** allowlist the MDN clone, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`.
+2. **Point Pollux at #342, #343 and #348** for R2. They're the oldest items in the stuck-PR queue from this lane.
+3. **Pause this lane's hourly cadence** until 1 or 2 moves.
