@@ -21999,6 +21999,28 @@ mod script_dom_flush_tests {
             DomDirty::Clean
         );
     }
+
+    // A clone is styled like its original once inserted, and
+    // insertAdjacentHTML content is parsed into the Rust DOM and painted.
+    #[test]
+    fn clones_and_adjacent_html_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>p { margin: 0 } .off { display: none }</style></head>\
+             <body><p id='a'>alpha</p><p id='z'>omega</p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha omega");
+        engine
+            .execute_script(
+                view,
+                "var a = document.getElementById('a'), c = a.cloneNode(true); \
+                 c.id = 'c'; c.firstChild.data = 'beta'; \
+                 a.parentNode.insertBefore(c, a.nextSibling); \
+                 a.insertAdjacentHTML('afterend', '<p>gamma</p><p class=\"off\">no</p>'); \
+                 document.getElementById('z').insertAdjacentText('beforebegin', 'delta')",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "alpha gamma beta delta omega");
+    }
 }
 
 #[cfg(all(test, feature = "headless"))]
