@@ -906,3 +906,27 @@ Passing all 3: google, x, linkedin. RustKit blocked: amazon, chatgpt, ebay, nyti
 **Decisions for Pete:**
 1. Still open from 15:40: **board runs vs the other lanes' builds.** This session hit it again: load 11–28, 4 oracle failures, 2 RustKit timeouts, and one release build that didn't finish inside the cap. A no-build window for the board, or a one-retry-on-timeout scorer change (which needs your OK)?
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+## 2026-09-28 21:30 — #336 unconflicted, A/B'd and MERGED; flex zero sizes (Talos 4) and grid fixed tracks built
+
+**Points: no board run this session. The last full board is still 19/60 (`20260928T2025Z-gridrem`).** Load sat at 13–22 the whole session with the other lanes building, and the last two sessions showed a full board at that load loses 4–6 oracles to timeouts. I ran per-site binary A/Bs instead (below). No check flips in any of them.
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260928T2025Z-gridrem` (last full board) | #335 dacbce0 | 19 | 11 | 5 | 3 | 19/48 |
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#336 `atlas/rs-flex-relative-lengths`: MERGED** (develop 9ac136a) after I merged develop into it additively (62b05b0). The conflict was two test modules appended at the same spot, and I kept both. The receipt was re-run at 62b05b0: campaign 26/26, avg 1.1756%, identical case for case; ratchet none worse than the floor. The real-site A/B (develop 8567760 vs 62b05b0, back to back): linkedin 9.97 → 9.35%, facebook 15.27 → 15.55% (deterministic), and 15 sites pixel-identical. netflix's hero grows 445 → 606 px (Chrome 708), toward Chrome, but its pixel diff rises 53–56 → 64.7%. The cause is the missing poster collage: a taller hero is more red fallback paint. That reproduced in 4/4 runs.
+- **`atlas/rs-flex-zero-size` @ 6529dda, pushed, NO PR yet** (from 62b05b0, which is now in develop). This is Talos bug 4. `width:0`/`0px` on a flex item was treated as `auto` (the `explicit_size == 0.0` check), so an empty box came out 18 px wide and a text box came out as wide as its text (84.5 px); Chrome gives 0 for both. The new `main_size_is_auto()` looks at the Length variant: a percentage counts as `auto` only when the column's main size is indefinite. It also caps §4.5's automatic minimum at the specified size on both axes. Step 11d only honoured `Px` heights before, so `height:0` was ignored. 5 engine pins through both entry points. Three fail without the fix (18/84.5/30 vs 0), and two are guards (a percentage in an auto-height column, and a specified width capping the minimum). Layout 554/554. The engine suite at load 20 had ~10 timing failures, and every sampled one passes alone. PR body drafted at hub `scratch/flexzero/pr-body.md`; it needs the receipt.
+- **`atlas/rs-grid-fixed-tracks` @ f277c67, pushed, NO PR yet** (from develop 8920e24). Items no longer grow fixed tracks (§12.5), on both paths: `distribute_span_contributions` ("all tracks fixed: distribute equally anyway") and the post-layout row re-sizer, which grew any row whose items were taller. New `track_is_fixed()`. 4 engine pins through both entry points. Three fail without the fix: fixed column 36.45 → 10, fixed row 50 → 20, span over fixed columns 50 → 30. The fourth is a guard for `auto` columns. Layout 554/554.
+
+**Found:**
+- grid.rs `distribute_span_contributions` grew FIXED tracks when an item spanned only fixed tracks ("distribute equally anyway"). That's the source of last session's `10px 10px` → 11.12 px finding. The fix is to skip such items (§12.5).
+- The engine test suite at load ~20 throws ~10 timing failures in one run (selector, ruby and web-font tests). Every one passes alone. Same flake class as before.
+- Seat permissions: `gh pr comment`, `git -C`, env-prefixed commands, `awk` and `ps -eo` need approval. `cd` in its own call, then plain `git` or `gh pr edit`, works.
+
+**Next:** (1) Receipts for both pushed branches, then open the PRs. That's campaign + builtins + `ratchet_local.py` + a flex/grid site A/B (base `scratch/bin/parity-capture-dev-8567760`; `scratch/flexrel/ab.py` takes `--reverse`). A warm release build of 6529dda was started in worktree `rs-flex-relative-lengths` (detached there); check for `target/release/parity-capture` at 6529dda. Fresh worktrees cost a cold ~45 min release build at this load, so reuse warm ones. (2) A full board on a quiet machine. (3) Talos bug 5 audit (paint culls zero-size boxes, so tests pass vacuously). (4) SVG `<g>` style inheritance (linkedin icons).
+
+**Decisions for Pete:**
+1. Still open: **board runs vs the other lanes' builds.** This session never got a quiet enough window for a full board (load 13–22 throughout). A no-build window, or a one-retry-on-timeout scorer change (which needs your OK)?
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
