@@ -1,0 +1,15 @@
+<!doctype html><html><head><style>
+@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-translate-x:0;--tw-translate-y:0}}}
+body{margin:0}
+.a{width:100px;height:20px;background:red}
+.translate-y-\[-200\%\]{--tw-translate-y:-200%;translate:var(--tw-translate-x)var(--tw-translate-y)}
+.b{width:100px;height:20px;background:blue;translate:0 -200%}
+.c{width:100px;height:20px;background:green;--tw-translate-x:0;--tw-translate-y:-200%;translate:var(--tw-translate-x)var(--tw-translate-y)}
+.d{width:100px;height:20px;background:black;--q:0;translate:var(--q) var(--q)}
+</style></head><body>
+<div style="height:100px"></div>
+<div id="a" class="a translate-y-[-200%]"></div>
+<div id="b" class="b"></div>
+<div id="c" class="c"></div>
+<div id="d" class="d"></div>
+</body></html>

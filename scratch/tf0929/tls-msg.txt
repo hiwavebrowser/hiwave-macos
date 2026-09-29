@@ -1,0 +1,13 @@
+perf(http): load the platform root store once per process, not per client and per h2 downgrade
+
+The rustls client from PR 346 called rustls_native_certs::load_native_certs()
+in every Client::with_config, and again inside connect_tls on every
+connection whose peer selects h2. On macOS that walks the keychain trust
+settings and costs seconds. Measured on develop vs 062f73a: engine start
++5.2 s, reddit's top-level GET 5.45 s vs 0.14 s, and x/wikipedia/facebook
+now exceeding the 30 s capture budget. The store is now a process-wide
+OnceLock, and the http/1.1-only connector for the negotiated downgrade is
+built once in with_config. The TLS profile, the ALPN offer and the
+downgrade are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
