@@ -25,6 +25,7 @@ use crate::{inner_text, DomDirty};
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Does this element match this selector list? `None` means the list is
@@ -38,6 +39,13 @@ pub(crate) struct DomHost {
     generation: u32,
     /// The injected selector matcher (`DomBindings::set_selector_matcher`).
     pub(crate) matcher: Option<SelectorMatchFn>,
+    /// HTML §4.10.5.4 "dirty value" of the `<input>`/`<textarea>` controls
+    /// that script or the user changed, by NodeId. A control missing here
+    /// shows its default value (the `value` attribute, or a textarea's text).
+    values: HashMap<usize, String>,
+    /// Script value writes the engine has not yet copied into its edit
+    /// state, which is what layout paints (`DomBindings::take_value_writes`).
+    value_writes: Vec<(usize, String)>,
 }
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
@@ -47,7 +55,18 @@ impl DomHost {
     pub(crate) fn bind(&mut self, document: Rc<Document>) -> u32 {
         self.document = Some(document);
         self.generation += 1;
+        self.values.clear();
+        self.value_writes.clear();
         self.generation
+    }
+
+    /// Record the value the user typed into a control, so script reads it.
+    pub(crate) fn sync_value(&mut self, node: usize, value: String) {
+        self.values.insert(node, value);
+    }
+
+    pub(crate) fn take_value_writes(&mut self) -> Vec<(usize, String)> {
+        std::mem::take(&mut self.value_writes)
     }
 
     fn document_for(&self, generation: &JsValue) -> Option<&Rc<Document>> {
@@ -328,6 +347,53 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         }
         _ => Err("NotSupportedError"),
     }
+}
+
+/// `value(gen, id[, v])`: a text control's value (HTML §4.10.5.4, value
+/// mode "value"). With `v` a string, sets it; with `v` null, resets the
+/// control to its default (form reset). Answers the value, or null when
+/// the node is stale or not an `<input>`/`<textarea>`. A write marks
+/// `Layout`: the engine repaints the control from its edit state.
+fn control_value(host: &mut DomHost, args: &[JsValue]) -> (JsValue, DomDirty) {
+    let Some(node) = host.node(args) else {
+        return (JsValue::Null, DomDirty::Clean);
+    };
+    let textarea = match node.tag_name() {
+        Some(t) if t.eq_ignore_ascii_case("textarea") => true,
+        Some(t) if t.eq_ignore_ascii_case("input") => false,
+        _ => return (JsValue::Null, DomDirty::Clean),
+    };
+    let default = || {
+        if textarea {
+            node.text_content()
+        } else {
+            node.get_attribute("value").unwrap_or("").to_string()
+        }
+    };
+    let raw = node.id.raw();
+    let value = match args.get(2) {
+        Some(JsValue::String(v)) => {
+            // The value sanitization algorithms: a text input drops line
+            // breaks; a textarea normalizes them to LF.
+            let v = if textarea {
+                v.replace("\r\n", "\n").replace('\r', "\n")
+            } else {
+                v.chars().filter(|c| !matches!(c, '\r' | '\n')).collect()
+            };
+            host.values.insert(raw, v.clone());
+            v
+        }
+        Some(JsValue::Null) => {
+            host.values.remove(&raw);
+            default()
+        }
+        _ => {
+            let v = host.values.get(&raw).cloned().unwrap_or_else(default);
+            return (JsValue::String(v), DomDirty::Clean);
+        }
+    };
+    host.value_writes.push((raw, value.clone()));
+    (JsValue::String(value), DomDirty::Layout)
 }
 
 /// DOM §4.4 "clone a node": a detached copy with fresh NodeIds, its
@@ -735,6 +801,18 @@ pub(crate) fn install(
         }),
     )?;
 
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_value",
+        3,
+        Box::new(move |args| {
+            let (result, bucket) = control_value(&mut h.borrow_mut(), args);
+            d.set(d.get().max(bucket));
+            result
+        }),
+    )?;
+
     runtime.evaluate_script(WRAPPERS_JS)?;
     Ok(())
 }
@@ -747,9 +825,10 @@ const WRAPPERS_JS: &str = r#"
         root: __rustkit_dom_root, byId: __rustkit_dom_by_id,
         collect: __rustkit_dom_collect, info: __rustkit_dom_info,
         attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate,
-        write: __rustkit_dom_write, matches: __rustkit_dom_matches
+        write: __rustkit_dom_write, matches: __rustkit_dom_matches,
+        value: __rustkit_dom_value
     };
-    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches'].forEach(function (n) {
+    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -786,6 +865,11 @@ const WRAPPERS_JS: &str = r#"
     var Comment = iface('Comment', CharacterData);
     var Element = iface('Element', Node);
     var HTMLElement = iface('HTMLElement', Element);
+    var HTMLInputElement = iface('HTMLInputElement', HTMLElement);
+    var HTMLTextAreaElement = iface('HTMLTextAreaElement', HTMLElement);
+    var HTMLFormElement = iface('HTMLFormElement', HTMLElement);
+    var elementProtos = { input: HTMLInputElement.prototype,
+                          textarea: HTMLTextAreaElement.prototype, form: HTMLFormElement.prototype };
     var DocumentFragment = iface('DocumentFragment', Node);
     var NodeList = iface('NodeList');
     var HTMLCollection = iface('HTMLCollection');
@@ -805,7 +889,8 @@ const WRAPPERS_JS: &str = r#"
         var w = cache.get(id);
         if (w) return w;
         var t = N.info(gen, id, 'type');
-        var proto = t === 1 ? HTMLElement.prototype : t === 3 ? Text.prototype
+        var proto = t === 1 ? elementProtos[N.info(gen, id, 'local')] || HTMLElement.prototype
+                  : t === 3 ? Text.prototype
                   : t === 8 ? Comment.prototype : t === 11 ? DocumentFragment.prototype
                   : Node.prototype;
         w = Object.create(proto);
@@ -1188,6 +1273,162 @@ const WRAPPERS_JS: &str = r#"
         return d;
     });
 
+    // Form controls (HTML §4.10). A text control's value lives host-side
+    // (its dirty value, which the engine's edit state mirrors for paint);
+    // the other input value modes read and write the `value` attribute.
+    function controlValue(el, v) {
+        var s = slotOf(el);
+        var r = s.gen === gen ? (v === undefined ? N.value(s.gen, s.id) : N.value(s.gen, s.id, v)) : null;
+        return r === null ? '' : r;
+    }
+    function inputMode(el) {
+        var t = el.type;
+        if (t === 'checkbox' || t === 'radio') return 'default/on';
+        return /^(hidden|submit|image|reset|button)$/.test(t) ? 'default' : 'value';
+    }
+    var INPUT_TYPES = /^(hidden|text|search|tel|url|email|password|date|month|week|time|datetime-local|number|range|color|checkbox|radio|file|submit|image|reset|button)$/;
+    accessor(HTMLInputElement.prototype, 'type', function () {
+        var t = (this.getAttribute('type') || '').toLowerCase();
+        return INPUT_TYPES.test(t) ? t : 'text';
+    }, function (v) { this.setAttribute('type', v); });
+    accessor(HTMLInputElement.prototype, 'value', function () {
+        var m = inputMode(this);
+        if (m === 'value') return controlValue(this);
+        var a = this.getAttribute('value');
+        return a === null ? (m === 'default/on' ? 'on' : '') : a;
+    }, function (v) {
+        v = v === null ? '' : String(v);
+        if (inputMode(this) !== 'value') return this.setAttribute('value', v);
+        var n = controlValue(this, v).length;
+        selectionOf(this).start = selectionOf(this).end = n;
+    });
+    accessor(HTMLTextAreaElement.prototype, 'value', function () { return controlValue(this); },
+        function (v) {
+            var n = controlValue(this, v === null ? '' : String(v)).length;
+            selectionOf(this).start = selectionOf(this).end = n;
+        });
+    // Script's view of the selection (HTML §4.10.5.2.10). The engine's caret
+    // is not synced to it yet; setting a value moves both ends to its end.
+    var selections = new WeakMap();
+    function selectionOf(el) {
+        var s = selections.get(el);
+        if (!s) { s = { start: 0, end: 0, dir: 'none' }; selections.set(el, s); }
+        var n = controlValue(el).length;
+        s.start = Math.min(s.start, n); s.end = Math.min(s.end, n);
+        return s;
+    }
+    function setSelection(el, start, end, dir) {
+        var s = selectionOf(el), n = el.value.length;
+        s.end = Math.min(end >>> 0, n);
+        s.start = Math.min(start >>> 0, s.end);
+        s.dir = dir === 'forward' || dir === 'backward' ? dir : 'none';
+    }
+    // Validity (HTML §4.10.20.3) for the constraints this rung models.
+    var customValidity = new WeakMap();
+    function validityOf(el) {
+        var v = el.value, min = el.minLength, max = el.maxLength, pat = el.getAttribute('pattern');
+        var patternMismatch = false;
+        if (pat !== null && v !== '') {
+            try { patternMismatch = !new RegExp('^(?:' + pat + ')$').test(v); } catch (e) {}
+        }
+        var r = {
+            valueMissing: el.required && v === '',
+            tooShort: min > 0 && v !== '' && v.length < min,
+            tooLong: max >= 0 && v.length > max,
+            patternMismatch: patternMismatch,
+            typeMismatch: false, stepMismatch: false, rangeUnderflow: false,
+            rangeOverflow: false, badInput: false,
+            customError: !!customValidity.get(el)
+        };
+        r.valid = !Object.keys(r).some(function (k) { return r[k]; });
+        return r;
+    }
+    [HTMLInputElement, HTMLTextAreaElement].forEach(function (C) {
+        var P = C.prototype;
+        getter(P, 'selectionStart', function () { return selectionOf(this).start; });
+        getter(P, 'selectionEnd', function () { return selectionOf(this).end; });
+        getter(P, 'selectionDirection', function () { return selectionOf(this).dir; });
+        P.setSelectionRange = function (start, end, dir) { setSelection(this, start, end, dir); };
+        P.select = function () { setSelection(this, 0, this.value.length); };
+        getter(P, 'validity', function () { return validityOf(this); });
+        getter(P, 'willValidate', function () { return !this.disabled && !this.readOnly; });
+        getter(P, 'validationMessage', function () { return customValidity.get(this) || ''; });
+        P.setCustomValidity = function (msg) { customValidity.set(this, String(msg)); };
+        P.checkValidity = function () {
+            if (!this.willValidate || validityOf(this).valid) return true;
+            this.dispatchEvent(new Event('invalid', { cancelable: true }));
+            return false;
+        };
+        P.reportValidity = P.checkValidity;
+        [['maxLength', 'maxlength'], ['minLength', 'minlength']].forEach(function (p) {
+            accessor(P, p[0], function () {
+                var n = parseInt(this.getAttribute(p[1]), 10);
+                return n >= 0 ? n : -1;
+            }, function (v) { this.setAttribute(p[1], String(v)); });
+        });
+    });
+    [['rows', 2], ['cols', 20]].forEach(function (p) {
+        accessor(HTMLTextAreaElement.prototype, p[0], function () {
+            var n = parseInt(this.getAttribute(p[0]), 10);
+            return n > 0 ? n : p[1];
+        }, function (v) { this.setAttribute(p[0], String(v)); });
+    });
+    getter(HTMLTextAreaElement.prototype, 'textLength', function () { return this.value.length; });
+    getter(HTMLTextAreaElement.prototype, 'type', function () { return 'textarea'; });
+    accessor(HTMLTextAreaElement.prototype, 'defaultValue', function () { return this.textContent; },
+        function (v) { this.textContent = v; });
+    accessor(HTMLInputElement.prototype, 'defaultValue', function () {
+        return this.getAttribute('value') || '';
+    }, function (v) { this.setAttribute('value', v); });
+    [HTMLInputElement, HTMLTextAreaElement].forEach(function (C) {
+        ['name', 'placeholder'].forEach(function (k) {
+            accessor(C.prototype, k, function () { return this.getAttribute(k) || ''; },
+                function (v) { this.setAttribute(k, v); });
+        });
+        [['disabled', 'disabled'], ['readOnly', 'readonly'], ['required', 'required']].forEach(function (p) {
+            accessor(C.prototype, p[0], function () { return this.hasAttribute(p[1]); },
+                function (v) { this.toggleAttribute(p[1], !!v); });
+        });
+        getter(C.prototype, 'form', function () { return this.closest('form'); });
+    });
+    // HTML §4.10.21 form reset, for the controls this rung models: each text
+    // control drops its dirty value and shows its default again.
+    function controls(form, tags) {
+        return Array.prototype.filter.call(form.getElementsByTagName('*'), function (el) {
+            return tags.test(el.localName);
+        });
+    }
+    HTMLFormElement.prototype.reset = function () {
+        if (!this.dispatchEvent(new Event('reset', { bubbles: true, cancelable: true }))) return;
+        controls(this, /^(input|textarea)$/).forEach(function (el) {
+            var s = slotOf(el);
+            if (s.gen === gen && (el.localName === 'textarea' || inputMode(el) === 'value')) {
+                N.value(s.gen, s.id, null);
+            }
+        });
+    };
+    // Navigation from script is not wired; submission stays engine-side.
+    HTMLFormElement.prototype.submit = function () {};
+    [['name', 'name'], ['action', 'action'], ['target', 'target']].forEach(function (p) {
+        accessor(HTMLFormElement.prototype, p[0], function () { return this.getAttribute(p[1]) || ''; },
+            function (v) { this.setAttribute(p[1], v); });
+    });
+    getter(HTMLFormElement.prototype, 'method', function () {
+        return (this.getAttribute('method') || '').toLowerCase() === 'post' ? 'post' : 'get';
+    });
+    // A static snapshot, like the other collections here.
+    getter(HTMLFormElement.prototype, 'elements', function () {
+        var els = controls(this, /^(input|textarea|select|button)$/);
+        var out = Object.create(HTMLCollection.prototype);
+        els.forEach(function (el, i) { out[i] = el; });
+        Object.defineProperty(out, 'length', { value: els.length });
+        return out;
+    });
+    // Focus is engine-side (pin §4) and not reachable from script yet; these
+    // keep handlers that call them (`input.focus()` after a submit) running.
+    HTMLElement.prototype.focus = function () {};
+    HTMLElement.prototype.blur = function () {};
+
     Element.prototype.getAttribute = function (name) {
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
     };
@@ -1482,9 +1723,6 @@ const WRAPPERS_JS: &str = r#"
     };
     Document.prototype.createElement = function (tag) {
         tag = String(tag);
-        // Form controls keep their JS stubs for now: their editing state
-        // (value, selection) lives there, not in the Rust DOM.
-        if (/^(input|textarea|form)$/i.test(tag)) return stubCreateElement.call(this, tag);
         return create('element', tag, 'createElement');
     };
     Document.prototype.createTextNode = function (data) {
@@ -1645,7 +1883,6 @@ const WRAPPERS_JS: &str = r#"
     var doc = g.document;
     Object.setPrototypeOf(doc, Document.prototype);
     // The stub's own factories would shadow the Rust-backed ones.
-    var stubCreateElement = doc.createElement;
     delete doc.createElement;
     delete doc.createTextNode;
     delete doc.createDocumentFragment;
@@ -1837,5 +2074,127 @@ mod tests {
             doc.get_element_by_id("main").unwrap().text_content(),
             "txts1s2Hello, world!Twoend!"
         );
+    }
+
+    const FORM: &str = r#"<!DOCTYPE html><html><body><form id="f">
+<input id="i" value="ab"><textarea id="t">hi</textarea><input id="c" type="checkbox">
+<input id="h" type="HIDDEN" value="hv"><button id="b">Go</button></form></body></html>"#;
+
+    #[test]
+    fn text_control_value_is_a_dirty_value_the_engine_is_told_about() {
+        let (b, doc) = bound(FORM);
+        let raw = |id: &str| doc.get_element_by_id(id).unwrap().id.raw();
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), t = document.getElementById('t'), r = []; \
+                 r.push(i instanceof HTMLInputElement, t instanceof HTMLTextAreaElement, \
+                        document.getElementById('f') instanceof HTMLFormElement, \
+                        i.value, i.defaultValue, i.type, t.value, t.defaultValue, t.type); \
+                 i.value = 'x\\ny'; t.value = 'a\\r\\nb'; \
+                 r.push(i.value, i.getAttribute('value'), t.value, t.textLength, t.textContent); \
+                 r.join('|')"
+            ),
+            "true|true|true|ab|ab|text|hi|hi|textarea|xy|ab|a\nb|3|hi"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Layout, "a value write repaints");
+        assert_eq!(
+            b.take_value_writes(),
+            vec![(raw("i"), "xy".to_string()), (raw("t"), "a\nb".to_string())]
+        );
+        assert!(b.take_value_writes().is_empty());
+        assert_eq!(
+            doc.get_element_by_id("i").unwrap().get_attribute("value"),
+            Some("ab"),
+            "the value attribute is the default, not the value"
+        );
+    }
+
+    #[test]
+    fn other_input_modes_and_reflected_control_attributes() {
+        let (b, _doc) = bound(FORM);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var c = document.getElementById('c'), h = document.getElementById('h'), r = []; \
+                 r.push(c.value, h.type, h.value); c.value = 'yes'; h.value = 'hw'; \
+                 r.push(c.getAttribute('value'), h.getAttribute('value')); \
+                 var i = document.getElementById('i'); i.disabled = true; i.readOnly = true; \
+                 i.name = 'q'; i.placeholder = 'p'; \
+                 r.push(i.getAttribute('disabled'), i.hasAttribute('readonly'), i.name, \
+                        i.placeholder, i.required, i.form.id, document.body.value); \
+                 var f = document.getElementById('f'); \
+                 r.push(f.elements.length, f.elements[4].id, f.method); \
+                 i.focus(); i.blur(); r.join('|')"
+            ),
+            "on|hidden|hv|yes|hw||true|q|p|false|f||5|b|get"
+        );
+        assert!(
+            b.take_value_writes().is_empty(),
+            "attribute modes queue no value"
+        );
+    }
+
+    #[test]
+    fn created_controls_are_rust_backed() {
+        let (b, doc) = bound(FORM);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.createElement('INPUT'), t = document.createElement('textarea'); \
+                 var f = document.createElement('form'); \
+                 f.appendChild(i); f.appendChild(t); document.body.appendChild(f); \
+                 i.id = 'made'; i.value = 'v'; \
+                 [i instanceof HTMLInputElement, t instanceof HTMLTextAreaElement, \
+                  f instanceof HTMLFormElement, i.parentNode === f, i.value, \
+                  document.querySelector('#made') === i].join('|')"
+            ),
+            "true|true|true|true|v|true"
+        );
+        assert!(doc.get_element_by_id("made").is_some());
+    }
+
+    #[test]
+    fn typed_text_reads_back_and_reset_or_navigate_drop_it() {
+        let (b, doc) = bound(FORM);
+        let i = doc.get_element_by_id("i").unwrap().id.raw();
+        b.sync_control_value(i, "typed".to_string());
+        assert_eq!(
+            eval_string(&b, "document.getElementById('i').value"),
+            "typed"
+        );
+        assert_eq!(
+            b.take_dirty(),
+            DomDirty::Clean,
+            "a read or a sync marks nothing"
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var f = document.getElementById('f'), n = 0; \
+                 f.addEventListener('reset', function () { n++; }); \
+                 document.getElementById('t').value = 'edited'; f.reset(); \
+                 [n, document.getElementById('i').value, document.getElementById('t').value].join('|')"
+            ),
+            "1|ab|hi"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Layout);
+        let t = doc.get_element_by_id("t").unwrap().id.raw();
+        assert_eq!(
+            b.take_value_writes(),
+            vec![
+                (t, "edited".to_string()),
+                (i, "ab".to_string()),
+                (t, "hi".to_string())
+            ],
+            "reset repaints each text control's default, and only those"
+        );
+
+        // A new document starts with no dirty values, even at a reused NodeId.
+        b.sync_control_value(i, "stale".to_string());
+        b.set_document(Rc::new(Document::parse_html(FORM).unwrap()))
+            .unwrap();
+        assert_eq!(eval_string(&b, "document.getElementById('i').value"), "ab");
+        assert!(b.take_value_writes().is_empty());
     }
 }
