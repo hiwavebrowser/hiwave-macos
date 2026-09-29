@@ -4876,6 +4876,26 @@ impl Engine {
             _ => {}
         }
 
+        // HTML §15.3.1's UA rules that hide by attribute: `[hidden]`,
+        // `dialog:not([open])`, `[popover]:not(:popover-open)` (nothing opens
+        // a popover without script) and `template`. Set before the author
+        // cascade, like every UA default above, so `[hidden]{display:flex}`
+        // style overrides still show the element. `hidden=until-found` is
+        // `content-visibility: hidden` in Chrome, not `display: none`, and is
+        // left alone.
+        let tag_is = |t: &str| tag_name.eq_ignore_ascii_case(t);
+        let hidden_attr = attributes
+            .get("hidden")
+            .is_some_and(|v| !v.eq_ignore_ascii_case("until-found"));
+        let open_dialog = tag_is("dialog") && attributes.contains_key("open");
+        if hidden_attr
+            || (tag_is("dialog") && !open_dialog)
+            || (attributes.contains_key("popover") && !open_dialog)
+            || tag_is("template")
+        {
+            style.display = rustkit_css::Display::None;
+        }
+
         // Collect matching rules with specificity for ordering
         let mut matching_rules: Vec<(&Rule, (usize, usize, usize), usize)> = Vec::new();
         // With a rule index installed, only the rules filed under this
@@ -22348,5 +22368,55 @@ mod flex_relative_length_tests {
             // Grid: 30 + 20.
             assert_eq!(rect(&root, "g").x, 50.0);
         }
+    }
+}
+
+// HTML §15.3.1 (the rendering section's UA sheet): `[hidden]`, a closed
+// `<dialog>`, a popover that is not showing, and `<template>` generate no
+// box. RustKit painted all four (shopify's "Choose a region & language"
+// popover sat over its hero). They are UA rules, so author `display` wins.
+#[cfg(all(test, feature = "headless"))]
+mod ua_hidden_tests {
+    use super::*;
+
+    fn painted(html: &str) -> String {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        let list = engine.views[&view].display_list.as_ref().expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn hidden_closed_dialogs_closed_popovers_and_templates_are_not_painted() {
+        let text = painted(concat!(
+            "<html><body><p>shown</p><div hidden>attr</div><dialog>closed</dialog>",
+            "<div popover=auto>auto</div><div popover>bare</div>",
+            "<template><p>template</p></template></body></html>",
+        ));
+        assert_eq!(text, "shown");
+    }
+
+    #[test]
+    fn an_open_dialog_is_painted() {
+        assert_eq!(painted("<html><body><dialog open>open</dialog></body></html>"), "open");
+    }
+
+    #[test]
+    fn an_author_display_overrides_the_ua_hidden_rule() {
+        let text = painted(concat!(
+            "<html><head><style>.show{display:block}</style></head>",
+            "<body><div hidden class=show>author</div></body></html>",
+        ));
+        assert_eq!(text, "author");
     }
 }
