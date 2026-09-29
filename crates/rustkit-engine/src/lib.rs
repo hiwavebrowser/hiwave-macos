@@ -4492,6 +4492,7 @@ impl Engine {
         sib: SiblingContext,
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
+        let _ancestor_filter = AncestorFilterScope::install(ancestors);
         let mut style = ComputedStyle::new();
         style.color = rustkit_css::Color::BLACK;
 
@@ -8156,7 +8157,12 @@ impl SelectorMatcher {
                     )
                 });
             }
-            PreparedSelector::Complex { tokens, compounds, subject } => {
+            PreparedSelector::Complex { tokens, compounds, subject, ancestor_keys } => {
+                if !ancestor_keys.is_empty() && !ancestor_filter_admits(ancestors, ancestor_keys) {
+                    #[cfg(test)]
+                    ANCESTOR_FILTER_REJECTS.with(|n| n.set(n.get() + 1));
+                    return false;
+                }
                 if !subject.matches(self, tag_name, attributes, sib) {
                     return false;
                 }
@@ -8293,12 +8299,20 @@ impl SelectorMatcher {
                 Some((_, combinator)) if combinator.is_empty() => {}
                 _ => return PreparedSelector::Never,
             }
-            let compounds = tokens
+            let compounds: Vec<AncestorCompound> = tokens
                 .iter()
                 .map(|(part, _)| AncestorCompound::parse(part))
                 .collect();
             let subject = SubjectCompound::parse(self, &tokens[tokens.len() - 1].0);
-            PreparedSelector::Complex { tokens, compounds, subject }
+            let mut ancestor_keys = Vec::new();
+            for ((_, combinator), compound) in tokens.iter().zip(&compounds) {
+                if combinator == " " || combinator == ">" {
+                    ancestor_compound_keys(compound, &mut ancestor_keys);
+                }
+            }
+            ancestor_keys.sort_unstable();
+            ancestor_keys.dedup();
+            PreparedSelector::Complex { tokens, compounds, subject, ancestor_keys }
         };
 
         PREPARED.with(|cache| {
@@ -17701,6 +17715,8 @@ thread_local! {
     static PREFILTER_VISITS: Cell<u64> = const { Cell::new(0) };
     /// How many times a selector string was tokenized on this thread.
     static SELECTOR_TOKENIZATIONS: Cell<u64> = const { Cell::new(0) };
+    /// How many selectors the ancestor filter rejected on this thread.
+    static ANCESTOR_FILTER_REJECTS: Cell<u64> = const { Cell::new(0) };
 }
 
 // Real Engine (Compositor wants a device) — macOS only, like
@@ -17748,6 +17764,62 @@ mod rule_prefilter_tests {
             tokenized <= 1,
             "200 elements asked about one selector; it was tokenized {tokenized} times"
         );
+    }
+
+    #[test]
+    fn the_ancestor_filter_rejects_only_what_the_walk_rejects() {
+        // Nearest ancestor first, as the cascade passes them.
+        let chain = vec![
+            ancestor("div", &["card", "wide"], None),
+            ancestor("section", &["sec"], Some("s1")),
+            ancestor("main", &["page"], Some("app")),
+        ];
+        let t = attrs(&[("class", "t")]);
+        let selectors = [
+            "main .t",
+            "MAIN .t",
+            "main#app.page .t",
+            "#app .t",
+            ".card > .t",
+            ".sec > .t",
+            "section.sec .card.wide > .t",
+            "*.card .t",
+            ".card:hover .t",
+            ":is(.card, .nope) .t",
+            ":is(.nope) .t",
+            "div[data-x] .t",
+            ".card + .t",
+            ".missing .t",
+            "#nope .t",
+            "article .t",
+            "main .missing .t",
+            ".t",
+            "main .t, .missing .t",
+        ];
+        let run = |s: &str, chain: &[(String, Vec<String>, Option<String>)]| {
+            SelectorMatcher.selector_matches(s, "p", &t, chain, &[], SiblingContext::SOLE)
+        };
+        for chain in [&chain[..], &chain[1..], &[]] {
+            let expected: Vec<bool> = selectors.iter().map(|s| run(s, chain)).collect();
+            ANCESTOR_FILTER_REJECTS.with(|n| n.set(0));
+            let filtered: Vec<bool> = {
+                let _scope = AncestorFilterScope::install(chain);
+                selectors.iter().map(|s| run(s, chain)).collect()
+            };
+            assert_eq!(filtered, expected, "chain of {}", chain.len());
+            assert!(ANCESTOR_FILTER_REJECTS.with(|n| n.get()) > 0, "chain of {}", chain.len());
+        }
+        {
+            let _scope = AncestorFilterScope::install(&chain);
+            assert!(run("MAIN .t", &chain) && run("section.sec .card.wide > .t", &chain));
+            assert!(!run(".missing .t", &chain) && !run("#nope .t", &chain));
+        }
+        // A filter never answers for another slice, even one of equal length.
+        let other = vec![ancestor("x", &[], None); 3];
+        let _scope = AncestorFilterScope::install(&chain);
+        assert!(ancestor_filter_admits(&other, &[ancestor_key_hash(b'.', "missing")]));
+        assert!(!ancestor_filter_admits(&chain, &[ancestor_key_hash(b'.', "missing")]));
+        assert!(ancestor_filter_admits(&chain, &[ancestor_key_hash(b'<', "SECTION")]));
     }
 
     #[test]
@@ -19377,7 +19449,124 @@ enum PreparedSelector {
         tokens: Vec<(String, String)>,
         compounds: Vec<AncestorCompound>,
         subject: SubjectCompound,
+        /// [`ancestor_key_hash`]es that some ancestor must carry: the tag,
+        /// classes and id of every compound left of a descendant or child
+        /// combinator. Checked against the element's [`AncestorFilter`]
+        /// before the walk.
+        ancestor_keys: Vec<u32>,
     },
+}
+
+/// A key's hash for [`AncestorFilter`]: FNV-1a over a kind byte (`<` tag,
+/// `.` class, `#` id) and the name, then a murmur3 finalizer so both of the
+/// filter's bit indices come from well-mixed bits. Tags are ASCII-folded,
+/// the way `AncestorCompound::matches` compares them.
+fn ancestor_key_hash(kind: u8, name: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    let fold = kind == b'<';
+    for b in std::iter::once(kind).chain(name.bytes()) {
+        h ^= if fold { b.to_ascii_lowercase() } else { b } as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^ (h >> 16)
+}
+
+/// What `AncestorCompound::matches` requires of the ancestor it matches, as
+/// [`ancestor_key_hash`]es. Only hard requirements: a `never` compound fails
+/// the walk anyway, and `:is()` alternatives, pseudo-classes and attributes
+/// are left to the walk.
+fn ancestor_compound_keys(compound: &AncestorCompound, out: &mut Vec<u32>) {
+    if compound.never {
+        return;
+    }
+    if let Some(tag) = compound.tag.as_deref().filter(|t| *t != "*") {
+        out.push(ancestor_key_hash(b'<', tag));
+    }
+    out.extend(compound.classes.iter().map(|c| ancestor_key_hash(b'.', c)));
+    out.extend(compound.id.iter().map(|id| ancestor_key_hash(b'#', id)));
+}
+
+/// A Bloom filter over the tags, classes and ids of one element's
+/// ancestors (Blink's ancestor filter, our own code). A descendant/child
+/// selector whose ancestor compounds need a key no ancestor carries cannot
+/// match, and is rejected without walking the chain. It only ever says
+/// "maybe" or "no", so it can't turn a non-match into a match.
+struct AncestorFilter {
+    bits: [u64; 16],
+}
+
+impl AncestorFilter {
+    fn of(ancestors: &[(String, Vec<String>, Option<String>)]) -> Self {
+        let mut f = AncestorFilter { bits: [0; 16] };
+        for (tag, classes, id) in ancestors {
+            f.insert(ancestor_key_hash(b'<', tag));
+            for c in classes {
+                f.insert(ancestor_key_hash(b'.', c));
+            }
+            if let Some(id) = id {
+                f.insert(ancestor_key_hash(b'#', id));
+            }
+        }
+        f
+    }
+
+    fn bit_indices(h: u32) -> [u32; 2] {
+        [h & 1023, (h >> 16) & 1023]
+    }
+
+    fn insert(&mut self, h: u32) {
+        for b in Self::bit_indices(h) {
+            self.bits[(b >> 6) as usize] |= 1 << (b & 63);
+        }
+    }
+
+    fn may_contain(&self, h: u32) -> bool {
+        Self::bit_indices(h)
+            .iter()
+            .all(|&b| self.bits[(b >> 6) as usize] & (1 << (b & 63)) != 0)
+    }
+}
+
+thread_local! {
+    /// The filter for the element being styled, with the address and length
+    /// of the ancestor slice it was built from.
+    static ANCESTOR_FILTER: std::cell::RefCell<Option<(usize, usize, AncestorFilter)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Installs the [`AncestorFilter`] of one ancestor slice while one element
+/// is styled. Dropping it (also on unwind) restores the previous one. The
+/// filter only answers for that exact slice, which is borrowed for the
+/// scope's whole life, so it can't describe a different chain.
+struct AncestorFilterScope(Option<(usize, usize, AncestorFilter)>);
+
+impl AncestorFilterScope {
+    fn install(ancestors: &[(String, Vec<String>, Option<String>)]) -> Self {
+        let entry = (ancestors.as_ptr() as usize, ancestors.len(), AncestorFilter::of(ancestors));
+        AncestorFilterScope(ANCESTOR_FILTER.with(|c| c.replace(Some(entry))))
+    }
+}
+
+impl Drop for AncestorFilterScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        ANCESTOR_FILTER.with(|c| *c.borrow_mut() = previous);
+    }
+}
+
+/// False only when a filter is installed for exactly `ancestors` and it
+/// lacks one of `keys`. With no filter for this slice, it always says true.
+fn ancestor_filter_admits(ancestors: &[(String, Vec<String>, Option<String>)], keys: &[u32]) -> bool {
+    ANCESTOR_FILTER.with(|c| match &*c.borrow() {
+        Some((ptr, len, f)) if *ptr == ancestors.as_ptr() as usize && *len == ancestors.len() => {
+            keys.iter().all(|&k| f.may_contain(k))
+        }
+        _ => true,
+    })
 }
 
 /// The subject compound of a prepared selector, split once into the pieces
