@@ -1,0 +1,84 @@
+{
+  "id": "x",
+  "url": "https://x.com/",
+  "chrome": [
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 503,
+      "final_url": "https://x.com/",
+      "title": "X / Error",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/x/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/x/chrome-a.png",
+      "elapsed_ms": 14231,
+      "oracle_blocked": "top-level document HTTP 503"
+    },
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://x.com/",
+      "title": "X. It\u2019s what\u2019s happening / X",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/x/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/x/chrome-b.png",
+      "elapsed_ms": 18225
+    }
+  ],
+  "oracle_capture": "b",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://x.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/x/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260929T2220Z-dev9f49-quiet/x/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 6,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 6066,
+      "elapsed_ms": 8
+    },
+    "elapsed_ms": 4423,
+    "error": null,
+    "wall_ms": 4497,
+    "non_background_fraction": 0.1049
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 43,
+    "rustkit_words": 41,
+    "ratio": 0.9535,
+    "missing_sample": [
+      "scan",
+      "the"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "diff": 10.608203125
+  },
+  "points": 3
+}
