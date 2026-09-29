@@ -1,0 +1,33 @@
+{
+  "ts": "20260929T142510Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 5,
+  "points": 4,
+  "max_points": 15,
+  "loads": 2,
+  "readable": 2,
+  "looks_right": 0,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [
+    "reddit",
+    "yahoo"
+  ],
+  "oracle_blocked": {},
+  "blocked": {},
+  "per_site": {
+    "lyft": 2,
+    "reddit": 0,
+    "x": 0,
+    "linkedin": 2,
+    "yahoo": 0
+  },
+  "scorable_sites": 5,
+  "scorable_points": 4,
+  "scorable_max": 15,
+  "full_run": false
+}
