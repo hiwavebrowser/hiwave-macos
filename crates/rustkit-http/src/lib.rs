@@ -111,6 +111,39 @@ pub fn default_user_agent() -> String {
     format!("Mozilla/5.0 ({platform}) HiWave/1.0 RustKit/1.0")
 }
 
+
+/// The platform root store, loaded ONCE per process.
+///
+/// `rustls_native_certs::load_native_certs` walks the macOS keychain's trust
+/// settings and costs SECONDS there. Loaded per `Client` (as #346 shipped
+/// it) it added ~5 s to every engine start — measured by the trench as the
+/// real-site board falling 16/30 -> 7/30 when develop picked #346 up, every
+/// lost site a 30 s-budget timeout, not a block. Linux reads a bundle file
+/// in milliseconds, which is why the author's probes never saw it: the
+/// platform-verification gap the network lane declared on day one, now with
+/// its first scar. Approach and measurements from Atlas's
+/// rs-tls-roots-once (307fc8e), rebuilt here against post-#355 develop —
+/// #355 already removed the second (per-connection) load site.
+#[cfg(not(feature = "native-tls"))]
+fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
+    static ROOTS: std::sync::OnceLock<Arc<tokio_rustls::rustls::RootCertStore>> =
+        std::sync::OnceLock::new();
+    let roots = ROOTS.get_or_init(|| {
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        for cert in rustls_native_certs::load_native_certs().certs {
+            // A single unparseable platform cert must not kill the store.
+            let _ = roots.add(cert);
+        }
+        Arc::new(roots)
+    });
+    if roots.is_empty() {
+        return Err(HttpError::TlsError(
+            "no usable platform root certificates".into(),
+        ));
+    }
+    Ok(roots.clone())
+}
+
 /// ALPN outcome of a TLS handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NegotiatedProtocol {
@@ -207,17 +240,7 @@ impl Client {
         // currently keep speaking HTTP/1.1 only when the peer permits it —
         // see `connect_tls`, which records the negotiated protocol so the
         // caller can refuse mismatches loudly instead of desyncing.
-        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-        let native = rustls_native_certs::load_native_certs();
-        for cert in native.certs {
-            // A single unparseable platform cert must not kill the store.
-            let _ = roots.add(cert);
-        }
-        if roots.is_empty() {
-            return Err(HttpError::TlsError(
-                "no usable platform root certificates".into(),
-            ));
-        }
+        let roots = platform_roots()?;
 
         let mut tls_config = tokio_rustls::rustls::ClientConfig::builder()
             .with_root_certificates(roots)
