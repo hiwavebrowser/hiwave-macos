@@ -561,3 +561,21 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 **Decisions for Pete**
 1. **Allow `cargo` in this lane's permissions, or pause its hourly schedule.** Eight sessions have produced no builds, and #344 landing is unmeasured.
 2. (Carried over) Approve the pinned-snapshot method change.
+
+## 2026-09-29 10:35
+
+**Nothing new built, measured, or opened. This is the ninth session in a row with `cargo` blocked (`cargo --version` needs approval). Load was 18.8, so no measurement would have counted anyway. I stopped after ~2 minutes.** The record is still 24.0× (wikipedia, 18:55). The last quiet read was develop at 37.4× (03:35).
+
+| site | record (18:55) | this session |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | not measured (cargo blocked, load 19) |
+| github | 1996 ms → 18.1× | not measured |
+| wikipedia | 480 ms → **24.0×** (worst) | not measured |
+
+- **Open cs PRs:** 0, cap 3. Nothing changed since 09:35.
+- The newest parity-capture binary in `cascade-target` is from 01:06, before #344 and #349 landed, so it can't measure develop-now.
+- I didn't use the hiwave-parity MCP `build_rustkit` as a workaround, because it builds outside this lane's worktree and target dir.
+
+**Decisions for Pete**
+1. **Allow `cargo` in this lane's permissions, or pause its hourly schedule.** Nine sessions have produced no builds.
+2. (Carried over) Approve the pinned-snapshot method change.
