@@ -2,8 +2,12 @@
 //!
 //! Minimal HTTP/1.1 client for the RustKit browser engine.
 //!
-//! This crate provides a simple async HTTP client using native-tls for TLS,
-//! eliminating the need for reqwest and its transitive dependencies.
+//! This crate provides a simple async HTTP client, eliminating the need for
+//! reqwest and its transitive dependencies. TLS is rustls with a
+//! browser-typical client profile (ALPN h2+http/1.1 advertised, negotiated
+//! http/1.1 fallback) — the network-lane change measured in exchange #276.
+//! The previous native-tls stack remains available for one release behind
+//! the `native-tls` feature as a rollback path (Atlas #535).
 
 use std::io::{self, Write};
 use std::time::Duration;
@@ -134,7 +138,10 @@ impl Default for ClientConfig2 {
 /// HTTP client.
 pub struct Client {
     config: ClientConfig2,
+    #[cfg(not(feature = "native-tls"))]
     tls_connector: TlsConnector,
+    #[cfg(feature = "native-tls")]
+    tls_connector: tokio_native_tls::TlsConnector,
 }
 
 impl Client {
@@ -144,6 +151,33 @@ impl Client {
     }
 
     /// Create a new HTTP client with custom configuration.
+    /// Rollback constructor (Atlas #535): the pre-network-lane native-tls
+    /// handshake, byte-for-byte the old behaviour. One release only.
+    #[cfg(feature = "native-tls")]
+    pub fn with_config(config: ClientConfig2) -> Result<Self, HttpError> {
+        let native_connector = native_tls::TlsConnector::new()
+            .map_err(|e| HttpError::TlsError(e.to_string()))?;
+        let tls_connector = tokio_native_tls::TlsConnector::from(native_connector);
+        Ok(Self {
+            config,
+            tls_connector,
+        })
+    }
+
+    #[cfg(feature = "native-tls")]
+    async fn connect_tls(
+        &self,
+        host: &str,
+        _addr: &str,
+        stream: tokio::net::TcpStream,
+    ) -> Result<tokio_native_tls::TlsStream<tokio::net::TcpStream>, HttpError> {
+        self.tls_connector
+            .connect(host, stream)
+            .await
+            .map_err(|e| HttpError::TlsError(e.to_string()))
+    }
+
+    #[cfg(not(feature = "native-tls"))]
     pub fn with_config(config: ClientConfig2) -> Result<Self, HttpError> {
         // rustls with a browser-typical client profile (network lane).
         //
@@ -200,9 +234,11 @@ impl Client {
     /// the peer explicitly agrees to http/1.1 in the second handshake.
     /// Full h2 support is the flagged follow-up (hyper adoption is a
     /// dependency-philosophy decision above this lane).
+    #[cfg(not(feature = "native-tls"))]
     async fn connect_tls(
         &self,
         host: &str,
+        addr: &str,
         stream: tokio::net::TcpStream,
     ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, HttpError> {
         let server_name = ServerName::try_from(host.to_string())
@@ -228,8 +264,7 @@ impl Client {
                 .with_no_client_auth();
             h1_only.alpn_protocols = vec![b"http/1.1".to_vec()];
             let connector = TlsConnector::from(Arc::new(h1_only));
-            let addr = format!("{}:443", host);
-            let fresh = tokio::net::TcpStream::connect(&addr)
+            let fresh = tokio::net::TcpStream::connect(addr)
                 .await
                 .map_err(|e| HttpError::ConnectionFailed(e.to_string()))?;
             return connector
@@ -341,7 +376,7 @@ impl Client {
             .await
             .map_err(|e| HttpError::ConnectionFailed(e.to_string()))?;
 
-        let tls_stream = self.connect_tls(host, stream).await?;
+        let tls_stream = self.connect_tls(host, &addr, stream).await?;
 
         self.send_request(tls_stream, host, method, url, headers, body)
             .await
@@ -802,7 +837,7 @@ impl Client {
             .await
             .map_err(|e| HttpError::ConnectionFailed(e.to_string()))?;
 
-        let tls_stream = self.connect_tls(host, stream).await?;
+        let tls_stream = self.connect_tls(host, &addr, stream).await?;
 
         self.send_streaming_request(tls_stream, host, url).await
     }
