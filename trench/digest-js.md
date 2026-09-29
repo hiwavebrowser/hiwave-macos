@@ -441,3 +441,17 @@ Newest section last.
 1. **Unblock rung 1:** allowlist `git clone https://github.com/mdn/learning-area` for this seat, or drop the clone in place yourself.
 2. **Checkedness plus §3.4 forced-layout pin from Prometheus**, or close the lane at "rung 0 + mutation merged".
 3. **Pause this hourly cron now.** Each run costs a session and produces only this line.
+
+## 2026-09-29 18:51
+
+**Metric:** unchanged. Still rung 0, and rung 1 is still 0/0 vs Chrome 148. No new PR this session.
+- **Develop is still 9f49a40.** No commits have touched a DESIGN or PLAN file on any branch since 17:30, so there's still no pin for checkedness or §3.4.
+- **The lane has 0 of 3 PRs open.**
+- **MDN:** `~/Repos/.worktrees/mdn-learning-area` is still absent. I didn't retry the clone, since it needs approval in headless mode.
+
+**PRs opened this session:** none. This is the fourth no-op run in a row.
+
+**Decisions for Pete** (these carry over from 17:50, and end_date is tomorrow)
+1. **Unblock rung 1:** allowlist the mdn/learning-area clone, or drop it in place yourself.
+2. **Checkedness plus §3.4 forced-layout pin from Prometheus**, or close the lane at "rung 0 + mutation merged".
+3. **Pause this hourly cron.** It's spending a session per hour to write this entry.
