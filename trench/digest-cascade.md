@@ -615,3 +615,26 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 **Decisions for Pete**
 1. **Re-baseline the record** (carried over): a record is develop's quiet median taken interleaved with the previous record binary. Today develop is .70× the record binary on wikipedia. Default: 24.0× stays on the books until a quiet run.
 2. (Carried over) Approve the pinned-snapshot method change.
+
+## 2026-09-29 15:53
+
+**First quiet window in days (load 2.4–3.9 from 14:35 to 14:50). The pseudo content-gate is dropped (quiet B/A ≈ 1.00). Develop has a new quiet absolute: 33.4× (wikipedia). The 24.0× "record" doesn't hold up: the same record binary reads ~850 ms now vs 480 ms then. PR #363 is open: the first layout is deferred until the linked sheets arrive (wikipedia 3 → 2 builds, B/A 0.79, pixel-identical receipt).**
+
+| site | quiet develop 35fe782, flag off (median of 5, load ~2.6) | same, `RUSTKIT_INCREMENTAL_RESTYLE=1` | #363 B/A vs develop (4 pairs, load 4.5–5.6) |
+|---|---|---|---|
+| cnn | 1030 ms → 4.9× | 1086 ms → 5.2× | 1.04 1.03 1.18 .82 → **1.03** (links no sheets) |
+| github | 1679 ms → 15.3× | 1189 ms → 10.8× | .99 .95 .99 .92 → **0.97** |
+| wikipedia | 667 ms → **33.4×** (worst) | 565 ms → 28.3× | .82 .77 .83 .69 → **0.79** (≈ 26× projected) |
+
+- **Pseudo content-gate (`atlas/cs-pseudo-content-gate` @ b9bc8c8): dropped.** A quiet 5-pair B/A vs develop 35fe782 at load 2.6–3.9 gave cnn 1.02, github 0.98, wikipedia 1.01. Branch left pushed, no PR.
+- **Record drift:** a quiet 3-pair interleave of the record binary `pc-dev-8567760` vs develop 35fe782 gave B/A cnn .60, github .63, wikipedia .71 (develop really is faster). But the record binary itself read 841–862 ms on wikipedia vs 480 ms at 18:55. Machine state moves absolute numbers ~1.8× between sessions, so only same-window interleaves are comparable.
+- **PR #363** `atlas/cs-defer-first-layout` @ **40e09e0** on develop 275d696. When the document has `<link rel=stylesheet>`, `load_url` skips the pre-sheet layout (render-blocking, as in Chrome). `load_subresources` lays out even if every sheet fails, and there's a safety net after the join. Engine tests with `--features headless`: 282/282 (+2 new); without features: 221/221. Receipt: 26/26, avg 1.2%, **`diffPixels` identical on all 26 to develop 275d696's own binary** (the 2 cases that differ from the 8f44204-era receipt are develop drift).
+- **Test note for the next session:** `page_script_tests` (and other load-path tests) are `#[cfg(feature = "headless")]`. Plain `cargo test -p rustkit-engine --lib` silently skips them, so run with `--features headless`.
+- **Saved binaries:** `cascade-target/pc-dev-275d696` (develop), `pc-dfl-40e09e0` (#363).
+- **Open cs PRs:** 1 (#363), cap 3.
+- **Next session:** (1) watch #363's R1/R2. (2) The flag-on board run for flipping `RUSTKIT_INCREMENTAL_RESTYLE` (quiet today: wikipedia 33.4× → 28.3×, github 15.3× → 10.8×). Stacked with #363, wikipedia's builds would be [sheets, replay] ≈ 296 + 112 ms. (3) Then the wikipedia sheets build itself (~300 ms vs Chrome's 20 total): re-profile on develop + #363.
+
+**Decisions for Pete**
+1. **Retire the 24.0× record and use 33.4× (quiet develop 35fe782, 14:45 today) as the ratio of record.** The same binary that set 24.0× reads 1.8× slower in today's quiet window, so 24.0× reflected a machine state, not the engine. Default: yes. From now on, records are same-window only.
+2. **The flag-on real-site board run for the `RUSTKIT_INCREMENTAL_RESTYLE` default flip** (carried over). It's worth ~15% on wikipedia and ~30% on github, measured quietly today. Default: this lane runs the board itself in the next quiet window.
+3. (Carried over) Approve the pinned-snapshot method change.
