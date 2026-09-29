@@ -216,3 +216,23 @@ Newest section last.
 1. **Rung 1 is still blocked (sixth digest running).** Allowlist `Bash(git clone https://github.com/mdn/learning-area:*)`, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. end_date is Wednesday. Without fixtures, the rung 1 80% exit can't be scored at all. What's left in the no-fixture surface is layout reads (`getBoundingClientRect`, `offset*`), and those need the §3.4 forced-layout design before the lane can build them.
 2. **Re-fire R2 on #342, #343 and #348?** All three have R1 CLEAR at head and green CI. Their last R2s are stale DIRTY FAILs, or missing. Whoever owns the Cursor automation can re-trigger it without a push, which would keep the R1 stamps valid. After that, raising max_open_prs to 4 matters less.
 3. **UA stylesheet gap (for realsite or cascade, not this lane):** the engine has **no `[hidden] { display: none }`** rule. I confirmed it with an engine paint probe: `<span hidden>no</span>` is painted. The `hidden` attribute is common on real pages (collapsed menus, templates, modals), so this is real parity debt. It's probably a one-line UA rule. Which lane takes it?
+
+## 2026-09-29 03:50
+
+**Metric:** unchanged. Still rung 0, and rung 1 is still 0/0 vs Chrome 148. **This was a no-op session (~10 min), by design:** every on-plan move is gated.
+- **Lane cap:** 3 of 3 PRs open (#342 @ 6343239, #343 @ 89eca75, #348 @ 17ea713). There are no new reviews since 02:58.
+  - All three have R1 CLEAR at head.
+  - None has an R2 at its current head.
+- **MDN:** I retried `git clone https://github.com/mdn/learning-area` at 03:52. It still needs approval.
+  - `~/Repos/.worktrees/js-ladder-mdn` is not a clone. It's a plain develop checkout at 8920e24.
+- **No-fixture surface:** what's left (`getBoundingClientRect`, `offset*`) needs the pin's §3.4 forced-layout design first.
+- **Develop:** unchanged at 8f44204. The open PRs and the banked branches are all current, so no merge upkeep was needed.
+  - Banked: `atlas/js-dom-node-clone` @ 971689b and `atlas/js-dom-inner-text` @ 7dd53ed. I verified both on origin.
+- **Headless permissions:** `null_exchange` and bare `gh api` / `git ls-remote` also need approval in this lane now, so I couldn't read the exchange for answers to the earlier decisions.
+
+**PRs opened this session:** none (lane cap).
+
+**Decisions for Pete**
+1. **Unblock rung 1 (seventh digest).** Allowlist `Bash(git clone https://github.com/mdn/learning-area:*)`, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. end_date is tomorrow (Wednesday).
+2. **Re-fire R2 on #342, #343 and #348** from the Cursor automation side (no push, so the R1 stamps stay valid), or raise max_open_prs to 4 or 5. Two receipted branches are queued behind the cap.
+3. **Pause this lane's hourly cadence until 1 or 2 moves?** Until then, each hourly session can only re-confirm the same blocked state. Alternatively, ask Prometheus for the §3.4 forced-layout pin, which would give the lane real work (layout reads) without fixtures.
