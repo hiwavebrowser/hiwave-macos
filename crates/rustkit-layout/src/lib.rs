@@ -1440,8 +1440,10 @@ pub struct LayoutBox {
     pub box_type: BoxType,
     /// Computed dimensions.
     pub dimensions: Dimensions,
-    /// Computed style.
-    pub style: ComputedStyle,
+    /// Computed style. Boxed: a style is ~1.5 KB, and a layout box is moved
+    /// by value many times while the tree is built (returns, `Vec` pushes
+    /// and regrowth), so an inline style made every move a ~2 KB copy.
+    pub style: Box<ComputedStyle>,
     /// Child boxes.
     pub children: Vec<LayoutBox>,
     /// CSS position property.
@@ -1516,11 +1518,11 @@ pub struct LayoutBox {
 
 impl LayoutBox {
     /// Create a new layout box.
-    pub fn new(box_type: BoxType, style: ComputedStyle) -> Self {
+    pub fn new(box_type: BoxType, style: impl Into<Box<ComputedStyle>>) -> Self {
         Self {
             box_type,
             dimensions: Dimensions::default(),
-            style,
+            style: style.into(),
             children: Vec::new(),
             position: Position::Static,
             offsets: PositionOffsets::default(),
