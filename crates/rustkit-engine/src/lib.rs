@@ -4586,8 +4586,15 @@ impl Engine {
         // Only create pseudo-element if content property is set
         let content = pseudo_style.content.as_ref()?;
 
-        // Create the pseudo-element box
-        let mut pseudo_box = LayoutBox::new(BoxType::Inline, pseudo_style.clone());
+        // The box type follows `display`, as for elements. An always-Inline
+        // pseudo put `::before { content:""; display:block; height:0;
+        // margin-top:-5px }` (facebook's leading trim) on a line of its own,
+        // one line-height tall, instead of an empty block.
+        let box_type = match pseudo_style.display {
+            rustkit_css::Display::Inline => BoxType::Inline,
+            _ => BoxType::Block,
+        };
+        let mut pseudo_box = LayoutBox::new(box_type, pseudo_style.clone());
         if std::env::var("RK_NO_PSEUDO_POS").is_err() {
             Self::transfer_positioning(&mut pseudo_box, &pseudo_style);
         }
@@ -24008,6 +24015,85 @@ mod empty_formatting_root_margin_tests {
         )) {
             assert_eq!(rect(&root, "o").width, 0.0);
             assert_eq!(rect(&root, "h").x, 100.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod pseudo_element_display_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.set_viewport(1280.0, 800.0);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.set_viewport(1280.0, 800.0);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    /// facebook's headings trim their leading with empty block pseudos.
+    const TRIM: &str = r#"<style>.t{display:block;font-size:17px;line-height:22px}
+        .t:before{content:"";display:block;height:0;margin-top:-5px}
+        .t:after{content:"";display:block;height:0;margin-bottom:-5px}</style>"#;
+
+    #[test]
+    fn empty_block_pseudos_trim_a_flex_items_leading() {
+        // Chrome 148: the column item is a formatting root, so both -5px
+        // margins stay inside it: -5 + 22 - 5 = 12. Each pseudo used to be an
+        // inline box on a line of its own, one line tall (~60), and the
+        // trailing -5px margin was not subtracted from the auto height (17).
+        for (path, root) in laid_out(&format!(
+            r#"<!doctype html>{TRIM}<body style="margin:0"><div style="display:flex;flex-direction:column"><div id="w" style="display:flex;flex-direction:column"><span id="a" class="t">Log into Facebook</span></div></div><div id="b" style="height:2px"></div></body>"#
+        )).into_iter().enumerate() {
+            assert_eq!(rect(&root, "a").height, 12.0, "path {path}");
+            assert_eq!(rect(&root, "b").y, 12.0, "path {path}");
+        }
+    }
+
+    #[test]
+    fn a_last_childs_negative_bottom_margin_ends_a_flex_items_height() {
+        // CSS 2.1 §10.6.7: the auto height ends at the last in-flow child's
+        // bottom margin edge, 20 - 5 = 15 (it took the max bottom, 20).
+        for (path, root) in laid_out(
+            r#"<!doctype html><body style="margin:0"><div style="display:flex;flex-direction:column"><div id="a"><div style="height:20px"></div><div style="height:0;margin-bottom:-5px"></div></div></div></body>"#,
+        ).into_iter().enumerate() {
+            assert_eq!(rect(&root, "a").height, 15.0, "path {path}");
+        }
+    }
+
+    #[test]
+    fn a_block_pseudo_is_a_block_of_its_own_height() {
+        // A `display:block` pseudo stacks above the text as a block: 10 + 22.
+        for (path, root) in laid_out(
+            r#"<!doctype html><style>#a{font-size:17px;line-height:22px}#a:before{content:"";display:block;height:10px}</style><body style="margin:0"><div id="a">text</div></body>"#,
+        ).into_iter().enumerate() {
+            assert_eq!(rect(&root, "a").height, 32.0, "path {path}");
         }
     }
 }

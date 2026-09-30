@@ -2516,20 +2516,37 @@ fn content_border_height(b: &LayoutBox) -> f32 {
             crate::BoxType::Block | crate::BoxType::AnonymousBlock
         )
     };
+    let bottom = |c: &LayoutBox| {
+        let m = c.dimensions.margin_box();
+        let h = if block_level(c) {
+            c.dimensions.margin.vertical() + content_border_height(c)
+        } else {
+            m.height
+        };
+        m.y + h - d.content.y
+    };
     let extent = || {
-        b.children
+        let max = b.children.iter().filter(in_flow).map(bottom).fold(0.0f32, f32::max);
+        // CSS 2.1 §10.6.3/§10.6.7: the auto height ends at the bottom margin
+        // edge of the LAST in-flow block-level child, so its negative bottom
+        // margin pulls the box up (facebook's `::after { margin-bottom:-5px }`
+        // leading trim: 17 -> 12, as in Chrome). Floats still extend it, and
+        // line content keeps the max: the last inline piece need not be the
+        // tallest on its line.
+        let last = b
+            .children
             .iter()
             .filter(in_flow)
-            .map(|c| {
-                let m = c.dimensions.margin_box();
-                let h = if block_level(c) {
-                    c.dimensions.margin.vertical() + content_border_height(c)
-                } else {
-                    m.height
-                };
-                m.y + h - d.content.y
-            })
-            .fold(0.0f32, f32::max)
+            .rfind(|c| c.float == crate::Float::None);
+        match last {
+            Some(c) if block_level(c) => b
+                .children
+                .iter()
+                .filter(|c| c.float != crate::Float::None)
+                .map(bottom)
+                .fold(bottom(c), f32::max),
+            _ => max,
+        }
     };
     let content = if b.style.display.is_flex() && !b.children.is_empty() {
         let outer = |c: &LayoutBox| content_border_height(c) + c.dimensions.margin.vertical();
