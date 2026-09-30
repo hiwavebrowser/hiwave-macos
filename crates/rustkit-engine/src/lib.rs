@@ -8131,12 +8131,13 @@ impl Engine {
                 }
                 ix.keys.push(keys);
                 let members = SelectorMatcher.list_member_specificity(rule.selector.trim());
-                // With no parens, brackets or quotes, `selector_specificity`'s
-                // plain comma split yields the same members (plus empty ones,
-                // which score zero), so the list's specificity is their max.
+                // `selector_specificity` splits a list with the same
+                // `split_top_level_commas` and takes its members' max, so a
+                // list's specificity is the max of the members just computed.
+                // A single selector (no members) is scored whole.
                 let whole = match members.iter().map(|&(_, spec)| spec).max() {
-                    Some(max) if !rule.selector.contains(['(', ')', '[', ']', '"', '\'']) => max,
-                    _ => SelectorMatcher.selector_specificity(&rule.selector),
+                    Some(max) => max,
+                    None => SelectorMatcher.selector_specificity(&rule.selector),
                 };
                 ix.specificity.push(whole);
                 ix.member_specificity.push(members);
@@ -15655,6 +15656,28 @@ mod tests {
         assert_eq!(SelectorMatcher.selector_specificity(":not("), (0, 0, 0));
         // The unclosed argument is dropped, not counted; only the `a` remains.
         assert_eq!(SelectorMatcher.selector_specificity("a :is( b"), (0, 0, 1));
+    }
+
+    #[test]
+    fn a_list_scores_the_max_of_its_member_specificities() {
+        // build_rule_index takes a list's specificity from the members it
+        // has already scored instead of rescanning the whole selector.
+        for sel in [
+            "a, .b, #c",
+            " ul li ,  .x > .y ",
+            ":is(a, b), #c",
+            ":is( #a, .b ) c, d",
+            "[data-x=\"a,b\"], .c",
+            "a:not(.x, .y), b",
+            "a,,b",
+        ] {
+            let members = SelectorMatcher.list_member_specificity(sel.trim());
+            let max = members.iter().map(|&(_, spec)| spec).max();
+            assert_eq!(max, Some(SelectorMatcher.selector_specificity(sel)), "{sel}");
+        }
+        // A single selector has no members and is scored whole.
+        assert!(SelectorMatcher.list_member_specificity(":is(a, b)").is_empty());
+        assert!(SelectorMatcher.list_member_specificity("div > p").is_empty());
     }
 }
 
