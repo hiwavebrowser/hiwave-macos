@@ -8130,9 +8130,16 @@ impl Engine {
                     ix.main.file(key, g);
                 }
                 ix.keys.push(keys);
-                ix.specificity.push(SelectorMatcher.selector_specificity(&rule.selector));
-                ix.member_specificity
-                    .push(SelectorMatcher.list_member_specificity(rule.selector.trim()));
+                let members = SelectorMatcher.list_member_specificity(rule.selector.trim());
+                // With no parens, brackets or quotes, `selector_specificity`'s
+                // plain comma split yields the same members (plus empty ones,
+                // which score zero), so the list's specificity is their max.
+                let whole = match members.iter().map(|&(_, spec)| spec).max() {
+                    Some(max) if !rule.selector.contains(['(', ')', '[', ']', '"', '\'']) => max,
+                    _ => SelectorMatcher.selector_specificity(&rule.selector),
+                };
+                ix.specificity.push(whole);
+                ix.member_specificity.push(members);
                 ix.prepared.push(SelectorMatcher.prepared_selector(rule.selector.trim()));
                 let mut pseudo_keys = None;
                 let mut pseudo_prepared = None;
@@ -8318,34 +8325,23 @@ impl Engine {
             out.push(key)
         }
 
-        fn keys_for(engine: &Engine, selector: &str, out: &mut Vec<SubjectKey>) {
-            let selector = selector.trim();
-            if !SelectorMatcher::selector_list_is_valid(selector) {
-                return;
-            }
-            if selector.contains(',') {
-                let members = SelectorMatcher::split_top_level_commas(selector);
-                if members.len() != 1 || members[0] != selector {
+        // Read off the prepared selector, which has already validated, split
+        // and tokenized the string the way the matcher does (`Never` for an
+        // invalid, pseudo-element or subject-less selector), so the index
+        // no longer repeats that work per rule (~150 ms of github's index).
+        fn keys_for(engine: &Engine, prepared: &PreparedSelector, out: &mut Vec<SubjectKey>) {
+            match prepared {
+                PreparedSelector::Never => {}
+                PreparedSelector::List(members) => {
                     for m in members {
                         keys_for(engine, m, out);
                     }
-                    return;
                 }
-            }
-            if selector.contains("::")
-                || selector.ends_with(":before")
-                || selector.ends_with(":after")
-                || selector.contains(":before ")
-                || selector.contains(":after ")
-            {
-                return;
-            }
-            let tokens = SelectorMatcher.tokenize_selector(selector);
-            match tokens.last() {
-                Some((compound, combinator)) if combinator.is_empty() => {
-                    keys_for_compound(engine, compound, out)
+                PreparedSelector::Complex { tokens, .. } => {
+                    if let Some((compound, _)) = tokens.last() {
+                        keys_for_compound(engine, compound, out)
+                    }
                 }
-                _ => {}
             }
         }
 
@@ -8354,7 +8350,7 @@ impl Engine {
                 return k.clone();
             }
             let mut v = Vec::new();
-            keys_for(self, selector, &mut v);
+            keys_for(self, &SelectorMatcher.prepared_selector(selector.trim()), &mut v);
             let v = Rc::new(v);
             let mut cache = cache.borrow_mut();
             // Selectors are page-controlled; keep a runaway page from
