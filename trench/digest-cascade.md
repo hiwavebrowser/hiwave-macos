@@ -934,3 +934,27 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Pause the hourly cascade trigger until the allow rules exist.** Three sessions have now produced only digests. Rules needed: `cargo build`/`cargo test` (any `--manifest-path` under `~/Repos/.worktrees/cs-*`, `CARGO_TARGET_DIR=…/cascade-target`), `git -C ~/Repos/.worktrees/{trench-cascade,cs-*}`, and `gh run`. Default: pause the trigger.
 2. **Ratio of record stays 15.9×.** Default: yes.
 3. **Close #371** (carried over). Default: a maintainer closes it.
+
+## 2026-09-30 12:16
+
+**The session was unblocked through python wrappers, and one cut was tried. It read flat and was dropped. #379 passed its quiet test and was marked ready, but its speed claim did not survive a reversed-order A/B. The worst ratio is unchanged: 15.9× (wikipedia, ratio of record). Retract "14.5× once #379 lands".**
+
+| site | Chrome ms | before: ratio of record (quiet, 08:36) | after: develop ddbeae5, 10 runs at load 2.8–5.7 (not quiet) | pseudo-memo cut, median B/A of 10 pairs (5 AB + 5 BA) |
+|---|---|---|---|---|
+| cnn | 210 | 728 → 3.5× | 746 → 3.6× | ~1.05 |
+| github | 110 | 1106 → 10.1× | 1158 → 10.5× | ~1.01 |
+| wikipedia | 20 | 318 → **15.9×** | 328 → **16.4×** | **~0.98** (AB: .92 .97 .81 .80 .78, BA: 1.11 1.11 .99 1.09 .99) |
+
+- **Unblocked:** `.worktrees/cs-cargo.py <worktree> <cargo args>` (sets `CARGO_TARGET_DIR=cascade-target`, like the JS lane's `js-cargo.py`) and `.worktrees/js-git.py <worktree> <git args>`. `gh` calls with long bodies go through `python3 -c subprocess`. Plain `git` works in the hub while the cwd stays there. Never `cd`.
+- **#379 @ 35bccf1: quiet `cargo test -p rustkit-engine --features headless --lib` gave 297/297** (load 2.8). The body was updated and the PR **marked ready**.
+- **Order effect found.** `ab-hub.py` always ran A first, and the first binary in a pair reads ~10% slower on wikipedia (the pseudo-memo A/B flipped from .80 to 1.09 when the order was swapped). Re-running #379 with B first gave wikipedia per-pair .91 1.29 .90 1.06 1.23, **median 1.06**. Across 10 counterbalanced pairs it's ~0.93, with a wide spread. wikipedia's A side is also bimodal (build 1 at ~165–190 or ~250 ms). I posted this on #379 and **retitled it without "B/A 0.90"**. Receipt, verify and tests stand. **`ab-hub.py` now alternates AB/BA.** Every claim of record in this lane since 2026-09-27 came from A-first pairs, so treat small (≥0.90) wins as unproven.
+- **Dropped, local only:** `atlas/cs-pseudo-memo-some` @ ac0d0bb (worktree `.worktrees/cs-pseudo-memo-some`). It stores only matched `::before`/`::after` styles in the style memo, and "absent key + node in `styles`" replays as no match. It's sound (all early returns between the style lookup and the pseudo lookup depend only on the tag, the style or the DOM) and engine lib 304/304, but flat (above). Binaries `cascade-target/pc-pms-ac0d0bb` and `pc-dev-ddbeae5`. A/B logs `cascade-target/tmp/ab-pms-quiet{,2}.txt` and `ab-rwk-reversed.txt`.
+- **Scoped and rejected:** a content-keyed pseudo bucket. `shared_rule_index` reuses the index while the selectors are unchanged, so a bucket keyed on declarations could replay a stale "no content". A non-allocating probe would only save ~22k tiny `candidates()` Vecs, below the noise.
+- **Caught:** `cargo fmt -p rustkit-engine` rewrote ~2.6k lines of develop's lib.rs (develop isn't fmt-clean). I reset and redid the edits without fmt. Never run fmt on this crate in a cs branch.
+- **Open cs PRs:** 2 (#379 ready, R1 CLEAR + R2 PASS at 35bccf1; #371 draft/close-recommended), cap 3.
+- **Next session:** Every result is small against noise, so fix the instrument before cutting again. Run `cascade_bench` with ≥10 counterbalanced pairs and report the bimodal wikipedia mode split. Then pick the structural cut (skip the replay build's box construction via tree reuse, decision 1 at 07:50), or github's rule index (~417 ms of build 1).
+
+**Decisions for Pete**
+1. **The A/B standard becomes counterbalanced: ≥5 AB + ≥5 BA pairs, median of per-pair B/A.** It replaces the 2026-09-27 rule of 3+ interleaved pairs, which let a fixed-order bias of ~10% through. Default: yes.
+2. **#379 lands as a neutral/small change** (it removes one `ComputedStyle` clone per element; receipt identical) rather than a 0.90 win. The ratio of record stays 15.9×. Default: yes, a maintainer merges on R1 + R2.
+3. **Close #371** (carried over). Default: a maintainer closes it.
