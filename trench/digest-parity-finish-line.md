@@ -13210,3 +13210,255 @@ regression check.
   flexible-item containers.
 - **`own_min_content_width` still has no flex arm at all** — no gap, no item
   sum. The two functions keep turning out to be one defect apart.
+
+## 2026-09-30
+
+**Metric: `3/26` on macOS, carried forward and NOT re-measured by me.** Last
+measured by run 36526608129 on 09-29 against #350. `develop` is now `6e26932`
+— #351..#370 later, engine changes I did not read — so the carry-forward states
+what I know, not that the number is still 3. Tonight's PR (#372) carries Rust,
+so its own Parity Gate on `macos-14` measures it; that run is the check, not
+this entry. On this seat the metric is **unchanged and provably so**: all 26
+`layout.json` and all 26 frames are **bit-identical** before and after.
+
+**P-item: the unit 09-29 recorded. It does not exist.** I measured the recorded
+next unit, found it was an artefact of the probe that produced it, and worked
+the second item on the same note instead — the missing flex arm in
+`own_min_content_width`. That is **COMPLETE as a unit**, branch
+`atlas/n70-flex-clamp-max-content`, **PR #372** against `develop`.
+
+### The recorded unit was a measurement artefact — retracting it
+
+09-29 closed with this, and it was the loudest thing on the board:
+
+> **Recorded next unit: `own_max_content_width` does not model flex factors.**
+> Chrome clamps each item's max-content contribution by its flex base size and
+> factors (css-flexbox-1 §9.9); RustKit sums the items raw. `settings`'
+> `div.blocklist-add` reads Chrome 266.188 against an item sum of 652 … A
+> **300–400px** claim against tonight's 8px one, and the largest single geometry
+> defect on that case.
+
+**There is no such defect.** `n69_gap_contribution_probe.mjs` measures an item's
+intrinsic size by setting `width: max-content` **on the item**, which is a no-op
+for a flex item whose `flex-basis` is not `auto`. `flex: 1` means basis `0%`, so
+the `width` property never reaches the base size and the number read back is the
+item's **used** width inside its full-width container. Hence the "652":
+
+```
+593.813 (#focusBlocklistInput) + 58.188 (#focusBlocklistAddBtn) = 652.001
+container used width = 660         <- this is what was summed
+```
+
+Both numbers appear verbatim in `baselines/chrome-148/builtins/settings/layout-rects.json`
+as those elements' **used** rects (593.796875 and 58.203125). The "residual
+−393.813" was the container's own width minus its own width, wearing a §9.9 hat.
+
+`trench/tools/n70_flex_fraction_probe.mjs` measures the two quantities §9.9.1
+actually needs, each by neutralising only the factor it is about and leaving the
+item's own `width` declaration alone (`flex: 0 0 auto` for the contribution,
+`flex-grow: 0; flex-shrink: 0` for the base). Under that measurement
+`div.blocklist-add` decomposes **exactly**:
+
+| | value |
+|---|---:|
+| Chrome max-content | 266.188 |
+| `#focusBlocklistInput` contribution (`input[type=text] { width: 200px }`) | 200.000 |
+| `#focusBlocklistAddBtn` contribution | 58.188 |
+| gap (`0.5rem`) | 8.000 |
+| **residual** | **0.000** |
+
+And the general result, on **all 26 gating cases, 126 row flex containers**:
+
+```
+containers where the RAW SUM rule and §9.9.1 disagree by >0.01px:  0 of 126
+```
+
+They coincide wherever every item's flex base size equals its max-content
+contribution, which is every container in this corpus — Chrome resolves a `0%`
+flex-basis against an indefinite container as the item's own size, not as zero,
+so the "max-content flex fraction" is 0 and the machinery collapses to the sum
+RustKit already computes. **RustKit's max-content rule is right, and the fix that
+was queued for tonight would have changed a correct number.**
+
+### What the real defect was
+
+The other half of 09-29's note: *"`own_min_content_width` still has no flex arm
+at all — no gap, no item sum."* That one is real, and the same probe measures it.
+
+css-flexbox-1 §9.9.1 computes the min-content main size exactly as the
+max-content main size with each item's **min-content** contribution in place of
+its max-content one. The function's generic walk answers the LARGEST block-level
+child and drops every gap, so two items of 100 and 90 with a 16px gap read 100
+where Chrome reads 206.
+
+Chrome 148 ground truth, 83 comparable row containers (nowrap, no anonymous text
+run, laid out, and not themselves a flex item whose basis swallows the forced
+width):
+
+| rule | closes on |
+|---|---|
+| `sum(item min-content) + (n-1)*gap + pb` | **81** |
+| largest child — what the function answered | **0** |
+
+The two that close on neither are the sum rule clamped **up** by the container's
+own `min-width` (`settings`' `.setting-control` 140px against a sum of 110.906,
+`chrome_rustkit`'s `.tab` 120px against 108.344), which is the caller's clamp.
+
+**Wrap is excluded by measurement, not by spec reading.** On all 19 wrapping row
+containers Chrome's min-content equals the largest child to 0.000 — `bg-pure`'s
+`.row` 130.000, `card-grid`'s `.grid` 300.000, `about`'s `.links` 66.406,
+`settings`' `.clear-options` 95.000, `form-elements`' `.button-row` 124.500 —
+because a multi-line container may put every item on its own line, which is what
+the generic walk already answers. Column containers are excluded for the same
+reason: width is then the cross axis.
+
+This number is a **floor** — §4.5 automatic minimum size (`flex.rs:1529`) and
+shrink-to-fit (`lib.rs:1035`) both read it — so understating it lets a nested
+flex container shrink below its own contents. That is the shape of defect n68
+fixed for form controls; this is the same hole one level up.
+
+### Commits
+
+- `5a5f4fd` (on `atlas/n70-flex-clamp-max-content`, PR #372) — the flex arm in
+  `own_min_content_width`, and twelve guards.
+- this commit — the digest entry and `trench/tools/n70_{flex_fraction_probe.mjs,mutation_sweep.py,seat_ab.sh}`.
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+```
+  layout.json        bit-identical on 26 of 26
+  frame.ppm          bit-identical on 26 of 26
+  Gate A   geometry failures 2581 -> 2581     green 3/26 -> 3/26   join 8 -> 8
+           per-axis A/B: improved 0  worsened 0  appeared 0  disappeared 0
+  Gate B   paint-green 1/26 -> 1/26           discrete 0 -> 0
+```
+
+**The fix changes nothing observable on this corpus, and that is not because the
+arm is dead.** Instrumented (temporary `eprintln`, not committed), the arm runs
+**111 times** and returns a different number from the old answer on **78**:
+
+| case | reached | differ | largest rise |
+|---|---:|---:|---:|
+| settings | 95 | 71 | 238.88px |
+| sticky-scroll | 9 | 5 | 304.00px |
+| chrome_rustkit | 2 | 2 | 65.50px |
+| about | 5 | 0 | — |
+
+Rises only; **not one fall**, which is what a sum replacing a max must do. The
+floor is simply not binding anywhere on these pages: every item it raises is
+already laid out wider than its new minimum. `sticky-scroll`'s `nav` is the
+clean illustration — its floor goes 64.00 → **368.00**, RustKit lays it out at
+384.16, and Chrome's used width for it is **368**. The new floor is exactly
+Chrome's number and the box is still above it, so nothing moves.
+
+So the change is **guarded rather than measured**: correct against 81 Chrome
+containers, and with zero corpus evidence behind its effect. It cannot move the
+metric in either direction. Stated this plainly because "no regression" and "no
+evidence" read the same in a table and are very different claims.
+
+### Stop rule
+
+Did not fire, and by arithmetic rather than by a reading of the wording: no
+oracle improved (bit-identical captures on all 26 cases, per-box, every axis),
+so there is no trade to revert. Nothing worsened either.
+
+### Mutation-check results
+
+**14 probes, 14 RED, control green before and after, every landing site asserted
+unique, every guard verified to have run, and every one of the 12 guards killed
+by at least one probe.**
+
+| probe | caught by |
+|---|---|
+| M1 no flex arm at all (the defect itself) | 8 guards |
+| M2 the arm takes WRAPPING containers too | the wrap guard |
+| M3 the arm takes COLUMN containers too | the column guard |
+| M4 the gap matched for `Length::Px` (n69's hole reopened) | 6 guards |
+| M5 a percentage gap resolves against the box's own used width | the percentage guard |
+| M6 the main-axis gap read from `row_gap` | 8 guards |
+| M7 one gap per ITEM instead of per boundary | 8 guards |
+| M8 exactly one gap, whatever the item count | the three-item guard |
+| M9 the container's own padding and border dropped | the padding/border guard |
+| M10 the item's MAX-content summed instead of its min | the min-vs-max guard |
+| M11 the item's inline margins dropped | the margins guard |
+| M12 an out-of-flow child counted as a flex item | the out-of-flow guard |
+| M13 a white-space-only run given a gap slot | the white-space guard |
+| M14 a specified width stops winning over the flex sum | the explicit-width guard |
+
+Two failures of the **sweep**, both of which are the reason to trust the table:
+
+- **The first run refused to start**: `anchor GAP occurs 2 times, not once`. The
+  gap line and the two after it are character-identical in
+  `own_max_content_width`, so a first-occurrence replace would have landed in the
+  sibling function. That is the third night in four that these two functions have
+  tried to swallow a probe, and the first on which the check caught it *before*
+  any result was printed rather than after. 09-29's note — "it is not a lesson
+  that stays learned; it is a property of the file" — is now load-bearing
+  machinery.
+- **M14's first form was a no-op** (a dead `if` block), and the sweep reported it
+  as a survivor whose guard was killed by nothing. The guard's claim is about the
+  arm's *position* below the `width: Px` check, so the probe had to be the one
+  line that stops that position holding. Note the shape: this is the **inverse**
+  of the four-night-long survivor pattern. The previous four were guards too
+  specific for a general fix; this was a **probe too weak for a real guard**, and
+  the `killed_by` table added to this sweep is what surfaced it. A sweep that
+  only reports per-probe verdicts cannot see it at all.
+
+### Tests
+
+`cargo test -p rustkit-layout --lib`: **559 passed, 3 failed** — the same three
+by name that fail on unmodified `develop`, verified by reverting the change and
+re-running (547 passed, the same three): `a_long_first_run_keeps_its_last_line_open_for_the_next_sibling`,
+`bare_control_widths_match_chrome`,
+`justified_wrapped_lines_fill_the_container_except_the_last`.
+`cargo test -p rustkit-engine --lib`: **197 passed, 0 failed** with the
+SwiftShader ICD (without it, 95 fail — worth knowing before reading a red run as
+a regression). No clippy warning and no rustfmt diff falls in the changed
+regions. `cargo fmt -p rustkit-layout` rewrites **182** hunks across nine files
+of pre-existing debt, so it must never be run whole on this crate; I ran it once
+by accident and reverted every file.
+
+### Decisions needed from Pete
+
+1. **The 09-29 unit is retracted, so the queue has no recorded next unit.** The
+   largest *measured* geometry row is still `settings`; should the next night
+   pick from Gate A's failure list directly, or do you want the flex-factor claim
+   re-checked by another seat before it is written off?
+2. **#372 moves no number, by construction.** It is spec-correct and
+   ground-truth-verified on 81 containers, and bit-identical on all 26 cases — a
+   "correctness only" land. If the campaign would rather spend review on changes
+   that move the metric, say so and I will hold this class of fix behind the ones
+   that do.
+3. Unchanged, fifth night running: allow `*.blob.core.windows.net` so a night
+   here can read the macOS `gate-a.json` and Gate C's board. Tonight's specific
+   cost is that I cannot confirm macOS agrees the captures are unchanged.
+
+### Surprises
+
+- **The loudest number on the board was the probe measuring its own container.**
+  A 300–400px "largest single geometry defect" was a container's used width minus
+  itself. It survived a night's write-up, a "Recorded next unit" block and a
+  state-of-the-world summary — and the thing that caught it was not scepticism, it
+  was re-deriving the number with a differently-built instrument before acting on
+  it. **A recorded unit is a hypothesis, not an inheritance.**
+- **The same class of confound appeared three more times inside my own probe**,
+  and each time it read as evidence for whichever rule happened to be nearer.
+  `getComputedStyle(el).width` returns the **used** width and never the keyword
+  `auto`, so my first min-content measurement silently returned max-content on
+  every item and reported the sum rule as matching Chrome on 34 of 91 with the
+  max rule "nearer" on the rest — the opposite of the truth. Reading the computed
+  value through a `display: none` box is what fixes it. Then: out-of-flow
+  children counted as flex items (`.toggle-slider`, 8 containers), a
+  `display: none` row scoring 0 against a prediction of 0, and the container's
+  own forced `width` not reaching its used size when the container is itself a
+  flex item (`div.url-bar`, Chrome "min-content" 906 against a real 196). All
+  four inflated or deflated a number in a direction that looked like a finding.
+- **A fix can be reached 111 times, differ 78 times by up to 304px, and move
+  nothing.** I expected bit-identical captures to mean the code path was dead and
+  went to check. The floor is computed on every one of those boxes and binds on
+  none, which is a third state between "dead code" and "no regression" that a
+  count-and-fraction board cannot show.
+- **Chrome does not resolve `flex-basis: 0%` to zero when the container is
+  indefinite** — it resolves to the item's own size, which is why §9.9.1 and the
+  raw sum are the same number on 126 of 126 containers. That is the single fact
+  the retracted unit turned on, and one probe run settles it.
