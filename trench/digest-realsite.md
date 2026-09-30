@@ -1163,3 +1163,22 @@ Per-check on these 4 sites: develop loads 2 · readable 0 · looks-right 0; #361
 **Decisions for Pete:**
 1. Still open: **a quiet board slot.** Tonight's quiet window lasted about 15 minutes (load 5 → 21 by the third chunk). The 04:30 quiet-board job is the only trustworthy /60 until then.
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+## 2026-09-30 04:20 — #374 (empty blocks that affect layout) and #375 (block pseudos + trailing negative margin; facebook's heading 61 → 12 offline) opened; no board (load 8–23)
+
+**Points: no board this session.** Load was 8–23 throughout (other lanes building; one release build took 32 min). The last readings stand: 26/60 quiet (09-29 06:05, develop 8f44204), 23/60 on develop 9f49a40 (09-29 20:17, contended second half). Per-check at that run: loads 14 · readable 6 · looks-right 3. The 04:30 quiet-board job is the next real number.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#374 `atlas/rs-flex-collapse-through` @ 2ab00b3** (new). Box construction kept no childless block without visible styling. Now an empty element block is kept when it affects layout: vertical margins, a formatting root, min-height, clear, or being a flex/grid item. A childless row flex item is 0 wide. 10/10 probes match Chrome. Campaign vs develop 6e26932: 26/26 identical, builtins 5/5, ratchet identical (settings geo 243, back from 9003d99's 416).
+- **#375 `atlas/rs-pseudo-block-display` @ dba8a8a** (new, on develop 18555f3). facebook's `rk50`: the "Log into Facebook" heading trims its leading with `::before/::after { content:""; display:block; height:0; margin:-5px }`. Two causes: (1) `pseudo_element_box` built every pseudo as Inline whatever its `display`, so each empty pseudo was a line of its own (61.7 → 17); (2) flex `content_border_height` took the MAX child bottom, not the LAST in-flow block child's margin edge (§10.6.3/§10.6.7), so a trailing negative margin was lost (17 → 12). **Offline facebook: `rk50` 61 → 12 (Chrome 12); the login card `rk51` goes from +26 px to +6 px.** Probes match Chrome exactly. 3 pins through both entry points (both fail first). Engine 232/232, layout 574/574. Campaign: fix arm identical to develop 6e26932 on 26/26, builtins and ratchet. **The develop arm is 6e26932, not the base 18555f3** (the 18555f3 build didn't fit the cap); this is disclosed in the body.
+
+**Found:**
+- **Shared-target A/B hazard (tooling, fixed for this lane).** With `CARGO_TARGET_DIR` shared across worktrees, cargo judges path crates by source mtime. A worktree whose files are older than the last build is treated as fresh even when its code differs. Tonight the develop build "finished in 2.10s" and produced the fix arm's binary, byte for byte. `scratch/s0930/cleanbuild.py` touches every workspace `.rs` first (a full workspace recompile), and `ctest.py` does the same for tests (`--touch`). Earlier A/Bs whose second build finished in seconds are suspect; the 09-29 ones were 12–16 min builds, so they were real.
+- An INLINE pseudo with text (`::before { content: "> " }`, line-height 22px) makes its block 40.8 px, not 22. It predates #375. Next small fix.
+- Remaining facebook divergences, offline: `rk32` (hero span, y 476 vs 617), `rk60`/`rk67` (inputs 472 vs 502 wide), `rk145` (footer row, 938 vs 1088 wide).
+
+**Next:** (1) If R2 asks, add an 18555f3 develop arm to #375: `scratch/s0930/cleanbuild.py ~/Repos/.worktrees/rs-dev-9f49a40 scratch/bin/pc-dev18555f3` (that worktree is already at 18555f3), then `camp.py`. (2) The inline-pseudo 40.8 px line. (3) facebook `rk60`/`rk67` input width (472 vs 502). (4) `border-style: inset` for the UA `<hr>`.
+
+**Decisions for Pete:**
+1. Still open: **a quiet board slot.** No trustworthy full board since 09-29 06:05. Release builds now take 13–32 min at load 12–23.
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
