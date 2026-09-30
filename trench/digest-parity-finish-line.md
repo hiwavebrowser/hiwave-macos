@@ -13534,3 +13534,21 @@ Gate C, non-gating, for context rather than as a receipt: mean raw 13.4903%,
   `max`/`min` columns are USED widths for any item whose `flex-basis` is not
   `auto`. `n70_flex_fraction_probe.mjs` is the one to use, and it carries the
   four confound guards in its header.
+
+### Addendum — #372 R2-STAMP PASS, land gate met, waiting on a person
+
+`R2-STAMP: PASS @ 5a5f4fd` (`checks: green | merge: CLEAN | gates: 1-7 ok`).
+Verified from the PR rather than from the comment: `mergeable_state` **clean**,
+label **`r2-pass`**, the stamped SHA is the head SHA, and the diff is 1 commit /
+2 files / +339 −1 — bit-for-bit the receipt in the PR body, so nothing was
+re-resolved on the way through review.
+
+**Every gate this seat can move is met: R1 DESIGN CLEAR, R2-STAMP PASS, CI green
+on `macos-14`, merge CLEAN, ratchet holds.** The only thing left is a person
+pressing merge, which is not this seat's to supply and not something a push can
+clear. No further action is mine until the PR merges, the base moves, or a
+review arrives; the check-in stays armed until it is merged or closed, and will
+re-arm silently if nothing changed. Unlike #350 — where R2 was held four
+check-ins by a Cursor quota outage and a substitute seat eventually stamped it —
+this one cleared in eleven minutes, so a future night reading a fast `r2-pass`
+should not take it as unusual.
