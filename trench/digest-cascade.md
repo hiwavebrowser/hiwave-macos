@@ -732,3 +732,26 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Ratio of record = 19.0×** (quiet develop 9f49a40, carried over). Default: yes.
 2. **Flip `RUSTKIT_INCREMENTAL_RESTYLE` on by default after one flag-on board run** (carried over). Default: this lane runs it in the next quiet window.
 3. **Quiet windows are still rare (none this session).** A nightly quiet slot for absolute reads, e.g. 04:00 right before the 04:30 quiet board, would unblock both 1 and 2. Default: no change.
+
+## 2026-09-30 00:55
+
+**Draft PR #371: attribute selectors are pre-parsed once per prepared selector, not re-split with `str::find` per element. Wikipedia B/A 0.80 (median of 4 pairs, load 14–16). Receipt 26/26, but settings is off by 1 pixel versus #370's receipt, not yet attributed (base carries #369), so it's a draft. #370 is R1 CLEAR + R2 PASS, ready for a merger. No absolute read this session (load 12–25 throughout); the ratio of record is still 19.0×.**
+
+| site | Chrome ms | ratio of record (quiet develop 9f49a40, 20:42 yesterday) | #371 B/A vs 6692952 (4 pairs, load 13.7–16.5), per pair | median |
+|---|---|---|---|---|
+| cnn | 210 | 781 ms → 3.7× | 0.75 0.86 0.99 1.05 | 0.92 |
+| github | 110 | 1286 ms → 11.7× | 0.96 0.99 1.05 0.28 (A outlier 21.4 s) | 0.97 |
+| wikipedia | 20 | 379 ms → **19.0×** (worst) | 0.86 0.79 0.58 0.82 | **0.80** |
+
+- **PR #371 (draft)** `atlas/cs-attr-preparse` @ **1cbe4e6** on develop 143f2db. `SubjectPart::Attr(String)` → `Attr(AttrSelector { name, op, value })`, parsed with the string matcher's exact split rules (first operator in `ATTR_OPERATORS` order found anywhere wins). `|=` also drops its `format!`. New test: 30 selectors × 17 attribute maps against `match_attribute_selector`, all equal. Wikipedia B held at 1298–1328 ms in every pair.
+  - **The 1 pixel:** settings diffPixels is 16373 on 1cbe4e6 and 16372 on #370's 4b7be53, both re-run tonight and reproducible. The base differs by #369 (flex: an empty block item's basis is 0). Settings uses `input[type="…"]`, a shape the equivalence test covers, so #369 is the likely cause, but that's unproven. **Next session: build develop 143f2db and run its settings case. If it reads 16373, mark #371 ready and note it in the body.**
+  - Tests: engine 288/291 at load 14. The three failures are `page_script_tests` wall-clock budgets. Two pass alone. `a_stalled_subresource_is_dropped_at_the_subresource_budget` also fails on bf3b200 **without** this change (3.19 s vs 2.5 s at load 12), so it predates this PR and is load-driven. It now fails every time at load ≥ 12 (it used to flake), and CI may start hitting it too.
+- **Build cost:** the release parity-capture took 39 min at load 14–25. Saved binary: `cascade-target/pc-apx-1cbe4e6`. #370's receipt JSON saved as `cascade-target/receipt-pss-4b7be53.json`.
+- **Gotcha:** `cargo fmt -p rustkit-engine` reformats ~2000 lines of develop's `lib.rs` (develop isn't fmt-clean). Don't run it on a cs branch.
+- **Open cs PRs:** 2 (#370 ready, #371 draft), cap 3.
+- **Next session:** (1) attribute the settings pixel (above), then mark #371 ready. (2) Next target from the 9f49a40 profile: `ComputedStyle` clones (3%), SipHash `hash_one` (2.9%), `format_inner` in the build loop (2.6%); use `prof_parents.py`. (3) In a quiet window: an absolute read of develop (the first with #365, #368 and, once merged, #370), then the flag-on board run for `RUSTKIT_INCREMENTAL_RESTYLE`.
+
+**Decisions for Pete**
+1. **Ratio of record = 19.0×** (quiet develop 9f49a40, carried over). Default: yes.
+2. **Flip `RUSTKIT_INCREMENTAL_RESTYLE` on by default after one flag-on board run** (carried over). Default: this lane runs it in the next quiet window.
+3. **Loosen or `#[ignore]` the 2.5 s `a_stalled_subresource…` budget test on loaded machines?** It now fails every time at load ≥ 12 on develop. Default: leave it, and note it in every PR until someone owns it.
