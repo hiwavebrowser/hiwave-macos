@@ -3064,7 +3064,12 @@ impl Engine {
             });
         }
 
+        // Sub-phase marks for the "Cascade timing" line: sheet copy and
+        // `@media` filter, custom-property extraction, rule index, walk.
+        let mark = || cascade_started.map(|_| std::time::Instant::now());
+        let vars_started = mark();
         let css_vars = self.extract_css_variables(&stylesheets);
+        let index_started = mark();
 
         // A replayed style records no trace entries, so a traced build
         // always cascades in full.
@@ -3095,6 +3100,8 @@ impl Engine {
                 self.shared_rule_index(&stylesheets),
             )),
         };
+
+        let walk_started = mark();
 
         // A trace describes ONE build. Keeping entries from the previous
         // page would let `hiwave_style` answer with a stale element that no
@@ -3227,11 +3234,18 @@ impl Engine {
         }
 
         info!(total_children = root_box.children.len(), "Root box built");
-        if let Some((parse, started)) = cascade_started {
+        if let (Some((parse, started)), Some(vars), Some(index), Some(walk)) =
+            (cascade_started, vars_started, index_started, walk_started)
+        {
             let cascade = started.elapsed();
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
             info!(
-                parse_ms = parse.as_secs_f64() * 1000.0,
-                cascade_ms = cascade.as_secs_f64() * 1000.0,
+                parse_ms = ms(parse),
+                cascade_ms = ms(cascade),
+                sheets_ms = ms(vars - started),
+                vars_ms = ms(index - vars),
+                index_ms = ms(walk - index),
+                walk_ms = ms(walk.elapsed()),
                 "Cascade timing"
             );
         }
