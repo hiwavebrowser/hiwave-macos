@@ -1249,3 +1249,22 @@ trench/realsite/runs/20260930T0910Z-quiet-devc4047ab
 **Decisions for Pete:**
 1. Still open: **a quiet board slot.** Today's mid-session board hit load 18 again; only the 04:30 job is trustworthy.
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop (a `--check` on the three CSS/engine crates shows dozens of pre-existing hunks).
+
+## 2026-09-30 14:15: #382 (`#id.class` compounds) opened and MERGED; #384 (`light-dark()`) opened; develop was uncompilable for ~1 h; linkedin's layered variant: CSS nesting is next
+
+**Points: 29/60 -> 29/60** (no full board; the 05:34 quiet board on develop c4047ab stands: loads 17 · readable 9 · looks-right 3, scorable 29/60). Both fixes are ±0 in interleaved A/Bs: apple/bing/wikipedia (`trench/realsite/runs/20260930T1640Z-abidc-*`, load 6) and linkedin (`20260930T1800Z-abld-*`, load 13, both arms 3/3 on the old variant).
+
+**PRs (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#382 `atlas/rs-id-compound` @ 9b96b1d: MERGED.** An id followed by more of its compound (`#x.c`, `#x:hover`, `#x[a]`, and inside `:is()/:not()`) never matched. All three subject parsers (string matcher, compiled `SubjectCompound`, rule-index keys) read everything after `#` as the id. Fix: a shared `is_bare_id`; an escaped id keeps the whole-id reading. 4 pins (3 fail first); engine 308/308. Campaign 26/26 + builtins 5/5 + ratchet identical. apple's page has 647 such selectors, but nearly all key off JS-set state classes (`globalnav-with-flyout-open`), so its pixels are identical.
+- **#384 `atlas/rs-light-dark` @ eef161e** (new). CSS Color 5 `light-dark()` was dropped everywhere. linkedin's layered bundle defines 411 theme colours as `light-dark(var(--a), var(--b))`. Now it resolves to the light arm after `var()` substitution in `resolve_css_variables` (sheet, inline and recorded paths; works inside shorthands). RustKit doesn't track `color-scheme` (disclosed). 3 pins (all fail first); engine 314/314. Campaign/builtins/ratchet identical (develop arm 315fbb3 + compile fix; disclosed). **Honest:** on the saved layered variant the colours now match Chrome, but its pixel diff goes 50.7 -> 74.0%, because the grey band now paints where the missing hero should be. It's a layout problem, next item.
+
+**Found:**
+1. **develop 315fbb3 did not compile `rustkit-engine`** (a semantic merge race: #379 moved `style` into the box, and #378's pseudo calls then borrowed it). #381 (Cursor bot) and my #382 carried the identical two-line fix. #382's merge restored develop.
+2. **linkedin layered variant, root cause of the missing hero: native CSS nesting.** `.auya49 { display:grid; & > * { grid-area:1/-1; min-width:0 } }` is the grid-stack utility around the hero and every topic pill. `rustkit-cssparser` documents "does not support CSS nesting". Offline, the hero section is 0 px tall with no `h1` box, and the pills are 570 px tall. Only 8 nested rules in the bundle, but they're structural. Repro: `scratch/li0930/li-new.html` + `scratch/s0930/idc/hero.py <bin>`; Chrome shot `scratch/li0930/chrome-new.png`.
+
+**Next:** (1) CSS nesting in rustkit-cssparser: at least `&`-relative nested style rules (`& > *`, `&:hover`, `&.x`) and nested `@media`. Expected: linkedin's layered variant gets its hero back. (2) facebook `rk60`/`rk67`; `border-style: inset`.
+
+**Decisions for Pete:**
+1. **New: develop can break between two green PRs.** #378 and #379 were each green at their own head, but together they don't compile. That lasted ~1 h, and every lane's A/B needed a local patch. A "require branches up to date before merge" rule (or a merge queue) on develop would stop it. It's Prometheus's merge flow, so it's your call.
+2. Still open: **a quiet board slot** (release builds took 7–34 min this session at load 3–24).
+3. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.

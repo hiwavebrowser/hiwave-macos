@@ -1,0 +1,75 @@
+{
+  "id": "linkedin",
+  "url": "https://www.linkedin.com/",
+  "chrome": [
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1800Z-abld-2-B/linkedin/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1800Z-abld-2-B/linkedin/chrome-a.png",
+      "elapsed_ms": 49712
+    },
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 52355
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.linkedin.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1800Z-abld-2-B/linkedin/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1800Z-abld-2-B/linkedin/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 5,
+      "threw": 3,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 830599,
+      "elapsed_ms": 3409
+    },
+    "elapsed_ms": 10206,
+    "error": null,
+    "wall_ms": 10398,
+    "non_background_fraction": 0.2554
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 36,
+    "rustkit_words": 51,
+    "ratio": 1.0,
+    "missing_sample": []
+  },
+  "looks_right": {
+    "pass": true,
+    "diff": 7.605761718749999
+  },
+  "points": 3
+}

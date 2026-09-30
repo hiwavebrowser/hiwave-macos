@@ -1,0 +1,107 @@
+{
+  "id": "wikipedia",
+  "url": "https://en.wikipedia.org/wiki/Web_browser",
+  "chrome": [
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "title": "Web browser - Wikipedia",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/wikipedia/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/wikipedia/chrome-a.png",
+      "elapsed_ms": 20713
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "title": "Web browser - Wikipedia",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/wikipedia/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/wikipedia/chrome-b.png",
+      "elapsed_ms": 26258
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://en.wikipedia.org/wiki/Web_browser",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/wikipedia/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/wikipedia/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 4,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 77213,
+      "elapsed_ms": 198
+    },
+    "elapsed_ms": 7195,
+    "error": null,
+    "wall_ms": 7956,
+    "non_background_fraction": 0.0994
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 178,
+    "rustkit_words": 190,
+    "ratio": 0.8146,
+    "missing_sample": [
+      "0",
+      "24",
+      "automatic",
+      "by",
+      "color",
+      "contents",
+      "dark",
+      "displaying",
+      "duration",
+      "english",
+      "external",
+      "features",
+      "hide",
+      "large",
+      "light",
+      "links",
+      "macbook",
+      "navigating",
+      "privacy",
+      "references",
+      "search",
+      "seconds",
+      "security",
+      "see",
+      "small"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 16.93798828125
+  },
+  "points": 2
+}

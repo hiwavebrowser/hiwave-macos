@@ -1,0 +1,24 @@
+fix(engine): resolve light-dark() to its light argument
+
+CSS Color 5 light-dark(<light>, <dark>) was never understood, so every
+declaration that used it was dropped. linkedin's layered bundle (the
+1.3 MB `assets/*.css` variant it serves about 1 fetch in 10) defines 411
+theme colours as `--x: light-dark(var(--a), var(--b))`: links painted
+UA blue, buttons UA grey, backgrounds were missing.
+
+resolve_css_variables now rewrites each light-dark() call to its light
+argument after var() substitution, for sheet, inline and recorded
+declarations alike. It runs on the substituted value because the
+function usually arrives through a custom property inside a shorthand
+(`border: 1px solid var(--c)`), where the colour parser never sees it
+alone. RustKit renders the light scheme and does not track
+color-scheme, so the light arm is what the used scheme selects on a
+light page; a subtree with `color-scheme: dark` is out of scope. A call
+without exactly two arguments is left as is (invalid, dropped as before).
+
+Also carries the one-line #379 follow-up develop still needs to compile
+(`&layout_box.style` in the two pseudo calls; identical to #381 and #382).
+
+3 pins (all fail without the fix). rustkit-engine 314/314 (headless, serial).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
