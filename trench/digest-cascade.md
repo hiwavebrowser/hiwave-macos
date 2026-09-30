@@ -682,3 +682,29 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Retire 24.0× and use 33.4× as the ratio of record** (carried over). Default: yes.
 2. **Flip `RUSTKIT_INCREMENTAL_RESTYLE` on by default after one flag-on board run** (carried over). Default: this lane runs the board in the next quiet window.
 3. **Quiet windows have been rare (load 13–22 every session today except 14:35–14:50).** Consider moving this lane's hourly schedule off the other lane's build hours, or a nightly quiet slot for absolute reads. Default: no change.
+
+## 2026-09-29 21:50
+
+**First quiet absolute since 14:45, and a new ratio of record: develop 9f49a40 is 19.0× on wikipedia (the worst), down from 33.4×. #363 (defer first layout) did most of it. PR #368 opened: `LayoutBox.style` is boxed, so moving a box copies ~0.5 KB instead of ~2 KB. Wikipedia B/A 0.89 in both rounds (loaded machine), receipt pixel-identical 26/26.**
+
+| site | Chrome ms | before: quiet develop 35fe782 (14:45) | **after: quiet develop 9f49a40 (20:42, load 2.8–4.4, 5 runs)** | #368 B/A vs 9f49a40 (2×5 pairs, load 7–16) |
+|---|---|---|---|---|
+| cnn | 210 | 1030 ms → 4.9× | 781 ms (776 779 781 791 1063) → **3.7×** | 0.90 / 0.93 |
+| github | 110 | 1679 ms → 15.3× | 1286 ms (1187 1217 1286 1366 1711) → **11.7×** | 1.11 / 0.94 |
+| wikipedia | 20 | 667 ms → 33.4× | 379 ms (345 365 379 400 485) → **19.0×** (worst) | **0.89 / 0.89** |
+
+(The 9f49a40 absolutes are the A side of a 5-pair interleave vs #365, all taken at load ≤ 4.4 with no other cargo or lane running.)
+
+- **#365 quiet B/A** (same 5 pairs, B = c39e014): cnn 0.97, github 0.99, wikipedia 0.94. That confirms the load-14 read (0.93). `gh pr comment` isn't on this lane's allowlist, so the numbers live here and not on the PR.
+- **PR #368** `atlas/cs-boxed-style` @ **6692952** on develop 9f49a40. `LayoutBox` was 2032 B, 1576 of them the inline `ComputedStyle`. The wikipedia profile had ~10% of samples in `_platform_memmove`, with the innermost engine frame the build walk itself (334) or `push_child_hoisting_line_breaks` (126). `LayoutBox::new` takes `impl Into<Box<ComputedStyle>>`, so no caller changes. Tests: engine (headless) 283/283, layout 562/562 serial. Receipt 26/26, avg 1.2%, **diffPixels identical on all 26** to the 40e09e0 reference.
+- **Layout test flake (pre-existing, not this PR):** `font_resolve_tests::a_new_web_font_set_invalidates_the_cache` fails in a parallel `rustkit-layout --lib` run: another test installs web fonts globally between its two `shape()` calls. It passes alone and serially. Worth a `serial` guard someday.
+- **Dropped: incremental ancestor filter** (`atlas/cs-incremental-filter` @ cb757d9, stacked on #365, pushed, no PR). It's a per-depth memo of cumulative filters matched by `Rc::ptr_eq`, and a test proves it equals `AncestorFilter::of`. B/A vs c39e014 at load 4–7: cnn 0.95, github 1.10, wikipedia 1.00. The profile explains it: `AncestorFilter::of` is inlined and too small to show.
+- **New tool:** `trench/tools/prof_parents.py <report> <leaf>` attributes a leaf's samples (memmove, malloc, …) to the innermost engine frame above it. That's how the #368 target was found.
+- **Saved binaries:** `cascade-target/pc-bxs-6692952` (#368), `pc-inf-cb757d9` (dropped filter).
+- **Open cs PRs:** 2 (#365 R1 CLEAR + CI green, R2 neutral; #368 new), cap 3.
+- **Next session:** (1) watch #365 and #368. (2) Remaining memmove/alloc in the walk: `ComputedStyle` clones (3%), `format_inner` in the build loop (2.6%), SipHash `hash_one` (2.9%), `str::find` (2.9%). Use `prof_parents.py` on the 9f49a40 report to attribute each. (3) In a quiet window: the flag-on board run for the `RUSTKIT_INCREMENTAL_RESTYLE` flip.
+
+**Decisions for Pete**
+1. **Ratio of record = 19.0× (quiet develop 9f49a40, wikipedia, 20:42 today).** This replaces both 24.0× and 33.4×. Default: yes.
+2. **Flip `RUSTKIT_INCREMENTAL_RESTYLE` on by default after one flag-on board run** (carried over). Default: this lane runs the board in the next quiet window.
+3. (Carried over) Approve the pinned-snapshot method change.
