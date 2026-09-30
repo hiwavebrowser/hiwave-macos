@@ -1,0 +1,81 @@
+{
+  "id": "lyft",
+  "url": "https://www.lyft.com/",
+  "chrome": [
+    {
+      "url": "https://www.lyft.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 504,
+      "final_url": "https://www.lyft.com/",
+      "title": "",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/lyft/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/lyft/chrome-a.png",
+      "elapsed_ms": 32513,
+      "oracle_blocked": "top-level document HTTP 504"
+    },
+    {
+      "url": "https://www.lyft.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.lyft.com/",
+      "title": "Ride or drive with Lyft",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/lyft/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/lyft/chrome-b.png",
+      "elapsed_ms": 32795
+    }
+  ],
+  "oracle_capture": "b",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.lyft.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/lyft/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/lyft/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 29,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 3524122,
+      "elapsed_ms": 4515
+    },
+    "elapsed_ms": 13395,
+    "error": null,
+    "wall_ms": 13773,
+    "non_background_fraction": 0.5091
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 50,
+    "rustkit_words": 50,
+    "ratio": 1.0,
+    "missing_sample": []
+  },
+  "looks_right": {
+    "pass": false,
+    "diff": 17.93115234375
+  },
+  "points": 2
+}

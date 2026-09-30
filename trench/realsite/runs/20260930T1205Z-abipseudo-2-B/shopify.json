@@ -1,0 +1,83 @@
+{
+  "id": "shopify",
+  "url": "https://www.shopify.com/",
+  "chrome": [
+    {
+      "url": "https://www.shopify.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.shopify.com/",
+      "title": "Shopify: The All-in-One Commerce Platform for Businesses - Shopify",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/shopify/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/shopify/chrome-a.png",
+      "elapsed_ms": 41829
+    },
+    {
+      "url": "https://www.shopify.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.shopify.com/",
+      "title": "Shopify: The All-in-One Commerce Platform for Businesses - Shopify",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/shopify/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/shopify/chrome-b.png",
+      "elapsed_ms": 46025
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.shopify.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/shopify/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-2-B/shopify/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 3,
+      "threw": 3,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 372536,
+      "elapsed_ms": 164
+    },
+    "elapsed_ms": 15790,
+    "error": null,
+    "wall_ms": 15987,
+    "non_background_fraction": 0.3764
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 28,
+    "rustkit_words": 116,
+    "ratio": 0.9643,
+    "missing_sample": [
+      "we"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 19.44482421875
+  },
+  "points": 2
+}

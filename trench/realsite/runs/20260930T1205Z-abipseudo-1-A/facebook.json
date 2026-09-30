@@ -1,0 +1,101 @@
+{
+  "id": "facebook",
+  "url": "https://www.facebook.com/",
+  "chrome": [
+    {
+      "url": "https://www.facebook.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.facebook.com/",
+      "title": "Facebook",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-1-A/facebook/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-1-A/facebook/chrome-a.png",
+      "elapsed_ms": 47174
+    },
+    {
+      "url": "https://www.facebook.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.facebook.com/",
+      "title": "Facebook",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-1-A/facebook/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-1-A/facebook/chrome-b.png",
+      "elapsed_ms": 50265
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.facebook.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-1-A/facebook/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1205Z-abipseudo-1-A/facebook/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 47,
+      "threw": 1,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 7426,
+      "elapsed_ms": 88
+    },
+    "elapsed_ms": 26797,
+    "error": null,
+    "wall_ms": 27094,
+    "non_background_fraction": 0.0482
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 46,
+    "rustkit_words": 27,
+    "ratio": 0.587,
+    "missing_sample": [
+      "ai",
+      "ban",
+      "email",
+      "instagram",
+      "lite",
+      "messenger",
+      "meta",
+      "mobile",
+      "muse",
+      "number",
+      "or",
+      "pay",
+      "quest",
+      "ray",
+      "sign",
+      "store",
+      "threads",
+      "up",
+      "video"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0,
+    "diff": 6.235546875
+  },
+  "points": 2
+}
