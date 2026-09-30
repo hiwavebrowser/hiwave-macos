@@ -874,3 +874,27 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **The last ~90 ms of the replay build is spread across ~7 small buckets, so shaving it piecemeal may keep reading flat.** The structural alternative is to skip the replay build: when the memo key matches and only image sizes changed, reuse build 1's box tree and patch the `Image` natural sizes. It's bigger and riskier (layout mutates the tree), but it's the only change that removes ~90 ms from wikipedia (16× → ~12×). Default: try the pseudo-memo fold first, then scope tree reuse behind a flag.
 2. **The ratio of record stays 16.3×** (no quiet read this session). Default: yes.
 3. **Close #371** (carried over: correct, but flat on a quiet machine). Default: a maintainer closes it.
+
+## 2026-09-30 08:50
+
+**The quiet A/B cleared `atlas/cs-replay-walk`: wikipedia median B/A 0.90 (318 → 290 ms, 15.9× → 14.5×). It's open as draft PR #379 @ 35bccf1. The worst ratio is still wikipedia, and this is the first sub-16× read on a quiet machine. Cargo needed approval in this headless session (both a build and a test call were denied), so the session was cut short: no new cut was built, and #379's quiet test re-run is still owed.** #377 merged (develop 2e1d739, then 1b514f8 with #375).
+
+| site | Chrome ms | A: develop-equivalent 0184ed7, quiet (load 2.2–3.3), median of 5 | B: #379 35bccf1, median of 5 | per-pair B/A |
+|---|---|---|---|---|
+| cnn | 210 | 728 → 3.5× (620 728 742 728 736) | 704 → 3.4× (700 734 701 724 704) | 1.13 1.01 .95 1.00 .96 → **1.00** |
+| github | 110 | 1106 → 10.1× (1111 1078 1103 1106 1154) | 1092 → 9.9× (934 1129 1122 1064 1092) | .84 1.05 1.02 .96 .95 → **0.96** |
+| wikipedia | 20 | 318 → **15.9×** (324 318 308 327 304) | 290 → **14.5×** (290 302 309 268 256) | .90 .95 1.00 .82 .84 → **0.90** |
+
+- **PR #379** `atlas/cs-replay-walk` @ **35bccf1** (on fb1a2ea; merges cleanly with develop 1b514f8). Opened as a **DRAFT**.
+  - Receipt: 26/26, **diffPixels identical on all 26** to 668142c.
+  - Verify mode at the head: cnn 5832/5832, github 11237/11237, wikipedia 3153/3153, **0 mismatches**.
+  - Tests: only the loaded run so far (294/297; the 3 failures are wall-clock tests, and develop fails one of them at that load too). The PR says so. The win is mostly in wikipedia's recording build (~247 → ~220 ms), where the per-element clone into the box is gone.
+- **Blocked:** in this session's permission mode, `cargo test` and `cargo build` (with `CARGO_TARGET_DIR` and `--manifest-path`) and git in other worktrees all needed approval. So there was no quiet test re-run and no new cut. I didn't route cargo through a wrapper to get around the denial. The `hiwave-parity` MCP `run_cargo_test` targets ~/Repos/hiwave-macos (off-limits), so I didn't use it either.
+- **Saved:** A/B log `cascade-target/tmp/ab-rwk-quiet.txt`, verify logs `cascade-target/tmp/rwk-verify/`, `cascade-target/tmp/ab-hub.py` (A/B against the hub's bench, logging load per run), `cascade-target/tmp/receipt_cmp.py` (diffPixels comparison of two receipts), PR body `.worktrees/cs-rwk-pr-body.md`.
+- **Open cs PRs:** 2 (#379 draft, #371 draft/close-recommended), cap 3.
+- **Next session:** (1) Run the quiet `cargo test -p rustkit-engine --features headless --lib` on `cs-replay-walk`, post the result on #379, and mark it ready if it's 297/297. (2) Fold the pseudo memo into the element's memo entry: one lookup instead of two per element, and no ~22k `None` entries. (3) github: stop deep-copying external sheets on every build (~57 ms per build).
+
+**Decisions for Pete**
+1. **Allow cargo (and git in the `cs-*` worktrees) in the trench-cascade session's permissions.** This session lost its build and test step to approval prompts. Default: add allow rules for `cargo build`/`cargo test` with `CARGO_TARGET_DIR=…/cascade-target` and for `git -C ~/Repos/.worktrees/cs-*`.
+2. **Ratio of record = 15.9× (wikipedia, develop-equivalent, quiet, 08:36 today)**, and 14.5× once #379 lands. Default: yes.
+3. **Close #371** (carried over: correct, but flat on a quiet machine). Default: a maintainer closes it.
