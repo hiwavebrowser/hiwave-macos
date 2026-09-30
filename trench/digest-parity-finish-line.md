@@ -13552,3 +13552,49 @@ re-arm silently if nothing changed. Unlike #350 — where R2 was held four
 check-ins by a Cursor quota outage and a substitute seat eventually stamped it —
 this one cleared in eleven minutes, so a future night reading a fast `r2-pass`
 should not take it as unusual.
+
+### Addendum — #372 MERGED (2026-09-30 06:03 UTC), `develop 18555f3`
+
+The night's unit is on the mainline. Verified from the repository rather than
+from the webhook: `5a5f4fd` is an ancestor of `origin/develop`, and the merge
+commit `18555f3`'s diff against its first parent is **+339 / −1 across exactly
+two files** (`crates/rustkit-layout/src/grid.rs`,
+`crates/rustkit-layout/src/lib.rs`) — bit-for-bit the PR's diffstat, so nothing
+was lost or re-resolved on the way in. R1 DESIGN CLEAR and R2-STAMP PASS both at
+`5a5f4fd`, label `r2-pass`, `mergeable_state` clean, all 12 Parity Gate jobs
+green or skipped. Check-in cancelled; watch released.
+
+Twenty minutes from PR open to merged, against #350's two hours. Recorded only
+because the previous night's entry warned a future seat not to read a stalled
+`r2-pass` as a problem — the inverse is equally uninformative, and neither
+duration says anything about the change.
+
+**What is true at the end of this night, in the order a next seat needs it:**
+
+1. **Metric `3/26` on macOS**, measured on #372's own lane
+   ([run 36674733208](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36674733208)):
+   geometry 14/26, paint 3/26, stability 26/26, discrete 26/26. Green:
+   `bg-pure`, `bg-solid`, `gradients`. No case regressed (ratchet, committed
+   floors). The engine change in this night carries bit-identical captures, so
+   the number is the same before and after it by construction.
+2. **The 09-29 "Recorded next unit" is RETRACTED.** `own_max_content_width`
+   models flex factors correctly for this corpus: the raw sum rule and
+   css-flexbox-1 §9.9.1 disagree on **0 of 126** row flex containers. Do not
+   re-open it without reading this night's first section.
+3. **The queue therefore has NO recorded next unit.** Pick from Gate A directly.
+   `settings` is the largest geometry row by a wide margin — 243 on macOS this
+   run, against `about` 66, `form-elements` 47, `article-typography` 46,
+   `form-controls` 43. Run `trench/tools/n67_confound_census.py` first; most of
+   `settings`' `y` failures are confounded on the Linux seat.
+4. **`n69_gap_contribution_probe.mjs` must not be used for per-item
+   intrinsics.** Its container arithmetic is sound; its per-item `max`/`min`
+   columns are USED widths for any item whose `flex-basis` is not `auto`. Use
+   `n70_flex_fraction_probe.mjs`, whose header documents the four confounds it
+   guards against (item basis, author-width keyword, out-of-flow items,
+   container basis).
+5. **Two things worth fixing that are nobody's unit yet**, both recorded and
+   neither touched: `estimate_content_height` omits the element's border
+   (latent under every auto-sized grid row, noted 08-12 and still true), and
+   `own_min_content_width` has no flex arm on the **column** cross axis beyond
+   what the generic walk gives — correct today, but the two functions have now
+   been one defect apart four times.
