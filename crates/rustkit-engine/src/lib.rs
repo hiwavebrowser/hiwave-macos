@@ -3058,11 +3058,33 @@ impl Engine {
             .get()
             .and_then(|id| self.view_viewport(id));
         for sheet in &mut stylesheets {
+            // A layer named inside an `@media` block that doesn't apply is
+            // not declared, so its statement goes too. A statement's position
+            // counts the rules before it, so re-count over the rules kept.
+            if !sheet.layer_statements.is_empty() {
+                let mut kept_before = Vec::with_capacity(sheet.rules.len() + 1);
+                let mut kept = 0usize;
+                for rule in &sheet.rules {
+                    kept_before.push(kept);
+                    if rule.media.is_empty()
+                        || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))
+                    {
+                        kept += 1;
+                    }
+                }
+                kept_before.push(kept);
+                sheet.layer_statements.retain_mut(|s| {
+                    s.position = kept_before[s.position.min(kept_before.len() - 1)];
+                    s.media.is_empty() || viewport.is_some_and(|(w, h)| s.applies_at(w, h))
+                });
+            }
             sheet.rules.retain(|rule| {
                 rule.media.is_empty()
                     || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))
             });
         }
+        // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
+        rustkit_css::assign_layer_order(&mut stylesheets);
 
         // Sub-phase marks for the "Cascade timing" line: sheet copy and
         // `@media` filter, custom-property extraction, rule index, walk.
@@ -4584,13 +4606,23 @@ impl Engine {
             pseudo_style.visibility = parent.visibility;
         }
 
-        // Sort by specificity (a, b, c)
-        matching_rules.sort_by_key(|(spec, _)| *spec);
+        // Sort by cascade layer, then specificity (a, b, c); the sort is
+        // stable, so source order breaks ties. `!important` declarations
+        // take the layers in reverse (CSS Cascade 5 §6.4), as the element's
+        // own cascade does.
+        matching_rules.sort_by_key(|(spec, rule)| (rule.layer_order, *spec));
+        let mut important_rules = matching_rules.clone();
+        important_rules.sort_by_key(|(spec, rule)| (std::cmp::Reverse(rule.layer_order), *spec));
 
         // Apply matching rules: normal declarations, then `!important` ones
         // (CSS Cascade 4 §6.1), specificity order within each.
         for important_pass in [false, true] {
-            for (_, rule) in &matching_rules {
+            let rules = if important_pass {
+                &important_rules
+            } else {
+                &matching_rules
+            };
+            for (_, rule) in rules {
                 for declaration in &rule.declarations {
                     if declaration.important != important_pass {
                         continue;
@@ -5150,11 +5182,22 @@ impl Engine {
             }
         }
 
-        // Sort by specificity (lower first, so they get overwritten by higher)
+        // Sort by cascade layer, then specificity, then source order (lower
+        // first, so they get overwritten by higher). CSS Cascade 5 §6.4:
+        // among normal declarations a later layer beats an earlier one and
+        // unlayered rules beat every layer, whatever the specificity.
         matching_rules.sort_by(|a, b| {
             // Compare specificity: (ids, classes, tags)
-            a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2))
+            (a.0.layer_order, a.1, a.2).cmp(&(b.0.layer_order, b.1, b.2))
         });
+        // `!important` reverses the layer order: an earlier layer's
+        // important declaration beats a later one's, and any layer's beats
+        // an unlayered one's. Without layers the two orders are the same.
+        let important_rules = layered_important_order(&matching_rules);
+        let rules_for = |important_pass: bool| match (&important_rules, important_pass) {
+            (Some(rules), true) => rules.as_slice(),
+            _ => matching_rules.as_slice(),
+        };
 
         // Custom properties first: every `var()` below resolves against THIS
         // element's map. Winners come from the same matched, sorted rules as
@@ -5169,7 +5212,7 @@ impl Engine {
         let inline_style = attributes.get("style");
         let mut declared_vars: Vec<(&str, Option<&str>)> = Vec::new();
         for important_pass in [false, true] {
-            for (rule, _, _) in &matching_rules {
+            for (rule, _, _) in rules_for(important_pass) {
                 for decl in &rule.declarations {
                     if decl.important != important_pass || !decl.property.starts_with("--") {
                         continue;
@@ -5224,7 +5267,7 @@ impl Engine {
         // `style="color: red !important"` handed "red !important" to the
         // value parser, which dropped the declaration.
         for important_pass in [false, true] {
-            for (rule, specificity, _) in &matching_rules {
+            for (rule, specificity, _) in rules_for(important_pass) {
                 for decl in &rule.declarations {
                     if decl.important != important_pass {
                         continue;
@@ -19103,6 +19146,76 @@ mod cascade_wire_tests {
         b.children.iter().find_map(|c| find(c, pred))
     }
 
+    /// The background of the one box whose width is `width` px, as (r, g, b).
+    fn background_of(css: &str, body: &str, width: f32) -> (u8, u8, u8) {
+        let e = engine();
+        let html = format!("<html><head><style>{css}</style></head><body>{body}</body></html>");
+        let d = Document::parse_html(&html).expect("parse");
+        let layout = e.build_layout_from_document(&d, &[]);
+        let b = find(&layout, &|b| {
+            matches!(b.style.width, rustkit_css::Length::Px(w) if w == width)
+        })
+        .expect("box");
+        let c = b.style.background_color;
+        (c.r, c.g, c.b)
+    }
+
+    const GREEN: (u8, u8, u8) = (0, 255, 0);
+    const X: &str = r#"<div id="x" class="c" style="width:50px;height:10px"></div>"#;
+
+    #[test]
+    fn the_layer_pins_selectors_match_the_box() {
+        // Guards the pins below against passing vacuously.
+        for sel in ["#x", ".c", "div"] {
+            let css = format!("{sel} {{ background: #0f0 }}");
+            assert_eq!(background_of(&css, X, 50.0), GREEN, "{sel}");
+        }
+        assert_eq!(background_of("#x { background: #0f0 } .c { background: #f00 }", X, 50.0), GREEN);
+    }
+
+    // cascade layers: linkedin's 1.3 MB sheet is all `@layer` blocks, and
+    // flattened in source order its `reset` rules undid the page's styling.
+    #[test]
+    fn a_later_layer_beats_an_earlier_one_whatever_the_specificity() {
+        let css = "@layer a, b; @layer b { div { background: #0f0 } } @layer a { #x { background: #f00 } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn an_unlayered_rule_beats_every_layer() {
+        let css = "div { background: #0f0 } @layer a { #x { background: #f00 } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn important_declarations_take_the_layers_in_reverse() {
+        let css = "@layer a { div { background: #0f0 !important } } \
+                   @layer b { #x { background: #f00 !important } } \
+                   #x { background: #f00 !important }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn a_layers_own_rules_beat_its_sublayers() {
+        let css = "@layer a { div { background: #0f0 } @layer inner { #x { background: #f00 } } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn the_first_declaration_of_a_layer_name_fixes_its_place() {
+        // `b` is declared first by the statement, so a later `@layer a`
+        // block ranks above it even though b's block comes last.
+        let css = "@layer b; @layer a { #x { background: #0f0 } } @layer b { #x { background: #f00 } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn a_pseudo_element_cascades_by_layer_too() {
+        let css = "@layer a, b; @layer b { #x::before { content: \"\"; display: block; width: 7px; background: #0f0 } } \
+                   @layer a { #x::before { background: #f00 } }";
+        assert_eq!(background_of(css, X, 7.0), GREEN);
+    }
+
     // transform (#48)
     #[test]
     fn an_invalid_transform_leaves_the_previous_value_untouched() {
@@ -20455,6 +20568,26 @@ impl RuleBuckets {
         out.dedup();
         out
     }
+}
+
+/// The order `!important` declarations cascade in when layers are involved:
+/// layer order reversed (CSS Cascade 5 §6.4), then specificity and source
+/// order as usual. `rules` is already in normal order. `None` when that order
+/// serves both passes: no matched rule is layered, or none has an important
+/// declaration.
+fn layered_important_order<'a>(
+    rules: &[(&'a Rule, (usize, usize, usize), usize)],
+) -> Option<Vec<(&'a Rule, (usize, usize, usize), usize)>> {
+    let layered = rules.iter().any(|r| r.0.layer_order != rustkit_css::UNLAYERED);
+    if !layered || !rules.iter().any(|r| r.0.declarations.iter().any(|d| d.important)) {
+        return None;
+    }
+    let mut out = rules.to_vec();
+    out.sort_by(|a, b| {
+        (std::cmp::Reverse(a.0.layer_order), a.1, a.2)
+            .cmp(&(std::cmp::Reverse(b.0.layer_order), b.1, b.2))
+    });
+    Some(out)
 }
 
 /// The selector a `…::before`/`…:before` rule matches its host with, as
