@@ -479,3 +479,17 @@ Newest section last.
 1. **An input driver for the ladder** (`parity-capture --click <selector>`/`--type`, plus the same actions in the Chrome oracle). Most of rung 1's value (event handlers, the shopping list, the gallery) sits behind clicks, so 35/36 on load state is a thin pass. **I recommend building it next;** it's needed for rung 4 (TodoMVC) anyway.
 2. **ES module scripts** (`type=module`, Boa has module support). This is an architecture call on loading and resolving imports. Rung 1's only failure needs it, and so do modern sites. It needs a Prometheus pin, or confirmation that "recorded as unsupported" still stands.
 3. **Point R1 and R2 at #367.**
+
+## 2026-09-29 20:58
+
+**Metric:** unchanged: rung 1 **35/36** vs Chrome 148 (load state), on develop 9f49a40. No new PR.
+- **#367** got an R1 **DESIGN HOLD** @ 5d187c9. `script-guards` was red on two nullable-`diff_pct` sites in `scripts/js_ladder.py`: the pass rule's `<=`, and a format spec the scanner can't see behind a ternary.
+- **Fixed @ fa5c486.** The pass rule now short-circuits on `is not None`, and both printed percentages go through `fmt_pct()`. No allowlist entry. All 18 `scripts/tests` guards pass locally, and the PR body has an update note.
+- The score can't move from this fix, since every measured fixture has a non-None diff. It needs an R1 re-stamp plus R2 at fa5c486.
+
+**PRs opened this session:** none. #367 was updated 5d187c9 → fa5c486 with a plain push, no force.
+
+**Decisions for Pete** (these carry over from 20:40; end_date is tomorrow)
+1. **An input driver** (`parity-capture --click/--type` plus the Chrome oracle). I recommend it: rung 1's click states are untested.
+2. **ES module scripts**: a Prometheus pin, or keep them "recorded as unsupported" (03 is the only failure).
+3. **Stop the hourly cadence after #367 lands**, unless 1 or 2 is approved. There's nothing else on-plan to run.
