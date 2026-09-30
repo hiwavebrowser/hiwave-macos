@@ -2946,7 +2946,20 @@ impl Engine {
     /// Transfer position + offsets from a computed style onto a layout box.
     /// Percent offsets resolve later (apply time) from the style itself.
     fn transfer_positioning(layout_box: &mut LayoutBox, style: &ComputedStyle) {
-        layout_box.position = if std::env::var("RK_NO_POS").is_ok() {
+        let positioning = Self::positioning_of(style);
+        Self::apply_positioning(layout_box, positioning);
+    }
+
+    /// `transfer_positioning` from the box's own style.
+    fn transfer_own_positioning(layout_box: &mut LayoutBox) {
+        let positioning = Self::positioning_of(&layout_box.style);
+        Self::apply_positioning(layout_box, positioning);
+    }
+
+    /// What `transfer_positioning` reads from a style: position, the px
+    /// offsets and z-index of a positioned box, float and clear.
+    fn positioning_of(style: &ComputedStyle) -> BoxPositioning {
+        let position = if std::env::var("RK_NO_POS").is_ok() {
             Position::Static
         } else {
             match style.position {
@@ -2963,7 +2976,8 @@ impl Engine {
                 rustkit_css::Position::Sticky => Position::Static, // sticky pipeline unproven; ledgered
             }
         };
-        if layout_box.position != Position::Static {
+        let mut offsets = None;
+        if position != Position::Static {
             let px = |l: &Option<rustkit_css::Length>| match l {
                 Some(rustkit_css::Length::Px(v)) => Some(*v),
                 Some(rustkit_css::Length::Zero) => Some(0.0),
@@ -2977,7 +2991,10 @@ impl Engine {
                 }
                 _ => None,
             };
-            layout_box.set_offsets(px(&style.top), px(&style.right), px(&style.bottom), px(&style.left));
+            offsets = Some((
+                [px(&style.top), px(&style.right), px(&style.bottom), px(&style.left)],
+                style.z_index,
+            ));
             // z-index was parsed into the computed style and never copied
             // here, so every positioned box painted at z 0: a `z-index: -1`
             // overlay (the WPT css-text "red under green" idiom) painted ON
@@ -2986,17 +3003,31 @@ impl Engine {
             // before normal flow — it only ever saw zeros. Field only, no
             // stacking-context push: the builder's grouping is what CSS 2.1
             // App. E needs here, and the context pipeline is still gated.
-            layout_box.z_index = style.z_index;
         }
         // float / clear were parsed nowhere, so every float laid out as a
         // block and every clearfix was a no-op.
         // CSS 2.1 §9.7: an absolutely positioned box does not float, and a
         // float is blockified.
-        layout_box.float = match layout_box.position {
+        let float = match position {
             Position::Absolute | Position::Fixed => rustkit_css::Float::None,
             _ => style.float,
         };
-        layout_box.clear = style.clear;
+        BoxPositioning {
+            position,
+            offsets,
+            float,
+            clear: style.clear,
+        }
+    }
+
+    fn apply_positioning(layout_box: &mut LayoutBox, positioning: BoxPositioning) {
+        layout_box.position = positioning.position;
+        if let Some(([top, right, bottom, left], z_index)) = positioning.offsets {
+            layout_box.set_offsets(top, right, bottom, left);
+            layout_box.z_index = z_index;
+        }
+        layout_box.float = positioning.float;
+        layout_box.clear = positioning.clear;
         if layout_box.float != rustkit_css::Float::None {
             if matches!(layout_box.box_type, BoxType::Inline) {
                 layout_box.box_type = BoxType::Block;
@@ -3164,7 +3195,7 @@ impl Engine {
                 &stylesheets,
                 &css_vars,
                 &[],
-                html_style.as_ref(),
+                html_style.as_deref(),
                 &[],
                 SiblingContext::SOLE.with_children(Self::node_has_children(&body)),
                 "body",
@@ -4034,9 +4065,19 @@ impl Engine {
                     }
                 };
 
-                let mut layout_box = LayoutBox::new(box_type, style.clone());
+                // The style moves into the box; the box's copy is the parent
+                // style of the children below. Floating blockifies the box's
+                // `display`, which the children never saw, so that one case
+                // keeps the unblockified style for them.
+                let display = style.display;
+                let mut layout_box = LayoutBox::new(box_type, style);
 
-                Self::transfer_positioning(&mut layout_box, &style);
+                Self::transfer_own_positioning(&mut layout_box);
+                let unblockified = (layout_box.style.display != display).then(|| {
+                    let mut s = (*layout_box.style).clone();
+                    s.display = display;
+                    s
+                });
 
                 Self::attach_identity(
                     &mut layout_box,
@@ -4129,6 +4170,10 @@ impl Engine {
                     }
                 }
                 let mut type_seen: HashMap<String, usize> = HashMap::new();
+                let children_parent_style: &ComputedStyle = match &unblockified {
+                    Some(s) => s,
+                    None => &layout_box.style,
+                };
                 for (child_index, child) in child_nodes.iter().enumerate() {
                     let child_path = Self::child_selector_path(
                         selector_path,
@@ -4153,7 +4198,7 @@ impl Engine {
                         stylesheets,
                         css_vars,
                         &child_ancestors,
-                        Some(&style),
+                        Some(children_parent_style),
                         &preceding_siblings,
                         child_sib,
                         &child_path,
@@ -20562,6 +20607,15 @@ fn incremental_restyle_mode() -> RestyleMode {
     })
 }
 
+/// The positioning a layout box takes from its computed style.
+struct BoxPositioning {
+    position: Position,
+    /// Top/right/bottom/left px offsets and z-index, for a positioned box.
+    offsets: Option<([Option<f32>; 4], i32)>,
+    float: rustkit_css::Float,
+    clear: rustkit_css::Clear,
+}
+
 /// Everything a memoized cascade depends on besides the DOM and the sheets.
 /// Neither of those can change between the two builds a memo spans: it is
 /// armed only inside `load_subresources`, after the sheets are assigned and
@@ -20748,17 +20802,19 @@ impl Drop for StyleMemoBuild {
 
 /// The cascade for `node`, through the memo when the build in progress has
 /// one. `compute` is the full cascade; it runs outside the memo's borrow.
+/// Boxed, because that is what a `LayoutBox` holds: a replayed style is
+/// cloned once, straight into the box it ends up in.
 fn memoized_style(
     node: rustkit_dom::NodeId,
     compute: impl FnOnce() -> ComputedStyle,
-) -> ComputedStyle {
+) -> Box<ComputedStyle> {
     through_memo(
         |m| &mut m.styles,
         node,
-        |s| Box::new(s.clone()),
-        |b| (**b).clone(),
+        |s| s.clone(),
+        |b| b.clone(),
         |b, s| same_computed_style(b, s),
-        compute,
+        || Box::new(compute()),
     )
 }
 
