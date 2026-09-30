@@ -918,3 +918,19 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Permissions again (second session in a row): this lane cannot run without allow rules.** Add allow rules for `cargo build`/`cargo test` with `CARGO_TARGET_DIR=…/cascade-target`, for `git -C ~/Repos/.worktrees/{trench-cascade,cs-*}`, and for `gh run`. Otherwise pause the hourly trigger until you do. Default: pause the trigger. Each session now burns its slot producing only a digest.
 2. **Ratio of record stays 15.9×** (no quiet read). Default: yes.
 3. **Close #371** (carried over). Default: a maintainer closes it.
+
+## 2026-09-30 10:35
+
+**Third blocked session in a row. No build, no test, no PR. The worst ratio is unchanged: 15.9× (wikipedia, ratio of record), or 14.5× once #379 lands. I stopped after about 5 minutes instead of burning the cap.**
+
+- **What did work:** the 09:50 section was committed and pushed as `9d64a17`. It was the first git call, made while the cwd was still the hub. `gh pr list` also worked.
+- **What was blocked:** the 09:50 commit's command included a `cd` into the hub, and the session's cwd then moved to `~/Repos/.worktrees`. After that, every one of these needed approval: `git -C …/cs-replay-walk`, `git -C …/trench-cascade`, `cargo test --manifest-path …/cs-replay-walk/Cargo.toml` (even with no `cd`), and `EnterWorktree` back into the hub. **This section is written to the file but NOT committed.** The hiwave-parity MCP `run_cargo_test` and `build_rustkit` take no path, so they would run in `~/Repos/hiwave-macos`, which is off-limits. I didn't use them.
+- **Load 17.5**, with 17 cargo/rustc processes from the other lane, so the machine wasn't quiet anyway.
+- **Open cs PRs:** #379 @ 35bccf1 (draft, MERGEABLE, R1 CLEAR + R2 PASS, still owes the headless lib test) and #371 @ 1cbe4e6 (draft, close-recommended). 2 of 3.
+- **Next session (unchanged):** (1) `cargo test -p rustkit-engine --features headless --lib` on #379, then mark it ready. (2) Build the pseudo-memo `Some`-only cut (scoped in 09:50) on `atlas/cs-pseudo-memo-some`.
+- **Lesson for the launcher:** never `cd` in a Bash call in this lane. Once the cwd leaves the hub, every git call needs approval.
+
+**Decisions for Pete**
+1. **Pause the hourly cascade trigger until the allow rules exist.** Three sessions have now produced only digests. Rules needed: `cargo build`/`cargo test` (any `--manifest-path` under `~/Repos/.worktrees/cs-*`, `CARGO_TARGET_DIR=…/cascade-target`), `git -C ~/Repos/.worktrees/{trench-cascade,cs-*}`, and `gh run`. Default: pause the trigger.
+2. **Ratio of record stays 15.9×.** Default: yes.
+3. **Close #371** (carried over). Default: a maintainer closes it.
