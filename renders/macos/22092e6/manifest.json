@@ -1,0 +1,142 @@
+{
+ "os": "macos",
+ "engine": "22092e6",
+ "command": "python3 scripts/parity_test.py --scope all",
+ "parity_capture_sha256": "da25e0f89c5be91f9d504f16090d64d0ff485f32b1b894e4c7bfb77cabab4da5",
+ "chrome": "148.0.7778.216, pinned baselines in baselines/chrome-148 (captured on macOS)",
+ "host": "macOS-26.5.2-arm64-arm-64bit / Apple M2 Max",
+ "utc": "2026-09-30T20:50:23.217553Z",
+ "cases": {
+  "new_tab": {
+   "group": "builtins",
+   "diff_pct": 1.5685,
+   "pass": true
+  },
+  "about": {
+   "group": "builtins",
+   "diff_pct": 3.6742,
+   "pass": true
+  },
+  "settings": {
+   "group": "builtins",
+   "diff_pct": 2.0819,
+   "pass": true
+  },
+  "chrome_rustkit": {
+   "group": "builtins",
+   "diff_pct": 1.1234,
+   "pass": true
+  },
+  "shelf": {
+   "group": "builtins",
+   "diff_pct": 1.0781,
+   "pass": true
+  },
+  "article-typography": {
+   "group": "websuite",
+   "diff_pct": 4.7857,
+   "pass": true
+  },
+  "card-grid": {
+   "group": "websuite",
+   "diff_pct": 1.3068,
+   "pass": true
+  },
+  "css-selectors": {
+   "group": "websuite",
+   "diff_pct": 1.3819,
+   "pass": true
+  },
+  "flex-positioning": {
+   "group": "websuite",
+   "diff_pct": 0.6327,
+   "pass": true
+  },
+  "form-elements": {
+   "group": "websuite",
+   "diff_pct": 0.9875,
+   "pass": true
+  },
+  "gradient-backgrounds": {
+   "group": "websuite",
+   "diff_pct": 1.0133,
+   "pass": true
+  },
+  "image-gallery": {
+   "group": "websuite",
+   "diff_pct": 0.5217,
+   "pass": true
+  },
+  "sticky-scroll": {
+   "group": "websuite",
+   "diff_pct": 0.6575,
+   "pass": true
+  },
+  "backgrounds": {
+   "group": "micro",
+   "diff_pct": 1.2163,
+   "pass": true
+  },
+  "bg-solid": {
+   "group": "micro",
+   "diff_pct": 0.2106,
+   "pass": true
+  },
+  "bg-pure": {
+   "group": "micro",
+   "diff_pct": 0,
+   "pass": true
+  },
+  "combinators": {
+   "group": "micro",
+   "diff_pct": 0.6547,
+   "pass": true
+  },
+  "form-controls": {
+   "group": "micro",
+   "diff_pct": 3.2442,
+   "pass": true
+  },
+  "gradients": {
+   "group": "micro",
+   "diff_pct": 0.1412,
+   "pass": true
+  },
+  "gradient-no-radius": {
+   "group": "micro",
+   "diff_pct": 0.5204,
+   "pass": true
+  },
+  "gradient-radius-only": {
+   "group": "micro",
+   "diff_pct": 0.6892,
+   "pass": true
+  },
+  "gpu-gradient-regression": {
+   "group": "micro",
+   "diff_pct": 0.3903,
+   "pass": true
+  },
+  "images-intrinsic": {
+   "group": "micro",
+   "diff_pct": 0.3267,
+   "pass": true
+  },
+  "pseudo-classes": {
+   "group": "micro",
+   "diff_pct": 0.4341,
+   "pass": true
+  },
+  "rounded-corners": {
+   "group": "micro",
+   "diff_pct": 1.3221,
+   "pass": true
+  },
+  "specificity": {
+   "group": "micro",
+   "diff_pct": 0.6015,
+   "pass": true
+  }
+ },
+ "mean_diff_pct": 1.1756
+}
