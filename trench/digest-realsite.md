@@ -1215,3 +1215,20 @@ ORACLE BLOCKED none
 SCORABLE 29/60 on 20 sites
 trench/realsite/runs/20260930T0910Z-quiet-devc4047ab
 ```
+
+## 2026-09-30 08:30: #375 un-conflicted and re-receipted (facebook 1 -> 2 in an interleaved A/B); #378 opened (pseudo-elements inherit, and are inline by default)
+
+**Points: 29/60 -> 29/60 on develop** (no new full board; the 05:34 quiet board on develop c4047ab stands: loads 17 · readable 9 · looks-right 3, scorable 29/60). With #375 built: **+1 (facebook LOOKS RIGHT)** in a 2-round interleaved A/B at 06:35, load 3-10: develop 15.88% / 15.90% (fail), #375 13.52% / 13.54% (pass). Chrome-vs-Chrome was 0.1-10%. Runs are `trench/realsite/runs/20260930T1035Z-ab375-*`. Caveat: by 08:15, facebook's live page had drifted, and develop scored 6.2% (pass) on it. Only a quiet board after #375 merges settles the point.
+
+**PRs (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#375 `atlas/rs-pseudo-block-display` @ ef54fa8.** R2 FAILED only on gate 2 (DIRTY), so I merged develop fb1a2ea in additively (no rebase, no force-push). Both sides had added a test module at the same spot, and both are kept. Engine 238/238, layout 574/574. Re-receipt vs develop fb1a2ea: campaign 26/26 identical, builtins 5/5 identical, ratchet identical. The body carries the facebook A/B above.
+- **#378 `atlas/rs-inline-pseudo-line` @ b82afd5** (new, on develop fb1a2ea). `pseudo_element_style` started from `ComputedStyle::new()`. So (1) a pseudo inherited nothing: its text was always black 16px in the default face with `normal` line-height. (2) Its `display` was `Display`'s Rust default, Block, and not CSS's initial `inline`, so an inline `::before{content:"> "}` took a line of its own (40.8 px vs Chrome's 22). Fix: seed inherited properties from the element (plus line-height), absolutize em/%/rem font-size, start display at inline, and blockify the pseudos of flex/grid containers. 4 pins (2 fail first). 5/5 probes now match Chrome 148 exactly. Campaign 26/26 + builtins 5/5 + ratchet identical. Board ±0 on facebook/shopify/lyft (github timed out on both arms at load 13).
+- The two compose: #375 makes the box type follow `display`, and #378 makes that `display` right.
+
+**Found:** facebook's LOOKS RIGHT moves with live content (15.9% -> 6.2% on the same develop binary within 2 h). Its near-miss status is drift-sensitive, so treat any single facebook reading as ±1.
+
+**Next:** (1) A quiet board once #375/#378 land. (2) facebook `rk60`/`rk67` (inputs 472 vs 502 wide) and `rk32`/`rk145`. (3) `border-style: inset/outset` in the renderer, then the UA `<hr>`. Release builds took 7-34 min this session (load 5 -> 17).
+
+**Decisions for Pete:**
+1. Still open: **a quiet board slot**. The 04:30 job works (29/60 today), but mid-session A/Bs still land at load 12-17.
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
