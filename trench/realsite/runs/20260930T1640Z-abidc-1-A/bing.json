@@ -1,0 +1,107 @@
+{
+  "id": "bing",
+  "url": "https://www.bing.com/",
+  "chrome": [
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/bing/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/bing/chrome-a.png",
+      "elapsed_ms": 19112
+    },
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/bing/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/bing/chrome-b.png",
+      "elapsed_ms": 23717
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.bing.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/bing/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1640Z-abidc-1-A/bing/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 9,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 117314,
+      "elapsed_ms": 312
+    },
+    "elapsed_ms": 2778,
+    "error": null,
+    "wall_ms": 2847,
+    "non_background_fraction": 0.3621
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 46,
+    "rustkit_words": 6,
+    "ratio": 0.1087,
+    "missing_sample": [
+      "13",
+      "3rd",
+      "a",
+      "at",
+      "bid",
+      "blood",
+      "by",
+      "cancer",
+      "charged",
+      "country",
+      "creator",
+      "daughter",
+      "deportations",
+      "diagnosed",
+      "diagnosis",
+      "dies",
+      "discover",
+      "disney",
+      "don",
+      "face",
+      "forget",
+      "hit",
+      "ice",
+      "image",
+      "in"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.407421875,
+    "diff": 87.57529296874999
+  },
+  "points": 1
+}
