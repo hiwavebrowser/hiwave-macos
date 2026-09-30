@@ -2810,6 +2810,28 @@ impl Engine {
         false
     }
 
+    /// An empty, unstyled block still changes layout when it is dropped:
+    /// - its vertical margins collapse THROUGH it into its siblings' (CSS 2.1
+    ///   §8.3.1), so `<div style="margin-top:30px"></div>` moves what follows;
+    /// - a formatting root (flex, grid, overflow, ...) never collapses through,
+    ///   so it keeps the margins on either side apart (body's 8px and an
+    ///   `<hr>`'s 8px stack to 16 around an empty flex container);
+    /// - `min-height` and `clear` give it extent or clearance;
+    /// - a flex or grid item takes a track slot, a gap and free space (an
+    ///   empty `flex:1` spacer).
+    fn empty_block_affects_layout(child: &LayoutBox, parent: &ComputedStyle) -> bool {
+        use rustkit_css::Length;
+        let nonzero = |len: &Length| !matches!(len, Length::Zero | Length::Auto | Length::Px(0.0));
+        let s = &child.style;
+        parent.display.is_flex()
+            || parent.display.is_grid()
+            || nonzero(&s.margin_top)
+            || nonzero(&s.margin_bottom)
+            || nonzero(&s.min_height)
+            || s.clear != rustkit_css::Clear::None
+            || rustkit_layout::establishes_bfc(s, child.float)
+    }
+
     /// Whether a box participates in inline flow (shares line boxes with
     /// adjacent inline-level siblings). Mirrors the layout-side flows_inline
     /// gate in rustkit-layout's block child loop.
@@ -4121,9 +4143,11 @@ impl Engine {
                     // Determine if box should be included in layout tree
                     let should_include = match child_box.box_type {
                         BoxType::Block | BoxType::AnonymousBlock => {
-                            // Include blocks if they have children, OR have visible styling
+                            // Include blocks if they have children, OR have visible styling,
+                            // OR still take part in layout while empty.
                             !child_box.children.is_empty()
                                 || Self::has_visible_styling(&child_box.style)
+                                || Self::empty_block_affects_layout(&child_box, &layout_box.style)
                         }
                         BoxType::Inline => {
                             // Include inline boxes if they have content children (text, images, form controls)
@@ -23764,6 +23788,108 @@ mod flex_indefinite_column_grow_tests {
             assert_eq!(rect(&root, "a").height, 280.0);
             assert_eq!(rect(&root, "i").height, 280.0);
             assert_eq!(rect(&root, "f").y, 280.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod empty_formatting_root_margin_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.set_viewport(1280.0, 800.0);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.set_viewport(1280.0, 800.0);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    /// The page path only: `layout()` does not collapse sibling margins at
+    /// all, so the margin cases have nothing to pin there.
+    fn engine_path(html: &str) -> LayoutBox {
+        laid_out(html).pop().expect("engine path")
+    }
+
+    #[test]
+    fn an_empty_formatting_root_keeps_the_margins_around_it_apart() {
+        // Chrome 148: body's 8px and the next block's 8px do not collapse
+        // through an empty flex / grid / overflow box, so the block lands at
+        // y=16. The empty box used to be dropped from the tree, and the two
+        // margins collapsed to 8.
+        for display in ["display:flex", "display:flex;flex-direction:column", "display:grid", "overflow:hidden"] {
+            let root = engine_path(&format!(
+                r#"<!doctype html><body><div id="o" style="{display}"></div><div id="h" style="margin:8px 0;height:2px"></div></body>"#
+            ));
+            assert_eq!(rect(&root, "o").y, 8.0, "{display}");
+            assert_eq!(rect(&root, "o").height, 0.0, "{display}");
+            assert_eq!(rect(&root, "h").y, 16.0, "{display}");
+        }
+    }
+
+    #[test]
+    fn an_empty_formatting_roots_own_margins_stay_on_its_edges() {
+        // Its top margin separates it from the block above; its bottom margin
+        // collapses with the next block's (5 vs 8 -> 8), never through it.
+        let root = engine_path(concat!(
+            r#"<!doctype html><body><div style="height:4px"></div>"#,
+            r#"<div id="o" style="display:flex;margin:5px 0"></div>"#,
+            r#"<div id="h" style="margin:8px 0;height:2px"></div></body>"#,
+        ));
+        assert_eq!(rect(&root, "o").y, 17.0);
+        assert_eq!(rect(&root, "h").y, 25.0);
+    }
+
+    #[test]
+    fn an_empty_blocks_margin_still_collapses_through_into_the_flow() {
+        for root in laid_out(concat!(
+            r#"<!doctype html><body><div style="height:4px"></div>"#,
+            r#"<div id="o" style="margin-top:30px"></div><div id="h" style="height:2px"></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "h").y, 42.0);
+        }
+        // Guard: an empty plain div with no margins still collapses through
+        // (body's and the block's 8px stay one 8px margin).
+        let root = engine_path(
+            r#"<!doctype html><body><div></div><div id="h" style="margin:8px 0;height:2px"></div></body>"#,
+        );
+        assert_eq!(rect(&root, "h").y, 8.0);
+    }
+
+    #[test]
+    fn an_empty_flex_item_spacer_takes_its_share_of_the_free_space() {
+        for root in laid_out(concat!(
+            r#"<!doctype html><body style="margin:0"><div style="display:flex;width:300px">"#,
+            r#"<div id="o" style="flex:1"></div><div id="h" style="width:100px;height:2px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "o").width, 200.0);
+            assert_eq!(rect(&root, "h").x, 200.0);
         }
     }
 }
