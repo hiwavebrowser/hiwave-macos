@@ -2604,6 +2604,9 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
             // `.flex-item { padding: 10px 20px }` measured 123.2 against
             // Chrome's 83.1 (+40), `.justify-item` +30, `.nested-item` +24.
             match main_axis {
+                // Nothing to measure is a 0 max-content width, not a line
+                // height: an empty `<div>` row item is 0 wide in Chrome 148.
+                Axis::Horizontal if layout_box.children.is_empty() => 0.0,
                 Axis::Horizontal => {
                     let border_box = crate::grid::estimate_max_content_width(layout_box);
                     let content =
