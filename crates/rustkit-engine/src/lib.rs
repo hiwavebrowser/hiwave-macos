@@ -4127,7 +4127,10 @@ impl Engine {
                 child_ancestors.push(Rc::new((tag_lower.clone(), classes, id)));
                 child_ancestors.extend(ancestors.iter().cloned());
 
-                // Check for ::before pseudo-element
+                // Check for ::before pseudo-element. Inherit from the box's
+                // style (the element's computed style after float-blockify);
+                // #379 moved `style` into the box, so this must not borrow
+                // the moved local.
                 if let Some(before_box) = memoized_pseudo_style(node.id, Pseudo::Before, || {
                     self.pseudo_element_style(
                         &tag_lower,
@@ -4137,7 +4140,7 @@ impl Engine {
                         siblings_before,
                         sib,
                         "::before",
-                        Some(&style),
+                        Some(&layout_box.style),
                     )
                 })
                 .and_then(Self::pseudo_element_box)
@@ -4247,7 +4250,7 @@ impl Engine {
                     }
                 }
 
-                // Check for ::after pseudo-element
+                // Check for ::after pseudo-element (see ::before above).
                 if let Some(after_box) = memoized_pseudo_style(node.id, Pseudo::After, || {
                     self.pseudo_element_style(
                         &tag_lower,
@@ -4257,7 +4260,7 @@ impl Engine {
                         siblings_before,
                         sib,
                         "::after",
-                        Some(&style),
+                        Some(&layout_box.style),
                     )
                 })
                 .and_then(Self::pseudo_element_box)
