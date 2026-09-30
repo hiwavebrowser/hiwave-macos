@@ -16973,6 +16973,41 @@ mod web_font_tests {
     }
 
     #[test]
+    fn escaped_class_inside_is_matches_the_literal_name() {
+        // Subject `.sm\:flex` is covered above. Tailwind also nests escapes
+        // inside forgiving lists (`:is(.sm\:flex)`, `:is(.w-1\/2)`). If the
+        // functional-pseudo argument path skips escape decoding, the rule
+        // never matches and responsive utilities vanish on real sites.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><head><style>
+            :is(.sm\:flex, .lg\:flex) { font-size: 21px }
+            div:is(.w-1\/2) span { font-size: 22px }
+            :is(.nope) { font-size: 99px }
+            .sm { font-size: 30px }
+        </style></head><body>
+            <p class="sm:flex">a</p>
+            <div class="w-1/2"><span>b</span></div>
+            <p class="sm">c</p>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn size_of(b: &LayoutBox, text: &str) -> Option<rustkit_css::Length> {
+            if matches!(&b.box_type, BoxType::Text(t) if t.trim() == text) {
+                return Some(b.style.font_size.clone());
+            }
+            b.children.iter().find_map(|c| size_of(c, text))
+        }
+        use rustkit_css::Length::Px;
+        assert_eq!(size_of(&layout, "a"), Some(Px(21.0)), ":is(.sm\\:flex)");
+        assert_eq!(size_of(&layout, "b"), Some(Px(22.0)), ":is(.w-1\\/2) descendant");
+        assert_eq!(
+            size_of(&layout, "c"),
+            Some(Px(30.0)),
+            "plain .sm must not be poisoned by a failed :is(.sm\\:flex) parse"
+        );
+    }
+
+    #[test]
     fn a_none_or_hidden_border_side_has_zero_width_in_either_declaration_order() {
         // Prometheus R1 HOLD on #217: `none`/`hidden` only zeroed the width
         // inside the `border` shorthand, so a width set by an earlier
