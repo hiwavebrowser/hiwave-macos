@@ -16707,7 +16707,7 @@ mod web_font_tests {
         let layout = engine.build_layout_from_document(&document, &[]);
         fn style_of_x(b: &LayoutBox) -> Option<ComputedStyle> {
             if matches!(&b.box_type, BoxType::Text(t) if t == "x") {
-                return Some(b.style.clone());
+                return Some((*b.style).clone());
             }
             b.children.iter().find_map(style_of_x)
         }
@@ -16782,7 +16782,7 @@ mod web_font_tests {
                 .iter()
                 .any(|c| matches!(&c.box_type, BoxType::Text(t) if t.trim() == text))
             {
-                return Some(b.style.clone());
+                return Some((*b.style).clone());
             }
             b.children.iter().find_map(|c| style_around(c, text))
         }
