@@ -7499,7 +7499,7 @@ impl Engine {
             info!(count = fonts_loaded, "Loaded web fonts");
         }
 
-        // Behind RUSTKIT_INCREMENTAL_RESTYLE: the sheets relayout records
+        // Unless RUSTKIT_INCREMENTAL_RESTYLE=0: the sheets relayout records
         // each element's cascade and the images relayout below replays it.
         // Images change box sizes, not styles, and no script runs between
         // the two builds.
@@ -20399,9 +20399,10 @@ fn active_rule_index(stylesheets: &[Stylesheet]) -> Option<Rc<RuleIndex>> {
     })
 }
 
-/// `RUSTKIT_INCREMENTAL_RESTYLE`: `1` lets the images relayout reuse the
-/// sheets relayout's per-element cascade; `verify` recomputes every style
-/// anyway and counts the ones that differ from the memo. Off by default.
+/// `RUSTKIT_INCREMENTAL_RESTYLE`: on by default, so the images relayout
+/// reuses the sheets relayout's per-element cascade. `0` or `off` turns it
+/// off; `verify` recomputes every style anyway and counts the ones that
+/// differ from the memo.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RestyleMode {
     Off,
@@ -20409,12 +20410,18 @@ enum RestyleMode {
     Verify,
 }
 
+fn restyle_mode_from(value: Option<&str>) -> RestyleMode {
+    match value {
+        Some("0") | Some("off") => RestyleMode::Off,
+        Some("verify") => RestyleMode::Verify,
+        _ => RestyleMode::Reuse,
+    }
+}
+
 fn incremental_restyle_mode() -> RestyleMode {
     static MODE: std::sync::OnceLock<RestyleMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("RUSTKIT_INCREMENTAL_RESTYLE").as_deref() {
-        Ok("verify") => RestyleMode::Verify,
-        Ok(v) if !v.is_empty() && v != "0" => RestyleMode::Reuse,
-        _ => RestyleMode::Off,
+    *MODE.get_or_init(|| {
+        restyle_mode_from(std::env::var("RUSTKIT_INCREMENTAL_RESTYLE").ok().as_deref())
     })
 }
 
@@ -20931,6 +20938,16 @@ mod incremental_restyle_tests {
         }
         assert!(memo_counts().is_none());
         assert!(StyleMemoScope::arm_with(RestyleMode::Off).is_none());
+    }
+
+    #[test]
+    fn restyle_reuse_is_the_default_and_0_or_off_turns_it_off() {
+        assert_eq!(restyle_mode_from(None), RestyleMode::Reuse);
+        assert_eq!(restyle_mode_from(Some("")), RestyleMode::Reuse);
+        assert_eq!(restyle_mode_from(Some("1")), RestyleMode::Reuse);
+        assert_eq!(restyle_mode_from(Some("0")), RestyleMode::Off);
+        assert_eq!(restyle_mode_from(Some("off")), RestyleMode::Off);
+        assert_eq!(restyle_mode_from(Some("verify")), RestyleMode::Verify);
     }
 }
 
