@@ -958,3 +958,27 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **The A/B standard becomes counterbalanced: ≥5 AB + ≥5 BA pairs, median of per-pair B/A.** It replaces the 2026-09-27 rule of 3+ interleaved pairs, which let a fixed-order bias of ~10% through. Default: yes.
 2. **#379 lands as a neutral/small change** (it removes one `ComputedStyle` clone per element; receipt identical) rather than a 0.90 win. The ratio of record stays 15.9×. Default: yes, a maintainer merges on R1 + R2.
 3. **Close #371** (carried over). Default: a maintainer closes it.
+
+## 2026-09-30 13:50
+
+**Develop was broken: `rustkit-engine` stopped compiling at 1a016c4, and this lane's #379 was half of the cause. This session fixed it instead of cutting. PR #383 `atlas/cs-fix-pseudo-parent` @ 0abb7c1. No ratio work: the load was 10–13 all session, so there was no quiet read. The worst ratio is unchanged: 15.9× (wikipedia, ratio of record).**
+
+| site | Chrome ms | before: ratio of record (quiet, 08:36) | after |
+|---|---|---|---|
+| cnn | 210 | 728 → 3.5× | not measured (develop didn't build; load 10–13) |
+| github | 110 | 1106 → 10.1× | not measured |
+| wikipedia | 20 | 318 → **15.9×** | not measured |
+
+- **The break.** #378 (real-site lane, merged 13:07Z) made `::before`/`::after` inherit from their element via `Some(&style)`. #379 (this lane, merged 15:55Z) moved `style` into the `LayoutBox`. Each passed CI and review on its own base. Together: `E0382 borrow of moved value: style` at lib.rs:4153. #380 merged on top (1a016c4) without anyone noticing.
+- **PR #383** @ **0abb7c1** on develop 1a016c4 (9+/6−). It hoists `children_parent_style` (the box's style, or the unblockified copy for a float) above `::before` and passes it to both pseudos. That's the value #378 passed, so behavior equals #378 + #379 as each was reviewed. Cursor's draft #381 carries a variant that passes `&layout_box.style`, which is the *blockified* style for a float. The PR body says to close whichever loses.
+  - Receipt, ddbeae5 (the last develop that compiled) vs 0abb7c1: 26/26 both, avg 1.2%, **diffPixels identical on all 26**. **Marked ready 13:47.** Note that my coordination comment on #381 needed approval and wasn't posted.
+  - Engine lib (headless) at load ~13: 302/311. 8 of the failures are GPU-guard 120 s timeouts behind a test that ran >60 s in the suite and 11.5 s alone; all 8 pass on a re-run. The 9th is `a_stalled_subresource_is_dropped_at_the_subresource_budget` (3.49 s against a 2.5 s wall-clock limit), the load-flake seen on develop before.
+- **Build cost:** release parity-capture 34 min at load 13–19.
+- **Saved:** binary `cascade-target/pc-fpp-0abb7c1`. Worktrees `.worktrees/cs-dev-1a016c4` (the #383 branch) and `cs-dev-ddbeae5` (receipt baseline). Receipts `cascade-target/receipt-fpp-*`. Test logs `cascade-target/tmp/fpp-test{1,2}.log`.
+- **Open cs PRs:** 2 (#383 new, #371 draft/close-recommended), cap 3.
+- **Next session:** (1) watch #383. Run the quiet `a_stalled_subresource…` re-run and post it on #383 (the PR promises it). If #381's fix lands first, close #383. (2) With develop building again, take a counterbalanced develop read (≥5 AB + 5 BA) to set the post-#379/#380 ratio of record. (3) Then the structural cut (reuse build 1's box tree on replay) or github's rule index (~417 ms).
+
+**Decisions for Pete**
+1. **Require PR heads to be up to date with develop before merge (branch protection "require branches to be up to date", or a merge queue).** Two same-file engine PRs merged ~3 h apart broke develop, and nothing caught it. Default: turn it on for develop.
+2. **Merge #383 or #381's fix?** #383 keeps #378's exact parent style; #381 inherits from the blockified float style (a subtle behavior change bundled into a test PR). Default: land #383 first, and #381 drops its fix commit.
+3. **Close #371** (carried over). Default: a maintainer closes it.
