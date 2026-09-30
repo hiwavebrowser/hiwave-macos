@@ -642,3 +642,16 @@ Newest section last.
 1. **Close the lane now (recommended):** remove the hourly cron, record the exit as met ("rung 0 + mutation merged, rung 1 35/36 on load"), and prune the merged `atlas/js-*` worktrees. The scratch ones are already gone.
 2. **Or extend it with your OK:** allow `cargo build` for this seat, then build the input driver (`parity-capture --click/--type` plus the Chrome oracle).
 3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
+
+## 2026-09-30 09:50
+
+**Metric:** unchanged. Rung 1 is still **35/36** vs Chrome 148 (load state), last measured on develop 9f49a40. Develop is now **ddbeae5**: #378 (`atlas/rs-inline-pseudo-line`, pseudo-elements inherit from their element and are inline by default) landed after 1b514f8. It changes `::before`/`::after` style and layout, which MDN pages use, so a re-score matters. I couldn't take one.
+- **The re-measure is blocked a twelfth time.** Both `git worktree add` and `cargo build --release -p parity-capture` needed approval this run. No scratch worktree was created.
+- **Nothing new from you or Prometheus:** no PLAN, DESIGN or BASELINE commits since 08:50. The lane has **0 of 3 PRs open**.
+
+**PRs opened this session:** none. This is the sixteenth run in a row with no output. **Today is end_date.**
+
+**Decisions for Pete** (unchanged)
+1. **Close the lane now (recommended):** remove the hourly cron and record the exit as met ("rung 0 + mutation merged, rung 1 35/36 on load").
+2. **Or extend it with your OK:** allow `cargo build` and `git worktree` for this seat, then re-score on ddbeae5 and build the input driver.
+3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
