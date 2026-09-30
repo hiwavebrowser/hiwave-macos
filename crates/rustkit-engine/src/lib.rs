@@ -2822,6 +2822,11 @@ impl Engine {
     fn empty_block_affects_layout(child: &LayoutBox, parent: &ComputedStyle) -> bool {
         use rustkit_css::Length;
         let nonzero = |len: &Length| !matches!(len, Length::Zero | Length::Auto | Length::Px(0.0));
+        // Elements only: an anonymous block around collapsed white space is
+        // no box at all (and no flex item) in Chrome.
+        if !matches!(child.box_type, BoxType::Block) {
+            return false;
+        }
         let s = &child.style;
         parent.display.is_flex()
             || parent.display.is_grid()
@@ -23890,6 +23895,17 @@ mod empty_formatting_root_margin_tests {
         )) {
             assert_eq!(rect(&root, "o").width, 200.0);
             assert_eq!(rect(&root, "h").x, 200.0);
+        }
+        // Guard: an empty item that doesn't grow is 0 wide, and white space
+        // plus a `<script>` beside it make no flex items (HiWave's settings
+        // page centres its container in a flex body like this).
+        for root in laid_out(concat!(
+            r#"<!doctype html><body style="margin:0"><div style="display:flex;width:300px;justify-content:center">"#,
+            r#"<div id="o"></div> <div id="h" style="width:100px;height:2px"></div> <script>var a;</script>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "o").width, 0.0);
+            assert_eq!(rect(&root, "h").x, 100.0);
         }
     }
 }
