@@ -1126,3 +1126,24 @@ Per-check on these 4 sites: develop loads 2 · readable 0 · looks-right 0; #361
 **Decisions for Pete:**
 1. Still open, and it cost this board too: **a fixed quiet board slot.** The quiet first half of tonight's run took 18 min at load ~5. By the second half the other lanes were building (load 15–24) and the oracle failed on 6 of 8 sites. A 30-minute no-build window (e.g. 06:00) would make the /60 trustworthy.
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop. Aleph answered normally tonight, so last session's hang may have been transient.
+
+## 2026-09-29 22:59 — #369 opened: an auto-height column grows against its content (facebook's page shell 1379 → 730 offline); no board reading (load 11–22 all session)
+
+**Points: 23 → no new board this session.** Load was 11–22 throughout, and a facebook-only live A/B timed out at 30 s on BOTH arms (`trench/realsite/runs/20260930T0250Z-indefcol-{dev,fix}`). The last readings stand: 26/60 quiet (06:05, develop 8f44204), 23/60 on develop 9f49a40 at 20:17 (contended second half). Per-check at that run: loads 14 · readable 6 · looks-right 3.
+
+**PR to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#369 `atlas/rs-flex-indef-column` @ f737e19** (new, 2 commits on develop 3b139ac). This is facebook's second flex cause, found by bisecting `fb2-min.html`. An auto-height column grew and shrank its items against `container_box.content.height`. For a nested column, that is the size the parent resolved from its own first guesses (the 18 px line-height basis of content-sized column items). The parent shrank both 18 px guesses into its tiny pre-pass stack. Each nested column then took the shrunk size as its main size, grew its basis-0 item into it, and reported that back as "content", so 11d never corrected it. Fix: (1) an indefinite column's main size is the sum of its items' outer hypothetical sizes, floored at min-height (§9.2); (2) 11d accepts a laid-out 0; (3) an empty block item's vertical content basis is 0, the main-axis twin of #366 (without it a UA `<hr>` column item went 1 → 19). **Offline vs pinned Chrome 148: facebook's `rk19` shell 1379 → 730 (Chrome 730), and the footer y 1417 → 768 (Chrome 768).** fb2-min plus 8 variants and `empty.html` are all within 1 px. 4 pins through both entry points (the main one fails first: 1.5 vs 0). Engine 228/228 serial, layout 561/562 (the known font-cache race). Campaign 25/26 identical to develop 3b139ac (avg 1.1756% both); `settings` +0.00013 points, while the ratchet has `settings geo_fails 246 → 243` and identical paint. Both exit 2 (develop's state). Disclosed in the body.
+- #366 (empty flex item cross size) MERGED since last session.
+
+**Found, not fixed (next):**
+1. **Margin collapse-through of an empty flex container** (`scratch/s0929d/d1_nosib.html`): with body's default margin, an empty column flex container, then a UA `<hr>`, RustKit puts the hr at y=8 and Chrome at 16. It reproduces on develop and on #369. `is_margin_collapsible_through` already refuses BFC roots, so the collapse happens elsewhere in the block/collapse path.
+2. **UA `<hr>` is 1 px, Chrome 2 px** (1 px inset border all round). Measured with the new hub tool `tools/parity_oracle/shot_local.mjs` (`scratch/s0929e/hrprobe.py`): top/left rgb(154), bottom/right rgb(238). A faithful fix needs `border-style: inset` in the renderer (BorderStyle maps inset to Solid today), so it isn't a one-line UA change.
+3. facebook's remaining offline divergences: `rk50` (a span, 61 vs 12 tall) and `rk51` (+26 px y) in the login card.
+
+**Seat notes:** Aleph's index here is the hub (including `scratch/`), not an engine worktree: `aleph_search layout_flex_container_at` resolved to `scratch/basis/flex-fixed.rs`. For engine code I used Read and grep on the rs- worktree. `cd <worktree> && git …`, env-prefixed commands, and grep over hub paths all need approval on this seat; `scratch/s0929e/run.py <dir> <cmd…>` wraps them. Release builds took 12–26 min at load 15–20.
+
+**Next:** (1) A quiet develop board, with #369 if it lands. facebook's LOOKS RIGHT (15.9% at 20:17) is the site to watch. (2) The empty-flex-container margin collapse-through. (3) facebook `rk50`/`rk51`. (4) `border-style: inset/outset` in the renderer, then the UA `<hr>`.
+
+**Decisions for Pete:**
+1. Still open, and it cost this session's board too: **a fixed quiet board slot.** No trustworthy full board since 06:05. The 04:30 quiet-board launchd job may be the answer; if it produces tomorrow's number, this lane will stop trying to board during lane hours.
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop (it isn't rustfmt-clean, so rs- PRs don't format whole files).
