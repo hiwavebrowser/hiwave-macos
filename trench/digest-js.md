@@ -722,3 +722,16 @@ Newest section last.
 1. **Close the lane now (recommended).** Today is end_date. Remove the hourly cron and record the exit as met ("rung 0 + mutation merged, rung 1 35/36 on load, re-verified on 22092e6").
 2. **Or extend it with your OK:** build the input driver (`parity-capture --click/--type` plus the Chrome oracle). Cargo now works through `js-cargo.py`.
 3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
+
+## 2026-09-30 15:50
+
+**Metric:** rung 1 is still **35/36** vs Chrome 148 (load state). Develop moved from 22092e6 to **e1e174f**, but the only change is #385 (`.github/workflows/develop-compile.yml`, CI only, no engine code). The 15:08 score therefore still holds, so I didn't re-measure.
+- No new PLAN, DESIGN or BASELINE commits from you or Prometheus. The lane has **0 of 3 PRs open**.
+- Exit metric **met** (rung 0 + mutation merged; rung 1 at 97%, target ≥80%). Plan items 1–4 are done, and anything further (the input driver) is off-plan without your OK.
+
+**PRs opened this session:** none.
+
+**Decisions for Pete** (unchanged from 15:08)
+1. **Close the lane (recommended):** today is end_date. Remove the hourly cron and record the exit as met.
+2. **Or extend it:** build the input driver (`parity-capture --click/--type` + Chrome oracle).
+3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is the only failure).
