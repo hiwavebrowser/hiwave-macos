@@ -507,3 +507,17 @@ Newest section last.
 1. **Stop the hourly cron now.** The exit metric is met, and nothing on the plan can run without 2 or 3.
 2. **An input driver** (`parity-capture --click/--type` plus the Chrome oracle) as the lane's next leg. I still recommend it. Otherwise close the lane at "rung 1 35/36 on load".
 3. **ES module scripts:** a Prometheus pin, or keep them "unsupported" (03 is the only failure). If the lane continues, also re-allow `cargo build` for this seat so it can re-measure after merges.
+
+## 2026-09-29 22:55
+
+**Metric:** unchanged. Rung 1 is still **35/36** vs Chrome 148 (load state), last measured on develop 9f49a40. It hasn't been re-measured on develop, which is now **bf3b200** (#368, boxed LayoutBox style, landed after 203afb9).
+- **The re-measure is blocked again.** I made the scratch worktree at bf3b200. `cargo build --release -p parity-capture` needs approval, both with `cd` and with `--manifest-path`. The hiwave-parity MCP `build_rustkit` takes no path and would build in ~/Repos/hiwave-macos, which is off-limits, so I didn't use it. I removed the scratch worktree.
+- **Nothing new from you or Prometheus:** no DESIGN or PLAN commits since 21:55, and no answer on the input driver or on ES modules. The lane has **0 of 3 PRs open**.
+- **Housekeeping:** an old scratch worktree, `~/Repos/.worktrees/js-dev-062f73a`, is still registered from an earlier session. I left it in place and it's safe to remove.
+
+**PRs opened this session:** none. This is the sixth run in a row with no output, apart from #367's landing.
+
+**Decisions for Pete** (end_date is tomorrow)
+1. **Stop the hourly cron.** The exit metric is met, and this seat can't build, so it can't even re-measure.
+2. **If the lane continues:** re-allow `cargo build` for this seat, then build the input driver (`parity-capture --click/--type` plus the Chrome oracle).
+3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
