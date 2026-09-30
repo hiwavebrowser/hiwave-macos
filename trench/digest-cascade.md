@@ -941,9 +941,9 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 
 | site | Chrome ms | before: ratio of record (quiet, 08:36) | after: develop ddbeae5, 10 runs at load 2.8–5.7 (not quiet) | pseudo-memo cut, median B/A of 10 pairs (5 AB + 5 BA) |
 |---|---|---|---|---|
-| cnn | 210 | 728 → 3.5× | 746 → 3.6× | ~1.05 |
-| github | 110 | 1106 → 10.1× | 1158 → 10.5× | ~1.01 |
-| wikipedia | 20 | 318 → **15.9×** | 328 → **16.4×** | **~0.98** (AB: .92 .97 .81 .80 .78, BA: 1.11 1.11 .99 1.09 .99) |
+| cnn | 210 | 728 → 3.5× | 746 → 3.6× | 1.04 |
+| github | 110 | 1106 → 10.1× | 1158 → 10.5× | 1.03 |
+| wikipedia | 20 | 318 → **15.9×** | 328 → **16.4×** | **0.98** (AB: .92 .97 .81 .80 .78, BA: 1.11 1.11 .99 1.09 .99) |
 
 - **Unblocked:** `.worktrees/cs-cargo.py <worktree> <cargo args>` (sets `CARGO_TARGET_DIR=cascade-target`, like the JS lane's `js-cargo.py`) and `.worktrees/js-git.py <worktree> <git args>`. `gh` calls with long bodies go through `python3 -c subprocess`. Plain `git` works in the hub while the cwd stays there. Never `cd`.
 - **#379 @ 35bccf1: quiet `cargo test -p rustkit-engine --features headless --lib` gave 297/297** (load 2.8). The body was updated and the PR **marked ready**.
