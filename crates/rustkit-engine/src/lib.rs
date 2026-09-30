@@ -2256,6 +2256,20 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.initial_layout_deferred = defer;
         }
+        // Undeferred, this layout has every sheet the load will lay out
+        // with, so `load_subresources`' relayouts join this memo span and the
+        // images relayout replays it: cnn, which links no sheets, cascaded
+        // twice in full. Not while a previous document's sheets are still
+        // assigned (they are cleared below), and gone before any script runs.
+        let style_memo = match !defer
+            && self
+                .views
+                .get(&id)
+                .is_some_and(|v| v.external_stylesheets.is_empty())
+        {
+            true => StyleMemoScope::arm(),
+            false => None,
+        };
         if !defer {
             self.relayout(id)?;
         }
@@ -2279,6 +2293,7 @@ impl Engine {
             }
         };
         let ((subresources, subresources_done), scripts) = futures::join!(subresources, scripts);
+        drop(style_memo);
         // This will trigger additional relayouts as resources arrive
         if let Err(e) = subresources {
             warn!(?e, "Failed to load some subresources");
@@ -2810,6 +2825,33 @@ impl Engine {
         false
     }
 
+    /// An empty, unstyled block still changes layout when it is dropped:
+    /// - its vertical margins collapse THROUGH it into its siblings' (CSS 2.1
+    ///   §8.3.1), so `<div style="margin-top:30px"></div>` moves what follows;
+    /// - a formatting root (flex, grid, overflow, ...) never collapses through,
+    ///   so it keeps the margins on either side apart (body's 8px and an
+    ///   `<hr>`'s 8px stack to 16 around an empty flex container);
+    /// - `min-height` and `clear` give it extent or clearance;
+    /// - a flex or grid item takes a track slot, a gap and free space (an
+    ///   empty `flex:1` spacer).
+    fn empty_block_affects_layout(child: &LayoutBox, parent: &ComputedStyle) -> bool {
+        use rustkit_css::Length;
+        let nonzero = |len: &Length| !matches!(len, Length::Zero | Length::Auto | Length::Px(0.0));
+        // Elements only: an anonymous block around collapsed white space is
+        // no box at all (and no flex item) in Chrome.
+        if !matches!(child.box_type, BoxType::Block) {
+            return false;
+        }
+        let s = &child.style;
+        parent.display.is_flex()
+            || parent.display.is_grid()
+            || nonzero(&s.margin_top)
+            || nonzero(&s.margin_bottom)
+            || nonzero(&s.min_height)
+            || s.clear != rustkit_css::Clear::None
+            || rustkit_layout::establishes_bfc(s, child.float)
+    }
+
     /// Whether a box participates in inline flow (shares line boxes with
     /// adjacent inline-level siblings). Mirrors the layout-side flows_inline
     /// gate in rustkit-layout's block child loop.
@@ -3037,6 +3079,7 @@ impl Engine {
                     external_sheets: external_stylesheets.len(),
                     viewport,
                     focus: self.building_focus.get(),
+                    fonts: self.web_font_count(),
                 })
             })
             .flatten();
@@ -4121,9 +4164,11 @@ impl Engine {
                     // Determine if box should be included in layout tree
                     let should_include = match child_box.box_type {
                         BoxType::Block | BoxType::AnonymousBlock => {
-                            // Include blocks if they have children, OR have visible styling
+                            // Include blocks if they have children, OR have visible styling,
+                            // OR still take part in layout while empty.
                             !child_box.children.is_empty()
                                 || Self::has_visible_styling(&child_box.style)
+                                || Self::empty_block_affects_layout(&child_box, &layout_box.style)
                         }
                         BoxType::Inline => {
                             // Include inline boxes if they have content children (text, images, form controls)
@@ -7506,10 +7551,11 @@ impl Engine {
             info!(count = fonts_loaded, "Loaded web fonts");
         }
 
-        // Behind RUSTKIT_INCREMENTAL_RESTYLE: the sheets relayout records
+        // Unless RUSTKIT_INCREMENTAL_RESTYLE=0: the sheets relayout records
         // each element's cascade and the images relayout below replays it.
         // Images change box sizes, not styles, and no script runs between
-        // the two builds.
+        // the two builds. A navigation that laid out undeferred has already
+        // armed the memo with that layout's recording; this joins it.
         let _style_memo = StyleMemoScope::arm();
 
         // A deferred first layout happens here even if every sheet failed.
@@ -7724,6 +7770,17 @@ impl Engine {
                 "web font face(s) rejected by the platform (unsupported container or bad data)"
             );
         }
+    }
+
+    /// Loaded faces in the partition of the view being built (the opaque one
+    /// for a view-less build).
+    fn web_font_count(&self) -> usize {
+        let base = self
+            .building_view
+            .get()
+            .and_then(|id| self.views.get(&id))
+            .and_then(|v| v.url.as_ref());
+        self.font_loader.faces_for(&Self::font_partition(base)).len()
     }
 
     fn install_web_fonts(&self, id: EngineViewId) {
@@ -20406,9 +20463,10 @@ fn active_rule_index(stylesheets: &[Stylesheet]) -> Option<Rc<RuleIndex>> {
     })
 }
 
-/// `RUSTKIT_INCREMENTAL_RESTYLE`: `1` lets the images relayout reuse the
-/// sheets relayout's per-element cascade; `verify` recomputes every style
-/// anyway and counts the ones that differ from the memo. Off by default.
+/// `RUSTKIT_INCREMENTAL_RESTYLE`: on by default, so the images relayout
+/// reuses the sheets relayout's per-element cascade. `0` or `off` turns it
+/// off; `verify` recomputes every style anyway and counts the ones that
+/// differ from the memo.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RestyleMode {
     Off,
@@ -20416,12 +20474,18 @@ enum RestyleMode {
     Verify,
 }
 
+fn restyle_mode_from(value: Option<&str>) -> RestyleMode {
+    match value {
+        Some("0") | Some("off") => RestyleMode::Off,
+        Some("verify") => RestyleMode::Verify,
+        _ => RestyleMode::Reuse,
+    }
+}
+
 fn incremental_restyle_mode() -> RestyleMode {
     static MODE: std::sync::OnceLock<RestyleMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("RUSTKIT_INCREMENTAL_RESTYLE").as_deref() {
-        Ok("verify") => RestyleMode::Verify,
-        Ok(v) if !v.is_empty() && v != "0" => RestyleMode::Reuse,
-        _ => RestyleMode::Off,
+    *MODE.get_or_init(|| {
+        restyle_mode_from(std::env::var("RUSTKIT_INCREMENTAL_RESTYLE").ok().as_deref())
     })
 }
 
@@ -20436,6 +20500,11 @@ struct StyleMemoKey {
     external_sheets: usize,
     viewport: Option<(f32, f32)>,
     focus: Option<rustkit_dom::NodeId>,
+    /// How many web faces the view's font partition has loaded (the loader
+    /// only grows a partition, so the count names the set): `ch` lengths
+    /// resolve against the element's font, so a face arriving between two
+    /// builds can change a cascade.
+    fonts: usize,
 }
 
 /// What the build in progress does with the memo.
@@ -20493,7 +20562,12 @@ thread_local! {
 /// That is sound on the engine's `current_thread` runtime. Were the task ever
 /// to resume on another thread, its builds would find no memo there and
 /// cascade in full: a lost speedup, never a wrong replay.
-struct StyleMemoScope;
+///
+/// Arming inside an armed span joins it: the inner scope keeps the outer
+/// recording and leaves discarding it to the outer scope.
+struct StyleMemoScope {
+    owner: bool,
+}
 
 impl StyleMemoScope {
     fn arm() -> Option<Self> {
@@ -20503,6 +20577,9 @@ impl StyleMemoScope {
     fn arm_with(mode: RestyleMode) -> Option<Self> {
         if mode == RestyleMode::Off {
             return None;
+        }
+        if STYLE_MEMO.with(|m| m.borrow().is_some()) {
+            return Some(StyleMemoScope { owner: false });
         }
         STYLE_MEMO.with(|m| {
             *m.borrow_mut() = Some(StyleMemo {
@@ -20516,13 +20593,15 @@ impl StyleMemoScope {
                 mismatches: 0,
             })
         });
-        Some(StyleMemoScope)
+        Some(StyleMemoScope { owner: true })
     }
 }
 
 impl Drop for StyleMemoScope {
     fn drop(&mut self) {
-        STYLE_MEMO.with(|m| *m.borrow_mut() = None);
+        if self.owner {
+            STYLE_MEMO.with(|m| *m.borrow_mut() = None);
+        }
     }
 }
 
@@ -20554,11 +20633,14 @@ impl StyleMemoBuild {
                     true => MemoUse::Verify,
                     false => MemoUse::Replay,
                 },
-                // Something style-relevant moved (a resize, a focus change):
-                // the recording describes a different build.
+                // Something style-relevant moved (a resize, a focus change, a
+                // web font): the recording describes a different build. Start
+                // over from this one, for a later build with its key.
                 Some(_) => {
-                    *slot = None;
-                    return None;
+                    memo.key = Some(key);
+                    memo.styles.clear();
+                    memo.pseudos.clear();
+                    MemoUse::Record
                 }
             };
             memo.in_build = Some(use_);
@@ -20775,7 +20857,7 @@ mod incremental_restyle_tests {
     }
 
     #[test]
-    fn a_build_of_another_document_discards_the_memo() {
+    fn a_build_of_another_document_records_afresh() {
         let e = engine();
         let first = Document::parse_html(PAGE).expect("parse");
         let other_html = PAGE.replace("#c00", "#0c0");
@@ -20784,19 +20866,23 @@ mod incremental_restyle_tests {
 
         let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
         paint(&e, &first);
+        assert_eq!(paint(&e, &other), other_full, "a key mismatch cascades in full");
+        let (_, _, memoized) = memo_counts().expect("memo");
         assert_eq!(paint(&e, &other), other_full);
-        assert!(memo_counts().is_none(), "a key mismatch drops the recording");
+        let (hits, _, _) = memo_counts().expect("memo");
+        assert_eq!(hits, memoized, "the other document's own recording replays");
     }
 
     #[test]
-    fn every_style_relevant_key_change_discards_the_memo() {
-        fn assert_discards(name: &str, mutate: impl FnOnce(&mut StyleMemoKey)) {
+    fn every_style_relevant_key_change_restarts_the_recording() {
+        fn assert_restarts(name: &str, mutate: impl FnOnce(&mut StyleMemoKey)) {
             let original = StyleMemoKey {
                 view: None,
                 document: std::ptr::null(),
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                fonts: 0,
             };
             let mut changed = original.clone();
             mutate(&mut changed);
@@ -20805,20 +20891,39 @@ mod incremental_restyle_tests {
             let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
             {
                 let _build = StyleMemoBuild::begin(original).expect("records");
+                memoized_style(rustkit_dom::NodeId::new(3), ComputedStyle::new);
             }
-            assert!(
-                StyleMemoBuild::begin(changed).is_none(),
-                "{name} must not replay stale styles"
-            );
-            assert!(memo_counts().is_none(), "{name} must drop the recording");
+            let build = StyleMemoBuild::begin(changed.clone()).expect("records afresh");
+            assert!(!build.replays(), "{name} must not replay stale styles");
+            let (_, _, memoized) = memo_counts().expect("memo");
+            assert_eq!(memoized, 0, "{name} must drop the old recording");
+            let key = STYLE_MEMO.with(|m| m.borrow().as_ref().and_then(|m| m.key.clone()));
+            assert_eq!(key, Some(changed), "{name}: the new build's key is recorded");
         }
 
-        assert_discards("view", |key| key.view = Some(EngineViewId::new()));
-        assert_discards("external sheets", |key| key.external_sheets = 1);
-        assert_discards("viewport", |key| key.viewport = Some((800.0, 600.0)));
-        assert_discards("focus", |key| {
+        assert_restarts("view", |key| key.view = Some(EngineViewId::new()));
+        assert_restarts("external sheets", |key| key.external_sheets = 1);
+        assert_restarts("viewport", |key| key.viewport = Some((800.0, 600.0)));
+        assert_restarts("focus", |key| {
             key.focus = Some(rustkit_dom::NodeId::new(1))
         });
+        assert_restarts("web fonts", |key| key.fonts = 1);
+    }
+
+    #[test]
+    fn an_inner_scope_joins_the_armed_span_and_leaves_it_armed() {
+        let e = engine();
+        let d = Document::parse_html(PAGE).expect("parse");
+        let _outer = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+        paint(&e, &d);
+        let (_, _, memoized) = memo_counts().expect("memo");
+        {
+            let _inner = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("joined");
+            paint(&e, &d);
+            let (hits, _, _) = memo_counts().expect("memo");
+            assert_eq!(hits, memoized, "the inner span replays the outer recording");
+        }
+        assert!(memo_counts().is_some(), "only the outer scope discards the memo");
     }
 
     #[cfg(feature = "headless")]
@@ -20864,6 +20969,7 @@ mod incremental_restyle_tests {
             external_sheets: 0,
             viewport: None,
             focus: None,
+            fonts: 0,
         };
         let recorded_node = rustkit_dom::NodeId::new(7);
         let fresh_node = rustkit_dom::NodeId::new(8);
@@ -20918,6 +21024,7 @@ mod incremental_restyle_tests {
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                fonts: 0,
             })
             .expect("records");
         }
@@ -20938,6 +21045,16 @@ mod incremental_restyle_tests {
         }
         assert!(memo_counts().is_none());
         assert!(StyleMemoScope::arm_with(RestyleMode::Off).is_none());
+    }
+
+    #[test]
+    fn restyle_reuse_is_the_default_and_0_or_off_turns_it_off() {
+        assert_eq!(restyle_mode_from(None), RestyleMode::Reuse);
+        assert_eq!(restyle_mode_from(Some("")), RestyleMode::Reuse);
+        assert_eq!(restyle_mode_from(Some("1")), RestyleMode::Reuse);
+        assert_eq!(restyle_mode_from(Some("0")), RestyleMode::Off);
+        assert_eq!(restyle_mode_from(Some("off")), RestyleMode::Off);
+        assert_eq!(restyle_mode_from(Some("verify")), RestyleMode::Verify);
     }
 }
 
@@ -23771,6 +23888,119 @@ mod flex_indefinite_column_grow_tests {
             assert_eq!(rect(&root, "a").height, 280.0);
             assert_eq!(rect(&root, "i").height, 280.0);
             assert_eq!(rect(&root, "f").y, 280.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod empty_formatting_root_margin_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.set_viewport(1280.0, 800.0);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.set_viewport(1280.0, 800.0);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    /// The page path only: `layout()` does not collapse sibling margins at
+    /// all, so the margin cases have nothing to pin there.
+    fn engine_path(html: &str) -> LayoutBox {
+        laid_out(html).pop().expect("engine path")
+    }
+
+    #[test]
+    fn an_empty_formatting_root_keeps_the_margins_around_it_apart() {
+        // Chrome 148: body's 8px and the next block's 8px do not collapse
+        // through an empty flex / grid / overflow box, so the block lands at
+        // y=16. The empty box used to be dropped from the tree, and the two
+        // margins collapsed to 8.
+        for display in ["display:flex", "display:flex;flex-direction:column", "display:grid", "overflow:hidden"] {
+            let root = engine_path(&format!(
+                r#"<!doctype html><body><div id="o" style="{display}"></div><div id="h" style="margin:8px 0;height:2px"></div></body>"#
+            ));
+            assert_eq!(rect(&root, "o").y, 8.0, "{display}");
+            assert_eq!(rect(&root, "o").height, 0.0, "{display}");
+            assert_eq!(rect(&root, "h").y, 16.0, "{display}");
+        }
+    }
+
+    #[test]
+    fn an_empty_formatting_roots_own_margins_stay_on_its_edges() {
+        // Its top margin separates it from the block above; its bottom margin
+        // collapses with the next block's (5 vs 8 -> 8), never through it.
+        let root = engine_path(concat!(
+            r#"<!doctype html><body><div style="height:4px"></div>"#,
+            r#"<div id="o" style="display:flex;margin:5px 0"></div>"#,
+            r#"<div id="h" style="margin:8px 0;height:2px"></div></body>"#,
+        ));
+        assert_eq!(rect(&root, "o").y, 17.0);
+        assert_eq!(rect(&root, "h").y, 25.0);
+    }
+
+    #[test]
+    fn an_empty_blocks_margin_still_collapses_through_into_the_flow() {
+        for root in laid_out(concat!(
+            r#"<!doctype html><body><div style="height:4px"></div>"#,
+            r#"<div id="o" style="margin-top:30px"></div><div id="h" style="height:2px"></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "h").y, 42.0);
+        }
+        // Guard: an empty plain div with no margins still collapses through
+        // (body's and the block's 8px stay one 8px margin).
+        let root = engine_path(
+            r#"<!doctype html><body><div></div><div id="h" style="margin:8px 0;height:2px"></div></body>"#,
+        );
+        assert_eq!(rect(&root, "h").y, 8.0);
+    }
+
+    #[test]
+    fn an_empty_flex_item_spacer_takes_its_share_of_the_free_space() {
+        for root in laid_out(concat!(
+            r#"<!doctype html><body style="margin:0"><div style="display:flex;width:300px">"#,
+            r#"<div id="o" style="flex:1"></div><div id="h" style="width:100px;height:2px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "o").width, 200.0);
+            assert_eq!(rect(&root, "h").x, 200.0);
+        }
+        // Guard: an empty item that doesn't grow is 0 wide, and white space
+        // plus a `<script>` beside it make no flex items (HiWave's settings
+        // page centres its container in a flex body like this).
+        for root in laid_out(concat!(
+            r#"<!doctype html><body style="margin:0"><div style="display:flex;width:300px;justify-content:center">"#,
+            r#"<div id="o"></div> <div id="h" style="width:100px;height:2px"></div> <script>var a;</script>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "o").width, 0.0);
+            assert_eq!(rect(&root, "h").x, 100.0);
         }
     }
 }
