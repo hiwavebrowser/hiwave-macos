@@ -2256,6 +2256,20 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.initial_layout_deferred = defer;
         }
+        // Undeferred, this layout has every sheet the load will lay out
+        // with, so `load_subresources`' relayouts join this memo span and the
+        // images relayout replays it: cnn, which links no sheets, cascaded
+        // twice in full. Not while a previous document's sheets are still
+        // assigned (they are cleared below), and gone before any script runs.
+        let style_memo = match !defer
+            && self
+                .views
+                .get(&id)
+                .is_some_and(|v| v.external_stylesheets.is_empty())
+        {
+            true => StyleMemoScope::arm(),
+            false => None,
+        };
         if !defer {
             self.relayout(id)?;
         }
@@ -2279,6 +2293,7 @@ impl Engine {
             }
         };
         let ((subresources, subresources_done), scripts) = futures::join!(subresources, scripts);
+        drop(style_memo);
         // This will trigger additional relayouts as resources arrive
         if let Err(e) = subresources {
             warn!(?e, "Failed to load some subresources");
@@ -3064,6 +3079,7 @@ impl Engine {
                     external_sheets: external_stylesheets.len(),
                     viewport,
                     focus: self.building_focus.get(),
+                    fonts: self.web_font_count(),
                 })
             })
             .flatten();
@@ -7531,7 +7547,8 @@ impl Engine {
         // Unless RUSTKIT_INCREMENTAL_RESTYLE=0: the sheets relayout records
         // each element's cascade and the images relayout below replays it.
         // Images change box sizes, not styles, and no script runs between
-        // the two builds.
+        // the two builds. A navigation that laid out undeferred has already
+        // armed the memo with that layout's recording; this joins it.
         let _style_memo = StyleMemoScope::arm();
 
         // A deferred first layout happens here even if every sheet failed.
@@ -7746,6 +7763,17 @@ impl Engine {
                 "web font face(s) rejected by the platform (unsupported container or bad data)"
             );
         }
+    }
+
+    /// Loaded faces in the partition of the view being built (the opaque one
+    /// for a view-less build).
+    fn web_font_count(&self) -> usize {
+        let base = self
+            .building_view
+            .get()
+            .and_then(|id| self.views.get(&id))
+            .and_then(|v| v.url.as_ref());
+        self.font_loader.faces_for(&Self::font_partition(base)).len()
     }
 
     fn install_web_fonts(&self, id: EngineViewId) {
@@ -20465,6 +20493,11 @@ struct StyleMemoKey {
     external_sheets: usize,
     viewport: Option<(f32, f32)>,
     focus: Option<rustkit_dom::NodeId>,
+    /// How many web faces the view's font partition has loaded (the loader
+    /// only grows a partition, so the count names the set): `ch` lengths
+    /// resolve against the element's font, so a face arriving between two
+    /// builds can change a cascade.
+    fonts: usize,
 }
 
 /// What the build in progress does with the memo.
@@ -20522,7 +20555,12 @@ thread_local! {
 /// That is sound on the engine's `current_thread` runtime. Were the task ever
 /// to resume on another thread, its builds would find no memo there and
 /// cascade in full: a lost speedup, never a wrong replay.
-struct StyleMemoScope;
+///
+/// Arming inside an armed span joins it: the inner scope keeps the outer
+/// recording and leaves discarding it to the outer scope.
+struct StyleMemoScope {
+    owner: bool,
+}
 
 impl StyleMemoScope {
     fn arm() -> Option<Self> {
@@ -20532,6 +20570,9 @@ impl StyleMemoScope {
     fn arm_with(mode: RestyleMode) -> Option<Self> {
         if mode == RestyleMode::Off {
             return None;
+        }
+        if STYLE_MEMO.with(|m| m.borrow().is_some()) {
+            return Some(StyleMemoScope { owner: false });
         }
         STYLE_MEMO.with(|m| {
             *m.borrow_mut() = Some(StyleMemo {
@@ -20545,13 +20586,15 @@ impl StyleMemoScope {
                 mismatches: 0,
             })
         });
-        Some(StyleMemoScope)
+        Some(StyleMemoScope { owner: true })
     }
 }
 
 impl Drop for StyleMemoScope {
     fn drop(&mut self) {
-        STYLE_MEMO.with(|m| *m.borrow_mut() = None);
+        if self.owner {
+            STYLE_MEMO.with(|m| *m.borrow_mut() = None);
+        }
     }
 }
 
@@ -20583,11 +20626,14 @@ impl StyleMemoBuild {
                     true => MemoUse::Verify,
                     false => MemoUse::Replay,
                 },
-                // Something style-relevant moved (a resize, a focus change):
-                // the recording describes a different build.
+                // Something style-relevant moved (a resize, a focus change, a
+                // web font): the recording describes a different build. Start
+                // over from this one, for a later build with its key.
                 Some(_) => {
-                    *slot = None;
-                    return None;
+                    memo.key = Some(key);
+                    memo.styles.clear();
+                    memo.pseudos.clear();
+                    MemoUse::Record
                 }
             };
             memo.in_build = Some(use_);
@@ -20804,7 +20850,7 @@ mod incremental_restyle_tests {
     }
 
     #[test]
-    fn a_build_of_another_document_discards_the_memo() {
+    fn a_build_of_another_document_records_afresh() {
         let e = engine();
         let first = Document::parse_html(PAGE).expect("parse");
         let other_html = PAGE.replace("#c00", "#0c0");
@@ -20813,19 +20859,23 @@ mod incremental_restyle_tests {
 
         let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
         paint(&e, &first);
+        assert_eq!(paint(&e, &other), other_full, "a key mismatch cascades in full");
+        let (_, _, memoized) = memo_counts().expect("memo");
         assert_eq!(paint(&e, &other), other_full);
-        assert!(memo_counts().is_none(), "a key mismatch drops the recording");
+        let (hits, _, _) = memo_counts().expect("memo");
+        assert_eq!(hits, memoized, "the other document's own recording replays");
     }
 
     #[test]
-    fn every_style_relevant_key_change_discards_the_memo() {
-        fn assert_discards(name: &str, mutate: impl FnOnce(&mut StyleMemoKey)) {
+    fn every_style_relevant_key_change_restarts_the_recording() {
+        fn assert_restarts(name: &str, mutate: impl FnOnce(&mut StyleMemoKey)) {
             let original = StyleMemoKey {
                 view: None,
                 document: std::ptr::null(),
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                fonts: 0,
             };
             let mut changed = original.clone();
             mutate(&mut changed);
@@ -20834,20 +20884,39 @@ mod incremental_restyle_tests {
             let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
             {
                 let _build = StyleMemoBuild::begin(original).expect("records");
+                memoized_style(rustkit_dom::NodeId::new(3), ComputedStyle::new);
             }
-            assert!(
-                StyleMemoBuild::begin(changed).is_none(),
-                "{name} must not replay stale styles"
-            );
-            assert!(memo_counts().is_none(), "{name} must drop the recording");
+            let build = StyleMemoBuild::begin(changed.clone()).expect("records afresh");
+            assert!(!build.replays(), "{name} must not replay stale styles");
+            let (_, _, memoized) = memo_counts().expect("memo");
+            assert_eq!(memoized, 0, "{name} must drop the old recording");
+            let key = STYLE_MEMO.with(|m| m.borrow().as_ref().and_then(|m| m.key.clone()));
+            assert_eq!(key, Some(changed), "{name}: the new build's key is recorded");
         }
 
-        assert_discards("view", |key| key.view = Some(EngineViewId::new()));
-        assert_discards("external sheets", |key| key.external_sheets = 1);
-        assert_discards("viewport", |key| key.viewport = Some((800.0, 600.0)));
-        assert_discards("focus", |key| {
+        assert_restarts("view", |key| key.view = Some(EngineViewId::new()));
+        assert_restarts("external sheets", |key| key.external_sheets = 1);
+        assert_restarts("viewport", |key| key.viewport = Some((800.0, 600.0)));
+        assert_restarts("focus", |key| {
             key.focus = Some(rustkit_dom::NodeId::new(1))
         });
+        assert_restarts("web fonts", |key| key.fonts = 1);
+    }
+
+    #[test]
+    fn an_inner_scope_joins_the_armed_span_and_leaves_it_armed() {
+        let e = engine();
+        let d = Document::parse_html(PAGE).expect("parse");
+        let _outer = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+        paint(&e, &d);
+        let (_, _, memoized) = memo_counts().expect("memo");
+        {
+            let _inner = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("joined");
+            paint(&e, &d);
+            let (hits, _, _) = memo_counts().expect("memo");
+            assert_eq!(hits, memoized, "the inner span replays the outer recording");
+        }
+        assert!(memo_counts().is_some(), "only the outer scope discards the memo");
     }
 
     #[cfg(feature = "headless")]
@@ -20893,6 +20962,7 @@ mod incremental_restyle_tests {
             external_sheets: 0,
             viewport: None,
             focus: None,
+            fonts: 0,
         };
         let recorded_node = rustkit_dom::NodeId::new(7);
         let fresh_node = rustkit_dom::NodeId::new(8);
@@ -20947,6 +21017,7 @@ mod incremental_restyle_tests {
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                fonts: 0,
             })
             .expect("records");
         }
