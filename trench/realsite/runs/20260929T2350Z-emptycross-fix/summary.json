@@ -1,0 +1,29 @@
+{
+  "ts": "20260929T235005Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 4,
+  "points": 5,
+  "max_points": 12,
+  "loads": 3,
+  "readable": 2,
+  "looks_right": 0,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [],
+  "oracle_blocked": {},
+  "blocked": {},
+  "per_site": {
+    "facebook": 0,
+    "lyft": 2,
+    "walmart": 1,
+    "shopify": 2
+  },
+  "scorable_sites": 4,
+  "scorable_points": 5,
+  "scorable_max": 12,
+  "full_run": false
+}
