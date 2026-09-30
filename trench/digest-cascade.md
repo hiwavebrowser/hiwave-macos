@@ -755,3 +755,33 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Ratio of record = 19.0×** (quiet develop 9f49a40, carried over). Default: yes.
 2. **Flip `RUSTKIT_INCREMENTAL_RESTYLE` on by default after one flag-on board run** (carried over). Default: this lane runs it in the next quiet window.
 3. **Loosen or `#[ignore]` the 2.5 s `a_stalled_subresource…` budget test on loaded machines?** It now fails every time at load ≥ 12 on develop. Default: leave it, and note it in every PR until someone owns it.
+
+## 2026-09-30 02:50
+
+**PR #373 turns `RUSTKIT_INCREMENTAL_RESTYLE` on by default. On a quiet machine the worst ratio goes from 19.9× to 16.0× (wikipedia), and github from 14.4× to 10.4×. Verify mode finds 0 mismatches, the flag-on real-site board matches flag off, and the receipt is pixel-identical 26/26. #371 turns out to be flat on a quiet machine: its 0.80 was a loaded-machine artifact. I recommend closing it.**
+
+| site | Chrome ms | before: develop-equivalent, flag off (quiet, load 3.0–3.7, 5 pairs as A) | **after: #373 behaviour, flag on (quiet, load 3.2, 5 runs)** |
+|---|---|---|---|
+| cnn | 210 | ~965 ms → 4.6× (A: 997 895 937 966 1043) | 960 ms → **4.6×** (960 937 1059 943 1004) |
+| github | 110 | ~1582 ms → 14.4× (1583 1555 1365 1648 1715) | 1143 ms → **10.4×** (1143 1186 1153 1077 1135) |
+| wikipedia | 20 | ~398 ms → 19.9× (392 389 404 412 398) | 320 ms → **16.0×** (worst) (309 331 342 315 320) |
+
+"Before" is the #370 head 4b7be53. Its cascade is the same as develop 6e26932's (the only commit between them is #369, a flex fix). The 19.9× is higher than yesterday's 19.0× ratio of record even though #365, #368 and #370 merged since. The machine read slower tonight: the #368 binary gave wikipedia ~475 ms, against 379 ms for its base last night. Tonight's same-session numbers are the fair comparison.
+
+- **PR #373** `atlas/cs-restyle-default` @ **ab8e689** on develop 6e26932. The default becomes Reuse; `0` or `off` turns it off; `verify` stays. There's a new parse test.
+  - Verify mode on 6e26932: github 11237/11237 and wikipedia 3153/3153 replayed styles equal a fresh cascade (0 mismatches). cnn doesn't replay.
+  - **Real-site board, flag on, all 20 sites: 19 pts.** Per site it matches the lane's flag-off develop boards except apple and x. Re-running both flag off and flag on back to back gave **identical** results (apple 2 pts, x readable 0.1667 both ways). So the flag isn't the cause.
+  - Receipt at the head: 26/26, avg 1.2%, **diffPixels identical on all 26** to develop 6e26932. Engine (headless) lib 292/292.
+  - Head vs develop with no env var set (load 14–19): github B/A 0.63, wikipedia 0.74.
+- **#371's settings pixel is attributed:** develop 6e26932 reads settings 16373 as well, so the pixel comes from #369's flex change. **But on a quiet machine #371 is flat:** 5 pairs at load 3.0–3.7 vs 4b7be53 gave cnn 0.98, github 0.98, wikipedia **1.00**. The same quiet window confirmed #370 at wikipedia **0.82** vs #368, so the method can see a real win. The PR body is updated with a close recommendation, and it stays a draft.
+- **Lesson: B/A read at load ≥ 12 can be biased, not just noisy.** #371 read 0.80 under load and 1.00 quiet. #370's 0.82 held up. Loaded pairs are fine for choosing what to try next, but only a quiet pair should back a claim in a PR.
+- **For the real-site lane (FYI, not touched):** on develop 6e26932 with the flag off, **x's readable is 0.1667**, down from 0.95 on 9f49a40, and the drop reproduces. Suspects are #369/#370 or the live site changing. Also note the site list has changed since the lane's last full board (amazon, chatgpt, ebay and nytimes are in; lyft, shopify, squarespace and walmart are out).
+- **Saved:** binaries `cascade-target/pc-dev-6e26932` and `pc-rsd-ab8e689`. Receipts `receipt-dev-6e26932.json` and `receipt-rsd-ab8e689.json`. Board runs in `cascade-target/tmp/board-on-6e26932`, `board-{off2,on2}-6e26932`. New tool `.worktrees/cs-board-cmp.py`, which prints per-site board rows side by side.
+- **Build cost:** release parity-capture 10 min at load ~5. The full board takes ~35 min.
+- **Open cs PRs:** 2 (#373 new, #371 draft/close-recommended), cap 3.
+- **Next session:** (1) watch #373. (2) The flag-on second build is still ~75–90 ms on wikipedia and ~100 ms on github, while build 1 is ~235 ms and ~1040 ms, so **build 1 is now the target**. Profile flag-on wikipedia build 1. (3) cnn's two builds never replay (the memo key differs). Find which key field changes; replaying them could be worth ~300 ms on cnn.
+
+**Decisions for Pete**
+1. **Close #371** (correct but no measurable gain on a quiet machine). Default: a maintainer closes it; the trench doesn't close its own PRs.
+2. **Ratio of record = 16.0× once #373 merges** (quiet, same session as a 19.9× develop read). This replaces 19.0×. Default: yes.
+3. **Only quiet B/A backs a PR claim** (loaded reads of ≥ 12 are demoted to triage). Default: yes. The 04:00 slot before the quiet board is still the best time for claims.
