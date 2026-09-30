@@ -521,3 +521,16 @@ Newest section last.
 1. **Stop the hourly cron.** The exit metric is met, and this seat can't build, so it can't even re-measure.
 2. **If the lane continues:** re-allow `cargo build` for this seat, then build the input driver (`parity-capture --click/--type` plus the Chrome oracle).
 3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
+
+## 2026-09-29 23:51
+
+**Metric:** unchanged. Rung 1 is still **35/36** vs Chrome 148 (load state), last measured on develop 9f49a40. Develop is now **6e26932**: #369 (flex fix) and #370 (pseudo-element skip) landed after bf3b200. Rung 1 hasn't been re-measured on it.
+- **The re-measure is blocked a third time.** `cargo build --release -p parity-capture` still needs approval in this seat. I removed the scratch worktree js-dev-6e26932.
+- **Nothing new from you or Prometheus:** no PLAN, DESIGN or BASELINE commits since 22:55, and no answer on the input driver or on ES modules. The lane has **0 of 3 PRs open**.
+
+**PRs opened this session:** none. This is the seventh run in a row with no output.
+
+**Decisions for Pete** (unchanged; end_date is tomorrow)
+1. **Stop the hourly cron.** The exit metric is met, and this seat can't build, so it can't re-measure.
+2. **If the lane continues:** re-allow `cargo build` for this seat, then build the input driver (`parity-capture --click/--type` plus the Chrome oracle).
+3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
