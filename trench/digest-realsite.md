@@ -1268,3 +1268,21 @@ trench/realsite/runs/20260930T0910Z-quiet-devc4047ab
 1. **New: develop can break between two green PRs.** #378 and #379 were each green at their own head, but together they don't compile. That lasted ~1 h, and every lane's A/B needed a local patch. A "require branches up to date before merge" rule (or a merge queue) on develop would stop it. It's Prometheus's merge flow, so it's your call.
 2. Still open: **a quiet board slot** (release builds took 7–34 min this session at load 3–24).
 3. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+## 2026-09-30 17:05: #389 opened (CSS nesting + negative grid lines); all five of this morning's rs- PRs merged; linkedin's layered variant still 82.9% offline (a third cause, next)
+
+**Points: 29/60 -> 29/60** (no board this session; load 7-14 throughout. The 05:34 quiet board on develop c4047ab stands: loads 17 · readable 9 · looks-right 3, scorable 29/60). #374, #375, #378, #380, #382 and #384 have all MERGED (develop e1e174f).
+
+**PR (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#389 `atlas/rs-css-nesting` @ 78c3ebd** (2 commits on develop e1e174f).
+  1. **CSS nesting** (de4586a, rustkit-cssparser). It did worse than drop nested rules: the nested `}` closed the parent, and the parent's `}` then ate the NEXT rule. linkedin loses 16 nested rules plus the 16 rules after them. Nested style rules (`&`-relative and relative), and nested `@media/@supports/@layer`, now flatten in source order. `&` is expanded per parent (`.a, .b > p { & span }` -> `.a span, .b > p span`), because the matcher's `:is()` takes compounds only: an engine pin failed with `:is(complex)`. The cap is 64 selectors, after which `:is()` is kept.
+  2. **Negative grid lines** (78c3ebd, rustkit-layout, CSS Grid §8.3). `-1` counted from the implicit track count, and an `auto` end was set to start + 1 before resolving. `grid-area: 1/-1` (the grid-stack idiom) landed children in a stray column (x=96 w=96 of 288), in the flat form too. So fix 1 alone would have done nothing on linkedin.
+  - Pins: cssparser 5 (4 fail first), engine 4, layout 1 (fails first). engine 256/256 (serial rerun of 4 guard timeouts), layout 575/575 (1 font-cache flake, passes alone), cssparser 22/22. Campaign 26/26 + builtins 5/5 + ratchet **identical** vs `eef161e` (develop arm disclosed: lacks only #382 + CI-only #385).
+
+**Found:** on linkedin's saved layered variant (`scratch/li0930/li-new.html`), #389 changes the frame, but the first-viewport diff stays **82.9%**. The hero's grid-stack wrapper `div.auyip7.auya49.auyguo.auyhpk` is still **0 px tall** around a 5697 px child. The same structure in a minimal page (`scratch/s0930/gh-min.html`: grid > stacked flex column) sizes correctly, so the cause is in one of those utility classes (bisect them next). Tools: `scratch/s0930/nestcmp.py <binA> <binB>` (frame identity + `auya49` boxes), `nestdiff.py` (pixel diff vs `chrome-new.png`), `nestscan.py <file>` (lists nested CSS rules).
+
+**Next:** (1) Bisect `auyip7`/`auyguo`/`auyhpk` on the 0-px wrapper. (2) A quiet board once #389 lands. (3) facebook `rk60`/`rk67` (inputs 472 vs 502); `border-style: inset`.
+
+**Decisions for Pete:**
+1. Still open: **a quiet board slot.** No board fit this session (release builds took 13-15 min at load 11-14).
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop (the nesting file shows pre-existing fmt hunks, so I left formatting alone).
