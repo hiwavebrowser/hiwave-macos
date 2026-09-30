@@ -1,0 +1,59 @@
+name: Develop Compile
+
+# Every merge to develop must leave it compiling.
+#
+# PR CI (Parity Gate) builds each PR against develop as it was at the PR's
+# last push. Two PRs that are each green can still break develop together:
+# on 2026-09-30 #378 and #379 did exactly that (E0382, lib.rs), and develop
+# failed to build for ~75 minutes because nothing builds develop itself after
+# a merge. This job closes that gap: F1's compile check, on every push to
+# develop. On failure it opens (or comments on) one `develop-broken` issue so
+# the merge seat sees it on its next tick instead of the next lane that
+# branches from a broken base.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: develop-compile
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  compile:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: All test targets must COMPILE on develop
+        run: cargo test --workspace --no-run
+
+      - name: Flag develop-broken
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body="develop ${GITHUB_SHA} does not compile. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          gh label create develop-broken --color B60205 --force >/dev/null 2>&1 || true
+          open=$(gh issue list --label develop-broken --state open --json number --jq '.[0].number')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --label develop-broken --title "develop does not compile" --body "$body"
+          fi
+
+      - name: Close develop-broken
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for n in $(gh issue list --label develop-broken --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "develop ${GITHUB_SHA} compiles again."
+          done
