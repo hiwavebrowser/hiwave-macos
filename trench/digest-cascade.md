@@ -708,3 +708,27 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Ratio of record = 19.0× (quiet develop 9f49a40, wikipedia, 20:42 today).** This replaces both 24.0× and 33.4×. Default: yes.
 2. **Flip `RUSTKIT_INCREMENTAL_RESTYLE` on by default after one flag-on board run** (carried over). Default: this lane runs the board in the next quiet window.
 3. (Carried over) Approve the pinned-snapshot method change.
+
+## 2026-09-29 23:30
+
+**#365 and #368 both merged (develop bf3b200). PR #370 opened: a pseudo-element's style is skipped unless a matched rule declares `content`. Over 9 pooled pairs, wikipedia B/A is 0.82 and all 26 receipt cases are pixel-identical. No absolute read this session: load was 5–23 throughout. The ratio of record is still 19.0×.**
+
+| site | Chrome ms | ratio of record (quiet develop 9f49a40, 20:42) | #370 B/A vs 6692952, round 1 (4 pairs, load 6–11) | round 2 (5 pairs, load 5–9) | pooled, 9 pairs |
+|---|---|---|---|---|---|
+| cnn | 210 | 781 ms → 3.7× | 0.99 | 1.10 | 1.06 (noise: A alone ranged 581–1133 ms) |
+| github | 110 | 1286 ms → 11.7× | 0.84 | 0.97 | 0.94 |
+| wikipedia | 20 | 379 ms → **19.0×** (worst) | **0.79** | **0.95** | **0.82** |
+
+- **PR #370** `atlas/cs-pseudo-skip` @ **4b7be53** on develop bf3b200. Only a `content` declaration can make `ComputedStyle.content` Some, and without `content` there is no pseudo box. So when no matched `::before`/`::after` rule declares `content`, the function returns None before `ComputedStyle::new`. That covers no match at all, and a match on only the `*::before, *::after { box-sizing }` reset. In the 9f49a40 profile, the style's construction and drop were ~21% of `pseudo_element_style`, which is ~13% of the cascade. The single-colon `replace` allocation also moves off the indexed path.
+  - Tests: engine (headless) 287/287, including a new indexed and unindexed test (reset-only → None; lower-specificity `content` still makes the box; `content: none` still cancels it).
+  - Receipt: 26/26, avg 1.2%, **diffPixels identical on all 26** to #368's receipt.
+  - The A binary was the #368 head (6692952), not bf3b200. The merges between them (#366 flex, #367 JS) don't touch the cascade.
+- **Next target (from the same profile):** attribute selectors are parsed from strings at match time. `match_attribute_selector` (7.9%) plus `attr_selector_name` (3.3%) plus `str::find`/`StrSearcher::new` (~10%, mostly under those two) make up ~15–20% of `compute_style_for_element` on wikipedia. The fix is to pre-parse each `[name op value]` once into the prepared compound when the rule index is built. That's exact, and a test can prove it matches the string path.
+- **Build cost:** release parity-capture took 25 min at load ~15. Saved binary: `cascade-target/pc-pss-4b7be53`.
+- **Open cs PRs:** 1 (#370), cap 3.
+- **Next session:** (1) watch #370. (2) Pre-parsed attribute selectors on a new `atlas/cs-` branch. (3) In a quiet window: an absolute read of develop bf3b200 (the first with #365 and #368), then the flag-on board run for the `RUSTKIT_INCREMENTAL_RESTYLE` flip.
+
+**Decisions for Pete**
+1. **Ratio of record = 19.0×** (quiet develop 9f49a40, carried over). Default: yes.
+2. **Flip `RUSTKIT_INCREMENTAL_RESTYLE` on by default after one flag-on board run** (carried over). Default: this lane runs it in the next quiet window.
+3. **Quiet windows are still rare (none this session).** A nightly quiet slot for absolute reads, e.g. 04:00 right before the 04:30 quiet board, would unblock both 1 and 2. Default: no change.
