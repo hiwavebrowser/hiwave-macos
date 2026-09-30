@@ -3366,7 +3366,7 @@ impl Engine {
         node: &Rc<Node>,
         stylesheets: &[Stylesheet],
         css_vars: &HashMap<String, String>,
-        ancestors: &[(String, Vec<String>, Option<String>)],
+        ancestors: &[Ancestor],
     ) -> LayoutBox {
         self.build_layout_from_parent_style_and_path(
             node,
@@ -3410,7 +3410,7 @@ impl Engine {
         node: &Rc<Node>,
         stylesheets: &[Stylesheet],
         css_vars: &HashMap<String, String>,
-        ancestors: &[(String, Vec<String>, Option<String>)],
+        ancestors: &[Ancestor],
         parent_style: Option<&ComputedStyle>,
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
@@ -4025,7 +4025,8 @@ impl Engine {
                     .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
                     .unwrap_or_default();
                 let id = attributes.get("id").cloned();
-                let mut child_ancestors = vec![(tag_lower.clone(), classes, id)];
+                let mut child_ancestors: Vec<Ancestor> = Vec::with_capacity(ancestors.len() + 1);
+                child_ancestors.push(Rc::new((tag_lower.clone(), classes, id)));
                 child_ancestors.extend(ancestors.iter().cloned());
 
                 // Check for ::before pseudo-element
@@ -4364,7 +4365,7 @@ impl Engine {
         attributes: &std::collections::HashMap<String, String>,
         stylesheets: &[Stylesheet],
         _css_vars: &HashMap<String, String>,
-        ancestors: &[(String, Vec<String>, Option<String>)],
+        ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
         pseudo: &str,
@@ -4390,7 +4391,7 @@ impl Engine {
         tag_name: &str,
         attributes: &std::collections::HashMap<String, String>,
         stylesheets: &[Stylesheet],
-        ancestors: &[(String, Vec<String>, Option<String>)],
+        ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
         pseudo: &str,
@@ -4539,7 +4540,7 @@ impl Engine {
         attributes: &std::collections::HashMap<String, String>,
         stylesheets: &[Stylesheet],
         css_vars: &HashMap<String, String>,
-        ancestors: &[(String, Vec<String>, Option<String>)],
+        ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
         parent_style: Option<&ComputedStyle>,
@@ -8159,7 +8160,11 @@ impl SelectorMatcher {
             let NodeType::Element { tag_name, attributes, .. } = &n.node_type else {
                 break;
             };
-            ancestors.push((tag_name.to_lowercase(), classes(attributes), attributes.get("id").cloned()));
+            ancestors.push(Rc::new((
+                tag_name.to_lowercase(),
+                classes(attributes),
+                attributes.get("id").cloned(),
+            )));
             current = n.parent();
         }
 
@@ -8207,7 +8212,7 @@ impl SelectorMatcher {
         selector: &str,
         tag_name: &str,
         attributes: &HashMap<String, String>,
-        ancestors: &[(String, Vec<String>, Option<String>)],
+        ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
     ) -> bool {
@@ -8229,7 +8234,7 @@ impl SelectorMatcher {
         prepared: &PreparedSelector,
         tag_name: &str,
         attributes: &HashMap<String, String>,
-        ancestors: &[(String, Vec<String>, Option<String>)],
+        ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
     ) -> bool {
@@ -8280,9 +8285,8 @@ impl SelectorMatcher {
                     // Descendant combinator: some ancestor (from current position) must match
                     let mut found = false;
                     let mut found_idx = ancestor_idx;
-                    for (idx, (anc_tag, anc_classes, anc_id)) in
-                        ancestors.iter().enumerate().skip(ancestor_idx)
-                    {
+                    for (idx, anc) in ancestors.iter().enumerate().skip(ancestor_idx) {
+                        let (anc_tag, anc_classes, anc_id) = &**anc;
                         if compound.matches(anc_tag, anc_classes, anc_id.as_ref()) {
                             found = true;
                             found_idx = idx + 1; // Next position after this ancestor
@@ -8297,7 +8301,7 @@ impl SelectorMatcher {
                 ">" => {
                     // Child combinator: immediate parent (at current position) must match
                     if let Some((parent_tag, parent_classes, parent_id)) =
-                        ancestors.get(ancestor_idx)
+                        ancestors.get(ancestor_idx).map(|a| &**a)
                     {
                         if !compound.matches(parent_tag, parent_classes, parent_id.as_ref()) {
                             return false;
@@ -9219,7 +9223,7 @@ impl SelectorMatcher {
         whole: (usize, usize, usize),
         tag_name: &str,
         attributes: &HashMap<String, String>,
-        ancestors: &[(String, Vec<String>, Option<String>)],
+        ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
     ) -> Option<(usize, usize, usize)> {
@@ -17911,12 +17915,12 @@ mod rule_prefilter_tests {
             .collect()
     }
 
-    fn ancestor(tag: &str, classes: &[&str], id: Option<&str>) -> (String, Vec<String>, Option<String>) {
-        (
+    fn ancestor(tag: &str, classes: &[&str], id: Option<&str>) -> Ancestor {
+        Rc::new((
             tag.to_string(),
             classes.iter().map(|c| c.to_string()).collect(),
             id.map(str::to_string),
-        )
+        ))
     }
 
     #[test]
@@ -17974,7 +17978,7 @@ mod rule_prefilter_tests {
             ".t",
             "main .t, .missing .t",
         ];
-        let run = |s: &str, chain: &[(String, Vec<String>, Option<String>)]| {
+        let run = |s: &str, chain: &[Ancestor]| {
             SelectorMatcher.selector_matches(s, "p", &t, chain, &[], SiblingContext::SOLE)
         };
         for chain in [&chain[..], &chain[1..], &[]] {
@@ -18087,7 +18091,10 @@ mod rule_prefilter_tests {
         ];
         let prev: Vec<SiblingKey> = [ancestor("p", &["lead"], None), ancestor("hr", &[], Some("rule"))]
             .into_iter()
-            .map(|(t, c, id)| (t, c, id, ElementState::default()))
+            .map(|a| {
+                let (t, c, id) = (*a).clone();
+                (t, c, id, ElementState::default())
+            })
             .collect();
         let cases: &[(&str, bool)] = &[
             ("section .t", true),
@@ -18361,11 +18368,11 @@ mod rule_prefilter_tests {
         let sheet = Stylesheet::parse(css).expect("css");
         let sheets = std::slice::from_ref(&sheet);
         let engine = Engine::new(EngineConfig::default()).expect("engine");
-        let li = |c: &str| ("li".to_string(), vec![c.to_string()], None::<String>);
-        let ancestors_sets: [Vec<(String, Vec<String>, Option<String>)>; 3] = [
+        let li = |c: &str| Rc::new(("li".to_string(), vec![c.to_string()], None::<String>));
+        let ancestors_sets: [Vec<Ancestor>; 3] = [
             vec![],
-            vec![("ul".to_string(), vec![], None), ("nav".to_string(), vec![], None)],
-            vec![li("b"), ("ol".to_string(), vec![], None)],
+            vec![Rc::new(("ul".to_string(), vec![], None)), Rc::new(("nav".to_string(), vec![], None))],
+            vec![li("b"), Rc::new(("ol".to_string(), vec![], None))],
         ];
         let elements = [
             ("div", attrs(&[("class", "a")])),
@@ -18595,9 +18602,8 @@ mod rule_prefilter_tests {
         let sheets = std::slice::from_ref(&sheet);
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
-        let section: Vec<(String, Vec<String>, Option<String>)> =
-            vec![("section".to_string(), vec![], None)];
-        let hosts: Vec<(&str, HashMap<String, String>, &[(String, Vec<String>, Option<String>)])> = vec![
+        let section: Vec<Ancestor> = vec![Rc::new(("section".to_string(), vec![], None))];
+        let hosts: Vec<(&str, HashMap<String, String>, &[Ancestor])> = vec![
             ("div", attrs(&[("class", "card wide"), ("id", "main")]), &section),
             ("div", attrs(&[("class", "card")]), &[]),
             ("p", attrs(&[("data-x", "1")]), &section),
@@ -18605,7 +18611,7 @@ mod rule_prefilter_tests {
             ("html", attrs(&[]), &[]),
             ("em", attrs(&[("class", "other")]), &[]),
         ];
-        let pseudo = |host: &(&str, HashMap<String, String>, &[(String, Vec<String>, Option<String>)]),
+        let pseudo = |host: &(&str, HashMap<String, String>, &[Ancestor]),
                       which: &str| {
             engine
                 .create_pseudo_element(
@@ -18653,7 +18659,7 @@ mod rule_prefilter_tests {
         let sheets = std::slice::from_ref(&sheet);
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
-        let ancestors = vec![("section".to_string(), vec![], None)];
+        let ancestors: Vec<Ancestor> = vec![Rc::new(("section".to_string(), vec![], None))];
         let elements = [
             ("div", attrs(&[("class", "card wide"), ("id", "main"), ("data-x", "1")])),
             ("div", attrs(&[("class", "card")])),
@@ -18792,7 +18798,7 @@ mod rule_prefilter_tests {
         let sheets = std::slice::from_ref(&sheet);
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
-        let ancestors = vec![("section".to_string(), vec![], None)];
+        let ancestors: Vec<Ancestor> = vec![Rc::new(("section".to_string(), vec![], None))];
         let elements = [
             ("html", attrs(&[("data-theme", "t"), ("data-mode", "dark")])),
             ("div", attrs(&[("class", "card wide"), ("data-x", "1")])),
@@ -18844,10 +18850,10 @@ mod rule_prefilter_tests {
             ("html", attrs(&[])),
             ("span", attrs(&[("id", "main.a")])),
         ];
-        let ancestors = vec![
-            ("section".to_string(), vec!["a".to_string()], None),
-            ("body".to_string(), vec![], None),
-            ("html".to_string(), vec![], None),
+        let ancestors: Vec<Ancestor> = vec![
+            Rc::new(("section".to_string(), vec!["a".to_string()], None)),
+            Rc::new(("body".to_string(), vec![], None)),
+            Rc::new(("html".to_string(), vec![], None)),
         ];
         let siblings = vec![("section".to_string(), vec![], None, ElementState::default())];
         for sel in selectors {
@@ -19699,6 +19705,13 @@ fn ancestor_compound_keys(compound: &AncestorCompound, out: &mut Vec<u32>) {
     out.extend(compound.id.iter().map(|id| ancestor_key_hash(b'#', id)));
 }
 
+/// One ancestor as the selector matcher sees it: lowercased tag, classes, id.
+type AncestorKey = (String, Vec<String>, Option<String>);
+
+/// Chains share their entries, so building a child's chain (`ancestors[0]`
+/// is the parent) copies one pointer per level instead of every string.
+type Ancestor = Rc<AncestorKey>;
+
 /// A Bloom filter over the tags, classes and ids of one element's
 /// ancestors (Blink's ancestor filter, our own code). A descendant/child
 /// selector whose ancestor compounds need a key no ancestor carries cannot
@@ -19709,9 +19722,10 @@ struct AncestorFilter {
 }
 
 impl AncestorFilter {
-    fn of(ancestors: &[(String, Vec<String>, Option<String>)]) -> Self {
+    fn of(ancestors: &[Ancestor]) -> Self {
         let mut f = AncestorFilter { bits: [0; 16] };
-        for (tag, classes, id) in ancestors {
+        for a in ancestors {
+            let (tag, classes, id) = &**a;
             f.insert(ancestor_key_hash(b'<', tag));
             for c in classes {
                 f.insert(ancestor_key_hash(b'.', c));
@@ -19754,7 +19768,7 @@ thread_local! {
 struct AncestorFilterScope(Option<(usize, usize, AncestorFilter)>);
 
 impl AncestorFilterScope {
-    fn install(ancestors: &[(String, Vec<String>, Option<String>)]) -> Self {
+    fn install(ancestors: &[Ancestor]) -> Self {
         let entry = (ancestors.as_ptr() as usize, ancestors.len(), AncestorFilter::of(ancestors));
         AncestorFilterScope(ANCESTOR_FILTER.with(|c| c.replace(Some(entry))))
     }
@@ -19769,7 +19783,7 @@ impl Drop for AncestorFilterScope {
 
 /// False only when a filter is installed for exactly `ancestors` and it
 /// lacks one of `keys`. With no filter for this slice, it always says true.
-fn ancestor_filter_admits(ancestors: &[(String, Vec<String>, Option<String>)], keys: &[u32]) -> bool {
+fn ancestor_filter_admits(ancestors: &[Ancestor], keys: &[u32]) -> bool {
     ANCESTOR_FILTER.with(|c| match &*c.borrow() {
         Some((ptr, len, f)) if *ptr == ancestors.as_ptr() as usize && *len == ancestors.len() => {
             keys.iter().all(|&k| f.may_contain(k))
@@ -20916,9 +20930,9 @@ mod windows_engine_pins {
             .count()
     }
 
-    fn anc(tag: &str, class: &str) -> (String, Vec<String>, Option<String>) {
+    fn anc(tag: &str, class: &str) -> Ancestor {
         let classes = if class.is_empty() { vec![] } else { vec![class.to_string()] };
-        (tag.to_string(), classes, None)
+        Rc::new((tag.to_string(), classes, None))
     }
 
     // ── border-radius reaches paint (#75) ──
@@ -21040,7 +21054,7 @@ mod windows_engine_pins {
     fn a_descendant_selector_requires_the_ancestor() {
         let attrs = HashMap::new();
         let inside = [anc("div", "hero")];
-        let outside: [(String, Vec<String>, Option<String>); 0] = [];
+        let outside: [Ancestor; 0] = [];
         assert!(SelectorMatcher.selector_matches(".hero p", "p", &attrs, &inside, &[], SiblingContext::SOLE));
         assert!(
             !SelectorMatcher.selector_matches(".hero p", "p", &attrs, &outside, &[], SiblingContext::SOLE),
