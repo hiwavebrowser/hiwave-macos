@@ -511,6 +511,31 @@ fn layout_flex_container_at(
     // Sort by order property
     items.sort_by_key(|item| item.order);
 
+    // css-flexbox-1 §9.2 step 4: an auto-height column is sized by its
+    // content, so it has no free space to grow or shrink its items into
+    // beyond its `min-height` floor. `container_box.content.height` is not
+    // that content: for a nested column, step 11 of the PARENT hands over the
+    // size the parent resolved from its own first guesses. facebook's shell
+    // is five `flex-grow: 1` columns around a `flex: 1 1 0` item beside a
+    // footer column. The parent shrank both items' 18px line-height guesses
+    // into its 2px pre-pass stack; each nested column then took the shrunk 1px
+    // as its main size, grew its basis-0 item into it, and reported that back
+    // as laid-out content, so step 11d could never correct it. Chrome 148
+    // keeps them all 0 tall.
+    let container_main_size = if main_axis == Axis::Vertical
+        && style_definite_inner_main.is_none()
+        && inset_used_main.is_none()
+    {
+        let n = items.len().saturating_sub(1) as f32;
+        let sum: f32 = items
+            .iter()
+            .map(|i| i.outer_hypothetical_main_size())
+            .sum();
+        (sum + main_gap * n).max(style_min_inner_main)
+    } else {
+        container_main_size
+    };
+
     // 3. Collect items into flex lines
     let wrap = style.flex_wrap;
     let mut lines = collect_flex_lines(items, container_main_size, main_gap, wrap);
@@ -987,10 +1012,10 @@ fn layout_flex_container_at(
                 // margin-bottom 2rem, next section margin-top 3rem) measured
                 // 746 for its flowed 714, and the 32 landed as empty space
                 // under the last child.
-                let laid_out: f32 = item.layout_box.dimensions.content.height;
-                if laid_out <= 0.0 {
-                    continue;
-                }
+                // 0 is a measurement too: step 11 laid this item out, and a
+                // column of grow wrappers around an empty basis-0 item is
+                // 0 tall in Chrome 148, not the 18px line-height guess.
+                let laid_out: f32 = item.layout_box.dimensions.content.height.max(0.0);
                 let new_hyp = (laid_out + item.main_pb())
                     .max(item.min_main_size)
                     .min(item.max_main_size);
@@ -2589,6 +2614,11 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
                         crate::resolve_line_height(style, font_size)
                     }
                 }
+                // An item with no children has no line box, so its content
+                // height is 0 (Chrome 148), as on the cross axis. Step 11d
+                // skips childless items, so the guess would stand: a UA `<hr>`
+                // in an auto-height column came out 19 tall instead of 2.
+                Axis::Vertical if layout_box.children.is_empty() => 0.0,
                 Axis::Vertical => crate::resolve_line_height(style, font_size),
             }
         }

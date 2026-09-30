@@ -23613,3 +23613,109 @@ mod flex_empty_item_cross_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod flex_indefinite_column_grow_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.set_viewport(1280.0, 800.0);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.set_viewport(1280.0, 800.0);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    #[test]
+    fn nested_grow_columns_in_an_auto_height_column_stay_at_their_content() {
+        // facebook's page shell, reduced: grow wrappers around a basis-0 item
+        // inside an auto-height column have no free space to grow into, so
+        // Chrome 148 keeps them 0 tall and the sibling starts at y=0.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><style>.c{display:flex;flex-direction:column}"#,
+            r#".g{flex-grow:1}</style><div id="o" class="c"><div id="p" class="c g">"#,
+            r#"<div id="a" class="c g"><div id="b" class="c g"><div id="c" class="c g">"#,
+            r#"<div id="d" class="c g"><div id="i" class="g" style="flex-basis:0">"#,
+            r#"<div style="background:red"></div></div></div></div></div></div>"#,
+            r#"<div class="c"><div><div id="s" style="height:2px"></div></div></div>"#,
+            r#"</div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "a").height, 0.0);
+            assert_eq!(rect(&root, "i").height, 0.0);
+            assert_eq!(rect(&root, "s").y, 0.0);
+            assert_eq!(rect(&root, "p").height, 2.0);
+        }
+    }
+
+    #[test]
+    fn a_content_sized_column_item_takes_its_content_height() {
+        // The sibling of the grow wrappers: a block holding a 30px child is
+        // 30 tall, and the auto-height column around both is their sum.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div id="o" style="display:flex;flex-direction:column">"#,
+            r#"<div id="a"><div style="height:30px"></div></div>"#,
+            r#"<div id="b"><div style="height:12px"></div></div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "a").height, 30.0);
+            assert_eq!(rect(&root, "b").y, 30.0);
+            assert_eq!(rect(&root, "o").height, 42.0);
+        }
+    }
+
+    #[test]
+    fn an_empty_column_item_is_only_its_borders_tall() {
+        // A childless item has no line box: a 1px-bordered empty block in an
+        // auto-height column is 2 tall, as Chrome 148 lays out a UA `<hr>`.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div id="o" style="display:flex;flex-direction:column">"#,
+            r#"<div id="e" style="border:1px solid gray"></div>"#,
+            r#"<div id="f" style="height:5px"></div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "e").height, 2.0);
+            assert_eq!(rect(&root, "f").y, 2.0);
+            assert_eq!(rect(&root, "o").height, 7.0);
+        }
+    }
+
+    #[test]
+    fn grow_wrappers_still_fill_a_min_height_column() {
+        // Guard: the `min-height` floor is free space the grow items take.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><style>.c{display:flex;flex-direction:column}"#,
+            r#".g{flex-grow:1}</style><div class="c" style="min-height:300px">"#,
+            r#"<div id="a" class="c g"><div id="i" class="g" style="flex-basis:0">"#,
+            r#"<div style="background:red"></div></div></div>"#,
+            r#"<div id="f" style="height:20px"></div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "a").height, 280.0);
+            assert_eq!(rect(&root, "i").height, 280.0);
+            assert_eq!(rect(&root, "f").y, 280.0);
+        }
+    }
+}
