@@ -170,6 +170,37 @@ pub struct CachedTexture {
     pub height: u32,
 }
 
+/// Shrink an RGBA image so neither side exceeds `limit`, keeping its aspect.
+/// Box filter: each output pixel is the mean of the source pixels it covers.
+/// Returns `(width, height, pixels)`.
+pub(crate) fn downscale_rgba_to_fit(width: u32, height: u32, data: &[u8], limit: u32) -> (u32, u32, Vec<u8>) {
+    let limit = limit.max(1);
+    let scale = (limit as f64 / width as f64).min(limit as f64 / height as f64).min(1.0);
+    let out_w = ((width as f64 * scale).floor() as u32).clamp(1, limit);
+    let out_h = ((height as f64 * scale).floor() as u32).clamp(1, limit);
+    let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
+    for oy in 0..out_h {
+        let y0 = (oy as u64 * height as u64 / out_h as u64) as u32;
+        let y1 = (((oy + 1) as u64 * height as u64 / out_h as u64) as u32).max(y0 + 1).min(height);
+        for ox in 0..out_w {
+            let x0 = (ox as u64 * width as u64 / out_w as u64) as u32;
+            let x1 = (((ox + 1) as u64 * width as u64 / out_w as u64) as u32).max(x0 + 1).min(width);
+            let mut acc = [0u64; 4];
+            for y in y0..y1 {
+                let row = (y as usize * width as usize + x0 as usize) * 4;
+                for px in data[row..row + (x1 - x0) as usize * 4].chunks_exact(4) {
+                    for c in 0..4 {
+                        acc[c] += px[c] as u64;
+                    }
+                }
+            }
+            let n = ((y1 - y0) as u64 * (x1 - x0) as u64).max(1);
+            out.extend(acc.iter().map(|&v| ((v + n / 2) / n) as u8));
+        }
+    }
+    (out_w, out_h, out)
+}
+
 /// Texture cache for images.
 pub struct TextureCache {
     textures: HashMap<String, CachedTexture>,
@@ -208,11 +239,27 @@ impl TextureCache {
         data: &[u8],
     ) -> &CachedTexture {
         if !self.textures.contains_key(key) {
+            // An image larger than the device allows in either direction
+            // (8192 under wgpu's default limits; hulu ships an 11501 px
+            // sprite) is downscaled to fit. `create_texture` would otherwise
+            // raise a validation error that takes the whole page down. The
+            // cache entry keeps the intrinsic size: background sizing reads
+            // it, and drawing samples by UV so the smaller texture is
+            // stretched back over the same rect.
+            let limit = device.limits().max_texture_dimension_2d;
+            let scaled;
+            let (tex_w, tex_h, data) = if width > limit || height > limit {
+                let (w, h, px) = downscale_rgba_to_fit(width, height, data, limit);
+                scaled = px;
+                (w, h, scaled.as_slice())
+            } else {
+                (width, height, data)
+            };
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(key),
                 size: wgpu::Extent3d {
-                    width,
-                    height,
+                    width: tex_w,
+                    height: tex_h,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -237,12 +284,12 @@ impl TextureCache {
                 data,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * width),
-                    rows_per_image: Some(height),
+                    bytes_per_row: Some(4 * tex_w),
+                    rows_per_image: Some(tex_h),
                 },
                 wgpu::Extent3d {
-                    width,
-                    height,
+                    width: tex_w,
+                    height: tex_h,
                     depth_or_array_layers: 1,
                 },
             );
@@ -6393,6 +6440,32 @@ fn multiply_matrices_2d(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_oversized_image_is_downscaled_to_the_limit_keeping_its_aspect() {
+        // 20x10 solid red, limit 8: longest side becomes 8, the other 4.
+        let data = vec![255u8, 0, 0, 255].repeat(20 * 10);
+        let (w, h, px) = super::downscale_rgba_to_fit(20, 10, &data, 8);
+        assert_eq!((w, h), (8, 4));
+        assert_eq!(px.len(), 8 * 4 * 4);
+        assert!(px.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn downscaling_averages_the_source_pixels_it_covers() {
+        // 2x1: black and white, to 1x1: mid grey.
+        let data = vec![0, 0, 0, 255, 255, 255, 255, 255];
+        let (w, h, px) = super::downscale_rgba_to_fit(2, 1, &data, 1);
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(px, vec![128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn an_image_within_the_limit_is_left_alone() {
+        let data = vec![7u8; 3 * 2 * 4];
+        let (w, h, px) = super::downscale_rgba_to_fit(3, 2, &data, 8);
+        assert_eq!((w, h, px), (3, 2, data));
+    }
+
     use super::*;
 
     // ==================== Transform origin (n48) ====================

@@ -9497,11 +9497,20 @@ impl SelectorMatcher {
         let mut classes = 0; // (b)
         let mut tags = 0; // (c)
 
-        // Handle comma-separated selectors - take max specificity
-        if selector.contains(',') {
+        // A selector list takes the specificity of its most specific member.
+        // Split on top-level commas only: `:is( a, b)` is one member, and a
+        // plain `split(',')` cut it into `:is( a` and `b)`. Then the
+        // whitespace split below severed `:is(` from its argument, and the
+        // functional-pseudo-class branch sliced an inverted range and
+        // panicked. Five of the top-80 live sites (nytimes, hbo, uber,
+        // caranddriver, salesforce) put whitespace or newlines inside `:is()`.
+        // Only a list of two or more members recurses: a lone `:is(a, b)`
+        // splits to itself and would recurse without end.
+        let members = SelectorMatcher::split_top_level_commas(selector);
+        if members.len() > 1 {
             let mut max_spec = (0, 0, 0);
-            for part in selector.split(',') {
-                let spec = SelectorMatcher.selector_specificity(part.trim());
+            for part in members {
+                let spec = SelectorMatcher.selector_specificity(part);
                 if spec > max_spec {
                     max_spec = spec;
                 }
@@ -9509,14 +9518,12 @@ impl SelectorMatcher {
             return max_spec;
         }
 
-        // Process each part of the selector (space-separated for descendants)
-        for part in selector.split_whitespace() {
-            // Skip combinators
-            if part == ">" || part == "+" || part == "~" {
-                continue;
-            }
-
-            let chars: Vec<char> = part.chars().collect();
+        // Walk the whole member. Whitespace and the combinators fall through
+        // the `_` arm, and the functional pseudo-class arms consume their
+        // parenthesised argument whole, whitespace included, so no
+        // pre-splitting on whitespace is needed (or safe).
+        {
+            let chars: Vec<char> = selector.chars().collect();
             let mut i = 0;
 
             while i < chars.len() {
@@ -9597,8 +9604,11 @@ impl SelectorMatcher {
                                         }
                                         i += 1;
                                     }
-                                    let arg: String =
-                                        chars[arg_start..i.saturating_sub(1)].iter().collect();
+                                    // An unclosed `:is(` ends the walk at
+                                    // `i == arg_start`; the range must not
+                                    // run backwards.
+                                    let arg_end = i.saturating_sub(1).max(arg_start);
+                                    let arg: String = chars[arg_start..arg_end].iter().collect();
                                     let (a, b, c) = SelectorMatcher.selector_specificity(&arg);
                                     ids += a;
                                     classes += b;
@@ -15617,6 +15627,34 @@ mod tests {
             id_spec > multi_class_spec,
             "ID should beat multiple classes"
         );
+    }
+
+    #[test]
+    fn specificity_of_is_and_not_with_whitespace_inside_the_parens() {
+        // nytimes: newlines inside `:is(...)`. The old splitter cut on the
+        // comma inside the parens, then on the whitespace, and panicked on
+        // the `:is(` fragment.
+        assert_eq!(SelectorMatcher.selector_specificity(":is( a, b)"), (0, 0, 1));
+        assert_eq!(SelectorMatcher.selector_specificity(":is(
+  #a,
+  .b
+) c"), (1, 0, 1));
+        assert_eq!(SelectorMatcher.selector_specificity(":not( .x )"), (0, 1, 0));
+        assert_eq!(SelectorMatcher.selector_specificity(":where( #a, .b )"), (0, 0, 0));
+        // Descendants and combinators still count, with any spacing.
+        assert_eq!(SelectorMatcher.selector_specificity("div  >  .a ~ #b"), (1, 1, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("ul li a"), (0, 0, 3));
+        // A list still takes its most specific member, split at the top level.
+        assert_eq!(SelectorMatcher.selector_specificity(":is(a, b), #c"), (1, 0, 0));
+    }
+
+    #[test]
+    fn an_unclosed_functional_pseudo_class_does_not_panic() {
+        // Malformed input must not take the whole page down.
+        assert_eq!(SelectorMatcher.selector_specificity(":is("), (0, 0, 0));
+        assert_eq!(SelectorMatcher.selector_specificity(":not("), (0, 0, 0));
+        // The unclosed argument is dropped, not counted; only the `a` remains.
+        assert_eq!(SelectorMatcher.selector_specificity("a :is( b"), (0, 0, 1));
     }
 }
 
