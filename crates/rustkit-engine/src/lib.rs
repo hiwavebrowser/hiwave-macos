@@ -17940,6 +17940,43 @@ mod rule_prefilter_tests {
     }
 
     #[test]
+    fn the_shared_ancestor_filter_equals_one_built_from_scratch() {
+        // The order a tree walk styles chains in: descend, siblings, back
+        // up, a new branch, plus chains with equal content but new entries
+        // and one entry repeated.
+        let html = ancestor("html", &[], None);
+        let body = ancestor("body", &["b"], None);
+        let main = ancestor("main", &["page"], Some("app"));
+        let nav = ancestor("nav", &["top", "x"], None);
+        let card = ancestor("div", &["card"], None);
+        let chains: Vec<Vec<Ancestor>> = vec![
+            vec![],
+            vec![html.clone()],
+            vec![body.clone(), html.clone()],
+            vec![main.clone(), body.clone(), html.clone()],
+            vec![card.clone(), main.clone(), body.clone(), html.clone()],
+            vec![card.clone(), main.clone(), body.clone(), html.clone()],
+            vec![main.clone(), body.clone(), html.clone()],
+            vec![nav.clone(), body.clone(), html.clone()],
+            vec![ancestor("nav", &["top", "x"], None), body.clone(), html.clone()],
+            vec![card.clone(), nav.clone(), body.clone(), html.clone()],
+            vec![body.clone(), ancestor("html", &["other"], None)],
+            vec![card.clone(); 3],
+            vec![html.clone()],
+            vec![],
+            vec![card.clone(), main.clone(), body.clone(), html.clone()],
+        ];
+        for chain in &chains {
+            assert_eq!(
+                AncestorFilter::of_shared(chain).bits,
+                AncestorFilter::of(chain).bits,
+                "chain of {}",
+                chain.len()
+            );
+        }
+    }
+
+    #[test]
     fn the_ancestor_filter_rejects_only_what_the_walk_rejects() {
         // Nearest ancestor first, as the cascade passes them.
         let chain = vec![
@@ -19716,16 +19753,50 @@ impl AncestorFilter {
     fn of(ancestors: &[Ancestor]) -> Self {
         let mut f = AncestorFilter { bits: [0; 16] };
         for a in ancestors {
-            let (tag, classes, id) = &**a;
-            f.insert(ancestor_key_hash(b'<', tag));
-            for c in classes {
-                f.insert(ancestor_key_hash(b'.', c));
-            }
-            if let Some(id) = id {
-                f.insert(ancestor_key_hash(b'#', id));
-            }
+            f.insert_ancestor(a);
         }
         f
+    }
+
+    /// [`AncestorFilter::of`], reusing the filters of the chain styled just
+    /// before. A tree walk styles chains that share their root-side entries
+    /// (siblings share the whole chain, a child adds one entry), so only the
+    /// entries that differ get hashed. Levels match by `Rc::ptr_eq`, and
+    /// [`FILTER_LEVELS`] holds its entries strongly, so an equal pointer is
+    /// the same immutable entry: the result is always `of(ancestors)`.
+    fn of_shared(ancestors: &[Ancestor]) -> Self {
+        FILTER_LEVELS.with(|levels| {
+            let mut levels = levels.borrow_mut();
+            let n = ancestors.len();
+            // levels[k] covers the chain's k+1 root-most entries.
+            let mut kept = 0;
+            while kept < n.min(levels.len()) && Rc::ptr_eq(&levels[kept].0, &ancestors[n - 1 - kept]) {
+                kept += 1;
+            }
+            levels.truncate(kept);
+            for k in kept..n {
+                let a = &ancestors[n - 1 - k];
+                let mut f = match levels.last() {
+                    Some((_, f)) => AncestorFilter { bits: f.bits },
+                    None => AncestorFilter { bits: [0; 16] },
+                };
+                f.insert_ancestor(a);
+                levels.push((Rc::clone(a), f));
+            }
+            let bits = n.checked_sub(1).map_or([0; 16], |top| levels[top].1.bits);
+            AncestorFilter { bits }
+        })
+    }
+
+    fn insert_ancestor(&mut self, a: &Ancestor) {
+        let (tag, classes, id) = &**a;
+        self.insert(ancestor_key_hash(b'<', tag));
+        for c in classes {
+            self.insert(ancestor_key_hash(b'.', c));
+        }
+        if let Some(id) = id {
+            self.insert(ancestor_key_hash(b'#', id));
+        }
     }
 
     fn bit_indices(h: u32) -> [u32; 2] {
@@ -19750,6 +19821,12 @@ thread_local! {
     /// of the ancestor slice it was built from.
     static ANCESTOR_FILTER: std::cell::RefCell<Option<(usize, usize, AncestorFilter)>> =
         const { std::cell::RefCell::new(None) };
+
+    /// [`AncestorFilter::of_shared`]'s memo: per level, root-most first, the
+    /// entry at that level of the last chain styled and the filter of that
+    /// entry plus everything above it.
+    static FILTER_LEVELS: std::cell::RefCell<Vec<(Ancestor, AncestorFilter)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Installs the [`AncestorFilter`] of one ancestor slice while one element
@@ -19760,7 +19837,7 @@ struct AncestorFilterScope(Option<(usize, usize, AncestorFilter)>);
 
 impl AncestorFilterScope {
     fn install(ancestors: &[Ancestor]) -> Self {
-        let entry = (ancestors.as_ptr() as usize, ancestors.len(), AncestorFilter::of(ancestors));
+        let entry = (ancestors.as_ptr() as usize, ancestors.len(), AncestorFilter::of_shared(ancestors));
         AncestorFilterScope(ANCESTOR_FILTER.with(|c| c.replace(Some(entry))))
     }
 }
