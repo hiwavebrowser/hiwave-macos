@@ -809,3 +809,30 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Close #371** (carried over: correct, but flat on a quiet machine). Default: a maintainer closes it.
 2. **Ratio of record = 16.2× (wikipedia, quiet develop c4047ab-equivalent, 04:25 today).** This confirms #373's 16.0×. Default: yes.
 3. **Is a real-site board run required for memo-span PRs like #376, or is verify mode on the pinned pages enough?** Default: verify mode is enough; the board runs only when R1 asks.
+
+## 2026-09-30 06:30
+
+**#376 merged (develop fb1a2ea). The worst ratio is unchanged at ~16× (wikipedia). This session's one cut was flat and dropped. PR #377 opened: it splits `Cascade timing` into sheets / vars / index / walk, and that split names the next three cuts.**
+
+| site | Chrome ms | develop fb1a2ea-equivalent (0184ed7), near-quiet (load 2.3–4.7), A side of 5 pairs | median B/A of the dropped cut |
+|---|---|---|---|
+| cnn | 210 | 740 ms → **3.5×** (770 740 684 705 1041) | 1.00 |
+| github | 110 | 1134 ms → **10.3×** (1156 1142 1133 1082 1134) | 0.99 |
+| wikipedia | 20 | 326 ms → **16.3×** (worst) (281 326 330 610 328) | 0.98 |
+
+- **Profile, wikipedia, develop fb1a2ea** (`cascade-target-prof/pc-prof-fb1a2ea`, 20 pooled loads, 149 samples under the root; reports `~/Repos/.worktrees/cascade-prof-wikipedia-fb1a2ea-{1..20}.txt`, pooled copy `cs-prof-scratch/pool-fb1a2ea.txt`). `through_memo` 50% (`compute_style_for_element` 33%; the rest is the recording's `ComputedStyle` clone 7% and its insert and rehash), `format_inner` + `finish_grow` in the walk ~12%, `subject_keys` 6% (rule index), `getenv` per box in `transfer_positioning` 2.7%.
+- **Dropped: `atlas/cs-walk-strings-dropped` @ c982b2b** (local only, not pushed). It builds selector paths with exact capacity instead of `format!`, and reads `RK_NO_POS`/`RK_NO_PSEUDO_POS` once. 5 pairs at load 2.3–4.7 gave B/A cnn 1.00, github 0.99, wikipedia 0.98: flat. As with #371, profile shares this small don't show up end to end.
+- **PR #377** `atlas/cs-cascade-phases` @ **668142c** on develop fb1a2ea. `RUSTKIT_CASCADE_TIMING=1` also logs `sheets_ms vars_ms index_ms walk_ms`, which add up to `cascade_ms` (unchanged). Receipt 26/26, avg 1.2%, **diffPixels identical on all 26** to 0184ed7. Engine lib 297/297 headless, 235/235 plain. It's an instrument change with no speed claim.
+- **What the split says** (medians of 5, but at load 10–12, so use the shape and not the absolutes):
+  - **wikipedia:** build 1 is 258 ms, of which walk 215 and index 41. **Replay build 2 is 93 ms, all walk: ~90 ms with no cascade at all.** That's box construction plus the memo's `(**b).clone()` per element.
+  - **github:** build 1 is 1093 ms: **index 417**, walk 600, sheets 60. **Replay build 2 is 106 ms, of which sheets 57**: `stylesheets.extend(external_stylesheets.iter().cloned())` deep-copies every external sheet on every build.
+  - **cnn:** build 1 index 779 and walk 1158 (loaded run, very noisy).
+- **Saved:** binaries `cascade-target/pc-phs-HEAD` (#377, stripped), `cascade-target/pc-wb1-wip` (the dropped cut), and `cascade-target-prof/pc-prof-fb1a2ea` (develop, symbolized). Receipt `cascade-target/receipt-phs-668142c.json`. Phase logs in `cascade-target/tmp/phase-logs/`.
+- **Build cost:** symbolized ~12 min and release ~8–10 min, at load 5–6.
+- **Open cs PRs:** 2 (#377 new, #371 draft/close-recommended), cap 3.
+- **Next session:** (1) watch #377. (2) **wikipedia's replay walk (~90 ms)** is the worst site's biggest remaining piece. Profile a replay-only load (e.g. a `sample` attach delayed past build 1, or a temporary env to skip build 1's walk timing), then cut the per-element clone and box work. (3) github: stop deep-copying external sheets per build (borrow them, or cache the `@media`-filtered copy per viewport). That's ~57 ms on every build. Then the rule index (417 ms).
+
+**Decisions for Pete**
+1. **Close #371** (carried over: correct, but flat on a quiet machine). Default: a maintainer closes it.
+2. **Ratio of record = 16.3× (wikipedia, develop fb1a2ea-equivalent, near-quiet 06:05 today).** This confirms 16.2×. Default: yes.
+3. **Merge #377 even though it claims no speed gain?** It's what locates the next cuts. Default: yes, once R1 and R2 pass.
