@@ -982,3 +982,31 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Require PR heads to be up to date with develop before merge (branch protection "require branches to be up to date", or a merge queue).** Two same-file engine PRs merged ~3 h apart broke develop, and nothing caught it. Default: turn it on for develop.
 2. **Merge #383 or #381's fix?** #383 keeps #378's exact parent style; #381 inherits from the blockified float style (a subtle behavior change bundled into a test PR). Default: land #383 first, and #381 drops its fix commit.
 3. **Close #371** (carried over). Default: a maintainer closes it.
+
+## 2026-09-30 15:50
+
+**Develop builds again (#382 carried the #379 follow-up), so #383 was closed as superseded. New develop read: worst ratio 14.8× (wikipedia), down from 15.9× of record, not quiet. One exact index cut is built, tested and pushed (`atlas/cs-index-build` @ 634a013) but has no PR yet: the builtins receipt didn't fit in the cap. Counterbalanced B/A: 0.93–0.95 on all three sites.**
+
+| site | Chrome ms | before: develop 22092e6, median of 5 (load 3–5) | A/B: develop vs 634a013, 5 AB + 5 BA (load 3–7, not quiet) | per-pair B/A median |
+|---|---|---|---|---|
+| cnn | 210 | 735 → 3.5× (735 722 718 747 748) | 759 → 700 | **0.954** |
+| github | 110 | 1223 → 11.1× (1183 1235 1211 1235 1223) | 1198 → 1119 | **0.931** (outliers both ways: 3427, 755/528, 513) |
+| wikipedia | 20 | 296 → **14.8×** (318 298 214 196 296, bimodal) | 309 → 297 | **0.936** (1.49 1.14 .92 .93 .94 .82 .89 .87 1.06 .96) |
+
+- **#383 closed**, with a comment. #382 (merged) carried the same one-line fix in #381's form: the pseudo parent is `&layout_box.style`, i.e. the blockified style for a float. The only difference is `display:inherit` on a float's pseudo, which is too rare to chase.
+- **Index probe** (in-process timers, local only, never committed), per-rule cost of the first build's `build_rule_index`:
+  - github (33,266 rules): keys 157, prepared 177, specificity 88, member specificity 37, pseudo 15 ms.
+  - cnn (6,681 rules): keys 72, prepared 96, specificity 70, member specificity 60 ms.
+  - wikipedia (1,058 rules): 13 / 17 / 5 / 3.5 ms.
+- **The cut, 634a013** (+23 −27): `subject_keys` now reads its keys off `prepared_selector` (identical branch order: invalid, list, pseudo-element guard, subject-less), so each selector is validated and tokenized once instead of twice. A plain comma list (no `()[]"'`) takes its specificity from the max of its member specificities instead of a second scan. The results are exactly equal by construction; the receipt will confirm it.
+- **Tests (engine lib, headless, load 10–14):** 296–297/318. Every failure is a GPU-guard 120 s timeout queued behind `cascade_wire_tests::the_layer_pins_selectors_match_the_box` (4 s alone). **Develop 22092e6 fails the same way:** the `cascade_wire_tests` module alone gave 18/20 in 258 s on both develop and the cut. That test (from #380) holds the GPU for >120 s whenever it runs with its module peers. It's a develop problem, not this lane's.
+- **Instrument trap found:** the `cs-*` worktrees share `cascade-target`, and cargo hashes workspace crates by their path relative to the workspace root. So building worktree B after worktree A can **reuse A's artifact** if B's sources are older ("Finished in 2.94s"). `touch` the crate in B before building. This session's binaries are sound: develop was built first, and the cut's source was newer.
+- **Saved:** binaries `cascade-target/pc-dev-22092e6`, `pc-idx-wip` (634a013), `pc-idx-probe`. A/B log `cascade-target/tmp/ab-idx.txt`, test logs `tmp/idx-test{,2}.log`, probe logs `tmp/logs-idx-probe/`.
+- **Slip:** one Bash call ran a `cd`, and the cwd left the hub. The rest of the session used absolute paths and python `cwd=` wrappers, with no approval stalls.
+- **Open cs PRs:** 1 (#371 draft/close-recommended), cap 3. The branch `atlas/cs-index-build` is pushed but not opened.
+- **Next session:** (1) Take the builtins receipt for 634a013 vs 22092e6 (expect identical diffPixels), then open the PR with this A/B and the test note. (2) wikipedia is still walk-bound (build 1 walk ~190–215 ms, replay ~50–70 ms). The index cut only takes ~8 ms off it, so the structural replay tree-reuse cut is still the one that moves the metric.
+
+**Decisions for Pete**
+1. **`the_layer_pins_selectors_match_the_box` (#380) hangs the GPU guard for >120 s when run with its module**, failing 2–21 other tests per engine-lib run on develop. Default: the real-site lane (owner of #380) fixes or splits it. This lane treats those guard timeouts as known-develop until then.
+2. **Ratio of record → 14.8× (wikipedia, develop 22092e6, load 3–5, 5 runs, bimodal 196–318 ms).** Default: yes, flagged not-quiet.
+3. **Close #371** (carried over). Default: a maintainer closes it.
