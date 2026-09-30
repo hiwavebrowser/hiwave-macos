@@ -4149,6 +4149,13 @@ impl Engine {
                 child_ancestors.push(Rc::new((tag_lower.clone(), classes, id)));
                 child_ancestors.extend(ancestors.iter().cloned());
 
+                // Children and ::before/::after all inherit from the element's
+                // own (unblockified) style.
+                let children_parent_style: &ComputedStyle = match &unblockified {
+                    Some(s) => s,
+                    None => &layout_box.style,
+                };
+
                 // Check for ::before pseudo-element
                 if let Some(before_box) = memoized_pseudo_style(node.id, Pseudo::Before, || {
                     self.pseudo_element_style(
@@ -4159,7 +4166,7 @@ impl Engine {
                         siblings_before,
                         sib,
                         "::before",
-                        Some(&style),
+                        Some(children_parent_style),
                     )
                 })
                 .and_then(Self::pseudo_element_box)
@@ -4192,10 +4199,6 @@ impl Engine {
                     }
                 }
                 let mut type_seen: HashMap<String, usize> = HashMap::new();
-                let children_parent_style: &ComputedStyle = match &unblockified {
-                    Some(s) => s,
-                    None => &layout_box.style,
-                };
                 for (child_index, child) in child_nodes.iter().enumerate() {
                     let child_path = Self::child_selector_path(
                         selector_path,
@@ -4279,7 +4282,7 @@ impl Engine {
                         siblings_before,
                         sib,
                         "::after",
-                        Some(&style),
+                        Some(children_parent_style),
                     )
                 })
                 .and_then(Self::pseudo_element_box)
