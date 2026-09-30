@@ -13462,3 +13462,75 @@ by accident and reverted every file.
   indefinite** — it resolves to the item's own size, which is why §9.9.1 and the
   raw sum are the same number on 126 of 126 containers. That is the single fact
   the retracted unit turned on, and one probe run settles it.
+
+### Addendum — the macOS receipt for #372, and the base-drift trap again
+
+CI green on `5a5f4fd`: all 12 Parity Gate jobs success or skipped (the three
+skips are nightly-only and `commit-gate`, as on #350). R1 DESIGN **CLEAR**
+(COMMENT, Pete-authored seat) at this SHA, no fix asks; it ruled the formula,
+the axis/wrap scoping and the mutation table right, and called the
+bit-identical-corpus disclosure honest rather than a gap. Its one factual
+claim I checked rather than took: `FlexDirection::is_row()` is
+`matches!(self, Row | RowReverse)`, so `row-reverse` is covered as it says.
+R2-STAMP absent; the PR waits on that and on a person. This seat does not merge.
+
+[Run 36674733208](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36674733208),
+`macos-14`:
+
+```
+  metric:     3/26 cases pass all four conditions
+  measured:   26/26 scored on all four  (0 not fully measured)
+    geometry   14/26 green, 26/26 measured
+    paint       3/26 green, 26/26 measured
+    stability  26/26 green, 26/26 measured
+    discrete   26/26 green, 26/26 measured
+```
+
+Green: `bg-pure`, `bg-solid`, `gradients` — the same three as #316 and #350.
+**So the night's metric line upgrades from a carry-forward to a measurement,
+and the number is the same: `3/26 -> 3/26`.** All four columns unchanged. That
+is the outcome the PR body predicted from the Linux A/B, and predicting it was
+cheap: a change whose captures are bit-identical cannot move a
+count-and-fraction receipt.
+
+**Ratchet holds — "23 case(s) absolutely red, none worse than the committed
+floor", `discrete=0` on all 26.** That is the regression check and it needs no
+control run.
+
+**And the base-drift trap, for the fourth consecutive night.** This run reads
+`settings: geo_fails=243`; #350's read 246 and #316's 252. Right direction,
+**not mine**: this PR's base is `develop 6e26932` against #350's `8f44204`
+(#351..#370 later), and `parity.yml` passes no `ref:` to `actions/checkout@v4`,
+so the lane builds the merge ref. The base-matched Linux A/B says this change
+moves the count by exactly zero, and the captures are bit-identical, so the −3
+cannot be this PR's under any reading. Posted on the PR as well, because a
+future night will read that job summary before this file — which is precisely
+how this trap keeps getting rediscovered. 09-29 named the rule and it is worth
+repeating verbatim: **the PR lane's number is never comparable to the previous
+PR lane's number.**
+
+Gate C, non-gating, for context rather than as a receipt: mean raw 13.4903%,
+26/26 measured, `settings` raw 34.086% / >tol 4.927%, `card-grid` >tol 17.490%
+(the worst tile board of the 26).
+
+**State at end of night, for whoever reads this next:**
+
+- Metric **3/26** on macOS, measured on this PR's own lane: geometry 14/26,
+  paint 3/26, stability 26/26, discrete 26/26. Unchanged, and predicted to be.
+- **No macOS case regressed**, per the ratchet's committed floors.
+- **#372 is ready to land and waits on R2-STAMP and a person.** R1 CLEAR, CI
+  green, `crates/` is the two files in the receipt and nothing else.
+- **The 09-29 unit is RETRACTED, so the queue has no recorded next unit.** Do
+  not re-open the flex-factor claim from that entry's "Recorded next unit"
+  block without reading this night's first section: the raw sum rule and
+  §9.9.1 disagree on 0 of 126 row flex containers, measured.
+- **The next unit has to be chosen from Gate A directly.** `settings` is still
+  the largest geometry row by a wide margin (243 on macOS this run against
+  `about`'s 66, `form-elements`' 47, `article-typography`'s 46,
+  `form-controls`' 43). Run `trench/tools/n67_confound_census.py` first: most
+  of `settings`' `y` failures are confounded on the Linux seat.
+- **`n69_gap_contribution_probe.mjs` should not be trusted for per-item
+  intrinsics.** Its container-level arithmetic is sound; its per-item
+  `max`/`min` columns are USED widths for any item whose `flex-basis` is not
+  `auto`. `n70_flex_fraction_probe.mjs` is the one to use, and it carries the
+  four confound guards in its header.
