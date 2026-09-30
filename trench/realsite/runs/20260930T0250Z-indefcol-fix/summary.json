@@ -1,0 +1,26 @@
+{
+  "ts": "20260930T025505Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 1,
+  "points": 0,
+  "max_points": 3,
+  "loads": 0,
+  "readable": 0,
+  "looks_right": 0,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [],
+  "oracle_blocked": {},
+  "blocked": {},
+  "per_site": {
+    "facebook": 0
+  },
+  "scorable_sites": 1,
+  "scorable_points": 0,
+  "scorable_max": 3,
+  "full_run": false
+}
