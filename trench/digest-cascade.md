@@ -785,3 +785,27 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Close #371** (correct but no measurable gain on a quiet machine). Default: a maintainer closes it; the trench doesn't close its own PRs.
 2. **Ratio of record = 16.0× once #373 merges** (quiet, same session as a 19.9× develop read). This replaces 19.0×. Default: yes.
 3. **Only quiet B/A backs a PR claim** (loaded reads of ≥ 12 are demoted to triage). Default: yes. The 04:00 slot before the quiet board is still the best time for claims.
+
+## 2026-09-30 04:50
+
+**#373 merged (develop c4047ab), so incremental restyle is on by default. PR #376 makes cnn replay too: quiet cnn B/A 0.73 (4.9× → 3.5×). Worst ratio unchanged at ~16× (wikipedia). This session's quiet absolute read (load 2.8–4.3) confirms #373's 16.0×.**
+
+| site | Chrome ms | quiet develop-equivalent (#373 head ab8e689, median of 5) | **#376 (quiet, 5 pairs + 3 at the head)** | median B/A |
+|---|---|---|---|---|
+| cnn | 210 | 1021 ms → 4.9× (994 1421 1040 1021 922) | 739 ms → **3.5×** (739 733 758 740 634) | **0.73** (8 pairs: .74 .52 .73 .73 .69 .75 .73 .68) |
+| github | 110 | 1125 ms → 10.2× | 1128 ms → 10.3× | 0.84 (path unchanged: noise) |
+| wikipedia | 20 | 325 ms → **16.2×** (worst) | 312 ms → 15.6× | 0.97 (path unchanged) |
+
+- **PR #376** `atlas/cs-cnn-replay` @ **0184ed7** (2 commits: 970a3ed, 0184ed7) on develop c4047ab. **Cause:** cnn links no sheets, so its initial layout is undeferred and `load_subresources` skips the sheets relayout. The images relayout was the only build in the memo span, so it recorded and nothing replayed. Last session's "memo key differs" was wrong: there was only one build to key. **Fix:** the navigation arms the memo just before an undeferred initial layout (only if no previous document's sheets are still assigned) and drops it before scripts run. The inner `load_subresources` scope joins the armed span. The key gains the view partition's web-face count, because `ch` depends on fonts. A key mismatch now restarts the recording instead of discarding it, so a no-sheets page with remote fonts still replays at the images relayout.
+  - Verify mode at the head: cnn 5832/5832 (new), github 11237/11237, wikipedia 3153/3153, **0 mismatches**. Receipt: 26/26, avg 1.2%, **diffPixels identical on all 26** to ab8e689. Engine (headless) lib 297/297.
+  - **Caught before push:** the first cut keyed fonts on the process-global `webfonts::generation()`, and one memo test failed in the full suite, because other tests' font installs bump that counter. It's now keyed on the view's own partition face count; 297/297.
+- **Not done:** no real-site board run for #376 (35 min, over the cap). The PR body offers a verify-mode board if R1 wants one.
+- **Saved:** binaries `cascade-target/pc-cnr-970a3ed`, `pc-cnr-0184ed7`. Receipts `receipt-cnr-{970a3ed,0184ed7}.json`. Verify logs `cascade-target/tmp/cnr-verify2/`.
+- **Build cost:** release parity-capture 33 min at load 15–24, then 5.5 min incremental at load ~5.
+- **Open cs PRs:** 2 (#376 new, #371 draft/close-recommended), cap 3.
+- **Next session:** (1) watch #376. (2) The worst site is wikipedia at ~16×, and cnn and github replay now, so **wikipedia build 1 (~235 ms) is the target**. Profile flag-on wikipedia build 1 with `cascade_profile.py` and `prof_parents.py`. (3) Github build 1 (~1 s) is second.
+
+**Decisions for Pete**
+1. **Close #371** (carried over: correct, but flat on a quiet machine). Default: a maintainer closes it.
+2. **Ratio of record = 16.2× (wikipedia, quiet develop c4047ab-equivalent, 04:25 today).** This confirms #373's 16.0×. Default: yes.
+3. **Is a real-site board run required for memo-span PRs like #376, or is verify mode on the pinned pages enough?** Default: verify mode is enough; the board runs only when R1 asks.
