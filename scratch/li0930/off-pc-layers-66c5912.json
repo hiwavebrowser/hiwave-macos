@@ -1,0 +1,6053 @@
+{
+  "commands": [
+    {
+      "color": {
+        "a": 1.0,
+        "b": 255,
+        "g": 255,
+        "r": 255
+      },
+      "index": 0,
+      "op": "solid_color",
+      "rect": {
+        "height": 800.0,
+        "width": 1280.0,
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "index": 1,
+      "op": "push_clip",
+      "rect": {
+        "height": 800.0,
+        "width": 1280.0,
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "index": 2,
+      "op": "push_clip",
+      "rect": {
+        "height": 800.0,
+        "width": 1280.0,
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "advances": [
+        9.652883529663086,
+        10.764756202697754,
+        11.137506484985352,
+        4.783882141113281,
+        13.234503746032715,
+        10.764756202697754,
+        10.63200569152832,
+        6.234006881713867,
+        10.392005920410156,
+        10.63200569152832,
+        6.391506195068359
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 238,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 3,
+      "op": "text",
+      "text": "Top Content",
+      "x": 667.3074951171875,
+      "y": 34.9375
+    },
+    {
+      "index": 4,
+      "matrix": [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "op": "push_transform",
+      "origin": {
+        "x": 707.9273681640625,
+        "y": 92.69999694824219
+      }
+    },
+    {
+      "index": 5,
+      "op": "pop_transform"
+    },
+    {
+      "debug": "FillPolygon { points: [(808.0472, 12.5), (808.0472, 12.5), (808.8292, 12.566856), (807.36835, 12.566856)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 6,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(807.36835, 12.566856), (808.8292, 12.566856), (808.90283, 12.586466), (807.16925, 12.586466)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 7,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(807.16925, 12.586466), (808.90283, 12.586466), (809.58765, 12.768869), (806.568, 12.768869)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 8,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(806.568, 12.768869), (809.58765, 12.768869), (809.74603, 12.842543), (806.32513, 12.842543)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 9,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(806.32513, 12.842543), (809.74603, 12.842543), (810.2993, 13.099867), (805.8437, 13.099867)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 10,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(805.8437, 13.099867), (810.2993, 13.099867), (810.52594, 13.258387), (805.5471, 13.258387)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 11,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(805.5471, 13.258387), (810.52594, 13.258387), (810.94244, 13.549734), (805.1921, 13.549734)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 12,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(805.1921, 13.549734), (810.94244, 13.549734), (811.21075, 13.81802), (804.8652, 13.81802)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 13,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.8652, 13.81802), (811.21075, 13.81802), (811.49744, 14.104725), (804.6299, 14.104725)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 14,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.6299, 14.104725), (811.49744, 14.104725), (811.77386, 14.499934), (804.30554, 14.499934)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 15,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.30554, 14.499934), (811.77386, 14.499934), (811.9473, 14.747879), (804.17303, 14.747879)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 16,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.17303, 14.747879), (811.9473, 14.747879), (812.19385, 15.277925), (803.8897, 15.277925)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 17,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.8897, 15.277925), (812.19385, 15.277925), (812.2783, 15.459546), (803.8346, 15.459546)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 18,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.8346, 15.459546), (812.2783, 15.459546), (812.45483, 16.122093), (803.63367, 16.122093)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 19,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.63367, 16.122093), (812.45483, 16.122093), (812.48035, 16.217978), (803.6242, 16.217978)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 20,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.6242, 16.217978), (812.48035, 16.217978), (812.50446, 16.5), (803.59644, 16.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 21,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.59644, 16.5), (812.50446, 16.5), (812.5102, 16.567251), (803.5898, 16.567251)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 22,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(818.0472, 16.5), (818.0472, 16.5), (818.73, 16.567251), (817.3644, 16.567251)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 23,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.5898, 16.567251), (812.5102, 16.567251), (812.5272, 16.766422), (803.5702, 16.766422)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 24,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(817.3644, 16.567251), (818.73, 16.567251), (819.3866, 16.766422), (816.70776, 16.766422)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 25,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.5702, 16.766422), (812.5272, 16.766422), (812.5472, 17.0), (803.5472, 17.0)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 26,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(816.70776, 16.766422), (819.3866, 16.766422), (819.8236, 17.0), (816.27075, 17.0)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 27,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.5472, 17.0), (812.5472, 17.0), (812.5383, 17.089855), (803.556, 17.089855)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 28,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(816.27075, 17.0), (819.8236, 17.0), (819.9917, 17.089855), (816.10266, 17.089855)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 29,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.556, 17.089855), (812.5383, 17.089855), (812.4954, 17.525127), (803.59894, 17.525127)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 30,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(816.10266, 17.089855), (819.9917, 17.089855), (820.52203, 17.525127), (815.5723, 17.525127)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 31,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.59894, 17.525127), (812.4954, 17.525127), (812.4607, 17.877907), (803.63367, 17.877907)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 32,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(815.5723, 17.525127), (820.52203, 17.525127), (820.8116, 17.877907), (815.2828, 17.877907)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 33,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.63367, 17.877907), (812.4607, 17.877907), (812.4068, 18.055504), (803.68756, 18.055504)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 34,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(815.2828, 17.877907), (820.8116, 17.877907), (820.95734, 18.055504), (815.137, 18.055504)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 35,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.68756, 18.055504), (812.4068, 18.055504), (812.22327, 18.660608), (803.8711, 18.660608)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 36,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(815.137, 18.055504), (820.95734, 18.055504), (821.28076, 18.660608), (814.8136, 18.660608)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 37,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.8711, 18.660608), (812.22327, 18.660608), (812.20465, 18.722076), (803.8897, 18.722076)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 38,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.8136, 18.660608), (821.28076, 18.660608), (821.2994, 18.722076), (814.795, 18.722076)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 39,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.8897, 18.722076), (812.20465, 18.722076), (811.8866, 19.317184), (804.20776, 19.317184)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 40,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.795, 18.722076), (821.2994, 18.722076), (821.4799, 19.317184), (814.61444, 19.317184)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 41,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.20776, 19.317184), (811.8866, 19.317184), (811.7888, 19.500065), (804.30554, 19.500065)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 42,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.61444, 19.317184), (821.4799, 19.317184), (821.4979, 19.500065), (814.59644, 19.500065)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 43,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.30554, 19.500065), (811.7888, 19.500065), (811.37854, 20.0), (804.7158, 20.0)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 44,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.59644, 19.500065), (821.4979, 19.500065), (821.5472, 20.0), (814.5472, 20.0)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 45,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.7158, 20.0), (811.37854, 20.0), (811.2292, 20.18198), (804.8652, 20.18198)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 46,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.5472, 20.0), (821.5472, 20.0), (821.52924, 20.18198), (814.5651, 20.18198)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 47,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.8652, 20.18198), (811.2292, 20.18198), (810.6189, 20.682816), (805.47546, 20.682816)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 48,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.5651, 20.18198), (821.52924, 20.18198), (821.4799, 20.682816), (814.61444, 20.682816)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 49,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(805.47546, 20.682816), (810.6189, 20.682816), (810.54724, 20.741613), (805.5471, 20.741613)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 50,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.61444, 20.682816), (821.4799, 20.682816), (821.4621, 20.741613), (814.63226, 20.741613)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 51,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(805.5471, 20.741613), (810.54724, 20.741613), (809.7692, 21.15746), (806.32513, 21.15746)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 52,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.63226, 20.741613), (821.4621, 20.741613), (821.33594, 21.15746), (814.7584, 21.15746)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 53,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(806.32513, 21.15746), (809.7692, 21.15746), (809.1695, 21.339392), (806.92487, 21.339392)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 54,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.7584, 21.15746), (821.33594, 21.15746), (821.28076, 21.339392), (814.8136, 21.339392)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 55,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(806.92487, 21.339392), (809.1695, 21.339392), (808.9251, 21.413534), (807.16925, 21.413534)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 56,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.8136, 21.339392), (821.28076, 21.339392), (821.24115, 21.413534), (814.8532, 21.413534)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 57,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(807.16925, 21.413534), (808.9251, 21.413534), (808.0472, 21.5), (808.0472, 21.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 58,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.8532, 21.413534), (821.24115, 21.413534), (821.19495, 21.5), (814.8994, 21.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 59,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.8994, 21.5), (821.19495, 21.5), (820.95734, 21.944496), (815.137, 21.944496)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 60,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(815.137, 21.944496), (820.95734, 21.944496), (820.52203, 22.474873), (815.5723, 22.474873)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 61,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(815.5723, 22.474873), (820.52203, 22.474873), (819.9917, 22.910145), (816.10266, 22.910145)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 62,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(816.10266, 22.910145), (819.9917, 22.910145), (819.3866, 23.233578), (816.70776, 23.233578)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 63,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(816.70776, 23.233578), (819.3866, 23.233578), (818.73, 23.432749), (817.3644, 23.432749)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 64,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(817.3644, 23.432749), (818.73, 23.432749), (818.0472, 23.5), (818.0472, 23.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 65,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(806.5472, 23.5), (809.5472, 23.5), (810.13245, 23.557644), (805.9619, 23.557644)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 66,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(805.9619, 23.557644), (810.13245, 23.557644), (810.69525, 23.728361), (805.3991, 23.728361)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 67,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(805.3991, 23.728361), (810.69525, 23.728361), (811.21387, 24.005592), (804.8805, 24.005592)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 68,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.8805, 24.005592), (811.21387, 24.005592), (811.6685, 24.37868), (804.42584, 24.37868)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 69,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.42584, 24.37868), (811.6685, 24.37868), (812.04156, 24.83329), (804.0528, 24.83329)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 70,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(804.0528, 24.83329), (812.04156, 24.83329), (812.31885, 25.35195), (803.7755, 25.35195)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 71,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.7755, 25.35195), (812.31885, 25.35195), (812.3638, 25.5), (803.7306, 25.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 72,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.7306, 25.5), (812.3638, 25.5), (812.37836, 25.548037), (803.716, 25.548037)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 73,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(817.0472, 25.5), (819.0472, 25.5), (819.5349, 25.548037), (816.55945, 25.548037)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 74,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.716, 25.548037), (812.37836, 25.548037), (812.4215, 25.6903), (803.67285, 25.6903)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 75,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(816.55945, 25.548037), (819.5349, 25.548037), (820.0039, 25.6903), (816.09045, 25.6903)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 76,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.67285, 25.6903), (812.4215, 25.6903), (812.48956, 25.91473), (803.6048, 25.91473)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 77,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(816.09045, 25.6903), (820.0039, 25.6903), (820.42377, 25.91473), (815.6706, 25.91473)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 78,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.6048, 25.91473), (812.48956, 25.91473), (812.49023, 25.921326), (803.6041, 25.921326)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 79,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(815.6706, 25.91473), (820.42377, 25.91473), (820.4361, 25.921326), (815.65826, 25.921326)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 80,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.6041, 25.921326), (812.49023, 25.921326), (812.5208, 26.232233), (803.57355, 26.232233)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 81,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(815.65826, 25.921326), (820.4361, 25.921326), (820.81494, 26.232233), (815.2794, 26.232233)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 82,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.57355, 26.232233), (812.5208, 26.232233), (812.5472, 26.5), (803.5472, 26.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 83,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(815.2794, 26.232233), (820.81494, 26.232233), (821.03467, 26.5), (815.0597, 26.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 84,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.5472, 26.5), (812.5472, 26.5), (812.5472, 26.611074), (803.5472, 26.611074)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 85,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(815.0597, 26.5), (821.03467, 26.5), (821.12585, 26.611074), (814.9685, 26.611074)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 86,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.5472, 26.611074), (812.5472, 26.611074), (812.5472, 27.043291), (803.5472, 27.043291)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 87,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.9685, 26.611074), (821.12585, 26.611074), (821.3569, 27.043291), (814.7375, 27.043291)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 88,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.5472, 27.043291), (812.5472, 27.043291), (812.5472, 27.512274), (803.5472, 27.512274)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 89,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.7375, 27.043291), (821.3569, 27.043291), (821.49915, 27.512274), (814.5952, 27.512274)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 90,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.5472, 27.512274), (812.5472, 27.512274), (812.5472, 28.0), (803.5472, 28.0)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 91,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.5952, 27.512274), (821.49915, 27.512274), (821.5472, 28.0), (814.5472, 28.0)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 92,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(803.5472, 28.0), (812.5472, 28.0), (812.5472, 32.5), (803.5472, 32.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 93,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(814.5472, 28.0), (821.5472, 28.0), (821.5472, 32.5), (814.5472, 32.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 94,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "advances": [
+        11.319756507873535,
+        10.392005920410156,
+        10.764756202697754,
+        11.137506484985352,
+        4.30312967300415,
+        10.392005920410156
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 238,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 95,
+      "op": "text",
+      "text": "People",
+      "x": 818.2379760742188,
+      "y": 34.9375
+    },
+    {
+      "index": 96,
+      "matrix": [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "op": "push_transform",
+      "origin": {
+        "x": 812.5471801757812,
+        "y": 92.69999694824219
+      }
+    },
+    {
+      "index": 97,
+      "op": "pop_transform"
+    },
+    {
+      "advances": [
+        9.916128158569336,
+        10.392005920410156,
+        10.038379669189453,
+        6.869257926940918,
+        10.63200569152832,
+        4.208629131317139,
+        10.63200569152832,
+        11.119880676269531
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 238,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 98,
+      "op": "text",
+      "text": "Learning",
+      "x": 861.0479736328125,
+      "y": 34.9375
+    },
+    {
+      "index": 99,
+      "matrix": [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "op": "push_transform",
+      "origin": {
+        "x": 870.8563232421875,
+        "y": 92.69999694824219
+      }
+    },
+    {
+      "index": 100,
+      "op": "pop_transform"
+    },
+    {
+      "debug": "FillPolygon { points: [(942.6647, 12.5), (946.6647, 12.5), (947.24994, 12.557644), (942.0794, 12.557644)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 101,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(942.0794, 12.557644), (947.24994, 12.557644), (947.81274, 12.728361), (941.5166, 12.728361)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 102,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(941.5166, 12.728361), (947.81274, 12.728361), (948.33136, 13.005591), (940.998, 13.005591)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 103,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(940.998, 13.005591), (948.33136, 13.005591), (948.786, 13.378679), (940.54333, 13.378679)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 104,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(940.54333, 13.378679), (948.786, 13.378679), (949.15906, 13.833289), (940.1703, 13.833289)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 105,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(940.1703, 13.833289), (949.15906, 13.833289), (949.43634, 14.35195), (939.893, 14.35195)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 106,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.893, 14.35195), (949.43634, 14.35195), (949.48126, 14.5), (939.8481, 14.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 107,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.8481, 14.5), (942.6647, 14.5), (942.4696, 14.519215), (939.8423, 14.519215)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 108,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(946.6647, 14.5), (949.48126, 14.5), (949.48706, 14.519215), (946.85974, 14.519215)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 109,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.8423, 14.519215), (942.4696, 14.519215), (942.282, 14.57612), (939.825, 14.57612)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 110,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(946.85974, 14.519215), (949.48706, 14.519215), (949.50433, 14.57612), (947.04736, 14.57612)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 111,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.825, 14.57612), (942.282, 14.57612), (942.10913, 14.66853), (939.797, 14.66853)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 112,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(947.04736, 14.57612), (949.50433, 14.57612), (949.53235, 14.66853), (947.2202, 14.66853)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 113,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.797, 14.66853), (942.10913, 14.66853), (941.9576, 14.792893), (939.7593, 14.792893)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 114,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(947.2202, 14.66853), (949.53235, 14.66853), (949.57007, 14.792893), (947.37177, 14.792893)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 115,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.7593, 14.792893), (941.9576, 14.792893), (941.85754, 14.914729), (939.7223, 14.914729)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 116,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(947.37177, 14.792893), (949.57007, 14.792893), (949.60706, 14.914729), (947.4718, 14.914729)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 117,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.7223, 14.914729), (941.85754, 14.914729), (941.8332, 14.944429), (939.71936, 14.944429)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 118,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(947.4718, 14.914729), (949.60706, 14.914729), (949.61, 14.944429), (947.49615, 14.944429)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 119,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.71936, 14.944429), (941.8332, 14.944429), (941.7408, 15.117317), (939.70233, 15.117317)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 120,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(947.49615, 14.944429), (949.61, 14.944429), (949.627, 15.117317), (947.58856, 15.117317)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 121,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.70233, 15.117317), (941.7408, 15.117317), (941.6839, 15.30491), (939.6839, 15.30491)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 122,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(947.58856, 15.117317), (949.627, 15.117317), (949.64545, 15.30491), (947.64545, 15.30491)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 123,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.6839, 15.30491), (941.6839, 15.30491), (941.6647, 15.5), (939.6647, 15.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 124,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(947.64545, 15.30491), (949.64545, 15.30491), (949.6647, 15.5), (947.6647, 15.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 125,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(939.6647, 15.5), (941.6647, 15.5), (941.6647, 16.5), (939.6647, 16.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 126,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(947.6647, 15.5), (949.6647, 15.5), (949.6647, 16.5), (947.6647, 16.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 127,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 16.5), (954.6647, 16.5), (954.6647, 20.5), (934.6647, 20.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 128,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 20.5), (954.6647, 20.5), (954.60706, 21.08527), (934.7223, 21.08527)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 129,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.7223, 21.08527), (954.60706, 21.08527), (954.43634, 21.64805), (934.893, 21.64805)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 130,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.893, 21.64805), (954.43634, 21.64805), (954.15906, 22.16671), (935.1703, 22.16671)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 131,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(935.1703, 22.16671), (954.15906, 22.16671), (953.786, 22.62132), (935.54333, 22.62132)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 132,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(935.54333, 22.62132), (953.786, 22.62132), (953.33136, 22.994408), (935.998, 22.994408)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 133,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(935.998, 22.994408), (953.33136, 22.994408), (953.09644, 23.119999), (936.2329, 23.119999)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 134,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 23.119999), (934.6647, 23.119999), (934.82056, 23.271639), (934.6647, 23.271639)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 135,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(936.2329, 23.119999), (953.09644, 23.119999), (952.81274, 23.271639), (936.5166, 23.271639)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 136,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(954.6647, 23.119999), (954.6647, 23.119999), (954.6647, 23.271639), (954.5088, 23.271639)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 137,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 23.271639), (934.82056, 23.271639), (934.9961, 23.442356), (934.6647, 23.442356)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 138,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(936.5166, 23.271639), (952.81274, 23.271639), (952.24994, 23.442356), (937.0794, 23.442356)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 139,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(954.5088, 23.271639), (954.6647, 23.271639), (954.6647, 23.442356), (954.33325, 23.442356)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 140,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 23.442356), (934.9961, 23.442356), (935.05536, 23.5), (934.6647, 23.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 141,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(937.0794, 23.442356), (952.24994, 23.442356), (951.6647, 23.5), (937.6647, 23.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 142,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(954.33325, 23.442356), (954.6647, 23.442356), (954.6647, 23.5), (954.274, 23.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 143,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 23.5), (935.05536, 23.5), (935.1521, 23.5941), (934.6647, 23.5941)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 144,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(954.274, 23.5), (954.6647, 23.5), (954.6647, 23.5941), (954.17725, 23.5941)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 145,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 23.5941), (935.1521, 23.5941), (935.71277, 23.978794), (934.6647, 23.978794)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 146,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(954.17725, 23.5941), (954.6647, 23.5941), (954.6647, 23.978794), (953.6166, 23.978794)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 147,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 23.978794), (935.71277, 23.978794), (936.33057, 24.262959), (934.6647, 24.262959)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 148,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(953.6166, 23.978794), (954.6647, 23.978794), (954.6647, 24.262959), (952.9988, 24.262959)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 149,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 24.262959), (936.33057, 24.262959), (936.9875, 24.438383), (934.6647, 24.438383)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 150,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(952.9988, 24.262959), (954.6647, 24.262959), (954.6647, 24.438383), (952.34186, 24.438383)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 151,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 24.438383), (936.9875, 24.438383), (937.6647, 24.5), (934.6647, 24.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 152,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(952.34186, 24.438383), (954.6647, 24.438383), (954.6647, 24.5), (951.6647, 24.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 153,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 24.5), (954.6647, 24.5), (954.6647, 27.5), (934.6647, 27.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 154,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.6647, 27.5), (954.6647, 27.5), (954.60706, 28.085272), (934.7223, 28.085272)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 155,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.7223, 28.085272), (954.60706, 28.085272), (954.43634, 28.64805), (934.893, 28.64805)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 156,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(934.893, 28.64805), (954.43634, 28.64805), (954.15906, 29.16671), (935.1703, 29.16671)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 157,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(935.1703, 29.16671), (954.15906, 29.16671), (953.786, 29.62132), (935.54333, 29.62132)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 158,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(935.54333, 29.62132), (953.786, 29.62132), (953.33136, 29.99441), (935.998, 29.99441)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 159,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(935.998, 29.99441), (953.33136, 29.99441), (952.81274, 30.271639), (936.5166, 30.271639)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 160,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(936.5166, 30.271639), (952.81274, 30.271639), (952.24994, 30.442356), (937.0794, 30.442356)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 161,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "debug": "FillPolygon { points: [(937.0794, 30.442356), (952.24994, 30.442356), (951.6647, 30.5), (937.6647, 30.5)], color: Color { r: 0, g: 0, b: 238, a: 1.0 } }",
+      "index": 162,
+      "modelled": false,
+      "op": "fill_polygon"
+    },
+    {
+      "advances": [
+        9.791629791259766,
+        10.764756202697754,
+        11.213630676269531,
+        9.475505828857422
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 238,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 163,
+      "op": "text",
+      "text": "Jobs",
+      "x": 967.419189453125,
+      "y": 34.9375
+    },
+    {
+      "index": 164,
+      "matrix": [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "op": "push_transform",
+      "origin": {
+        "x": 944.6646728515625,
+        "y": 92.69999694824219
+      }
+    },
+    {
+      "index": 165,
+      "op": "pop_transform"
+    },
+    {
+      "advances": [
+        13.801504135131836,
+        10.038379669189453,
+        16.111507415771484,
+        10.392005920410156,
+        9.475505828857422
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 238,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 166,
+      "op": "text",
+      "text": "Games",
+      "x": 990.09130859375,
+      "y": 34.9375
+    },
+    {
+      "index": 167,
+      "matrix": [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "op": "push_transform",
+      "origin": {
+        "x": 985.91015625,
+        "y": 92.69999694824219
+      }
+    },
+    {
+      "index": 168,
+      "op": "pop_transform"
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 169,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 129.05477905273438,
+        "x": 1039.3289794921875,
+        "y": 26.5000057220459
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        12.11248779296875,
+        12.76805591583252,
+        5.323002338409424,
+        12.795198440551758,
+        4.905542373657227,
+        12.795198440551758,
+        12.531780242919922,
+        17.423498153686523
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 170,
+      "op": "text",
+      "text": "Join now",
+      "x": 1058.5289306640625,
+      "y": 33.24375534057617
+    },
+    {
+      "advances": [
+        14.037081718444824,
+        5.323002338409424,
+        13.237162590026855,
+        12.795198440551758,
+        4.905542373657227,
+        5.323002338409424,
+        12.795198440551758
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 171,
+      "op": "text",
+      "text": "Sign in",
+      "x": 1200.3836669921875,
+      "y": 33.24375534057617
+    },
+    {
+      "index": 172,
+      "op": "push_clip",
+      "rect": {
+        "height": 800.0,
+        "width": 1280.0,
+        "x": 0.0,
+        "y": 83.19999694824219
+      }
+    },
+    {
+      "index": 173,
+      "op": "push_clip",
+      "rect": {
+        "height": 2940.0,
+        "width": 1280.0,
+        "x": 0.0,
+        "y": 83.19999694824219
+      }
+    },
+    {
+      "advances": [
+        26.859375,
+        22.828125,
+        26.71875,
+        10.1484375,
+        25.828125,
+        13.96875,
+        24.9375,
+        10.1953125,
+        14.109375,
+        25.828125,
+        26.71875,
+        10.1953125,
+        25.5234375,
+        10.2421875,
+        25.640625,
+        22.4765625,
+        24.9375,
+        26.9296875,
+        11.1328125,
+        25.640625,
+        10.1953125,
+        24.3984375,
+        25.828125,
+        25.640625,
+        14.109375,
+        24.9375,
+        25.640625,
+        14.8125
+      ],
+      "ascent": 46.40625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 48.0,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 174,
+      "op": "text",
+      "text": "Explore top LinkedIn content",
+      "x": 76.0000228881836,
+      "y": 184.19375610351562
+    },
+    {
+      "advances": [
+        19.92656135559082,
+        6.314062118530273,
+        13.78125,
+        14.807811737060547,
+        15.103124618530273,
+        13.72499942779541,
+        15.13124942779541,
+        9.253125190734863,
+        6.285937309265137,
+        8.550000190734863,
+        15.13124942779541,
+        6.2578125,
+        14.56874942779541,
+        14.00624942779541,
+        14.8359375,
+        15.55312442779541,
+        9.056249618530273,
+        6.285937309265137,
+        16.19999885559082,
+        15.665624618530273,
+        13.78125,
+        9.056249618530273,
+        13.78125,
+        6.285937309265137,
+        14.8359375,
+        15.55312442779541,
+        16.326562881469727,
+        6.285937309265137,
+        14.84999942779541,
+        13.86562442779541,
+        16.19999885559082,
+        15.13124942779541,
+        9.956250190734863,
+        9.056249618530273,
+        6.285937309265137,
+        6.314062118530273,
+        15.55312442779541,
+        13.78125,
+        6.314062118530273,
+        16.185937881469727,
+        15.90468692779541,
+        9.056249618530273,
+        13.78125,
+        6.285937309265137,
+        24.314062118530273,
+        6.285937309265137,
+        14.807811737060547,
+        15.55312442779541,
+        8.971875190734863,
+        14.8359375,
+        8.634374618530273,
+        15.13124942779541,
+        16.326562881469727,
+        6.285937309265137,
+        15.764062881469727,
+        14.385936737060547,
+        6.285937309265137,
+        8.634374618530273,
+        15.665624618530273,
+        16.19999885559082,
+        6.314062118530273,
+        14.807811737060547,
+        6.285937309265137,
+        14.8359375,
+        15.55312442779541,
+        16.326562881469727,
+        6.285937309265137,
+        6.314062118530273,
+        15.55312442779541,
+        6.285937309265137,
+        15.665624618530273,
+        15.55312442779541,
+        15.13124942779541,
+        6.285937309265137,
+        16.19999885559082,
+        6.2578125,
+        14.8359375,
+        14.807811737060547,
+        15.13124942779541,
+        6.567187309265137
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 175,
+      "op": "text",
+      "text": "Discover relevant posts and expert insights — curated by topic and in one place.",
+      "x": 76.0000228881836,
+      "y": 262.95623779296875
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 176,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 106.94901275634766,
+        "x": 649.6000366210938,
+        "y": 451.2001037597656
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        15.792891502380371,
+        12.10700798034668,
+        7.78030252456665,
+        12.353753089904785,
+        12.353753089904785,
+        8.161308288574219
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 177,
+      "op": "text",
+      "text": "Career",
+      "x": 668.800048828125,
+      "y": 457.94384765625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 178,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 161.20620727539062,
+        "x": 769.3490600585938,
+        "y": 451.2001037597656
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        13.833130836486816,
+        7.78030252456665,
+        12.76805591583252,
+        13.333440780639648,
+        12.795198440551758,
+        12.157684326171875,
+        7.865523815155029,
+        5.323002338409424,
+        11.783823013305664,
+        5.323002338409424,
+        7.865523815155029,
+        11.977509498596191
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 179,
+      "op": "text",
+      "text": "Productivity",
+      "x": 788.549072265625,
+      "y": 457.94384765625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 180,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 118.22522735595703,
+        "x": 943.355224609375,
+        "y": 451.2001037597656
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        12.35534381866455,
+        5.323002338409424,
+        12.795198440551758,
+        12.10700798034668,
+        12.795198440551758,
+        12.09571647644043,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 181,
+      "op": "text",
+      "text": "Finance",
+      "x": 962.5552368164062,
+      "y": 457.94384765625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 182,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 388.62359619140625,
+        "x": 649.6000366210938,
+        "y": 1046.400390625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        14.037081718444824,
+        12.76805591583252,
+        7.877767086029053,
+        7.865523815155029,
+        4.905542373657227,
+        14.037081718444824,
+        11.989109992980957,
+        5.323002338409424,
+        5.391671180725098,
+        5.391671180725098,
+        11.428396224975586,
+        4.905542373657227,
+        15.647497177124023,
+        4.905542373657227,
+        12.902948379516602,
+        19.279964447021484,
+        12.76805591583252,
+        7.865523815155029,
+        5.323002338409424,
+        12.76805591583252,
+        12.795198440551758,
+        12.10700798034668,
+        5.391671180725098,
+        4.905542373657227,
+        5.86454439163208,
+        12.795198440551758,
+        7.6877760887146,
+        12.353753089904785,
+        5.391671180725098,
+        5.391671180725098,
+        5.323002338409424,
+        13.237162590026855,
+        12.353753089904785,
+        12.795198440551758,
+        12.09571647644043,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 183,
+      "op": "text",
+      "text": "Soft Skills & Emotional Intelligence",
+      "x": 668.800048828125,
+      "y": 1053.1441650390625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 184,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 249.36614990234375,
+        "x": 649.6000366210938,
+        "y": 1641.6005859375
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        13.833130836486816,
+        7.78030252456665,
+        12.76805591583252,
+        5.311152458190918,
+        12.353753089904785,
+        12.157684326171875,
+        7.865523815155029,
+        4.905542373657227,
+        19.096420288085938,
+        12.10700798034668,
+        12.795198440551758,
+        12.10700798034668,
+        13.237162590026855,
+        12.353753089904785,
+        19.279964447021484,
+        12.353753089904785,
+        12.795198440551758,
+        7.865523815155029
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 185,
+      "op": "text",
+      "text": "Project Management",
+      "x": 668.800048828125,
+      "y": 1648.3443603515625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 186,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 140.3861083984375,
+        "x": 911.7661743164062,
+        "y": 1641.6005859375
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        12.902948379516602,
+        13.333440780639648,
+        12.795198440551758,
+        12.09571647644043,
+        12.10700798034668,
+        7.865523815155029,
+        5.323002338409424,
+        12.76805591583252,
+        12.795198440551758
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 187,
+      "op": "text",
+      "text": "Education",
+      "x": 930.9661865234375,
+      "y": 1648.3443603515625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 188,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 155.92404174804688,
+        "x": 649.6000366210938,
+        "y": 2236.801025390625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        11.168732643127441,
+        12.353753089904785,
+        12.09571647644043,
+        12.968181610107422,
+        12.795198440551758,
+        12.76805591583252,
+        5.391671180725098,
+        12.76805591583252,
+        13.237162590026855,
+        11.977509498596191
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 189,
+      "op": "text",
+      "text": "Technology",
+      "x": 668.800048828125,
+      "y": 2243.544677734375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 190,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 151.486328125,
+        "x": 818.3240966796875,
+        "y": 2236.801025390625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        11.907590866088867,
+        12.353753089904785,
+        12.10700798034668,
+        13.333440780639648,
+        12.353753089904785,
+        8.056267738342285,
+        11.428396224975586,
+        12.968181610107422,
+        5.323002338409424,
+        13.254914283752441
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 191,
+      "op": "text",
+      "text": "Leadership",
+      "x": 837.5241088867188,
+      "y": 2243.544677734375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 192,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 159.3101806640625,
+        "x": 982.6103515625,
+        "y": 2236.801025390625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        12.902948379516602,
+        12.09571647644043,
+        12.76805591583252,
+        19.279964447021484,
+        19.279964447021484,
+        12.353753089904785,
+        7.78030252456665,
+        12.09571647644043,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 193,
+      "op": "text",
+      "text": "Ecommerce",
+      "x": 1001.8103637695312,
+      "y": 2243.544677734375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 194,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 123.15644073486328,
+        "x": 649.6000366210938,
+        "y": 2832.001220703125
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        14.037081718444824,
+        12.968181610107422,
+        12.531780242919922,
+        17.423498153686523,
+        4.905542373657227,
+        12.10700798034668,
+        5.391671180725098,
+        5.391671180725098
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 195,
+      "op": "text",
+      "text": "Show all",
+      "x": 668.800048828125,
+      "y": 2838.744873046875
+    },
+    {
+      "advances": [
+        25.6875,
+        10.2421875,
+        25.640625,
+        26.9296875,
+        10.1953125,
+        14.8125,
+        26.2265625,
+        24.9375,
+        10.1953125,
+        15.140625,
+        10.2421875,
+        26.6953125,
+        26.2265625,
+        14.8125,
+        10.1953125,
+        10.1953125,
+        25.828125,
+        26.9296875,
+        10.1953125,
+        25.828125,
+        15.140625,
+        10.1953125,
+        10.2421875,
+        25.640625,
+        14.109375,
+        24.9375,
+        15.140625,
+        25.640625,
+        22.6875,
+        26.2265625,
+        10.2421875,
+        26.71875,
+        10.1953125,
+        12.5859375,
+        25.828125,
+        15.140625,
+        10.1953125,
+        22.7578125,
+        25.828125,
+        25.640625
+      ],
+      "ascent": 46.40625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 48.0,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 196,
+      "op": "text",
+      "text": "Find the right job or internship for you",
+      "x": 76.0000228881836,
+      "y": 708.9937744140625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 197,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 159.67770385742188,
+        "x": 649.6000366210938,
+        "y": 1001.60009765625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        12.902948379516602,
+        12.795198440551758,
+        13.237162590026855,
+        5.323002338409424,
+        12.795198440551758,
+        12.353753089904785,
+        12.353753089904785,
+        8.161308288574219,
+        5.323002338409424,
+        12.795198440551758,
+        13.237162590026855
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 198,
+      "op": "text",
+      "text": "Engineering",
+      "x": 668.800048828125,
+      "y": 1008.3438720703125
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 199,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 270.2373352050781,
+        "x": 822.0777587890625,
+        "y": 1001.60009765625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        14.337904930114746,
+        12.795198440551758,
+        11.428396224975586,
+        5.323002338409424,
+        12.795198440551758,
+        12.353753089904785,
+        11.337713241577148,
+        11.428396224975586,
+        4.905542373657227,
+        15.749037742614746,
+        11.97822093963623,
+        11.342103958129883,
+        12.353753089904785,
+        5.391671180725098,
+        12.76805591583252,
+        13.254914283752441,
+        19.279964447021484,
+        12.353753089904785,
+        12.795198440551758,
+        7.865523815155029
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 200,
+      "op": "text",
+      "text": "Business Development",
+      "x": 841.2777709960938,
+      "y": 1008.3438720703125
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 201,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 118.22522735595703,
+        "x": 649.6000366210938,
+        "y": 1648.000244140625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        12.35534381866455,
+        5.323002338409424,
+        12.795198440551758,
+        12.10700798034668,
+        12.795198440551758,
+        12.09571647644043,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 202,
+      "op": "text",
+      "text": "Finance",
+      "x": 668.800048828125,
+      "y": 1654.7440185546875
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 203,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 285.377197265625,
+        "x": 780.625244140625,
+        "y": 1648.000244140625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        14.726802825927734,
+        13.333440780639648,
+        19.279964447021484,
+        5.323002338409424,
+        12.795198440551758,
+        5.323002338409424,
+        11.397412300109863,
+        7.865523815155029,
+        7.955535411834717,
+        12.10700798034668,
+        7.865523815155029,
+        5.323002338409424,
+        11.342103958129883,
+        12.353753089904785,
+        4.905542373657227,
+        15.048073768615723,
+        11.337713241577148,
+        11.428396224975586,
+        5.323002338409424,
+        11.397412300109863,
+        7.778009414672852,
+        12.10700798034668,
+        12.795198440551758,
+        7.865523815155029
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 204,
+      "op": "text",
+      "text": "Administrative Assistant",
+      "x": 799.8252563476562,
+      "y": 1654.7440185546875
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 205,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 200.526123046875,
+        "x": 649.6000366210938,
+        "y": 2294.400634765625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        14.11763858795166,
+        12.353753089904785,
+        7.778009414672852,
+        12.10700798034668,
+        5.323002338409424,
+        5.391671180725098,
+        4.905542373657227,
+        15.048073768615723,
+        11.337713241577148,
+        11.428396224975586,
+        12.76805591583252,
+        12.09571647644043,
+        5.323002338409424,
+        12.10700798034668,
+        7.6877760887146,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 206,
+      "op": "text",
+      "text": "Retail Associate",
+      "x": 668.800048828125,
+      "y": 2301.144287109375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 207,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 219.95706176757812,
+        "x": 862.9261474609375,
+        "y": 2294.400634765625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        15.813167572021484,
+        12.795198440551758,
+        11.397412300109863,
+        7.6877760887146,
+        12.76805591583252,
+        19.279964447021484,
+        12.353753089904785,
+        8.161308288574219,
+        4.905542373657227,
+        14.037081718444824,
+        12.353753089904785,
+        8.447741508483887,
+        11.783823013305664,
+        5.323002338409424,
+        12.09571647644043,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 208,
+      "op": "text",
+      "text": "Customer Service",
+      "x": 882.1261596679688,
+      "y": 2301.144287109375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 209,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 151.07266235351562,
+        "x": 649.6000366210938,
+        "y": 2940.800537109375
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        16.821256637573242,
+        13.254914283752441,
+        12.353753089904785,
+        7.955535411834717,
+        12.10700798034668,
+        7.865523815155029,
+        5.323002338409424,
+        12.76805591583252,
+        12.795198440551758,
+        11.428396224975586
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 210,
+      "op": "text",
+      "text": "Operations",
+      "x": 668.800048828125,
+      "y": 2947.544189453125
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 211,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 277.7470397949219,
+        "x": 813.4727172851562,
+        "y": 2940.800537109375
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        5.86454439163208,
+        12.795198440551758,
+        7.127597808837891,
+        12.76805591583252,
+        8.223276138305664,
+        19.279964447021484,
+        12.10700798034668,
+        7.865523815155029,
+        5.323002338409424,
+        12.76805591583252,
+        12.795198440551758,
+        4.905542373657227,
+        11.168732643127441,
+        12.353753089904785,
+        12.09571647644043,
+        12.968181610107422,
+        12.795198440551758,
+        12.76805591583252,
+        5.391671180725098,
+        12.76805591583252,
+        13.237162590026855,
+        11.977509498596191
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 212,
+      "op": "text",
+      "text": "Information Technology",
+      "x": 832.6727294921875,
+      "y": 2947.544189453125
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 213,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 140.73855590820312,
+        "x": 649.6000366210938,
+        "y": 3587.20068359375
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        19.096420288085938,
+        12.10700798034668,
+        8.161308288574219,
+        11.399163246154785,
+        12.353753089904785,
+        7.865523815155029,
+        5.323002338409424,
+        12.795198440551758,
+        13.237162590026855
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 214,
+      "op": "text",
+      "text": "Marketing",
+      "x": 668.800048828125,
+      "y": 3593.9443359375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 215,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 223.76138305664062,
+        "x": 803.1385498046875,
+        "y": 3587.20068359375
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        16.35725975036621,
+        12.795198440551758,
+        19.279964447021484,
+        12.10700798034668,
+        12.795198440551758,
+        4.905542373657227,
+        14.11763858795166,
+        12.353753089904785,
+        11.428396224975586,
+        12.76805591583252,
+        12.795198440551758,
+        7.78030252456665,
+        12.09571647644043,
+        12.353753089904785,
+        11.428396224975586
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 216,
+      "op": "text",
+      "text": "Human Resources",
+      "x": 822.3385620117188,
+      "y": 3593.9443359375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 217,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 206.6048583984375,
+        "x": 649.6000366210938,
+        "y": 4233.60107421875
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        14.037081718444824,
+        12.968181610107422,
+        12.531780242919922,
+        17.423498153686523,
+        4.905542373657227,
+        19.279964447021484,
+        12.76805591583252,
+        7.78030252456665,
+        12.353753089904785,
+        4.905542373657227,
+        5.311152458190918,
+        12.76805591583252,
+        13.343578338623047,
+        11.428396224975586
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 218,
+      "op": "text",
+      "text": "Show more jobs",
+      "x": 668.800048828125,
+      "y": 4240.3447265625
+    },
+    {
+      "advances": [
+        26.90625,
+        25.828125,
+        22.6875,
+        14.8125,
+        10.1953125,
+        22.7578125,
+        25.828125,
+        25.640625,
+        15.140625,
+        10.1953125,
+        10.1953125,
+        25.828125,
+        26.9296875,
+        10.1953125,
+        12.5859375,
+        25.828125,
+        15.140625,
+        10.1953125,
+        38.90625,
+        10.2421875,
+        10.1484375,
+        10.1484375,
+        10.2421875,
+        25.828125,
+        25.640625,
+        22.6875,
+        10.1953125,
+        25.828125,
+        14.9296875,
+        10.1953125,
+        26.71875,
+        24.9375,
+        25.828125,
+        26.71875,
+        10.1484375,
+        24.9375,
+        10.1953125,
+        14.109375,
+        25.828125,
+        10.1953125,
+        22.6875,
+        24.9375,
+        24.9375
+      ],
+      "ascent": 46.40625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 48.0,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 219,
+      "op": "text",
+      "text": "Post your job for millions of people to see",
+      "x": 227.96878051757812,
+      "y": 1265.7938232421875
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 220,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 70.4000015258789,
+        "width": 115.81764221191406,
+        "x": 628.0,
+        "y": 1372.400146484375
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        15.274023056030273,
+        14.58768081665039,
+        13.028742790222168,
+        8.927192687988281,
+        5.49044942855835,
+        13.883366584777832,
+        5.49044942855835,
+        6.1199235916137695,
+        14.58768081665039,
+        15.205327987670898
+      ],
+      "ascent": 24.75,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 25.600000381469727,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 221,
+      "op": "text",
+      "text": "Post a job",
+      "x": 660.0,
+      "y": 1392.85009765625
+    },
+    {
+      "advances": [
+        32.9296875,
+        10.2421875,
+        22.6875,
+        24.3984375,
+        24.890625,
+        22.59375,
+        24.9375,
+        15.140625,
+        10.1953125,
+        14.8125,
+        26.2265625,
+        24.9375,
+        10.1953125,
+        26.9296875,
+        24.9375,
+        22.6875,
+        14.8125,
+        10.1953125,
+        22.6875,
+        25.828125,
+        14.9296875,
+        14.8125,
+        34.21875,
+        24.4453125,
+        13.96875,
+        24.9375,
+        10.1953125,
+        14.109375,
+        25.828125,
+        25.828125,
+        10.1484375,
+        22.6875
+      ],
+      "ascent": 46.40625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 48.0,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 222,
+      "op": "text",
+      "text": "Discover the best software tools",
+      "x": 76.0000228881836,
+      "y": 1623.7938232421875
+    },
+    {
+      "advances": [
+        20.13749885559082,
+        15.665624618530273,
+        15.55312442779541,
+        15.55312442779541,
+        15.13124942779541,
+        14.807811737060547,
+        9.056249618530273,
+        6.285937309265137,
+        20.98124885559082,
+        6.314062118530273,
+        9.056249618530273,
+        15.90468692779541,
+        6.285937309265137,
+        16.326562881469727,
+        15.55312442779541,
+        13.823436737060547,
+        15.13124942779541,
+        9.253125190734863,
+        13.78125,
+        6.285937309265137,
+        20.98124885559082,
+        15.90468692779541,
+        15.665624618530273,
+        6.285937309265137,
+        15.90468692779541,
+        14.8359375,
+        13.72499942779541,
+        15.13124942779541,
+        6.285937309265137,
+        9.126562118530273,
+        6.314062118530273,
+        9.253125190734863,
+        13.78125,
+        9.056249618530273,
+        12.7265625,
+        15.90468692779541,
+        14.8359375,
+        15.55312442779541,
+        16.326562881469727,
+        6.285937309265137,
+        14.84999942779541,
+        13.86562442779541,
+        16.19999885559082,
+        15.13124942779541,
+        9.253125190734863,
+        6.314062118530273,
+        15.13124942779541,
+        15.55312442779541,
+        14.807811737060547,
+        15.13124942779541,
+        6.285937309265137,
+        8.634374618530273,
+        15.665624618530273,
+        6.285937309265137,
+        9.126562118530273,
+        6.314062118530273,
+        15.55312442779541,
+        16.326562881469727,
+        6.285937309265137,
+        9.056249618530273,
+        15.90468692779541,
+        15.13124942779541,
+        6.285937309265137,
+        16.326562881469727,
+        15.13124942779541,
+        13.78125,
+        9.056249618530273,
+        6.285937309265137,
+        16.19999885559082,
+        8.550000190734863,
+        15.665624618530273,
+        16.326562881469727,
+        15.55312442779541,
+        14.807811737060547,
+        9.056249618530273,
+        13.78125,
+        6.285937309265137,
+        7.720312118530273,
+        15.665624618530273,
+        9.253125190734863,
+        6.285937309265137
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 223,
+      "op": "text",
+      "text": "Connect with buyers who have first-hand experience to find the best products for ",
+      "x": 76.0000228881836,
+      "y": 1702.556396484375
+    },
+    {
+      "advances": [
+        13.823436737060547,
+        15.665624618530273,
+        15.55312442779541,
+        6.567187309265137
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 224,
+      "op": "text",
+      "text": "you.",
+      "x": 76.0000228881836,
+      "y": 1745.75634765625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 225,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 275.9475402832031,
+        "x": 649.6000366210938,
+        "y": 1890.7999267578125
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        12.882672309875488,
+        9.981294631958008,
+        15.813167572021484,
+        12.76805591583252,
+        19.279964447021484,
+        19.279964447021484,
+        12.353753089904785,
+        7.78030252456665,
+        12.09571647644043,
+        12.353753089904785,
+        4.905542373657227,
+        13.833130836486816,
+        5.391671180725098,
+        12.10700798034668,
+        7.894238471984863,
+        7.127597808837891,
+        12.76805591583252,
+        8.223276138305664,
+        19.279964447021484,
+        11.428396224975586
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 226,
+      "op": "text",
+      "text": "E-Commerce Platforms",
+      "x": 668.800048828125,
+      "y": 1897.543701171875
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 227,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 184.57345581054688,
+        "x": 938.3475341796875,
+        "y": 1890.7999267578125
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        15.813167572021484,
+        14.308572769165039,
+        19.258106231689453,
+        4.905542373657227,
+        14.037081718444824,
+        12.76805591583252,
+        7.877767086029053,
+        7.865523815155029,
+        17.09857749938965,
+        12.10700798034668,
+        7.78030252456665,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 228,
+      "op": "text",
+      "text": "CRM Software",
+      "x": 957.5475463867188,
+      "y": 1897.543701171875
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 229,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 455.5690002441406,
+        "x": 649.6000366210938,
+        "y": 2485.999755859375
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        16.35725975036621,
+        12.795198440551758,
+        19.279964447021484,
+        12.10700798034668,
+        12.795198440551758,
+        4.905542373657227,
+        14.11763858795166,
+        12.353753089904785,
+        11.428396224975586,
+        12.76805591583252,
+        12.795198440551758,
+        7.78030252456665,
+        12.09571647644043,
+        12.353753089904785,
+        11.428396224975586,
+        4.905542373657227,
+        19.096420288085938,
+        12.10700798034668,
+        12.795198440551758,
+        12.10700798034668,
+        13.237162590026855,
+        12.353753089904785,
+        19.279964447021484,
+        12.353753089904785,
+        12.795198440551758,
+        7.865523815155029,
+        4.905542373657227,
+        14.037081718444824,
+        11.821208953857422,
+        11.397412300109863,
+        7.6877760887146,
+        12.353753089904785,
+        19.279964447021484,
+        11.428396224975586
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 230,
+      "op": "text",
+      "text": "Human Resources Management Systems",
+      "x": 668.800048828125,
+      "y": 2492.743408203125
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 231,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 239.2611083984375,
+        "x": 649.6000366210938,
+        "y": 3081.199462890625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        14.11763858795166,
+        12.353753089904785,
+        12.09571647644043,
+        8.161308288574219,
+        12.795198440551758,
+        5.323002338409424,
+        7.865523815155029,
+        5.323002338409424,
+        12.795198440551758,
+        13.237162590026855,
+        4.905542373657227,
+        14.037081718444824,
+        12.76805591583252,
+        7.877767086029053,
+        7.865523815155029,
+        17.09857749938965,
+        12.10700798034668,
+        7.78030252456665,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 232,
+      "op": "text",
+      "text": "Recruiting Software",
+      "x": 668.800048828125,
+      "y": 3087.943115234375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 233,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 313.01715087890625,
+        "x": 649.6000366210938,
+        "y": 3676.399169921875
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        13.994009971618652,
+        12.10700798034668,
+        5.391671180725098,
+        12.353753089904785,
+        11.428396224975586,
+        4.905542373657227,
+        5.86454439163208,
+        12.795198440551758,
+        7.6877760887146,
+        12.353753089904785,
+        5.391671180725098,
+        5.391671180725098,
+        5.323002338409424,
+        13.237162590026855,
+        12.353753089904785,
+        12.795198440551758,
+        12.09571647644043,
+        12.353753089904785,
+        4.905542373657227,
+        14.037081718444824,
+        12.76805591583252,
+        7.877767086029053,
+        7.865523815155029,
+        17.09857749938965,
+        12.10700798034668,
+        7.78030252456665,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 234,
+      "op": "text",
+      "text": "Sales Intelligence Software",
+      "x": 668.800048828125,
+      "y": 3683.142822265625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 235,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 346.1596984863281,
+        "x": 649.6000366210938,
+        "y": 4271.59912109375
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        13.833130836486816,
+        7.78030252456665,
+        12.76805591583252,
+        5.311152458190918,
+        12.353753089904785,
+        12.157684326171875,
+        7.865523815155029,
+        4.905542373657227,
+        19.096420288085938,
+        12.10700798034668,
+        12.795198440551758,
+        12.10700798034668,
+        13.237162590026855,
+        12.353753089904785,
+        19.279964447021484,
+        12.353753089904785,
+        12.795198440551758,
+        7.865523815155029,
+        4.905542373657227,
+        14.037081718444824,
+        12.76805591583252,
+        7.877767086029053,
+        7.865523815155029,
+        17.09857749938965,
+        12.10700798034668,
+        7.78030252456665,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 236,
+      "op": "text",
+      "text": "Project Management Software",
+      "x": 668.800048828125,
+      "y": 4278.3427734375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 237,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 238.97705078125,
+        "x": 649.6000366210938,
+        "y": 4866.798828125
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        16.35725975036621,
+        12.353753089904785,
+        5.391671180725098,
+        13.254914283752441,
+        4.905542373657227,
+        15.749037742614746,
+        12.353753089904785,
+        11.428396224975586,
+        11.989109992980957,
+        4.905542373657227,
+        14.037081718444824,
+        12.76805591583252,
+        7.877767086029053,
+        7.865523815155029,
+        17.09857749938965,
+        12.10700798034668,
+        7.78030252456665,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 238,
+      "op": "text",
+      "text": "Help Desk Software",
+      "x": 668.800048828125,
+      "y": 4873.54248046875
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 239,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 319.62420654296875,
+        "x": 649.6000366210938,
+        "y": 5461.99853515625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        14.037081718444824,
+        12.76805591583252,
+        12.09571647644043,
+        5.323002338409424,
+        12.10700798034668,
+        5.391671180725098,
+        4.905542373657227,
+        16.14253044128418,
+        12.353753089904785,
+        7.865523815155029,
+        17.166946411132812,
+        12.76805591583252,
+        8.161308288574219,
+        11.989109992980957,
+        5.323002338409424,
+        12.795198440551758,
+        13.237162590026855,
+        4.905542373657227,
+        14.037081718444824,
+        12.76805591583252,
+        7.877767086029053,
+        7.865523815155029,
+        17.09857749938965,
+        12.10700798034668,
+        7.78030252456665,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 240,
+      "op": "text",
+      "text": "Social Networking Software",
+      "x": 668.800048828125,
+      "y": 5468.7421875
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 241,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 331.71124267578125,
+        "x": 649.6000366210938,
+        "y": 6057.1982421875
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        15.749037742614746,
+        12.353753089904785,
+        11.428396224975586,
+        11.931680679321289,
+        7.6877760887146,
+        12.76805591583252,
+        13.254914283752441,
+        4.905542373657227,
+        13.833130836486816,
+        12.795198440551758,
+        13.343578338623047,
+        5.391671180725098,
+        5.323002338409424,
+        11.428396224975586,
+        12.968181610107422,
+        5.323002338409424,
+        12.795198440551758,
+        13.237162590026855,
+        4.905542373657227,
+        14.037081718444824,
+        12.76805591583252,
+        7.877767086029053,
+        7.865523815155029,
+        17.09857749938965,
+        12.10700798034668,
+        7.78030252456665,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 242,
+      "op": "text",
+      "text": "Desktop Publishing Software",
+      "x": 668.800048828125,
+      "y": 6063.94189453125
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 243,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 123.15644073486328,
+        "x": 994.111328125,
+        "y": 6057.1982421875
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        14.037081718444824,
+        12.968181610107422,
+        12.531780242919922,
+        17.423498153686523,
+        4.905542373657227,
+        12.10700798034668,
+        5.391671180725098,
+        5.391671180725098
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 244,
+      "op": "text",
+      "text": "Show all",
+      "x": 1013.3113403320312,
+      "y": 6063.94189453125
+    },
+    {
+      "advances": [
+        27.7734375,
+        24.9375,
+        24.9375,
+        26.71875,
+        10.1953125,
+        22.7578125,
+        25.828125,
+        25.640625,
+        15.140625,
+        10.1953125,
+        38.90625,
+        10.2421875,
+        25.640625,
+        26.9296875,
+        10.1953125,
+        22.6875,
+        26.2265625,
+        24.4453125,
+        15.140625,
+        26.71875,
+        10.1953125,
+        34.6875,
+        10.2421875,
+        14.8125,
+        26.2265625,
+        10.1953125,
+        26.6953125,
+        24.4453125,
+        38.90625,
+        24.9375,
+        22.6875
+      ],
+      "ascent": 46.40625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 48.0,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 245,
+      "op": "text",
+      "text": "Keep your mind sharp with games",
+      "x": 76.0000228881836,
+      "y": 2148.59375
+    },
+    {
+      "advances": [
+        13.31718635559082,
+        14.8359375,
+        13.65468692779541,
+        15.13124942779541,
+        6.285937309265137,
+        14.8359375,
+        6.285937309265137,
+        16.326562881469727,
+        8.550000190734863,
+        15.13124942779541,
+        14.8359375,
+        14.35781192779541,
+        6.285937309265137,
+        14.8359375,
+        15.55312442779541,
+        16.326562881469727,
+        6.285937309265137,
+        8.550000190734863,
+        15.13124942779541,
+        14.807811737060547,
+        15.665624618530273,
+        15.55312442779541,
+        15.55312442779541,
+        15.13124942779541,
+        14.807811737060547,
+        9.056249618530273,
+        6.285937309265137,
+        20.98124885559082,
+        6.314062118530273,
+        9.056249618530273,
+        15.90468692779541,
+        6.285937309265137,
+        13.823436737060547,
+        15.665624618530273,
+        15.55312442779541,
+        9.253125190734863,
+        6.285937309265137,
+        15.55312442779541,
+        15.13124942779541,
+        9.056249618530273,
+        20.98124885559082,
+        15.665624618530273,
+        9.253125190734863,
+        14.35781192779541,
+        6.285937309265137,
+        9.056249618530273,
+        15.90468692779541,
+        8.550000190734863,
+        15.665624618530273,
+        15.55312442779541,
+        16.185937881469727,
+        15.90468692779541,
+        6.285937309265137,
+        16.185937881469727,
+        15.55312442779541,
+        6.314062118530273,
+        14.807811737060547,
+        14.35781192779541,
+        6.285937309265137,
+        16.326562881469727,
+        14.8359375,
+        6.314062118530273,
+        6.2578125,
+        14.385936737060547,
+        6.285937309265137,
+        16.185937881469727,
+        14.8359375,
+        23.51249885559082,
+        15.13124942779541,
+        13.78125,
+        6.567187309265137
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 246,
+      "op": "text",
+      "text": "Take a break and reconnect with your network through quick daily games.",
+      "x": 76.0000228881836,
+      "y": 2227.356201171875
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 247,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 120.1974105834961,
+        "x": 649.6000366210938,
+        "y": 2329.2001953125
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        13.15656852722168,
+        12.10700798034668,
+        7.6877760887146,
+        12.09571647644043,
+        12.968181610107422,
+        12.353753089904785,
+        11.428396224975586
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 248,
+      "op": "text",
+      "text": "Patches",
+      "x": 668.800048828125,
+      "y": 2335.94384765625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 249,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 71.21168518066406,
+        "x": 782.597412109375,
+        "y": 2329.2001953125
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        14.233768463134766,
+        5.323002338409424,
+        13.254914283752441
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 250,
+      "op": "text",
+      "text": "Zip",
+      "x": 801.7974243164062,
+      "y": 2335.94384765625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 251,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 163.72296142578125,
+        "x": 866.609130859375,
+        "y": 2329.2001953125
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        19.258106231689453,
+        5.323002338409424,
+        12.795198440551758,
+        5.323002338409424,
+        4.905542373657227,
+        14.037081718444824,
+        12.795198440551758,
+        13.333440780639648,
+        12.76805591583252,
+        11.989109992980957,
+        12.795198440551758
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 252,
+      "op": "text",
+      "text": "Mini Sudoku",
+      "x": 885.8091430664062,
+      "y": 2335.94384765625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 253,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 116.9455337524414,
+        "x": 1043.132080078125,
+        "y": 2329.2001953125
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        16.81922721862793,
+        12.795198440551758,
+        12.353753089904785,
+        12.353753089904785,
+        12.795198440551758,
+        11.428396224975586
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 254,
+      "op": "text",
+      "text": "Queens",
+      "x": 1062.33203125,
+      "y": 2335.94384765625
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 255,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 100.41897583007812,
+        "x": 649.6000366210938,
+        "y": 2751.599853515625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        11.111553192138672,
+        12.10700798034668,
+        12.795198440551758,
+        13.237162590026855,
+        12.76805591583252
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 256,
+      "op": "text",
+      "text": "Tango",
+      "x": 668.800048828125,
+      "y": 2758.343505859375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 257,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 122.35802459716797,
+        "x": 762.8190307617188,
+        "y": 2751.599853515625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        13.833130836486816,
+        5.323002338409424,
+        12.795198440551758,
+        13.254914283752441,
+        12.76805591583252,
+        5.323002338409424,
+        12.795198440551758,
+        7.865523815155029
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 258,
+      "op": "text",
+      "text": "Pinpoint",
+      "x": 782.01904296875,
+      "y": 2758.343505859375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 259,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 152.96157836914062,
+        "x": 897.97705078125,
+        "y": 2751.599853515625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        15.813167572021484,
+        7.78030252456665,
+        12.76805591583252,
+        11.337713241577148,
+        11.428396224975586,
+        12.09571647644043,
+        5.391671180725098,
+        5.323002338409424,
+        19.279964447021484,
+        13.343578338623047
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 260,
+      "op": "text",
+      "text": "Crossclimb",
+      "x": 917.1770629882812,
+      "y": 2758.343505859375
+    },
+    {
+      "advances": [
+        44.6953125,
+        26.2265625,
+        25.828125,
+        10.1953125,
+        10.2421875,
+        22.6875,
+        10.1953125,
+        25.5234375,
+        10.2421875,
+        25.640625,
+        22.4765625,
+        24.9375,
+        26.9296875,
+        11.1328125,
+        25.640625,
+        10.1953125,
+        12.5859375,
+        25.828125,
+        15.140625,
+        23.8359375
+      ],
+      "ascent": 46.40625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 48.0,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 261,
+      "op": "text",
+      "text": "Who is LinkedIn for?",
+      "x": 76.0000228881836,
+      "y": 2577.3935546875
+    },
+    {
+      "advances": [
+        18.674999237060547,
+        15.55312442779541,
+        13.823436737060547,
+        15.665624618530273,
+        15.55312442779541,
+        15.13124942779541,
+        6.285937309265137,
+        6.2578125,
+        15.665624618530273,
+        15.665624618530273,
+        14.35781192779541,
+        6.314062118530273,
+        15.55312442779541,
+        16.185937881469727,
+        6.285937309265137,
+        8.634374618530273,
+        15.665624618530273,
+        6.285937309265137,
+        15.55312442779541,
+        14.8359375,
+        14.28749942779541,
+        6.314062118530273,
+        16.185937881469727,
+        14.8359375,
+        8.634374618530273,
+        15.13124942779541,
+        6.285937309265137,
+        9.056249618530273,
+        15.90468692779541,
+        15.13124942779541,
+        6.314062118530273,
+        9.253125190734863,
+        6.285937309265137,
+        16.19999885559082,
+        8.550000190734863,
+        15.665624618530273,
+        7.720312118530273,
+        15.13124942779541,
+        13.78125,
+        13.78125,
+        6.314062118530273,
+        15.665624618530273,
+        15.55312442779541,
+        14.8359375,
+        6.2578125,
+        6.285937309265137,
+        6.2578125,
+        6.314062118530273,
+        7.720312118530273,
+        15.13124942779541,
+        6.567187309265137
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 262,
+      "op": "text",
+      "text": "Anyone looking to navigate their professional life.",
+      "x": 76.0000228881836,
+      "y": 2656.15625
+    },
+    {
+      "advances": [
+        18.242891311645508,
+        14.58768081665039,
+        14.606738090515137,
+        14.606738090515137,
+        14.12182903289795,
+        13.86268138885498,
+        8.927192687988281,
+        5.49044942855835,
+        19.86020278930664,
+        6.136075496673584,
+        8.927192687988281,
+        14.842364311218262,
+        5.49044942855835,
+        15.107434272766113,
+        14.12182903289795,
+        14.58768081665039,
+        15.107434272766113,
+        6.160713195800781,
+        14.12182903289795,
+        5.49044942855835,
+        19.86020278930664,
+        14.842364311218262,
+        14.58768081665039,
+        5.49044942855835,
+        13.844048500061035,
+        13.883366584777832,
+        14.606738090515137,
+        5.49044942855835,
+        14.842364311218262,
+        14.12182903289795,
+        6.160713195800781,
+        15.107434272766113
+      ],
+      "ascent": 24.75,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 25.600000381469727,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 263,
+      "op": "text",
+      "text": "Connect with people who can help",
+      "x": 188.00003051757812,
+      "y": 2741.249755859375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 264,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 107.77706146240234,
+        "x": 188.00003051757812,
+        "y": 2778.39990234375
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        12.35534381866455,
+        5.323002338409424,
+        12.795198440551758,
+        13.333440780639648,
+        4.905542373657227,
+        13.254914283752441,
+        12.353753089904785,
+        12.76805591583252,
+        13.254914283752441,
+        5.391671180725098,
+        12.353753089904785
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 265,
+      "op": "text",
+      "text": "Find people",
+      "x": 207.2000274658203,
+      "y": 2785.1435546875
+    },
+    {
+      "advances": [
+        18.0271053314209,
+        6.136075496673584,
+        13.03805923461914,
+        13.844048500061035,
+        14.100996017456055,
+        12.940266609191895,
+        14.12182903289795,
+        9.165506362915039,
+        5.49044942855835,
+        13.150486946105957,
+        14.58768081665039,
+        14.606738090515137,
+        9.165506362915039,
+        5.49044942855835,
+        14.606738090515137,
+        13.875508308410645,
+        13.275501251220703,
+        8.927192687988281,
+        5.49044942855835,
+        14.58768081665039,
+        15.107434272766113,
+        15.107434272766113,
+        14.58768081665039,
+        9.683393478393555,
+        8.927192687988281,
+        14.606738090515137,
+        14.606738090515137,
+        6.136075496673584,
+        8.927192687988281,
+        6.136075496673584,
+        14.12182903289795,
+        13.03805923461914
+      ],
+      "ascent": 24.75,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 25.600000381469727,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 266,
+      "op": "text",
+      "text": "Discover your next opportunities",
+      "x": 188.00003051757812,
+      "y": 2904.44970703125
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 267,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 82.20698547363281,
+        "x": 188.00003051757812,
+        "y": 2941.599853515625
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        12.35534381866455,
+        5.323002338409424,
+        12.795198440551758,
+        13.333440780639648,
+        4.905542373657227,
+        5.311152458190918,
+        12.76805591583252,
+        13.343578338623047,
+        11.428396224975586
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 268,
+      "op": "text",
+      "text": "Find jobs",
+      "x": 207.2000274658203,
+      "y": 2948.343505859375
+    },
+    {
+      "advances": [
+        13.740362167358398,
+        14.12182903289795,
+        13.883366584777832,
+        9.184139251708984,
+        14.606738090515137,
+        5.49044942855835,
+        8.927192687988281,
+        14.842364311218262,
+        14.12182903289795,
+        5.49044942855835,
+        13.03805923461914,
+        13.622237205505371,
+        6.136075496673584,
+        6.160713195800781,
+        6.160713195800781,
+        13.03805923461914,
+        5.49044942855835,
+        13.150486946105957,
+        14.58768081665039,
+        14.606738090515137,
+        5.49044942855835,
+        14.606738090515137,
+        14.12182903289795,
+        14.12182903289795,
+        15.18769645690918,
+        5.49044942855835,
+        8.684911727905273,
+        14.58768081665039,
+        5.49044942855835,
+        13.03805923461914,
+        14.606738090515137,
+        13.844048500061035,
+        13.844048500061035,
+        14.12182903289795,
+        14.12182903289795,
+        15.18769645690918
+      ],
+      "ascent": 24.75,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 25.600000381469727,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 269,
+      "op": "text",
+      "text": "Learn the skills you need to succeed",
+      "x": 188.00003051757812,
+      "y": 3067.64990234375
+    },
+    {
+      "blur_radius": 0.0,
+      "color": {
+        "a": 0.5,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "index": 270,
+      "inset": true,
+      "offset_x": 0.0,
+      "offset_y": 0.0,
+      "op": "box_shadow",
+      "rect": {
+        "height": 40.79999923706055,
+        "width": 122.89962005615234,
+        "x": 188.00003051757812,
+        "y": 3104.7998046875
+      },
+      "spread_radius": 1.0
+    },
+    {
+      "advances": [
+        15.813167572021484,
+        12.968181610107422,
+        12.76805591583252,
+        12.76805591583252,
+        11.428396224975586,
+        12.353753089904785,
+        4.905542373657227,
+        12.10700798034668,
+        4.905542373657227,
+        7.6877760887146,
+        12.76805591583252,
+        13.254914283752441,
+        5.323002338409424,
+        12.09571647644043
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 271,
+      "op": "text",
+      "text": "Choose a topic",
+      "x": 207.2000274658203,
+      "y": 3111.54345703125
+    },
+    {
+      "advances": [
+        18.691165924072266,
+        14.12182903289795,
+        8.927192687988281,
+        5.49044942855835,
+        16.09871482849121,
+        8.774988174438477,
+        13.883366584777832,
+        9.683393478393555,
+        8.684911727905273,
+        14.12182903289795,
+        15.18769645690918
+      ],
+      "ascent": 24.75,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 25.600000381469727,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 272,
+      "op": "text",
+      "text": "Get Started",
+      "x": 108.0000228881836,
+      "y": 3557.249755859375
+    },
+    {
+      "advances": [
+        18.691165924072266,
+        14.12182903289795,
+        14.606738090515137,
+        14.12182903289795,
+        8.890241622924805,
+        13.883366584777832,
+        6.160713195800781
+      ],
+      "ascent": 24.75,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 25.600000381469727,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 273,
+      "op": "text",
+      "text": "General",
+      "x": 76.0000228881836,
+      "y": 3863.0498046875
+    },
+    {
+      "advances": [
+        17.46562385559082,
+        6.314062118530273,
+        16.185937881469727,
+        15.55312442779541,
+        6.285937309265137,
+        20.432811737060547,
+        16.19999885559082
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 274,
+      "op": "text",
+      "text": "Sign Up",
+      "x": 76.0000228881836,
+      "y": 3917.15576171875
+    },
+    {
+      "advances": [
+        20.517187118530273,
+        15.13124942779541,
+        6.2578125,
+        16.19999885559082,
+        6.285937309265137,
+        20.13749885559082,
+        15.13124942779541,
+        15.55312442779541,
+        8.634374618530273,
+        15.13124942779541,
+        9.253125190734863
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 275,
+      "op": "text",
+      "text": "Help Center",
+      "x": 76.0000228881836,
+      "y": 3966.755859375
+    },
+    {
+      "advances": [
+        18.674999237060547,
+        16.326562881469727,
+        15.665624618530273,
+        15.55312442779541,
+        9.056249618530273
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 276,
+      "op": "text",
+      "text": "About",
+      "x": 76.0000228881836,
+      "y": 4016.35595703125
+    },
+    {
+      "advances": [
+        17.015625,
+        8.550000190734863,
+        15.13124942779541,
+        13.78125,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 277,
+      "op": "text",
+      "text": "Press",
+      "x": 76.0000228881836,
+      "y": 4065.955810546875
+    },
+    {
+      "advances": [
+        17.7890625,
+        6.2578125,
+        15.665624618530273,
+        16.185937881469727
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 278,
+      "op": "text",
+      "text": "Blog",
+      "x": 76.0000228881836,
+      "y": 4115.5556640625
+    },
+    {
+      "advances": [
+        20.13749885559082,
+        14.8359375,
+        8.550000190734863,
+        15.13124942779541,
+        15.13124942779541,
+        9.253125190734863,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 279,
+      "op": "text",
+      "text": "Careers",
+      "x": 76.0000228881836,
+      "y": 4165.15576171875
+    },
+    {
+      "advances": [
+        19.92656135559082,
+        14.56874942779541,
+        13.72499942779541,
+        15.13124942779541,
+        6.2578125,
+        15.665624618530273,
+        16.19999885559082,
+        15.13124942779541,
+        9.253125190734863,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 280,
+      "op": "text",
+      "text": "Developers",
+      "x": 76.0000228881836,
+      "y": 4214.755859375
+    },
+    {
+      "advances": [
+        16.368942260742188,
+        8.67788314819336,
+        14.458300590515137,
+        19.78403663635254,
+        13.03805923461914,
+        14.12182903289795,
+        5.49044942855835,
+        14.036836624145508,
+        6.136075496673584,
+        14.606738090515137,
+        12.984285354614258,
+        14.12182903289795,
+        15.18769645690918,
+        6.71310567855835,
+        14.606738090515137
+      ],
+      "ascent": 24.75,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 25.600000381469727,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 281,
+      "op": "text",
+      "text": "Browse LinkedIn",
+      "x": 76.0000228881836,
+      "y": 4255.0498046875
+    },
+    {
+      "advances": [
+        15.06093692779541,
+        15.13124942779541,
+        14.8359375,
+        9.253125190734863,
+        15.55312442779541,
+        6.314062118530273,
+        15.55312442779541,
+        16.185937881469727
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 282,
+      "op": "text",
+      "text": "Learning",
+      "x": 76.0000228881836,
+      "y": 4309.15576171875
+    },
+    {
+      "advances": [
+        14.63906192779541,
+        15.665624618530273,
+        16.326562881469727,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 283,
+      "op": "text",
+      "text": "Jobs",
+      "x": 76.0000228881836,
+      "y": 4358.755859375
+    },
+    {
+      "advances": [
+        20.728124618530273,
+        14.8359375,
+        23.51249885559082,
+        15.13124942779541,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 284,
+      "op": "text",
+      "text": "Games",
+      "x": 76.0000228881836,
+      "y": 4408.35546875
+    },
+    {
+      "advances": [
+        24.314062118530273,
+        15.665624618530273,
+        16.326562881469727,
+        6.314062118530273,
+        6.2578125,
+        15.13124942779541
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 285,
+      "op": "text",
+      "text": "Mobile",
+      "x": 76.0000228881836,
+      "y": 4457.9560546875
+    },
+    {
+      "advances": [
+        17.46562385559082,
+        15.13124942779541,
+        9.675000190734863,
+        14.28749942779541,
+        6.314062118530273,
+        14.807811737060547,
+        15.13124942779541,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 286,
+      "op": "text",
+      "text": "Services",
+      "x": 76.0000228881836,
+      "y": 4507.5556640625
+    },
+    {
+      "advances": [
+        17.015625,
+        8.550000190734863,
+        15.665624618530273,
+        16.326562881469727,
+        15.55312442779541,
+        14.807811737060547,
+        9.056249618530273,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 287,
+      "op": "text",
+      "text": "Products",
+      "x": 76.0000228881836,
+      "y": 4557.15576171875
+    },
+    {
+      "advances": [
+        13.31718635559082,
+        15.665624618530273,
+        16.19999885559082,
+        6.285937309265137,
+        20.13749885559082,
+        15.665624618530273,
+        23.51249885559082,
+        16.19999885559082,
+        14.8359375,
+        15.55312442779541,
+        6.314062118530273,
+        15.13124942779541,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 288,
+      "op": "text",
+      "text": "Top Companies",
+      "x": 76.0000228881836,
+      "y": 4606.755859375
+    },
+    {
+      "advances": [
+        13.31718635559082,
+        15.665624618530273,
+        16.19999885559082,
+        6.285937309265137,
+        17.46562385559082,
+        8.774999618530273,
+        14.8359375,
+        9.956250190734863,
+        9.056249618530273,
+        15.55312442779541,
+        16.19999885559082,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 289,
+      "op": "text",
+      "text": "Top Startups",
+      "x": 76.0000228881836,
+      "y": 4656.35546875
+    },
+    {
+      "advances": [
+        13.31718635559082,
+        15.665624618530273,
+        16.19999885559082,
+        6.285937309265137,
+        20.13749885559082,
+        15.665624618530273,
+        6.2578125,
+        6.2578125,
+        15.13124942779541,
+        16.185937881469727,
+        15.13124942779541,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 290,
+      "op": "text",
+      "text": "Top Colleges",
+      "x": 76.0000228881836,
+      "y": 4705.95556640625
+    },
+    {
+      "advances": [
+        16.368942260742188,
+        14.606738090515137,
+        13.03805923461914,
+        6.136075496673584,
+        14.606738090515137,
+        14.12182903289795,
+        13.010791778564453,
+        13.03805923461914,
+        5.49044942855835,
+        16.09871482849121,
+        14.58768081665039,
+        6.160713195800781,
+        14.606738090515137,
+        8.927192687988281,
+        6.136075496673584,
+        14.58768081665039,
+        14.606738090515137,
+        13.03805923461914
+      ],
+      "ascent": 24.75,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 25.600000381469727,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 291,
+      "op": "text",
+      "text": "Business Solutions",
+      "x": 76.0000228881836,
+      "y": 4746.24951171875
+    },
+    {
+      "advances": [
+        13.31718635559082,
+        14.8359375,
+        6.2578125,
+        15.13124942779541,
+        15.55312442779541,
+        9.056249618530273
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 292,
+      "op": "text",
+      "text": "Talent",
+      "x": 76.0000228881836,
+      "y": 4800.35546875
+    },
+    {
+      "advances": [
+        23.892187118530273,
+        14.8359375,
+        9.253125190734863,
+        13.65468692779541,
+        15.13124942779541,
+        9.056249618530273,
+        6.314062118530273,
+        15.55312442779541,
+        16.185937881469727
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 293,
+      "op": "text",
+      "text": "Marketing",
+      "x": 76.0000228881836,
+      "y": 4849.9560546875
+    },
+    {
+      "advances": [
+        17.46562385559082,
+        14.8359375,
+        6.2578125,
+        15.13124942779541,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 294,
+      "op": "text",
+      "text": "Sales",
+      "x": 76.0000228881836,
+      "y": 4899.5556640625
+    },
+    {
+      "advances": [
+        15.06093692779541,
+        15.13124942779541,
+        14.8359375,
+        9.253125190734863,
+        15.55312442779541,
+        6.314062118530273,
+        15.55312442779541,
+        16.185937881469727
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 295,
+      "op": "text",
+      "text": "Learning",
+      "x": 76.0000228881836,
+      "y": 4949.15576171875
+    },
+    {
+      "advances": [
+        18.0271053314209,
+        6.136075496673584,
+        8.67788314819336,
+        14.12182903289795,
+        13.86268138885498,
+        8.684911727905273,
+        14.58768081665039,
+        9.165506362915039,
+        6.136075496673584,
+        14.12182903289795,
+        13.03805923461914
+      ],
+      "ascent": 24.75,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 25.600000381469727,
+      "font_style": 0,
+      "font_weight": 600,
+      "index": 296,
+      "op": "text",
+      "text": "Directories",
+      "x": 76.0000228881836,
+      "y": 4989.44921875
+    },
+    {
+      "advances": [
+        24.314062118530273,
+        15.13124942779541,
+        23.51249885559082,
+        16.326562881469727,
+        15.13124942779541,
+        9.253125190734863,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 297,
+      "op": "text",
+      "text": "Members",
+      "x": 76.0000228881836,
+      "y": 5043.5556640625
+    },
+    {
+      "advances": [
+        14.63906192779541,
+        15.665624618530273,
+        16.326562881469727,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 298,
+      "op": "text",
+      "text": "Jobs",
+      "x": 76.0000228881836,
+      "y": 5093.15576171875
+    },
+    {
+      "advances": [
+        20.13749885559082,
+        15.665624618530273,
+        23.51249885559082,
+        16.19999885559082,
+        14.8359375,
+        15.55312442779541,
+        6.314062118530273,
+        15.13124942779541,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 299,
+      "op": "text",
+      "text": "Companies",
+      "x": 76.0000228881836,
+      "y": 5142.755859375
+    },
+    {
+      "advances": [
+        15.018749237060547,
+        15.13124942779541,
+        14.8359375,
+        9.056249618530273,
+        15.55312442779541,
+        8.550000190734863,
+        15.13124942779541,
+        16.326562881469727
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 300,
+      "op": "text",
+      "text": "Featured",
+      "x": 76.0000228881836,
+      "y": 5192.35546875
+    },
+    {
+      "advances": [
+        15.06093692779541,
+        15.13124942779541,
+        14.8359375,
+        9.253125190734863,
+        15.55312442779541,
+        6.314062118530273,
+        15.55312442779541,
+        16.185937881469727
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 301,
+      "op": "text",
+      "text": "Learning",
+      "x": 76.0000228881836,
+      "y": 5241.95556640625
+    },
+    {
+      "advances": [
+        16.3125,
+        15.665624618530273,
+        13.78125,
+        9.056249618530273,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 302,
+      "op": "text",
+      "text": "Posts",
+      "x": 76.0000228881836,
+      "y": 5291.5556640625
+    },
+    {
+      "advances": [
+        18.674999237060547,
+        9.956250190734863,
+        9.056249618530273,
+        6.314062118530273,
+        14.807811737060547,
+        6.2578125,
+        15.13124942779541,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 303,
+      "op": "text",
+      "text": "Articles",
+      "x": 76.0000228881836,
+      "y": 5341.1552734375
+    },
+    {
+      "advances": [
+        17.46562385559082,
+        14.807811737060547,
+        15.90468692779541,
+        15.665624618530273,
+        15.665624618530273,
+        6.2578125,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 304,
+      "op": "text",
+      "text": "Schools",
+      "x": 76.0000228881836,
+      "y": 5390.755859375
+    },
+    {
+      "advances": [
+        20.517187118530273,
+        15.13124942779541,
+        20.98124885559082,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 305,
+      "op": "text",
+      "text": "News",
+      "x": 76.0000228881836,
+      "y": 5440.35546875
+    },
+    {
+      "advances": [
+        20.517187118530273,
+        15.13124942779541,
+        20.98124885559082,
+        13.78125,
+        6.2578125,
+        15.13124942779541,
+        9.056249618530273,
+        8.634374618530273,
+        15.13124942779541,
+        9.253125190734863,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 306,
+      "op": "text",
+      "text": "Newsletters",
+      "x": 76.0000228881836,
+      "y": 5489.95556640625
+    },
+    {
+      "advances": [
+        17.46562385559082,
+        15.13124942779541,
+        9.675000190734863,
+        14.28749942779541,
+        6.314062118530273,
+        14.807811737060547,
+        15.13124942779541,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 307,
+      "op": "text",
+      "text": "Services",
+      "x": 76.0000228881836,
+      "y": 5539.5556640625
+    },
+    {
+      "advances": [
+        17.015625,
+        8.550000190734863,
+        15.665624618530273,
+        16.326562881469727,
+        15.55312442779541,
+        14.807811737060547,
+        9.056249618530273,
+        13.78125
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 308,
+      "op": "text",
+      "text": "Products",
+      "x": 76.0000228881836,
+      "y": 5589.1552734375
+    },
+    {
+      "advances": [
+        16.3125,
+        15.13124942779541,
+        15.665624618530273,
+        16.19999885559082,
+        6.2578125,
+        15.13124942779541,
+        6.285937309265137,
+        17.46562385559082,
+        15.13124942779541,
+        14.8359375,
+        8.550000190734863,
+        14.807811737060547,
+        15.90468692779541
+      ],
+      "ascent": 27.84375,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 28.799999237060547,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 309,
+      "op": "text",
+      "text": "People Search",
+      "x": 76.0000228881836,
+      "y": 5638.755859375
+    },
+    {
+      "advances": [
+        10.36237907409668,
+        4.208629131317139,
+        10.63200569152832,
+        9.382881164550781,
+        10.392005920410156,
+        11.213630676269531,
+        4.597879409790039,
+        10.63200569152832,
+        4.783882141113281,
+        13.234503746032715,
+        10.764756202697754,
+        6.869257926940918,
+        11.137506484985352,
+        10.764756202697754,
+        6.681757926940918,
+        10.038379669189453,
+        6.391506195068359,
+        4.208629131317139,
+        10.764756202697754,
+        10.63200569152832,
+        4.783882141113281,
+        16.61700439453125,
+        4.783882141113281,
+        11.060254096984863,
+        11.576628684997559,
+        11.060254096984863,
+        11.73937702178955
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 310,
+      "op": "text",
+      "text": "LinkedIn Corporation © 2026",
+      "x": 94.40001678466797,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        12.408003807067871,
+        11.213630676269531,
+        10.764756202697754,
+        10.63200569152832,
+        6.391506195068359
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 311,
+      "op": "text",
+      "text": "About",
+      "x": 414.1144104003906,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        11.890501976013184,
+        10.168130874633789,
+        10.168130874633789,
+        10.392005920410156,
+        9.310504913330078,
+        9.475505828857422,
+        4.208629131317139,
+        11.213630676269531,
+        4.208629131317139,
+        4.30312967300415,
+        4.208629131317139,
+        6.391506195068359,
+        9.853880882263184
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 312,
+      "op": "text",
+      "text": "Accessibility",
+      "x": 478.3243103027344,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        13.59862995147705,
+        9.475505828857422,
+        10.392005920410156,
+        6.704257011413574,
+        4.783882141113281,
+        11.890501976013184,
+        11.119880676269531,
+        6.400507926940918,
+        10.392005920410156,
+        10.392005920410156,
+        16.111507415771484,
+        10.392005920410156,
+        10.63200569152832,
+        6.391506195068359
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 313,
+      "op": "text",
+      "text": "User Agreement",
+      "x": 596.9171142578125,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        11.623505592346191,
+        6.704257011413574,
+        4.208629131317139,
+        9.477005004882812,
+        10.038379669189453,
+        10.168130874633789,
+        9.853880882263184,
+        4.783882141113281,
+        11.319756507873535,
+        10.764756202697754,
+        4.30312967300415,
+        4.208629131317139,
+        10.168130874633789,
+        9.853880882263184
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 314,
+      "op": "text",
+      "text": "Privacy Policy",
+      "x": 748.393310546875,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        10.42538070678711,
+        10.764756202697754,
+        10.63200569152832,
+        6.704257011413574,
+        4.783882141113281,
+        13.234503746032715,
+        10.038379669189453,
+        4.30312967300415,
+        4.208629131317139,
+        5.8886332511901855,
+        10.764756202697754,
+        6.869257926940918,
+        10.63200569152832,
+        4.208629131317139,
+        10.038379669189453,
+        4.783882141113281,
+        11.623505592346191,
+        6.704257011413574,
+        4.208629131317139,
+        9.477005004882812,
+        10.038379669189453,
+        10.168130874633789,
+        9.853880882263184,
+        4.783882141113281,
+        13.234503746032715,
+        10.742630004882812,
+        10.764756202697754,
+        4.208629131317139,
+        10.168130874633789,
+        10.392005920410156,
+        9.475505828857422
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 315,
+      "op": "text",
+      "text": "Your California Privacy Choices",
+      "x": 878.6693115234375,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        13.234503746032715,
+        10.764756202697754,
+        10.764756202697754,
+        9.851631164550781,
+        4.208629131317139,
+        10.392005920410156,
+        4.783882141113281,
+        11.319756507873535,
+        10.764756202697754,
+        4.30312967300415,
+        4.208629131317139,
+        10.168130874633789,
+        9.853880882263184
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 316,
+      "op": "text",
+      "text": "Cookie Policy",
+      "x": 1155.593505859375,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        13.234503746032715,
+        10.764756202697754,
+        10.762506484985352,
+        9.853880882263184,
+        6.704257011413574,
+        4.208629131317139,
+        11.119880676269531,
+        10.742630004882812,
+        6.391506195068359,
+        4.783882141113281,
+        11.319756507873535,
+        10.764756202697754,
+        4.30312967300415,
+        4.208629131317139,
+        10.168130874633789,
+        9.853880882263184
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 317,
+      "op": "text",
+      "text": "Copyright Policy",
+      "x": 1283.011962890625,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        12.05663013458252,
+        6.681757926940918,
+        10.038379669189453,
+        10.63200569152832,
+        11.213630676269531,
+        4.783882141113281,
+        11.319756507873535,
+        10.764756202697754,
+        4.30312967300415,
+        4.208629131317139,
+        10.168130874633789,
+        9.853880882263184
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 318,
+      "op": "text",
+      "text": "Brand Policy",
+      "x": 1434.99658203125,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        13.801504135131836,
+        10.63200569152832,
+        10.392005920410156,
+        9.39300537109375,
+        6.391506195068359,
+        4.783882141113281,
+        10.168130874633789,
+        10.764756202697754,
+        10.63200569152832,
+        6.391506195068359,
+        6.400507926940918,
+        10.764756202697754,
+        4.30312967300415,
+        9.475505828857422
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 319,
+      "op": "text",
+      "text": "Guest controls",
+      "x": 1553.8212890625,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        13.234503746032715,
+        10.764756202697754,
+        16.111507415771484,
+        16.111507415771484,
+        10.63200569152832,
+        10.63200569152832,
+        4.208629131317139,
+        6.391506195068359,
+        9.853880882263184,
+        4.783882141113281,
+        13.801504135131836,
+        10.63200569152832,
+        4.208629131317139,
+        11.213630676269531,
+        10.392005920410156,
+        4.30312967300415,
+        4.208629131317139,
+        10.63200569152832,
+        10.392005920410156,
+        9.475505828857422
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 320,
+      "op": "text",
+      "text": "Community Guidelines",
+      "x": 1690.91552734375,
+      "y": 128.4375
+    },
+    {
+      "advances": [
+        10.36237907409668,
+        10.038379669189453,
+        10.63200569152832,
+        11.119880676269531,
+        10.63200569152832,
+        10.038379669189453,
+        11.119880676269531,
+        10.392005920410156
+      ],
+      "ascent": 18.5625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 19.200000762939453,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 321,
+      "op": "text",
+      "text": "Language",
+      "x": 1895.69873046875,
+      "y": 128.4375
+    },
+    {
+      "index": 322,
+      "op": "pop_clip"
+    },
+    {
+      "index": 323,
+      "op": "pop_clip"
+    },
+    {
+      "index": 324,
+      "op": "pop_clip"
+    },
+    {
+      "index": 325,
+      "op": "pop_clip"
+    },
+    {
+      "index": 326,
+      "op": "push_clip",
+      "rect": {
+        "height": 1.0,
+        "width": 1.0,
+        "x": 50.20000076293945,
+        "y": 747.7999877929688
+      }
+    },
+    {
+      "advances": [
+        13.605138778686523,
+        5.1042022705078125
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 327,
+      "op": "text",
+      "text": "0 ",
+      "x": 50.20000076293945,
+      "y": 748.1437377929688
+    },
+    {
+      "advances": [
+        12.130648612976074,
+        12.249887466430664,
+        7.127399444580078,
+        4.799618244171143,
+        7.145813465118408,
+        4.799618244171143,
+        11.569097518920898,
+        11.509358406066895,
+        7.127399444580078,
+        4.799618244171143,
+        12.249887466430664,
+        12.130648612976074,
+        10.766125679016113
+      ],
+      "ascent": 21.65625,
+      "color": {
+        "a": 1.0,
+        "b": 0,
+        "g": 0,
+        "r": 0
+      },
+      "font_family": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Ubuntu, Oxygen, Cantarell, \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\", \"Segoe UI Symbol",
+      "font_size": 22.399999618530273,
+      "font_style": 0,
+      "font_weight": 400,
+      "index": 328,
+      "op": "text",
+      "text": "notifications",
+      "x": 50.20000076293945,
+      "y": 776.1437377929688
+    },
+    {
+      "index": 329,
+      "op": "pop_clip"
+    }
+  ],
+  "count": 330,
+  "version": 1,
+  "viewport": {
+    "height": 800,
+    "width": 1280
+  }
+}

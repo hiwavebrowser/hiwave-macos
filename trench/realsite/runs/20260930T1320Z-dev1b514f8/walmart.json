@@ -1,0 +1,107 @@
+{
+  "id": "walmart",
+  "url": "https://www.walmart.com/",
+  "chrome": [
+    {
+      "url": "https://www.walmart.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.walmart.com/",
+      "title": "Walmart | Save Money. Live better.",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/walmart/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/walmart/chrome-a.png",
+      "elapsed_ms": 72189
+    },
+    {
+      "url": "https://www.walmart.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.walmart.com/",
+      "title": "Walmart | Save Money. Live better.",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/walmart/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/walmart/chrome-b.png",
+      "elapsed_ms": 57383
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.walmart.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/walmart/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/walmart/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 87,
+      "bytes": 5741998,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 10131,
+    "error": null,
+    "wall_ms": 10327,
+    "non_background_fraction": 0.3464
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 56,
+    "rustkit_words": 48,
+    "ratio": 0.4286,
+    "missing_sample": [
+      "activate",
+      "and",
+      "anywhere",
+      "app",
+      "are",
+      "big",
+      "button",
+      "check",
+      "confirm",
+      "delivery",
+      "departments",
+      "easiest",
+      "get",
+      "grocery",
+      "hold",
+      "home",
+      "human",
+      "on",
+      "orders",
+      "out",
+      "pickup",
+      "re",
+      "robot",
+      "services",
+      "shopping"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.16787109375,
+    "diff": 66.8099609375
+  },
+  "points": 1
+}

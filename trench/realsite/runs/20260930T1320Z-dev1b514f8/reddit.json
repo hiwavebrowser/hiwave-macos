@@ -1,0 +1,107 @@
+{
+  "id": "reddit",
+  "url": "https://www.reddit.com/",
+  "chrome": [
+    {
+      "url": "https://www.reddit.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.reddit.com/?solution=2b7e9bed4567cc242b7e9bed4567cc24&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c3313f47ec7472e90216a0312bd8dfc011e3&jsc_orig_r=",
+      "title": "Reddit - The heart of the internet",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/reddit/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/reddit/chrome-a.png",
+      "elapsed_ms": 33531
+    },
+    {
+      "url": "https://www.reddit.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.reddit.com/?solution=73445327ee46152873445327ee461528&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c3318ea1f1aee2ae3eab41039ece7c94c4fc&jsc_orig_r=",
+      "title": "Reddit - The heart of the internet",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/reddit/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/reddit/chrome-b.png",
+      "elapsed_ms": 34919
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.reddit.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/reddit/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/reddit/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 420,
+      "elapsed_ms": 1
+    },
+    "elapsed_ms": 1391,
+    "error": null,
+    "wall_ms": 1441,
+    "non_background_fraction": 0.015
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "blank frame (1.50% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 109,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "14",
+      "188",
+      "1s",
+      "2026",
+      "247",
+      "3",
+      "306",
+      "378",
+      "463",
+      "5",
+      "713",
+      "829",
+      "946",
+      "962",
+      "975",
+      "accessibility",
+      "acknowledge",
+      "acura",
+      "acura_official",
+      "ad",
+      "advertisement",
+      "ago",
+      "agree",
+      "agreement",
+      "all"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 3.32802734375,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}
