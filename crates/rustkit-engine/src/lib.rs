@@ -4137,7 +4137,7 @@ impl Engine {
                         siblings_before,
                         sib,
                         "::before",
-                        Some(&style),
+                        Some(&layout_box.style),
                     )
                 })
                 .and_then(Self::pseudo_element_box)
@@ -4257,7 +4257,7 @@ impl Engine {
                         siblings_before,
                         sib,
                         "::after",
-                        Some(&style),
+                        Some(&layout_box.style),
                     )
                 })
                 .and_then(Self::pseudo_element_box)
@@ -8205,14 +8205,16 @@ impl Engine {
             if compound == "*" {
                 return out.push(SubjectKey::default());
             }
+            let stop = |c: char| c == '.' || c == '#' || c == ':' || c == '[';
             if let Some(id) = compound.strip_prefix('#') {
-                // The matcher compares the WHOLE remainder to the id.
+                // A bare id is the whole remainder; in a longer compound
+                // (#x.c, #x:hover) the leading id is still required.
+                let end = if is_bare_id(id) { id.len() } else { id.find(stop).unwrap_or(id.len()) };
                 return out.push(SubjectKey {
-                    id: Some(css_ident(id).into_owned()),
+                    id: Some(css_ident(&id[..end]).into_owned()),
                     ..Default::default()
                 });
             }
-            let stop = |c: char| c == '.' || c == '#' || c == ':' || c == '[';
             if compound.starts_with('.')
                 && !compound.contains(|c| c == '#' || c == '[' || c == ':')
             {
@@ -8752,8 +8754,8 @@ impl SelectorMatcher {
             return tag_name.eq_ignore_ascii_case("html");
         }
 
-        // ID selector: #id
-        if let Some(id) = selector.strip_prefix('#') {
+        // ID selector: #id (a longer compound like #id.class goes below)
+        if let Some(id) = selector.strip_prefix('#').filter(|id| is_bare_id(id)) {
             if let Some(el_id) = attributes.get("id") {
                 return *el_id == css_ident(id);
             }
@@ -20054,6 +20056,14 @@ enum SubjectPart {
     List { negate: bool, members: Vec<Option<SubjectCompound>> },
 }
 
+/// Whether the text after a leading `#` is the whole compound (`#id`), not
+/// an id followed by more parts (`#id.class`, `#id:hover`, `#id[attr]`).
+/// An escaped remainder (`#a\:b`) keeps the whole-id reading: the part
+/// scanners split on delimiters without knowing escapes.
+fn is_bare_id(rest: &str) -> bool {
+    rest.contains('\\') || !rest.contains(['.', '#', ':', '['])
+}
+
 impl SubjectCompound {
     fn parse(engine: &SelectorMatcher, selector: &str) -> Self {
         if selector == "*" {
@@ -20062,7 +20072,7 @@ impl SubjectCompound {
         if selector == ":root" {
             return Self::Root;
         }
-        if let Some(id) = selector.strip_prefix('#') {
+        if let Some(id) = selector.strip_prefix('#').filter(|id| is_bare_id(id)) {
             return Self::IdOnly(css_ident(id).into_owned());
         }
         if selector.starts_with('.') && !selector.contains(|c| c == '#' || c == '[' || c == ':') {
@@ -23600,6 +23610,65 @@ mod ua_hidden_tests {
             "<body><div hidden class=show>author</div></body></html>",
         ));
         assert_eq!(text, "author");
+    }
+}
+
+// An id followed by more of the compound (`#x.c`, `#x:hover`, `#x[a]`) never
+// matched: all three subject matchers took the whole remainder after `#` as
+// the id. linkedin's layered bundle and many real sheets write these.
+#[cfg(all(test, feature = "headless"))]
+mod id_compound_selector_tests {
+    use super::*;
+
+    /// The text left painted after `css` hides what it matches.
+    fn painted(css: &str, body: &str) -> String {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        let html = format!("<html><head><style>{css}</style></head><body>{body}</body></html>");
+        engine.load_html(view, &html).expect("load");
+        let list = engine.views[&view].display_list.as_ref().expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    const BODY: &str = "<p id=a class=x data-k=1>one</p><p id=b class=y>two</p>";
+
+    #[test]
+    fn an_id_followed_by_a_class_matches() {
+        assert_eq!(painted("#a.x{display:none}", BODY), "two");
+        assert_eq!(painted("#a.y{display:none}", BODY), "one two");
+        assert_eq!(painted("p#a.x{display:none}", BODY), "two");
+    }
+
+    #[test]
+    fn an_id_followed_by_an_attribute_or_pseudo_class_matches() {
+        assert_eq!(painted("#a[data-k]{display:none}", BODY), "two");
+        assert_eq!(painted("#b[data-k]{display:none}", BODY), "one two");
+        assert_eq!(painted("#a:first-child{display:none}", BODY), "two");
+        assert_eq!(painted("#b:first-child{display:none}", BODY), "one two");
+    }
+
+    #[test]
+    fn an_id_compound_matches_inside_is_and_not() {
+        assert_eq!(painted(":is(#a.x){display:none}", BODY), "two");
+        assert_eq!(painted("p:not(#a.x){display:none}", BODY), "one");
+    }
+
+    #[test]
+    fn a_bare_and_an_escaped_id_still_match_whole() {
+        assert_eq!(painted("#b{display:none}", BODY), "one");
+        assert_eq!(
+            painted(r"#a\:b{display:none}", "<p id=a:b>one</p><p>two</p>"),
+            "two"
+        );
     }
 }
 
