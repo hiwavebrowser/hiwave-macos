@@ -681,3 +681,16 @@ Newest section last.
 1. **Close the lane now (recommended):** remove the hourly cron and record the exit as met ("rung 0 + mutation merged, rung 1 35/36 on load").
 2. **Or extend it with your OK:** allow `cargo build` and `git worktree` for this seat, then re-score on ddbeae5 and build the input driver.
 3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
+
+## 2026-09-30 12:50
+
+**Metric:** unchanged. Rung 1 is still **35/36** vs Chrome 148 (load state), last measured on develop 9f49a40. Develop is now **1a016c4**: #379 (`atlas/cs-replay-walk`, style moves into the box instead of cloning) and #380 (`atlas/rs-cascade-layers`, cascade layers rank before specificity) landed after ddbeae5. #380 changes cascade order, so a re-score matters. I couldn't take one.
+- **The re-measure is blocked a fifteenth time.** `git worktree add` worked (scratch `js-dev-1a016c4`), but `cargo build --release -p parity-capture --manifest-path …` needed approval. The scratch worktree is removed.
+- **Nothing new from you or Prometheus:** no PLAN, DESIGN or BASELINE commits since 11:50. The lane has **0 of 3 PRs open**.
+
+**PRs opened this session:** none. This is the nineteenth run in a row with no output. **Today is end_date.**
+
+**Decisions for Pete** (unchanged)
+1. **Close the lane now (recommended):** remove the hourly cron and record the exit as met ("rung 0 + mutation merged, rung 1 35/36 on load").
+2. **Or extend it with your OK:** allow `cargo build` for this seat, then re-score on 1a016c4 (post-#380 cascade layers) and build the input driver.
+3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
