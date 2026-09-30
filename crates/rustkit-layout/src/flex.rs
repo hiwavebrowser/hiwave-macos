@@ -2154,7 +2154,13 @@ fn get_content_cross_height(layout_box: &LayoutBox) -> f32 {
         _ => {}
     }
 
-    // For inline/block boxes without content, use line height as minimum
+    // A box with no children has no line box, so its content height is 0
+    // (Chrome 148: an empty `<div>` flex item in an auto-height row).
+    if layout_box.children.is_empty() {
+        return 0.0;
+    }
+
+    // Children that have not been laid out yet: one line as a first guess.
     crate::resolve_line_height(&layout_box.style, font_size)
 }
 
@@ -2671,6 +2677,11 @@ fn get_intrinsic_cross_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f
                 Axis::Horizontal => 0.0, // Text width depends on content
             }
         }
+        // An item with no children has no content, so no line box: its
+        // content height is 0, as in Chrome 148. The one-line floor below made
+        // an empty `<div style="background:…">` in a row 18.4 tall, and its
+        // auto-height row with it.
+        _ if layout_box.children.is_empty() => 0.0,
         _ => {
             // For block/inline boxes, provide a minimum based on line height
             // This ensures flex items have non-zero cross size

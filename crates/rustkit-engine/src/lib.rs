@@ -23538,3 +23538,78 @@ mod grid_fixed_track_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod flex_empty_item_cross_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.set_viewport(1280.0, 800.0);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.set_viewport(1280.0, 800.0);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    #[test]
+    fn an_empty_row_flex_item_is_zero_tall() {
+        // An empty block in a row flex has no content, so its cross size is 0
+        // (Chrome 148). It was floored at one line height (18.4 at 16px), so
+        // an empty decorative div made its auto-height row a text line tall.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div id="row" style="display:flex">"#,
+            r#"<div id="e" style="background:red"></div></div>"#,
+            r#"<div id="after" style="height:1px"></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "e").height, 0.0);
+            assert_eq!(rect(&root, "row").height, 0.0);
+            assert_eq!(rect(&root, "after").y, 0.0);
+        }
+    }
+
+    #[test]
+    fn an_empty_item_still_stretches_to_a_definite_row() {
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:flex;height:40px">"#,
+            r#"<div id="e" style="background:red"></div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "e").height, 40.0);
+        }
+    }
+
+    #[test]
+    fn an_item_with_text_keeps_its_line_height() {
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:16px Arial"><div style="display:flex;align-items:flex-start">"#,
+            r#"<div id="t">text</div></div></body>"#,
+        )) {
+            assert!(rect(&root, "t").height > 10.0);
+        }
+    }
+}
