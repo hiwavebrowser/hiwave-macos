@@ -4096,6 +4096,7 @@ impl Engine {
                         siblings_before,
                         sib,
                         "::before",
+                        Some(&style),
                     )
                 })
                 .and_then(Self::pseudo_element_box)
@@ -4211,6 +4212,7 @@ impl Engine {
                         siblings_before,
                         sib,
                         "::after",
+                        Some(&style),
                     )
                 })
                 .and_then(Self::pseudo_element_box)
@@ -4437,6 +4439,7 @@ impl Engine {
             siblings_before,
             sib,
             pseudo,
+            None,
         )?;
         Self::pseudo_element_box(style)
     }
@@ -4454,6 +4457,7 @@ impl Engine {
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
         pseudo: &str,
+        parent: Option<&ComputedStyle>,
     ) -> Option<ComputedStyle> {
         // Collect matching rules for this element + pseudo
         // Use (a, b, c) specificity tuple converted to u32 for sorting
@@ -4548,8 +4552,37 @@ impl Engine {
             return None;
         }
 
-        // Compute style for the pseudo-element from the matched rules.
+        // Compute style for the pseudo-element from the matched rules. Its
+        // parent is the element that generates it (CSS Pseudo 4 §4), so the
+        // inherited properties start from the element's computed values, as
+        // `compute_style_for_element` seeds them for a child element, plus
+        // `line-height`. They started from the initial values, so pseudo
+        // text was always black 16px in the default face.
         let mut pseudo_style = ComputedStyle::new();
+        // `display` is not inherited, but its initial value is `inline`, not
+        // `Display`'s Rust default (Block). A pseudo with no `display` was an
+        // Inline box whose style said block; the inline flow counts a box as
+        // inline-level by its style, so the pseudo took a line of its own
+        // (a 22 px line became 40.8 px).
+        pseudo_style.display = rustkit_css::Display::Inline;
+        if let Some(parent) = parent {
+            pseudo_style.font_size = parent.font_size.clone();
+            pseudo_style.font_family = parent.font_family.clone();
+            pseudo_style.font_weight = parent.font_weight;
+            pseudo_style.font_style = parent.font_style;
+            pseudo_style.font_stretch = parent.font_stretch;
+            pseudo_style.color = parent.color;
+            pseudo_style.line_height = parent.line_height.clone();
+            pseudo_style.letter_spacing = parent.letter_spacing.clone();
+            pseudo_style.word_spacing = parent.word_spacing.clone();
+            pseudo_style.text_align = parent.text_align;
+            pseudo_style.white_space = parent.white_space;
+            pseudo_style.word_break = parent.word_break;
+            pseudo_style.overflow_wrap = parent.overflow_wrap;
+            pseudo_style.line_break = parent.line_break;
+            pseudo_style.text_transform = parent.text_transform;
+            pseudo_style.visibility = parent.visibility;
+        }
 
         // Sort by specificity (a, b, c)
         matching_rules.sort_by_key(|(spec, _)| *spec);
@@ -4575,6 +4608,32 @@ impl Engine {
                 }
             }
         }
+
+        // CSS Display 3 §2.7: a flex or grid container's pseudos are its
+        // items, and blockify like its element children.
+        if parent.is_some_and(|p| p.display.is_flex() || p.display.is_grid()) {
+            pseudo_style.display = match pseudo_style.display {
+                rustkit_css::Display::Inline | rustkit_css::Display::InlineBlock => {
+                    rustkit_css::Display::Block
+                }
+                rustkit_css::Display::InlineFlex => rustkit_css::Display::Flex,
+                rustkit_css::Display::InlineGrid => rustkit_css::Display::Grid,
+                other => other,
+            };
+        }
+
+        // font-size absolutizes against the parent's, as for elements in the
+        // build walk (layout falls back to 16px on any non-Px size).
+        let parent_font_px = match parent.map(|p| &p.font_size) {
+            Some(rustkit_css::Length::Px(px)) => *px,
+            _ => 16.0,
+        };
+        pseudo_style.font_size = match pseudo_style.font_size {
+            rustkit_css::Length::Em(em) => rustkit_css::Length::Px(em * parent_font_px),
+            rustkit_css::Length::Percent(pct) => rustkit_css::Length::Px(pct / 100.0 * parent_font_px),
+            rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+            other => other,
+        };
 
         // Without `content` there is no box, so there is nothing to keep:
         // `*::before, *::after { box-sizing: … }` matches on every element.
@@ -18487,7 +18546,7 @@ mod rule_prefilter_tests {
                             out.push(format!(
                                 "{tag} {a:?} {ancestors:?} {pseudo}: {:?}",
                                 engine.pseudo_element_style(
-                                    tag, a, sheets, ancestors, siblings, *sib, pseudo,
+                                    tag, a, sheets, ancestors, siblings, *sib, pseudo, None,
                                 )
                             ));
                         }
@@ -23088,6 +23147,104 @@ mod script_selector_tests {
         assert_eq!(js("document.querySelectorAll('.card p').length"), "2");
         js("document.querySelector('.card > p.x').textContent = 'B'");
         assert_eq!(painted_text(&engine, view), "a B c");
+    }
+}
+
+#[cfg(test)]
+mod pseudo_inheritance_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn a(root: &LayoutBox) -> &LayoutBox {
+        by_id(root, "a").expect("no box #a")
+    }
+
+    const STYLE: &str =
+        "#a{font-size:17px;line-height:22px;color:rgb(10,20,30);font-family:Arial}";
+
+    #[test]
+    fn an_inline_pseudo_shares_the_line_with_its_elements_text() {
+        // Chrome 148: one 22px line. The pseudo inherited no line-height or
+        // font, so it sat on a line of its own and the block was 40.8.
+        for pseudo in [r#"#a:before{content:"> "}"#, r#"#a:after{content:" <"}"#] {
+            for (path, root) in laid_out(&format!(
+                r#"<!doctype html><style>{STYLE}{pseudo}</style><body style="margin:0"><div id="a">text</div></body>"#
+            ))
+            .into_iter()
+            .enumerate()
+            {
+                assert_eq!(a(&root).dimensions.border_box().height, 22.0, "{pseudo} path {path}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pseudo_inherits_its_elements_text_style() {
+        let root = laid_out(&format!(
+            r#"<!doctype html><style>{STYLE}#a:before{{content:"x";font-size:2em}}#a:after{{content:"y"}}</style><body><div id="a">t</div></body>"#
+        ))
+        .pop()
+        .expect("root");
+        let a = a(&root);
+        let before = &a.children[0].style;
+        let after = &a.children.last().expect("after").style;
+        assert_eq!(after.color, rustkit_css::Color::new(10, 20, 30, 1.0));
+        assert_eq!(after.font_size, rustkit_css::Length::Px(17.0));
+        assert_eq!(after.line_height, rustkit_css::LineHeight::Px(22.0));
+        assert_eq!(after.font_family, a.style.font_family);
+        // em resolves against the element (the pseudo's parent).
+        assert_eq!(before.font_size, rustkit_css::Length::Px(34.0));
+    }
+
+    #[test]
+    fn a_pseudos_own_declarations_still_win() {
+        let root = laid_out(&format!(
+            r#"<!doctype html><style>{STYLE}#a:before{{content:"x";color:red;line-height:normal}}</style><body><div id="a">t</div></body>"#
+        ))
+        .pop()
+        .expect("root");
+        let before = &a(&root).children[0].style;
+        assert_eq!(before.color, rustkit_css::Color::new(255, 0, 0, 1.0));
+        assert_eq!(before.line_height, rustkit_css::LineHeight::Normal);
+    }
+
+    #[test]
+    fn a_pseudo_is_inline_by_default_and_blockified_in_a_flex_container() {
+        let root = laid_out(&format!(
+            r#"<!doctype html><style>{STYLE}#a:before{{content:"x"}}#f{{display:flex}}#f:before{{content:"y"}}</style><body><div id="a">t</div><div id="f">u</div></body>"#
+        ))
+        .pop()
+        .expect("root");
+        assert_eq!(a(&root).children[0].style.display, rustkit_css::Display::Inline);
+        let f = by_id(&root, "f").expect("no box #f");
+        assert_eq!(f.children[0].style.display, rustkit_css::Display::Block);
     }
 }
 
