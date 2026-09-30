@@ -4396,15 +4396,10 @@ impl Engine {
         sib: SiblingContext,
         pseudo: &str,
     ) -> Option<ComputedStyle> {
-        // Compute style for the pseudo-element by matching selectors with the pseudo suffix
-        let mut pseudo_style = ComputedStyle::new();
-
         // Collect matching rules for this element + pseudo
         // Use (a, b, c) specificity tuple converted to u32 for sorting
         let mut matching_rules: Vec<((usize, usize, usize), &Rule)> = Vec::new();
 
-        // Hoisted: this used to allocate twice per rule per element.
-        let single_colon = pseudo.replace("::", ":");
         let index = active_rule_index(stylesheets);
         let indexed = index.as_ref().and_then(|ix| match pseudo {
             "::before" => Some(&ix.before),
@@ -4444,6 +4439,8 @@ impl Engine {
         }
         // Without an index (or for another pseudo), walk every rule.
         let unindexed = indexed.is_none();
+        // Hoisted: this used to allocate twice per rule per element.
+        let single_colon = if unindexed { pseudo.replace("::", ":") } else { String::new() };
         for rule in stylesheets.iter().flat_map(|s| s.rules.iter()).filter(|_| unindexed) {
             {
                 let selector = &rule.selector;
@@ -4476,10 +4473,24 @@ impl Engine {
             }
         }
 
-        // If no rules match, no pseudo-element
-        if matching_rules.is_empty() {
+        // No box without `content`, and only a `content` declaration can set
+        // it (it starts None; `initial`/`unset`/`all` only reset it). So when
+        // no matched rule declares `content` — no rule matched, or only
+        // `*::before, *::after { box-sizing: … }` did — skip building and
+        // dropping a whole ComputedStyle: ~a fifth of this function's time
+        // on wikipedia, for a style that was always thrown away.
+        let declares_content = matching_rules.iter().any(|(_, rule)| {
+            rule.declarations.iter().any(|d| {
+                d.property == "content"
+                    && matches!(d.value, rustkit_css::PropertyValue::Specified(_))
+            })
+        });
+        if !declares_content {
             return None;
         }
+
+        // Compute style for the pseudo-element from the matched rules.
+        let mut pseudo_style = ComputedStyle::new();
 
         // Sort by specificity (a, b, c)
         matching_rules.sort_by_key(|(spec, _)| *spec);
@@ -18632,6 +18643,43 @@ mod rule_prefilter_tests {
         assert_eq!(indexed, plain);
         // Not vacuous: class, compound-class, id and attribute winners.
         assert_eq!(plain.iter().filter(|c| c.is_some()).count(), 4, "{plain:?}");
+    }
+
+    #[test]
+    fn a_pseudo_element_needs_a_matched_content_declaration() {
+        // Matched rules without `content` (the `*::before` box-sizing reset)
+        // generate nothing; `content` from any matched rule, at any
+        // specificity, generates the box; `content: none` still cancels it.
+        let css = r#"
+            *::before, *::after { box-sizing: border-box; color: rgb(1, 0, 0) }
+            .a::before { content: "x" }
+            .a.b::before { color: rgb(2, 0, 0) }
+            .n::after { content: "y" }
+            .n.none::after { content: none }
+            .q::after { content: 'z' }
+        "#;
+        let sheet = Stylesheet::parse(css).expect("css");
+        let sheets = std::slice::from_ref(&sheet);
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let vars = HashMap::new();
+        for indexed in [false, true] {
+            let _scope = indexed.then(|| RuleIndexScope::install(engine.build_rule_index(sheets)));
+            let pseudo = |class: &str, which: &str| {
+                engine
+                    .create_pseudo_element(
+                        "div", &attrs(&[("class", class)]), sheets, &vars, &[], &[],
+                        SiblingContext::SOLE, which,
+                    )
+                    .map(|b| b.style.color)
+            };
+            assert_eq!(pseudo("plain", "::before"), None, "indexed={indexed}");
+            assert_eq!(pseudo("plain", "::after"), None, "indexed={indexed}");
+            let ab = pseudo("a b", "::before").expect("content from .a");
+            assert_eq!((ab.r, ab.g, ab.b), (2, 0, 0), "indexed={indexed}");
+            assert!(pseudo("n", "::after").is_some(), "indexed={indexed}");
+            assert_eq!(pseudo("n none", "::after"), None, "indexed={indexed}");
+            assert!(pseudo("q", "::after").is_some(), "indexed={indexed}");
+        }
     }
 
     #[test]
