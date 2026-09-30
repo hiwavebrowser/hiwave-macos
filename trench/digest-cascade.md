@@ -836,3 +836,41 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Close #371** (carried over: correct, but flat on a quiet machine). Default: a maintainer closes it.
 2. **Ratio of record = 16.3× (wikipedia, develop fb1a2ea-equivalent, near-quiet 06:05 today).** This confirms 16.2×. Default: yes.
 3. **Merge #377 even though it claims no speed gain?** It's what locates the next cuts. Default: yes, once R1 and R2 pass.
+
+
+## 2026-09-30 07:50
+
+**No PR opened, and the worst ratio is unchanged at ~16× (wikipedia; ratio of record 16.3×, from 06:05). The machine was loaded the whole session (load 13–23: two other lanes building), so no absolute read counts. One cut is built, receipt-clean and pushed without a PR, waiting on a quiet A/B.** #377 has R1 CLEAR and R2 PASS and is waiting on a maintainer merge.
+
+| site | Chrome ms | ratio of record (06:05, near-quiet) | this session: loaded B/A of `atlas/cs-replay-walk` vs develop-equivalent (3 pairs, load 13–23) |
+|---|---|---|---|
+| cnn | 210 | 740 ms → 3.5× | 1.00 (1.07 .95 1.00) |
+| github | 110 | 1134 ms → 10.3× | 1.03 (1.03 1.02 1.56) |
+| wikipedia | 20 | 326 ms → **16.3×** (worst) | 0.93 (.72 1.03 .93) |
+
+- **Where the wikipedia replay walk goes.** Temporary per-section timers were added to the walk, built locally only (patch saved at `cascade-target/tmp/walk-timers/cs-walk-timers.patch`; binary `cascade-target/pc-walk-timers`). The cleanest run, at load ~15 with the timers inflating everything, split the replay build's walk into:
+  - memo load and clone: 30 ms
+  - **a second full `ComputedStyle` clone into the `LayoutBox`: 30 ms**
+  - `::before`/`::after` memo lookups: 38 ms
+  - sibling and ancestor bookkeeping (to_lowercase ×~6 per element, class `Vec<String>` ×2, `type_totals`/`type_seen` maps): 4.6 + 22 + 35 ms
+  - text post-pass: 31 ms
+  - text arm: 22 ms
+  - img/svg: ~0
+
+  **No single bucket dominates.** The replay walk is ~7 roughly equal slices, so cutting it takes several cuts or a structural change (see decision 1). The record build's `::before`/`::after` slot was ~100–130 ms under load: pseudo cascades are a large, unmeasured part of build 1.
+- **Built and pushed, NO PR:** `atlas/cs-replay-walk` @ **35bccf1** on develop fb1a2ea. It moves the element's style into its box instead of cloning it, and the box's copy serves as the children's parent style. The memo hands out a `Box`, so a replay clones once, straight into the box. A float whose display gets blockified keeps an unblockified copy for its children, so parent styles are unchanged.
+  - Receipt: 26/26, avg 1.2%, **diffPixels identical on all 26** to #377's (668142c). Saved as `receipt-rwk-wip.json`.
+  - Engine lib (headless): 294/297 under load. The 3 failures are wall-clock page-script tests. **develop fb1a2ea fails `a_stalled_subresource_is_dropped_at_the_subresource_budget` too at this load** (2.51 s against a 2.5 s limit, vs 2.65–3.14 s on the branch). Re-run on a quiet machine before any PR.
+  - Why no PR: the lane rule is that only a quiet B/A backs a claim, and the loaded reads above are triage.
+- **Saved:** binaries `cascade-target/pc-rwk-wip` (35bccf1) and `pc-walk-timers`. Receipt `receipt-rwk-wip.json`. Tool `.worktrees/cs-walk-timers.py` (prints `Walk timing` per build; needs the timer patch).
+- **Tooling notes:** xctrace needs full Xcode, and this Mac has only the CLT, so `sample` or in-process timers are the only profilers. The Aleph index on the hub is of the hub tree, not develop, so it can't see the memo code. Aleph navigation was skipped for engine code this session.
+- **Build cost:** release parity-capture 29 min, then 17.5 min, at load 15–22.
+- **Open cs PRs:** 2 (#377 R1 CLEAR / R2 PASS awaiting merge, #371 draft/close-recommended), cap 3.
+- **Next session (quiet slot):**
+  1. Run a quiet A/B for 35bccf1: 5 pairs, `pc-cnr-0184ed7` vs `pc-rwk-wip`. If wikipedia B/A ≤ 0.95, open the PR with this receipt and a quiet page_script_tests run. If it's flat, drop it like walk-strings.
+  2. The next wikipedia cut is the pseudo memo. Two lookups per element per build, plus ~22k `None` entries. Fold `::before`/`::after` into the element's memo entry (one lookup), or record only the elements with a matching pseudo rule.
+
+**Decisions for Pete**
+1. **The last ~90 ms of the replay build is spread across ~7 small buckets, so shaving it piecemeal may keep reading flat.** The structural alternative is to skip the replay build: when the memo key matches and only image sizes changed, reuse build 1's box tree and patch the `Image` natural sizes. It's bigger and riskier (layout mutates the tree), but it's the only change that removes ~90 ms from wikipedia (16× → ~12×). Default: try the pseudo-memo fold first, then scope tree reuse behind a flag.
+2. **The ratio of record stays 16.3×** (no quiet read this session). Default: yes.
+3. **Close #371** (carried over: correct, but flat on a quiet machine). Default: a maintainer closes it.
