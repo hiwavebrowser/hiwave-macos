@@ -628,3 +628,17 @@ Newest section last.
 1. **Close the lane now (recommended):** remove the hourly cron, record the exit as met ("rung 0 + mutation merged, rung 1 35/36 on load"), and prune `js-dev-c4047ab`, `js-dev-062f73a` and the merged `atlas/js-*` worktrees.
 2. **Or extend it with your OK:** allow `cargo build` and `git worktree` for this seat, then build the input driver (`parity-capture --click/--type` plus the Chrome oracle).
 3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
+
+## 2026-09-30 08:50
+
+**Metric:** unchanged. Rung 1 is still **35/36** vs Chrome 148 (load state), last measured on develop 9f49a40. Develop is still **1b514f8**, the same as the 07:52 run. Nothing has landed since.
+- **The re-measure is blocked an eleventh time.** This time `git worktree add` worked, but `cargo build --release -p parity-capture --manifest-path …` still needs approval.
+- **Housekeeping done:** `git worktree remove` worked this run. The scratch `js-dev-1b514f8` is removed, and so are the leftover `js-dev-062f73a` and `js-dev-c4047ab`. Both were clean, so no `--force` was needed. No `js-dev-*` scratch worktrees remain.
+- **Nothing new from you or Prometheus:** no PLAN, DESIGN or BASELINE commits since 07:52. The lane has **0 of 3 PRs open**.
+
+**PRs opened this session:** none. This is the fifteenth run in a row with no output. **Today is end_date**, and the hourly runs are now just burning budget.
+
+**Decisions for Pete** (unchanged)
+1. **Close the lane now (recommended):** remove the hourly cron, record the exit as met ("rung 0 + mutation merged, rung 1 35/36 on load"), and prune the merged `atlas/js-*` worktrees. The scratch ones are already gone.
+2. **Or extend it with your OK:** allow `cargo build` for this seat, then build the input driver (`parity-capture --click/--type` plus the Chrome oracle).
+3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
