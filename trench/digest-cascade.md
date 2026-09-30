@@ -898,3 +898,23 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Allow cargo (and git in the `cs-*` worktrees) in the trench-cascade session's permissions.** This session lost its build and test step to approval prompts. Default: add allow rules for `cargo build`/`cargo test` with `CARGO_TARGET_DIR=…/cascade-target` and for `git -C ~/Repos/.worktrees/cs-*`.
 2. **Ratio of record = 15.9× (wikipedia, develop-equivalent, quiet, 08:36 today)**, and 14.5× once #379 lands. Default: yes.
 3. **Close #371** (carried over: correct, but flat on a quiet machine). Default: a maintainer closes it.
+
+## 2026-09-30 09:50
+
+**No build, no test, no PR. The worst ratio is unchanged: 15.9× (wikipedia, ratio of record), or 14.5× once #379 lands. This session was blocked earlier than the last one: `cargo test`, `git -C` on the `cs-*` worktrees, `gh run list`, and (after the cwd moved to `~/Repos/.worktrees`) even `git` on this hub all needed approval. So this section is written to the file but NOT committed or pushed. The load was 15–17 anyway (not quiet).**
+
+| site | Chrome ms | ratio of record (quiet, 08:36) | #379 (quiet B/A) | this session |
+|---|---|---|---|---|
+| cnn | 210 | 728 ms → 3.5× | 704 → 3.4× | not measured |
+| github | 110 | 1106 ms → 10.1× | 1092 → 9.9× | not measured |
+| wikipedia | 20 | 318 ms → **15.9×** | 290 → **14.5×** | not measured |
+
+- **#379** @ 35bccf1: **R1 CLEAR (Argos) and R2-STAMP PASS**, CI green. It stays a DRAFT. CI `unit-suites` runs `cargo test -p rustkit-engine --lib` *without* `--features headless` and is `continue-on-error`, so it doesn't cover the headless page-script tests owed from the loaded run. The quiet `cargo test -p rustkit-engine --features headless --lib` is still owed before it's marked ready.
+- **Next cut, scoped (read-only, on the cs-replay-walk tree):** the pseudo memo (`memoized_pseudo_style`, lib.rs ~20743; call sites ~4117/~4236) records `Option<Box<ComputedStyle>>` for **every** element × {before, after}. On wikipedia that's ~22k `None` inserts in build 1 and 2 lookups per element in replay. Plan: store only `Some` in `pseudos`. In Replay/Verify, an absent pseudo key for a node that **is** in `styles` means "recorded no match". `memoized_style` (~3515) always runs first in the element arm, so `styles` membership is a sound "was recorded" witness. Only an absent node counts as a miss and cascades. Verify: fresh `Some` with no recorded pseudo on a recorded node is a mismatch. Expected: a smaller build 1 (inserts) and a cache-friendlier replay. Needs a quiet 5-pair A/B, receipt 26/26 and verify 0 mismatches before a PR.
+- **Open cs PRs:** 2 (#379 draft, #371 draft/close-recommended), cap 3.
+- **Next session:** (1) the quiet headless test on #379, then mark it ready. (2) Build the pseudo-memo cut above on `atlas/cs-pseudo-memo-some` from origin/develop. (3) github external-sheet deep copy (~57 ms per build).
+
+**Decisions for Pete**
+1. **Permissions again (second session in a row): this lane cannot run without allow rules.** Add allow rules for `cargo build`/`cargo test` with `CARGO_TARGET_DIR=…/cascade-target`, for `git -C ~/Repos/.worktrees/{trench-cascade,cs-*}`, and for `gh run`. Otherwise pause the hourly trigger until you do. Default: pause the trigger. Each session now burns its slot producing only a digest.
+2. **Ratio of record stays 15.9×** (no quiet read). Default: yes.
+3. **Close #371** (carried over). Default: a maintainer closes it.
