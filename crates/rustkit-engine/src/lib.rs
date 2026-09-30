@@ -19308,6 +19308,49 @@ mod cascade_wire_tests {
         assert_eq!(background_of(css, X, 7.0), GREEN);
     }
 
+    // CSS nesting: linkedin's layered bundle stacks its hero with
+    // `.stack { display: grid; & > * { grid-area: 1/-1 } }`.
+    const IN_P: &str = r#"<div class="p"><div id="x" class="c" style="width:50px;height:10px"></div></div>"#;
+
+    #[test]
+    fn a_nested_rule_styles_the_parents_child() {
+        assert_eq!(background_of(".p { & > .c { background: #0f0 } }", IN_P, 50.0), GREEN);
+        assert_eq!(background_of(".p { .c { background: #0f0 } }", IN_P, 50.0), GREEN);
+    }
+
+    #[test]
+    fn a_nested_rule_under_a_complex_parent_list_matches() {
+        let css = ".q, .p > div { & { background: #0f0 } }";
+        assert_eq!(background_of(css, IN_P, 50.0), GREEN);
+    }
+
+    #[test]
+    fn the_rule_after_a_nested_rule_still_applies() {
+        let css = ".p { & .zz { color: red } } #x { background: #0f0 }";
+        assert_eq!(background_of(css, IN_P, 50.0), GREEN);
+    }
+
+    #[test]
+    fn nested_grid_area_stacks_the_children() {
+        let e = engine();
+        let html = r#"<html><head><style>
+            body { margin: 0 }
+            .stack { display: grid; & > * { grid-area: 1/-1; min-width: 0 } }
+            </style></head><body><div class="stack">
+            <div style="width:30px;height:20px"></div><div style="width:40px;height:20px"></div>
+            </div></body></html>"#;
+        let d = Document::parse_html(html).expect("parse");
+        let layout = e.build_layout_from_document(&d, &[]);
+        let y = |w: f32| {
+            find(&layout, &|b| matches!(b.style.width, rustkit_css::Length::Px(v) if v == w))
+                .expect("box")
+                .dimensions
+                .content
+                .y
+        };
+        assert_eq!(y(30.0), y(40.0), "both items sit in the one stacked cell");
+    }
+
     // transform (#48)
     #[test]
     fn an_invalid_transform_leaves_the_previous_value_untouched() {
