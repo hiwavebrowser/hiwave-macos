@@ -7995,11 +7995,18 @@ impl Engine {
     /// bound.
     fn resolve_css_variables(&self, value: &str, css_vars: &dyn VarSource) -> String {
         if !value.contains("var(") {
-            return value.to_string();
+            return resolve_light_dark(value.to_string());
         }
         let mut stack: Vec<&str> = Vec::new();
         let mut budget = VAR_EXPANSION_BUDGET;
-        substitute_css_vars(value, &[css_vars], &mut stack, &mut budget, &mut false, &mut false)
+        resolve_light_dark(substitute_css_vars(
+            value,
+            &[css_vars],
+            &mut stack,
+            &mut budget,
+            &mut false,
+            &mut false,
+        ))
     }
 
     /// The custom properties in effect on one element: the inherited map
@@ -22326,6 +22333,47 @@ mod float_clear_tests {
 /// it only stops pathological exponential fan-out.
 const VAR_EXPANSION_BUDGET: usize = 64 * 1024;
 
+/// Replace each `light-dark(<light>, <dark>)` with its light argument (CSS
+/// Color 5 §8.1). RustKit renders the light scheme and does not track
+/// `color-scheme`, so the light arm is what the used scheme selects on a
+/// light page. It runs on the substituted value because sites put
+/// `light-dark(var(--a), var(--b))` in a custom property and use it inside
+/// shorthands (`border: 1px solid var(--c)`), where the colour parser never
+/// sees the function on its own. A call without exactly two arguments is
+/// left alone, so the declaration stays invalid.
+fn resolve_light_dark(value: String) -> String {
+    const NAME: &str = "light-dark(";
+    if !value.contains(NAME) {
+        return value;
+    }
+    let mut out = value;
+    let mut from = 0;
+    while let Some(at) = out[from..].find(NAME).map(|i| i + from) {
+        let start = at + NAME.len();
+        let preceded_by_ident = out[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '-' || c == '_');
+        let Some(len) = (!preceded_by_ident)
+            .then(|| matching_close_paren(&out[start..]))
+            .flatten()
+        else {
+            from = start;
+            continue;
+        };
+        let args = SelectorMatcher::split_top_level_commas(&out[start..start + len]);
+        if args.len() != 2 || args.iter().any(|a| a.trim().is_empty()) {
+            from = start;
+            continue;
+        }
+        let light = args[0].trim().to_string();
+        out.replace_range(at..start + len + 1, &light);
+        // Rescan from the replacement: the light arm may hold a nested call.
+        from = at;
+    }
+    out
+}
+
 /// Byte index of the `)` that closes the parenthesis opened just before
 /// `s[0]`, or `None` when unbalanced.
 fn matching_close_paren(s: &str) -> Option<usize> {
@@ -23346,6 +23394,73 @@ mod script_selector_tests {
         assert_eq!(js("document.querySelectorAll('.card p').length"), "2");
         js("document.querySelector('.card > p.x').textContent = 'B'");
         assert_eq!(painted_text(&engine, view), "a B c");
+    }
+}
+
+// CSS Color 5 `light-dark()`. linkedin's layered bundle defines every theme
+// colour as `light-dark(var(--a), var(--b))` in a custom property; none of
+// them applied, so links painted UA blue and buttons UA grey.
+#[cfg(test)]
+mod light_dark_tests {
+    use super::*;
+    use rustkit_css::Color;
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn styled(css: &str, body: &str) -> LayoutBox {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let html = format!("<!doctype html><style>{css}</style><body>{body}</body>");
+        let d = Document::parse_html(&html).expect("parse");
+        e.build_layout_from_document(&d, &[])
+    }
+
+    #[test]
+    fn the_light_argument_is_used() {
+        let r = |v: &str| resolve_light_dark(v.to_string());
+        assert_eq!(r("light-dark(#0a66c2, #71b7fb)"), "#0a66c2");
+        assert_eq!(r("1px solid light-dark(rgb(1, 2, 3), red)"), "1px solid rgb(1, 2, 3)");
+        assert_eq!(r("light-dark(light-dark(red, blue), green)"), "red");
+        assert_eq!(
+            r("0 0 1px light-dark(red, blue), 0 0 2px light-dark(lime, blue)"),
+            "0 0 1px red, 0 0 2px lime"
+        );
+        // Not exactly two arguments: invalid, left for the property parser to drop.
+        assert_eq!(r("light-dark(red)"), "light-dark(red)");
+        assert_eq!(r("light-dark(red, blue, lime)"), "light-dark(red, blue, lime)");
+        assert_eq!(r("my-light-dark(red, blue)"), "my-light-dark(red, blue)");
+        assert_eq!(r("#fff"), "#fff");
+    }
+
+    #[test]
+    fn a_light_dark_custom_property_colours_text_background_and_border() {
+        let root = styled(
+            concat!(
+                ":root{--l:#0a66c2;--d:#71b7fb;--fg:light-dark(var(--l),var(--d));",
+                "--bg:light-dark(rgb(1,2,3),black)}",
+                "#a{color:var(--fg);background:var(--bg);border:2px solid var(--fg)}",
+            ),
+            "<p id=a>x</p>",
+        );
+        let a = by_id(&root, "a").expect("#a");
+        let blue = Color::from_rgb(0x0a, 0x66, 0xc2);
+        assert_eq!(a.style.color, blue);
+        assert_eq!(a.style.background_color, Color::from_rgb(1, 2, 3));
+        assert_eq!(a.style.border_top_color, blue);
+    }
+
+    #[test]
+    fn a_literal_light_dark_applies_in_sheets_and_inline_styles() {
+        let root = styled(
+            "#a{color:light-dark(rgb(0,128,0),red)}",
+            "<p id=a>x</p><p id=b style=\"color:light-dark(rgb(0,0,255),red)\">y</p>",
+        );
+        assert_eq!(by_id(&root, "a").expect("#a").style.color, Color::from_rgb(0, 128, 0));
+        assert_eq!(by_id(&root, "b").expect("#b").style.color, Color::from_rgb(0, 0, 255));
     }
 }
 
