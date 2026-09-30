@@ -18083,6 +18083,51 @@ mod rule_prefilter_tests {
     }
 
     #[test]
+    fn prepared_attribute_selectors_match_like_the_string_matcher() {
+        let selectors = [
+            "lang", " lang ", "lang=en", "lang = en", "lang=\"en\"", "lang='en'", "lang=\"en'",
+            "lang|=en", "lang|=\"en\"", "lang~=b", "class~=b", "class~=\"a b\"", "href^=http",
+            "href$=.pdf", "href*=example", "href^=\"\"", "href*=''", "data-x", "data-x=",
+            "data-x=\"\"", "a=\"x~=y\"", "a~=x=y", "a|=x^=y", "title*=\"=\"", "lang=\"\"\"",
+            "LANG=en", "lang=EN", "", "=", "~=",
+        ];
+        let elements = [
+            attrs(&[]),
+            attrs(&[("lang", "en")]),
+            attrs(&[("lang", "en-US")]),
+            attrs(&[("lang", "english")]),
+            attrs(&[("lang", "EN")]),
+            attrs(&[("class", "a b c")]),
+            attrs(&[("class", "a  b")]),
+            attrs(&[("href", "http://example.com/x.pdf")]),
+            attrs(&[("href", "")]),
+            attrs(&[("data-x", "")]),
+            attrs(&[("data-x", "1")]),
+            attrs(&[("a", "x~=y"), ("a=\"x", "")]),
+            attrs(&[("a~", "x=y"), ("a", "x=y")]),
+            attrs(&[("a", "x^=y-z")]),
+            attrs(&[("title", "a=b")]),
+            attrs(&[("lang", "\"")]),
+            attrs(&[("", ""), ("=", "")]),
+        ];
+        for s in selectors {
+            let prepared = AttrSelector::parse(s);
+            for el in &elements {
+                assert_eq!(
+                    prepared.matches(el),
+                    SelectorMatcher.match_attribute_selector(s, el),
+                    "[{s}] on {el:?}"
+                );
+            }
+        }
+        // A lone quote as the value: the string matcher panics on it, the
+        // prepared one keeps the quote.
+        let lone = AttrSelector::parse("lang=\"");
+        assert_eq!((lone.op, lone.value.as_str()), (AttrOp::Equals, "\""));
+        assert!(lone.matches(&attrs(&[("lang", "\"")])));
+    }
+
+    #[test]
     fn prepared_selectors_match_like_the_string_matcher_did() {
         let chain = vec![
             ancestor("section", &["card", "wide"], Some("main")),
@@ -19815,7 +19860,7 @@ enum SubjectCompound {
 enum SubjectPart {
     Class(String),
     Id(String),
-    Attr(String),
+    Attr(AttrSelector),
     Pseudo(String, Option<String>),
     /// `:not(list)` (`negate`) or `:is`/`:where`/`:matches`/`-webkit-any`
     /// with its members compiled once, which `any_compound_in_list_matches`
@@ -19861,7 +19906,7 @@ impl SubjectCompound {
                 remaining = &rest[end..];
             } else if let Some(rest) = remaining.strip_prefix('[') {
                 let end = rest.find(']').unwrap_or(rest.len());
-                parts.push(SubjectPart::Attr(rest[..end].to_string()));
+                parts.push(SubjectPart::Attr(AttrSelector::parse(&rest[..end])));
                 remaining = if end < rest.len() { &rest[end + 1..] } else { "" };
             } else if let Some(rest) = remaining.strip_prefix(':') {
                 let (name, arg, consumed) = SelectorMatcher.parse_pseudo_class(rest);
@@ -19916,7 +19961,7 @@ impl SubjectCompound {
                         .get("class")
                         .is_some_and(|el_class| el_class.split_whitespace().any(|c| c == class)),
                     SubjectPart::Id(id) => attributes.get("id") == Some(id),
-                    SubjectPart::Attr(attr) => SelectorMatcher.match_attribute_selector(attr, attributes),
+                    SubjectPart::Attr(attr) => attr.matches(attributes),
                     SubjectPart::Pseudo(name, arg) => {
                         SelectorMatcher.match_pseudo_class(name, arg.as_deref(), tag_name, sib, attributes)
                     }
@@ -19926,6 +19971,78 @@ impl SubjectCompound {
                     }
                 })
             }
+        }
+    }
+}
+
+/// The operator of an `[...]` selector.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AttrOp {
+    /// `[name]`: presence only.
+    Exists,
+    Equals,
+    Includes,
+    DashMatch,
+    Prefix,
+    Suffix,
+    Substring,
+}
+
+/// An `[...]` subject part split once into name, operator and unquoted
+/// value, which `match_attribute_selector` re-found with `str::find` for
+/// every candidate element. `parse` splits exactly as that function does:
+/// the first operator in `ATTR_OPERATORS` order that occurs anywhere wins,
+/// and the name is what precedes it, trimmed. The one difference is a lone
+/// quote as the value, which that function sliced out of range (a panic);
+/// here it stays as written.
+#[derive(Debug, PartialEq)]
+struct AttrSelector {
+    name: String,
+    op: AttrOp,
+    value: String,
+}
+
+impl AttrSelector {
+    fn parse(attr_selector: &str) -> Self {
+        let name = SelectorMatcher::attr_selector_name(attr_selector).to_string();
+        for (i, op) in SelectorMatcher::ATTR_OPERATORS.iter().enumerate() {
+            if let Some(pos) = attr_selector.find(op) {
+                let mut value = attr_selector[pos + op.len()..].trim();
+                if value.len() >= 2
+                    && ((value.starts_with('"') && value.ends_with('"'))
+                        || (value.starts_with('\'') && value.ends_with('\'')))
+                {
+                    value = &value[1..value.len() - 1];
+                }
+                let op = [
+                    AttrOp::Includes,
+                    AttrOp::DashMatch,
+                    AttrOp::Prefix,
+                    AttrOp::Suffix,
+                    AttrOp::Substring,
+                    AttrOp::Equals,
+                ][i];
+                return AttrSelector { name, op, value: value.to_string() };
+            }
+        }
+        AttrSelector { name, op: AttrOp::Exists, value: String::new() }
+    }
+
+    fn matches(&self, attributes: &HashMap<String, String>) -> bool {
+        let Some(el_attr) = attributes.get(&self.name) else {
+            return false;
+        };
+        let value = self.value.as_str();
+        match self.op {
+            AttrOp::Exists => true,
+            AttrOp::Equals => el_attr == value,
+            AttrOp::Includes => el_attr.split_whitespace().any(|w| w == value),
+            AttrOp::DashMatch => {
+                el_attr == value || el_attr.strip_prefix(value).is_some_and(|r| r.starts_with('-'))
+            }
+            AttrOp::Prefix => el_attr.starts_with(value),
+            AttrOp::Suffix => el_attr.ends_with(value),
+            AttrOp::Substring => el_attr.contains(value),
         }
     }
 }
