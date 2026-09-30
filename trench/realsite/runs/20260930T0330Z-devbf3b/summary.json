@@ -1,0 +1,34 @@
+{
+  "ts": "20260930T034153Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 5,
+  "points": 1,
+  "max_points": 15,
+  "loads": 1,
+  "readable": 0,
+  "looks_right": 0,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [
+    "microsoft",
+    "netflix",
+    "github"
+  ],
+  "oracle_blocked": {},
+  "blocked": {},
+  "per_site": {
+    "walmart": 1,
+    "microsoft": 0,
+    "apple": 0,
+    "netflix": 0,
+    "github": 0
+  },
+  "scorable_sites": 5,
+  "scorable_points": 1,
+  "scorable_max": 15,
+  "full_run": false
+}

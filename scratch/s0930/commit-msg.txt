@@ -1,0 +1,19 @@
+fix(engine): keep an empty block in the layout tree when it still affects layout
+
+Box construction dropped every childless block without "visible styling"
+(size, background, border, padding). Some empty blocks still change layout:
+
+- an empty formatting root (flex, grid, overflow) never collapses through,
+  so body's 8px and the next block's 8px stack to 16 around it; dropped,
+  they collapsed to 8;
+- an empty block's vertical margins collapse through into the flow
+  (`<div style="margin-top:30px"></div>` moves what follows);
+- min-height and clear give an empty box extent or clearance;
+- an empty flex/grid item takes a slot, a gap and free space (a `flex:1`
+  spacer came out 0 wide, pulling its siblings left).
+
+All four pins match pinned Chrome 148 (scratch probe) and fail without the
+fix. Margin pins go through the engine page path only: `layout()` doesn't
+collapse sibling margins at all, before or after this change.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

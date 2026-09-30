@@ -1,0 +1,17 @@
+fix(flex): an empty row item is 0 wide; keep only element empty blocks
+
+The campaign caught 9003d99 regressing HiWave's settings page (2.08 ->
+2.95%, ratchet geometry fails 371 -> 416). Its flex body centres the
+container, and two things added an 18px item beside it:
+
+- the keep rule also kept anonymous blocks (collapsed white space), which
+  make no flex item in Chrome. It now applies to element blocks only;
+- a childless row flex item measured its max-content width as one line
+  height (18) instead of 0, the horizontal twin of the vertical fix in
+  #369. Chrome 148 gives an empty `<div>` row item 0.
+
+New guard pin: an empty non-growing item beside white space and a
+`<script>` in a centring flex row is 0 wide, and its sibling centres at
+x=100. Engine 233/233 serial, layout 562/562.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
