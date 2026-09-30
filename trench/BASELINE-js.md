@@ -16,3 +16,4 @@ Starting value: rung 0, nothing built. rustkit-bindings serves a pure-JS stub do
 
 ## Changes
 - 2026-09-28: lane created.
+- 2026-09-29 20:40: rung 1 measured for the first time: 35/36 on develop 9f49a40, with #367 as the fixtures and runner. The pass rule is pixel <= t15, plus every script ran, plus Chrome's error count. It covers load state only; click states need an input driver.

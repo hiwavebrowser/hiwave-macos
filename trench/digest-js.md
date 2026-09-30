@@ -455,3 +455,27 @@ Newest section last.
 1. **Unblock rung 1:** allowlist the mdn/learning-area clone, or drop it in place yourself.
 2. **Checkedness plus §3.4 forced-layout pin from Prometheus**, or close the lane at "rung 0 + mutation merged".
 3. **Pause this hourly cron.** It's spending a session per hour to write this entry.
+
+## 2026-09-29 20:40
+
+**Metric:** rung 1 went from 0/0 to **35/36** vs Chrome 148, on develop 9f49a40. The 80% exit bar is met on load state; the caveat is below.
+
+**The unblock:** `git clone` still needs approval, but plain HTTPS to raw.githubusercontent.com and the GitHub API works in headless mode. `scripts/js_ladder_vendor.py` pulls the files that way, at pinned commit mdn/learning-area `dbed6bc`.
+
+**PRs** (1 of 3 open)
+- **#367 (new)** `atlas/js-ladder-mdn` @ **5d187c9**, from develop 9f49a40. It's test and tooling only.
+  - 36 DOM-touching MDN examples (CC0), in MDN's course order.
+  - `scripts/js_ladder.py`: both engines load each page from a local `127.0.0.1` server with scripts on. `parity-capture --url` has no `file://` support, which is why the server is there.
+  - Chrome 148 baselines, plus each page's uncaught errors.
+  - **Receipt:** 26/26, **0 changed** vs the #362 receipt; builtins 5/5.
+- **The pass rule is strict on purpose.** On pixels alone the rung scored 36/36, because most pages only change on click. A fixture must also run every script, and throw exactly as often as Chrome.
+- **A no-JS control shows how little the pixels test.** Only calendar (72% → 2.6%), gallery (35% → 6.4%) and dom-example (~2% → 0.2%) look different with scripts off.
+
+**The one failure (first real ladder gap):** 03-apply-javascript-external uses `<script type="module">`, and RustKit skips module scripts ("type=module unsupported").
+
+**PRs opened this session:** #367 @ 5d187c9.
+
+**Decisions for Pete**
+1. **An input driver for the ladder** (`parity-capture --click <selector>`/`--type`, plus the same actions in the Chrome oracle). Most of rung 1's value (event handlers, the shopping list, the gallery) sits behind clicks, so 35/36 on load state is a thin pass. **I recommend building it next;** it's needed for rung 4 (TodoMVC) anyway.
+2. **ES module scripts** (`type=module`, Boa has module support). This is an architecture call on loading and resolving imports. Rung 1's only failure needs it, and so do modern sites. It needs a Prometheus pin, or confirmation that "recorded as unsupported" still stands.
+3. **Point R1 and R2 at #367.**
