@@ -1182,3 +1182,36 @@ Per-check on these 4 sites: develop loads 2 · readable 0 · looks-right 0; #361
 **Decisions for Pete:**
 1. Still open: **a quiet board slot.** No trustworthy full board since 09-29 06:05. Release builds now take 13–32 min at load 12–23.
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+## 2026-09-30 05:34 — daily QUIET board (quiet), develop c4047ab
+
+**29/60 (loads 17, readable 9, looks-right 3; scorable 29/60)** (load at start: { 8.87 7.39 6.99 })
+
+```
+google     PASS PASS 100.0% PASS   9.1% (cc   0.3%)  3/3  
+youtube    fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.25% non-background)
+facebook   PASS fail  58.7% fail  15.9% (cc   8.6%)  1/3  
+instagram  PASS fail   0.0% fail  16.4% (cc   0.0%)  1/3  
+wikipedia  PASS PASS  81.5% fail  16.9% (cc   0.0%)  2/3  
+lyft       PASS PASS 100.0% fail  17.9% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% fail    -   (cc   1.1%)  0/3  blank frame (1.19% non-background)
+x          PASS PASS  95.3% PASS  10.4% (cc   0.3%)  3/3  
+linkedin   PASS PASS  89.2% PASS   8.7% (cc   4.8%)  3/3  
+yahoo      PASS fail    -   fail    -   (cc    -  )  1/3  
+bing       PASS fail  13.0% fail  87.1% (cc   0.0%)  1/3  
+walmart    PASS fail  58.7% unst  92.5% (cc  94.3%)  1/3  
+microsoft  fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (1.08% non-background)
+apple      PASS PASS 100.0% fail  59.7% (cc   0.0%)  2/3  
+netflix    PASS PASS  90.6% fail  68.4% (cc   3.1%)  2/3  
+github     PASS fail  71.7% fail  72.9% (cc   0.3%)  1/3  
+shopify    PASS PASS  96.4% fail  19.6% (cc   0.0%)  2/3  
+squarespace PASS PASS  85.7% unst  78.1% (cc  74.6%)  2/3  
+cnn        PASS fail  47.0% fail  60.1% (cc   0.0%)  1/3  
+weather    PASS fail   9.6% unst  30.9% (cc  23.8%)  1/3  
+------------------------------------------------------------------------------
+POINTS 29/60   loads 17  readable 9  looks-right 3   unstable: walmart, squarespace, weather   oracle failed: yahoo
+BLOCKED none
+ORACLE BLOCKED none
+SCORABLE 29/60 on 20 sites
+trench/realsite/runs/20260930T0910Z-quiet-devc4047ab
+```
