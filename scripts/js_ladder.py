@@ -134,6 +134,11 @@ def compare(chrome_png: Path, frame: Path, out: Path) -> dict:
     )
 
 
+def fmt_pct(pct) -> str:
+    """A diff percentage for display; None (not measured) prints as `--`."""
+    return "  --  " if pct is None else f"{pct:6.2f}"
+
+
 def main() -> int:
     args = sys.argv[1:]
     manifest = json.loads((RUNG_DIR / "manifest.json").read_text())
@@ -169,7 +174,8 @@ def main() -> int:
                 row["diff_pct"] = cmp["diff_pct"]
                 row["instrument"] = cmp["instrument"]
                 row["script_problems"] = script_verdict(row["scripts"], chrome_errors)
-                row["passed"] = (cmp["instrument"] is None and cmp["diff_pct"] <= PASS_PCT
+                row["passed"] = (cmp["instrument"] is None and cmp["diff_pct"] is not None
+                                 and cmp["diff_pct"] <= PASS_PCT
                                  and not row["script_problems"])
             nojs = capture_nojs(RUNG_DIR / fid / "index.html", out, w, h)
             if nojs.get("status") == "ok":
@@ -177,8 +183,8 @@ def main() -> int:
         except Exception as e:
             row["error"] = str(e)[-300:]
         rows.append(row)
-        d = "  --  " if row["diff_pct"] is None else f"{row['diff_pct']:6.2f}"
-        nj = "  --  " if row.get("nojs_diff_pct") is None else f"{row['nojs_diff_pct']:6.2f}"
+        d = fmt_pct(row["diff_pct"])
+        nj = fmt_pct(row.get("nojs_diff_pct"))
         mark = "PASS" if row["passed"] else "fail"
         extra = row.get("error") or row.get("script_problems") or ""
         print(f"{mark}  {d}%  nojs {nj}%  {fid:40s} {extra}"[:200])
