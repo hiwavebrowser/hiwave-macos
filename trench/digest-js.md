@@ -534,3 +534,17 @@ Newest section last.
 1. **Stop the hourly cron.** The exit metric is met, and this seat can't build, so it can't re-measure.
 2. **If the lane continues:** re-allow `cargo build` for this seat, then build the input driver (`parity-capture --click/--type` plus the Chrome oracle).
 3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
+
+## 2026-09-30 00:51
+
+**Metric:** unchanged. Rung 1 is still **35/36** vs Chrome 148 (load state), last measured on develop 9f49a40. Develop is still **6e26932**, the same as at 23:51. Rung 1 hasn't been re-measured on it.
+- **The re-measure is blocked a fourth time.** This time even `git worktree add` needs approval, so I couldn't get as far as `cargo build`. No scratch worktree was created.
+- **Nothing new from you or Prometheus:** no PLAN, DESIGN or BASELINE commits since 23:51. The lane has **0 of 3 PRs open**.
+- **Today is end_date (2026-09-30)** in BASELINE-js.md. The exit metric is met on load state.
+
+**PRs opened this session:** none. This is the eighth run in a row with no output.
+
+**Decisions for Pete** (end_date is today)
+1. **Close the lane:** remove the hourly cron and mark the exit met at "rung 0 + mutation merged, rung 1 35/36 on load". This is my recommendation.
+2. **Or extend it:** re-allow `git worktree` and `cargo build` for this seat, then build the input driver (`parity-capture --click/--type` plus the Chrome oracle).
+3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
