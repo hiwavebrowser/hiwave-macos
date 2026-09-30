@@ -3079,7 +3079,7 @@ impl Engine {
                     external_sheets: external_stylesheets.len(),
                     viewport,
                     focus: self.building_focus.get(),
-                    fonts: rustkit_layout::webfonts::generation(),
+                    fonts: self.web_font_count(),
                 })
             })
             .flatten();
@@ -7763,6 +7763,17 @@ impl Engine {
                 "web font face(s) rejected by the platform (unsupported container or bad data)"
             );
         }
+    }
+
+    /// Loaded faces in the partition of the view being built (the opaque one
+    /// for a view-less build).
+    fn web_font_count(&self) -> usize {
+        let base = self
+            .building_view
+            .get()
+            .and_then(|id| self.views.get(&id))
+            .and_then(|v| v.url.as_ref());
+        self.font_loader.faces_for(&Self::font_partition(base)).len()
     }
 
     fn install_web_fonts(&self, id: EngineViewId) {
@@ -20482,10 +20493,11 @@ struct StyleMemoKey {
     external_sheets: usize,
     viewport: Option<(f32, f32)>,
     focus: Option<rustkit_dom::NodeId>,
-    /// The installed web-font set (`webfonts::generation`): `ch` lengths
+    /// How many web faces the view's font partition has loaded (the loader
+    /// only grows a partition, so the count names the set): `ch` lengths
     /// resolve against the element's font, so a face arriving between two
     /// builds can change a cascade.
-    fonts: u64,
+    fonts: usize,
 }
 
 /// What the build in progress does with the memo.
