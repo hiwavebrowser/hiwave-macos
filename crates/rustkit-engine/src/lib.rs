@@ -23689,6 +23689,21 @@ mod flex_indefinite_column_grow_tests {
     }
 
     #[test]
+    fn an_empty_column_item_is_only_its_borders_tall() {
+        // A childless item has no line box: a 1px-bordered empty block in an
+        // auto-height column is 2 tall, as Chrome 148 lays out a UA `<hr>`.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div id="o" style="display:flex;flex-direction:column">"#,
+            r#"<div id="e" style="border:1px solid gray"></div>"#,
+            r#"<div id="f" style="height:5px"></div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "e").height, 2.0);
+            assert_eq!(rect(&root, "f").y, 2.0);
+            assert_eq!(rect(&root, "o").height, 7.0);
+        }
+    }
+
+    #[test]
     fn grow_wrappers_still_fill_a_min_height_column() {
         // Guard: the `min-height` floor is free space the grow items take.
         for root in laid_out(concat!(

@@ -2614,6 +2614,11 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
                         crate::resolve_line_height(style, font_size)
                     }
                 }
+                // An item with no children has no line box, so its content
+                // height is 0 (Chrome 148), as on the cross axis. Step 11d
+                // skips childless items, so the guess would stand: a UA `<hr>`
+                // in an auto-height column came out 19 tall instead of 2.
+                Axis::Vertical if layout_box.children.is_empty() => 0.0,
                 Axis::Vertical => crate::resolve_line_height(style, font_size),
             }
         }
