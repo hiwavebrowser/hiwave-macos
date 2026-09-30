@@ -1745,6 +1745,19 @@ impl TextShaper {
         )
     }
 
+    /// Slack for "does this text fit on the line", in CSS px.
+    ///
+    /// A shrink-to-fit box is sized from the text's max-content width, and
+    /// that width comes back to the line breaker after a trip through
+    /// `(width + padding) - padding` and the flex/grid sizing arithmetic in
+    /// f32, where it can land a bit below the value the shaper measured. An
+    /// exact `<=` then wraps text that was measured to fit its own box:
+    /// gradient-no-radius's "to right Pink-Blue" label broke at the hyphen
+    /// with the box 129.068 wide and the text 129.068 wide. Chrome never
+    /// sees this because LayoutUnit quantises every length to 1/64 px, so
+    /// that is the slack used here.
+    const FIT_EPSILON: f32 = 1.0 / 64.0;
+
     /// Wrap text into lines that fit within the specified width.
     ///
     /// This function shapes text and breaks it into multiple lines based on:
@@ -2102,7 +2115,7 @@ impl TextShaper {
             let remaining = &text[line_start..];
             let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
 
-            if shaped.metrics.width <= cur_max {
+            if shaped.metrics.width <= cur_max + Self::FIT_EPSILON {
                 // Entire remaining text fits on one line
                 let width = shaped.metrics.width;
                 lines.push(WrappedLine {
@@ -2167,7 +2180,7 @@ impl TextShaper {
                             stretch,
                             size,
                         )?;
-                        if shaped_prefix.metrics.width <= cur_max {
+                        if shaped_prefix.metrics.width <= cur_max + Self::FIT_EPSILON {
                             fitted = offset;
                         } else {
                             break;
@@ -2279,7 +2292,7 @@ impl TextShaper {
                 self.shape(prefix, font_chain, weight, style, stretch, size)?
                     .metrics
                     .width
-                    <= max_width
+                    <= max_width + Self::FIT_EPSILON
             };
 
             if fits {
@@ -3326,6 +3339,54 @@ mod tests {
         let lines = result.unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text(), "Hello");
+    }
+
+    /// A line whose measured width comes back a few ulps under its own
+    /// max-content width (f32 round trips through padding and flex sizing)
+    /// must not wrap. Chrome's LayoutUnit hides this; FIT_EPSILON does here.
+    #[test]
+    fn text_that_measures_its_own_width_does_not_wrap_on_an_ulp() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let text = "to right Pink-Blue";
+        let measured = shaper
+            .shape(text, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 16.0)
+            .unwrap()
+            .metrics
+            .width;
+        // Two ulps below: what `(w + 24.0) - 24.0` can hand back for w in
+        // [64, 128) when the sum crosses 128.
+        let a_hair_under = measured - 2.0 * f32::EPSILON * measured;
+        assert!(a_hair_under < measured);
+        let lines = shaper
+            .wrap_text(
+                text,
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+                a_hair_under,
+                CssWordBreak::Normal,
+                CssOverflowWrap::Normal,
+            )
+            .unwrap();
+        assert_eq!(lines.len(), 1, "wrapped on an ulp: {:?}", lines.iter().map(|l| l.width).collect::<Vec<_>>());
+        // And a real shortfall still wraps.
+        let lines = shaper
+            .wrap_text(
+                text,
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+                measured - 1.0,
+                CssWordBreak::Normal,
+                CssOverflowWrap::Normal,
+            )
+            .unwrap();
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
