@@ -707,3 +707,18 @@ Newest section last.
 1. **Close the lane now (recommended):** remove the hourly cron and record the exit as met ("rung 0 + mutation merged, rung 1 35/36 on load").
 2. **Or extend it with your OK:** allow `cargo build` for this seat, then re-score on c327df9 (post-#380/#382 selector changes) and build the input driver.
 3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
+
+## 2026-09-30 15:08
+
+**Metric:** rung 1 **35/36 → 35/36** vs Chrome 148 (load state). This time it was **actually re-measured, on develop 22092e6**, which includes #378, #379, #380, #382 and #384 (light-dark()). The last score was on 9f49a40.
+- **The re-measure worked** after 16 blocked runs. The lane wrappers ran without prompting: `js-git.py … worktree add` and `js-cargo.py <wt> build --release -p parity-capture` (14m17s, cold for this tree), then `js-ladder-run.py`. The scratch worktree `js-dev-22092e6` is removed.
+- **No regressions from the cascade and selector changes.** Per-fixture diffs match the 9f49a40 run: calendar 2.56% (was 2.6%), gallery 6.36% (was 6.4%), dom-example 0.28% (was about 0.2%). Everything else is under 1.6%.
+- The only failure is still **03-apply-javascript-external** (`type=module` skipped).
+- No new PLAN, DESIGN or BASELINE commits from you or Prometheus. The lane has **0 of 3 PRs open**.
+
+**PRs opened this session:** none. The exit metric is met on load state, and nothing on-plan is left without a decision below.
+
+**Decisions for Pete**
+1. **Close the lane now (recommended).** Today is end_date. Remove the hourly cron and record the exit as met ("rung 0 + mutation merged, rung 1 35/36 on load, re-verified on 22092e6").
+2. **Or extend it with your OK:** build the input driver (`parity-capture --click/--type` plus the Chrome oracle). Cargo now works through `js-cargo.py`.
+3. **ES modules:** a Prometheus pin, or keep them "unsupported" (03 is rung 1's only failure).
