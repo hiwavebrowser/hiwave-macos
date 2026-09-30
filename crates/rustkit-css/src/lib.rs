@@ -2794,7 +2794,12 @@ pub fn assign_layer_order(sheets: &mut [Stylesheet]) -> bool {
         }
     }
     // Post-order: a layer ranks after all of its sublayers.
-    fn rank(node: &Node, path: &str, next: &mut u32, out: &mut std::collections::HashMap<String, u32>) {
+    fn rank(
+        node: &Node,
+        path: &str,
+        next: &mut u32,
+        out: &mut std::collections::HashMap<String, u32>,
+    ) {
         for (name, child) in &node.children {
             let full = if path.is_empty() {
                 name.clone()
@@ -3572,8 +3577,10 @@ mod tests {
     use super::*;
 
     fn layer_orders(sheets: &[&str]) -> Vec<(String, u32)> {
-        let mut sheets: Vec<Stylesheet> =
-            sheets.iter().map(|c| Stylesheet::parse(c).expect("css")).collect();
+        let mut sheets: Vec<Stylesheet> = sheets
+            .iter()
+            .map(|c| Stylesheet::parse(c).expect("css"))
+            .collect();
         assign_layer_order(&mut sheets);
         sheets
             .iter()
