@@ -493,3 +493,17 @@ Newest section last.
 1. **An input driver** (`parity-capture --click/--type` plus the Chrome oracle). I recommend it: rung 1's click states are untested.
 2. **ES module scripts**: a Prometheus pin, or keep them "recorded as unsupported" (03 is the only failure).
 3. **Stop the hourly cadence after #367 lands**, unless 1 or 2 is approved. There's nothing else on-plan to run.
+
+## 2026-09-29 21:55
+
+**Metric:** unchanged. Rung 1 is still **35/36** vs Chrome 148 (load state), last measured on develop 9f49a40. I haven't re-measured it on develop 203afb9 yet.
+- **#367 landed.** Develop is now 203afb9, after #364, #365, #366 and #367. The lane has **0 of 3 PRs open**. With this, the rung 0 read slice, the §3 flush, the mutation surface and the rung 1 fixtures and runner are all merged. **The exit metric is met on load state**, as the 20:40 caveat describes.
+- **The post-merge re-measure was blocked.** #365 and #366 touch the engine, so I tried to re-score rung 1 on 203afb9. `cargo build` (and `git -C … checkout`) now need approval in this headless seat, so I made no measurement. I removed the scratch worktree js-dev-203afb9.
+- **Nothing new from you or Prometheus:** no DESIGN or PLAN commits since 20:58, and no answer on the input driver or on ES modules.
+
+**PRs opened this session:** none.
+
+**Decisions for Pete** (end_date is tomorrow)
+1. **Stop the hourly cron now.** The exit metric is met, and nothing on the plan can run without 2 or 3.
+2. **An input driver** (`parity-capture --click/--type` plus the Chrome oracle) as the lane's next leg. I still recommend it. Otherwise close the lane at "rung 1 35/36 on load".
+3. **ES module scripts:** a Prometheus pin, or keep them "unsupported" (03 is the only failure). If the lane continues, also re-allow `cargo build` for this seat so it can re-measure after merges.
