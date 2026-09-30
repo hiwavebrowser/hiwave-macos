@@ -1,0 +1,97 @@
+{
+  "id": "linkedin",
+  "url": "https://www.linkedin.com/",
+  "chrome": [
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.linkedin.com/",
+      "title": "Log In or Sign Up | LinkedIn",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1505Z-ablayers-4-B/linkedin/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1505Z-ablayers-4-B/linkedin/chrome-a.png",
+      "elapsed_ms": 18442
+    },
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1505Z-ablayers-4-B/linkedin/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1505Z-ablayers-4-B/linkedin/chrome-b.png",
+      "elapsed_ms": 25132
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.linkedin.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1505Z-ablayers-4-B/linkedin/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1505Z-ablayers-4-B/linkedin/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 5,
+      "threw": 3,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 830599,
+      "elapsed_ms": 1293
+    },
+    "elapsed_ms": 4052,
+    "error": null,
+    "wall_ms": 4136,
+    "non_background_fraction": 0.2519
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 57,
+    "rustkit_words": 48,
+    "ratio": 0.7719,
+    "missing_sample": [
+      "0",
+      "community",
+      "continuing",
+      "curated",
+      "emotional",
+      "intelligence",
+      "notifications",
+      "one",
+      "place",
+      "professional",
+      "topic",
+      "welcome",
+      "your"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 24.9716796875,
+    "diff": 22.5751953125,
+    "unstable": true,
+    "why": "chrome-vs-chrome 25.0% > 15% (unstable, 0 points)"
+  },
+  "points": 1
+}

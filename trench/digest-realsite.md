@@ -1232,3 +1232,20 @@ trench/realsite/runs/20260930T0910Z-quiet-devc4047ab
 **Decisions for Pete:**
 1. Still open: **a quiet board slot**. The 04:30 job works (29/60 today), but mid-session A/Bs still land at load 12-17.
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+## 2026-09-30 11:30: #380 opened (cascade layers). linkedin now A/B-serves a layered-CSS variant that renders nearly unstyled (a live 2-point risk)
+
+**Points: 29/60 -> 29/60** (the 05:34 quiet board on develop c4047ab stands: loads 17 · readable 9 · looks-right 3). A develop 1b514f8 board ran in three 5-site chunks, and load went 5 -> 18 during it (other lanes building). It is not trustworthy: chunks 1-3 scored 7 + 7 + 5 on 15 sites, with 3 oracle failures (yahoo, microsoft, netflix) and chunk 4 not run. Runs: `trench/realsite/runs/20260930T1320Z-dev1b514f8`. google READABLE 100 -> 78% is Chrome drift (Chrome showed 32 words including an AI-mode prompt; RustKit's 25 words are unchanged).
+
+**Found: linkedin randomly serves two CSS bundles.** The old one is `8bnxn2t783wxez9h12gkxfnlx`, and RustKit gets 3/3 on it. The new one is `assets/Kf3QXGdB.css`, 1.3 MB, all `@layer` (reset/theme/rootTheme/derivedTheme/localization/atoms/overrides), with 91 `:has()` and 9 `@container`. It came up about 1 fetch in 10 today. On the new one, RustKit paints a near-unstyled page: UA-blue nav links, grey buttons, no hero or sign-in card. That scored 1/3 in the board run. The dev-arm frame and the saved variant are in `scratch/li0930/` (`li-new.html` has the sheet inlined and scripts dropped; `offline.py` re-renders it with any binary).
+
+**PR (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#380 `atlas/rs-cascade-layers` @ ee4ed52** (receipt at 66c5912; ee4ed52 is rustfmt-only). `@layer` was flattened in source order. Now each rule carries its dotted layer name, statements and blocks declare the order across sheets, and the cascade sorts by (layer, specificity, source order), with `!important` taking layers in reverse (elements and `::before/::after`). Pages without `@layer` keep exactly the old order. 6 engine pins (all fail with the ranking disabled), plus a selector sanity pin, a ranking test and 2 parser tests. Campaign vs develop 1b514f8 (the base is ddbeae5 = +#378; disclosed): 26/26 identical, builtins identical, ratchet identical. **Honest:** spec-correct, but not the main cause of linkedin's new-variant look. Offline, it only changes button text weight.
+
+**Also found (next PR):** `#x.c`, an id followed by anything, never matches. `simple_selector_matches_with_pseudo`, `SubjectCompound::parse` and `keys_for_compound` all take the whole remainder after `#` as the id (a quirk the compiled matcher deliberately copied). `#id.class` / `#id:hover` / `#id[attr]` are common on real sites.
+
+**Next:** (1) The `#id.class` compound fix: three sites, plus a pin through both matchers. (2) linkedin's new variant: diff the offline frame against Chrome on `li-new.html`, and bisect the sheet by layer to find what un-styles it (`:has()`? `@container`? `.auya`-scoped theme vars?). (3) facebook `rk60`/`rk67`; `border-style: inset`.
+
+**Decisions for Pete:**
+1. Still open: **a quiet board slot.** Today's mid-session board hit load 18 again; only the 04:30 job is trustworthy.
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop (a `--check` on the three CSS/engine crates shows dozens of pre-existing hunks).

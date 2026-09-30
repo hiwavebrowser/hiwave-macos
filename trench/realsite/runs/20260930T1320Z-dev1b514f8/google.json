@@ -1,0 +1,89 @@
+{
+  "id": "google",
+  "url": "https://www.google.com/",
+  "chrome": [
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.google.com/",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/google/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/google/chrome-a.png",
+      "elapsed_ms": 21015
+    },
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.google.com/",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/google/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/google/chrome-b.png",
+      "elapsed_ms": 15801
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.google.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/google/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260930T1320Z-dev1b514f8/google/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 8,
+      "threw": 7,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 1445192,
+      "elapsed_ms": 2354
+    },
+    "elapsed_ms": 5789,
+    "error": null,
+    "wall_ms": 6331,
+    "non_background_fraction": 0.127
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 32,
+    "rustkit_words": 25,
+    "ratio": 0.7812,
+    "missing_sample": [
+      "ask",
+      "brainstorm",
+      "feeling",
+      "files",
+      "i",
+      "lucky",
+      "m"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0.3529296875,
+    "diff": 13.368066406250001
+  },
+  "points": 2
+}
