@@ -462,6 +462,27 @@ pub enum Length {
     Calc(Box<CalcSum>),
 }
 
+/// One corner of `border-radius`: the two radii of its quarter ellipse
+/// (CSS Backgrounds 3 §5.1). A percentage in `horizontal` refers to the
+/// border box's width and one in `vertical` to its height, so the pair
+/// cannot be folded into one length before layout.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CornerRadius {
+    pub horizontal: Length,
+    pub vertical: Length,
+}
+
+impl CornerRadius {
+    /// Both radii the same length: the one-value form, a quarter circle
+    /// unless the length is a percentage of a non-square box.
+    pub fn circular(radius: Length) -> Self {
+        Self {
+            horizontal: radius.clone(),
+            vertical: radius,
+        }
+    }
+}
+
 impl Length {
     /// Compute the absolute pixel value.
     ///
@@ -2468,11 +2489,12 @@ pub struct ComputedStyle {
     pub border_bottom_style: BorderStyle,
     pub border_left_style: BorderStyle,
 
-    // Border radius (for rounded corners)
-    pub border_top_left_radius: Length,
-    pub border_top_right_radius: Length,
-    pub border_bottom_right_radius: Length,
-    pub border_bottom_left_radius: Length,
+    // Border radius (for rounded corners): a horizontal and a vertical
+    // radius per corner (CSS Backgrounds 3 §5.1)
+    pub border_top_left_radius: CornerRadius,
+    pub border_top_right_radius: CornerRadius,
+    pub border_bottom_right_radius: CornerRadius,
+    pub border_bottom_left_radius: CornerRadius,
 
     // Colors
     pub color: Color,

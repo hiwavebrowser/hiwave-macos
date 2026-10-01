@@ -5949,32 +5949,148 @@ pub struct HitTestAncestor {
     pub position: Position,
 }
 
+/// One corner's used radii in px: the horizontal and vertical semi-axes of
+/// its quarter ellipse. A circle has `h == v`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CornerRadius {
+    pub h: f32,
+    pub v: f32,
+}
+
+impl CornerRadius {
+    /// A quarter circle of radius `r`.
+    pub fn circular(r: f32) -> Self {
+        Self { h: r, v: r }
+    }
+
+    /// A corner with either radius zero is square (CSS Backgrounds 3 §5.1).
+    pub fn is_zero(&self) -> bool {
+        self.h <= 0.0 || self.v <= 0.0
+    }
+
+    /// The radii of the curve `dx` in from the vertical edge and `dy` in from
+    /// the horizontal one: the padding edge for border widths (§5.2). Square
+    /// once either inset swallows its radius.
+    pub fn inset(&self, dx: f32, dy: f32) -> Self {
+        let inner = Self {
+            h: (self.h - dx).max(0.0),
+            v: (self.v - dy).max(0.0),
+        };
+        if inner.is_zero() {
+            Self::default()
+        } else {
+            inner
+        }
+    }
+}
+
 /// Border radius values for each corner.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BorderRadius {
-    pub top_left: f32,
-    pub top_right: f32,
-    pub bottom_right: f32,
-    pub bottom_left: f32,
+    pub top_left: CornerRadius,
+    pub top_right: CornerRadius,
+    pub bottom_right: CornerRadius,
+    pub bottom_left: CornerRadius,
 }
 
 impl BorderRadius {
-    /// Create uniform border radius.
+    /// Create uniform, circular border radius.
     pub fn uniform(radius: f32) -> Self {
+        let corner = CornerRadius::circular(radius);
         Self {
-            top_left: radius,
-            top_right: radius,
-            bottom_right: radius,
-            bottom_left: radius,
+            top_left: corner,
+            top_right: corner,
+            bottom_right: corner,
+            bottom_left: corner,
         }
     }
 
-    /// Check if all radii are zero (no rounding).
+    /// Check if every corner is square (no rounding).
     pub fn is_zero(&self) -> bool {
-        self.top_left == 0.0
-            && self.top_right == 0.0
-            && self.bottom_right == 0.0
-            && self.bottom_left == 0.0
+        self.top_left.is_zero()
+            && self.top_right.is_zero()
+            && self.bottom_right.is_zero()
+            && self.bottom_left.is_zero()
+    }
+
+    /// The radii as they are used on a `width` x `height` box: negative
+    /// values dropped, a corner with one zero radius made square, and all of
+    /// them scaled by one factor so that adjacent corners do not overlap
+    /// (CSS Backgrounds 3 §5.5):
+    /// `f = min(1, width / (two radii along a horizontal side), height / (two
+    /// radii along a vertical side))`.
+    ///
+    /// One factor for all eight radii keeps every corner's shape. It is
+    /// applied as `side * (r / sum)` for the side that overlaps most, so two
+    /// equal radii on that side come out at exactly half of it: four equal
+    /// circular radii give `min(r, width / 2, height / 2)` to the bit.
+    pub fn fitted(&self, width: f32, height: f32) -> Self {
+        let clean = |c: CornerRadius| {
+            let c = CornerRadius {
+                h: c.h.max(0.0),
+                v: c.v.max(0.0),
+            };
+            if c.is_zero() {
+                CornerRadius::default()
+            } else {
+                c
+            }
+        };
+        let (tl, tr, br, bl) = (
+            clean(self.top_left),
+            clean(self.top_right),
+            clean(self.bottom_right),
+            clean(self.bottom_left),
+        );
+        // The side whose radii overlap most: (side length, sum of its two).
+        let mut tightest: Option<(f32, f32)> = None;
+        for (side, sum) in [
+            (width.max(0.0), tl.h + tr.h),
+            (width.max(0.0), bl.h + br.h),
+            (height.max(0.0), tl.v + bl.v),
+            (height.max(0.0), tr.v + br.v),
+        ] {
+            let tighter = match tightest {
+                Some((s, total)) => side / sum < s / total,
+                None => true,
+            };
+            if sum > side && tighter {
+                tightest = Some((side, sum));
+            }
+        }
+        let Some((side, sum)) = tightest else {
+            return Self {
+                top_left: tl,
+                top_right: tr,
+                bottom_right: br,
+                bottom_left: bl,
+            };
+        };
+        let scale = |c: CornerRadius| CornerRadius {
+            h: side * (c.h / sum),
+            v: side * (c.v / sum),
+        };
+        Self {
+            top_left: scale(tl),
+            top_right: scale(tr),
+            bottom_right: scale(br),
+            bottom_left: scale(bl),
+        }
+    }
+
+    /// The radii of the same box drawn `sx` times as wide and `sy` times as
+    /// tall.
+    pub fn scaled(&self, sx: f32, sy: f32) -> Self {
+        let scale = |c: CornerRadius| CornerRadius {
+            h: c.h * sx,
+            v: c.v * sy,
+        };
+        Self {
+            top_left: scale(self.top_left),
+            top_right: scale(self.top_right),
+            bottom_right: scale(self.bottom_right),
+            bottom_left: scale(self.bottom_left),
+        }
     }
 }
 
@@ -7044,13 +7160,12 @@ impl DisplayList {
     /// Render background.
     /// Supports multiple background layers painted bottom-to-top.
     /// Respects background-clip property (border-box, padding-box, content-box).
-    /// The box's border-box corner radii, resolved to pixels.
+    /// The box's border-box corner radii as used: resolved to pixels per
+    /// axis and reduced so adjacent corners do not overlap.
     ///
-    /// Percentages resolve against the border box WIDTH for every corner. That
-    /// is not what CSS says (the vertical radius resolves against height), but
-    /// it is what the background painter has always done, and the overflow clip
-    /// has to round exactly where the background rounds or the two disagree by
-    /// a pixel and the clip cuts into the paint it is supposed to contain.
+    /// The background, the border and the overflow clip all start from this
+    /// one value, so they round in the same place; if they resolved radii
+    /// separately the clip could cut into the paint it is meant to contain.
     fn border_radius_px(&self, layout_box: &LayoutBox) -> BorderRadius {
         let s = &layout_box.style;
         let border_rect = layout_box.dimensions.border_box();
@@ -7059,26 +7174,21 @@ impl DisplayList {
             _ => 16.0,
         };
         let root_font_size = self.root_font_size;
-        BorderRadius {
-            top_left: s
-                .border_top_left_radius
+        // A percentage is of the border box's width for the horizontal
+        // radius and of its height for the vertical one (§5.1).
+        let corner = |c: &rustkit_css::CornerRadius| CornerRadius {
+            h: c.horizontal
                 .to_px(font_size, root_font_size, border_rect.width),
-            top_right: s.border_top_right_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
-            bottom_right: s.border_bottom_right_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
-            bottom_left: s.border_bottom_left_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
+            v: c.vertical
+                .to_px(font_size, root_font_size, border_rect.height),
+        };
+        BorderRadius {
+            top_left: corner(&s.border_top_left_radius),
+            top_right: corner(&s.border_top_right_radius),
+            bottom_right: corner(&s.border_bottom_right_radius),
+            bottom_left: corner(&s.border_bottom_left_radius),
         }
+        .fitted(border_rect.width, border_rect.height)
     }
 
     /// The rounded clip a box imposes on its descendants, if any.
@@ -7128,18 +7238,14 @@ impl DisplayList {
             return None;
         }
 
-        // Each corner shrinks by the THICKER of its two borders. BorderRadius
-        // is one scalar per corner, so an elliptical inner radius cannot be
-        // expressed; taking the thicker border rounds less than Chrome would,
-        // which errs toward clipping too little rather than eating paint that
-        // belongs on screen. With no border — every case this currently fires
-        // on — it is exact.
-        let inset = |r: f32, a: f32, b: f32| (r - a.max(b)).max(0.0);
+        // Each corner's horizontal radius shrinks by the vertical border it
+        // meets and its vertical radius by the horizontal one, so unequal
+        // borders give an elliptical padding edge (§5.2).
         let inner = BorderRadius {
-            top_left: inset(radius.top_left, d.border.left, d.border.top),
-            top_right: inset(radius.top_right, d.border.right, d.border.top),
-            bottom_right: inset(radius.bottom_right, d.border.right, d.border.bottom),
-            bottom_left: inset(radius.bottom_left, d.border.left, d.border.bottom),
+            top_left: radius.top_left.inset(d.border.left, d.border.top),
+            top_right: radius.top_right.inset(d.border.right, d.border.top),
+            bottom_right: radius.bottom_right.inset(d.border.right, d.border.bottom),
+            bottom_left: radius.bottom_left.inset(d.border.left, d.border.bottom),
         };
 
         Some((padding_rect, inner))
@@ -8874,10 +8980,14 @@ mod tests {
     fn scaled_gradient_card(radius_px: f32) -> LayoutBox {
         let mut style = ComputedStyle::new();
         if radius_px > 0.0 {
-            style.border_top_left_radius = Length::Px(radius_px);
-            style.border_top_right_radius = Length::Px(radius_px);
-            style.border_bottom_right_radius = Length::Px(radius_px);
-            style.border_bottom_left_radius = Length::Px(radius_px);
+            style.border_top_left_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+            style.border_top_right_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+            style.border_bottom_right_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+            style.border_bottom_left_radius =
+                rustkit_css::CornerRadius::circular(Length::Px(radius_px));
         }
         style.background_layers = vec![rustkit_css::BackgroundLayer {
             image: rustkit_css::BackgroundImage::Gradient(rustkit_css::Gradient::Linear(
@@ -8947,7 +9057,12 @@ mod tests {
                 radius.bottom_right,
                 radius.bottom_left
             ),
-            (16.0, 16.0, 16.0, 16.0),
+            (
+                CornerRadius::circular(16.0),
+                CornerRadius::circular(16.0),
+                CornerRadius::circular(16.0),
+                CornerRadius::circular(16.0)
+            ),
             "the clip must carry the box's own radius on all four corners"
         );
         assert!(
@@ -9346,10 +9461,12 @@ mod tests {
 
     fn rounded_overflow_parent(radius_px: f32, hidden: bool) -> LayoutBox {
         let mut style = ComputedStyle::new();
-        style.border_top_left_radius = Length::Px(radius_px);
-        style.border_top_right_radius = Length::Px(radius_px);
-        style.border_bottom_right_radius = Length::Px(radius_px);
-        style.border_bottom_left_radius = Length::Px(radius_px);
+        style.border_top_left_radius = rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+        style.border_top_right_radius = rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+        style.border_bottom_right_radius =
+            rustkit_css::CornerRadius::circular(Length::Px(radius_px));
+        style.border_bottom_left_radius =
+            rustkit_css::CornerRadius::circular(Length::Px(radius_px));
         if hidden {
             style.overflow_x = rustkit_css::Overflow::Hidden;
             style.overflow_y = rustkit_css::Overflow::Hidden;
@@ -9405,7 +9522,7 @@ mod tests {
         assert_eq!(rect.width, 237.0, "the border box");
         assert_eq!(widths, [5.0; 4]);
         assert_eq!(colors[0], Color::BLACK);
-        assert_eq!(radius.bottom_left, 12.0);
+        assert_eq!(radius.bottom_left, CornerRadius::circular(12.0));
         assert!(
             !list.commands.iter().any(|c| matches!(c, DisplayCommand::SolidColor(col, _) if *col == Color::BLACK)),
             "the square strips must not also paint"
@@ -9443,7 +9560,7 @@ mod tests {
         let (rect, radius) = rounded_clip(&list).expect(
             "a rounded box that clips its overflow must push a rounded clip for its children",
         );
-        assert_eq!(radius.top_left, 12.0);
+        assert_eq!(radius.top_left, CornerRadius::circular(12.0));
         assert_eq!(rect.width, 227.0);
 
         let push = list
@@ -9769,9 +9886,103 @@ mod tests {
         assert_eq!(rect.x, border_box.x + 4.0);
         assert_eq!(rect.width, border_box.width - 8.0);
         assert_eq!(
-            radius.top_left, 8.0,
+            radius.top_left,
+            CornerRadius::circular(8.0),
             "12px radius inside a 4px border is 8px"
         );
+    }
+
+    #[test]
+    fn unequal_borders_give_the_overflow_clip_an_elliptical_radius() {
+        // CSS Backgrounds 3 §5.2: the padding edge's horizontal radius is the
+        // outer one less the vertical border beside it, and its vertical
+        // radius the outer one less the horizontal border. One scalar per
+        // corner could only take the thicker border off both.
+        let mut parent = rounded_overflow_parent(12.0, true);
+        parent.dimensions.border = EdgeSizes {
+            top: 10.0,
+            right: 2.0,
+            bottom: 14.0,
+            left: 4.0,
+        };
+
+        let list = DisplayList::build(&under_root(parent));
+        let (_, radius) = rounded_clip(&list).expect("must still clip");
+        assert_eq!(radius.top_left, CornerRadius { h: 8.0, v: 2.0 });
+        assert_eq!(radius.top_right, CornerRadius { h: 10.0, v: 2.0 });
+        assert_eq!(
+            radius.bottom_right,
+            CornerRadius::default(),
+            "a 14px border swallows the 12px vertical radius: that corner is square"
+        );
+        assert_eq!(radius.bottom_left, CornerRadius::default());
+    }
+
+    #[test]
+    fn fitting_scales_every_radius_by_one_factor() {
+        // §5.5. 200x400: the top side holds 150 + 150, so f = 200/300.
+        let fitted = BorderRadius {
+            top_left: CornerRadius::circular(150.0),
+            top_right: CornerRadius::circular(150.0),
+            bottom_right: CornerRadius { h: 30.0, v: 15.0 },
+            bottom_left: CornerRadius::default(),
+        }
+        .fitted(200.0, 400.0);
+        assert_eq!(fitted.top_left, CornerRadius::circular(100.0));
+        assert_eq!(fitted.bottom_right, CornerRadius { h: 20.0, v: 10.0 });
+        assert_eq!(fitted.bottom_left, CornerRadius::default());
+
+        // Nothing overlaps: unchanged, even with a radius past half the box.
+        let lone = BorderRadius {
+            top_left: CornerRadius { h: 180.0, v: 90.0 },
+            ..BorderRadius::default()
+        };
+        assert_eq!(lone.fitted(200.0, 100.0), lone);
+
+        // The vertical sides count too. 200x100: the right side holds
+        // 150 + 15 and is the tightest, f = 100/165.
+        let fitted = BorderRadius {
+            top_left: CornerRadius::circular(150.0),
+            top_right: CornerRadius::circular(150.0),
+            bottom_right: CornerRadius { h: 30.0, v: 15.0 },
+            bottom_left: CornerRadius::default(),
+        }
+        .fitted(200.0, 100.0);
+        assert!((fitted.top_right.v - 150.0 * 100.0 / 165.0).abs() < 1e-3);
+        assert!((fitted.top_right.v + fitted.bottom_right.v - 100.0).abs() < 1e-3);
+
+        // Four equal circular radii: exactly half the shorter side, as
+        // before, whatever the radius and the side are.
+        assert_eq!(
+            BorderRadius::uniform(9999.0).fitted(200.0, 100.0),
+            BorderRadius::uniform(50.0)
+        );
+        for (r, w, h) in [
+            (9999.0_f32, 311.59375_f32, 37.59375_f32),
+            (1e6, 73.3, 1280.7),
+            (24.0, 40.1, 31.9),
+        ] {
+            assert_eq!(
+                BorderRadius::uniform(r).fitted(w, h),
+                BorderRadius::uniform(w.min(h) / 2.0),
+                "uniform {r} on {w}x{h}"
+            );
+        }
+
+        // One zero axis makes the corner square, so it takes no room.
+        let half_zero = BorderRadius {
+            top_left: CornerRadius { h: 500.0, v: 0.0 },
+            top_right: CornerRadius::circular(40.0),
+            ..BorderRadius::default()
+        };
+        let fitted = half_zero.fitted(200.0, 100.0);
+        assert_eq!(fitted.top_left, CornerRadius::default());
+        assert_eq!(fitted.top_right, CornerRadius::circular(40.0));
+        assert!(BorderRadius {
+            top_left: CornerRadius { h: 5.0, v: 0.0 },
+            ..BorderRadius::default()
+        }
+        .is_zero());
     }
 
     #[test]
@@ -15927,10 +16138,10 @@ mod border_radius_emit_tests {
     fn box_with(radius: Length, bg: Color) -> LayoutBox {
         let mut s = ComputedStyle::new();
         s.background_color = bg;
-        s.border_top_left_radius = radius.clone();
-        s.border_top_right_radius = radius.clone();
-        s.border_bottom_right_radius = radius.clone();
-        s.border_bottom_left_radius = radius;
+        s.border_top_left_radius = rustkit_css::CornerRadius::circular(radius.clone());
+        s.border_top_right_radius = rustkit_css::CornerRadius::circular(radius.clone());
+        s.border_bottom_right_radius = rustkit_css::CornerRadius::circular(radius.clone());
+        s.border_bottom_left_radius = rustkit_css::CornerRadius::circular(radius);
         let mut b = LayoutBox::new(BoxType::Block, s);
         b.dimensions.content.width = 80.0;
         b.dimensions.content.height = 40.0;
