@@ -149,7 +149,7 @@ impl TextShaper {
     /// Get font metrics
     pub fn get_metrics(&self) -> FontMetrics {
         FontMetrics {
-            ascent: self.font.ascent() as f32,
+            ascent: blink_ascent(&self.font),
             descent: self.font.descent() as f32,
             leading: self.font.leading() as f32,
             cap_height: self.font.cap_height() as f32,
@@ -190,12 +190,54 @@ fn is_system_family(lower: &str) -> bool {
     )
 }
 
+/// A face's ascent as Blink reports it on macOS.
+///
+/// Blink raises the ascent of Times, Helvetica and Courier by 15% of the
+/// rounded ascent + descent, to match the vertical metrics of their
+/// Microsoft counterparts (`FontMetrics::AscentDescentWithHacks`). Those are
+/// Chrome's default, `sans-serif` and `monospace` faces, so a 16px line set
+/// in any of them is 18px in Chrome, where the font's own 12 + 4 gives 16.
+/// Every other family keeps the font's ascent (Times New Roman, Helvetica
+/// Neue and Courier New are other families).
+pub fn blink_ascent(font: &CTFont) -> f32 {
+    let ascent = font.ascent() as f32;
+    if matches!(family_name_or_empty(font).as_str(), "Times" | "Helvetica" | "Courier") {
+        let rounded = ascent.round();
+        let descent = (font.descent() as f32).round();
+        return rounded + ((rounded + descent) * 0.15 + 0.5).floor();
+    }
+    ascent
+}
+
+/// A face's family name, or the empty string when it has none.
+///
+/// `CTFont::family_name` panics on a face without one, and a downloaded font
+/// can lack the name (x.com's does): Core Text returns null for it.
+pub fn family_name_or_empty(font: &CTFont) -> String {
+    use core_foundation::string::{CFString, CFStringRef};
+
+    extern "C" {
+        fn CTFontCopyFamilyName(font: core_text::font::CTFontRef) -> CFStringRef;
+    }
+    // SAFETY: `font` is a live CTFont. The result follows the create rule
+    // and is null when the face has no family name.
+    unsafe {
+        let name = CTFontCopyFamilyName(font.as_concrete_TypeRef());
+        if name.is_null() {
+            return String::new();
+        }
+        CFString::wrap_under_create_rule(name).to_string()
+    }
+}
+
 /// Map CSS generic families to concrete macOS fonts.
 fn map_generic(lower: &str, fam: &str) -> &'static str {
     match lower {
         "sans-serif" => "Helvetica",
-        "serif" => "Times New Roman",
-        "monospace" => "Menlo",
+        // Chrome's faces on macOS, and the ones layout measures with
+        // (rustkit-layout `FontFamilyChain::serif` / `monospace`).
+        "serif" => "Times",
+        "monospace" => "Courier",
         _ => {
             // Not generic: caller uses the original string.
             let _ = fam;
@@ -1398,8 +1440,50 @@ mod tests {
         let weighted = create_font_with_traits("No Such Face n34, Menlo", 16.0, 700, false)
             .expect("font");
         assert_eq!(weighted.family_name(), "Menlo");
-        // A bare generic still maps straight to its platform face.
-        assert_eq!(create_font("monospace", 16.0).expect("font").family_name(), "Menlo");
+        // A bare generic still maps straight to its platform face, and those
+        // are Chrome's on macOS: Courier and Times, not Menlo and Times New
+        // Roman.
+        assert_eq!(create_font("monospace", 16.0).expect("font").family_name(), "Courier");
+        assert_eq!(create_font("serif", 16.0).expect("font").family_name(), "Times");
+        assert_eq!(create_font("sans-serif", 16.0).expect("font").family_name(), "Helvetica");
+    }
+
+    /// A downloaded font may have no family name (x.com's does not), and
+    /// `CTFont::family_name` panics on it. The ascent of such a face is the
+    /// font's own. The fixture is Ahem with its `name` table hidden from the
+    /// table directory.
+    #[test]
+    fn a_face_without_a_family_name_keeps_its_own_ascent() {
+        use core_graphics::data_provider::CGDataProvider;
+        use core_graphics::font::CGFont;
+
+        let mut bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/Ahem.ttf"
+        ))
+        .expect("fixture");
+        let tables = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
+        let record = (0..tables)
+            .map(|i| 12 + 16 * i)
+            .find(|&at| &bytes[at..at + 4] == b"name")
+            .expect("Ahem has a name table");
+        bytes[record..record + 4].copy_from_slice(b"namf");
+        let provider = CGDataProvider::from_buffer(std::sync::Arc::new(bytes));
+        let cg = CGFont::from_data_provider(provider).expect("decodes");
+        let font = font::new_from_CGFont(&cg, 16.0);
+
+        assert_eq!(family_name_or_empty(&font), "");
+        assert_eq!(blink_ascent(&font), font.ascent() as f32);
+        // The three adjusted families, and one that is not.
+        let line = |name: &str| {
+            let f = named_font(name, 16.0).expect("installed");
+            blink_ascent(&f).round() + (f.descent() as f32).round()
+        };
+        assert_eq!(line("Times"), 18.0);
+        assert_eq!(line("Helvetica"), 18.0);
+        assert_eq!(line("Courier"), 18.0);
+        let neue = named_font("Helvetica Neue", 16.0).expect("installed");
+        assert_eq!(blink_ascent(&neue), neue.ascent() as f32);
     }
 
     #[test]
