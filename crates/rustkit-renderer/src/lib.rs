@@ -2158,6 +2158,7 @@ impl Renderer {
                 font_family,
                 font_weight,
                 padding,
+                kind,
             } => {
                 self.draw_text_input(
                     *rect,
@@ -2174,6 +2175,35 @@ impl Renderer {
                     font_family,
                     *font_weight,
                     *padding,
+                    *kind,
+                );
+            }
+
+            DisplayCommand::ListBox {
+                rect,
+                options,
+                selected,
+                row_height,
+                font_size,
+                font_family,
+                font_weight,
+                text_color,
+                background_color,
+                border_color,
+                border_width,
+            } => {
+                self.draw_list_box(
+                    *rect,
+                    options,
+                    selected,
+                    *row_height,
+                    *font_size,
+                    font_family,
+                    *font_weight,
+                    *text_color,
+                    *background_color,
+                    *border_color,
+                    *border_width,
                 );
             }
 
@@ -4570,7 +4600,10 @@ impl Renderer {
         font_family: &str,
         font_weight: u16,
         padding: [f32; 4],
+        kind: rustkit_layout::TextControlKind,
     ) {
+        let menu_list = kind == rustkit_layout::TextControlKind::MenuList;
+
         // Draw background
         self.draw_solid_rect(rect, background_color);
 
@@ -4597,12 +4630,24 @@ impl Renderer {
         // form_text_seat for what the old formula got wrong).
         let (text_x, text_top, ascent, descent) =
             Self::form_text_seat(rect, border_width, padding, font_family, font_size);
+        // A drop-down's label sits 4px inside its padding edge (Chrome
+        // CfT-148: "Option 1" at border + 4 on a bare select, at border +
+        // padding + 4 on a padded one).
+        let text_x = if menu_list {
+            text_x + MENU_LIST_LABEL_INSET
+        } else {
+            text_x
+        };
 
         let (display_text, display_color) = if value.is_empty() {
             (placeholder, placeholder_color)
         } else {
             (value, text_color)
         };
+
+        if menu_list {
+            self.draw_menu_list_arrow(rect, text_color);
+        }
 
         if !display_text.is_empty() {
             self.draw_text_with_metrics(
@@ -4635,6 +4680,87 @@ impl Renderer {
         }
     }
     
+    /// The drop-down arrow of a `<select>`: a chevron in the control's text
+    /// colour, centred vertically, at a fixed distance from the right edge.
+    /// Chrome CfT-148 measures the same at 13.333px and at 18px with
+    /// `padding: 8px 12px`: about 7.5 wide and 4 tall, its centre 8.75px
+    /// inside the border box, whatever the author padding or font size.
+    fn draw_menu_list_arrow(&mut self, rect: Rect, color: Color) {
+        let (cx, cy) = menu_list_arrow_centre(rect);
+        self.process_command(&DisplayCommand::Polyline {
+            points: vec![(cx - 3.75, cy - 2.0), (cx, cy + 2.0), (cx + 3.75, cy - 2.0)],
+            color,
+            width: 1.75,
+        });
+    }
+
+    /// Draw a list box: the frame, then one row per option, clipped to the
+    /// inside of the frame (a list box with more options than rows scrolls;
+    /// the rows past its height are not painted).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_list_box(
+        &mut self,
+        rect: Rect,
+        options: &[String],
+        selected: &[usize],
+        row_height: f32,
+        font_size: f32,
+        font_family: &str,
+        font_weight: u16,
+        text_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
+    ) {
+        self.draw_solid_rect(rect, background_color);
+        self.draw_border(
+            rect,
+            border_color,
+            border_width,
+            border_width,
+            border_width,
+            border_width,
+        );
+
+        let inner = Rect::new(
+            rect.x + border_width,
+            rect.y + border_width,
+            (rect.width - 2.0 * border_width).max(0.0),
+            (rect.height - 2.0 * border_width).max(0.0),
+        );
+        let (ascent, _descent) = Self::fallback_run_metrics(font_family, font_size);
+        self.push_clip(inner);
+        for (index, label) in options.iter().enumerate() {
+            let row = list_box_row_rect(inner, row_height, index);
+            if row.y >= inner.y + inner.height {
+                break;
+            }
+            // Chrome CfT-148, list box without focus: a selected row is
+            // rgb(206,206,206) with rgb(16,16,16) text.
+            let is_selected = selected.contains(&index);
+            if is_selected {
+                self.draw_solid_rect(row, LIST_BOX_SELECTED_ROW);
+            }
+            self.draw_text_with_metrics(
+                label,
+                row.x + LIST_BOX_OPTION_INSET,
+                row.y,
+                if is_selected {
+                    LIST_BOX_SELECTED_TEXT
+                } else {
+                    text_color
+                },
+                font_size,
+                font_family,
+                font_weight,
+                0,
+                None,
+                Some(ascent),
+            );
+        }
+        self.pop_clip();
+    }
+
     /// Draw a button.
     #[allow(clippy::too_many_arguments)]
     fn draw_button(
@@ -7649,6 +7775,74 @@ mod outer_shadow_tests {
         let border_box = Rect::new(0.0, 0.0, 100.0, 100.0);
         let shadow = Rect::new(10.0, 10.0, 80.0, 80.0);
         assert!(Renderer::outer_shadow_paint_rects(border_box, shadow, 0.0, 1.0).is_empty());
+    }
+}
+
+/// How far inside its padding edge a drop-down `<select>` seats its label.
+const MENU_LIST_LABEL_INSET: f32 = 4.0;
+/// Horizontal padding of a list-box option row (Chrome's `option` padding).
+const LIST_BOX_OPTION_INSET: f32 = 2.0;
+/// A selected list-box row, and its text, in a list box without focus.
+const LIST_BOX_SELECTED_ROW: Color = Color {
+    r: 206,
+    g: 206,
+    b: 206,
+    a: 1.0,
+};
+const LIST_BOX_SELECTED_TEXT: Color = Color {
+    r: 16,
+    g: 16,
+    b: 16,
+    a: 1.0,
+};
+
+/// Centre of a drop-down's arrow in its border box `rect`.
+fn menu_list_arrow_centre(rect: Rect) -> (f32, f32) {
+    (rect.x + rect.width - 8.75, rect.y + rect.height / 2.0)
+}
+
+/// Row `index` of a list box whose frame encloses `inner`.
+fn list_box_row_rect(inner: Rect, row_height: f32, index: usize) -> Rect {
+    Rect::new(
+        inner.x,
+        inner.y + row_height * index as f32,
+        inner.width,
+        row_height,
+    )
+}
+
+#[cfg(test)]
+mod select_paint_tests {
+    use super::*;
+
+    /// Chrome CfT-148, bare `<select>` at (156.19, 875) 137x19: the chevron
+    /// spans x 280.5..288.5 and y 882..886 — centred on the control's
+    /// height, clear of the right border.
+    #[test]
+    fn the_drop_down_arrow_sits_inside_the_right_edge_at_mid_height() {
+        let rect = Rect::new(156.1875, 875.0, 137.0, 19.0);
+        let (cx, cy) = menu_list_arrow_centre(rect);
+        assert!((cx - 284.5).abs() <= 0.5, "arrow centre x {cx}");
+        assert_eq!(cy, 884.5);
+        // The same distance from the right edge on a padded 155x40 select.
+        let big = Rect::new(239.45, 167.0, 155.0, 40.0);
+        let (bx, by) = menu_list_arrow_centre(big);
+        assert_eq!(big.x + big.width - bx, rect.x + rect.width - cx);
+        assert_eq!(by, 187.0);
+    }
+
+    /// Chrome's option rows stack from the inside of the frame: 16px rows
+    /// at y = 906, 922, 938 in a list box whose border box starts at 905.
+    #[test]
+    fn list_box_rows_stack_from_the_inside_of_the_frame() {
+        let inner = Rect::new(157.1875, 906.0, 37.05, 48.0);
+        let ys: Vec<f32> = (0..4)
+            .map(|i| list_box_row_rect(inner, 16.0, i).y)
+            .collect();
+        assert_eq!(ys, vec![906.0, 922.0, 938.0, 954.0]);
+        // The fourth option starts at the frame's inner bottom: not painted.
+        assert!(ys[3] >= inner.y + inner.height);
+        assert_eq!(list_box_row_rect(inner, 16.0, 1).width, inner.width);
     }
 }
 
