@@ -4557,28 +4557,34 @@ impl Engine {
         // for every element, half of all cascade time.
         if let (Some(ix), Some(buckets)) = (index.as_ref(), indexed) {
             // Every rule in these buckets ends in the pseudo, and the index
-            // holds its prepared base selector, base keys and specificity:
-            // the same tests as the string path below, computed once.
-            let keyed = KeyedElement::of(tag_name, attributes);
+            // holds its prepared base selector and specificity. As in the
+            // cascade, a candidate goes straight to the matcher: the bucket
+            // it came from already stands in for the subject prefilter.
             for g in buckets.candidates(tag_name, attributes) {
                 let gi = g as usize;
                 let Some(prepared) = ix.pseudo_prepared[gi].as_deref() else {
                     continue;
                 };
+                #[cfg(test)]
+                CANDIDATE_VISITS.with(|n| n.set(n.get() + 1));
+                let matched = SelectorMatcher.selector_matches_prepared(
+                    prepared,
+                    tag_name,
+                    attributes,
+                    ancestors,
+                    siblings_before,
+                    sib,
+                );
                 // No base keys means an empty base, which admits any element.
-                let admitted = ix.pseudo_keys[gi]
-                    .as_deref()
-                    .is_none_or(|keys| Self::keys_may_match_keyed(keys, &keyed));
-                if admitted
-                    && SelectorMatcher.selector_matches_prepared(
-                        prepared,
-                        tag_name,
-                        attributes,
-                        ancestors,
-                        siblings_before,
-                        sib,
-                    )
-                {
+                debug_assert!(
+                    !matched
+                        || ix.pseudo_keys[gi]
+                            .as_deref()
+                            .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes)),
+                    "the subject prefilter rejects {:?}, which matches <{tag_name}>",
+                    ix.rule(stylesheets, g).selector
+                );
+                if matched {
                     matching_rules.push((ix.specificity[gi], ix.rule(stylesheets, g)));
                 }
             }
@@ -5210,28 +5216,40 @@ impl Engine {
             None => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).enumerate()),
         };
 
-        let keyed = KeyedElement::of(tag_name, attributes);
         for (rule_index, rule) in rules {
             // With an index, `rule_index` is the global index `g`.
-            let may_match = match index.as_ref() {
-                Some(ix) => Self::keys_may_match_keyed(&ix.keys[rule_index], &keyed),
-                None => self.rule_may_match(&rule.selector, tag_name, attributes),
-            };
-            if !may_match {
-                continue;
-            }
             let matched = match index.as_ref() {
-                Some(ix) => SelectorMatcher.matched_specificity(
-                    &ix.prepared[rule_index],
-                    &ix.member_specificity[rule_index],
-                    ix.specificity[rule_index],
-                    tag_name,
-                    attributes,
-                    ancestors,
-                    siblings_before,
-                    sib,
-                ),
+                // No subject prefilter here: a candidate is already filed
+                // under one of this element's own keys, so the prefilter
+                // passed 95-99.6% of them (wikipedia, cnn, github) and cost
+                // 7-8% of github's and cnn's cascade to say so. The matcher
+                // tests the same subject compound first. Debug builds hold
+                // the prefilter to its contract instead.
+                Some(ix) => {
+                    #[cfg(test)]
+                    CANDIDATE_VISITS.with(|n| n.set(n.get() + 1));
+                    let matched = SelectorMatcher.matched_specificity(
+                        &ix.prepared[rule_index],
+                        &ix.member_specificity[rule_index],
+                        ix.specificity[rule_index],
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    );
+                    debug_assert!(
+                        matched.is_none()
+                            || Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
+                        "the subject prefilter rejects {:?}, which matches <{tag_name}>",
+                        rule.selector
+                    );
+                    matched
+                }
                 None => {
+                    if !self.rule_may_match(&rule.selector, tag_name, attributes) {
+                        continue;
+                    }
                     let selector = rule.selector.trim();
                     SelectorMatcher.matched_specificity(
                         &SelectorMatcher.prepared_selector(selector),
@@ -8268,8 +8286,6 @@ impl Engine {
     /// once, instead of once per key of every candidate rule (11% of
     /// wikipedia's cascade went to those repeated attribute lookups).
     fn keys_may_match_keyed(keys: &[SubjectKey], element: &KeyedElement) -> bool {
-        #[cfg(test)]
-        PREFILTER_VISITS.with(|n| n.set(n.get() + 1));
         keys.iter().any(|k| {
             k.id.as_deref().map_or(true, |id| element.id == Some(id))
                 && k.tag
@@ -18261,8 +18277,9 @@ mod visual_rect_tests {
 thread_local! {
     /// How many times the full selector matcher ran on this thread.
     static FULL_SELECTOR_MATCHES: Cell<u64> = const { Cell::new(0) };
-    /// How many rules the subject prefilter was asked about on this thread.
-    static PREFILTER_VISITS: Cell<u64> = const { Cell::new(0) };
+    /// How many rule-index candidates were tried against an element on this
+    /// thread (the cascade's and the `::before`/`::after` lists').
+    static CANDIDATE_VISITS: Cell<u64> = const { Cell::new(0) };
     /// How many times a selector string was tokenized on this thread.
     static SELECTOR_TOKENIZATIONS: Cell<u64> = const { Cell::new(0) };
     /// How many selectors the ancestor filter rejected on this thread.
@@ -18657,7 +18674,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
-        PREFILTER_VISITS.with(|n| n.set(0));
+        CANDIDATE_VISITS.with(|n| n.set(0));
         let style = engine.compute_style_for_element(
             "div",
             &attrs(&[("class", "hit"), ("id", "main")]),
@@ -18668,13 +18685,13 @@ mod rule_prefilter_tests {
             SiblingContext::SOLE,
             None,
         );
-        let visits = PREFILTER_VISITS.with(|n| n.get());
+        let visits = CANDIDATE_VISITS.with(|n| n.get());
 
         assert_eq!(style.color, rustkit_css::Color::new(0, 0, 255, 1.0));
         assert!(
             visits <= 1,
             "1,500 rules filed under other subjects must not be visited; \
-             the prefilter ran {visits} times"
+             {visits} candidates were"
         );
     }
 
@@ -18926,7 +18943,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
-        PREFILTER_VISITS.with(|n| n.set(0));
+        CANDIDATE_VISITS.with(|n| n.set(0));
         let host = attrs(&[("class", "hit"), ("id", "main")]);
         let before = engine.create_pseudo_element(
             "div", &host, sheets, &vars, &[], &[], SiblingContext::SOLE, "::before",
@@ -18934,14 +18951,14 @@ mod rule_prefilter_tests {
         let after = engine.create_pseudo_element(
             "div", &host, sheets, &vars, &[], &[], SiblingContext::SOLE, "::after",
         );
-        let visits = PREFILTER_VISITS.with(|n| n.get());
+        let visits = CANDIDATE_VISITS.with(|n| n.get());
 
         assert!(before.is_some(), ".hit::before must still generate its box");
         assert!(after.is_none());
         assert!(
             visits <= 1,
             "1,200 pseudo rules filed under other subjects must not be \
-             visited; the prefilter ran {visits} times"
+             visited; {visits} candidates were"
         );
     }
 
@@ -19154,7 +19171,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
-        PREFILTER_VISITS.with(|n| n.set(0));
+        CANDIDATE_VISITS.with(|n| n.set(0));
         let style = engine.compute_style_for_element(
             "div",
             &attrs(&[("data-hit", ""), ("class", "card")]),
@@ -19165,13 +19182,13 @@ mod rule_prefilter_tests {
             SiblingContext::SOLE,
             None,
         );
-        let visits = PREFILTER_VISITS.with(|n| n.get());
+        let visits = CANDIDATE_VISITS.with(|n| n.get());
 
         assert_eq!(style.color, rustkit_css::Color::new(0, 0, 255, 1.0));
         assert!(
             visits <= 1,
             "1,500 attribute / :where / :is / :root rules the element can't \
-             match must not be visited; the prefilter ran {visits} times"
+             match must not be visited; {visits} candidates were"
         );
     }
 
