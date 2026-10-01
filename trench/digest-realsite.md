@@ -1327,3 +1327,36 @@ Same session as the section above; this replaces its "Next (1)".
 
 **Decisions for Pete:**
 1. Still open: **a quiet board slot.** Tonight's attempt started at load 3 and was at 17 ten minutes later; release builds took 8 to 22 min.
+
+## 2026-09-30 22:48 — daily QUIET board (quiet), develop af4b95d
+
+**28/60 (loads 17, readable 8, looks-right 3; scorable 27/57)** (load at start: { 7.57 7.35 8.30 })
+
+```
+google     PASS PASS 100.0% PASS  13.2% (cc   0.3%)  3/3  
+youtube    fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.25% non-background)
+facebook   PASS fail  58.7% PASS   3.9% (cc   0.0%)  2/3  
+instagram  PASS fail   0.0% fail  16.4% (cc   2.9%)  1/3  
+wikipedia  PASS PASS  81.5% fail  16.9% (cc   0.0%)  2/3  
+lyft       PASS PASS 100.0% fail  17.9% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% fail    -   (cc  11.0%)  0/3  blank frame (1.50% non-background)
+x          PASS PASS  95.3% PASS  10.4% (cc   0.1%)  3/3  
+linkedin   PASS fail    -   fail    -   (cc    -  )  1/3  
+yahoo      PASS fail  25.5% fail  27.1% (cc    -  )  1/3  
+bing       PASS fail  13.6% fail  87.2% (cc   0.0%)  1/3  
+walmart    PASS fail  46.4% unst  82.6% (cc  87.7%)  1/3  
+microsoft  fail fail   0.0% fail    -   (cc   0.1%)  0/3  blank frame (1.08% non-background)
+apple      PASS PASS 100.0% fail  59.7% (cc   0.0%)  2/3  
+netflix    PASS PASS  90.6% fail  66.2% (cc   2.0%)  2/3  
+github     PASS fail  71.7% fail  88.0% (cc   0.0%)  1/3  
+shopify    PASS PASS  96.4% fail  19.6% (cc   0.0%)  2/3  
+squarespace PASS PASS  85.7% fail  79.3% (cc  13.8%)  2/3  
+cnn        PASS fail  40.0% fail  59.4% (cc   0.9%)  1/3  
+weather    PASS fail   9.9% unst  47.8% (cc  32.7%)  1/3  
+------------------------------------------------------------------------------
+POINTS 28/60   loads 17  readable 8  looks-right 3   unstable: walmart, weather   oracle failed: linkedin
+BLOCKED none
+ORACLE BLOCKED linkedin (top-level document HTTP 403)
+SCORABLE 27/57 on 19 sites
+trench/realsite/runs/20261001T0226Z-quiet-devaf4b95d
+```
