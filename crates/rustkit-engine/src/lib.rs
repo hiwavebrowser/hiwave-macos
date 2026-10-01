@@ -19644,15 +19644,17 @@ mod rule_prefilter_tests {
 //
 // The Windows tree called a receiver-less `Engine::apply_declaration`; here
 // the production path is `Engine::apply_style_property(&self, ..)`, so each
-// test builds one Engine behind the init mutex (Compositor::new performs
-// wgpu adapter init, which must not run concurrently — hiwave-windows #51).
+// test builds its own Engine. `Engine::new` takes the GPU test guard
+// (`test_gpu`), which already keeps wgpu adapter init from running
+// concurrently (hiwave-windows #51). A module mutex around it is a second
+// lock taken in the other order: a test that builds two engines holds the
+// guard and waits for the mutex, while its neighbour holds the mutex and
+// waits for the guard.
 #[cfg(test)]
 mod cascade_wire_tests {
     use super::*;
 
     fn engine() -> Engine {
-        static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
         Engine::new(EngineConfig::default()).expect("engine")
     }
 
@@ -21812,8 +21814,6 @@ mod incremental_restyle_tests {
     use rustkit_layout::{Dimensions, DisplayList, Rect};
 
     fn engine() -> Engine {
-        static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
         Engine::new(EngineConfig::default()).expect("engine")
     }
 
@@ -22284,15 +22284,14 @@ mod incremental_restyle_tests {
 //
 // Each test drives the real engine paths (build_layout_from_document +
 // DisplayList::build, selector_matches, compute_style_for_element,
-// load_html) on one Engine built behind the init mutex (hiwave-windows #51).
+// load_html) on one Engine; `Engine::new` takes the GPU test guard
+// (hiwave-windows #51).
 #[cfg(test)]
 mod windows_engine_pins {
     use super::*;
     use rustkit_layout::{Dimensions, DisplayList, Rect};
 
     fn engine() -> Engine {
-        static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
         Engine::new(EngineConfig::default()).expect("engine")
     }
 
@@ -22729,8 +22728,6 @@ mod windows_a_leg_pins {
     use rustkit_layout::{Dimensions, Rect};
 
     fn engine() -> Engine {
-        static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
         Engine::new(EngineConfig::default()).expect("engine")
     }
 
