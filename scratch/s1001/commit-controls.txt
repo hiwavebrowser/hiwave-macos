@@ -1,0 +1,22 @@
+fix(layout, renderer, engine): carry control type to paint — mask passwords, draw select and list box
+
+The control-paint path matched FormControlType::TextInput and dropped
+input_type, so a password's value went to the renderer (and into every
+display-list dump) as plain text. A <select> became the same TextInput
+command showing one option: no arrow, and no rows for size > 1 / multiple.
+
+- layout: DisplayCommand::TextInput carries `kind` (Text, Password,
+  TextArea, MenuList). A password is masked when the display list is
+  built, one U+2022 per character, so the value is in no command.
+  New DisplayCommand::ListBox carries every option, the selected rows
+  and the row height layout sized the box with.
+- engine: Select carries `selected` (all options with `selected` under
+  `multiple`, the last one otherwise, none when no option has it).
+- renderer: draws the drop-down arrow for MenuList and seats its label
+  4px inside the padding edge; draws a list box as a frame, clipped
+  rows, and the selected-row highlight. Geometry and colours measured
+  on Chrome for Testing 148.
+
+Tests: 3 engine (fail on develop), 2 layout, 2 renderer.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

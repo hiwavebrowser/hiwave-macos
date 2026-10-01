@@ -1,0 +1,3 @@
+trench(realsite): digest 2026-10-01 01:10 — #396 (semantic controls: masked passwords, select arrow, list box) opened; queue items 2 and 3 not started; board 28/60 unchanged (no run)
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
