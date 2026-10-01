@@ -1,0 +1,8 @@
+The email box on facebook.com (536x60 at x 692), display list from `parity-capture --url`, both binaries in this session:
+
+| | develop f16ad4e | this PR |
+|---|---|---|
+| border strips painted | top and bottom (536x1 each) | top, bottom, left (1x60 at x 692) and right (1x60 at x 1227) |
+| overflow clip (padding box) | 536x58 at x 692 | 534x58 at x 693 |
+
+No board points are claimed; a scoring run was not taken at this machine load.

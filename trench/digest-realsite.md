@@ -1490,3 +1490,5 @@ trench/realsite/runs/20261001T0907Z-quiet-dev7ae0e68
 1. **Item 3 was split, as recommended last night.** #401 is the representation plus fill, border, gradient and clip. Shadow corners and rounded image clips are a second PR. Say so if you want them in one.
 2. **Order after that: rounded image clips before `::first-letter`?** Recommendation: yes. Avatars and card images under a rounded `overflow: hidden` are on most of the board; a drop cap is on few pages.
 3. **Build contention, third time.** Three release builds this session took 14, 16 and 17 minutes (6 when quiet), and the Chrome oracle was unusable again. A protected slot for the board, or staggered lanes, is still open.
+
+**08:33 addendum (supersedes "Branch pushed, NO PR yet" above):** the build finished at 08:21, so the receipt was taken and **#403 `atlas/rs-logical-borders` @ 04ebb59** is open. Campaign vs develop f16ad4e: all 26/26 and builtins 5/5 identical, ratchet output identical. On facebook the email box now paints all four border strips (develop: top and bottom only), read from both binaries' display lists. No points claimed.
