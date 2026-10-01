@@ -1,0 +1,25 @@
+fix: box shadows and textured quads follow rounded corners
+
+The second half of elliptical corners (#401 left both out and named them).
+
+Shadows: DisplayCommand::BoxShadow carries the box's used border-box
+radii. An outer shadow's shape is the box's shape moved and spread, with
+the corner radii grown by the spread (CSS Backgrounds 3 section 6.1.1:
+less for a radius smaller than the spread, never for a square corner),
+and its hole is the box's own curve. rounded_difference_pieces paints a
+rounded rect minus a rounded rect; two square shapes give rect_minus
+exactly, so a box without border-radius gets the rects it always did.
+The blur is still the stack of expanding layers; each layer's radii grow
+with it. Inset shadows do not use the radii yet.
+
+Textured quads: glyphs, colour glyphs, <img> and background tiles under a
+rounded overflow clip were cut to the clip's rect only, so an avatar in a
+border-radius: 50% box painted square. clip_textured_pieces_under applies
+the rounded decomposition colour quads get, each piece keeping the texels
+that were under it. A quad inside every rounded constraint (text between
+the arcs of a pill) stays one quad.
+
+Tests: an engine display-list pin and an engine frame test (both fail on
+develop 473a047), one layout test, nine device-free renderer tests.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

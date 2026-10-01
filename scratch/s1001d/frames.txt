@@ -1,0 +1,29 @@
+One fixture, served over local HTTP, captured by both release binaries and by pinned Chrome 148 at 1280x800. Row 1: six 140x90 boxes with outer shadows (a 6px ring on 20px corners; a 10px offset shadow; a blurred shadow on a pill; an 8px ring on a transparent `60px / 30px` ellipse; a 12px ring on 4px corners; a ring on a square box). Row 2: an image in a `50%` clip, in a 24px card, with `border-radius` on the `<img>` itself, as a background tile under a `40px 0` clip, a transparent PNG over blue, and text in a pill.
+
+Pixels of the fixture's 1280x340 region that differ from Chrome (any channel by more than 8/255):
+
+| arm | pixels | share |
+|---|---|---|
+| develop 473a047 | 29,910 | 6.873% |
+| fix __HEAD__ | 9,661 | 2.220% |
+
+Per box, pixels that differ from Chrome:
+
+| box | develop | fix |
+|---|---|---|
+| 6px ring, 20px corners | 1,016 | 412 |
+| 10px offset shadow, 20px corners | 460 | 140 |
+| blurred shadow on a pill | 8,839 | 5,594 |
+| 8px ring on a transparent ellipse | 3,343 | 950 |
+| 12px ring, 4px corners | 188 | 140 |
+| ring on a square box | 0 | 0 |
+| image in a `50%` clip | 3,256 | 204 |
+| image in a 24px card | 556 | 68 |
+| `border-radius` on the `<img>` itself | 852 | 852 |
+| background tile under `40px 0` | 748 | 70 |
+| transparent PNG over blue | 9,384 | 0 |
+| text in a pill | 1,270 | 1,231 |
+
+What is left on the fix arm: the blurred halo (the layered approximation is wider and flatter than Chrome's Gaussian; its shape is right now, its falloff is not), the corner antialiasing ramp (two pixels here, one in Chrome), `border-radius` on the `<img>` itself (not in this PR), and glyph rasterisation in the pill. The square box is pixel-identical on all three.
+
+Fixture and the three frames: hub branch `atlas/trench-realsite`, `scratch/s1001d/` (`shadow-clip.html`, `dev.png`, `fix.png`, `chrome.png`, `dev-fix-chrome.png`).

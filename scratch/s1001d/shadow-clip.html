@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: #f4f4f0; }
+  body { font: 16px/20px Arial, sans-serif; }
+  .row { display: flex; gap: 40px; padding: 30px 40px 10px; align-items: flex-start; }
+  .box { width: 140px; height: 90px; background: #fff; }
+  /* outer shadows on rounded boxes */
+  .s1 { border-radius: 20px; box-shadow: 0 0 0 6px #2060d0; }
+  .s2 { border-radius: 20px; box-shadow: 10px 10px 0 0 rgba(0,0,0,.5); }
+  .s3 { border-radius: 45px; box-shadow: 0 6px 16px rgba(0,0,0,.45); }
+  .s4 { border-radius: 60px / 30px; box-shadow: 0 0 0 8px #d04020; background: transparent; }
+  .s5 { border-radius: 4px; box-shadow: 0 0 0 12px #208040; }
+  .s6 { box-shadow: 0 0 0 6px #2060d0; }
+  /* rounded clipping of images */
+  .avatar { width: 120px; height: 120px; border-radius: 50%; overflow: hidden; }
+  .card { width: 120px; height: 120px; border-radius: 24px; overflow: hidden; }
+  .avatar img, .card img { display: block; width: 120px; height: 120px; }
+  .imgr { width: 120px; height: 120px; border-radius: 30px; }
+  .bg { width: 120px; height: 120px; border-radius: 40px 0; overflow: hidden; }
+  .bg div { width: 120px; height: 120px; background: url(quad.png) 0 0 / 120px 120px no-repeat; }
+  /* a transparent image over a colour */
+  .onblue { width: 120px; height: 120px; background: #3070e0; }
+  .onblue img { display: block; }
+  /* glyphs under a rounded clip */
+  .pill { width: 150px; height: 40px; border-radius: 20px; overflow: hidden; background: #222; color: #fff;
+          font: bold 40px/40px Arial, sans-serif; }
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="box s1"></div>
+  <div class="box s2"></div>
+  <div class="box s3"></div>
+  <div class="box s4"></div>
+  <div class="box s5"></div>
+  <div class="box s6"></div>
+</div>
+<div class="row">
+  <div class="avatar"><img src="quad.png"></div>
+  <div class="card"><img src="quad.png"></div>
+  <img class="imgr" src="quad.png">
+  <div class="bg"><div></div></div>
+  <div class="onblue"><img src="alpha.png" width="120" height="120"></div>
+  <div class="pill">HHHHHHHH</div>
+</div>
+</body>
+</html>

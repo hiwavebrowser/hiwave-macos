@@ -1,0 +1,16 @@
+fix(layout): border-radius on an <img> rounds the image
+
+Replaced content is trimmed to the content edge curve (CSS Backgrounds 3
+section 5.3): the border radius inset by the border and padding beside
+each corner. Only the image's background was rounded, so
+`img { border-radius: 50% }`, the usual way to write an avatar, painted
+a square photo.
+
+The image command is wrapped in a rounded clip of the content box when
+any corner of that curve is round. The renderer applies rounded clips to
+textured quads as of the previous commit on this stack.
+
+Test: a_rounded_img_clips_its_image_to_the_content_edge_curve (display
+list as text).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

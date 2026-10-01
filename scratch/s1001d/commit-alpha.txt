@@ -1,0 +1,12 @@
+fix(renderer): composite images source-over instead of copying them
+
+The image batch was drawn with the blit pipeline, whose blend is REPLACE:
+every texel overwrote the pixel under it, alpha included. A transparent
+texel is (0, 0, 0, 0) in most PNGs, so a logo with a transparent surround
+painted as a logo in a black box.
+
+create_image_pipeline is the same shader with ALPHA_BLENDING (decoded
+images are straight alpha). It shares one constructor with the colour-glyph
+pipeline. Opaque images paint the same pixels as before.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

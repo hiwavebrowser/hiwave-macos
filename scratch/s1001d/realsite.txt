@@ -1,0 +1,16 @@
+RustKit frames only, develop/fix/develop/fix on 14 board sites (`frames_ab.py`; no Chrome, machine load 19 to 30, so no scoring board and **no points claimed**). "Across" is develop vs fix; "within" is the same binary twice.
+
+| site | within develop | within fix | across | what changed |
+|---|---|---|---|---|
+| microsoft | 0.00% | 0.00% | 0.17% | the header logo: develop paints the wordmark's transparent PNG as a dark block, the fix shows "Microsoft" |
+| lyft | 0.00% | 0.00% | 0.08% | one 784x1 line at y=241 (a transparent image that painted opaque) |
+| bing | 0.00% | 0.00% | 0.04% | a black square beside "Copilot" is gone (transparent icon); the search box's shadow is rounded |
+| wikipedia | 0.00% | 0.00% | 0.02% | the padlock icon loses its dark backing square |
+| walmart | 0.00% | 11.43% | 0.02% | one 32px icon; the 11% is walmart's own rotation on one capture |
+| google | 0.00% | 0.00% | 3.76% | **not the change:** Google serves two variants of the page per request. Six more captures (order fix, develop, develop, fix, fix, develop) gave each binary both variants; within one variant the arms differ by under 0.01% (the search box's shadow corners) |
+| x, yahoo | 0.00% | 0.00% | 0.00% | nothing |
+| linkedin | 2.60% | 1.55% | 0.14% to 3.04% | inside linkedin's own variance |
+| shopify | 0.00% | n/a | 0.00% | one fix capture failed to load |
+| facebook, apple, github, netflix | n/a | n/a | n/a | captures failed on both arms (load) |
+
+Every change found is a transparent image now showing what is behind it, or a shadow corner. Nothing moved. Crops: hub `scratch/s1001d/ab-<site>.png`.
