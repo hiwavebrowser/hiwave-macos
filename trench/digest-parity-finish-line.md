@@ -14129,3 +14129,31 @@ decision about merge authority, not something a night can fix.
    of 4** on this seat, total always exactly 6 of 31. `control_semantics_tests`
    is order-dependent. A name-level engine-suite diff across two runs here
    proves nothing; use count plus an A/B at the same base.
+
+### Addendum — #397 MERGED (2026-10-01 07:31 UTC), `develop 4a7ca75`
+
+The night's unit is on the mainline. Verified from the repository rather than
+from the webhook: both `dd075ec` and the merge `d905157` are ancestors of
+`origin/develop`, and `4a7ca75`'s diff against its first parent is
+**+557 / −13 across exactly 7 files** — bit-for-bit the PR's diffstat, so
+nothing was lost or re-resolved on the way in. Spot-checked on `develop`
+itself: `TEXT_SHAPER_BACKEND` / `text_metrics_font_derived` present in
+`rustkit-engine`, `text_metrics_not_font_derived` present in
+`finish_line_receipt.py`. Check-in cancelled; watch released.
+
+**Twelve minutes from R2-STAMP to merged, by a person — so the stall I
+predicted one addendum above did not happen, and I overstated it.** I wrote
+that "every night that ends in a green-and-stamped PR will end in this same
+stall". That is not what the record shows: a human has pressed merge promptly
+on #298, #316, #350, #372 and now #397. The *gap* is real and worth keeping on
+file — R1's land note assigns the merge to an agent whose rules forbid it, so
+the automation and the agent disagree about whose job it is — but its practical
+cost so far is zero, not a nightly block. Recorded as a discrepancy to resolve
+at leisure, not as an impediment.
+
+**So the metric closes the night where it opened it: `3/26` on macOS**, now on
+`develop` rather than on a branch. Geometry 15/26, paint 3/26, stability 26/26,
+discrete 26/26, 0 not fully measured. Green: `bg-pure`, `bg-solid`,
+`gradients`. The change was never going to move it — bit-identical captures —
+and the value of the night is that the Linux board can no longer *claim* to
+move it either.
