@@ -17111,6 +17111,12 @@ mod web_font_tests {
     static WEB_FONT_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn test_engine() -> Option<LockedEngine> {
+        // GPU guard first, then the web-font lock, always in that order. The
+        // guard stays with this thread after the engine is dropped, so a test
+        // that asks for a second engine would otherwise hold the guard and
+        // wait for the lock while a neighbour holds the lock and waits for
+        // the guard.
+        crate::test_gpu::hold_for_this_test();
         let guard = WEB_FONT_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let compositor = match crate::test_compositor() {
             Ok(c) => c,
