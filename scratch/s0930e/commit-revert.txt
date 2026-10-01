@@ -1,0 +1,24 @@
+feat(engine): revert-layer rolls a property back to the layer below
+
+CSS Cascade 5 §7.3.3. The keyword was dropped as an unknown value, which
+left the same layer's earlier declaration in force. Now, when the
+declaration that wins a property within a layer is `revert-layer`, that
+layer contributes nothing for the property and the lower layers' result
+stands; in unlayered rules it rolls back to the layered result. Normal and
+`!important` declarations are resolved separately, each in its own layer
+order. Covers elements and `::before`/`::after`.
+
+linkedin's layered bundle hides its hero with `.h { display: none }` and
+shows it on desktop with `@media (min-width: 768px) { .d { display:
+revert-layer } }`, both in the `overrides` layer, so the hero never
+appeared.
+
+Pairs are matched by property name: a `revert-layer` longhand does not roll
+back a shorthand declared in the same layer. An element no `revert-layer`
+declaration reaches pays one length compare per matched declaration and no
+allocation.
+
+Pins (cascade_wire_tests): 7, of which 5 fail first; the other 2 guard that
+a losing `revert-layer` and the layers above are left alone.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
