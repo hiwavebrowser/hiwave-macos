@@ -1125,3 +1125,40 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **#395 merged while its title said HOLD, with no measured win.** It is exact and receipt-identical, and the quiet read shows no loss, so nothing needs undoing. Default: leave it merged; from now on this lane opens a speed PR only after a quiet counterbalanced read, so a hold is never needed.
 2. **The 3× exit is not reachable by 2026-10-11 with exact small cuts.** cnn is at 3.0× and github at 9.9×, but wikipedia at 14.4× has no hot spot: its largest blocks are box construction (76 ms) and the replay build (66 ms), against a 60 ms budget for the whole load. Default: keep the metric and the date, spend the remaining sessions on the two structural cuts (tree reuse on replay, then box construction), and report the gap on the end date.
 3. **Quiet windows exist around 01:30–02:00.** This one ended when the real-site session started at 02:05. Default: start the cascade session at 01:30 and hold the real-site launcher until 02:15, so the lane gets one clean read a night. Carried over from 21:55 and 00:58 in a narrower form.
+
+## 2026-10-01 05:00
+
+**One PR opened: #399 (`atlas/cs-prefilter-skip` @ c7304e2), measured on a quiet machine before it was opened. It is a win on cnn (0.90) and github (0.93) and flat on wikipedia (0.98), so the worst ratio does not move: 14.4× → 14.7× of record (wikipedia, develop 4a7ca75, 30 quiet runs; the 0.3 is the read, not a regression claim). A second cut is built and pushed with no PR yet: `atlas/cs-vars-large-layer` @ 7647595 reads github 0.87 in 12 quiet pairs.**
+
+| site | Chrome ms | before: of record (develop 570e25d, 20 quiet runs, 02:45) | after: develop 4a7ca75, median of 30 quiet runs | #399 c7304e2, same pairs | #399 / develop, per-pair median | large-layer cut 7647595 / develop, 12 pairs |
+|---|---|---|---|---|---|---|
+| cnn | 210 | 621.5 → 3.0× | 605.5 → **2.9×** | 544.5 → 2.6× | 0.899 (26 of 30 below 1) | 1.019 (5 of 12) |
+| github | 110 | 1087.5 → 9.9× | 1062.5 → **9.7×** | 1004.5 → 9.1× | 0.933 (26 of 30) | **0.870** (11 of 12), 1071 → 940 ms |
+| wikipedia | 20 | 287.5 → **14.4×** | 293.5 → **14.7×** | 279.5 → 14.0× | 0.980 (19 of 30) | 1.047 (4 of 12), medians equal at 291.5 |
+
+- **The machine was quiet from 04:17** (load 2.3–5.4), after starting the session at load 15. All A/B numbers here are from that window. Develop moved twice during the session: 4a7ca75 (#397) is what was built and measured; 7ae0e68 (#398) landed later in the session and is not built.
+- **#399, prefilter skip** (+64 −47, one file). On the indexed cascade and the indexed `::before`/`::after` path a candidate goes straight to the matcher. Debug builds assert the prefilter's contract on every matched rule instead (it never rejects a rule the matcher accepts). `PREFILTER_VISITS` became `CANDIDATE_VISITS`.
+  - A/B: `ab2.py`, 32 pairs in two runs, 30 counted (15 AB + 15 BA, both loads at load ≤ 6). Logs `cascade-target/tmp/ab2-pks-0415.txt`, `ab2-pks-0424.txt`.
+  - The win matches the 02:45 probe: it priced the prefilter at 50 ms on cnn, 72 ms on github and 8 ms on wikipedia.
+  - Pinned sites: layout JSON and display list byte-identical to develop on all three (`tmp/site_equal.py`, develop loaded twice as the control).
+  - Receipt vs develop 4a7ca75: 26/26 both, avg 1.2%, diffPixels identical on all 26.
+  - Engine lib, serial: 334 passed and 3 failed at load 15–23 (the same three `page_script_tests` wall-clock budgets as on #395). `page_script_tests` alone at load 2.7: 9/9. The debug assertion never fired.
+  - Not run: clippy, the real-site board. The branch is 2 commits behind develop 7ae0e68; `merge-tree` is clean.
+- **Large-layer cut, pushed, no PR: `atlas/cs-vars-large-layer` @ 7647595** (rustkit-css, +83 −12 with tests). `CustomProperties::over` collapsed every layer above the bottom into one at the sixth layer. A collapse now merges only the small layers on top and shares the nearest layer of 64 or more entries; past 32 layers large ones are copied too, so lookups stay bounded.
+  - This was a guess from reading the code: the 02:45 probe showed github paying 300–600 µs on each of 224 elements that declare 8 variables, and the collapse copy is the only step in `element_custom_properties` that scales with the inherited set. The A/B supports it: github 1071 → 940 ms, about the 148 ms the probe attributed to custom properties.
+  - A/B: 12 pairs (6 AB + 6 BA), load 2.2–3.8, log `tmp/ab2-vll-0451.txt`. cnn and wikipedia have no reason to change and read 1.02 and 1.05 with equal medians; take both as noise.
+  - Pinned sites: github and wikipedia byte-identical to develop. cnn matched one of develop's two loads; the two develop loads differed from each other in that run.
+  - Tests: the 3 `custom_properties_collapse_tests` in rustkit-css pass (2 new). **Not run: the engine lib suite and the receipt.** That is why there is no PR.
+- **New hub tools:** `trench/tools/ab2.py` (two-binary counterbalanced A/B, order AB BA BA AB, records the load and the build count of every load, drops a pair whose build counts differ) and `ab2_summary.py` (pools logs, counts only pairs under a load limit, prints the AB/BA split).
+- **Aleph:** answered on the first call (no hang, no error), but the hub index still has no entry for develop's `keys_may_match_keyed`, so engine navigation was Read plus python on the develop worktree, as in the last four sessions.
+- **Slip:** I edited `lib.rs` while build A was compiling in the same worktree. The compiler's warnings carried the old line numbers, so A is clean develop, but the edit should have waited for the build.
+- **Build cost:** release parity-capture 16 min 31 s and 15 min 14 s at load 12–23; 5 min 11 s at load 3–6.
+- **Saved:** binaries `cascade-target/pc-dev-4a7ca75`, `pc-pks-c7304e2`, `pc-vll-7647595`. Receipts `receipt-pks-{A-4a7ca75,B-c7304e2}.json`. Test logs `tmp/pks-test1.log`, `tmp/pks-test2-pagescript.log`, `tmp/vll-csstest1.log`. PR body `pr-pks-body.md`.
+- **State left behind:** `.worktrees/cs-dev-ddbeae5` is on `atlas/cs-vars-large-layer`, clean. The shared target dir's release artifact is that branch's build.
+- **Open cs PRs:** 1 (#399), cap 3.
+- **Next session:** (1) Large-layer cut: engine lib tests (serial, headless), receipt against `pc-dev-4a7ca75` or develop's tip, then open the PR with the 0.87. If the machine is quiet, add pairs first; 12 is thin. (2) wikipedia, the site that sets the metric, has had no cut that moves it in three sessions. Time its 76 ms outside-style walk by part (`cs-walk-timers.py`) and build the tree snapshot behind `RUSTKIT_TREE_REUSE`. (3) Build develop's tip with #398 and re-read the ratio of record if quiet.
+
+**Decisions for Pete**
+1. **#399 is a 7–10% win on cnn and github and does nothing measurable for the worst site.** Default: reviewers merge it on the cnn and github numbers; the metric of record stays wikipedia's.
+2. **The worst ratio has sat at 14–15× for three sessions, and the two cuts today both land on other sites.** wikipedia needs the structural work (tree reuse on replay, then box construction). Default: the next sessions do only that, after the large-layer PR is opened, and report the gap on 2026-10-11 as already agreed.
+3. **A second quiet window showed up at 04:17–05:00** (load fell from 15 to under 6; I did not check what stopped). Default: no launcher change yet; if it repeats tomorrow, move the cascade session to start right after the real-site one instead of beside it.
