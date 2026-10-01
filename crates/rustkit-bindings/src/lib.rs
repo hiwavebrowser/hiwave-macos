@@ -11,6 +11,7 @@
 
 mod dom;
 mod inner_text;
+mod web_url;
 
 pub use dom::SelectorMatchFn;
 pub mod events;
@@ -589,6 +590,9 @@ impl DomBindings {
         // The screen, performance and navigator facts, and the window
         // geometry, that pages read without feature-testing (web_platform.js).
         runtime.evaluate_script(include_str!("web_platform.js"))?;
+
+        // `URL` and `URLSearchParams` (parsing is the `url` crate's).
+        web_url::install(runtime)?;
 
         // IPC bridge for communication with Rust
         let ipc_js = r#"
@@ -1576,6 +1580,87 @@ mod tests {
         // Something defined first wins: the shim never overwrites.
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
         assert_eq!(eval_string(&bindings, "String(navigator.userAgent)"), "RustKit/1.0");
+    }
+
+    /// `URL` / `URLSearchParams` (lyft, weather and others died on
+    /// `ReferenceError: URL is not defined`). Parsing and setters are the
+    /// `url` crate's; these pin the object layer and the cases pages hit.
+    #[test]
+    fn url_parses_resolves_and_exposes_its_components() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_string(&bindings, s);
+        assert_eq!(
+            ev("var u = new URL('https://user:pw@Example.COM:8080/a/b/../c?x=1&y=2#frag'); \
+                [u.href, u.origin, u.protocol, u.username, u.password, u.host, u.hostname, u.port, u.pathname, u.search, u.hash].join('|')"),
+            "https://user:pw@example.com:8080/a/c?x=1&y=2#frag|https://example.com:8080|https:|user|pw|example.com:8080|example.com|8080|/a/c|?x=1&y=2|#frag"
+        );
+        // Default port is empty; empty query and fragment read as ''.
+        assert_eq!(ev("var d = new URL('https://example.com:443/?#'); [d.port, d.search, d.hash, d.pathname].join('|')"), "|||/");
+        // Relative resolution against a base, including a base with a path.
+        assert_eq!(ev("String(new URL('../x?q', 'https://a.test/dir/sub/page.html'))"), "https://a.test/dir/x?q");
+        assert_eq!(ev("String(new URL('//cdn.test/lib.js', 'https://a.test/'))"), "https://cdn.test/lib.js");
+        assert_eq!(ev("String(new URL('/abs', new URL('https://a.test/dir/')))"), "https://a.test/abs");
+        // Non-special schemes and an opaque origin.
+        assert_eq!(ev("var m = new URL('mailto:a@b.test'); [m.protocol, m.pathname, m.origin].join('|')"), "mailto:|a@b.test|null");
+        // toString / toJSON / JSON.stringify.
+        assert_eq!(ev("JSON.stringify({ u: new URL('https://a.test/p') })"), r#"{"u":"https://a.test/p"}"#);
+        // Invalid input throws TypeError, and canParse says so without throwing.
+        assert_eq!(ev("var r; try { new URL('not a url'); r = 'no throw'; } catch (e) { r = e.name; } r"), "TypeError");
+        assert_eq!(ev("var r2; try { new URL('/rel'); r2 = 'no throw'; } catch (e) { r2 = e.name; } r2"), "TypeError");
+        assert_eq!(ev("[URL.canParse('https://a.test'), URL.canParse('nope'), URL.canParse('/x', 'https://a.test')].join()"), "true,false,true");
+        assert_eq!(ev("String(URL.parse('nope'))"), "null");
+    }
+
+    #[test]
+    fn url_setters_rewrite_the_url() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_string(&bindings, s);
+        assert_eq!(
+            ev("var u = new URL('https://a.test/p?x=1#h'); \
+                u.pathname = '/new path'; u.hash = 'top'; u.port = '9000'; u.username = 'bob'; \
+                u.href"),
+            "https://bob@a.test:9000/new%20path?x=1#top"
+        );
+        assert_eq!(ev("var v = new URL('http://a.test:81/'); v.protocol = 'https'; v.port = ''; v.hostname = 'b.test'; v.search = '?k=v'; v.href"), "https://b.test/?k=v");
+        // host takes host:port together.
+        assert_eq!(ev("var w = new URL('https://a.test/'); w.host = 'c.test:444'; [w.hostname, w.port].join('|')"), "c.test|444");
+        // A value that does not parse is ignored, as the standard says.
+        assert_eq!(ev("var x = new URL('https://a.test:5/'); x.port = 'abc'; x.port"), "5");
+    }
+
+    #[test]
+    fn url_search_params_encode_decode_and_stay_in_step_with_the_url() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_string(&bindings, s);
+        // Parsing: '+' is space, percent-escapes decode, a lone key has ''.
+        assert_eq!(
+            ev("var p = new URLSearchParams('?a=1&b=x+y&c=%C3%A9&flag&a=2'); \
+                [p.get('a'), p.getAll('a').join('/'), p.get('b'), p.get('c'), String(p.get('flag') === ''), String(p.get('none') === null), p.has('flag'), p.size].join('|')"),
+            "1|1/2|x y|é|true|true|true|5"
+        );
+        // Serialising: application/x-www-form-urlencoded.
+        assert_eq!(
+            ev("var q = new URLSearchParams(); q.append('k', 'a b&c=d'); q.append('é', \"it's (ok)!~\"); q.toString()"),
+            "k=a+b%26c%3Dd&%C3%A9=it%27s+%28ok%29%21%7E"
+        );
+        // Every constructor form.
+        assert_eq!(ev("new URLSearchParams({ a: 1, b: 'two' }).toString()"), "a=1&b=two");
+        assert_eq!(ev("new URLSearchParams([['a', '1'], ['b', '2']]).toString()"), "a=1&b=2");
+        assert_eq!(ev("new URLSearchParams(new URLSearchParams('z=9')).toString()"), "z=9");
+        // set replaces the first and drops the rest; delete; sort is stable.
+        assert_eq!(ev("var s = new URLSearchParams('b=2&a=1&b=3&a=0'); s.set('b', 'X'); s.sort(); s.toString()"), "a=1&a=0&b=X");
+        assert_eq!(ev("var t = new URLSearchParams('a=1&b=2&a=3'); t.delete('a'); t.toString()"), "b=2");
+        // Iteration protocols.
+        assert_eq!(ev("var out = []; for (var kv of new URLSearchParams('a=1&b=2')) out.push(kv.join(':')); out.join()"), "a:1,b:2");
+        assert_eq!(ev("var o = []; new URLSearchParams('a=1&b=2').forEach(function (v, k) { o.push(k + v); }); o.join()"), "a1,b2");
+        assert_eq!(ev("Array.from(new URLSearchParams('a=1&b=2').keys()).join()"), "a,b");
+        // URL.searchParams is live in both directions.
+        assert_eq!(
+            ev("var u = new URL('https://a.test/p?x=1'); u.searchParams.append('y', 'a b'); u.searchParams.set('x', '9'); u.href"),
+            "https://a.test/p?x=9&y=a+b"
+        );
+        assert_eq!(ev("var v = new URL('https://a.test/'); v.search = '?k=1&k=2'; v.searchParams.getAll('k').join()"), "1,2");
+        assert_eq!(ev("var w = new URL('https://a.test/?only=1'); w.searchParams.delete('only'); w.href"), "https://a.test/");
     }
 
     #[test]
