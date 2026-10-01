@@ -355,12 +355,17 @@ itself** — `a_long_first_run_keeps_its_last_line_open_for_the_next_sibling`,
 text-metric tests. The repository's own suite had the finding before any
 bespoke tooling did, and three nights of entries called it noise.
 
-**Unresolved and awaiting Pete (night 71 decisions 1–3):** whether this seat
-may propose units from Gate A magnitudes at all; whether a real font shaper may
-be wired into the Linux body as seat infrastructure despite the macOS-only
-scope and the cross-platform-port ban; and the `*.blob.core.windows.net`
-allowance, asked six nights running, which under decision 1 stops being a
-convenience and becomes the only way this seat picks a unit.
+**~~Unresolved and awaiting Pete (night 71 decisions 1–3)~~ — ANSWERED the same
+night; see *Decisions RATIFIED by Pete (2026-10-01, night 71)* below.** The three
+questions were: whether this seat may propose units from Gate A magnitudes at
+all; whether a real font shaper may be wired into the Linux body as seat
+infrastructure despite the macOS-only scope and the cross-platform-port ban; and
+the `*.blob.core.windows.net` allowance, asked six nights running, which under
+decision 1 stops being a convenience and becomes the only way this seat picks a
+unit. Answers: **yes to 1, hold 2, yes to 3** — and 3 is applied. The paragraph
+is kept struck rather than deleted because the rest of this section is night
+71's reasoning *before* the answers, and silently rewriting it would make the
+record read as though the night already knew.
 
 ### Latent, found while reading the corpus, nobody's unit
 
