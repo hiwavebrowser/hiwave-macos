@@ -797,6 +797,37 @@ impl FontCache {
     }
 }
 
+/// Which backend `TextShaper::shape` actually calls on this build, and whether
+/// its advances come from a font at all.
+///
+/// This exists because the answer is not observable from the outside and the
+/// wrong answer is silent. `shape` has three bodies: DirectWrite on Windows,
+/// Core Text on macOS, and — on every other target, the one the Linux parity
+/// seat compiles — a stub that assigns `font_size * 0.5` to each ASCII
+/// character and `font_size` to each wider one, reads no font, and returns
+/// `Ok`. A caller cannot tell that apart from a successful shaping, so a
+/// parity oracle run on such a build reports geometry deltas against a fixed
+/// ruler and presents them as RustKit box-math defects
+/// (trench/digest-parity-finish-line.md, 2026-10-01).
+///
+/// The name is the provenance a capture carries so an oracle can refuse to
+/// attribute, rather than a feature flag: nothing in layout branches on it.
+pub const TEXT_SHAPER_BACKEND: &str = if cfg!(windows) {
+    "directwrite"
+} else if cfg!(target_os = "macos") {
+    "coretext"
+} else {
+    "stub-0.5em"
+};
+
+/// Whether this build's text advances are measured from a real font face.
+///
+/// False means every advance is a constant fraction of the font size, so any
+/// box whose size or inline position depends on a text measurement is reporting
+/// that constant and not a defect. Geometry taken on such a build is MECHANICS
+/// and can never be a parity receipt.
+pub const TEXT_METRICS_ARE_FONT_DERIVED: bool = cfg!(any(windows, target_os = "macos"));
+
 /// Text shaper for complex text layout.
 pub struct TextShaper {
     #[allow(dead_code)]
