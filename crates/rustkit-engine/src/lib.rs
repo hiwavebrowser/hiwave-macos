@@ -4031,6 +4031,20 @@ impl Engine {
                     } else {
                         Some(entries.iter().rposition(|(_, s)| *s).unwrap_or(0))
                     };
+                    // What a list box highlights: with `multiple`, every
+                    // option carrying `selected`; without, only the last
+                    // one. No fallback to the first option — that is the
+                    // drop-down's rule (`selected_index` above).
+                    let multiple = attributes.contains_key("multiple");
+                    let mut selected: Vec<usize> = entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (_, s))| *s)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !multiple && selected.len() > 1 {
+                        selected.drain(..selected.len() - 1);
+                    }
                     let options: Vec<String> = entries.into_iter().map(|(t, _)| t).collect();
 
                     // size > 1 (or `multiple` without size, which Chrome
@@ -4038,13 +4052,14 @@ impl Engine {
                     let size = attributes
                         .get("size")
                         .and_then(|s| s.parse().ok())
-                        .unwrap_or(if attributes.contains_key("multiple") { 4 } else { 0 });
+                        .unwrap_or(if multiple { 4 } else { 0 });
 
                     let mut b = LayoutBox::new(
                         BoxType::FormControl(rustkit_layout::FormControlType::Select {
                             options,
                             selected_index,
                             size,
+                            selected,
                         }),
                         style,
                     );
@@ -4544,6 +4559,7 @@ impl Engine {
             // Every rule in these buckets ends in the pseudo, and the index
             // holds its prepared base selector, base keys and specificity:
             // the same tests as the string path below, computed once.
+            let keyed = KeyedElement::of(tag_name, attributes);
             for g in buckets.candidates(tag_name, attributes) {
                 let gi = g as usize;
                 let Some(prepared) = ix.pseudo_prepared[gi].as_deref() else {
@@ -4552,7 +4568,7 @@ impl Engine {
                 // No base keys means an empty base, which admits any element.
                 let admitted = ix.pseudo_keys[gi]
                     .as_deref()
-                    .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes));
+                    .is_none_or(|keys| Self::keys_may_match_keyed(keys, &keyed));
                 if admitted
                     && SelectorMatcher.selector_matches_prepared(
                         prepared,
@@ -5194,10 +5210,11 @@ impl Engine {
             None => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).enumerate()),
         };
 
+        let keyed = KeyedElement::of(tag_name, attributes);
         for (rule_index, rule) in rules {
             // With an index, `rule_index` is the global index `g`.
             let may_match = match index.as_ref() {
-                Some(ix) => Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
+                Some(ix) => Self::keys_may_match_keyed(&ix.keys[rule_index], &keyed),
                 None => self.rule_may_match(&rule.selector, tag_name, attributes),
             };
             if !may_match {
@@ -8243,20 +8260,29 @@ impl Engine {
         tag_name: &str,
         attributes: &HashMap<String, String>,
     ) -> bool {
+        Self::keys_may_match_keyed(keys, &KeyedElement::of(tag_name, attributes))
+    }
+
+    /// `keys_may_match` for a caller that tests many rules against one
+    /// element: `KeyedElement::of` looks the element's `id` and `class` up
+    /// once, instead of once per key of every candidate rule (11% of
+    /// wikipedia's cascade went to those repeated attribute lookups).
+    fn keys_may_match_keyed(keys: &[SubjectKey], element: &KeyedElement) -> bool {
         #[cfg(test)]
         PREFILTER_VISITS.with(|n| n.set(n.get() + 1));
         keys.iter().any(|k| {
-            k.id.as_deref()
-                .map_or(true, |id| attributes.get("id").map(String::as_str) == Some(id))
+            k.id.as_deref().map_or(true, |id| element.id == Some(id))
                 && k.tag
                     .as_deref()
-                    .map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
+                    .map_or(true, |t| t.eq_ignore_ascii_case(element.tag_name))
                 && k.class.as_deref().map_or(true, |c| {
-                    attributes
-                        .get("class")
+                    element
+                        .class
                         .is_some_and(|cl| cl.split_whitespace().any(|x| x == c))
                 })
-                && k.attr.as_deref().map_or(true, |a| attributes.contains_key(a))
+                && k.attr
+                    .as_deref()
+                    .map_or(true, |a| element.attributes.contains_key(a))
         })
     }
 
@@ -10077,6 +10103,7 @@ impl Engine {
         fn display_command_op_name(cmd: &Cmd) -> &'static str {
             match cmd {
                 Cmd::TextInput { .. } => "text_input",
+                Cmd::ListBox { .. } => "list_box",
                 Cmd::Button { .. } => "button",
                 Cmd::FocusRing { .. } => "focus_ring",
                 Cmd::Caret { .. } => "caret",
@@ -20838,6 +20865,27 @@ impl RuleBuckets {
     }
 }
 
+/// What a rule's subject keys are tested against, read off an element once:
+/// its tag, its `id` and `class` attribute values, and (for a key that names
+/// an attribute) the attribute map itself.
+struct KeyedElement<'a> {
+    tag_name: &'a str,
+    id: Option<&'a str>,
+    class: Option<&'a str>,
+    attributes: &'a HashMap<String, String>,
+}
+
+impl<'a> KeyedElement<'a> {
+    fn of(tag_name: &'a str, attributes: &'a HashMap<String, String>) -> Self {
+        KeyedElement {
+            tag_name,
+            id: attributes.get("id").map(String::as_str),
+            class: attributes.get("class").map(String::as_str),
+            attributes,
+        }
+    }
+}
+
 /// The order `!important` declarations cascade in when layers are involved:
 /// layer order reversed (CSS Cascade 5 §6.4), then specificity and source
 /// order as usual. `rules` is already in normal order. `None` when that order
@@ -24970,5 +25018,129 @@ mod text_provenance_tests {
                  that string is what a reader of the board sees"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod control_semantics_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, DisplayList, Rect};
+
+    /// The page's display list, one `Debug` string per command — what
+    /// `--dump-display-list` writes for a control, and what the renderer is
+    /// handed.
+    fn painted(html: &str) -> Vec<String> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        root.layout(&cb);
+        DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect()
+    }
+
+    #[test]
+    fn a_password_value_never_reaches_the_display_list() {
+        // The control-paint path dropped `input_type`, so a password's value
+        // was handed to the renderer (and written to every display-list
+        // dump) as plain text. Chrome paints one bullet per character.
+        let ops = painted(
+            r#"<!DOCTYPE html><body><input type="password" value="hunter2secret">
+               <input type="PASSWORD" value="swordfish">
+               <input type="text" value="visible text">
+               <input type="password" placeholder="Your password"></body>"#,
+        );
+        let all = ops.join("\n");
+        assert!(
+            !all.contains("hunter2secret"),
+            "password value in the display list:\n{all}"
+        );
+        assert!(
+            !all.contains("swordfish"),
+            "type is ASCII case-insensitive:\n{all}"
+        );
+        let bullets = |n: usize| format!("value: \"{}\"", "\u{2022}".repeat(n));
+        assert!(
+            all.contains(&bullets(13)),
+            "13 characters paint 13 bullets:\n{all}"
+        );
+        assert!(
+            all.contains(&bullets(9)),
+            "9 characters paint 9 bullets:\n{all}"
+        );
+        // Guards: other input types and a password's placeholder still paint.
+        assert!(all.contains("visible text"));
+        assert!(all.contains("Your password"));
+    }
+
+    #[test]
+    fn a_list_box_reaches_paint_with_every_option_and_its_selection() {
+        // `<select size>` / `<select multiple>` painted as a text input
+        // showing one option. Chrome paints a row per option and highlights
+        // the selected ones.
+        let ops = painted(
+            r#"<!DOCTYPE html><body>
+               <select multiple size="3"><option>Item 1</option><option selected>Item 2</option>
+                 <option selected>Item 3</option><option>Item 4</option></select>
+               <select size="2"><option selected>one</option><option selected>two</option><option>three</option></select>
+               <select size="4"><option>alpha</option><option>beta</option></select>
+               <select multiple><option>m1</option><option>m2</option></select></body>"#,
+        );
+        let boxes: Vec<&String> = ops.iter().filter(|o| o.starts_with("ListBox")).collect();
+        assert_eq!(boxes.len(), 4, "four list boxes, got:\n{}", ops.join("\n"));
+        assert!(
+            boxes[0].contains(r#"options: ["Item 1", "Item 2", "Item 3", "Item 4"]"#),
+            "{}",
+            boxes[0]
+        );
+        assert!(
+            boxes[0].contains("selected: [1, 2]"),
+            "multiple keeps both: {}",
+            boxes[0]
+        );
+        assert!(
+            boxes[1].contains("selected: [1]"),
+            "single keeps the last: {}",
+            boxes[1]
+        );
+        assert!(
+            boxes[2].contains("selected: []"),
+            "no fallback to the first option: {}",
+            boxes[2]
+        );
+        assert!(
+            boxes[3].contains(r#"options: ["m1", "m2"]"#),
+            "{}",
+            boxes[3]
+        );
+        assert!(boxes[3].contains("selected: []"), "{}", boxes[3]);
+    }
+
+    #[test]
+    fn a_drop_down_reaches_paint_as_a_menu_list() {
+        // A `<select>` and an `<input>` were the same command, so the
+        // renderer could not draw the arrow.
+        let ops = painted(
+            r#"<!DOCTYPE html><body>
+               <select><option>hours</option><option selected>days</option></select>
+               <input value="typed"><textarea>notes</textarea></body>"#,
+        );
+        let kind_of = |value: &str| {
+            let op = ops
+                .iter()
+                .find(|o| o.contains(&format!("value: \"{value}\"")))
+                .unwrap_or_else(|| panic!("no control showing {value}:\n{}", ops.join("\n")));
+            ["MenuList", "TextArea", "Password", "Text"]
+                .into_iter()
+                .find(|k| op.contains(&format!("kind: {k}")))
+                .unwrap_or("none")
+        };
+        assert_eq!(kind_of("days"), "MenuList");
+        assert_eq!(kind_of("typed"), "Text");
+        assert_eq!(kind_of("notes"), "TextArea");
     }
 }
