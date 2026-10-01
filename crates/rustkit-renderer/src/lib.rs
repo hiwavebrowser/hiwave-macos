@@ -2067,19 +2067,29 @@ impl Renderer {
                 font_style,
                 advances,
                 ascent,
+                run,
             } => {
-                self.draw_text_with_metrics(
-                    text,
-                    *x,
-                    *y,
-                    *color,
-                    *font_size,
-                    font_family,
-                    *font_weight,
-                    *font_style,
-                    advances.as_deref(),
-                    *ascent,
-                );
+                // SHAPED-RUN CONTRACT (S0): a command that carries its run
+                // is painted from the run. The family-list path below is
+                // for commands without one, and for a run whose face the
+                // rasterizer no longer holds.
+                let painted_from_run = run
+                    .as_deref()
+                    .is_some_and(|run| self.draw_glyph_run(run, *x, *y, *color, *ascent));
+                if !painted_from_run {
+                    self.draw_text_with_metrics(
+                        text,
+                        *x,
+                        *y,
+                        *color,
+                        *font_size,
+                        font_family,
+                        *font_weight,
+                        *font_style,
+                        advances.as_deref(),
+                        *ascent,
+                    );
+                }
             }
 
             DisplayCommand::TextDecoration {
@@ -5165,6 +5175,106 @@ impl Renderer {
         let text_top = inner_top + (inner_h - (ascent + descent)) / 2.0;
         let text_x = rect.x + border_width + padding[3];
         (text_x, text_top, ascent, descent)
+    }
+
+    /// Paint a shaped run (SHAPED-RUN CONTRACT, slice S0): the run's glyph
+    /// ids, from the run's face, at the run's advances and offsets. Nothing
+    /// here reads a character or a `font-family` list.
+    ///
+    /// Seating is the family-list path's: the baseline is `y` plus layout's
+    /// ascent, snapped to a whole device row (INTEGER-BASELINE CONTRACT),
+    /// and glyphs are rasterized at phase 0.
+    ///
+    /// Returns `false`, having drawn nothing, when the rasterizer does not
+    /// hold the run's face; the caller then paints the command the old way.
+    fn draw_glyph_run(
+        &mut self,
+        run: &rustkit_layout::GlyphRun,
+        x: f32,
+        y: f32,
+        color: Color,
+        layout_ascent: Option<f32>,
+    ) -> bool {
+        // FROZEN AT 0, as on the character path (GlyphKey::subpixel_phase).
+        let key_for = |glyph_id: u16| RunGlyphKey {
+            face: run.face.id,
+            glyph_id,
+            font_size: (run.font_size * 10.0) as u32,
+            subpixel_phase: 0,
+        };
+
+        // Every glyph's bitmap first, so a missing face is known before a
+        // single quad is emitted.
+        let mut entries = Vec::with_capacity(run.glyphs.len());
+        for glyph in &run.glyphs {
+            match self.glyph_cache.get_or_rasterize_run_glyph(
+                &self.queue,
+                &key_for(glyph.glyph_id),
+                run.font_size,
+            ) {
+                Some(entry) => entries.push(entry),
+                None => return false,
+            }
+        }
+
+        let c = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a,
+        ];
+        let baseline = (y + layout_ascent.unwrap_or(run.ascent)).round();
+        let atlas_size = self.glyph_cache.atlas_size() as f32;
+
+        for ((glyph, pen_x), entry) in run
+            .glyphs
+            .iter()
+            .zip(run.pen_positions(x))
+            .zip(entries)
+        {
+            let glyph_x = pen_x + glyph.x_offset + entry.offset[0];
+            let glyph_y = baseline + glyph.y_offset + entry.offset[1];
+            let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
+            let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
+
+            // `overflow: hidden` clips glyphs like everything else.
+            for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                .textured_pieces(
+                    Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                    entry.tex_coords,
+                )
+            {
+                let c = [c[0], c[1], c[2], c[3] * coverage];
+                let base = self.texture_vertices.len() as u32;
+                self.texture_vertices.extend_from_slice(&[
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [tex[0], tex[1]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [tex[2], tex[1]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [tex[2], tex[3]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [tex[0], tex[3]],
+                        color: c,
+                    },
+                ]);
+                self.texture_indices.extend_from_slice(&[
+                    base, base + 1, base + 2,
+                    base, base + 2, base + 3,
+                ]);
+            }
+        }
+        true
     }
 
     /// Draw text honoring the ADVANCE CONTRACT: when layout ships per-char
@@ -8906,5 +9016,99 @@ mod sidecar_timestamp_tests {
         assert_eq!(utc_timestamp_from_secs(951_782_400), "2000-02-29T00:00:00Z");
         // Last second of 2099.
         assert_eq!(utc_timestamp_from_secs(4_102_444_799), "2099-12-31T23:59:59Z");
+    }
+}
+
+/// SHAPED-RUN CONTRACT, slice S0 (docs/SHAPED_RUN_CONTRACT_2026-09-30.md
+/// §7), paint side. Device-free: these read the bitmaps the atlas is filled
+/// from. The character path is the oracle.
+#[cfg(all(test, target_os = "macos"))]
+mod shaped_run_paint_tests {
+    use super::*;
+    use rustkit_css::{ComputedStyle, Length};
+
+    const GEORGIA_LIST: &str = "Georgia, 'Times New Roman', serif";
+
+    fn run_in(family: &str, weight: u16, text: &str, size: f32) -> rustkit_layout::GlyphRun {
+        let mut style = ComputedStyle::new();
+        style.font_family = family.to_string();
+        style.font_size = Length::Px(size);
+        style.font_weight = rustkit_css::FontWeight(weight);
+        rustkit_layout::shape_line_run(text, &style, size, 0.0).expect("a Latin line has a run")
+    }
+
+    fn key(run: &rustkit_layout::GlyphRun, glyph_id: u16) -> RunGlyphKey {
+        RunGlyphKey {
+            face: run.face.id,
+            glyph_id,
+            font_size: (run.font_size * 10.0) as u32,
+            subpixel_phase: 0,
+        }
+    }
+
+    /// "Face identity, macOS": painting the run resolves no family list,
+    /// and what it draws is, byte for byte, what the character path draws
+    /// when that path resolves the same list to the same face.
+    #[test]
+    fn run_glyphs_are_drawn_from_the_run_face_with_no_family_lookup() {
+        for (weight, text, size) in [(400u16, "Wave To", 24.0f32), (700, "Type", 17.6)] {
+            let run = run_in(GEORGIA_LIST, weight, text, size);
+
+            let before = rustkit_text::macos::css_list_resolutions();
+            let from_run: Vec<_> = run
+                .glyphs
+                .iter()
+                .map(|g| rasterize_run_glyph(&key(&run, g.glyph_id), run.font_size))
+                .collect();
+            assert_eq!(
+                rustkit_text::macos::css_list_resolutions(),
+                before,
+                "painting a run must not resolve a font-family list"
+            );
+
+            // The character path, at the size its key quantizes to.
+            let old = rustkit_text::macos::GlyphRasterizer::with_style(
+                GEORGIA_LIST,
+                (size * 10.0) as u32 as f32 / 10.0,
+                weight,
+                false,
+            );
+            assert!(rustkit_text::macos::css_list_resolutions() > before);
+            for (ch, drawn) in text.chars().zip(from_run) {
+                let drawn = drawn.expect("the run's face is held");
+                assert_eq!(Some(drawn), old.rasterize_char(ch, 0.0), "{ch:?} at {size}px");
+            }
+        }
+    }
+
+    /// Two faces, one glyph id each for the same letter: the key tells them
+    /// apart, so regular and bold do not share a bitmap.
+    #[test]
+    fn the_key_is_the_face_and_the_glyph_not_the_family() {
+        let regular = run_in(GEORGIA_LIST, 400, "W", 24.0);
+        let bold = run_in(GEORGIA_LIST, 700, "W", 24.0);
+        let k_regular = key(&regular, regular.glyphs[0].glyph_id);
+        let k_bold = key(&bold, bold.glyphs[0].glyph_id);
+        assert_ne!(k_regular, k_bold);
+        assert_ne!(
+            rasterize_run_glyph(&k_regular, 24.0).expect("regular"),
+            rasterize_run_glyph(&k_bold, 24.0).expect("bold"),
+        );
+
+        // The same face reached through another list is the same key.
+        let walked = run_in("No Such Family 9f2c, Georgia", 400, "W", 24.0);
+        assert_eq!(key(&walked, walked.glyphs[0].glyph_id), k_regular);
+    }
+
+    /// A face the rasterizer does not hold draws nothing: the caller paints
+    /// the command through the family-list path instead.
+    #[test]
+    fn a_face_that_is_not_held_is_not_drawn() {
+        let run = run_in(GEORGIA_LIST, 400, "W", 24.0);
+        let mut unknown = key(&run, run.glyphs[0].glyph_id);
+        unknown.face ^= 0x5a5a;
+        assert!(rasterize_run_glyph(&unknown, 24.0).is_none());
+        // Held per size: a size layout never shaped at is not held either.
+        assert!(rasterize_run_glyph(&key(&run, run.glyphs[0].glyph_id), 23.0).is_none());
     }
 }

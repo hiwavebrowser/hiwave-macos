@@ -352,6 +352,10 @@ pub struct ShapedRun {
     pub metrics: TextMetrics,
     /// Text direction (LTR or RTL).
     pub direction: TextDirection,
+    /// The face the glyph ids belong to, when the shaper can name it (see
+    /// [`FaceIdentity`]). `None` where a platform shaper does not record it
+    /// yet; such a run cannot be frozen into a [`GlyphRun`].
+    pub face: Option<FaceIdentity>,
 }
 
 /// Text direction for a shaped run.
@@ -398,6 +402,287 @@ impl TextDirection {
     pub fn is_rtl(self) -> bool {
         self == TextDirection::Rtl
     }
+}
+
+/// Which face a run's glyph ids belong to.
+///
+/// A CSS `font-family` list does not say this: the list is an order of
+/// preference, and the face that answers depends on what is installed, what
+/// the document registered, and the weight and style asked for. Layout
+/// resolves the list once, when it shapes. Paint is handed the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaceIdentity {
+    /// Handle the platform rasterizer accepts for this face
+    /// (`rustkit_text::macos::face_font`). Two runs with the same id draw
+    /// from the same face; the id is what a glyph cache keys on.
+    pub id: u64,
+    /// PostScript name of the selected face (Core Text).
+    pub postscript_name: String,
+    /// Index of the face in its file. 0 today: no collection face is
+    /// selected by index yet.
+    pub face_index: u32,
+}
+
+/// What the shaper faked because the face lacks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FaceSynthesis {
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// One glyph of a [`GlyphRun`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunGlyph {
+    /// Glyph id in the run's face.
+    pub glyph_id: u16,
+    /// How far the pen moves after this glyph. Letter-spacing,
+    /// word-spacing and justification are already in it.
+    pub advance: f32,
+    /// Offset of the glyph's origin from the pen.
+    pub x_offset: f32,
+    pub y_offset: f32,
+    /// The UTF-16 code units of the source text this glyph draws. Glyphs of
+    /// one cluster (a ligature, a base with its marks) share one range, and
+    /// a range is the only place a line may break or a caret may stand.
+    pub cluster: std::ops::Range<u32>,
+}
+
+/// A shaped run, frozen: the one result layout, paint and caret read.
+///
+/// Built by one shaper call for one face, with letter-spacing, word-spacing
+/// and justification already applied, then never edited. Paint places
+/// `glyphs` by id from `face`; it has no family list to resolve.
+/// (docs/SHAPED_RUN_CONTRACT_2026-09-30.md §1; this is slice S0, so a run
+/// exists only for a single left-to-right face with no fallback character.)
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlyphRun {
+    pub face: FaceIdentity,
+    /// Size in CSS px.
+    pub font_size: f32,
+    pub font_weight: FontWeight,
+    pub font_style: FontStyle,
+    pub font_stretch: FontStretch,
+    pub synthesis: FaceSynthesis,
+    /// Variation axis values, `(tag, value)`. Empty until a variable-font
+    /// slice sets them.
+    pub variations: Vec<(u32, f32)>,
+    pub glyphs: Vec<RunGlyph>,
+    pub direction: TextDirection,
+    /// ISO 15924 script of the run's letters (`Zyyy` when it has none of
+    /// one script, `Zzzz` when it mixes scripts or uses one not told apart
+    /// here).
+    pub script: [u8; 4],
+    /// BCP 47 language of the content, when layout knows it. It does not
+    /// today: no `lang` reaches computed style.
+    pub language: Option<String>,
+    pub ascent: f32,
+    pub descent: f32,
+    pub leading: f32,
+}
+
+impl GlyphRun {
+    /// Freeze `run`, the shaper's result for one line with spacing applied.
+    /// `justify_space` is the slack layout gave each word separator of a
+    /// justified line; it goes into the advances here, before the freeze.
+    ///
+    /// `None` when the run is outside S0: the shaper did not name its face,
+    /// it is not left-to-right, or a character has no glyph in the face
+    /// (the shaper measured that one from a fallback face, and an emoji is
+    /// painted in colour from one). Such a line keeps the per-character
+    /// path until the fallback-boundary slice.
+    pub fn freeze(run: &ShapedRun, justify_space: f32) -> Option<GlyphRun> {
+        let face = run.face.clone()?;
+        if run.direction != TextDirection::Ltr {
+            return None;
+        }
+        if run
+            .glyphs
+            .iter()
+            .any(|g| g.glyph_id == 0 || is_color_glyph_char(g.character))
+        {
+            return None;
+        }
+
+        // UTF-16 offset of every character, and of the end of the text.
+        let mut unit_offsets: Vec<u32> = Vec::with_capacity(run.text.len() + 1);
+        let mut units = 0u32;
+        for c in run.text.chars() {
+            unit_offsets.push(units);
+            units += c.len_utf16() as u32;
+        }
+        unit_offsets.push(units);
+        let unit_at = |char_index: u32| -> u32 {
+            unit_offsets
+                .get(char_index as usize)
+                .copied()
+                .unwrap_or(units)
+        };
+
+        let mut glyphs = Vec::with_capacity(run.glyphs.len());
+        for (i, g) in run.glyphs.iter().enumerate() {
+            // A cluster runs from its first character to the first
+            // character of the next cluster (left-to-right, so the next
+            // glyph that starts a different one), or to the end of the text.
+            let next_cluster = run.glyphs[i + 1..]
+                .iter()
+                .map(|n| n.cluster)
+                .find(|&c| c != g.cluster);
+            let start = unit_at(g.cluster);
+            let end = next_cluster.map_or(units, unit_at).max(start);
+            let justify = if justify_space > 0.0 && is_justify_separator(g.character) {
+                justify_space
+            } else {
+                0.0
+            };
+            glyphs.push(RunGlyph {
+                glyph_id: g.glyph_id,
+                advance: g.advance + justify,
+                // Today's shapers report the pen position (`x`) and no
+                // offset from it.
+                x_offset: 0.0,
+                y_offset: g.y,
+                cluster: start..end,
+            });
+        }
+
+        Some(GlyphRun {
+            face,
+            font_size: run.font_size,
+            font_weight: run.font_weight,
+            font_style: run.font_style,
+            font_stretch: run.font_stretch,
+            synthesis: FaceSynthesis::default(),
+            variations: Vec::new(),
+            glyphs,
+            direction: run.direction,
+            script: script_of(&run.text),
+            language: None,
+            ascent: run.metrics.ascent,
+            descent: run.metrics.descent,
+            leading: run.metrics.leading,
+        })
+    }
+
+    /// This run cut after its first `kept` glyphs, with `tail` (the
+    /// ellipsis, shaped alone) appended: `text-overflow: ellipsis`. The cut
+    /// is made where layout cut the characters, so it is only asked of a
+    /// run with one glyph per character. `None` when `tail` is in another
+    /// face (one run is one face) or the cut would split a cluster.
+    pub fn cut_with_tail(&self, kept: usize, tail: &GlyphRun) -> Option<GlyphRun> {
+        if tail.face != self.face || kept > self.glyphs.len() {
+            return None;
+        }
+        let cut_unit = match kept {
+            0 => 0,
+            n => self.glyphs[n - 1].cluster.end,
+        };
+        if self
+            .glyphs
+            .get(kept)
+            .is_some_and(|next| next.cluster.start < cut_unit)
+        {
+            return None;
+        }
+        let mut glyphs = self.glyphs[..kept].to_vec();
+        glyphs.extend(tail.glyphs.iter().map(|g| RunGlyph {
+            cluster: g.cluster.start + cut_unit..g.cluster.end + cut_unit,
+            ..g.clone()
+        }));
+        Some(GlyphRun {
+            glyphs,
+            ..self.clone()
+        })
+    }
+
+    /// The advance of each cluster, in order: glyphs that share a cluster
+    /// range are summed.
+    pub fn cluster_advances(&self) -> Vec<(std::ops::Range<u32>, f32)> {
+        let mut out: Vec<(std::ops::Range<u32>, f32)> = Vec::new();
+        for g in &self.glyphs {
+            match out.last_mut() {
+                Some((range, advance)) if *range == g.cluster => *advance += g.advance,
+                _ => out.push((g.cluster.clone(), g.advance)),
+            }
+        }
+        out
+    }
+
+    /// The run projected onto `text`'s characters: one advance per `char`.
+    /// `None` when a cluster is not exactly one character, which is where a
+    /// per-character vector cannot describe the run.
+    pub fn char_advances(&self, text: &str) -> Option<Vec<f32>> {
+        let clusters = self.cluster_advances();
+        let mut out = Vec::with_capacity(clusters.len());
+        let mut clusters = clusters.into_iter();
+        let mut unit = 0u32;
+        for c in text.chars() {
+            let (range, advance) = clusters.next()?;
+            let end = unit + c.len_utf16() as u32;
+            if range != (unit..end) {
+                return None;
+            }
+            out.push(advance);
+            unit = end;
+        }
+        clusters.next().is_none().then_some(out)
+    }
+
+    /// Pen x of every glyph when the run starts at `x`: where paint puts
+    /// each glyph's origin, before the glyph's own offset.
+    pub fn pen_positions(&self, x: f32) -> Vec<f32> {
+        let mut pen = x;
+        self.glyphs
+            .iter()
+            .map(|g| {
+                let here = pen;
+                pen += g.advance;
+                here
+            })
+            .collect()
+    }
+
+    /// Total advance of the run.
+    pub fn width(&self) -> f32 {
+        self.glyphs.iter().map(|g| g.advance).sum()
+    }
+}
+
+/// The word separators a justified line widens (`TextLine::is_word_separator`).
+fn is_justify_separator(c: char) -> bool {
+    matches!(c, ' ' | '\u{a0}')
+}
+
+/// Is `c` painted from the colour-glyph (emoji) path?
+fn is_color_glyph_char(c: char) -> bool {
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        rustkit_text::is_emoji(c)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = c;
+        false
+    }
+}
+
+/// ISO 15924 tag for the letters of `text`. Tells apart the scripts a
+/// single-face left-to-right run can be today; everything else is `Zzzz`.
+fn script_of(text: &str) -> [u8; 4] {
+    let mut found: Option<[u8; 4]> = None;
+    for c in text.chars().filter(|c| c.is_alphabetic()) {
+        let script = match c as u32 {
+            0x0041..=0x024F | 0x1E00..=0x1EFF | 0x2C60..=0x2C7F | 0xA720..=0xA7FF => *b"Latn",
+            0x0370..=0x03FF | 0x1F00..=0x1FFF => *b"Grek",
+            0x0400..=0x052F => *b"Cyrl",
+            _ => return *b"Zzzz",
+        };
+        match found {
+            None => found = Some(script),
+            Some(seen) if seen != script => return *b"Zzzz",
+            Some(_) => {}
+        }
+    }
+    found.unwrap_or(*b"Zyyy")
 }
 
 impl ShapedRun {
@@ -864,6 +1149,7 @@ impl TextShaper {
                 font_size: size,
                 metrics: TextMetrics::with_font_size(size),
                 direction: TextDirection::Ltr,
+                face: None,
             });
         }
 
@@ -1005,6 +1291,7 @@ impl TextShaper {
                         font_size: size,
                         metrics,
                         direction: TextDirection::Ltr,
+                        face: None,
                     });
                 }
             }
@@ -1071,6 +1358,7 @@ impl TextShaper {
             font_size: size,
             metrics,
             direction: TextDirection::Ltr,
+            face: None,
         })
     }
 
@@ -1167,6 +1455,7 @@ impl TextShaper {
                 font_size: size,
                 metrics: TextMetrics::with_font_size(size),
                 direction: TextDirection::Ltr,
+                face: None,
             });
         }
 
@@ -1186,11 +1475,29 @@ impl TextShaper {
         }
 
         // Fallback to system font if nothing found
+        let resolved_from_chain = ct_font_opt.is_some();
         let ct_font = ct_font_opt.unwrap_or_else(|| {
             ct_font::new_from_name("Helvetica", size as f64).unwrap_or_else(|_| {
                 ct_font::new_from_name(".AppleSystemUIFont", size as f64).unwrap()
             })
         });
+
+        // Name the face the glyph ids below belong to, and keep the font, so
+        // paint can draw this run with it instead of resolving the family
+        // list a second time (see `FaceIdentity`).
+        let italic = style == FontStyle::Italic;
+        let web_face = if resolved_from_chain {
+            rustkit_text::webfonts::face_id(&used_family, weight.0, italic)
+        } else {
+            0
+        };
+        let (face_id, postscript_name) =
+            rustkit_text::macos::intern_face(&ct_font, size, web_face, weight.0, italic);
+        let face = FaceIdentity {
+            id: face_id,
+            postscript_name,
+            face_index: 0,
+        };
 
         // Convert text to UTF-16 for Core Text
         let utf16_chars: Vec<u16> = text.encode_utf16().collect();
@@ -1354,6 +1661,7 @@ impl TextShaper {
                 font_size: size,
                 metrics,
                 direction: TextDirection::Ltr,
+                face: Some(face),
             })
         }
     }
@@ -1712,6 +2020,7 @@ impl TextShaper {
             font_size: size,
             metrics,
             direction: TextDirection::Ltr,
+            face: None,
         })
     }
 
