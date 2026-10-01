@@ -1,0 +1,23 @@
+fix(text): a missing glyph falls back to the system's cascade face
+
+A character the primary face has no glyph for was taken from a fixed list
+of families tried in order (Apple Color Emoji, Apple Symbols, Arial
+Unicode MS, Helvetica Neue, Menlo), in layout and in paint. Chrome asks
+the system for the fallback of the font in use. Courier has no U+2318,
+U+2190 or U+2192: its cascade face is Menlo, and the list gave Apple
+Symbols, so an `about` <kbd> was 22.3 to 22.6px wide against Chrome's
+21.23px.
+
+rustkit_text::macos::fallback_face_for(primary, ch) is now the one
+lookup: CTFontCreateForString on the primary face, the colour-glyph
+path's own faces first for its characters (that is where paint draws
+them), the old list as the last resort, and None when only Core Text's
+LastResort face answers. Layout takes the advance and extents from that
+face and the rasteriser draws the glyph id it returns, so a character
+outside the BMP is no longer looked up as `ch as u16` on this path.
+
+Tests: three in rustkit-text (face and glyph, the rasteriser's advance,
+emoji / LastResort / memo) and one in rustkit-layout (Courier and
+`monospace` measure the three symbols at Menlo's advance).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

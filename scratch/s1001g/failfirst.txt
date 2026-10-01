@@ -1,0 +1,18 @@
+```
+== layout: a_symbol_courier_lacks_is_measured_in_its_cascade_face on develop
+test a_symbol_courier_lacks_is_measured_in_its_cascade_face ... FAILED
+thread 'a_symbol_courier_lacks_is_measured_in_its_cascade_face' panicked at crates/rustkit-layout/tests/fallback_face_line_height.rs:72:9:
+  left: 11.25
+ right: 9.6328125
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+restored: True
+== rustkit-text: the_rasteriser_draws_a_missing_symbol_from_the_cascade_face on develop
+test macos::tests::the_rasteriser_draws_a_missing_symbol_from_the_cascade_face ... FAILED
+thread 'macos::tests::the_rasteriser_draws_a_missing_symbol_from_the_cascade_face' panicked at crates/rustkit-text/src/macos.rs:1806:13:
+  left: 11.25
+ right: 9.6328125
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 95 filtered out; finished in 0.11s
+restored: True
+```
+
+11.25 is Apple Symbols' advance for `⌘` at 16px; 9.63 is Menlo's.

@@ -1,0 +1,17 @@
+fix(text): the emoji face still leads the fallback for its own characters
+
+With the cascade first, U+23F0 and U+2328 (emoji outside is_emoji's
+ranges) got a text face, and their lines lost the emoji face's height:
+`about` went from 73 to 165 geometry-gate failures (a feature row 54 ->
+47px, a heading 29 -> 24px; Chrome 54 and 29). The campaign's diff_pct
+did not move, the gate did.
+
+A character above Latin-1 that Apple Color Emoji has is taken from it, as
+on develop. ASCII and Latin-1 are not: that face also has the digits, #,
+*, (c) and (r), which are text unless a variation selector or keycap
+follows, and develop drew a web font's missing digits from it.
+
+Tests: the emoji-face pin covers U+23F0 and U+2328 and a face without
+digits; the layout line-height test pins both lines at 26px.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

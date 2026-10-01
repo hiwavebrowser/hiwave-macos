@@ -1648,3 +1648,41 @@ trench/realsite/runs/20261001T1832Z-quiet-dev2b764be
 3. **Glyph fallback (Found 3) before or after L0?** It costs 7 geometry boxes on `about` today and affects every page with symbols in a face that lacks them. Recommendation: before L0, it is a day at most and it removes a regression #417 exposes.
 
 **17:29 addendum:** #417's CI is **all green at 5ad75d9**, `unit-suites` (the full engine suite) included, so no engine test pinned the old default face. R1 CLEAR is posted; no R2 stamp yet. Two A/B rows finished after the PR body was written: yahoo is pixel-identical across arms; github did not finish within 150 s on either arm (load), so it is unverified on both arms alike. That note is not on the PR (a comment needs approval in this session).
+
+## 2026-10-01 20:00
+
+**Points: 26/60 -> 26/60 (no scoring run this session).** The number is today's 14:54 quiet board on develop 2b764be: loads 16, readable 7, looks-right 3; scorable 25/57. Load was 4 to 16 during the session and two release builds and three campaign arms ran in it, so no Chrome oracle run was taken. Live-site evidence is RustKit frames A/B, scored against the 14:54 board's stored Chrome frames.
+
+**The 15:10 question (28 -> 26, instagram and microsoft)** was answered in the 17:28 section above and was not re-run: microsoft's one loading capture was the outlier, and instagram's splash logo became correct (#407) and fell under the 2% blank threshold. Neither is #411.
+
+**Queue status:** items 1 to 4 are MERGED (#396, #398, #401 + #407, #411). **#417 (generic families) MERGED at 17:50.** Item 5 (L0) is not started. `::first-letter` is not started.
+
+**PR opened (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#421** `atlas/rs-glyph-fallback-cascade` @ 00e32a1 (base ac1b067; commits e7b35bd, 00e32a1): **a character the font lacks falls back to the face the system gives for that font, as in Chrome.** It was a fixed list tried in order. Since #417 made `<kbd>` Courier, `⌘`, `←` and `→` on `about` came from Apple Symbols (22.3 to 22.6px boxes); the system's face for Courier is Menlo, and the boxes are now Chrome's 21.23px. Layout and paint share one lookup, so they cannot pick different faces.
+  - **Tests:** two **fail on develop ac1b067** (11.25 against 9.63, Apple Symbols' advance against Menlo's) and pass on the branch; five new or extended in all. rustkit-text 98/98, rustkit-layout 594/594, rustkit-renderer 114/114. Engine suite not run locally; CI ran it.
+  - **Campaign vs develop ac1b067:** all 26/26, builtins 5/5, micro 13/13 identical. Geometry gate `about` 73 -> 66 failures (the seven `<kbd>` boxes); every other ratchet line identical.
+  - **At 19:58:** R1 DESIGN CLEAR at 00e32a1. CI green on everything finished (unit-suites, f1-test-compile, pr-swarm 0 to 3, script-guards, selector-key, audit, the Cursor reviewer check); `pr-aggregate` still running; no R2 stamp yet.
+
+**Real-site A/B for #421 (frames only, develop/fix/develop/fix, 14 sites):**
+- **Pixel-identical across arms:** google, wikipedia, lyft, apple, microsoft. bing, linkedin, yahoo and netflix differ only by their own variance (netflix was captured four more times on one binary to check: 2.2% to 4.9% between captures).
+- **x: 10.39% -> 10.08% against Chrome (still a pass).** The headline and the terms line now wrap as Chrome's do, and the footer year reads "2026" (develop spaced it "2 0 2 6").
+- **shopify: 18.69% -> 19.91%. weather: 30.39% -> 30.53%.** Both fail on both arms. Slightly worse by pixel count: see Found 2.
+- facebook 13.55% -> 13.49%, walmart unchanged against Chrome; each moves 0.32% between arms and I did not look at where.
+- Not captured on either arm: github, squarespace, cnn (load). No check changes on any site.
+
+**Found:**
+1. **The first commit regressed `about` and `diff_pct` did not see it.** With the system's fallback ahead of everything, `⏰` and `⌨` got a text face and their lines lost the emoji face's height: 73 -> 165 geometry failures, while all 26 `diff_pct` values stayed identical (the change is below the first viewport). The ratchet output caught it; the second commit keeps the emoji face for its own characters. The receipts are all at the second commit.
+2. **On x, shopify and weather no character is drawn in the site's font.** The web-font file selected for their text lacks ordinary letters, so every character goes through the fallback. On develop that meant letters from Apple Symbols and digits from Apple Color Emoji (checked with a probe); #421 makes it Helvetica. Chrome draws the site's own font. This is the `unicode-range` gap from the 14:25 digest, now with three board sites behind it.
+3. **`new_tab`'s logo is 49px too narrow** (165.66 against Chrome's 214.80) and so sits 24.6px off centre. "HIWAVE" has `letter-spacing: 0.5rem`, and the function that sizes a shrink-to-fit box around text (`text_max_content_width`) does not add letter-spacing. Read in the code, not yet fixed. It is on develop and predates this session.
+4. **The PATH `python3` lost PIL** between the last session (ended 17:29) and 18:45 in this one (it is Homebrew 3.14 now). My scratch A/B and crop tools from earlier sessions fail on import; I wrote a PIL-free A/B. No repo script imports PIL, so the daily quiet board is not affected.
+
+**Not done:**
+- L0 (queue item 5), `::first-letter`, `unicode-range`, inset shadows, a real shadow blur, select sizing under `box-sizing`.
+- A scoring board after #411/#412/#417 (the daily quiet board will take it).
+- `new_tab` shortcut rows 2, 3 and 8 (5px above Chrome): looked at, not fixed. Every child of those three shortcuts is 5px high, which matches the row-height case the L0 design names.
+
+**Next:** (1) anything CI, R1 or R2 ask on #421. (2) Letter-spacing in intrinsic widths (Found 3): small, and it is HiWave's own new-tab logo. (3) `unicode-range` or L0, per decision 1. (4) The emoji-presentation rule (variation selector) for text-default characters.
+
+**Decisions for Pete:**
+1. **`unicode-range` before L0?** The queue says L0 is next. But three board sites (x, shopify, weather) draw none of their text in their own font, and that is what `unicode-range` fixes; L0's targets are HiWave's built-in pages. Recommendation: `unicode-range` first, then L0. If you want the queue order kept, say so and L0 goes first. The 17:28 question about L0's three readings is still open either way.
+2. **#421 makes shopify and weather about 1.2 and 0.15 points worse against Chrome, and x 0.3 better.** All three are the same cause (Found 2): the fallback is now Helvetica, which is what Chrome would use if it had to fall back, but Chrome does not have to. Recommendation: let #421 merge on review; the numbers come back with `unicode-range`. Say so if you would rather it wait.
