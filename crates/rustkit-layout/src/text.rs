@@ -1578,10 +1578,8 @@ impl TextShaper {
             let mut char_idx = 0;
             let mut utf16_idx = 0;
 
-            // Fallback faces this run actually used, lazily created, and
-            // the union of their extents (ascent, descent, leading).
-            let mut fallback_fonts: Vec<(&'static str, Option<core_text::font::CTFont>)> =
-                Vec::new();
+            // The union of the extents (ascent, descent, leading) of the
+            // fallback faces this run actually used.
             let mut used_fallback_extents: Option<(f32, f32, f32)> = None;
 
             while utf16_idx < char_count && char_idx < text_chars.len() {
@@ -1590,7 +1588,7 @@ impl TextShaper {
 
                 // A character the chosen face has no glyph for is shaped by
                 // the SAME fallback face paint will draw it with (rustkit-text
-                // `GLYPH_FALLBACK_FAMILIES`): its real advance, and its face's
+                // `fallback_face_for`): its real advance, and its face's
                 // extents folded into the run's — Blink unites every used
                 // fallback face into the line box under `line-height: normal`
                 // (NGInlineBoxState::AccumulateUsedFonts). Before: the
@@ -1604,7 +1602,7 @@ impl TextShaper {
                     if c.is_whitespace() || c.is_control() {
                         notdef_advance
                     } else {
-                        match Self::fallback_glyph_advance(c, size, &mut fallback_fonts) {
+                        match Self::fallback_glyph_advance(c, &ct_font) {
                             Some((adv, asc, desc, lead)) => {
                                 used_fallback_extents = Some(match used_fallback_extents {
                                     Some((a, d, l)) => (a.max(asc), d.max(desc), l.max(lead)),
@@ -1773,24 +1771,15 @@ impl TextShaper {
         deltas
     }
 
-    /// Advance and face extents for a character the primary face lacks,
-    /// from the first of rustkit-text's `GLYPH_FALLBACK_FAMILIES` that has
-    /// a glyph for it. Faces are created once per run and kept in `fonts`.
-    /// Returns `(advance, ascent, descent, leading)`.
+    /// Advance and face extents for a character `primary` lacks, from the
+    /// face rustkit-text's `fallback_face_for` gives: the one paint draws
+    /// the character from. Returns `(advance, ascent, descent, leading)`.
     #[cfg(target_os = "macos")]
     fn fallback_glyph_advance(
         c: char,
-        size: f32,
-        fonts: &mut Vec<(&'static str, Option<core_text::font::CTFont>)>,
+        primary: &core_text::font::CTFont,
     ) -> Option<(f32, f32, f32, f32)> {
         extern "C" {
-            fn CTFontGetGlyphsForCharacters(
-                font: core_text::font::CTFontRef,
-                characters: *const u16,
-                glyphs: *mut u16,
-                count: isize,
-            ) -> bool;
-
             fn CTFontGetAdvancesForGlyphs(
                 font: core_text::font::CTFontRef,
                 orientation: u32,
@@ -1800,53 +1789,25 @@ impl TextShaper {
             ) -> f64;
         }
 
-        let mut units = [0u16; 2];
-        let unit_count = c.encode_utf16(&mut units).len();
-
-        for family in rustkit_text::macos::GLYPH_FALLBACK_FAMILIES {
-            let slot = match fonts.iter().position(|(name, _)| name == family) {
-                Some(i) => i,
-                None => {
-                    // Same lookup as the painter's `rasterize_fallback`, so
-                    // measure and draw agree on the face.
-                    fonts.push((family, ct_font::new_from_name(family, size as f64).ok()));
-                    fonts.len() - 1
-                }
-            };
-            let Some(font) = fonts[slot].1.as_ref() else {
-                continue;
-            };
-
-            let mut glyph_ids = [0u16; 2];
-            unsafe {
-                // The bool is false when ANY unit lacks a glyph — a surrogate
-                // pair's trailing unit always does — so read the first slot.
-                let _ = CTFontGetGlyphsForCharacters(
-                    font.as_concrete_TypeRef(),
-                    units.as_ptr(),
-                    glyph_ids.as_mut_ptr(),
-                    unit_count as isize,
-                );
-                if glyph_ids[0] == 0 {
-                    continue;
-                }
-                let mut advance = CGSize::new(0.0, 0.0);
-                CTFontGetAdvancesForGlyphs(
-                    font.as_concrete_TypeRef(),
-                    0, // kCTFontOrientationHorizontal
-                    glyph_ids.as_ptr(),
-                    &mut advance,
-                    1,
-                );
-                return Some((
-                    advance.width as f32,
-                    font.ascent() as f32,
-                    font.descent() as f32,
-                    font.leading() as f32,
-                ));
-            }
+        let (font, glyph) = rustkit_text::macos::fallback_face_for(primary, c)?;
+        let mut advance = CGSize::new(0.0, 0.0);
+        // SAFETY: `font` is a live CTFont; one glyph id is read and one
+        // advance written.
+        unsafe {
+            CTFontGetAdvancesForGlyphs(
+                font.as_concrete_TypeRef(),
+                0, // kCTFontOrientationHorizontal
+                &glyph,
+                &mut advance,
+                1,
+            );
         }
-        None
+        Some((
+            advance.width as f32,
+            rustkit_text::macos::blink_ascent(&font),
+            font.descent() as f32,
+            font.leading() as f32,
+        ))
     }
 
     /// Create a Core Text font with specific traits, memoized.

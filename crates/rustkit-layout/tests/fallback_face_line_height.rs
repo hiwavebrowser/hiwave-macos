@@ -57,6 +57,25 @@ fn emoji_takes_the_fallback_face_advance_and_extents() {
     );
 }
 
+/// The fallback face is the one the system's cascade gives for the primary
+/// face, as in Chrome. Courier lacks `⌘`, `←` and `→`; its cascade face is
+/// Menlo, so each is measured at Menlo's advance. A fixed list tried Apple
+/// Symbols first: an `about` `<kbd>⌘</kbd>` was 22.3px wide against
+/// Chrome's 21.23px.
+#[test]
+fn a_symbol_courier_lacks_is_measured_in_its_cascade_face() {
+    let m = |t: &str, family: &str| {
+        measure_text_advanced(t, family, 16.0, FontWeight::NORMAL, FontStyle::Normal).width
+    };
+    for symbol in ["\u{2318}", "\u{2190}", "\u{2192}"] {
+        let menlo = m(symbol, "Menlo");
+        assert_eq!(m(symbol, "Courier"), menlo, "{symbol} in Courier");
+        // `monospace` is Courier, so this is what a `<kbd>` measures.
+        assert_eq!(m(symbol, "monospace"), menlo, "{symbol} in monospace");
+        assert_ne!(m(symbol, "Apple Symbols"), menlo, "{symbol}: the test cannot tell the faces apart");
+    }
+}
+
 #[test]
 fn normal_line_height_unites_the_used_faces_like_chrome() {
     let s16 = style(16.0, LineHeight::Normal);

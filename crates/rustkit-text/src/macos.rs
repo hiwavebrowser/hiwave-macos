@@ -471,6 +471,126 @@ pub const GLYPH_FALLBACK_FAMILIES: &[&str] = &[
     "Menlo",             // code/math symbols
 ];
 
+/// The faces the colour-glyph path draws from, in its order
+/// (`GlyphRasterizer::resolve_color_font`).
+const COLOR_GLYPH_FAMILIES: &[&str] = &["Apple Color Emoji", "Apple Symbols"];
+
+/// The face a character is drawn from when `primary` has no glyph for it,
+/// and its glyph id there. ONE function for layout (which takes the advance
+/// and the face's extents) and paint (which draws the glyph), so both use
+/// the same face.
+///
+/// Chrome asks the system for the fallback of the font in use, and so does
+/// this: `CTFontCreateForString` walks Core Text's cascade list for
+/// `primary`. A fixed list tried in order gave `⌘`, `←` and `→` in Courier
+/// Apple Symbols' advance (22.3 to 22.6px in a 16px `<kbd>`), where the
+/// cascade, and Chrome, give Menlo's (21.23px).
+///
+/// A character on the colour-glyph path (`is_emoji`) keeps that path's own
+/// faces first, because that is where paint draws it from. The fixed list
+/// is the last resort. `None` means no face has the character (Core Text
+/// answers with its LastResort face, which is not a glyph anyone meant).
+pub fn fallback_face_for(primary: &CTFont, ch: char) -> Option<(CTFont, u16)> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    type Key = (String, u32, char);
+    thread_local! {
+        static FOUND: RefCell<HashMap<Key, Option<(CTFont, u16)>>> = RefCell::new(HashMap::new());
+    }
+    const MAX_ENTRIES: usize = 4096;
+
+    let key = (postscript_name_or_empty(primary), (primary.pt_size() as f32).to_bits(), ch);
+    if let Some(hit) = FOUND.with(|m| m.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let found = fallback_face_uncached(primary, ch);
+    FOUND.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MAX_ENTRIES {
+            m.clear();
+        }
+        m.insert(key, found.clone());
+    });
+    found
+}
+
+fn fallback_face_uncached(primary: &CTFont, ch: char) -> Option<(CTFont, u16)> {
+    let size = primary.pt_size();
+    let named = |families: &[&str]| -> Option<(CTFont, u16)> {
+        families.iter().find_map(|name| {
+            let font = font::new_from_name(name, size).ok()?;
+            let glyph = color_glyph_id(&font, ch)?;
+            Some((font, glyph))
+        })
+    };
+
+    if is_emoji(ch) {
+        if let Some(hit) = named(COLOR_GLYPH_FAMILIES) {
+            return Some(hit);
+        }
+    }
+    if let Some(font) = cascade_font(primary, ch) {
+        if let Some(glyph) = color_glyph_id(&font, ch) {
+            return Some((font, glyph));
+        }
+    }
+    named(GLYPH_FALLBACK_FAMILIES)
+}
+
+/// Core Text's cascade face for `ch` under `primary`, at `primary`'s size.
+/// `None` when the answer is the LastResort face.
+fn cascade_font(primary: &CTFont, ch: char) -> Option<CTFont> {
+    use core_foundation::base::CFRange;
+    use core_foundation::string::{CFString, CFStringRef};
+    use core_text::font::CTFontRef;
+
+    extern "C" {
+        fn CTFontCreateForString(
+            current_font: CTFontRef,
+            string: CFStringRef,
+            range: CFRange,
+        ) -> CTFontRef;
+    }
+
+    let mut utf8 = [0u8; 4];
+    let string = CFString::new(ch.encode_utf8(&mut utf8));
+    let range = CFRange::init(0, ch.len_utf16() as isize);
+    // SAFETY: `primary` and `string` are live, and the range is the whole
+    // string in UTF-16 units. The result follows the create rule.
+    let font = unsafe {
+        let raw = CTFontCreateForString(
+            primary.as_concrete_TypeRef(),
+            string.as_concrete_TypeRef(),
+            range,
+        );
+        if raw.is_null() {
+            return None;
+        }
+        CTFont::wrap_under_create_rule(raw)
+    };
+    (postscript_name_or_empty(&font) != "LastResort").then_some(font)
+}
+
+/// A face's PostScript name, or the empty string when it has none (see
+/// `family_name_or_empty`).
+fn postscript_name_or_empty(font: &CTFont) -> String {
+    use core_foundation::string::{CFString, CFStringRef};
+
+    extern "C" {
+        fn CTFontCopyPostScriptName(font: core_text::font::CTFontRef) -> CFStringRef;
+    }
+    // SAFETY: `font` is a live CTFont. The result follows the create rule
+    // and is null when the face has no PostScript name.
+    unsafe {
+        let name = CTFontCopyPostScriptName(font.as_concrete_TypeRef());
+        if name.is_null() {
+            return String::new();
+        }
+        CFString::wrap_under_create_rule(name).to_string()
+    }
+}
+
 pub fn named_font(name: &str, size: f64) -> Option<CTFont> {
     let font = font::new_from_name(name, size).ok()?;
     let want = normalize_name(name);
@@ -992,49 +1112,13 @@ impl GlyphRasterizer {
 
     /// Fallback rasterization for characters without glyphs
     fn rasterize_fallback(&self, ch: char) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
-        // Try fallback fonts for the character — the same faces, in the same
-        // order, that layout shapes such characters with.
-        for font_name in GLYPH_FALLBACK_FAMILIES {
-            if let Ok(fallback_font) = font::new_from_name(font_name, self.font_size as f64) {
-                // Try to get glyph with this fallback font
-                let chars: [u16; 1] = [ch as u16];
-                let mut glyphs: [u16; 1] = [0];
-                
-                unsafe {
-                    use core_text::font::CTFontRef;
-                    
-                    extern "C" {
-                        fn CTFontGetGlyphsForCharacters(
-                            font: CTFontRef,
-                            characters: *const u16,
-                            glyphs: *mut u16,
-                            count: isize,
-                        ) -> bool;
-                    }
-                    
-                    let success = CTFontGetGlyphsForCharacters(
-                        fallback_font.as_concrete_TypeRef(),
-                        chars.as_ptr(),
-                        glyphs.as_mut_ptr(),
-                        1,
-                    );
-                    
-                    if success && glyphs[0] != 0 {
-                        // Found the glyph in this fallback font - rasterize with it
-                        let fallback_rasterizer = GlyphRasterizer {
-                            font: fallback_font.clone(),
-                            font_size: self.font_size,
-                            font_weight: self.font_weight,
-                            font_italic: self.font_italic,
-                        };
-                        if let Some(result) = fallback_rasterizer.rasterize_char_with_font(&fallback_font, ch) {
-                            return Some(result);
-                        }
-                    }
-                }
+        // The face layout shaped this character with (`fallback_face_for`).
+        if let Some((fallback_font, glyph)) = fallback_face_for(&self.font, ch) {
+            if let Some(result) = self.rasterize_glyph_with_font(&fallback_font, glyph) {
+                return Some(result);
             }
         }
-        
+
         // No fallback found - return transparent placeholder
         let (width, height) = estimate_glyph_size(ch, self.font_size);
         let width = width.max(4);
@@ -1047,23 +1131,15 @@ impl GlyphRasterizer {
         Some((bitmap, width, height, advance, 0.0, bearing_y))
     }
     
-    /// Rasterize a character using a specific font (for fallback)
-    fn rasterize_char_with_font(&self, font: &CTFont, ch: char) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
-        let chars: [u16; 1] = [ch as u16];
-        let mut glyphs: [u16; 1] = [0];
-        
+    /// Rasterize glyph `glyph` of a specific font (for fallback)
+    fn rasterize_glyph_with_font(&self, font: &CTFont, glyph: u16) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+        let glyphs: [u16; 1] = [glyph];
+
         unsafe {
             use core_text::font::CTFontRef;
             use std::os::raw::c_void;
-            
+
             extern "C" {
-                fn CTFontGetGlyphsForCharacters(
-                    font: CTFontRef,
-                    characters: *const u16,
-                    glyphs: *mut u16,
-                    count: isize,
-                ) -> bool;
-                
                 fn CTFontGetAdvancesForGlyphs(
                     font: CTFontRef,
                     orientation: u32,
@@ -1090,18 +1166,7 @@ impl GlyphRasterizer {
             }
             
             let font_ref = font.as_concrete_TypeRef();
-            
-            let success = CTFontGetGlyphsForCharacters(
-                font_ref,
-                chars.as_ptr(),
-                glyphs.as_mut_ptr(),
-                1,
-            );
-            
-            if !success || glyphs[0] == 0 {
-                return None;
-            }
-            
+
             let mut advance_size = CGSize::new(0.0, 0.0);
             CTFontGetAdvancesForGlyphs(
                 font_ref,
@@ -1791,6 +1856,56 @@ mod tests {
             r.rasterize_char_color('\u{1F3D4}').expect("color emoji rasterizes");
         assert_eq!(by.fract(), 0.0, "color path bearing_y {by} is not a whole row");
         assert!(by <= h as f32, "color path baseline row {by} is below the bitmap ({h})");
+    }
+
+    /// Courier has no `⌘`, `←` or `→`. Chrome draws them from the face the
+    /// system cascade gives for Courier, which is Menlo; the fixed list gave
+    /// Apple Symbols, whose advances are wider (an `about` `<kbd>` was 22.3
+    /// to 22.6px against Chrome's 21.23px).
+    #[test]
+    fn a_symbol_the_face_lacks_comes_from_the_systems_cascade_face() {
+        let courier = named_font("Courier", 16.0).expect("Courier is installed");
+        for ch in ['\u{2318}', '\u{2190}', '\u{2192}'] {
+            assert!(color_glyph_id(&courier, ch).is_none(), "{ch:?}: Courier has it");
+            let (face, glyph) = fallback_face_for(&courier, ch).expect("a fallback face");
+            assert_eq!(family_name_or_empty(&face), "Menlo", "{ch:?}");
+            assert_eq!(Some(glyph), color_glyph_id(&face, ch), "{ch:?}");
+            assert_eq!(face.pt_size(), 16.0, "{ch:?}: the fallback keeps the size");
+        }
+    }
+
+    /// Paint draws the fallback glyph from that same face: the advance the
+    /// rasteriser reports is Menlo's, not Apple Symbols'.
+    #[test]
+    fn the_rasteriser_draws_a_missing_symbol_from_the_cascade_face() {
+        let menlo = GlyphRasterizer::with_style("Menlo", 16.0, 400, false);
+        let courier = GlyphRasterizer::with_style("Courier", 16.0, 400, false);
+        for ch in ['\u{2318}', '\u{2190}', '\u{2192}'] {
+            let (_, _, _, want, ..) = menlo.rasterize_char(ch, 0.0).expect("Menlo has it");
+            let (bitmap, _, _, got, ..) = courier.rasterize_char(ch, 0.0).expect("rasterizes");
+            assert!(bitmap.iter().any(|&v| v > 0), "{ch:?}: no ink");
+            assert_eq!(got, want, "{ch:?}: advance is not Menlo's");
+        }
+    }
+
+    /// The colour-glyph path's faces still come first for its characters, a
+    /// character outside the BMP is looked up as itself, and a character no
+    /// face has is `None`, not Core Text's LastResort box.
+    #[test]
+    fn fallback_keeps_emoji_faces_and_refuses_the_last_resort_face() {
+        let helvetica = named_font("Helvetica", 16.0).expect("Helvetica is installed");
+        for ch in ['\u{2615}', '\u{1F3AF}'] {
+            let (face, glyph) = fallback_face_for(&helvetica, ch).expect("an emoji face");
+            assert_eq!(family_name_or_empty(&face), "Apple Color Emoji", "{ch:?}");
+            assert_ne!(glyph, 0);
+        }
+        // U+0378 is unassigned: only LastResort answers for it.
+        assert!(fallback_face_for(&helvetica, '\u{0378}').is_none());
+        // Asked twice, the answer is the same (the second is the memo's).
+        let first = fallback_face_for(&helvetica, '\u{6F22}').map(|(f, g)| (f.postscript_name(), g));
+        let again = fallback_face_for(&helvetica, '\u{6F22}').map(|(f, g)| (f.postscript_name(), g));
+        assert!(first.is_some(), "a CJK face");
+        assert_eq!(first, again);
     }
 
     #[test]
