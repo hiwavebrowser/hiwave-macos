@@ -13598,3 +13598,267 @@ duration says anything about the change.
    `own_min_content_width` has no flex arm on the **column** cross axis beyond
    what the generic walk gives — correct today, but the two functions have now
    been one defect apart four times.
+
+## 2026-10-01
+
+**Metric: `3/26` on macOS, carried forward. On THIS SEAT the metric is now
+`UNMEASURABLE`, and that is tonight's work rather than a regression.** The
+Linux trench seat's `TextShaper::shape` is a stub. It assigns `font_size * 0.5`
+to every ASCII character, reads no font, and returns `Ok`. Fifty-seven nights
+of Gate A boards from this seat were read as RustKit box-math deltas; 94.14% of
+them are in a direct relationship with that constant. Gate A, and the receipt,
+now refuse to attribute such a board instead of printing a confident number.
+
+macOS is unaffected by the change in either direction: there the backend is
+Core Text, every case is attributable, and all four columns score exactly as
+before. `3/26` last measured by
+[run 36674733208](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36674733208)
+on 09-30 against #372. `develop` is now `b946849`, #373..#390 later, so the
+carry-forward states what I know and not that the number is still 3.
+
+**P-item: the queue had no recorded next unit, so I picked from Gate A as
+09-30 instructed — and the pick was wrong, which is how the night's actual
+unit was found.** The instrument unit is **COMPLETE**. No parity defect was
+fixed, and none should have been.
+
+### What happened, in the order it happened
+
+09-30 closed with "pick from Gate A directly; `settings` is the largest
+geometry row by a wide margin" and "run `n67_confound_census.py` first". I did
+both. The census reproduced night 67's reading exactly — 273 of 1593 elements
+agree between the two Chromes on all four axes, and `settings`' `y` column is
+confounded on 186 of 189 elements.
+
+Rather than rule columns out by census, I ran Gate A a second time against the
+**seat control** (`PARITY_BASELINE_SET=seat-control`), which is what
+`capture_seat_control.mjs`'s own header says to do: `Δ_real = RustKit_seat −
+Chrome_seat`, both sides on the seat's own fonts. That looked like a strictly
+better instrument than the census, and it gave 2419 failures of which 2359 fail
+against both Chromes.
+
+Reducing those to **root** boxes — a failing box all of whose ancestors are
+green on the same axis, because a displaced parent hands its offset to every
+descendant — gave 839 roots, and grouping roots by their repeated delta gave
+the loudest thing I have seen on this board:
+
+```
+     x    +2.906  n=41   form-controls:11 pseudo-classes:11 gradients:7 backgrounds:6 rounded-corners:6
+     x    +5.812  n=29   pseudo-classes:10 gradients:7 backgrounds:6 rounded-corners:6
+     x    +8.719  n=10   pseudo-classes:5 rounded-corners:5
+```
+
+5.812 is 2 × 2.906 and 8.719 is 3 × 2.906. One constant, accumulating per
+sibling, on 80 root boxes across five unrelated pages. The fixtures are
+`display: inline-block` boxes one per source line, so the accumulating quantity
+is the collapsed whitespace between them, and the arithmetic closes exactly:
+
+| | inter-box space |
+|---|---:|
+| RustKit | **8.0000** |
+| Chrome, this seat (DejaVu Sans) | 5.0938 |
+| Chrome, macOS baseline | 4.1875 |
+
+8.0 is `0.5 × 16px`. I was one step from writing a unit called "the collapsed
+space advance is a hardcoded 0.5em".
+
+### The defect is not in layout. It is the seat's shaper.
+
+`collapsed_space_width` in `grid.rs` is correct — it asks the shaper. So I asked
+the shaper directly, for four families, one of which is not installed:
+
+```
+fam=system-ui, sans-serif  space=  8.0000 mm= 16.0000 shape_ok=true glyph_adv=Some([8.0])
+fam=sans-serif             space=  8.0000 mm= 16.0000 shape_ok=true glyph_adv=Some([8.0])
+fam=DejaVu Sans            space=  8.0000 mm= 16.0000 shape_ok=true glyph_adv=Some([8.0])
+fam=Arial                  space=  8.0000 mm= 16.0000 shape_ok=true glyph_adv=Some([8.0])
+```
+
+A space and an `m` cannot have the same advance in any real face, and an
+uninstalled family cannot measure the same as an installed one. The source is
+`crates/rustkit-layout/src/text.rs:1635`, the third body of `shape`:
+
+```rust
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn shape(...) -> Result<ShapedRun, TextError> {
+    // Simplified shaping for other platforms
+    let avg_char_width = size * 0.5;
+    ...
+    let advance = if c.is_ascii() { avg_char_width } else { size };
+```
+
+**It returns `Ok`.** There is no error, no warning, and no field in `layout.json`
+that differs from a capture that really shaped. `shape_text_metrics` has a
+fallback branch for `Err(_)`, and it has never been reached on this seat.
+
+The consequence is bigger than "text is wrong here". The **seat control exists
+to subtract exactly this class of confound** by putting the seat's own fonts on
+both sides — and it cannot, because RustKit's side has no fonts in it at all.
+`Δ_real` is not a RustKit box-math defect wherever text feeds the box. I built a
+sharper instrument on top of a broken one and it reported the break as a
+finding.
+
+### Measured exposure — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+```
+  Gate A, pinned baseline:  2577 geometry failures, 8 join, 3/26 green
+     own   (box's own subtree contains text)         2121   82.31%
+     flow  (a preceding sibling's subtree does)       305   11.84%
+     neither of those two direct relations            151    5.86%
+```
+
+The 5.86% is **not** a clean remainder and the gate's docstring says so:
+intrinsic sizing propagates a text measurement upward through any ancestor, and
+the classifier does not model that. It is why the stub makes a whole capture
+unattributable rather than merely its text rows.
+
+Corroboration from a direction I did not plan: the three `rustkit-layout`
+failures that 09-29 and 09-30 recorded as "the same three that fail on
+unmodified `develop`" are `a_long_first_run_keeps_its_last_line_open_for_the_next_sibling`,
+`bare_control_widths_match_chrome` and
+`justified_wrapped_lines_fill_the_container_except_the_last`. **All three are
+text-metric tests.** They have been carried as seat noise for at least three
+nights; they are the stub, failing honestly, in the one place that did report it.
+
+### Commits
+
+On `atlas/n71-text-metric-provenance` (off `develop`, PR to follow):
+
+- `dd075ec` — a capture declares which shaper produced its advances, and Gate A
+  and the receipt refuse to attribute one that came from no font.
+
+On this branch:
+
+- this commit — this digest entry and `trench/tools/n71_{attributable_board,
+  root_defects,root_classes,stub_shaper_census,mutation_sweep}.py`.
+
+### What the change does
+
+1. `TEXT_SHAPER_BACKEND` and `TEXT_METRICS_ARE_FONT_DERIVED` in
+   `rustkit-layout::text` name the compiled backend. Nothing branches on them;
+   they are provenance, not a feature flag.
+2. `export_layout_json` emits both into `layout.json`. Extracted as
+   `layout_export_wrapper` so it can be asserted on directly.
+3. Gate A reports `text_backend`, a per-failure `text_exposure` of `own`/`flow`/
+   absent, a per-case `attributable`, and a loud NOT-ATTRIBUTABLE banner. Its
+   `gate_passes` **cannot return PASS** on an unattributable board.
+4. `finish_line_receipt.py` scores an unattributable geometry column
+   **UNMEASURED** with reason `text_metrics_not_font_derived` — not RED, because
+   the stub can mask a defect as easily as invent one, and red would claim
+   RustKit got something wrong.
+
+Two things it deliberately does NOT do. It does not change
+`geometry_failures`: that count stays exactly what fifty nights of digests and
+the ratchet's committed floors measured, and netting exposure out of it would
+make all of them incomparable while looking like an improvement. And it does not
+fix the Linux shaper — see decision 2.
+
+### Stop rule
+
+Did not fire, by arithmetic. All 26 `layout.json` **roots** and all 26
+`frame.ppm` are **bit-identical** before and after, verified by hash, so no
+oracle moved in either direction and there is no trade to revert. The only new
+bytes in a capture are the two provenance keys.
+
+### Mutation-check results
+
+**19 probes, 19 RED**, control green before and after, all 19 anchors verified
+to occur exactly once before any replacement, and every one of the 7 guards
+killed by at least one probe.
+
+| probe | what it removes | caught by |
+|---|---|---|
+| M1 | the stub build CLAIMS font-derived advances | `the_declared_backend_matches_what_shaping_actually_does` |
+| M2 | the stub build NAMES itself `coretext` | same |
+| M3 | the export drops `text_backend` | `the_layout_export_declares_its_text_shaper` |
+| M4 | the export drops `text_metrics_font_derived` | same |
+| M5 | the export writes the boolean as a STRING | same |
+| M6 | an absent provenance field reads as font-derived | `test_a_capture_that_declares_no_provenance_is_not_trusted` |
+| M7 | a non-boolean value reads as a yes | same |
+| M8 | `gate_passes` stops refusing an unattributable board | `test_a_stub_shaper_capture_can_never_be_green_even_with_zero_failures` |
+| M9 | `attributable` treats "did not say" as a yes | `test_a_capture_that_declares_no_provenance_is_not_trusted` |
+| M10 | the exposure classifier also claims mere ancestry | `test_text_exposure_claims_downward_and_sideways_but_never_ancestry` |
+| M10b | …claims every box | same |
+| M11 | …drops the FLOW relation | same |
+| M11b | FLOW reads a preceding text BOX, not a preceding subtree | same |
+| M12 | OWN narrows to a direct text child only | same |
+| M12b | OWN dropped entirely | same |
+| M13 | the headline failure count is NETTED of exposure | `test_the_exposure_count_never_silently_corrects_the_failure_count` |
+| M14 | the receipt stops refusing an unattributable column | `test_a_stub_shaper_board_produces_no_n_over_26_at_all` |
+| M15 | the receipt scores it RED instead of UNMEASURED | same |
+| M16 | the receipt reads "did not say" as font-derived | same |
+
+**Two survivors on the first two sweeps, and both are the same shape as the
+four the digest has already named — the guard written against the example
+rather than against the rule.**
+
+- **M10 survived**, and the mutation was *correct*. My `own` relation claimed a
+  direct text child only, so widening it to "text anywhere beneath" left every
+  test green. The narrow rule was both unguarded and wrong: a box two levels
+  above its text still takes its content size from that text. The relation that
+  must be excluded is **ancestry** (upward), not depth (downward). I changed the
+  rule, not the test, and the guard now asserts a depth-2 descendant IS claimed
+  and an ancestry-only box is NOT.
+- **M16 survived** because the receipt's fixture builder always sets
+  `attributable`, so no guard could tell `is not True` from `is False`. The
+  shape that matters is the one most likely to be met in the wild: every
+  `gate-a.json` written in the 57 nights before tonight has no such key at all.
+  Closed by building a board with the keys **deleted**.
+
+The checklist item 08-12 proposed and 09-30 restated — *after writing the
+guards, ask which line of the change no assertion would miss* — caught neither
+of these. The sweep did, twice, and the `killed_by` table is what made the
+second one legible. I am recording that the checklist is not working as a
+substitute for the sweep.
+
+### Tests
+
+`cargo test -p rustkit-layout --lib`: **563 passed, 3 failed** — the same three
+by name as on unmodified `develop` (09-29, 09-30), and now explained rather than
+carried: all three are text-metric tests and the stub is why they fail.
+`cargo test -p rustkit-engine --lib`: **227 passed, 9 failed** with the
+SwiftShader ICD, A/B-verified against unmodified `develop` as the same nine.
+`scripts/tests/test_layout_oracle_gate.py`, `test_finish_line_receipt.py`,
+`test_paint_oracle_gate.py`, `test_instrument_not_a_score.py`,
+`test_seat_control_is_not_a_receipt.py`, `test_ratchet_gate.py`,
+`test_aggregate_provenance.py`: all PASS.
+
+### Decisions needed from Pete
+
+1. **Three of five nights' "largest defect" claims from this seat have now been
+   retracted on measurement** (09-29's flex factors, tonight's 0.5em space, and
+   by implication every text-exposed row before them); should this seat stop
+   proposing units from Gate A magnitudes altogether and work only from the
+   macOS `gate-a.json`, which needs decision 3?
+2. **Wiring a real font shaper into the Linux `shape` body would make this seat
+   measure again** — but the plan scopes the campaign to macOS and bans
+   cross-platform ports, and it is a large change to the text stack. Hold, or
+   authorise it as seat infrastructure?
+3. Unchanged, sixth night running: allow `*.blob.core.windows.net` so a night
+   here can read the macOS `gate-a.json` and Gate C's board. With decision 1 it
+   stops being a convenience and becomes the only way this seat picks a unit.
+
+### Surprises
+
+- **The loudest, cleanest, most reproducible signal on the board was the
+  instrument.** 80 root boxes, five unrelated pages, exact integer multiples of
+  one constant, arithmetic closing to four decimal places. Every property I have
+  learned to read as "this is a real defect, go fix it" was present. The thing
+  that caught it was asking the shaper a question whose answer I could predict
+  from a font file — `" "` and `"m"` cannot have the same advance — rather than
+  asking layout why it produced 8.0.
+- **An uninstalled family measures the same as an installed one, and nothing
+  anywhere noticed.** The probe asked for `Arial`, which is not on this seat,
+  and got the same numbers as `DejaVu Sans`. That single comparison is cheaper
+  than everything else I did tonight and would have ended the campaign's
+  Linux-seat ambiguity on night 4.
+- **Tonight's seat control made things worse, not better.** It is a more
+  careful instrument than the census and it produced a more confident wrong
+  answer, because its one assumption — that both sides read the seat's fonts —
+  is false on the side it was built to measure. A better instrument on a broken
+  foundation is not safer; it is more persuasive.
+- **The three carried `rustkit-layout` failures were the stub reporting
+  itself.** Three nights of entries called them seat noise and moved on. The
+  repository's own tests had the finding before any of my tooling did.
+- `Err(_)` in `shape_text_metrics` has a careful fallback that recomputes
+  letter- and word-spacing by hand. It is unreachable on this seat, because the
+  stub it exists to stand in for is what `Ok` returns.

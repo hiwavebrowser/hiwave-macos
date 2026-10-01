@@ -302,3 +302,74 @@ its own PR — then continue instrument work here. Nights 7 and 9 put engine
 commits here; the split cost a manual cherry-pick rebuild (atlas/p0-instrument)
 and three seats' review time. The night-1 "work on this branch" instruction is
 superseded by this rule wherever the two conflict.
+
+## Seat law (added 2026-10-01, night 71)
+
+**This seat does not shape text, and until it does, no geometry taken here
+attributes to RustKit.**
+
+`TextShaper::shape` (`crates/rustkit-layout/src/text.rs:1635`) has three
+bodies. The one compiled on any target that is neither Windows nor macOS
+assigns `font_size * 0.5` to every ASCII character, `font_size` to every wider
+one, reads no font, and **returns `Ok`**. Nothing detects it: the `Err(_)`
+fallback in `shape_text_metrics` is unreachable here, and a `layout.json` from
+this seat was byte-indistinguishable from one that really shaped.
+
+The wording this supersedes is the Gate A row above — *"Linux font stack, not
+CoreText"*. That is too kind by a category. There is no font stack on this
+seat's RustKit side at all. Measured: `shape(" ")`, `shape("mm")` and
+`shape("iiii")` return 8.0, 16.0 and 32.0 for every family asked, **including
+`Arial`, which is not installed**.
+
+What it costs, measured on the 26 gating cases at `develop b946849`:
+
+| | |
+|---|---|
+| Gate A geometry failures | 2577 |
+| …**text-exposed** (own 2121 + flow 305) | **2426 — 94.14%** |
+| …neither relation, and still not clean (intrinsic sizing propagates upward) | 151 |
+| RustKit inter-inline-block space | 8.0000px |
+| Chrome, this seat / macOS baseline | 5.0938px / 4.1875px |
+
+**The seat control does not fix this and makes it worse.**
+`capture_seat_control.mjs` exists to subtract the platform confound by putting
+the seat's own fonts on both sides, and it cannot: RustKit's side has no fonts
+in it. `Δ_real = RustKit_seat − Chrome_seat` is therefore *more* persuasive and
+no more true than the census it refines. Night 71 followed it to an 80-root,
+five-page defect class whose deltas were exact integer multiples of one
+constant — every property that reads as a real finding — and all of it was the
+stub. **A better instrument on a broken foundation is not safer.**
+
+So, as of `dd075ec`, the instrument refuses rather than reporting: Gate A
+cannot return PASS on a capture whose advances came from no font, and
+`finish_line_receipt.py` scores such a geometry column **UNMEASURED
+(`text_metrics_not_font_derived`)** rather than RED — the stub can mask a
+defect as easily as invent one, so RED would be a claim about RustKit that this
+board cannot support in either direction.
+
+Corollary, and it is the useful half: **three of the `rustkit-layout` test
+failures carried as "seat noise" since at least 09-29 are the stub reporting
+itself** — `a_long_first_run_keeps_its_last_line_open_for_the_next_sibling`,
+`bare_control_widths_match_chrome`,
+`justified_wrapped_lines_fill_the_container_except_the_last`. All three are
+text-metric tests. The repository's own suite had the finding before any
+bespoke tooling did, and three nights of entries called it noise.
+
+**Unresolved and awaiting Pete (night 71 decisions 1–3):** whether this seat
+may propose units from Gate A magnitudes at all; whether a real font shaper may
+be wired into the Linux body as seat infrastructure despite the macOS-only
+scope and the cross-platform-port ban; and the `*.blob.core.windows.net`
+allowance, asked six nights running, which under decision 1 stops being a
+convenience and becomes the only way this seat picks a unit.
+
+### Latent, found while reading the corpus, nobody's unit
+
+`baselines/common/parity-reset.css` declares four `@font-face` rules for a
+bundled `ParityTest` family (Noto Sans, committed under
+`baselines/common/fonts/`) — and **nothing in the corpus ever uses that
+family.** The `src` is also root-absolute (`/baselines/common/fonts/...`), so
+under a `file://` capture it resolves outside the repo and RustKit logs four
+`could not read local font file` warnings per case. Wiring it up would put the
+same font file on both sides on every seat and remove the font half of the
+confound everywhere — but it would also invalidate all 26 committed baselines,
+and corpus changes are banned from this loop. Recorded, not touched.
