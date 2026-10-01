@@ -1,0 +1,14 @@
+RustKit frames only, no Chrome and no scoring: each URL captured develop, fix, develop, fix (`frames_ab.py`), so a site's own variance shows next to the change. Machine load was 13 to 19 throughout, which is why some captures failed.
+
+| site | develop vs develop | fix vs fix | develop vs fix | what changed |
+|---|---|---|---|---|
+| facebook | one develop capture failed | 0.00% | 0.11% | the login inputs and buttons are rounded |
+| x | 0.00% | 0.00% | 0.03% | four 11px corners of one box |
+| shopify | 0.00% | 0.00% | 0.02% | the hero's pill button |
+| lyft | 38.56% (one develop capture differs) | 0.00% | 0.00% against the matching develop capture | nothing |
+| google | 3.75% (two search-box variants) | 3.75% | 0.00 to 0.01% within a variant | nothing visible |
+| apple | failed | failed | 0.00% on the one pair that loaded | nothing |
+
+facebook is the one worth reading. Its display list on develop has the email and password boxes as `solid_color` 536x60 with square strips for the border; on this branch they are `rounded_rect` with 16px corners and a rounded clip, and the buttons below get 22px. The page was declaring those radii in a form develop dropped. Every change found is a corner; nothing moved.
+
+No board points are claimed. A scoring run was not taken: at this load the Chrome oracle's screenshots time out (last session's A/B was unusable for that reason), and a change of 0.1% of a frame cannot move LOOKS RIGHT on a site that is 13.5% from Chrome. The next quiet daily board on develop is the measurement.

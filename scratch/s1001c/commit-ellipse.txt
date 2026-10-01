@@ -1,0 +1,37 @@
+fix(css, layout, renderer, engine): elliptical corners — two radii per corner from parse to paint
+
+border-radius kept one scalar per corner. `50px / 25px` painted its
+horizontal half as a circle, a two-value longhand was dropped, a
+percentage resolved against the width on both axes, and every rasteriser
+cut each radius to half the shorter side instead of applying the overlap
+reduction.
+
+- rustkit-css: `CornerRadius { horizontal, vertical }` on the four
+  computed radius fields.
+- rustkit-engine: the shorthand reads `h / v` (each side expanded 1-4),
+  longhands take one or two values, the flow-relative longhands map to
+  the physical corners of an ltr horizontal box. Parentheses are kept
+  whole when splitting; a negative radius is invalid.
+- rustkit-layout: `BorderRadius` holds a `CornerRadius { h, v }` per
+  corner. `border_radius_px` resolves h against the border box width and
+  v against its height, then `fitted` applies CSS Backgrounds 3 §5.5:
+  one factor for all eight radii. The overflow clip's inner radius is
+  inset per axis by the border beside it (§5.2).
+- rustkit-renderer: fill, border, gradient cells and the rounded clip
+  draw quarter ellipses and share one edge-distance function. The four
+  copies of `min(r, w/2, h/2)` are gone; each calls `fitted`. The fill
+  paints its interior as bands, so unequal corners leave no hole and a
+  translucent fill is never painted twice. A clip under a non-uniform
+  scale scales each axis of its radius.
+- Display-list JSON keeps the scalar radius keys (horizontal) and adds
+  `vertical`.
+
+A circular corner takes the same arithmetic as before: four equal radii
+fit to exactly half the shorter side, and the edge distance has an exact
+circle path.
+
+Not in this change: box-shadow corners (the shadow carries no radius
+today), rounded clipping of images and glyphs, `vw`/`vh` radii, and
+logical radii under other writing modes.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

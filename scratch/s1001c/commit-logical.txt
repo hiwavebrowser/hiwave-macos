@@ -1,0 +1,18 @@
+fix(engine): flow-relative border properties map to the physical sides
+
+`border-inline-*` and `border-block-*` had no arms, so a declaration
+written with them was dropped. StyleX and Tailwind v4 emit them:
+facebook's login inputs painted a top and a bottom border and no left or
+right one.
+
+`logical_to_physical` gains the per-side shorthands and longhands
+(`border-inline-start`, `border-block-end-width`, ...), the two-value
+`border-inline-width|style|color` and `border-block-*` forms, and
+`border-inline` / `border-block`, whose whole value goes to both sides.
+A two-value logical shorthand is now split at top-level whitespace, so
+`rgb(1, 2, 3)` is one value (this also fixes `margin-inline:
+calc(1px + 2px)`, which was dropped as three values).
+
+Horizontal-tb, ltr only, as for the margin, padding and inset names.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

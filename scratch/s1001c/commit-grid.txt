@@ -1,0 +1,16 @@
+fix(renderer): lay a corner's pixel grid from the box's outer edge
+
+A right or bottom corner's cells were laid from the corner box's inner
+corner. With a whole-pixel radius that is the same grid as the outer
+edge's. With a fractional one (`25%` of 150px is 37.5px) it sits half a
+pixel off: the pixels along the outer edge were measured on the curve
+instead of inside it and painted half transparent, a notch in the side
+where the corner ends.
+
+`corner_cells` lays the grid from the outer edge for all four corners
+and cuts the cell that crosses the box's inner end, so that pixel is
+painted once (the old loop let it stick out under the strip beside it).
+The fill and the border share it. A whole-pixel box gets the same cells
+as before.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

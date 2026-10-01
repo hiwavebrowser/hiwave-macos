@@ -1,0 +1,17 @@
+test(layout): font-resolve cache tests no longer race other tests' web-font installs
+
+The web-font generation is process-wide and several tests in this crate
+install a set. `a_new_web_font_set_invalidates_the_cache` judged "the
+second shape is a cache hit" unconditionally, so an install on another
+test thread between its two shapes failed it; and
+`a_font_is_resolved_once_not_once_per_shape` allowed for one bump when
+there can be several. On develop f16ad4e the parallel suite failed one of
+the two on 4 runs out of 4 at machine load 14 (579/580); each passes
+alone.
+
+The first now judges the hit only when the generation held still, the
+way `a_new_web_font_set_invalidates_shaped_runs` already does. The
+second counts the bumps that happened during its loop and allows two
+resolutions for each. Test code only.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
