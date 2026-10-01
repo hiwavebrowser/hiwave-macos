@@ -5982,6 +5982,34 @@ impl CornerRadius {
             inner
         }
     }
+
+    /// The radii of a shadow's corner when the box's shape is grown by
+    /// `spread` px, or shrunk by a negative one (CSS Backgrounds 3 §6.1.1).
+    ///
+    /// A radius grows by the spread. One smaller than the spread grows by
+    /// less, `spread * (1 + (r / spread - 1)^3)`, so a nearly square corner
+    /// stays nearly square and a square one stays square.
+    pub fn spread(&self, spread: f32) -> Self {
+        if self.is_zero() || spread == 0.0 {
+            return *self;
+        }
+        let grow = |r: f32| {
+            if spread > 0.0 && r < spread {
+                r + spread * (1.0 + (r / spread - 1.0).powi(3))
+            } else {
+                (r + spread).max(0.0)
+            }
+        };
+        let out = Self {
+            h: grow(self.h),
+            v: grow(self.v),
+        };
+        if out.is_zero() {
+            Self::default()
+        } else {
+            out
+        }
+    }
 }
 
 /// Border radius values for each corner.
@@ -6092,6 +6120,17 @@ impl BorderRadius {
             bottom_left: scale(self.bottom_left),
         }
     }
+
+    /// The radii of this shape grown by `spread` px on every side: the
+    /// corners of a box shadow (see `CornerRadius::spread`).
+    pub fn spread(&self, spread: f32) -> Self {
+        Self {
+            top_left: self.top_left.spread(spread),
+            top_right: self.top_right.spread(spread),
+            bottom_right: self.bottom_right.spread(spread),
+            bottom_left: self.bottom_left.spread(spread),
+        }
+    }
 }
 
 /// A paint command for rendering.
@@ -6189,6 +6228,10 @@ pub enum DisplayCommand {
         color: Color,
         /// Box rectangle (shadow is drawn outside this box, or inside if inset)
         rect: Rect,
+        /// The box's used border-box corner radii. The shadow's shape is
+        /// this shape moved and spread, and an outer shadow is clipped to
+        /// outside this shape (CSS Backgrounds 3 §6.1).
+        border_radius: BorderRadius,
         /// Whether this is an inset shadow
         inset: bool,
     },
@@ -7120,7 +7163,11 @@ impl DisplayList {
 
     /// Render box shadows (must be called before background).
     fn render_box_shadows(&mut self, layout_box: &LayoutBox) {
+        if layout_box.style.box_shadows.is_empty() {
+            return;
+        }
         let box_rect = layout_box.dimensions.border_box();
+        let border_radius = self.border_radius_px(layout_box);
 
         // Render outer shadows first (in order, first shadow is top-most)
         for shadow in &layout_box.style.box_shadows {
@@ -7132,6 +7179,7 @@ impl DisplayList {
                     spread_radius: shadow.spread_radius,
                     color: shadow.color,
                     rect: box_rect,
+                    border_radius,
                     inset: false,
                 });
             }
@@ -7140,7 +7188,11 @@ impl DisplayList {
 
     /// Render inset box shadows (called after background).
     fn render_inset_shadows(&mut self, layout_box: &LayoutBox) {
+        if layout_box.style.box_shadows.is_empty() {
+            return;
+        }
         let box_rect = layout_box.dimensions.border_box();
+        let border_radius = self.border_radius_px(layout_box);
 
         for shadow in &layout_box.style.box_shadows {
             if shadow.is_visible() && shadow.inset {
@@ -7151,6 +7203,7 @@ impl DisplayList {
                     spread_radius: shadow.spread_radius,
                     color: shadow.color,
                     rect: box_rect,
+                    border_radius,
                     inset: true,
                 });
             }
@@ -9916,6 +9969,28 @@ mod tests {
             "a 14px border swallows the 12px vertical radius: that corner is square"
         );
         assert_eq!(radius.bottom_left, CornerRadius::default());
+    }
+
+    /// CSS Backgrounds 3 §6.1.1: a shadow's corner radius is the box's plus
+    /// the spread, less for a radius smaller than the spread, and a square
+    /// corner stays square.
+    #[test]
+    fn a_shadows_corner_radius_grows_with_the_spread() {
+        let corner = CornerRadius { h: 20.0, v: 10.0 };
+        assert_eq!(corner.spread(6.0), CornerRadius { h: 26.0, v: 16.0 });
+        assert_eq!(corner.spread(0.0), corner);
+        assert_eq!(CornerRadius::default().spread(6.0), CornerRadius::default());
+
+        // r = 2 under a 10px spread: 2 + 10 * (1 + (0.2 - 1)^3) = 6.88.
+        let small = CornerRadius::circular(2.0).spread(10.0);
+        assert!((small.h - 6.88).abs() < 1e-4 && (small.v - 6.88).abs() < 1e-4, "{small:?}");
+
+        // A negative spread shrinks the curve, and squares it at zero.
+        assert_eq!(corner.spread(-4.0), CornerRadius { h: 16.0, v: 6.0 });
+        assert_eq!(corner.spread(-10.0), CornerRadius::default());
+
+        let all = BorderRadius::uniform(8.0).spread(4.0);
+        assert_eq!(all, BorderRadius::uniform(12.0));
     }
 
     #[test]

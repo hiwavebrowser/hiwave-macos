@@ -2125,10 +2125,12 @@ impl Renderer {
                 spread_radius,
                 color,
                 rect,
+                border_radius,
                 inset,
             } => {
                 self.draw_box_shadow(
                     *rect,
+                    *border_radius,
                     *offset_x,
                     *offset_y,
                     *blur_radius,
@@ -3066,9 +3068,14 @@ impl Renderer {
     /// - Outer shadows: semi-transparent rectangles with increasing offsets,
     ///   clipped to outside the border box (`outer_shadow_paint_rects`)
     /// - Inset shadows: Draw gradient-like rectangles inside the box
+    ///
+    /// `radius` is the box's border-box corner radii. An outer shadow takes
+    /// its shape from them; an inset shadow does not use them yet.
+    #[allow(clippy::too_many_arguments)]
     fn draw_box_shadow(
         &mut self,
         rect: Rect,
+        radius: rustkit_layout::BorderRadius,
         offset_x: f32,
         offset_y: f32,
         blur_radius: f32,
@@ -3104,7 +3111,15 @@ impl Renderer {
         }
 
         if !inset {
-            for (r, alpha) in Self::outer_shadow_paint_rects(rect, shadow_rect, blur_radius, color.a) {
+            let shadow_radius = radius.spread(spread_radius);
+            for (r, alpha) in Self::outer_shadow_paint_rects(
+                rect,
+                radius,
+                shadow_rect,
+                shadow_radius,
+                blur_radius,
+                color.a,
+            ) {
                 self.draw_solid_rect(r, Color::new(color.r, color.g, color.b, alpha));
             }
             return;
@@ -3144,10 +3159,16 @@ impl Renderer {
     /// is approximated by expanding layers, outermost first. Each layer is
     /// clipped to outside the border box (CSS Backgrounds 3 §7.1), so a
     /// transparent box shows what is behind it, not its own shadow.
-    /// Rounded corners are not modelled: the hole is the square border box.
+    ///
+    /// `box_radius` is the border box's corner radii and `shadow_radius` the
+    /// shadow shape's (the box's, spread). The hole follows the box's curve
+    /// and each layer its own, grown with the layer; a square box gets
+    /// exactly the rects it always did.
     fn outer_shadow_paint_rects(
         border_box: Rect,
+        box_radius: rustkit_layout::BorderRadius,
         shadow_rect: Rect,
+        shadow_radius: rustkit_layout::BorderRadius,
         blur_radius: f32,
         alpha: f32,
     ) -> Vec<(Rect, f32)> {
@@ -3164,15 +3185,20 @@ impl Renderer {
                         shadow_rect.width + expansion * 2.0,
                         shadow_rect.height + expansion * 2.0,
                     ),
+                    shadow_radius.spread(expansion),
                     alpha / (steps as f32 * 1.5),
                 ));
             }
         } else {
-            layers.push((shadow_rect, alpha));
+            layers.push((shadow_rect, shadow_radius, alpha));
         }
         layers
             .into_iter()
-            .flat_map(|(r, a)| Self::rect_minus(r, border_box).into_iter().map(move |p| (p, a)))
+            .flat_map(|(r, radius, a)| {
+                rounded_difference_pieces(r, radius, border_box, box_radius)
+                    .into_iter()
+                    .map(move |(p, coverage)| (p, a * coverage))
+            })
             .collect()
     }
 
@@ -5240,30 +5266,30 @@ impl Renderer {
                         .and_then(|a| a.get(char_idx).copied())
                         .unwrap_or(entry.advance);
 
-                    let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) = self
-                        .textured_corners(
+                    for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                        .textured_pieces(
                             Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
                             entry.tex_coords,
                         )
-                    else {
-                        continue;
-                    };
-
-                    // White vertex color: the blit pipeline multiplies, so this
-                    // passes the emoji's own colors through untinted. Preserve
-                    // the run's alpha for opacity/fade.
-                    let cw = [1.0, 1.0, 1.0, color.a];
-                    let base = self.color_glyph_vertices.len() as u32;
-                    self.color_glyph_vertices.extend_from_slice(&[
-                        TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
-                        TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
-                        TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
-                        TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
-                    ]);
-                    self.color_glyph_indices.extend_from_slice(&[
-                        base, base + 1, base + 2,
-                        base, base + 2, base + 3,
-                    ]);
+                    {
+                        // White vertex color: the blit pipeline multiplies, so this
+                        // passes the emoji's own colors through untinted. Preserve
+                        // the run's alpha for opacity/fade. The emoji is
+                        // premultiplied, so a rounded clip's partial coverage
+                        // scales every channel.
+                        let cw = [coverage, coverage, coverage, color.a * coverage];
+                        let base = self.color_glyph_vertices.len() as u32;
+                        self.color_glyph_vertices.extend_from_slice(&[
+                            TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
+                            TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
+                            TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
+                            TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
+                        ]);
+                        self.color_glyph_indices.extend_from_slice(&[
+                            base, base + 1, base + 2,
+                            base, base + 2, base + 3,
+                        ]);
+                    }
                     continue;
                 }
             }
@@ -5297,44 +5323,43 @@ impl Renderer {
                     .unwrap_or(entry.advance);
 
                 // `overflow: hidden` clips glyphs like everything else.
-                let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) = self
-                    .textured_corners(
+                for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                    .textured_pieces(
                         Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
                         entry.tex_coords,
                     )
-                else {
-                    continue;
-                };
+                {
+                    let c = [c[0], c[1], c[2], c[3] * coverage];
+                    let base = self.texture_vertices.len() as u32;
 
-                let base = self.texture_vertices.len() as u32;
+                    self.texture_vertices.extend_from_slice(&[
+                        TextureVertex {
+                            position: [x0, y0],
+                            tex_coords: [tex[0], tex[1]],
+                            color: c,
+                        },
+                        TextureVertex {
+                            position: [x1, y1],
+                            tex_coords: [tex[2], tex[1]],
+                            color: c,
+                        },
+                        TextureVertex {
+                            position: [x2, y2],
+                            tex_coords: [tex[2], tex[3]],
+                            color: c,
+                        },
+                        TextureVertex {
+                            position: [x3, y3],
+                            tex_coords: [tex[0], tex[3]],
+                            color: c,
+                        },
+                    ]);
 
-                self.texture_vertices.extend_from_slice(&[
-                    TextureVertex {
-                        position: [x0, y0],
-                        tex_coords: [tex[0], tex[1]],
-                        color: c,
-                    },
-                    TextureVertex {
-                        position: [x1, y1],
-                        tex_coords: [tex[2], tex[1]],
-                        color: c,
-                    },
-                    TextureVertex {
-                        position: [x2, y2],
-                        tex_coords: [tex[2], tex[3]],
-                        color: c,
-                    },
-                    TextureVertex {
-                        position: [x3, y3],
-                        tex_coords: [tex[0], tex[3]],
-                        color: c,
-                    },
-                ]);
-
-                self.texture_indices.extend_from_slice(&[
-                    base, base + 1, base + 2,
-                    base, base + 2, base + 3,
-                ]);
+                    self.texture_indices.extend_from_slice(&[
+                        base, base + 1, base + 2,
+                        base, base + 2, base + 3,
+                    ]);
+                }
             } else {
                 // Fallback: advance by estimated width (or layout's, if given)
                 cursor_x += layout_advances
@@ -5348,37 +5373,36 @@ impl Renderer {
     fn draw_image(&mut self, url: &str, rect: Rect) {
         if self.texture_cache.contains(url) {
             // `overflow: hidden` clips replaced content like everything else.
-            let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) =
-                self.textured_corners(rect, [0.0, 0.0, 1.0, 1.0])
-            else {
-                return;
-            };
-
-            self.push_image_quad(
-                url,
-                [
-                    TextureVertex {
-                        position: [x0, y0],
-                        tex_coords: [tex[0], tex[1]],
-                        color: [1.0, 1.0, 1.0, 1.0],
-                    },
-                    TextureVertex {
-                        position: [x1, y1],
-                        tex_coords: [tex[2], tex[1]],
-                        color: [1.0, 1.0, 1.0, 1.0],
-                    },
-                    TextureVertex {
-                        position: [x2, y2],
-                        tex_coords: [tex[2], tex[3]],
-                        color: [1.0, 1.0, 1.0, 1.0],
-                    },
-                    TextureVertex {
-                        position: [x3, y3],
-                        tex_coords: [tex[0], tex[3]],
-                        color: [1.0, 1.0, 1.0, 1.0],
-                    },
-                ],
-            );
+            for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in
+                self.textured_pieces(rect, [0.0, 0.0, 1.0, 1.0])
+            {
+                let color = [1.0, 1.0, 1.0, coverage];
+                self.push_image_quad(
+                    url,
+                    [
+                        TextureVertex {
+                            position: [x0, y0],
+                            tex_coords: [tex[0], tex[1]],
+                            color,
+                        },
+                        TextureVertex {
+                            position: [x1, y1],
+                            tex_coords: [tex[2], tex[1]],
+                            color,
+                        },
+                        TextureVertex {
+                            position: [x2, y2],
+                            tex_coords: [tex[2], tex[3]],
+                            color,
+                        },
+                        TextureVertex {
+                            position: [x3, y3],
+                            tex_coords: [tex[0], tex[3]],
+                            color,
+                        },
+                    ],
+                );
+            }
         }
         // If image not loaded, skip (async loading handled elsewhere)
     }
@@ -5578,37 +5602,36 @@ impl Renderer {
         let tex_bottom = 1.0 - clip_bottom / tile_rect.height;
 
         // Then the overflow clip on top of the container clip.
-        let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], [tex_left, tex_top, tex_right, tex_bottom])) =
-            self.textured_corners(draw_rect, [tex_left, tex_top, tex_right, tex_bottom])
-        else {
-            return;
-        };
-
-        self.push_image_quad(
-            url,
-            [
-                TextureVertex {
-                    position: [x0, y0],
-                    tex_coords: [tex_left, tex_top],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x1, y1],
-                    tex_coords: [tex_right, tex_top],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x2, y2],
-                    tex_coords: [tex_right, tex_bottom],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x3, y3],
-                    tex_coords: [tex_left, tex_bottom],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-            ],
-        );
+        for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], [tex_left, tex_top, tex_right, tex_bottom], coverage) in
+            self.textured_pieces(draw_rect, [tex_left, tex_top, tex_right, tex_bottom])
+        {
+            let color = [1.0, 1.0, 1.0, coverage];
+            self.push_image_quad(
+                url,
+                [
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [tex_left, tex_top],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [tex_right, tex_top],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [tex_right, tex_bottom],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [tex_left, tex_bottom],
+                        color,
+                    },
+                ],
+            );
+        }
     }
 
     /// Upload an image to the texture cache.
@@ -5690,24 +5713,41 @@ impl Renderer {
     /// the surviving part. `None` when nothing survives. One rule for every
     /// textured site so text, images and tiles are clipped under a transform
     /// exactly as color quads are.
-    fn textured_corners(&self, rect: Rect, tex: [f32; 4]) -> Option<([[f32; 2]; 4], [f32; 4])> {
-        let (g, tex, space) = clip_textured_under(self.current_transform(), self.current_clip(), rect, tex)?;
-        let corners = match space {
-            QuadSpace::Screen => [
-                [g.x, g.y],
-                [g.x + g.width, g.y],
-                [g.x + g.width, g.y + g.height],
-                [g.x, g.y + g.height],
-            ],
-            QuadSpace::Document => {
-                let (x0, y0) = self.transform_point(g.x, g.y);
-                let (x1, y1) = self.transform_point(g.x + g.width, g.y);
-                let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
-                let (x3, y3) = self.transform_point(g.x, g.y + g.height);
-                [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
-            }
-        };
-        Some((corners, tex))
+    ///
+    /// A quad that a rounded clip's corner cuts comes back as several
+    /// pieces, each with the coverage its vertices' alpha is to be scaled
+    /// by; any other quad is one piece with coverage 1. Empty when nothing
+    /// survives.
+    fn textured_pieces(&self, rect: Rect, tex: [f32; 4]) -> Vec<([[f32; 2]; 4], [f32; 4], f32)> {
+        let mut pieces = Vec::with_capacity(1);
+        let space = clip_textured_pieces_under(
+            self.current_transform(),
+            self.clip_stack.last(),
+            rect,
+            tex,
+            &mut pieces,
+        );
+        pieces
+            .into_iter()
+            .map(|(g, tex, coverage)| {
+                let corners = match space {
+                    QuadSpace::Screen => [
+                        [g.x, g.y],
+                        [g.x + g.width, g.y],
+                        [g.x + g.width, g.y + g.height],
+                        [g.x, g.y + g.height],
+                    ],
+                    QuadSpace::Document => {
+                        let (x0, y0) = self.transform_point(g.x, g.y);
+                        let (x1, y1) = self.transform_point(g.x + g.width, g.y);
+                        let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
+                        let (x3, y3) = self.transform_point(g.x, g.y + g.height);
+                        [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
+                    }
+                };
+                (corners, tex, coverage)
+            })
+            .collect()
     }
 
 
@@ -6282,8 +6322,7 @@ fn clip_textured_under(
 /// Textured quads used to bypass the clip stack entirely — only color quads
 /// went through `collect_clipped_pieces` — so `overflow: hidden` clipped a
 /// box's background but never its text (n35). The rounded part of the clip
-/// is NOT applied to textured quads: a glyph straddling a rounded corner's
-/// arc keeps its square corner. That is a ledgered residual, not a rule.
+/// is applied on top of this by `clip_textured_pieces_under`.
 fn clip_textured_rect(
     clip: Option<Rect>,
     rect: Rect,
@@ -6678,6 +6717,226 @@ fn clip_quad_to_rounded(
     }
 
     emit_rows(&mut out, middle_end.max(quad.y), quad.bottom());
+    out
+}
+
+/// Whether `quad` lies wholly inside every rounded constraint. A rounded rect
+/// is convex, so a quad whose top and bottom edges are both inside it is
+/// inside it everywhere.
+fn quad_inside_rounded(quad: Rect, rounded: &[(Rect, rustkit_layout::BorderRadius)]) -> bool {
+    rounded.iter().all(|(rect, radius)| {
+        [quad.y, quad.bottom()].into_iter().all(|y| {
+            matches!(
+                rounded_row_span(*rect, *radius, y),
+                Some((left, right)) if left <= quad.x && right >= quad.right()
+            )
+        })
+    })
+}
+
+/// A textured quad (glyph, image, background tile) drawn under transform `m`
+/// and cut to `clip`, rounded corners included: each surviving piece with its
+/// texture coordinates and coverage, appended to `out`. The return value says
+/// which space the pieces are in.
+///
+/// The rectangular half is `clip_textured_under`. The rounded half is the
+/// decomposition colour quads get (`clip_quad_to_rounded`), with each piece
+/// taking the texels that were under it, so an `<img>` in a rounded
+/// `overflow: hidden` box (an avatar, a card's cover photo) loses its corners
+/// the way the box's background does. A quad clear of every corner comes back
+/// as the one piece it always was.
+///
+/// Under a rotation or skew only the rectangular part applies, as for colour
+/// quads.
+fn clip_textured_pieces_under(
+    m: [f32; 6],
+    clip: Option<&ClipEntry>,
+    rect: Rect,
+    tex: [f32; 4],
+    out: &mut Vec<(Rect, [f32; 4], f32)>,
+) -> QuadSpace {
+    let Some((quad, tex, space)) = clip_textured_under(m, clip.map(|entry| entry.rect), rect, tex)
+    else {
+        return QuadSpace::Screen;
+    };
+    let rounded = match (space, clip) {
+        (QuadSpace::Screen, Some(entry)) => entry.rounded.as_slice(),
+        _ => &[],
+    };
+    if rounded.is_empty() || quad_inside_rounded(quad, rounded) {
+        out.push((quad, tex, 1.0));
+        return space;
+    }
+
+    let u_per_px = (tex[2] - tex[0]) / quad.width;
+    let v_per_px = (tex[3] - tex[1]) / quad.height;
+    for (piece, coverage) in clip_quad_to_rounded(quad, rounded) {
+        // An antialiased end cell is a whole pixel and can start before the
+        // quad does; a piece only has texels where the quad is.
+        let Some(piece) = piece.intersect(&quad) else {
+            continue;
+        };
+        if piece.width <= 0.0 || piece.height <= 0.0 {
+            continue;
+        }
+        let u0 = tex[0] + (piece.x - quad.x) * u_per_px;
+        let v0 = tex[1] + (piece.y - quad.y) * v_per_px;
+        out.push((
+            piece,
+            [u0, v0, u0 + piece.width * u_per_px, v0 + piece.height * v_per_px],
+            coverage,
+        ));
+    }
+    space
+}
+
+/// How much of the pixel centred on `(px, py)` the rounded rect covers: 1
+/// inside, 0 outside, and the fill's own ramp across a corner's curve
+/// (`corner_coverage`), so a shape cut out with this and the same shape
+/// filled by `draw_rounded_rect` meet on the curve. `radius` must be fitted.
+fn rounded_rect_coverage(rect: Rect, radius: rustkit_layout::BorderRadius, px: f32, py: f32) -> f32 {
+    if px < rect.x || px >= rect.right() || py < rect.y || py >= rect.bottom() {
+        return 0.0;
+    }
+    let mut coverage = 1.0_f32;
+    for (quadrant, corner) in [
+        radius.top_left,
+        radius.top_right,
+        radius.bottom_right,
+        radius.bottom_left,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(distance) = corner_distance_at(rect, corner, quadrant as u8, px, py) {
+            coverage = coverage.min(corner_coverage(distance));
+        }
+    }
+    coverage
+}
+
+/// The part of the rounded rect `shape` that is outside the rounded rect
+/// `hole`, as `(piece, coverage)`: an outer box shadow's layer with the box
+/// cut out of it (CSS Backgrounds 3 §6.1).
+///
+/// Two square shapes give `rect_minus` exactly. Otherwise the plane is cut
+/// along every edge of both rects and of their corner boxes: a cell outside
+/// every corner box is wholly painted or wholly not, and a cell in one is
+/// painted a pixel at a time, runs of fully covered pixels joined.
+///
+/// Pure for the same reason as `clip_quad_to_rounded`.
+fn rounded_difference_pieces(
+    shape: Rect,
+    shape_radius: rustkit_layout::BorderRadius,
+    hole: Rect,
+    hole_radius: rustkit_layout::BorderRadius,
+) -> Vec<(Rect, f32)> {
+    if shape.width <= 0.0 || shape.height <= 0.0 {
+        return Vec::new();
+    }
+    if shape_radius.is_zero() && hole_radius.is_zero() {
+        return Renderer::rect_minus(shape, hole)
+            .into_iter()
+            .map(|r| (r, 1.0))
+            .collect();
+    }
+    let shape_radius = shape_radius.fitted(shape.width, shape.height);
+    let hole_radius = hole_radius.fitted(hole.width, hole.height);
+    let coverage = |x: f32, y: f32| {
+        rounded_rect_coverage(shape, shape_radius, x, y)
+            * (1.0 - rounded_rect_coverage(hole, hole_radius, x, y))
+    };
+
+    // The corner boxes of both shapes, and the cuts along both axes.
+    let mut corner_boxes = Vec::new();
+    let mut xs = vec![shape.x, shape.right()];
+    let mut ys = vec![shape.y, shape.bottom()];
+    for (rect, radius) in [(shape, shape_radius), (hole, hole_radius)] {
+        xs.extend([rect.x, rect.right()]);
+        ys.extend([rect.y, rect.bottom()]);
+        for (quadrant, corner) in [
+            radius.top_left,
+            radius.top_right,
+            radius.bottom_right,
+            radius.bottom_left,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if corner.is_zero() {
+                continue;
+            }
+            let (x, y) = corner_box_origin(rect, corner, quadrant as u8);
+            corner_boxes.push(Rect::new(x, y, corner.h, corner.v));
+            xs.extend([x, x + corner.h]);
+            ys.extend([y, y + corner.v]);
+        }
+    }
+    let cuts = |mut values: Vec<f32>, from: f32, to: f32| {
+        for v in values.iter_mut() {
+            *v = v.clamp(from, to);
+        }
+        values.sort_by(|a, b| a.total_cmp(b));
+        values.dedup();
+        values
+    };
+    let xs = cuts(xs, shape.x, shape.right());
+    let ys = cuts(ys, shape.y, shape.bottom());
+
+    let mut out: Vec<(Rect, f32)> = Vec::new();
+    for band in ys.windows(2) {
+        let (y0, y1) = (band[0], band[1]);
+        // The whole cell of this band still open on its right, if any: cells
+        // side by side in a band join into one rect.
+        let mut open: Option<usize> = None;
+        for span in xs.windows(2) {
+            let (x0, x1) = (span[0], span[1]);
+            let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+            if !corner_boxes.iter().any(|b| b.contains(cx, cy)) {
+                if coverage(cx, cy) <= 0.0 {
+                    open = None;
+                } else if let Some(index) = open {
+                    out[index].0.width = x1 - out[index].0.x;
+                } else {
+                    open = Some(out.len());
+                    out.push((Rect::new(x0, y0, x1 - x0, y1 - y0), 1.0));
+                }
+                continue;
+            }
+            open = None;
+
+            // A cell in a corner box: one pixel at a time on the pixel grid,
+            // each drawn only as far as the cell reaches.
+            let mut row = y0.floor();
+            while row < y1 {
+                let top = row.max(y0);
+                let height = (row + 1.0).min(y1) - top;
+                let mut run: Option<usize> = None;
+                let mut column = x0.floor();
+                while column < x1 {
+                    let left = column.max(x0);
+                    let width = (column + 1.0).min(x1) - left;
+                    let c = coverage(column + 0.5, row + 0.5);
+                    if c >= 1.0 {
+                        match run {
+                            Some(index) => out[index].0.width = left + width - out[index].0.x,
+                            None => {
+                                run = Some(out.len());
+                                out.push((Rect::new(left, top, width, height), 1.0));
+                            }
+                        }
+                    } else {
+                        run = None;
+                        if c > 0.01 {
+                            out.push((Rect::new(left, top, width, height), c));
+                        }
+                    }
+                    column += 1.0;
+                }
+                row += 1.0;
+            }
+        }
+    }
     out
 }
 
@@ -7149,6 +7408,103 @@ mod tests {
         assert_eq!(space, QuadSpace::Screen);
         assert_eq!((r.x, r.width), (70.0, 20.0));
         assert_eq!(t, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    // ==================== Rounded clip on textured quads ====================
+
+    fn textured_pieces_under(
+        clip: Option<&ClipEntry>,
+        rect: Rect,
+        tex: [f32; 4],
+    ) -> Vec<(Rect, [f32; 4], f32)> {
+        let mut out = Vec::new();
+        clip_textured_pieces_under(IDENTITY_2D, clip, rect, tex, &mut out);
+        out
+    }
+
+    /// An avatar: an image filling a circular `overflow: hidden` box. Its
+    /// corners used to survive, because only the clip's rect reached a
+    /// textured quad.
+    #[test]
+    fn an_image_under_a_round_clip_loses_its_corners_and_keeps_its_texels() {
+        let box_rect = Rect::new(20.0, 10.0, 100.0, 100.0);
+        let entry = clip_entry_for(None, box_rect, radius(50.0));
+        let pieces = textured_pieces_under(Some(&entry), box_rect, [0.0, 0.0, 1.0, 1.0]);
+        assert!(pieces.len() > 1, "the image was not decomposed");
+
+        let holds = |x: f32, y: f32| {
+            pieces
+                .iter()
+                .any(|(r, _, coverage)| *coverage > 0.0 && r.contains(x, y))
+        };
+        assert!(!holds(22.0, 12.0), "the top-left corner is still painted");
+        assert!(!holds(118.0, 108.0), "the bottom-right corner is still painted");
+        assert!(holds(70.0, 60.0), "the centre is gone");
+
+        // Every piece samples the texels that were under it in the whole quad.
+        for (r, tex, coverage) in &pieces {
+            assert!(*coverage > 0.0 && *coverage <= 1.0);
+            let expected = [
+                (r.x - 20.0) / 100.0,
+                (r.y - 10.0) / 100.0,
+                (r.right() - 20.0) / 100.0,
+                (r.bottom() - 10.0) / 100.0,
+            ];
+            for (got, want) in tex.iter().zip(expected) {
+                assert!((got - want).abs() < 1e-4, "{r:?}: tex {tex:?}, expected {expected:?}");
+                assert!((-1e-4..=1.0 + 1e-4).contains(got), "texel {got} outside the image");
+            }
+        }
+
+        // What survives is the disc.
+        let area: f32 = pieces.iter().map(|(r, _, c)| r.width * r.height * c).sum();
+        let disc = std::f32::consts::PI * 50.0 * 50.0;
+        assert!((area - disc).abs() < disc * 0.02, "area {area}, disc {disc}");
+    }
+
+    /// A sub-rect of an atlas keeps its own texel range through the split.
+    #[test]
+    fn a_split_glyph_stays_inside_its_atlas_cell() {
+        let box_rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+        let entry = clip_entry_for(None, box_rect, radius(20.0));
+        let glyph = Rect::new(0.5, 4.0, 20.0, 30.0);
+        let cell = [0.25, 0.5, 0.35, 0.65];
+        let pieces = textured_pieces_under(Some(&entry), glyph, cell);
+        assert!(pieces.len() > 1);
+        for (r, tex, _) in &pieces {
+            assert!(r.x >= glyph.x - 1e-4 && r.right() <= glyph.right() + 1e-4, "{r:?}");
+            assert!(tex[0] >= cell[0] - 1e-5 && tex[2] <= cell[2] + 1e-5, "{tex:?}");
+            assert!(tex[1] >= cell[1] - 1e-5 && tex[3] <= cell[3] + 1e-5, "{tex:?}");
+        }
+    }
+
+    /// Text in a pill sits in the band the corners occupy but clear of both
+    /// arcs: it is one quad, as it was, not one per scanline.
+    #[test]
+    fn a_glyph_between_the_arcs_of_a_pill_is_not_split() {
+        let box_rect = Rect::new(0.0, 0.0, 150.0, 40.0);
+        let entry = clip_entry_for(None, box_rect, radius(20.0));
+        let glyph = Rect::new(60.0, 5.0, 20.0, 30.0);
+        let tex = [0.1, 0.2, 0.3, 0.4];
+        let pieces = textured_pieces_under(Some(&entry), glyph, tex);
+        assert_eq!(pieces.len(), 1);
+        let (r, t, coverage) = pieces[0];
+        assert_eq!((r.x, r.y, r.width, r.height), (60.0, 5.0, 20.0, 30.0));
+        assert_eq!(t, tex);
+        assert_eq!(coverage, 1.0);
+    }
+
+    /// No rounded clip, no change: the single piece `clip_textured_under`
+    /// always gave.
+    #[test]
+    fn a_textured_quad_under_a_square_clip_is_the_one_piece_it_was() {
+        let entry = clip_entry_for(None, Rect::new(0.0, 0.0, 50.0, 50.0), radius(0.0));
+        let glyph = Rect::new(40.0, 10.0, 20.0, 20.0);
+        let pieces = textured_pieces_under(Some(&entry), glyph, [0.0, 0.0, 1.0, 1.0]);
+        let (r, t, _) = clip_textured_under(IDENTITY_2D, Some(entry.rect), glyph, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].0.x, pieces[0].0.width, pieces[0].1, pieces[0].2), (r.x, r.width, t, 1.0));
+        assert!(textured_pieces_under(Some(&entry), Rect::new(60.0, 0.0, 10.0, 10.0), [0.0, 0.0, 1.0, 1.0]).is_empty());
     }
 
     /// Images are composited source-over. With the blit pipeline's REPLACE a
@@ -8173,6 +8529,141 @@ mod outer_shadow_tests {
         rects.iter().map(|(r, _)| r.width * r.height).sum()
     }
 
+    const SQUARE: rustkit_layout::BorderRadius = rustkit_layout::BorderRadius {
+        top_left: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+        top_right: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+        bottom_right: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+        bottom_left: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+    };
+
+    /// Paint at `(x, y)`: the summed alpha of the pieces holding the point.
+    fn alpha_at(rects: &[(Rect, f32)], x: f32, y: f32) -> f32 {
+        rects
+            .iter()
+            .filter(|(r, _)| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())
+            .map(|(_, a)| *a)
+            .sum()
+    }
+
+    /// The area painted, weighted by alpha.
+    fn weighted_area(rects: &[(Rect, f32)]) -> f32 {
+        rects.iter().map(|(r, a)| r.width * r.height * a).sum()
+    }
+
+    /// `box-shadow: 0 0 0 6px` on a 100px box with 20px corners is a ring
+    /// between two rounded rects (radii 26 and 20), not a square frame.
+    #[test]
+    fn a_rounded_box_gets_a_rounded_ring() {
+        let border_box = Rect::new(50.0, 50.0, 100.0, 100.0);
+        let radius = rustkit_layout::BorderRadius::uniform(20.0);
+        let shadow = Rect::new(44.0, 44.0, 112.0, 112.0);
+        let rects = Renderer::outer_shadow_paint_rects(
+            border_box,
+            radius,
+            shadow,
+            radius.spread(6.0),
+            0.0,
+            1.0,
+        );
+
+        // On the ring's straight side, and in the gap between the two curves.
+        assert_eq!(alpha_at(&rects, 100.5, 46.5), 1.0);
+        assert_eq!(alpha_at(&rects, 53.5, 53.5), 1.0);
+        // Outside the shadow's own curve: the corner of its bounding square.
+        assert_eq!(alpha_at(&rects, 44.5, 44.5), 0.0);
+        // Inside the box: its middle, and just inside its curve.
+        assert_eq!(alpha_at(&rects, 100.5, 100.5), 0.0);
+        assert_eq!(alpha_at(&rects, 58.5, 58.5), 0.0);
+
+        // No pixel is painted twice, and none outside the shadow's rect.
+        for (r, a) in &rects {
+            assert!(*a > 0.0 && *a <= 1.0, "alpha {a}");
+            assert!(r.x >= 44.0 && r.right() <= 156.0 && r.y >= 44.0 && r.bottom() <= 156.0, "{r:?}");
+        }
+        for y in 44..156 {
+            for x in 44..156 {
+                let a = alpha_at(&rects, x as f32 + 0.5, y as f32 + 0.5);
+                assert!(a <= 1.0 + 1e-6, "({x}, {y}) painted {a}");
+            }
+        }
+
+        // The ring's area: the difference of the two rounded rects.
+        let rounded_area = |side: f32, r: f32| side * side - (4.0 - std::f32::consts::PI) * r * r;
+        let ring = rounded_area(112.0, 26.0) - rounded_area(100.0, 20.0);
+        let painted = weighted_area(&rects);
+        assert!((painted - ring).abs() < ring * 0.02, "painted {painted}, ring {ring}");
+    }
+
+    /// The hole is the box's curve even when the shadow is only moved: the
+    /// notch between the box's square corner and its curve shows the shadow.
+    #[test]
+    fn an_offset_shadow_shows_through_the_corner_notch_of_its_box() {
+        let border_box = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let radius = rustkit_layout::BorderRadius::uniform(30.0);
+        let shadow = Rect::new(10.0, 10.0, 100.0, 100.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, radius, shadow, radius, 0.0, 1.0);
+        // Bottom-right notch of the box: outside its curve, inside the shadow.
+        assert_eq!(alpha_at(&rects, 97.5, 97.5), 1.0);
+        // The shadow's own bottom-right corner is cut.
+        assert_eq!(alpha_at(&rects, 108.5, 108.5), 0.0);
+        // Under the box.
+        assert_eq!(alpha_at(&rects, 50.5, 50.5), 0.0);
+    }
+
+    /// Each blur layer is the shadow's shape grown, corners included.
+    #[test]
+    fn blurred_layers_of_a_rounded_shadow_are_rounded() {
+        let border_box = Rect::new(20.0, 20.0, 60.0, 60.0);
+        let radius = rustkit_layout::BorderRadius::uniform(30.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, radius, border_box, radius, 8.0, 0.9);
+        assert!(!rects.is_empty());
+        // The outermost layer reaches 8px out on the axis, and its bounding
+        // square's corner stays clear.
+        assert!(alpha_at(&rects, 50.5, 13.5) > 0.0);
+        assert_eq!(alpha_at(&rects, 13.5, 13.5), 0.0);
+        assert_eq!(alpha_at(&rects, 50.5, 50.5), 0.0);
+    }
+
+    /// A square box takes the path it always did, rect for rect.
+    #[test]
+    fn a_square_box_gets_exactly_the_old_rects() {
+        let border_box = Rect::new(40.0, 40.0, 89.0, 38.0);
+        let shadow = Rect::new(39.0, 39.0, 91.0, 40.0);
+        let rects = rounded_difference_pieces(shadow, SQUARE, border_box, SQUARE);
+        let old: Vec<(Rect, f32)> = Renderer::rect_minus(shadow, border_box)
+            .into_iter()
+            .map(|r| (r, 1.0))
+            .collect();
+        assert_eq!(rects.len(), old.len());
+        for ((a, ca), (b, cb)) in rects.iter().zip(&old) {
+            assert_eq!((a.x, a.y, a.width, a.height, *ca), (b.x, b.y, b.width, b.height, *cb));
+        }
+    }
+
+    /// The hole's edge takes the fill's coverage ramp, so the two sum to one
+    /// across the box's curve.
+    #[test]
+    fn the_hole_and_the_fill_share_the_corner_ramp() {
+        let rect = Rect::new(0.0, 0.0, 80.0, 80.0);
+        let radius = rustkit_layout::BorderRadius::uniform(24.0);
+        // A shape that covers everything, minus the box.
+        let outside = rounded_difference_pieces(Rect::new(-10.0, -10.0, 100.0, 100.0), SQUARE, rect, radius);
+        let mut partial = 0;
+        for y in 0..24 {
+            for x in 0..24 {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let fill = rounded_rect_coverage(rect, radius, px, py);
+                let hole = alpha_at(&outside, px, py);
+                // A coverage under 0.01 is not emitted, as in the fill.
+                assert!((fill + hole - 1.0).abs() <= 0.011, "({x}, {y}): fill {fill} + hole {hole}");
+                if fill > 0.0 && fill < 1.0 {
+                    partial += 1;
+                }
+            }
+        }
+        assert!(partial > 10, "only {partial} antialiased pixels along a 24px arc");
+    }
+
     fn assert_outside(rects: &[(Rect, f32)], border_box: Rect) {
         for (r, _) in rects {
             assert!(
@@ -8189,7 +8680,7 @@ mod outer_shadow_tests {
     fn spread_only_ring_does_not_fill_the_box() {
         let border_box = Rect::new(40.0, 40.0, 89.0, 38.0);
         let shadow = Rect::new(39.0, 39.0, 91.0, 40.0);
-        let rects = Renderer::outer_shadow_paint_rects(border_box, shadow, 0.0, 1.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, SQUARE, shadow, SQUARE, 0.0, 1.0);
         assert_outside(&rects, border_box);
         let ring = 91.0 * 40.0 - 89.0 * 38.0;
         assert!((area(&rects) - ring).abs() < 1e-3, "area {} != ring {ring}", area(&rects));
@@ -8200,7 +8691,7 @@ mod outer_shadow_tests {
     fn offset_shadow_shows_only_outside_the_box() {
         let border_box = Rect::new(40.0, 40.0, 200.0, 60.0);
         let shadow = Rect::new(48.0, 48.0, 200.0, 60.0);
-        let rects = Renderer::outer_shadow_paint_rects(border_box, shadow, 0.0, 1.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, SQUARE, shadow, SQUARE, 0.0, 1.0);
         assert_outside(&rects, border_box);
         let visible = 200.0 * 60.0 - 192.0 * 52.0;
         assert!((area(&rects) - visible).abs() < 1e-3);
@@ -8210,7 +8701,7 @@ mod outer_shadow_tests {
     #[test]
     fn blurred_layers_are_clipped_too() {
         let border_box = Rect::new(10.0, 10.0, 50.0, 50.0);
-        let rects = Renderer::outer_shadow_paint_rects(border_box, border_box, 4.0, 0.9);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, SQUARE, border_box, SQUARE, 4.0, 0.9);
         assert!(!rects.is_empty());
         assert_outside(&rects, border_box);
         assert!(rects.iter().all(|(_, a)| (*a - 0.9 / 3.0).abs() < 1e-6));
@@ -8221,7 +8712,7 @@ mod outer_shadow_tests {
     fn shadow_under_the_box_paints_nothing() {
         let border_box = Rect::new(0.0, 0.0, 100.0, 100.0);
         let shadow = Rect::new(10.0, 10.0, 80.0, 80.0);
-        assert!(Renderer::outer_shadow_paint_rects(border_box, shadow, 0.0, 1.0).is_empty());
+        assert!(Renderer::outer_shadow_paint_rects(border_box, SQUARE, shadow, SQUARE, 0.0, 1.0).is_empty());
     }
 }
 
