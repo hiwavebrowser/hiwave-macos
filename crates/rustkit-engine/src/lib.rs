@@ -22900,6 +22900,136 @@ mod css_url_base_engine_tests {
 
 // Needs a headless view: `cargo test -p rustkit-engine --features headless`.
 #[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod web_font_format_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    const AHEM_TTF: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+    const AHEM_WOFF: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.woff");
+    const AHEM_WOFF2: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.woff2");
+
+    // Four 20px lines of "XXXXX" at x=20, 30px apart from y=20. Ahem's "X"
+    // is a solid em square; Helvetica's is two strokes.
+    const PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+@font-face { font-family: FormatTtf; src: url(/Ahem.ttf) format("truetype"); }
+@font-face { font-family: FormatWoff; src: url(/Ahem.woff) format("woff"); }
+@font-face { font-family: FormatWoff2; src: url(/Ahem.woff2) format("woff2"); }
+body { margin: 20px; font-size: 20px; background: white; color: black; }
+p { margin: 0 0 10px 0; line-height: 20px; }
+</style></head><body>
+<p style="font-family: FormatTtf">XXXXX</p>
+<p style="font-family: FormatWoff">XXXXX</p>
+<p style="font-family: FormatWoff2">XXXXX</p>
+<p style="font-family: Helvetica">XXXXX</p>
+</body></html>"#;
+
+    fn serve() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (ctype, body): (&str, &[u8]) =
+                    match head.split_whitespace().nth(1).unwrap_or("") {
+                        "/" => ("text/html", PAGE.as_bytes()),
+                        "/Ahem.ttf" => ("font/ttf", AHEM_TTF),
+                        "/Ahem.woff" => ("font/woff", AHEM_WOFF),
+                        "/Ahem.woff2" => ("font/woff2", AHEM_WOFF2),
+                        _ => ("text/plain", b""),
+                    };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        port
+    }
+
+    /// Share of dark pixels in the 96x16 block inside line `line`'s five
+    /// glyph cells (2px in from every edge), read from a binary PPM.
+    fn ink(ppm: &[u8], line: usize) -> f32 {
+        let mut fields = Vec::new();
+        let mut pos = 0;
+        while fields.len() < 4 {
+            let start = pos;
+            while !ppm[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            fields.push(std::str::from_utf8(&ppm[start..pos]).unwrap());
+            pos += 1;
+        }
+        assert_eq!(fields[0], "P6");
+        let width: usize = fields[1].parse().unwrap();
+        let pixels = &ppm[pos..];
+        let top = 20 + 30 * line;
+        let mut dark = 0;
+        for y in top + 2..top + 18 {
+            for x in 22..118 {
+                let p = &pixels[(y * width + x) * 3..][..3];
+                if p.iter().all(|&c| c < 96) {
+                    dark += 1;
+                }
+            }
+        }
+        dark as f32 / (96.0 * 16.0)
+    }
+
+    #[test]
+    fn ttf_woff_and_woff2_faces_paint_their_own_glyphs_after_a_fallback_first_paint() {
+        let port = serve();
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 400,
+                height: 200,
+            })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // The document is laid out and painted once before its fonts are
+        // fetched, so the fallback has already drawn every "X" by the time
+        // the three faces install.
+        rt.block_on(engine.load_url(
+            view,
+            Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap(),
+        ))
+        .expect("load_url");
+        engine.render_view(view).expect("render");
+        let path = std::env::temp_dir().join(format!("rustkit-web-font-formats-{port}.ppm"));
+        engine
+            .capture_frame(view, path.to_str().unwrap())
+            .expect("capture");
+        let ppm = std::fs::read(&path).expect("frame");
+        let _ = std::fs::remove_file(&path);
+
+        for (line, format) in ["ttf", "woff", "woff2"].into_iter().enumerate() {
+            let share = ink(&ppm, line);
+            assert!(
+                share > 0.98,
+                "{format}: {:.0}% of the glyph cells are ink; Ahem fills them, a fallback font does not",
+                share * 100.0
+            );
+        }
+        let control = ink(&ppm, 3);
+        assert!(
+            (0.02..0.6).contains(&control),
+            "the Helvetica control line is {:.0}% ink; the probe is not reading glyph cells",
+            control * 100.0
+        );
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
 mod referrer_tests {
     use super::*;
     use std::io::{Read, Write};
