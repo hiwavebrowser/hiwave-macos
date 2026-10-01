@@ -379,7 +379,12 @@ fn layout_flex_container_at(
     // For column direction, cross axis is horizontal (width)
     let has_definite_cross_size = match cross_axis {
         Axis::Vertical => {
-            used_inner_height.is_some() || !matches!(container.style.height, Length::Auto)
+            // `fit-content` is sized by content, as `auto` is. Counted as
+            // definite, a wrapping row stretched its lines over the height
+            // the block pre-pass had stacked its items to: linkedin's topic
+            // pills were 570 tall each.
+            used_inner_height.is_some()
+                || !matches!(container.style.height, Length::Auto | Length::FitContent)
         }
         // A block-level flex container with `width: auto` still has a
         // DEFINITE used width — it resolves against its containing block.
@@ -1148,7 +1153,10 @@ fn layout_flex_container_at(
             // of text it contains, which is exactly what happened when the
             // re-anchor re-ran this pass to re-justify the line.
             container.dimensions.content.height = used_main;
-        } else if matches!(container.style.height, rustkit_css::Length::Auto) {
+        } else if matches!(
+            container.style.height,
+            rustkit_css::Length::Auto | rustkit_css::Length::FitContent
+        ) {
             container.dimensions.content.height = content_size;
         } else if container.dimensions.content.height == 0.0 {
             let explicit = match container.style.height {
