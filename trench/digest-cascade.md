@@ -1244,7 +1244,7 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 2. **The builtins campaign cannot see this cut or any other two-build path**, because it loads each page once. Gate 5's receipt passes without exercising the change. Default: for flags on the relayout path, the pinned-site verify run (0 differing boxes) goes in the PR body beside the receipt; no change to the campaign.
 3. **After the flip, wikipedia's remaining 10.4× is one build of about 205 ms, and 3× needs 60.** No cut found so far is worth more than a few percent of that build. Default: unchanged from 02:45: keep the metric and the date, work the first build's element style and box construction, and report the gap on 2026-10-11.
 
-## 2026-10-01 10:50
+## 2026-10-01 10:47
 
 **One draft PR opened: #408 (`atlas/cs-tree-reuse-default` @ 63d24d1), which turns `RUSTKIT_TREE_REUSE` on by default. It is a draft because the real-site board, default against `=0`, is not in: I ran it on a machine at load 13–29 and the run is unusable. No ratio was measured this session (no quiet minute between 09:35 and 10:50). The worst ratio of record stays 14.1× (wikipedia). #404 merged at 09:24 as develop 566d6f0, not by this lane; it leaves the flag off, so it does not move the number.**
 
