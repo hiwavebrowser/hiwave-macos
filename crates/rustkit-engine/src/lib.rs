@@ -5706,7 +5706,9 @@ impl Engine {
             match physical {
                 LogicalMapping::Side(p) => self.apply_style_property(style, p, value),
                 LogicalMapping::Pair(start, end) => {
-                    let parts: Vec<&str> = value.split_whitespace().collect();
+                    // Split at top-level whitespace: one value may be
+                    // `rgb(1, 2, 3)` or `calc(1px + 2px)`.
+                    let parts = split_top_level_whitespace(value);
                     let (a, b) = match parts.as_slice() {
                         [one] => (*one, *one),
                         [a, b] => (*a, *b),
@@ -5714,6 +5716,10 @@ impl Engine {
                     };
                     self.apply_style_property(style, start, a);
                     self.apply_style_property(style, end, b);
+                }
+                LogicalMapping::Both(start, end) => {
+                    self.apply_style_property(style, start, value);
+                    self.apply_style_property(style, end, value);
                 }
             }
             return;
@@ -12160,13 +12166,65 @@ enum LogicalMapping {
     Side(&'static str),
     /// A two-value shorthand: `(start, end)`.
     Pair(&'static str, &'static str),
+    /// A shorthand whose whole value goes to both sides (`border-inline:
+    /// 1px solid red`).
+    Both(&'static str, &'static str),
 }
 
-/// css-logical-1 flow-relative margin / padding / inset names, mapped for
-/// horizontal-tb, ltr: inline-start = left, block-start = top.
+/// `value` split at whitespace outside parentheses.
+fn split_top_level_whitespace(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (i, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && ch.is_whitespace() {
+            if let Some(from) = start.take() {
+                parts.push(&value[from..i]);
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(from) = start {
+        parts.push(&value[from..]);
+    }
+    parts
+}
+
+/// css-logical-1 flow-relative margin / padding / inset / border names,
+/// mapped for horizontal-tb, ltr: inline-start = left, block-start = top.
 fn logical_to_physical(property: &str) -> Option<LogicalMapping> {
-    use LogicalMapping::{Pair, Side};
+    use LogicalMapping::{Both, Pair, Side};
     Some(match property {
+        "border-inline-start" => Side("border-left"),
+        "border-inline-end" => Side("border-right"),
+        "border-block-start" => Side("border-top"),
+        "border-block-end" => Side("border-bottom"),
+        "border-inline" => Both("border-left", "border-right"),
+        "border-block" => Both("border-top", "border-bottom"),
+        "border-inline-start-width" => Side("border-left-width"),
+        "border-inline-end-width" => Side("border-right-width"),
+        "border-block-start-width" => Side("border-top-width"),
+        "border-block-end-width" => Side("border-bottom-width"),
+        "border-inline-width" => Pair("border-left-width", "border-right-width"),
+        "border-block-width" => Pair("border-top-width", "border-bottom-width"),
+        "border-inline-start-style" => Side("border-left-style"),
+        "border-inline-end-style" => Side("border-right-style"),
+        "border-block-start-style" => Side("border-top-style"),
+        "border-block-end-style" => Side("border-bottom-style"),
+        "border-inline-style" => Pair("border-left-style", "border-right-style"),
+        "border-block-style" => Pair("border-top-style", "border-bottom-style"),
+        "border-inline-start-color" => Side("border-left-color"),
+        "border-inline-end-color" => Side("border-right-color"),
+        "border-block-start-color" => Side("border-top-color"),
+        "border-block-end-color" => Side("border-bottom-color"),
+        "border-inline-color" => Pair("border-left-color", "border-right-color"),
+        "border-block-color" => Pair("border-top-color", "border-bottom-color"),
         "margin-inline-start" => Side("margin-left"),
         "margin-inline-end" => Side("margin-right"),
         "margin-block-start" => Side("margin-top"),
@@ -22511,6 +22569,56 @@ mod logical_property_tests {
         // Three values is not a valid two-value shorthand: ignored.
         e.apply_style_property(&mut style, "margin-inline", "1px 2px 3px");
         assert_eq!(style.margin_left, ComputedStyle::new().margin_left);
+    }
+
+    /// The flow-relative border properties had no arms, so a box styled
+    /// with `border-inline-*` / `border-block-*` (what StyleX and Tailwind
+    /// v4 emit) lost those sides: facebook's login inputs painted a top and
+    /// a bottom border and no left or right one.
+    #[test]
+    fn logical_border_properties_map_to_physical_sides() {
+        use rustkit_css::{BorderStyle, Color, Length};
+        let root = laid_out(concat!(
+            r#"<body style="margin:0"><div style="width:400px">"#,
+            r#"<div id="w" style="height:10px;border-style:solid;border-width:0;border-inline-width:2px 5px;border-block-end-width:7px"></div>"#,
+            r#"<div id="s" style="height:10px;border-inline-start:3px solid red;border-block:4px solid rgb(1, 2, 3)"></div>"#,
+            r#"<div id="i" style="height:10px;border-inline:6px solid blue"></div>"#,
+            r#"</div></body>"#,
+        ));
+        let border = |id: &str| {
+            let b = by_id(&root, id).unwrap_or_else(|| panic!("#{id}"));
+            let e = &b.dimensions.border;
+            (e.top, e.right, e.bottom, e.left)
+        };
+        assert_eq!(border("w"), (0.0, 5.0, 7.0, 2.0), "inline-width is `start end`");
+        assert_eq!(border("s"), (4.0, 0.0, 4.0, 3.0), "inline-start is left; block is top and bottom");
+        assert_eq!(border("i"), (0.0, 6.0, 0.0, 6.0), "inline is left and right");
+        let s = &by_id(&root, "s").expect("#s").style;
+        assert_eq!(s.border_left_color, Color::from_rgb(255, 0, 0));
+        assert_eq!(s.border_top_color, Color::from_rgb(1, 2, 3), "a colour with spaces stays one value");
+        assert_eq!(s.border_bottom_color, Color::from_rgb(1, 2, 3));
+
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut style = ComputedStyle::new();
+        e.apply_style_property(&mut style, "border-inline-end-style", "dashed");
+        e.apply_style_property(&mut style, "border-block-start-style", "solid");
+        assert_eq!(style.border_right_style, BorderStyle::Dashed);
+        assert_eq!(style.border_top_style, BorderStyle::Solid);
+        e.apply_style_property(&mut style, "border-inline-style", "dotted solid");
+        assert_eq!((style.border_left_style, style.border_right_style), (BorderStyle::Dotted, BorderStyle::Solid));
+        e.apply_style_property(&mut style, "border-inline-end-width", "9px");
+        e.apply_style_property(&mut style, "border-block-start-width", "8px");
+        assert_eq!(style.border_right_width, Length::Px(9.0));
+        assert_eq!(style.border_top_width, Length::Px(8.0));
+        // Each colour may contain spaces: split at the top level only.
+        e.apply_style_property(&mut style, "border-inline-color", "rgb(10, 20, 30) rgba(0, 0, 0, 0.5)");
+        assert_eq!(style.border_left_color, Color::from_rgb(10, 20, 30));
+        assert_eq!(style.border_right_color.a, 0.5);
+        e.apply_style_property(&mut style, "border-block-color", "rgb(4, 5, 6)");
+        assert_eq!(style.border_top_color, Color::from_rgb(4, 5, 6));
+        assert_eq!(style.border_bottom_color, Color::from_rgb(4, 5, 6));
+        e.apply_style_property(&mut style, "border-block-end-color", "rgb(7, 8, 9)");
+        assert_eq!(style.border_bottom_color, Color::from_rgb(7, 8, 9));
     }
 }
 
