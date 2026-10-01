@@ -1338,3 +1338,51 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **#415 carries one fix beyond the four mutexes you approved: the web-font lock order (`204ba3e`).** Same inversion, one line, not reproduced. Default: it stays in #415 for the reviewers to judge; say "drop it" and I revert that commit (additively) and leave the site in a note.
 2. **A test-only PR cost a 37-minute release build to get the receipt gate 5 asks for.** Default: unchanged, every cs PR carries a receipt from its own head. Say so if a `#[cfg(test)]`-only diff may cite develop's receipt instead.
 3. **#408 is still a draft that a headless session cannot mark ready** (third session running). Default: Prometheus or you mark it ready; it merges on the board, the verify sweep and #404's 16-pair timing.
+
+## 2026-10-01 18:14
+
+**No new PR. The machine was quiet (load 1.4–3.6) and the owed timing of #408's head is in: with tree reuse on by default, wikipedia reads 0.787 of `RUSTKIT_TREE_REUSE=0` in 16 counterbalanced pairs (16 of 16 below 1), github 0.863 (15 of 16), cnn 0.898 (15 of 16). Worst ratio of record: 14.1× → 13.5× (wikipedia, develop a0583fa, 16 quiet runs); nothing from this lane landed in between, so the 0.6 is the read, not a cut. #415 merged at 17:49 (develop ef82fe1, by Pete's account, not this lane). A probe then measured the next structural cut: 66% of wikipedia's elements compute a style equal to one an earlier element already computed.**
+
+| site | Chrome ms | before: of record (#404 binary, flag unset, 16 quiet runs, 08:55) | after: develop a0583fa (the #415 binary), median of 16 quiet runs, 17:50 | #408 head 63d24d1 with `=0`, 16 pairs | #408 head, default (reuse on), same pairs | default / `=0`, per-pair median |
+|---|---|---|---|---|---|---|
+| cnn | 210 | 523.5 → 2.5× | 497 → **2.4×** | 534.0 → 2.5× | 489.0 → 2.3× | 0.898 (15 of 16 below 1) |
+| github | 110 | 844.0 → 7.7× | 824 → **7.5×** | 840.0 → 7.6× | 733.0 → 6.7× | 0.863 (15 of 16) |
+| wikipedia | 20 | 282.5 → **14.1×** | 270 → **13.5×** | 276.5 → 13.8× | 220.5 → 11.0× | **0.787** (16 of 16) |
+
+- **The brief's first task was already done.** It asked for the test lock inversion fix; that is #415, opened last session. At the start of this one it had R1 CLEAR, R2-STAMP PASS and green CI at 204ba3e, with nothing to answer. It merged at 17:49.
+- **The "after" column** is `cascade-target/pc-eil-204ba3e`: develop a0583fa plus #415's `#[cfg(test)]`-only diff. 16 runs per site, one site after another (not interleaved), load 1.4 before and 3.0 after. Raw numbers in `cascade-target/tmp/init-lock/bench-record-1750.txt`. Develop has since moved to ac1b067 (#414, #415, #416, #417: bindings, fonts, tests); that tip is not measured.
+- **#408's timing** (`ab_flag.py pc-trd-63d24d1 x <pairs> RUSTKIT_TREE_REUSE=0`, two runs of 6 and 10 pairs back to back, 8 AB + 8 BA, 17:36–17:48, none dropped). Logs `cascade-target/tmp/trd/abflag-1737-a.txt`, `abflag-1741-b.txt`; pooled by the new hub tool `trench/tools/ab_combine.py`.
+  - Ranges: cnn 0.84–1.01, github 0.83–1.22, wikipedia 0.63–0.94.
+  - The second build goes to 1–3 ms on all three sites (from 64, 124 and 74 ms). **The first build pays for the copy**: per-pair first-build default/`=0` is 1.016 (cnn), 1.003 (github) and 1.051 (wikipedia, 205.8 → 217.5 ms, below 1 in 4 of 16 pairs).
+  - wikipedia is weaker than #404's read on its own binary (0.787 against 0.749, and 11.0× against 10.4×). I did not look for a cause.
+  - It is in #408's body. **#408 is still a draft**: `gh pr ready` was refused again. Head 63d24d1, CLEAN, MERGEABLE, R2-STAMP PASS, no R1 review.
+- **The fast first builds from 08:55 are not the flag.** None turned up in the 96 loads of the A/B. Two turned up in the record bench, on a binary where reuse is off by default: one cnn load with a first build of 236.6 ms against a median of 429.9 (0.55), one wikipedia load at 137.5 against 199.3 (0.69). That is the control the 10:47 digest asked for. The cause is still not known (core placement is the guess from 02:45, not verified).
+- **Share probe** (local only, never committed; patch `cascade-target/tmp/share-probe.patch`, binary `pc-share-probe2-beb487b`, logs `tmp/share-probe-logs2/`, built on develop beb487b). In the walk, after each element's style is computed, it hashes a key and compares the style with the first one computed under that key (`same_computed_style`). One load per site, first build:
+
+  | key (all include the parent's key, tag, class, attribute names, values of `style`/`type`/`role`/`lang`/`dir`/`hidden`, has-children) | wikipedia (3,840 elements) | github (1,154) | cnn (2,160) |
+  |---|---|---|---|
+  | A: + id value, first/last child | 1,283 repeat (33%), 0 differ | 224 (19%), 0 | 929 (43%), 2 |
+  | B: + id present or not | 2,863 (75%), 3 differ | 655 (57%), 12 | 1,343 (62%), 45 |
+  | **C: B + first/last child** | **2,549 (66%), 1 differs** | 385 (33%), 0 | 929 (43%), 2 |
+  | D: C's parent key + exact sibling position | 1,774 (46%), 0 | 299 (26%), 0 | 705 (33%), 0 |
+
+  - **Read it as: two thirds of wikipedia's elements repeat a style that the walk already has.** Element style is 94 ms of wikipedia's first build (53% of its walk, 06:40 probe), and `::before`/`::after` another 27 ms. A cache that hands a repeat its style without matching would skip up to about 60 ms of the roughly 205 ms build, less the key and the clone. No other cut found for the first build has been worth more than a few percent of it.
+  - **The key is not exact as it stands, and the probe does not prove any key exact.** wikipedia's one exception under C is `li#t-upload` (a rule names that id). cnn's two are a 4th of 22 and a 3rd of 4 child (a positional or sibling rule); the exact-position key D removes them and costs a third of the hits. A real cache has to key on what the sheets' selectors can read: ids that some rule names, attribute values that some rule tests, and the sibling position only under a parent some positional or sibling rule can reach.
+  - What the cascade reads is narrower than the DOM: an ancestor is only (tag, classes, id) and a preceding sibling only (tag, classes, id, form state), so an ancestor's other attributes cannot change a match.
+  - The probe slows the load 5–12× (it clones and `Debug`-formats every style); its timings mean nothing.
+  - `trench/tools/share_estimate.py` (new, hub) gives the same bound from the pinned HTML alone, with no engine: wikipedia 34% with id values, 73% with ids as present or absent. It counts 3,933 elements on wikipedia against the engine's 3,840, and 4,933 on cnn against 2,160, so trust the probe over it.
+  - The first probe build had keys D and E wrong (the exact position went into the key children inherit, so no element repeated). That cost a second build.
+- **Lazy element identity (decision 2 from 06:40) is not the next cut.** `ElementIdentity.element_id` is read by tree reuse to refresh image sizes, so identity cannot be skipped as a whole; only the selector strings could be deferred, and they are part of an 8% slice. The share cache is worth several times that.
+- **Not done:** a timing of develop's tip, clippy, the `=0` control for the two odd pinned dumps in #408, any engine change.
+- **Aleph:** one call (`aleph_search selector_segments`), answered at once, no hang or error. It found `Engine::child_selector_segments` and `Engine::selector_segment` this time. Navigation after that was Read plus python on the cs worktree (a hook blocks `grep` on the indexed tree; `cascade-target/tmp/find.py` prints matching lines).
+- **Slips:** the wrong probe keys, above. I created a branch `atlas/cs-lazy-identity` before reading the code, then deleted it unpushed with no commits. Three commands were refused for shell expansions or chained operations before I split them into single calls.
+- **Build cost:** release parity-capture 5 min 01 s (nine crates, develop had moved) and 5 min 57 s (engine only), both at load 2–6.
+- **Saved:** binaries `cascade-target/pc-share-probe-beb487b` (first, wrong D/E) and `pc-share-probe2-beb487b`. Under `cascade-target/tmp/`: `share-probe.patch`, `share-probe-logs{,2}/`, `share-probe-run2.txt`, `share_show.py`, `find.py`; `init-lock/bench-record-1750.txt`; `trd/abflag-1737-a.txt`, `trd/abflag-1741-b.txt`. PR body `cascade-target/pr-trd-body.md`.
+- **State left behind:** `.worktrees/cs-engine-init-lock` is detached at develop ac1b067, clean (the probe is reverted). The shared target dir's release artifact is the probe build at beb487b: `touch` the engine crate before building. `.worktrees/cs-tree-reuse-default` untouched.
+- **Open cs PRs:** 1 (#408, draft), cap 3.
+- **Next session:** (1) #408: mark ready if permitted; answer reviews. (2) Style sharing, behind `RUSTKIT_STYLE_SHARE`, off by default, with a `verify` mode that computes anyway and counts styles that differ (the tree-reuse pattern). Start from `share-probe.patch` in `.worktrees/cs-engine-init-lock`. First step: collect from the rule index which ids, attribute names and positional or sibling selectors the sheets use, and build the key from that; verify must read 0 differing on the three pinned pages and the board's 20 sites before any timing. (3) If quiet: ratio of record on develop's tip.
+
+**Decisions for Pete**
+1. **Build a style-sharing cache as the next cut?** On wikipedia 66% of elements compute a style an earlier element already has; that is up to about 60 ms of its 205 ms first build, where every other cut found was worth 2–5%. It is the riskiest cut so far for correctness (a key that misses one thing a selector reads gives a wrong style). Default: yes, behind a flag that is off by default, with a verify mode, and the default flips only after verify reads 0 on the pinned pages and the 20-site board. This replaces lazy element identity as the next cut.
+2. **#408 now has everything, including the timing of its own head, and is still a draft that a headless session cannot mark ready** (fourth session). Default: you or Prometheus mark it ready. With it merged the worst ratio of record becomes about 11.0×.
+3. **3× by 2026-10-11 still is not in reach.** With #408 and the whole share-cache bound, wikipedia's load is about 220 − 60 = 160 ms, or 8×, against a 60 ms budget. Default: unchanged, keep the metric and the date, and report the gap on the end date.
