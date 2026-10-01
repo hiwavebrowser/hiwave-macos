@@ -1360,3 +1360,26 @@ ORACLE BLOCKED linkedin (top-level document HTTP 403)
 SCORABLE 27/57 on 19 sites
 trench/realsite/runs/20261001T0226Z-quiet-devaf4b95d
 ```
+
+## 2026-10-01 01:10: Atlas queue item 1 (semantic controls) is #396. Items 2 and 3 not started
+
+**Points: 28/60 -> 28/60.** No board run this session; the 22:48 quiet board on develop af4b95d stands (loads 17 · readable 8 · looks-right 3; scorable 27/57). #391 and #392 merged before the session started; develop is now b946849 (#390).
+
+**PR opened (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#396 `atlas/rs-control-semantics` @ 90be88d** (base 9c701ab). The control-paint path dropped `input_type`, so a password's value was painted as plain text and written into every display-list dump, and a `<select>` painted as a text input showing one option.
+  - A password is masked when the display list is built (one bullet per character), so the value is in no command, dump or frame. `DisplayCommand::TextInput` carries `kind` (Text / Password / TextArea / MenuList). New `DisplayCommand::ListBox` carries every option and the selected rows. The renderer draws the drop-down arrow and the list box rows with the selection highlight. Geometry and colours measured on Chrome 148.
+  - 7 tests. The 3 engine tests **fail on develop 9c701ab** (run there, 0/3) and pass on the branch. Layout 580/580, renderer 90/90. The full engine suite in parallel at load 13 to 18: 231 passed, 38 failed, all 38 the GPU-test-guard wait timeout, none an assertion; a serial run did not fit, so CI is the full-suite evidence.
+  - Campaign vs develop 9c701ab: 26/26 pass on both, avg 1.1622 -> 1.1612, 23/26 identical. form-elements 0.9875 -> 0.9535, form-controls 3.2442 -> 3.2405, **settings 2.0819 -> 2.0919 (worse by 0.01, said in the PR)**. Builtins 5/5, 4/5 identical (settings). Ratchet holds on both arms.
+
+**Not done, plainly:** queue item 2 (WOFF/WOFF2), item 3 (elliptical corners) and `::first-letter` were not started. One release build took 39 minutes (6 quiet) with the cascade lane building at the same time, at load 16 to 24. That one build was the session.
+
+**Found:**
+1. **Select widths are wrong against Chrome on develop**, and painting the arrow and rows makes it visible. A list box is `widest option + 2`; Chrome is `widest + 4 + 2` (39.05 and 43.05 measured), so the widest label's last glyph is clipped by about 2px. A drop-down's width ignores author horizontal padding: settings' selects are about 70 wide for Chrome's 92, and that is why settings got 0.01 worse (arrow and label now sit where Chrome puts them, in a box that starts 22px too far right). Next PR, numbers already measured (`scratch/s1001/controls-chrome.json`, `settings_cmp.py`).
+2. Layout's control sizes (input 149x19, 16px option rows) were calibrated on form-controls, which sets `* { box-sizing: border-box }`. On a page without it Chrome builds 153x21 and 17px rows (`scratch/s1001/row_probe.py`, 7 variants). Not fixed.
+3. **Item 2 may be smaller than the review says, on macOS.** `CGFont::from_data_provider` (what `webfonts.rs` installs with) accepts WOFF and WOFF2 bytes as they are: a probe test on develop returned ok for Ahem as TTF, WOFF and WOFF2 (`scratch/s1001/woff_probe.py`). The engine has no format filter ahead of it. **Not proven: that the glyphs render.** My render check was inconclusive, because a page loaded with `--html-file` applies no web font at all, not even the TTF (`scratch/s1001/woff-e2e.html`). The comment in `webfonts.rs` that says WOFF/WOFF2 "install as nothing" is what the review quoted; it may be out of date.
+
+**Next:** (1) `atlas/rs-select-width` (finding 1); it should bring settings back under 2.0819. (2) Item 2: serve `woff-e2e.html` over local HTTP and see which of the three faces render on develop. If WOFF2 already renders, the PR is the proof fixture, size bounds read from the WOFF/WOFF2 header before install, cache invalidation, and the comment. If not, find where the face is dropped. Then a real-site A/B. (3) Item 3, elliptical corners.
+
+**Decisions for Pete:**
+1. **Build contention.** Three lanes share this Mac, and a release build went from 6 to 39 minutes. Each queue item needs at least one release build plus two campaign runs. Either stagger the lanes (realsite on the hour, cascade on the half hour) or accept one PR per session from this lane.
+2. **WOFF2 decoding: OS or in-engine?** If Core Text's decoder does render (to be confirmed next session), macOS can ship WOFF/WOFF2 without a decoder of our own. Chrome does not hand untrusted font bytes to the OS unchecked; it sanitises them first. My recommendation: ship the OS path now with header-declared size caps, and treat an in-engine decoder (it needs Brotli: a pure-Rust crate, or our own) as its own item, since Windows and Linux need it anyway. That is a dependency-policy call, so it is yours.
