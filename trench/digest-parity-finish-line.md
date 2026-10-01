@@ -14157,3 +14157,34 @@ discrete 26/26, 0 not fully measured. Green: `bg-pure`, `bg-solid`,
 `gradients`. The change was never going to move it — bit-identical captures —
 and the value of the night is that the Linux board can no longer *claim* to
 move it either.
+
+### Addendum — the three decisions are answered
+
+Put to Pete and answered live, same night: **yes to 1, yes to 3, hold 2.** Full
+text now in `trench/BASELINE-parity-finish-line.md` under *Decisions RATIFIED by
+Pete (2026-10-01, night 71)*, which is the file a next night reads first.
+
+- **1 RATIFIED** — this seat may no longer propose a **unit** from its own Gate A
+  magnitudes. Units come from the macOS `gate-a.json`. The Linux gates still run
+  and their output is still mechanics; a delta or a root count from here is no
+  longer a defect to fix.
+- **2 HELD** — the Linux stub stays. Under decision 1 the seat reads macOS
+  numbers anyway, so fixing it buys nothing and would leave two divergent text
+  stacks instead of removing one. Declared and refused is the end state.
+- **3 RATIFIED** — `*.blob.core.windows.net` to be allowed. **Not yet applied**:
+  it is an environment network-policy change and a night cannot set it for
+  itself.
+
+**The consequence to state plainly, because the next night will hit it:** 1 and
+3 together mean that until the network change is actually applied, this seat
+**cannot select a unit at all.** That is intended. A night in that position
+should say so and work an instrument or recorded unit, not fall back on the
+numbers decision 1 just retired. Reading the receipt out of the `pr-aggregate`
+job logs (as tonight did) gets the four columns but not the per-case detail a
+unit needs — that is in the `parity-oracle` artifact.
+
+**What Pete did NOT rule on: the queue order.** Tonight's `settings` 201-of-243
+text-exposure on real Core Text says the largest geometry row is mostly P4,
+which §4 places fourth. That was context for decision 1, not a question he
+answered. The 08-12 geometry-first amendment stands. Moving the queue is its own
+decision.

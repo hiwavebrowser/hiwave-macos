@@ -373,3 +373,53 @@ under a `file://` capture it resolves outside the repo and RustKit logs four
 same font file on both sides on every seat and remove the font half of the
 confound everywhere — but it would also invalidate all 26 committed baselines,
 and corpus changes are banned from this loop. Recorded, not touched.
+
+## Decisions RATIFIED by Pete (2026-10-01, night 71) — the seat's numbers are not units
+
+Tonight's three decisions, put to Pete and answered live. **Yes to 1, yes to 3,
+hold 2.**
+
+1. **RATIFIED — this seat may no longer propose a UNIT from its own Gate A
+   magnitudes.** Units come from the macOS `gate-a.json`. The Linux gates may
+   still be run, and their output is still useful as *mechanics* — a code path
+   observed, an A/B showing a change moves nothing, a capture hash — but no
+   night may read a delta, a root count or a defect class off this seat and call
+   it a defect to fix. Three of five nights' "largest defect" claims from here
+   were retracted on measurement (09-29's flex factors, 10-01's 0.5em space, and
+   by implication every text-exposed row before them). The pattern is not bad
+   luck; the seat does not shape text, so its magnitudes are a ruler.
+
+2. **HELD — do not wire a real font shaper into the Linux `shape()` body.**
+   It would make this seat measure again, and it is still out of scope: the
+   campaign is macOS-only and cross-platform ports are banned from this loop.
+   Pete's reasoning, adopted: with decision 1 in force the seat reads macOS
+   numbers anyway, so fixing the stub buys nothing and would leave **two**
+   divergent text stacks to reason about instead of removing one. The stub stays,
+   declared and refused (`dd075ec`), which is the correct end state rather than a
+   deferral.
+
+3. **RATIFIED — allow `*.blob.core.windows.net`** so a night here can read the
+   macOS `gate-a.json` and Gate C's board directly. Asked six nights running;
+   under decision 1 it stops being a convenience and becomes **the only way this
+   seat picks a unit at all**. Not yet applied at the time of writing — it is an
+   environment network-policy change, made in the cloud environment's settings,
+   not something a night can set for itself.
+
+**Until 3 is actually applied, decisions 1 and 3 together leave the seat unable
+to select a unit.** That is a real and intended consequence, not an oversight:
+a night that cannot reach the macOS board should say so and work instrument or
+recorded units, rather than fall back to numbers decision 1 just retired.
+Night 71 obtained its macOS receipt by reading the `pr-aggregate` job logs
+through the GitHub API, which worked and is not a method to depend on — the
+receipt is in the job summary and the artifact, and only the artifact carries
+the per-case detail a unit needs.
+
+### Explicitly NOT ratified: the queue order
+
+Night 71 measured that `settings` reads **201 of 243** geometry failures
+text-exposed on **real Core Text**, i.e. the largest geometry row on the board
+is mostly P4 — which the ratified §4 queue places fourth. That tension was
+reported as context for decision 1 and **Pete did not rule on it.** The 08-12
+geometry-first amendment stands as written. A next night may not read "units
+come from macOS" as "P4 is now first"; if the queue is to move, that is its own
+decision with its own ratification.
