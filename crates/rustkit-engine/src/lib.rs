@@ -22063,6 +22063,56 @@ mod windows_engine_pins {
         );
     }
 
+    /// `border-radius` on the `<img>` itself rounds the image: replaced
+    /// content is trimmed to the content edge curve (CSS Backgrounds 3
+    /// §5.3). Only the image's (empty) background was rounded before.
+    #[test]
+    fn a_rounded_img_clips_its_image_to_the_content_edge_curve() {
+        const GIF: &str = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+        let e = engine();
+        let commands_for = |style: &str| {
+            dl(&e, &format!(
+                r#"<!DOCTYPE html><html><body><img src="{GIF}" style="display:block;width:100px;height:60px;{style}"></body></html>"#
+            ))
+        };
+
+        // The clip opens just before the image and closes just after it.
+        let list = commands_for("border-radius:50%");
+        let lines: Vec<&str> = list.lines().collect();
+        let image_at = lines
+            .iter()
+            .position(|c| c.starts_with("Image"))
+            .unwrap_or_else(|| panic!("no Image command:\n{list}"));
+        let clip = lines[image_at - 1];
+        assert!(clip.starts_with("PushClipRounded"), "before the image: {clip}");
+        assert!(clip.contains("width: 100.0, height: 60.0"), "{clip}");
+        assert_eq!(
+            clip.matches("CornerRadius { h: 50.0, v: 30.0 }").count(),
+            4,
+            "{clip}"
+        );
+        assert!(lines[image_at + 1].starts_with("PopClip"), "after the image: {}", lines[image_at + 1]);
+
+        // Border and padding move the curve in: 30px less 5px + 5px.
+        let list = commands_for("border-radius:30px;border:5px solid #000;padding:5px");
+        let clip = list
+            .lines()
+            .find(|c| c.starts_with("PushClipRounded"))
+            .unwrap_or_else(|| panic!("no rounded clip:\n{list}"));
+        assert_eq!(
+            clip.matches("CornerRadius { h: 20.0, v: 20.0 }").count(),
+            4,
+            "{clip}"
+        );
+
+        // A radius the border and padding swallow, or none at all: no clip.
+        for style in ["border-radius:8px;border:5px solid #000;padding:5px", ""] {
+            let list = commands_for(style);
+            assert!(list.lines().any(|c| c.starts_with("Image")), "{list}");
+            assert!(!list.contains("PushClipRounded"), "`{style}`:\n{list}");
+        }
+    }
+
     /// The shadow of a rounded box is rounded, and its hole is the box's own
     /// curve, so the command has to carry the box's corner radii. It carried
     /// none: every shadow was painted as a rectangle with a rectangular hole.
