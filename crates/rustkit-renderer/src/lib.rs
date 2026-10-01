@@ -360,6 +360,8 @@ pub struct Renderer {
     // Blit pipeline for copying RGBA textures (unlike texture_pipeline which treats R as alpha)
     blit_pipeline: wgpu::RenderPipeline,
     color_glyph_pipeline: wgpu::RenderPipeline,
+    // Image pipeline: the blit shader composited source-over (straight alpha)
+    image_pipeline: wgpu::RenderPipeline,
     // Blit pipeline for Rgba8Unorm targets (for blitting to filter textures)
     blit_pipeline_rgba: wgpu::RenderPipeline,
 
@@ -581,6 +583,14 @@ impl Renderer {
             &texture_bind_group_layout,
         );
 
+        // Image pipeline: blit shader + source-over blend for straight alpha.
+        let image_pipeline = pipeline::create_image_pipeline(
+            &device,
+            surface_format,
+            &uniform_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
         // Create blit pipeline for Rgba8Unorm targets (blitting to filter textures)
         let blit_pipeline_rgba = pipeline::create_blit_pipeline(
             &device,
@@ -644,6 +654,7 @@ impl Renderer {
             _texture_pipeline_rgba: texture_pipeline_rgba,
             blit_pipeline,
             color_glyph_pipeline,
+            image_pipeline,
             blit_pipeline_rgba,
             backdrop_filter_pipelines,
             gradient_pipeline,
@@ -5825,9 +5836,11 @@ impl Renderer {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // blit_pipeline, not texture_pipeline: the texture shader treats the
-        // sampled R channel as glyph-atlas alpha; blit samples real RGBA.
-        render_pass.set_pipeline(&self.blit_pipeline);
+        // image_pipeline, not texture_pipeline: the texture shader treats the
+        // sampled R channel as glyph-atlas alpha; the blit shader samples real
+        // RGBA. Not blit_pipeline either: its blend is REPLACE, which paints an
+        // image's transparent texels as their own colour (black, for most PNGs).
+        render_pass.set_pipeline(&self.image_pipeline);
         render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -7136,6 +7149,14 @@ mod tests {
         assert_eq!(space, QuadSpace::Screen);
         assert_eq!((r.x, r.width), (70.0, 20.0));
         assert_eq!(t, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    /// Images are composited source-over. With the blit pipeline's REPLACE a
+    /// transparent PNG painted black where it should show the page.
+    #[test]
+    fn images_are_blended_not_copied() {
+        assert_eq!(pipeline::IMAGE_BLEND, wgpu::BlendState::ALPHA_BLENDING);
+        assert_ne!(pipeline::IMAGE_BLEND, wgpu::BlendState::REPLACE);
     }
 
     #[test]
