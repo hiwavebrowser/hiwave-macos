@@ -216,6 +216,20 @@ impl FontFamilyChain {
                         let sans_chain = Self::sans_serif();
                         chain.fallbacks.push(sans_chain.primary);
                         chain.fallbacks.extend(sans_chain.fallbacks);
+                    } else if lower == "serif" || lower == "monospace" {
+                        // A generic keyword is not a font name. Left in the
+                        // chain as written it matched nothing, and the walk
+                        // went on to the system font appended below:
+                        // `Consolas, monospace` was measured in a
+                        // proportional face (and painted in Menlo, which is
+                        // what paint maps the keyword to).
+                        let generic = if lower == "serif" {
+                            Self::serif()
+                        } else {
+                            Self::monospace()
+                        };
+                        chain.fallbacks.push(generic.primary);
+                        chain.fallbacks.extend(generic.fallbacks);
                     } else {
                         chain.fallbacks.push(fallback.to_string());
                     }
@@ -3078,6 +3092,49 @@ mod tests {
         assert_eq!(apple.primary, ".AppleSystemUIFont");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(apple.primary, "Segoe UI");
+    }
+
+    /// A generic keyword after families that are not installed resolves
+    /// like the keyword alone. Chrome 148 on a 28-character line at 16px:
+    /// `X, monospace` 268.84 and `X, serif` 199.52, where the system font
+    /// (what the walk used to fall through to) is 220.78.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_generic_after_missing_families_resolves_as_the_generic() {
+        let width = |family: &str| {
+            TextShaper::new()
+                .shape(
+                    "Handgloves quick wizard 0123",
+                    &FontFamilyChain::from_css_value(family),
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    16.0,
+                )
+                .expect("shape")
+                .width()
+        };
+        let system = width("system-ui");
+        for generic in ["monospace", "serif"] {
+            let alone = width(generic);
+            let after_missing = width(&format!("\"No Such Family 9f2c\", {generic}"));
+            assert_eq!(after_missing, alone, "{generic}");
+            assert!((alone - system).abs() > 1.0, "{generic} is not the system font");
+        }
+        // A fixed-pitch face: every advance is the same.
+        let mono = TextShaper::new()
+            .shape(
+                "iW",
+                &FontFamilyChain::from_css_value("Consolas 9f2c, monospace"),
+                FontWeight(400),
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+            )
+            .expect("shape");
+        assert_eq!(mono.glyphs[0].advance, mono.glyphs[1].advance);
+        // An installed family ahead of the generic still wins.
+        assert_eq!(width("Georgia, serif"), width("Georgia"));
     }
 
     #[test]
