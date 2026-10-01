@@ -586,6 +586,10 @@ impl DomBindings {
 
         runtime.evaluate_script(window_js)?;
 
+        // The screen, performance and navigator facts, and the window
+        // geometry, that pages read without feature-testing (web_platform.js).
+        runtime.evaluate_script(include_str!("web_platform.js"))?;
+
         // IPC bridge for communication with Rust
         let ipc_js = r#"
             // IPC queue for postMessage calls
@@ -1530,6 +1534,37 @@ mod tests {
             JsValue::String(s) => s,
             other => panic!("{script} evaluated to {other:?}"),
         }
+    }
+
+    /// Pages read these without feature-testing; each used to throw a
+    /// ReferenceError or TypeError and end the rest of the script.
+    #[test]
+    fn the_screen_performance_window_and_navigator_baseline_exists() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let probe = |script: &str| eval_string(&bindings, script);
+        // screen is the viewport.
+        assert_eq!(probe("String(screen.width + 'x' + screen.height)"), "800x600");
+        assert_eq!(probe("String(screen.colorDepth)"), "24");
+        // performance: a monotonic clock and the Performance Timeline.
+        assert_eq!(
+            probe("var a = performance.now(); var b = performance.now(); String(typeof a + (b >= a))"),
+            "numbertrue"
+        );
+        assert_eq!(
+            probe("performance.mark('s'); performance.mark('e'); var m = performance.measure('m', 's', 'e');                    String(m.entryType + performance.getEntriesByType('mark').length + performance.getEntriesByName('m').length)"),
+            "measure21"
+        );
+        assert_eq!(probe("String(typeof performance.timing.navigationStart)"), "number");
+        // window geometry and frame tree.
+        assert_eq!(probe("String([scrollX, scrollY, pageXOffset, pageYOffset, screenX].join())"), "0,0,0,0,0");
+        assert_eq!(probe("String(window.top === window && window.parent === window && window.opener === null)"), "true");
+        assert_eq!(probe("String(typeof scrollTo + typeof focus + typeof getSelection().toString())"), "functionfunctionstring");
+        // navigator facts.
+        assert_eq!(probe("String(navigator.hardwareConcurrency > 0)"), "true");
+        assert_eq!(probe("String([navigator.maxTouchPoints, navigator.cookieEnabled, navigator.webdriver].join())"), "0,true,false");
+        // Something defined first wins: the shim never overwrites.
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        assert_eq!(eval_string(&bindings, "String(navigator.userAgent)"), "RustKit/1.0");
     }
 
     #[test]
