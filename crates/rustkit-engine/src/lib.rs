@@ -10097,8 +10097,18 @@ impl Engine {
                     font_style,
                     advances,
                     ascent,
+                    run,
                 } => serde_json::json!({
                     "op": "text",
+                    // The SHAPED-RUN CONTRACT, made visible: the face paint
+                    // draws this command with and how many glyphs and
+                    // clusters it places. `null` means the command is
+                    // painted by walking `text` in `font_family`.
+                    "run": run.as_ref().map(|run| serde_json::json!({
+                        "face": run.face.postscript_name,
+                        "glyphs": run.glyphs.len(),
+                        "clusters": run.cluster_advances().len(),
+                    })),
                     "text": text,
                     "x": x,
                     "y": y,

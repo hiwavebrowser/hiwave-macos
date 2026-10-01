@@ -30,6 +30,9 @@ mod flex_item_relayout_tests;
 #[cfg(test)]
 mod flex_resolve_tests;
 
+#[cfg(test)]
+mod shaped_run_tests;
+
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
     calculate_caret_position, calculate_selection_rects, render_button, render_checkbox,
@@ -59,6 +62,7 @@ pub use text::{
     FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
     TextMetrics, TextShaper, TopLevelSite, TEXT_METRICS_ARE_FONT_DERIVED, TEXT_SHAPER_BACKEND,
 };
+pub use text::{FaceIdentity, FaceSynthesis, GlyphRun, RunGlyph};
 
 use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
 use std::cmp::Ordering;
@@ -6174,6 +6178,16 @@ pub enum DisplayCommand {
         /// positions the baseline at y + ascent instead of consulting a
         /// third per-glyph shaper.
         ascent: Option<f32>,
+        /// SHAPED-RUN CONTRACT, slice S0
+        /// (docs/SHAPED_RUN_CONTRACT_2026-09-30.md): the frozen run layout
+        /// shaped for this line. When present, paint places ITS glyph ids
+        /// from ITS face and resolves no family list; `advances` is then
+        /// this run's per-character projection and `font_family` is kept
+        /// for the old path only. `None` where the run is outside the slice
+        /// (a fallback character, an emoji, a platform whose shaper does
+        /// not name its face) and on the legacy callers; paint then walks
+        /// `text` as before. A lane that edits the emitter keeps this field.
+        run: Option<std::sync::Arc<GlyphRun>>,
     },
     /// Draw text decoration line (underline, strikethrough, overline).
     TextDecoration {
@@ -7945,7 +7959,14 @@ impl DisplayList {
                 // (GradientText was skipped by the old continue-before-shape
                 // and re-owned pitch + baseline in paint — the last dual
                 // text path.)
-                let mut advances = shape_line_advances(&text, style, font_size);
+                let shaped = shape_line(&text, style, font_size);
+                let mut advances = shaped.as_ref().and_then(char_advances_of);
+                // SHAPED-RUN CONTRACT (S0): the same shape call, frozen with
+                // the justification slack in it. `advances` above is its
+                // projection onto characters and stays for the old path.
+                let line_run = shaped
+                    .as_ref()
+                    .and_then(|shaped| GlyphRun::freeze(shaped, justify_space));
                 // A justified line widens each word separator by the slack
                 // layout distributed (TextLine::justify_space). Only the
                 // per-char advance path can carry it: when shaping fell back
@@ -7965,7 +7986,7 @@ impl DisplayList {
                 // edge and paint `…` in the run's own font. Without per-char
                 // advances there is nothing to cut against — the run paints
                 // as laid out and the clip alone applies.
-                let (text, advances, text_width) = match (self.ellipsis.as_mut(), &advances) {
+                let (text, advances, text_width, line_run) = match (self.ellipsis.as_mut(), &advances) {
                     (Some(scope), Some(adv)) => {
                         let ellipsis_advance = shape_line_advances("\u{2026}", style, font_size)
                             .and_then(|a| a.first().copied())
@@ -7982,16 +8003,27 @@ impl DisplayList {
                                 .width
                             });
                         match scope.cut(&text, x, line_top, adv, ellipsis_advance) {
-                            TextOverflowCut::Keep => (text, advances, text_width),
+                            TextOverflowCut::Keep => (text, advances, text_width, line_run),
                             TextOverflowCut::Hide => continue,
                             TextOverflowCut::Cut {
                                 text,
                                 advances,
                                 width,
-                            } => (text, Some(advances), width),
+                            } => {
+                                // The run is cut where the characters were:
+                                // the kept glyphs, then the ellipsis shaped
+                                // alone in the same face (as its advance was).
+                                let kept = advances.len().saturating_sub(1);
+                                let line_run = line_run.and_then(|run| {
+                                    shape_line("\u{2026}", style, font_size)
+                                        .and_then(|tail| GlyphRun::freeze(&tail, 0.0))
+                                        .and_then(|tail| run.cut_with_tail(kept, &tail))
+                                });
+                                (text, Some(advances), width, line_run)
+                            }
                         }
                     }
-                    _ => (text, advances, text_width),
+                    _ => (text, advances, text_width, line_run),
                 };
 
                 // Check if this is gradient text (background-clip: text with gradient and transparent fill)
@@ -8038,6 +8070,7 @@ impl DisplayList {
                     },
                     advances,
                     ascent: Some(seat_ascent),
+                    run: line_run.map(std::sync::Arc::new),
                 });
 
                 // Draw text decorations
@@ -8660,15 +8693,13 @@ fn shape_text_metrics(
     }
 }
 
-/// Per-CHAR advances from the layout shaper, letter/word-spacing applied
-/// (ADVANCE CONTRACT, text-stack unification 2026-07-11). Returns None when
-/// shaping fails or when glyph count != char count (ligature clusters) — the
-/// renderer then falls back to its own advances instead of misaligning.
-pub fn shape_line_advances(
+/// One line of `text` shaped in `style`, letter/word-spacing applied: the
+/// single shape call behind `shape_line_advances` and `shape_line_run`.
+fn shape_line(
     text: &str,
     style: &rustkit_css::ComputedStyle,
     font_size: f32,
-) -> Option<Vec<f32>> {
+) -> Option<ShapedRun> {
     let letter_spacing = match style.letter_spacing {
         Length::Px(px) => px,
         Length::Em(em) => em * font_size,
@@ -8694,10 +8725,46 @@ pub fn shape_line_advances(
         )
         .ok()?;
     run.apply_spacing(letter_spacing, word_spacing);
-    if run.glyphs.len() != text.chars().count() {
+    Some(run)
+}
+
+/// The per-character projection of a shaped line: `None` when a glyph is
+/// not one character (the vector cannot describe it).
+fn char_advances_of(run: &ShapedRun) -> Option<Vec<f32>> {
+    if run.glyphs.len() != run.text.chars().count() {
         return None;
     }
     Some(run.glyphs.iter().map(|g| g.advance).collect())
+}
+
+/// Per-CHAR advances from the layout shaper, letter/word-spacing applied
+/// (ADVANCE CONTRACT, text-stack unification 2026-07-11). Returns None when
+/// shaping fails or when glyph count != char count (ligature clusters) — the
+/// renderer then falls back to its own advances instead of misaligning.
+pub fn shape_line_advances(
+    text: &str,
+    style: &rustkit_css::ComputedStyle,
+    font_size: f32,
+) -> Option<Vec<f32>> {
+    shape_line(text, style, font_size)
+        .as_ref()
+        .and_then(char_advances_of)
+}
+
+/// The frozen run for one line of `text` in `style` (SHAPED-RUN CONTRACT,
+/// slice S0): the shape `shape_line_advances` projects, kept whole.
+/// `justify_space` is added to each word separator before the freeze.
+/// `None` when shaping fails or the run is outside the slice
+/// (`GlyphRun::freeze`).
+pub fn shape_line_run(
+    text: &str,
+    style: &rustkit_css::ComputedStyle,
+    font_size: f32,
+    justify_space: f32,
+) -> Option<GlyphRun> {
+    shape_line(text, style, font_size)
+        .as_ref()
+        .and_then(|run| GlyphRun::freeze(run, justify_space))
 }
 
 /// Simple text measurement (fallback when shaping is unavailable).
