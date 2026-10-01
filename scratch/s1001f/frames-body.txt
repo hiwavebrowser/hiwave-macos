@@ -1,0 +1,17 @@
+RustKit-only A/B on live URLs, develop __BASE__ vs fix __HEAD__, each captured A, B, A, B at 1280x800 (machine load 12 to 23, so no Chrome oracle run; `nan` is a capture that did not finish in 150 s). "within" is the same binary twice (the site's own variance), "across" is the four develop/fix pairs:
+
+```
+x            within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 0/40 text commands carry a run ()
+wikipedia    within develop   0.00%  within fix   0.00%  across  12.30%  12.30%  12.30%  12.30%  | 2938/2938 text commands carry a run (Helvetica 2308, Helvetica-Bold 513, Helvetica-Oblique 61)
+google       within develop   8.87%  within fix   8.36%  across   0.74%   8.49%   8.81%   3.76%  | 15/15 text commands carry a run (HelveticaNeue 10, ArialMT 2, Helvetica 2)
+facebook     within develop   0.00%  within fix   0.00%  across   1.05%   1.05%   1.05%   1.05%  | 41/43 text commands carry a run (.SFNS-Regular 32, Times-Bold 5, font00000000306f027b 4)
+netflix      within develop   4.72%  within fix   4.78%  across   2.16%   4.58%   4.91%   4.69%  | 104/104 text commands carry a run (font00000000306f02e2 104)
+lyft         within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 155/155 text commands carry a run (RebelSansTextVF-Reg 154, RebelSansDisplay-VF-Regular 1)
+shopify      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 8/285 text commands carry a run (ShopifyInterBeta029-Regular 6, Menlo-Regular 2)
+apple        within develop   0.00%  within fix    nan%  across    nan%   0.00%    nan%   0.00%  | 262/262 text commands carry a run (SFProText-Regular 186, SFProDisplay-Regular 29, SFProText-Semibold 23)
+```
+
+- **wikipedia** is the one site whose frame follows the binary (12.30% of pixels, 0.00% within each arm): its 2938 text commands go from the system font to Helvetica, Helvetica-Bold and Helvetica-Oblique, which is what Chrome draws.
+- **facebook** moves 1.05%: five text commands with no author font are now Times-Bold.
+- **x**, **lyft** and **shopify** are pixel-identical across arms. google and netflix differ within an arm by as much as across (rotating content).
+- **x crashed on the first commit** (35b90b8) and loads on the head: see the third test above.

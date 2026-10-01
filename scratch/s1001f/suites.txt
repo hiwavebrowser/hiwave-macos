@@ -1,0 +1,8 @@
+Suites at __HEAD__: rustkit-layout 594/594 (2 new), rustkit-text 95/95 (1 new, 1 updated), rustkit-css 47/47, rustkit-renderer 114/114, rustkit-svg 26/26.
+
+**The rustkit-engine suite was not run to completion locally.** Two attempts at machine load 15 to 35 (other lanes building): every failure was the suite's own GPU test guard timing out (`GPU test guard: waited 120s`, `lib.rs:105`), not an assertion, so the run says nothing about this change. CI is the first full run of it; if an engine test pins the old default face, it will show there and I will fix it on this branch.
+
+Geometry gate (CI's Gate A, run locally through `ratchet_local.py`): the ratchet holds on both arms, and three lines differ. They are all `<kbd>` boxes, which are `font-family: monospace` and so change from Menlo to Courier:
+- Chrome's baseline confirms Courier there: `<kbd>Ctrl</kbd>` on `new_tab` is 28.81px of text at 12px bold (7.20 per character; Menlo is 7.22), in a 14px line.
+- `about` 66 -> 73 failing boxes: three `<kbd>` holding a symbol Courier has no glyph for (`⌘`, `←`, `→`) and four boxes to their right. Chrome's fallback face for them has Menlo's advance (21.23px box); RustKit's fallback list tries Apple Symbols first (22.3 to 22.6px). With Menlo as the primary face the symbol was in the font, which hid this. The fix is for glyph fallback to ask Core Text for the cascade face of the primary font; it is not in this PR.
+- `new_tab` 15 -> 17: the three `<kbd>` of the third shortcut sit 5px high (y 419.5, Chrome 424.5). The second and eighth shortcuts already fail the same way on develop; Menlo's wider advance hid it on the third. `new_tab`'s pixel diff improves (1.5685 -> 1.5003).

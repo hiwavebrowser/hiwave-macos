@@ -1,0 +1,17 @@
+sample chrome entry: {'rect': [10, 10, 199.515625, 18], 'display': 'inline-block'}
+id         chrome w rustkit w   delta  rustkit face
+unstyled     199.52    199.51   -0.01  Times-Roman   (chrome line box 18)
+sans         217.02    217.02    0.00  Helvetica   (chrome line box 18)
+serif        199.52    199.51   -0.01  Times-Roman   (chrome line box 18)
+mono         268.84    268.84    0.00  Courier   (chrome line box 18)
+nsans        217.02    217.02    0.00  Helvetica   (chrome line box 18)
+nserif       199.52    199.51   -0.01  Times-Roman   (chrome line box 18)
+nmono        268.84    268.84    0.00  Courier   (chrome line box 18)
+none         199.52    199.51   -0.01  Times-Roman   (chrome line box 18)
+helv         217.02    217.02    0.00  Helvetica   (chrome line box 18)
+times        199.52    199.51   -0.01  Times-Roman   (chrome line box 18)
+tnr          199.52    199.51   -0.01  TimesNewRomanPSMT   (chrome line box 18)
+menlo        269.72    269.72    0.00  Menlo-Regular   (chrome line box 19)
+sys          220.78    220.78    0.00  .SFNS-Regular   (chrome line box 18)
+cursive      200.45    200.45    0.00  Apple-Chancery   (chrome line box 25)
+fantasy      208.02    208.02    0.00  Papyrus   (chrome line box 25)

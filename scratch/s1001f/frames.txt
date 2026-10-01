@@ -1,0 +1,12 @@
+/Users/petecopeland/Repos/.worktrees/trench-realsite/scratch/s1001f/ab.py:31: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  return 100.0 * sum(1 for p in d.getdata() if p > 8) / (x.size[0] * x.size[1])
+wikipedia    within develop   0.00%  within fix   0.00%  across  12.30%  12.30%  12.30%  12.30%  | 2938/2938 text commands carry a run (Helvetica 2308, Helvetica-Bold 513, Helvetica-Oblique 61)
+google       within develop   0.00%  within fix   3.75%  across   3.76%   0.00%   3.76%   0.00%  | 18/19 text commands carry a run (HelveticaNeue 9, GoogleSans-Regular 5, ArialMT 2)
+x            within develop   0.00%  within fix    nan%  across    nan%    nan%    nan%    nan%  | no display list
+facebook     within develop   0.00%  within fix   0.00%  across   1.05%   1.05%   1.05%   1.05%  | 41/43 text commands carry a run (.SFNS-Regular 32, Times-Bold 5, font00000000306efa91 4)
+lyft         within develop  38.56%  within fix   0.00%  across   0.00%   0.00%  38.56%  38.56%  | 155/155 text commands carry a run (RebelSansTextVF-Reg 154, RebelSansDisplay-VF-Regular 1)
+shopify      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 8/285 text commands carry a run (ShopifyInterBeta029-Regular 6, Menlo-Regular 2)
+apple        within develop    nan%  within fix    nan%  across    nan%    nan%    nan%   0.00%  | no display list
+netflix      within develop   2.33%  within fix    nan%  across   2.26%    nan%   2.28%    nan%  | 105/105 text commands carry a run (font00000000306efbf9 105)
+github       within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  | no display list
+yahoo        within develop   0.00%  within fix    nan%  across    nan%    nan%    nan%    nan%  | no display list

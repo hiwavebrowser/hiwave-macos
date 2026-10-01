@@ -1,0 +1,12 @@
+/Users/petecopeland/Repos/.worktrees/trench-realsite/scratch/s1001f/ab.py:31: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  return 100.0 * sum(1 for p in d.getdata() if p > 8) / (x.size[0] * x.size[1])
+x            within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 0/40 text commands carry a run ()
+wikipedia    within develop   0.00%  within fix   0.00%  across  12.30%  12.30%  12.30%  12.30%  | 2938/2938 text commands carry a run (Helvetica 2308, Helvetica-Bold 513, Helvetica-Oblique 61)
+google       within develop   8.87%  within fix   8.36%  across   0.74%   8.49%   8.81%   3.76%  | 15/15 text commands carry a run (HelveticaNeue 10, ArialMT 2, Helvetica 2)
+facebook     within develop   0.00%  within fix   0.00%  across   1.05%   1.05%   1.05%   1.05%  | 41/43 text commands carry a run (.SFNS-Regular 32, Times-Bold 5, font00000000306f027b 4)
+netflix      within develop   4.72%  within fix   4.78%  across   2.16%   4.58%   4.91%   4.69%  | 104/104 text commands carry a run (font00000000306f02e2 104)
+lyft         within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 155/155 text commands carry a run (RebelSansTextVF-Reg 154, RebelSansDisplay-VF-Regular 1)
+shopify      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 8/285 text commands carry a run (ShopifyInterBeta029-Regular 6, Menlo-Regular 2)
+apple        within develop   0.00%  within fix    nan%  across    nan%   0.00%    nan%   0.00%  | 262/262 text commands carry a run (SFProText-Regular 186, SFProDisplay-Regular 29, SFProText-Semibold 23)
+github       within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  | no display list
+yahoo        within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 59/59 text commands carry a run (YahooProductSans-VF 34, CentraNo2-Medium 17, CentraNo2-Bold 8)

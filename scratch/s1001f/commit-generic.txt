@@ -1,0 +1,24 @@
+fix(layout,text): the default font and the generic families are Chrome's faces on macOS
+
+Unstyled text and `sans-serif` were laid out in the system font and
+`monospace` in Menlo. Chrome on macOS uses Times, Helvetica and Courier.
+Since #411 paint draws the face layout measured, so every page that names
+no font, or only a generic, was drawn in the wrong face.
+
+- rustkit-css: the initial `font-family` is INITIAL_FONT_FAMILY (Times on
+  macOS; other platforms keep `sans-serif`), and `font-family: initial`
+  gives the same value.
+- rustkit-layout FontFamilyChain (macOS): `sans-serif` leads with
+  Helvetica, `serif` with Times, `monospace` with Courier, `cursive` with
+  Apple Chancery, `fantasy` with Papyrus; the family appended to every
+  author list is the UA default, not the system font.
+- rustkit-text map_generic: `serif` is Times, `monospace` is Courier.
+- rustkit-text blink_ascent: Blink's macOS ascent adjustment for Times,
+  Helvetica and Courier (15% of the rounded ascent + descent), so a 16px
+  line in those faces is 18px as in Chrome, not 16.
+
+Chrome 148, 28 characters at 16px: unstyled 199.52, sans-serif 217.02,
+monospace 268.84, cursive 200.45, fantasy 208.02. Layout now measures
+each within 0.05px.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

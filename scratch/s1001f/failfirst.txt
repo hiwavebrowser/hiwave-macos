@@ -1,0 +1,12 @@
+generic_families_and_the_default_are_chromes_faces
+thread 'text::tests::generic_families_and_the_default_are_chromes_faces' (15843714) panicked at crates/rustkit-layout/src/text.rs:3163:13:
+sans-serif: 220.78125, Chrome 217.02
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 593 filtered out; finished in 0.19s
+error: test failed, to rerun pass `-p rustkit-layout --lib`
+times_helvetica_and_courier_get_blinks_ascent_adjustment
+thread 'text::tests::times_helvetica_and_courier_get_blinks_ascent_adjustment' (15843846) panicked at crates/rustkit-layout/src/text.rs:3215:13:
+  left: 16.0
+ right: 18.0
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 593 filtered out; finished in 0.23s
+error: test failed, to rerun pass `-p rustkit-layout --lib`
+restored: True

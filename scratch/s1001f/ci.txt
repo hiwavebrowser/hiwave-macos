@@ -1,0 +1,1 @@
+At 17:25: R1 DESIGN CLEAR at 5ad75d9; CI green on everything that has finished (pr-swarm 0 to 3, pr-aggregate, f1-test-compile, script-guards, selector-key, audit, the Cursor reviewer check); `unit-suites` (the engine suite) was still running, and no R2 stamp was posted yet.

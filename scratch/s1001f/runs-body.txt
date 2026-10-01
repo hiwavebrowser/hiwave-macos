@@ -1,0 +1,10 @@
+The same frames against the Chrome captures stored by the last quiet board (`20261001T1832Z-quiet-dev2b764be`, the oracle's own `diff`), develop -> fix:
+
+| site | Chrome capture | develop | fix |
+|---|---|---|---|
+| wikipedia | b | 15.15% | 15.28% |
+| wikipedia | a (the unstable capture: Chrome-vs-Chrome was 42.5% in that run) | 44.24% | 44.22% |
+| facebook | a and b | 13.63% | 13.55% |
+| x | a | 10.39% | 10.39% |
+
+No board check changes. wikipedia does not move toward Chrome on the pixel meter even though its face is now Chrome's: the page's diff is its layout (no sidebar, no banner, a different column), and the text sits in different places in the two browsers either way. The claim this PR makes for real sites is the face and its metrics, measured on the fixture above, not a board point.
