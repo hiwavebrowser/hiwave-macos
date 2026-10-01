@@ -8196,7 +8196,31 @@ impl DisplayList {
                     layout_box.style.color,
                 );
 
-                self.commands.push(cmd);
+                // Replaced content is trimmed to the content edge curve
+                // (CSS Backgrounds 3 §5.3): the border radius inset by the
+                // border and padding beside each corner. `img { border-radius:
+                // 50% }` is how most avatars are written, with no
+                // `overflow: hidden` box around them.
+                let radius = self.border_radius_px(layout_box);
+                let (b, p) = (&dims.border, &dims.padding);
+                let content_radius = BorderRadius {
+                    top_left: radius.top_left.inset(b.left + p.left, b.top + p.top),
+                    top_right: radius.top_right.inset(b.right + p.right, b.top + p.top),
+                    bottom_right: radius
+                        .bottom_right
+                        .inset(b.right + p.right, b.bottom + p.bottom),
+                    bottom_left: radius.bottom_left.inset(b.left + p.left, b.bottom + p.bottom),
+                };
+                if content_radius.is_zero() {
+                    self.commands.push(cmd);
+                } else {
+                    self.commands.push(DisplayCommand::PushClipRounded {
+                        rect: container,
+                        radius: content_radius,
+                    });
+                    self.commands.push(cmd);
+                    self.commands.push(DisplayCommand::PopClip);
+                }
             }
             BoxType::FormControl(control) => {
                 self.render_form_control(layout_box, control);
