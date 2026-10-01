@@ -1274,3 +1274,34 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 **Decisions for Pete**
 1. **#408 waits on a board run that needs about 70 quiet minutes, and this session had none.** The verify sweep already checks the same 20 sites box by box (13 reuse a tree, 0 of 16,387 boxes differ), which tests the flag more directly than the board's pixel score does. Default: the board still runs, in the first session that finds load under 6, and #408 stays a draft until then. Say "sweep is enough" and I mark it ready with what is in the body.
 2. **A release build in a new worktree cost 41 minutes at this load.** Default: flag flips and other small follow-ups reuse the worktree their parent PR was built in (merge develop in), so only the changed crates rebuild; no launcher change.
+
+## 2026-10-01 12:47
+
+**No new PR. The real-site board that #408 (`atlas/cs-tree-reuse-default` @ 63d24d1) was waiting on is in: 21 points with `RUSTKIT_TREE_REUSE=0` and 21 with the default, the same loads / readable / looks-right verdicts on all 20 sites. #408 is still a draft only because this session was not permitted to run `gh pr ready`. No ratio was measured: the machine was quiet for the first 15 minutes and the board took them. The worst ratio of record stays 14.1× (wikipedia).**
+
+| site | Chrome ms | before: of record (#404 binary, flag unset, 16 quiet runs, 08:55) | after: this session | with tree reuse on (08:55, same pairs), what #408 makes the default |
+|---|---|---|---|---|
+| cnn | 210 | 523.5 → 2.5× | not measured | 478.0 → 2.3× |
+| github | 110 | 844.0 → 7.7× | not measured | 701.5 → 6.4× |
+| wikipedia | 20 | 282.5 → **14.1×** | not measured | 208.5 → 10.4× |
+
+- **The board, on the 63d24d1 binary** (`cascade-target/pc-trd-63d24d1`), 11:37–12:31. One board process at a time, the arms interleaved in chunks of 2–4 sites (off, on, on, off, …), load 4.7–19.7. No RustKit capture timed out in either arm.
+  - Points 21 / 21. Verdicts identical on 20 of 20 sites. RustKit frame and display list byte-identical between the arms on 15 of the 19 sites that render (nytimes renders nothing in either arm).
+  - The four that differ: **linkedin** has two renderings and both arms produce both (three loads each: `=0` gave A, A, B; default gave B, A, A). **netflix** and **ebay** differ between two `=0` loads. **cnn** has no control: its second `=0` load timed out at load 21. The pinned cnn check from 10:47 is the evidence there, and that check has no matching `=0` control either.
+  - yahoo's Chrome capture failed in the default arm in two runs and once in the `=0` arm. RustKit rendered it every time, byte-identical between the arms.
+  - **nytimes, the exit 3 from the 10:47 sweep, is not the flag**: RustKit fails it with `NavigationError("HTTP error")` in both arms.
+- **#408's body** has the board section, the nytimes line, and a first line saying why it is still a draft. Head unchanged at 63d24d1; CI green, R2-STAMP PASS at that SHA; no R1 review yet; MERGEABLE against develop c6b4841.
+- **The board leaves a Chrome running when it kills a capture.** yahoo's first Chrome capture in the default arm was "killed after 120s"; its Chrome tree (about 50 processes, parent 1) stayed alive for 9 minutes with the GPU process at 244% CPU, during my own next chunk. I stopped it after matching its start time (11:53:49) to that capture and seeing no other board process. This is `scripts/realsite_board.py`, the real-site lane's tool; I did not change it. It may be part of why this Mac is so often loaded.
+- **Not done:** a timing of this head (default against `=0`, or against develop), the `=0` control for the odd pinned dumps, clippy, any work on wikipedia's first build.
+- **Aleph:** one call (`aleph_search tree_reuse_mode`), answered at once, no hang or error. It returned 8 lexical matches on "tree" and "mode" and none for the function, so the hub index still does not describe develop's engine.
+- **Slips:** I chained two 4-site chunks in one call after load rose; the call passed the 590 s limit and finished in the background (I waited for it in the foreground). One `ps` listing printed about 60 lines of Chrome renderers I did not need. `git -C <other worktree>` and `gh pr ready` both need approval this session; `gh pr edit` and `gh pr view` do not.
+- **Build cost:** none; no build this session.
+- **Saved:** under `cascade-target/tmp/trd/`: `board2-{off,on}/` (20 sites each, `yahoo-run1.json` is yahoo's first run), `board2-{off2,off3,on2,on3}/` (controls), one log per chunk, `chunk.py` (one arm, a few sites, foreground), `board2_cmp.py` (the per-site comparison). PR body `cascade-target/pr-trd-body.md`.
+- **State left behind:** `.worktrees/cs-tree-reuse-default` on `atlas/cs-tree-reuse-default` @ 63d24d1, untouched. The shared target dir's release artifact is still that build.
+- **Open cs PRs:** 1 (#408, draft), cap 3.
+- **Next session:** (1) If #408 is still a draft and `gh pr ready` is allowed, mark it ready; answer reviews. (2) If load is under 6: `ab_flag.py pc-trd-63d24d1 x 10 RUSTKIT_TREE_REUSE=0` (about 10 minutes) and put the result in #408; it also shows whether the fast first builds from 08:55 turn up with reuse off. (3) Then wikipedia's first build, about 205 ms against a 60 ms budget: start from develop's tip by merging into `.worktrees/cs-dev-1a016c4` rather than making a new worktree.
+
+**Decisions for Pete**
+1. **#408 has everything its body promised except a timing of its own head, and it is still a draft because a headless session cannot run `gh pr ready`.** Default: Prometheus or the next session that can marks it ready, and it merges on the board, the verify sweep and #404's 16-pair timing. Say "time the head first" and it waits for a quiet 10 minutes.
+2. **The board's 120 s kill leaves Chrome running** (one tree at 244% CPU for 9 minutes today). Default: the real-site lane fixes its own tool (kill the process group, not the parent); this lane only reports it here. Say so if you want this lane to open that PR instead.
+3. **Quiet time is now the scarce thing: 15 minutes in this session, none in the last.** Default: the next quiet window goes to the 10-pair timing of #408, and wikipedia's first build gets whatever is left; no launcher change.
