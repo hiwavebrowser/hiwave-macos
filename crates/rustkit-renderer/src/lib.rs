@@ -9112,3 +9112,40 @@ mod shaped_run_paint_tests {
         assert!(rasterize_run_glyph(&key(&run, run.glyphs[0].glyph_id), 23.0).is_none());
     }
 }
+
+/// Where S0 changes a frame (campaign case `css-selectors`, "Lang prefix |=
+/// (should be italic)"): layout measures italic system-font text in the
+/// system italic, and the character path, resolving the same family list
+/// again, drew another face at those advances. A run is drawn in the face
+/// that was measured.
+#[cfg(all(test, target_os = "macos"))]
+mod shaped_run_measured_face_tests {
+    use super::*;
+    use rustkit_css::{ComputedStyle, Length};
+
+    #[test]
+    fn italic_system_text_is_drawn_in_the_face_layout_measured() {
+        let mut style = ComputedStyle::new();
+        style.font_family = "-apple-system, BlinkMacSystemFont, sans-serif".to_string();
+        style.font_size = Length::Px(14.0);
+        style.font_style = rustkit_css::FontStyle::Italic;
+        let run = rustkit_layout::shape_line_run("Lang", &style, 14.0, 0.0).expect("run");
+        let name = &run.face.postscript_name;
+        assert!(
+            name.starts_with(".SFNS") && name.contains("Italic"),
+            "layout measures the system italic, got {name}"
+        );
+
+        // The rasterizer is handed that face, and draws the run's glyph.
+        let held = rustkit_text::macos::face_font(run.face.id, 14.0).expect("the face is held");
+        assert_eq!(&held.postscript_name(), name);
+        let key = RunGlyphKey {
+            face: run.face.id,
+            glyph_id: run.glyphs[0].glyph_id,
+            font_size: 140,
+            subpixel_phase: 0,
+        };
+        let (bitmap, ..) = rasterize_run_glyph(&key, 14.0).expect("drawn");
+        assert!(bitmap.iter().any(|&v| v > 128), "the glyph has ink");
+    }
+}
