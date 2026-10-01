@@ -21381,6 +21381,7 @@ impl StyleMemoScope {
         Self::arm_with_tree(incremental_restyle_mode(), tree_reuse_mode())
     }
 
+    #[cfg(test)]
     fn arm_with(mode: RestyleMode) -> Option<Self> {
         Self::arm_with_tree(mode, TreeReuse::Off)
     }
