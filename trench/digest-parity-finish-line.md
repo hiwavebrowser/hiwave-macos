@@ -13995,3 +13995,73 @@ Cost noted for whoever budgets a night: each of these runs is ~12 minutes, and
 establishing this shape took four of them (~50 min) on top of the merge
 validation. The nondeterminism, not the change, is what consumed the back half
 of this night.
+
+### Addendum — the macOS receipt for #397, and the number that matters more than it
+
+[Run 36828206213](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36828206213),
+`macos-14`, head `d905157`. All 13 checks green or nightly-skipped,
+`mergeable_state` **clean**, R1 DESIGN **CLEAR** re-stamped @ `d905157`.
+
+```
+Finish line — N/26 finish-line-green
+  metric:     3/26 cases pass all four conditions
+  measured:   26/26 scored on all four  (0 not fully measured)
+    geometry   15/26 green, 26/26 measured
+    paint       3/26 green, 26/26 measured
+    stability  26/26 green, 26/26 measured
+    discrete   26/26 green, 26/26 measured
+```
+
+Green: `bg-pure`, `bg-solid`, `gradients`. Ratchet holds — 23 absolutely red,
+none worse than the committed floor, `discrete=0` on all 26. Gate C mean raw
+13.4777%.
+
+**`3/26 -> 3/26` as predicted, and the line that actually validates the change
+is `0 not fully measured`.** Had the refusal been wrong about macOS, every case
+would have read `text_metrics_not_font_derived` and the metric would have
+collapsed to `0/26` with 26 unmeasured. It did not: Core Text is attributable,
+nothing was withheld, and the receipt is the same number by the same route as
+before. That is the half of the change that could have done damage, and the
+lane says it did not.
+
+**Where my prediction was wrong, and it is the trap I had just finished warning
+about.** I predicted "all four columns unchanged". Geometry reads **15/26**
+against #372's lane's 14/26. That is base drift — `#373..#390`, not this PR —
+and the comparison I made to produce the prediction is the exact one I had
+written into the PR body and into this file as invalid two hours earlier.
+**The rule does not stop applying because I am the one quoting the number.**
+The honest form of the prediction was: the metric holds at 3/26 and this PR's
+own diff moves nothing, both of which are true and both of which the
+bit-identical captures entail. The per-column claim was never mine to make.
+
+### The finding: text exposure is not a stub artefact
+
+The `text_exposed` column shipped in this PR, so this is the first time it has
+been computed on **real Core Text captures**. It does not go away:
+
+| case | geometry failures | text-exposed | share |
+|---|---:|---:|---:|
+| `settings` | 243 | **201** | 82.7% |
+| `sticky-scroll` | 16 | 15 | 93.8% |
+| `about` | 66 | — (not printed in the tail read) | — |
+
+On the Linux seat 94.14% exposure meant "the stub is the ruler". **On macOS
+there is no stub, and `settings` still reads 201 of 243.** Those are real
+divergences between RustKit's text measurement and Chrome's, on the same
+platform and the same font stack — which is the P4 class, and it is carrying
+the largest geometry row on the board.
+
+That is a queue fact, not a seat fact. The ratified 08-12 amendment put
+geometry P-items ahead of P1's paint residuals; this says the largest remaining
+*geometry* row is itself mostly text. P4 was placed fourth off the old mean-diff
+board. Nothing here authorises reordering — that is Pete's call and it is
+folded into tonight's decision 1 — but the next night should know that
+"`settings` is the largest geometry row" and "P4 is a later item" are in tension
+on the real board, and the instrument now shows it rather than implying it.
+
+Gate B's own attribution on macOS, for the record: 1210 elements examined, 383
+withheld because geometry is not within 0.5px. The night-8 precondition is
+visibly doing its job on the lane that counts.
+
+**#397 now waits on R2-STAMP and a person.** Every gate this seat can move is
+met: R1 CLEAR, CI green, merge clean, ratchet holds. No merge from this seat.
