@@ -7182,7 +7182,7 @@ impl Engine {
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
-            "font-family" => style.font_family = String::new(),
+            "font-family" => style.font_family = rustkit_css::INITIAL_FONT_FAMILY.to_string(),
             "line-height" => style.line_height = rustkit_css::LineHeight::Normal,
             "margin" | "margin-top" => style.margin_top = rustkit_css::Length::Zero,
             "margin-right" => style.margin_right = rustkit_css::Length::Zero,

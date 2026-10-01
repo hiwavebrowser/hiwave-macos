@@ -86,12 +86,13 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for sans-serif.
+    /// Helvetica first: it is Chrome's `sans-serif` on macOS. The chain led
+    /// with the system font, which is `system-ui` and a different face: a
+    /// 28-character line at 16px measured 220.78 where Chrome 148 has 217.02.
     #[cfg(target_os = "macos")]
     pub fn sans_serif() -> Self {
-        Self::new("SF Pro")
-            .with_fallback(".AppleSystemUIFont")
+        Self::new("Helvetica")
             .with_fallback("Helvetica Neue")
-            .with_fallback("Helvetica")
             .with_fallback("Arial")
             .with_fallback("PingFang SC")
             .with_fallback("Hiragino Sans")
@@ -111,9 +112,10 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for serif.
+    /// Times first: it is Chrome's `serif` (and its default font) on macOS.
     #[cfg(target_os = "macos")]
     pub fn serif() -> Self {
-        Self::new("New York")
+        Self::new("Times")
             .with_fallback("Times New Roman")
             .with_fallback("Georgia")
             .with_fallback("Songti SC")
@@ -132,19 +134,26 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for monospace.
-    /// Menlo first: it is Chrome's default `monospace` on macOS and ships
-    /// with the OS. SF Mono is an Xcode/Terminal bundle font — leading with
-    /// it measured a Core Text substitute on stock machines (see
-    /// rustkit-text `named_font`) and would measure a different face from
-    /// Chrome's on machines that have it.
+    /// Courier first: it is Chrome's `monospace` on macOS. Chrome 148
+    /// measures 9.6016px per character at 16px, which is Courier's advance;
+    /// Menlo, which led this chain, is 9.6328. SF Mono is an Xcode/Terminal
+    /// bundle font, so it stays out of the chain: stock machines do not have
+    /// it, and machines that do would measure a face Chrome does not use.
     #[cfg(target_os = "macos")]
     pub fn monospace() -> Self {
-        Self::new("Menlo")
-            .with_fallback("SF Mono")
-            .with_fallback("Monaco")
+        Self::new("Courier")
             .with_fallback("Courier New")
+            .with_fallback("Menlo")
+            .with_fallback("Monaco")
             .with_fallback("monospace")
     }
+
+    /// The family a list falls back to when nothing in it is installed: the
+    /// UA's default font, which in Chrome on macOS is Times. The system font
+    /// stood here, so `font-family: "Not Installed"` measured 220.78 for a
+    /// line Chrome sets at 199.52.
+    #[cfg(target_os = "macos")]
+    pub const UA_DEFAULT_FAMILY: &'static str = "Times";
 
     /// Create default font chain for monospace.
     #[cfg(not(target_os = "macos"))]
@@ -194,11 +203,13 @@ impl FontFamilyChain {
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
             "system-ui" | "-apple-system" | "blinkmacsystemfont" => Self::system_ui(),
-            "cursive" => Self::new("Comic Sans MS")
+            // Chrome's faces on macOS lead: Apple Chancery and Papyrus.
+            "cursive" => Self::new("Apple Chancery")
+                .with_fallback("Comic Sans MS")
                 .with_fallback("Brush Script MT")
                 .with_fallback("cursive"),
-            "fantasy" => Self::new("Impact")
-                .with_fallback("Papyrus")
+            "fantasy" => Self::new("Papyrus")
+                .with_fallback("Impact")
                 .with_fallback("fantasy"),
             _ => {
                 let mut chain = Self::new(primary);
@@ -237,7 +248,7 @@ impl FontFamilyChain {
                 // Add platform-specific system fallbacks
                 #[cfg(target_os = "macos")]
                 {
-                    chain.fallbacks.push(".AppleSystemUIFont".to_string());
+                    chain.fallbacks.push(Self::UA_DEFAULT_FAMILY.to_string());
                     chain.fallbacks.push("Helvetica".to_string());
                 }
                 #[cfg(not(target_os = "macos"))]
@@ -305,7 +316,7 @@ impl TextMetrics {
     /// This provides accurate metrics directly from the font.
     #[cfg(target_os = "macos")]
     pub fn from_core_text_font(ct_font: &core_text::font::CTFont, width: f32) -> Self {
-        let ascent = ct_font.ascent() as f32;
+        let ascent = rustkit_text::macos::blink_ascent(ct_font);
         let descent = ct_font.descent() as f32;
         let leading = ct_font.leading() as f32;
         let underline_position = ct_font.underline_position() as f32;
@@ -1629,7 +1640,9 @@ impl TextShaper {
 
             // Get font metrics from Core Text — united with the fallback
             // faces this run used (see `final_advance` above).
-            let mut ascent = ct_font.ascent() as f32;
+            // Blink's ascent: Times, Helvetica and Courier carry its macOS
+            // adjustment (see `blink_ascent`).
+            let mut ascent = rustkit_text::macos::blink_ascent(&ct_font);
             let mut descent = ct_font.descent() as f32;
             let mut leading = ct_font.leading() as f32;
             if let Some((fb_ascent, fb_descent, fb_leading)) = used_fallback_extents {
@@ -3070,13 +3083,13 @@ mod tests {
     fn test_generic_font_families() {
         let sans = FontFamilyChain::from_css_value("sans-serif");
         #[cfg(target_os = "macos")]
-        assert_eq!(sans.primary, "SF Pro");
+        assert_eq!(sans.primary, "Helvetica");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(sans.primary, "Segoe UI");
 
         let mono = FontFamilyChain::from_css_value("monospace");
         #[cfg(target_os = "macos")]
-        assert_eq!(mono.primary, "Menlo");
+        assert_eq!(mono.primary, "Courier");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(mono.primary, "Cascadia Code");
 
@@ -3135,6 +3148,87 @@ mod tests {
         assert_eq!(mono.glyphs[0].advance, mono.glyphs[1].advance);
         // An installed family ahead of the generic still wins.
         assert_eq!(width("Georgia, serif"), width("Georgia"));
+    }
+
+    /// The generic families and the default font are Chrome's on macOS.
+    /// Chrome 148, "Handgloves quick wizard 0123" at 16px: `sans-serif`
+    /// 217.02 (Helvetica), `serif` and no usable family 199.52 (Times),
+    /// `monospace` 268.84 (Courier). `sans-serif` and the default were the
+    /// system font (220.78) and `monospace` was Menlo (269.72).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn generic_families_and_the_default_are_chromes_faces() {
+        let shape = |family: &str| {
+            TextShaper::new()
+                .shape(
+                    "Handgloves quick wizard 0123",
+                    &FontFamilyChain::from_css_value(family),
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    16.0,
+                )
+                .expect("shape")
+        };
+        let face = |family: &str| shape(family).face.expect("face").postscript_name;
+        let near = |family: &str, chrome: f32| {
+            let w = shape(family).width();
+            assert!((w - chrome).abs() < 0.05, "{family}: {w}, Chrome {chrome}");
+        };
+        for (family, chrome_width, postscript) in [
+            ("sans-serif", 217.02, "Helvetica"),
+            ("\"No Such Family 9f2c\", sans-serif", 217.02, "Helvetica"),
+            ("serif", 199.52, "Times-Roman"),
+            ("\"No Such Family 9f2c\"", 199.52, "Times-Roman"),
+            (rustkit_css::INITIAL_FONT_FAMILY, 199.52, "Times-Roman"),
+            ("", 199.52, "Times-Roman"),
+            ("monospace", 268.84, "Courier"),
+            ("\"No Such Family 9f2c\", monospace", 268.84, "Courier"),
+            ("cursive", 200.45, "Apple-Chancery"),
+            ("fantasy", 208.02, "Papyrus"),
+        ] {
+            near(family, chrome_width);
+            assert_eq!(face(family), postscript, "{family}");
+        }
+        // `system-ui` is still the system font, and it is a different face.
+        near("system-ui", 220.78);
+    }
+
+    /// Chrome's line box for a 16px line of Times, Helvetica or Courier on
+    /// macOS is 18px: Blink adds 15% of the rounded ascent + descent to the
+    /// ascent of exactly those three families. The font's own extents give
+    /// 16. Times New Roman is 18 without the adjustment and must stay 18.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn times_helvetica_and_courier_get_blinks_ascent_adjustment() {
+        let line = |family: &str, size: f32| {
+            let m = TextShaper::new()
+                .shape(
+                    "Handgloves",
+                    &FontFamilyChain::from_css_value(family),
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    size,
+                )
+                .expect("shape")
+                .metrics;
+            m.ascent.round() + m.descent.round() + m.leading.round()
+        };
+        for family in [
+            "Times",
+            "Helvetica",
+            "Courier",
+            "serif",
+            "sans-serif",
+            "monospace",
+            "\"No Such Family 9f2c\"",
+            "Times New Roman",
+        ] {
+            assert_eq!(line(family, 16.0), 18.0, "{family}");
+        }
+        // Menlo is 19 in Chrome and is not one of the three.
+        assert_eq!(line("Menlo", 16.0), 19.0);
     }
 
     #[test]
