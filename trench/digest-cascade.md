@@ -1010,3 +1010,41 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **`the_layer_pins_selectors_match_the_box` (#380) hangs the GPU guard for >120 s when run with its module**, failing 2–21 other tests per engine-lib run on develop. Default: the real-site lane (owner of #380) fixes or splits it. This lane treats those guard timeouts as known-develop until then.
 2. **Ratio of record → 14.8× (wikipedia, develop 22092e6, load 3–5, 5 runs, bimodal 196–318 ms).** Default: yes, flagged not-quiet.
 3. **Close #371** (carried over). Default: a maintainer closes it.
+
+## 2026-09-30 21:55
+
+**No PR and no ratio this session: the machine was at load 13–34 throughout (the real-site lane was building), and every binary read 3–10× its own afternoon numbers. The worst ratio of record stays 14.8× (wikipedia, develop 22092e6). What the session produced: a 7,963-sample wikipedia profile that names the next exact cut, that cut written (not yet tested), and a probe that prices the tree-snapshot idea.** #387 (index build) merged since the last digest (develop 570e25d) and #371 was closed, so 0 cs PRs are open.
+
+| site | Chrome ms | before: ratio of record (develop 22092e6, 15:50) | after: develop 570e25d, median of 5 at load 23–34 (does NOT count) |
+|---|---|---|---|
+| cnn | 210 | 735 → 3.5× | 2226 (2613 2572 2226 2074 2085) |
+| github | 110 | 1223 → 11.1× | 4147 (3678 4212 4083 7517, one load logged no build) |
+| wikipedia | 20 | 296 → **14.8×** | 2940 (5153 1735 2940, two loads logged no build) |
+
+- **Those numbers are the machine, not develop.** The previous develop binary (`pc-idx-0eead1b`, which read ~700 / ~1120 / ~300 ms this afternoon) read 2665–2960 / 4581–5367 / 1038–2090 ms in the same window. 3 alternating pairs of it against 570e25d gave per-pair B/A cnn .83 .62 .86, github .89 1.21 .73, wikipedia 1.11 .69 1.23: noise, no sign of a regression. Log `cascade-target/tmp/ab-dev570-check.txt`. Part of the load was mine: a profile pool overlapped the 5-run read.
+- **Profile, wikipedia, 6 pooled loads of `pc-prof-fb1a2ea`, 7,963 samples under `build_layout_from_document`** (the 06:30 profile had 149). Reports `cascade-target/tmp/prof-2040/wiki-{19..24}.txt`; pooling tool `cascade-target/tmp/prof_pool_sum.py`. The binary predates #379 and #387, so the index-build rows are already cut. Inclusive shares:
+  - `compute_style_for_element` 58.4%. Its direct callees: **`keys_may_match` 11.0%**, `matched_specificity` 9.1%, **`RuleBuckets::candidates` 7.2%** (4.1% of it is `Vec` regrowth), **`active_rule_index` 5.8%**, `apply_style_property` 4.5%.
+  - `pseudo_element_style` 9.7% (`selector_matches_prepared` 7.4%, `candidates` 1.9%).
+  - The walk outside the memo is 12.8%; `ComputedStyle::new` 1.6%, `to_lowercase` 1.7%.
+  - So about a quarter of the cascade is the prefilter's own bookkeeping, before any selector is matched. Applying declarations is under 5%, which rules out the matched-properties cache (plan item 3) as the next cut.
+- **Next cut, written but NOT tested: `atlas/cs-prefilter-hoist`** (worktree `.worktrees/cs-prefilter-hoist`, on develop 570e25d, uncommitted, +40 −8; patch saved at `cascade-target/tmp/prefilter-hoist.patch`). `keys_may_match` looked `id` and `class` up in the attribute map (a SipHash each) for every key of every candidate rule. The cut reads both once per element into a `KeyedElement` and tests keys against that. The comparisons are the same ones in the same order, so the answer cannot change. **It compiles** (release build 16 min, binary `cascade-target/pc-pfh-wip`) and loads all three sites (exit 0, 2 builds each). No tests, no receipt and no A/B yet. The one smoke pair at load 13–14 read develop 2270 / 3088 / 845 ms and the cut 2158 / 11248 / 1908 ms (cnn / github / wikipedia): a single loaded pair, which says nothing in either direction (`tmp/ab-pfh-smoke.txt`).
+- **Tree-snapshot probe** (local only, never committed; patch `cascade-target/tmp/tree-clone-probe.patch`, binary `cascade-target/pc-tree-probe`). It deep-copies the finished pre-layout box tree at the end of each build and times the copy next to the walk that built it, in the same process. Loaded machine, so only the ratios mean anything:
+
+  | site | boxes | replay walk ms | tree copy ms | copy / replay walk |
+  |---|---|---|---|---|
+  | wikipedia | 7,273 | 167, 290 | 38, 98 (99, 54 after build 1) | 0.23–0.34 |
+  | github | 1,523 | 119, 89 | 34, 14 | 0.15–0.29 |
+  | cnn | 2,082 | 194, 194 | 58, 23 | 0.12–0.30 |
+
+  A snapshot taken after build 1 and handed to build 2 (image sizes patched through `node_id`) would replace the replay walk for about a third of its cost. On wikipedia that is roughly 50 of the ~73 ms replay build, so about 14.8× → 12.5×. On github the replay build's sheet copy and custom-property extraction (57 ms quiet) would go too. It also makes the style memo's recording unnecessary. Worth building behind a flag, but it is a ~15% cut, not the road to 3×.
+- **Where 3× actually is.** wikipedia's budget is 60 ms. Build 1's walk alone is ~235 ms and the replay build ~73 ms, so even a free build 2 leaves build 1 needing to be 4× faster. The cuts that can do that are in the matcher and prefilter (the rows above), then box construction.
+- **Aleph:** the hub's index covers the hub tree, not develop's engine (`memoized_style` has no entry), so engine navigation used Read plus python searches on the develop worktree. No hang or error.
+- **Build cost:** release parity-capture 22 min (develop tip, 4 crates changed), then 18 min engine-only, at load 15–34.
+- **Saved:** binaries `cascade-target/pc-dev-570e25d`, `pc-tree-probe`. Bench JSON `tmp/bench-dev-570e25d.json`. Probe logs `tmp/logs-tree-probe/`. Helper `tmp/wait_build.py`.
+- **Open cs PRs:** 0, cap 3.
+- **Next session:** (1) `atlas/cs-prefilter-hoist`: engine lib tests (headless), builtins receipt against `pc-dev-570e25d`, 5 AB + 5 BA, then the PR. Build it through the scratch worktree `cs-dev-1a016c4` (apply the patch there) or `touch` the crate first: the new worktree's files are all newer than the shared target dir's artifacts, so a build in it recompiles the whole workspace. (2) Same family, same profile: `candidates` allocating and regrowing a `Vec` per element (9.1% with the pseudo calls) and `active_rule_index` re-deriving the sheet identity per element (5.8%). (3) The tree snapshot behind `RUSTKIT_TREE_REUSE`, off by default, with a verify mode that compares the two trees.
+
+**Decisions for Pete**
+1. **This lane can't measure while the real-site lane builds.** Load was 13–34 for the whole session and the instrument read 3–10× high, so there was no A/B and no ratio. Default: the launcher skips a cascade session when the 1-minute load is above ~6 at start, instead of spending the slot.
+2. **Build the tree snapshot (decision 1 from 07:50) behind a flag?** The probe prices it at about a third of the replay walk: roughly wikipedia 14.8× → 12.5×, plus ~100 ms on github. Default: yes, after the prefilter cuts, which are smaller and exact by construction.
+3. **The 3× exit is unlikely by 2026-10-11 at this slope.** wikipedia needs build 1 four times faster even with build 2 free. Default: keep the metric and the date, keep grinding, and report the gap at the end date rather than change the method now.
