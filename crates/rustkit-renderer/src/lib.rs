@@ -2700,10 +2700,9 @@ impl Renderer {
 
         // Draw corner using small rectangles with AA
         let step = 1.0;
-        let mut py = y;
-        while py < y + v {
-            let mut px = x;
-            while px < x + h {
+        let columns = corner_cells(x, h, quadrant == 0 || quadrant == 3);
+        for (py, cell_y, cell_h) in corner_cells(y, v, quadrant == 0 || quadrant == 1) {
+            for &(px, cell_x, cell_w) in &columns {
                 // Calculate distance from pixel center to corner center
                 let dx = match quadrant {
                     0 | 3 => cx - (px + step / 2.0), // left corners: measure from right edge
@@ -2730,19 +2729,17 @@ impl Renderer {
                     }
                 }
 
+                let cell = Rect::new(cell_x, cell_y, cell_w, cell_h);
                 if coverage >= 1.0 {
                     // Fully inside
-                    self.draw_solid_rect(Rect::new(px, py, step, step), color);
+                    self.draw_solid_rect(cell, color);
                 } else if coverage > 0.01 {
                     // Edge pixel - apply anti-aliasing
                     let aa_color = Color::new(color.r, color.g, color.b, color.a * coverage);
-                    self.draw_solid_rect(Rect::new(px, py, step, step), aa_color);
+                    self.draw_solid_rect(cell, aa_color);
                 }
                 // else: outside, don't draw
-
-                px += step;
             }
-            py += step;
         }
     }
 
@@ -3016,12 +3013,9 @@ impl Renderer {
             let box_x = if q == 0 || q == 3 { rect.x } else { right - bw };
             let box_y = if q == 0 || q == 1 { rect.y } else { bottom - bh };
             let (rx, ry) = (rad.h - vw, rad.v - hw);
-            let mut py = box_y;
-            while py < box_y + bh - 0.001 {
-                let ph = (box_y + bh - py).min(1.0);
-                let mut px = box_x;
-                while px < box_x + bw - 0.001 {
-                    let pw = (box_x + bw - px).min(1.0);
+            let columns = corner_cells(box_x, bw, q == 0 || q == 3);
+            for (_, py, ph) in corner_cells(box_y, bh, q == 0 || q == 1) {
+                for &(_, px, pw) in &columns {
                     let (cx, cy) = (px + pw * 0.5, py + ph * 0.5);
                     // Distances from the corner's two outer edges.
                     let ex = if q == 0 || q == 3 { cx - rect.x } else { right - cx };
@@ -3050,9 +3044,7 @@ impl Renderer {
                             Color::new(c.r, c.g, c.b, c.a * coverage),
                         );
                     }
-                    px += 1.0;
                 }
-                py += 1.0;
             }
         }
     }
@@ -6364,6 +6356,40 @@ fn corner_coverage(signed_dist: f32) -> f32 {
     }
 }
 
+/// The one-pixel cells a corner box is painted in along one axis, as
+/// `(grid start, drawn start, drawn length)`.
+///
+/// The box runs `len` from `box_start`. Its grid is laid from the rect's
+/// OUTER edge inward (`outer_at_start` says which end that is), so the cell
+/// centres `grid start + 0.5` sit where the straight edge beside the corner
+/// puts its pixels, whatever the radius. Laying it from the box's inner
+/// corner put a right or bottom corner with a fractional radius (`25%` of
+/// 150px) half a pixel off the grid: the pixels along the box's outer edge
+/// were measured on the curve instead of inside it and came out half
+/// transparent, a notch in the side.
+///
+/// The cell that crosses the box's inner end is drawn only up to it; what
+/// is past it belongs to the strip beside the corner. A whole-pixel box
+/// gets whole cells, the same ones from either end.
+fn corner_cells(box_start: f32, len: f32, outer_at_start: bool) -> Vec<(f32, f32, f32)> {
+    let box_end = box_start + len;
+    let mut cells = Vec::new();
+    let mut grid = if outer_at_start {
+        box_start
+    } else {
+        box_start - (len.ceil() - len)
+    };
+    while grid < box_end - 0.001 {
+        let start = grid.max(box_start);
+        let length = (grid + 1.0).min(box_end) - start;
+        if length > 0.0 {
+            cells.push((grid, start, length));
+        }
+        grid += 1.0;
+    }
+    cells
+}
+
 /// Top-left of the `h` x `v` box a corner occupies in `rect`.
 /// quadrant: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
 fn corner_box_origin(rect: Rect, corner: rustkit_layout::CornerRadius, quadrant: u8) -> (f32, f32) {
@@ -7523,6 +7549,43 @@ mod tests {
             edge_pixels > 60,
             "the corner has an antialiased edge, saw {edge_pixels} partial pixels"
         );
+    }
+
+    #[test]
+    fn a_fractional_corner_is_sampled_on_the_grid_of_its_outer_edge() {
+        // `25%` of a 150px box is 37.5px. The right-hand corner's box starts
+        // at 112.5; its cells must still be centred where the box's right
+        // edge (150) puts pixels: 112.5, 113.5 ... 149.5.
+        let from_right = corner_cells(112.5, 37.5, false);
+        assert_eq!(from_right.len(), 38);
+        assert_eq!(from_right[0], (112.0, 112.5, 0.5), "the inner cell is cut at the box");
+        assert_eq!(from_right[37], (149.0, 149.0, 1.0), "the outer cell is whole");
+        // The left-hand corner: laid from 0, cut at 37.5.
+        let from_left = corner_cells(0.0, 37.5, true);
+        assert_eq!(from_left.len(), 38);
+        assert_eq!(from_left[0], (0.0, 0.0, 1.0));
+        assert_eq!(from_left[37], (37.0, 37.0, 0.5));
+
+        // Mirror images: the outermost column of a right corner reads the
+        // same coverage as the outermost column of a left one. Laid from the
+        // box's inner corner the right one sat half a pixel out and read
+        // one-half or less down the whole side.
+        let rect = Rect::new(0.0, 0.0, 150.0, 100.0);
+        let corner = rustkit_layout::CornerRadius { h: 37.5, v: 25.0 };
+        for row in 0..25 {
+            let py = row as f32 + 0.5;
+            let left = corner_distance_at(rect, corner, 0, from_left[0].0 + 0.5, py).map(corner_coverage);
+            let right = corner_distance_at(rect, corner, 1, from_right[37].0 + 0.5, py).map(corner_coverage);
+            let (left, right) = (left.expect("in the box"), right.expect("in the box"));
+            assert!((left - right).abs() < 1e-4, "row {row}: left {left} right {right}");
+        }
+        let side = corner_distance_at(rect, corner, 1, from_right[37].0 + 0.5, 24.5).map(corner_coverage);
+        assert!(side.unwrap() > 0.7, "the side just above the corner's end is covered, read {side:?}");
+
+        // A whole-pixel box has the same whole cells from either end.
+        assert_eq!(corner_cells(20.0, 12.0, true), corner_cells(20.0, 12.0, false));
+        assert_eq!(corner_cells(20.0, 12.0, true).len(), 12);
+        assert!(corner_cells(20.0, 12.0, true).iter().all(|c| c.0 == c.1 && c.2 == 1.0));
     }
 
     #[test]
