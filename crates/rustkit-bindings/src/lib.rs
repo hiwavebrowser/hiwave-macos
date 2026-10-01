@@ -591,6 +591,9 @@ impl DomBindings {
         // geometry, that pages read without feature-testing (web_platform.js).
         runtime.evaluate_script(include_str!("web_platform.js"))?;
 
+        // The observer interfaces and requestIdleCallback (web_observers.js).
+        runtime.evaluate_script(include_str!("web_observers.js"))?;
+
         // `URL` and `URLSearchParams` (parsing is the `url` crate's).
         web_url::install(runtime)?;
 
@@ -1661,6 +1664,62 @@ mod tests {
         );
         assert_eq!(ev("var v = new URL('https://a.test/'); v.search = '?k=1&k=2'; v.searchParams.getAll('k').join()"), "1,2");
         assert_eq!(ev("var w = new URL('https://a.test/?only=1'); w.searchParams.delete('only'); w.href"), "https://a.test/");
+    }
+
+    /// The observer interfaces and requestIdleCallback: pages construct them
+    /// during start-up (walmart died on MutationObserver and
+    /// IntersectionObserver, microsoft on MutationObserver). They exist and
+    /// validate like the real ones, and report no records.
+    #[test]
+    fn observers_exist_validate_their_arguments_and_report_nothing() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_string(&bindings, s);
+        assert_eq!(
+            ev("String([typeof MutationObserver, typeof IntersectionObserver, typeof ResizeObserver, typeof PerformanceObserver].join())"),
+            "function,function,function,function"
+        );
+        // A callback is required, and `new` is.
+        assert_eq!(ev("var a; try { new MutationObserver(); a = 'no throw'; } catch (e) { a = e.name; } a"), "TypeError");
+        assert_eq!(ev("var b; try { new IntersectionObserver(1); b = 'no throw'; } catch (e) { b = e.name; } b"), "TypeError");
+        assert_eq!(ev("var c; try { ResizeObserver(function () {}); c = 'no throw'; } catch (e) { c = e.name; } c"), "TypeError");
+        // MutationObserver.observe needs a target and at least one record type.
+        assert_eq!(ev("var el = {}; var m = new MutationObserver(function () {}); var d; try { m.observe(el, {}); d = 'no throw'; } catch (e) { d = e.name; } d"), "TypeError");
+        assert_eq!(ev("var e2; try { m.observe(null, { childList: true }); e2 = 'no throw'; } catch (e) { e2 = e.name; } e2"), "TypeError");
+        assert_eq!(ev("m.observe(el, { childList: true, subtree: true }); String(m.takeRecords().length)"), "0");
+        assert_eq!(ev("m.disconnect(); String(typeof WebKitMutationObserver)"), "function");
+        // IntersectionObserver reports its configuration.
+        assert_eq!(
+            ev("var io = new IntersectionObserver(function () {}); String([io.root, io.rootMargin, io.thresholds.join()].join('|'))"),
+            "|0px 0px 0px 0px|0"
+        );
+        assert_eq!(
+            ev("var io2 = new IntersectionObserver(function () {}, { rootMargin: '10px', threshold: [1, 0.5] }); String([io2.rootMargin, io2.thresholds.join()].join('|'))"),
+            "10px|0.5,1"
+        );
+        assert_eq!(ev("io.observe(el); io.unobserve(el); io.disconnect(); String(io.takeRecords().length)"), "0");
+        assert_eq!(ev("var ro = new ResizeObserver(function () {}); ro.observe(el); ro.unobserve(el); ro.disconnect(); 'ok'"), "ok");
+        assert_eq!(ev("var po = new PerformanceObserver(function () {}); po.observe({ entryTypes: ['mark'] }); po.disconnect(); String(PerformanceObserver.supportedEntryTypes.length)"), "0");
+    }
+
+    #[test]
+    fn request_idle_callback_runs_once_on_the_timer_clock_and_can_be_cancelled() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                r#"
+                var log = [];
+                var id1 = requestIdleCallback(function (d) { log.push('ran:' + d.didTimeout + ':' + (d.timeRemaining() >= 0)); });
+                var id2 = requestIdleCallback(function () { log.push('cancelled-ran'); });
+                cancelIdleCallback(id2);
+                var thrown = 'none';
+                try { requestIdleCallback('nope'); } catch (e) { thrown = e.name; }
+                "#,
+            )
+            .unwrap();
+        assert_eq!(eval_string(&bindings, "String(typeof id1 + ':' + (id1 !== id2) + ':' + thrown)"), "number:true:TypeError");
+        assert_eq!(eval_string(&bindings, "log.join()"), "", "not run before the timers advance");
+        bindings.run_timers(1_000, 100).unwrap();
+        assert_eq!(eval_string(&bindings, "log.join()"), "ran:false:true");
     }
 
     #[test]
