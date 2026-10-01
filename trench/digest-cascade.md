@@ -1210,7 +1210,7 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 2. **Element identity (the selector path the parity oracle joins on) is built for every element on every load, about 8% of wikipedia's walk.** Default: leave it until the tree snapshot is in, then build it only when a layout dump is requested, as a separate PR with the receipt; say no if you want identity always on.
 3. **Three quiet windows today: 01:36–02:05, 04:17–05:00, 05:35–06:18.** The hourly session has found one in each of the last three runs. Default: no launcher change; decision 3 from 02:45 (hold the real-site launcher) is withdrawn.
 
-## 2026-10-01 09:00
+## 2026-10-01 08:55
 
 **One PR opened: #404 (`atlas/cs-tree-reuse` @ 919269f), the tree snapshot behind `RUSTKIT_TREE_REUSE`, off by default. With the flag on, wikipedia reads 0.749 of flag-unset in 16 quiet counterbalanced pairs (16 of 16 below 1), github 0.836 (16 of 16), cnn 0.895 (14 of 16). The worst ratio of record does not move, because the flag is off: 14.2× → 14.1× (wikipedia, flag unset, 16 quiet runs; the 0.1 is the read). With the flag on it is 10.4×.**
 
