@@ -11,6 +11,8 @@
 
 mod dom;
 mod inner_text;
+#[cfg(test)]
+mod web_dom_surface_tests;
 mod web_url;
 
 pub use dom::SelectorMatchFn;
@@ -470,6 +472,9 @@ impl DomBindings {
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(Cell::new(DomDirty::Clean));
         dom::install(&mut runtime, &dom_host, &dirty)?;
+        // Element and document members pages read without feature-testing;
+        // extends the wrappers `dom::install` just made (web_dom_surface.js).
+        runtime.evaluate_script(include_str!("web_dom_surface.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
