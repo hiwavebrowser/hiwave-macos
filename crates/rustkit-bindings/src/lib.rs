@@ -11,6 +11,8 @@
 
 mod dom;
 mod inner_text;
+#[cfg(test)]
+mod web_blob_tests;
 mod web_url;
 
 pub use dom::SelectorMatchFn;
@@ -590,6 +592,9 @@ impl DomBindings {
         // The screen, performance and navigator facts, and the window
         // geometry, that pages read without feature-testing (web_platform.js).
         runtime.evaluate_script(include_str!("web_platform.js"))?;
+
+        // Blob, File, FormData, AbortController/AbortSignal, structuredClone (web_blob.js).
+        runtime.evaluate_script(include_str!("web_blob.js"))?;
 
         // The observer interfaces and requestIdleCallback (web_observers.js).
         runtime.evaluate_script(include_str!("web_observers.js"))?;
