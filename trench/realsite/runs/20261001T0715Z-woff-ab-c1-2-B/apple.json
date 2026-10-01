@@ -1,0 +1,81 @@
+{
+  "id": "apple",
+  "url": "https://www.apple.com/",
+  "chrome": [
+    {
+      "url": "https://www.apple.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.apple.com/",
+      "title": "Apple",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/apple/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/apple/chrome-a.png",
+      "elapsed_ms": 47243
+    },
+    {
+      "url": "https://www.apple.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.apple.com/",
+      "title": "Apple",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/apple/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/apple/chrome-b.png",
+      "elapsed_ms": 40395
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.apple.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/apple/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/apple/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 6,
+      "threw": 4,
+      "skipped": 4,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 862052,
+      "elapsed_ms": 3129
+    },
+    "elapsed_ms": 26083,
+    "error": null,
+    "wall_ms": 26316,
+    "non_background_fraction": 0.568
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 19,
+    "rustkit_words": 35,
+    "ratio": 1.0,
+    "missing_sample": []
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 59.65380859375
+  },
+  "points": 2
+}

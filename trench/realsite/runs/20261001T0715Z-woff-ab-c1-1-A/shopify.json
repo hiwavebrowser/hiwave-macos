@@ -1,0 +1,95 @@
+{
+  "id": "shopify",
+  "url": "https://www.shopify.com/",
+  "chrome": [
+    {
+      "url": "https://www.shopify.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.shopify.com/",
+      "title": "Shopify: The All-in-One Commerce Platform for Businesses - Shopify",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-1-A/shopify/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-1-A/shopify/chrome-a.png",
+      "elapsed_ms": 53450
+    },
+    {
+      "url": "https://www.shopify.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.shopify.com/",
+      "title": "Shopify: The All-in-One Commerce Platform for Businesses - Shopify",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-1-A/shopify/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-1-A/shopify/chrome-b.png",
+      "elapsed_ms": 52897
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "timeout",
+    "html_file": null,
+    "url": "https://www.shopify.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "error": "capture exceeded 30000 ms",
+    "wall_ms": 30253
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "capture exceeded 30000 ms"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 28,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "ai",
+      "all",
+      "and",
+      "be",
+      "best",
+      "big",
+      "build",
+      "commerce",
+      "dream",
+      "enterprise",
+      "fast",
+      "for",
+      "free",
+      "in",
+      "log",
+      "next",
+      "on",
+      "platform",
+      "pricing",
+      "products",
+      "s",
+      "shopify",
+      "star",
+      "start",
+      "the"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.27724609375,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

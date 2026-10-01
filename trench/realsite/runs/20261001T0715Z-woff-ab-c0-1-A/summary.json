@@ -1,0 +1,32 @@
+{
+  "ts": "20261001T071301Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 4,
+  "points": 6,
+  "max_points": 12,
+  "loads": 4,
+  "readable": 0,
+  "looks_right": 2,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [
+    "google",
+    "wikipedia"
+  ],
+  "oracle_blocked": {},
+  "blocked": {},
+  "per_site": {
+    "google": 1,
+    "facebook": 2,
+    "wikipedia": 1,
+    "x": 2
+  },
+  "scorable_sites": 4,
+  "scorable_points": 6,
+  "scorable_max": 12,
+  "full_run": false
+}
