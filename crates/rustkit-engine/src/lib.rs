@@ -4559,6 +4559,7 @@ impl Engine {
             // Every rule in these buckets ends in the pseudo, and the index
             // holds its prepared base selector, base keys and specificity:
             // the same tests as the string path below, computed once.
+            let keyed = KeyedElement::of(tag_name, attributes);
             for g in buckets.candidates(tag_name, attributes) {
                 let gi = g as usize;
                 let Some(prepared) = ix.pseudo_prepared[gi].as_deref() else {
@@ -4567,7 +4568,7 @@ impl Engine {
                 // No base keys means an empty base, which admits any element.
                 let admitted = ix.pseudo_keys[gi]
                     .as_deref()
-                    .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes));
+                    .is_none_or(|keys| Self::keys_may_match_keyed(keys, &keyed));
                 if admitted
                     && SelectorMatcher.selector_matches_prepared(
                         prepared,
@@ -5209,10 +5210,11 @@ impl Engine {
             None => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).enumerate()),
         };
 
+        let keyed = KeyedElement::of(tag_name, attributes);
         for (rule_index, rule) in rules {
             // With an index, `rule_index` is the global index `g`.
             let may_match = match index.as_ref() {
-                Some(ix) => Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
+                Some(ix) => Self::keys_may_match_keyed(&ix.keys[rule_index], &keyed),
                 None => self.rule_may_match(&rule.selector, tag_name, attributes),
             };
             if !may_match {
@@ -8258,20 +8260,29 @@ impl Engine {
         tag_name: &str,
         attributes: &HashMap<String, String>,
     ) -> bool {
+        Self::keys_may_match_keyed(keys, &KeyedElement::of(tag_name, attributes))
+    }
+
+    /// `keys_may_match` for a caller that tests many rules against one
+    /// element: `KeyedElement::of` looks the element's `id` and `class` up
+    /// once, instead of once per key of every candidate rule (11% of
+    /// wikipedia's cascade went to those repeated attribute lookups).
+    fn keys_may_match_keyed(keys: &[SubjectKey], element: &KeyedElement) -> bool {
         #[cfg(test)]
         PREFILTER_VISITS.with(|n| n.set(n.get() + 1));
         keys.iter().any(|k| {
-            k.id.as_deref()
-                .map_or(true, |id| attributes.get("id").map(String::as_str) == Some(id))
+            k.id.as_deref().map_or(true, |id| element.id == Some(id))
                 && k.tag
                     .as_deref()
-                    .map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
+                    .map_or(true, |t| t.eq_ignore_ascii_case(element.tag_name))
                 && k.class.as_deref().map_or(true, |c| {
-                    attributes
-                        .get("class")
+                    element
+                        .class
                         .is_some_and(|cl| cl.split_whitespace().any(|x| x == c))
                 })
-                && k.attr.as_deref().map_or(true, |a| attributes.contains_key(a))
+                && k.attr
+                    .as_deref()
+                    .map_or(true, |a| element.attributes.contains_key(a))
         })
     }
 
@@ -20827,6 +20838,27 @@ impl RuleBuckets {
         out.sort_unstable();
         out.dedup();
         out
+    }
+}
+
+/// What a rule's subject keys are tested against, read off an element once:
+/// its tag, its `id` and `class` attribute values, and (for a key that names
+/// an attribute) the attribute map itself.
+struct KeyedElement<'a> {
+    tag_name: &'a str,
+    id: Option<&'a str>,
+    class: Option<&'a str>,
+    attributes: &'a HashMap<String, String>,
+}
+
+impl<'a> KeyedElement<'a> {
+    fn of(tag_name: &'a str, attributes: &'a HashMap<String, String>) -> Self {
+        KeyedElement {
+            tag_name,
+            id: attributes.get("id").map(String::as_str),
+            class: attributes.get("class").map(String::as_str),
+            attributes,
+        }
     }
 }
 
