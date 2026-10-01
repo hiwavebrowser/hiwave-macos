@@ -452,6 +452,7 @@ pub fn named_font(name: &str, size: f64) -> Option<CTFont> {
 /// new_from_name, which failed on any multi-family value — the renderer
 /// painted Helvetica for every styled page regardless of the author's fonts.
 pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
+    count_css_list_resolution();
     for fam in family.split(',') {
         let fam = fam.trim().trim_matches('"').trim_matches('\'');
         if fam.is_empty() {
@@ -488,6 +489,7 @@ fn create_font_with_traits(
     weight: u16,
     italic: bool,
 ) -> Result<CTFont, TextError> {
+    count_css_list_resolution();
     for fam in family.split(',') {
         let fam = fam.trim().trim_matches('"').trim_matches('\'');
         if fam.is_empty() {
@@ -543,6 +545,95 @@ fn create_font_with_traits(
     create_font(family, size)
 }
 
+thread_local! {
+    /// How many times this thread resolved a CSS family list to a face
+    /// (`create_font`, `create_font_with_traits`). See `css_list_resolutions`.
+    static CSS_LIST_RESOLUTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of CSS family-list resolutions this thread has made. Painting a
+/// shaped run must not move it: the run names its face, so a list lookup on
+/// that path means paint chose a face again (and may choose another one).
+pub fn css_list_resolutions() -> u64 {
+    CSS_LIST_RESOLUTIONS.with(std::cell::Cell::get)
+}
+
+fn count_css_list_resolution() {
+    CSS_LIST_RESOLUTIONS.with(|n| n.set(n.get() + 1));
+}
+
+/// The faces layout has shaped with, by id, so paint can draw a shaped run
+/// with the SAME font object instead of resolving the CSS family list again.
+///
+/// An id names one face: its PostScript name, the `@font-face` file it came
+/// from (0 for a platform font), and the weight and style it was asked for.
+/// The last two are in the id because the system font's weights are
+/// instances of one variable font and need not differ by name. Fonts are
+/// kept per id AND size, as layout created them: the system font picks its
+/// optical size from the size it is created at.
+mod face_table {
+    use super::CTFont;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Bounds what the table keeps alive (a web face holds its file's
+    /// bytes). Past it the table starts over; a run whose face is gone is
+    /// painted through the family-list path until layout shapes it again.
+    const MAX_FONTS: usize = 1024;
+
+    #[derive(Default)]
+    pub(super) struct Faces {
+        /// `(face id, size bits)` to the font layout shaped with.
+        pub(super) fonts: HashMap<(u64, u32), CTFont>,
+    }
+
+    pub(super) fn with<R>(f: impl FnOnce(&mut Faces) -> R) -> R {
+        static FACES: OnceLock<Mutex<Faces>> = OnceLock::new();
+        let mut faces = FACES
+            .get_or_init(|| Mutex::new(Faces::default()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut faces)
+    }
+
+    impl Faces {
+        pub(super) fn keep(&mut self, key: (u64, u32), font: &CTFont) {
+            if self.fonts.contains_key(&key) {
+                return;
+            }
+            if self.fonts.len() >= MAX_FONTS {
+                self.fonts.clear();
+                // Shaped runs that layout memoised name faces that are no
+                // longer held. A new generation makes it shape them again,
+                // which records their faces again.
+                crate::webfonts::bump_generation();
+            }
+            self.fonts.insert(key, font.clone());
+        }
+    }
+}
+
+/// Record `font` as a face a run was shaped with and return its id and
+/// PostScript name. `web_face` is `webfonts::face_id` for the family that
+/// resolved (0 for a platform font); `weight` and `italic` are the style
+/// the face was resolved for.
+pub fn intern_face(font: &CTFont, size: f32, web_face: u64, weight: u16, italic: bool) -> (u64, String) {
+    use std::hash::{Hash, Hasher};
+
+    let postscript_name = font.postscript_name();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (postscript_name.as_str(), web_face, weight, italic).hash(&mut hasher);
+    // 0 is left free to mean "no face".
+    let id = hasher.finish().max(1);
+    face_table::with(|faces| faces.keep((id, size.to_bits()), font));
+    (id, postscript_name)
+}
+
+/// The font `intern_face` recorded for `face` at `size`, if it is still held.
+pub fn face_font(face: u64, size: f32) -> Option<CTFont> {
+    face_table::with(|faces| faces.fonts.get(&(face, size.to_bits())).cloned())
+}
+
 /// Rasterize glyphs to bitmaps using Core Text/Core Graphics
 pub struct GlyphRasterizer {
     font: CTFont,
@@ -589,6 +680,23 @@ impl GlyphRasterizer {
         }
     }
     
+    /// A rasterizer for a face layout already chose (`face_font`), drawn at
+    /// `size`. No family lookup happens: when `size` is the size the face
+    /// was created at, the font is used as it is.
+    pub fn for_face(font: CTFont, size: f32) -> Self {
+        let font = if (font.pt_size() as f32 - size).abs() > f32::EPSILON {
+            font.clone_with_font_size(size as f64)
+        } else {
+            font
+        };
+        Self {
+            font,
+            font_size: size,
+            font_weight: 400,
+            font_italic: false,
+        }
+    }
+
     /// Get font weight
     pub fn weight(&self) -> u16 {
         self.font_weight
@@ -635,7 +743,6 @@ impl GlyphRasterizer {
         
         unsafe {
             use core_text::font::CTFontRef;
-            use std::os::raw::c_void;
             
             // Get the raw CTFont reference
             let font_ref = self.font.as_concrete_TypeRef();
@@ -648,7 +755,49 @@ impl GlyphRasterizer {
                     glyphs: *mut u16,
                     count: isize,
                 ) -> bool;
-                
+            }
+
+            let success = CTFontGetGlyphsForCharacters(
+                font_ref,
+                chars.as_ptr(),
+                glyphs.as_mut_ptr(),
+                1,
+            );
+            
+            if !success || glyphs[0] == 0 {
+                // Fallback for characters without glyphs
+                return self.rasterize_fallback(ch);
+            }
+
+            self.rasterize_glyph_id(glyphs[0], subpixel_x)
+        }
+    }
+
+    /// Rasterize glyph `glyph` of THIS face: no character lookup, and no
+    /// fallback face. A shaped run names its glyphs by id, so paint draws
+    /// exactly what layout measured. `rasterize_char` ends here once it has
+    /// found the character's glyph, so both entries return the same bitmap
+    /// for the same glyph. Same return tuple and contracts as
+    /// `rasterize_char`.
+    pub fn rasterize_glyph_id(
+        &self,
+        glyph: u16,
+        subpixel_x: f32,
+    ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+        let subpixel_x = if subpixel_x.is_finite() {
+            subpixel_x.clamp(0.0, 1.0 - f32::EPSILON)
+        } else {
+            0.0
+        };
+        let glyphs: [u16; 1] = [glyph];
+
+        unsafe {
+            use core_text::font::CTFontRef;
+            use std::os::raw::c_void;
+
+            let font_ref = self.font.as_concrete_TypeRef();
+
+            extern "C" {
                 fn CTFontGetAdvancesForGlyphs(
                     font: CTFontRef,
                     orientation: u32,
@@ -689,18 +838,6 @@ impl GlyphRasterizer {
                     allows: bool,
                 );
                 fn CGContextSetShouldSubpixelQuantizeFonts(c: *mut c_void, should: bool);
-            }
-
-            let success = CTFontGetGlyphsForCharacters(
-                font_ref,
-                chars.as_ptr(),
-                glyphs.as_mut_ptr(),
-                1,
-            );
-            
-            if !success || glyphs[0] == 0 {
-                // Fallback for characters without glyphs
-                return self.rasterize_fallback(ch);
             }
             
             // Get glyph advance
