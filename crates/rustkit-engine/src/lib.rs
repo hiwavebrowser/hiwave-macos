@@ -9815,14 +9815,7 @@ impl Engine {
             .get_surface_size(view.viewhost_id)
             .unwrap_or((0, 0));
 
-        let wrapper = serde_json::json!({
-            "version": 1,
-            "viewport": {
-                "width": width,
-                "height": height
-            },
-            "root": layout_json
-        });
+        let wrapper = layout_export_wrapper(layout_json, width, height);
 
         let json_str = serde_json::to_string_pretty(&wrapper)
             .map_err(|e| EngineError::RenderError(format!("JSON serialization failed: {}", e)))?;
@@ -13198,6 +13191,37 @@ fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32,
     let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
     let max_y = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
     (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+/// Wrap a serialised layout tree with the provenance an oracle needs.
+///
+/// Split out of `export_layout_json` so it can be asserted on directly. The
+/// two text fields are the provenance a capture carries so a gate can REFUSE,
+/// not a feature flag: nothing in layout or paint reads them back.
+///
+/// `TextShaper::shape` has three bodies. The one compiled on any target that is
+/// neither Windows nor macOS is a stub — it assigns `font_size * 0.5` to each
+/// ASCII character, reads no font, and returns `Ok`. A capture taken on such a
+/// build carries geometry measured against a fixed ruler while looking exactly
+/// like a capture that shaped, and Gate A cannot tell the two apart from the
+/// rects alone. For 57 nights it did not try, and the Linux trench seat's
+/// boards were read as RustKit box-math deltas throughout
+/// (trench/digest-parity-finish-line.md, 2026-10-01).
+fn layout_export_wrapper(
+    layout_json: serde_json::Value,
+    width: u32,
+    height: u32,
+) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "viewport": {
+            "width": width,
+            "height": height
+        },
+        "text_backend": rustkit_layout::TEXT_SHAPER_BACKEND,
+        "text_metrics_font_derived": rustkit_layout::TEXT_METRICS_ARE_FONT_DERIVED,
+        "root": layout_json
+    })
 }
 
 /// Convert one layout box to its JSON form for `export_layout_json`.
@@ -24899,6 +24923,100 @@ mod pseudo_element_display_tests {
             r#"<!doctype html><style>#a{font-size:17px;line-height:22px}#a:before{content:"";display:block;height:10px}</style><body style="margin:0"><div id="a">text</div></body>"#,
         ).into_iter().enumerate() {
             assert_eq!(rect(&root, "a").height, 32.0, "path {path}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod text_provenance_tests {
+    //! The capture must declare which shaper produced its advances, and the
+    //! declaration must match what the shaper actually does.
+    //!
+    //! Two halves, and they fail differently. `layout_export_wrapper` emitting
+    //! the fields is what lets Gate A refuse; the constants being TRUE of this
+    //! build is what makes the refusal mean something. A declaration that says
+    //! `coretext` on a stub build is worse than no declaration at all, because
+    //! the gate would then trust it.
+
+    use super::layout_export_wrapper;
+
+    #[test]
+    fn the_layout_export_declares_its_text_shaper() {
+        let doc = layout_export_wrapper(serde_json::json!({"type": "block"}), 800, 600);
+
+        assert_eq!(
+            doc["text_backend"],
+            serde_json::json!(rustkit_layout::TEXT_SHAPER_BACKEND),
+            "a capture that does not name its shaper cannot be attributed, and \
+             Gate A treats an absent field as untrusted rather than as a font"
+        );
+        assert_eq!(
+            doc["text_metrics_font_derived"],
+            serde_json::json!(rustkit_layout::TEXT_METRICS_ARE_FONT_DERIVED),
+            "the boolean is what the gate branches on; the name is for humans"
+        );
+        assert!(
+            doc["text_metrics_font_derived"].is_boolean(),
+            "the gate reads only a real boolean as a yes, so a string or a \
+             number here would silently read as 'did not say'"
+        );
+        // The pre-existing shape is part of the contract: every consumer of
+        // layout.json joins on `root` and filters on `viewport`.
+        assert_eq!(doc["version"], serde_json::json!(1));
+        assert_eq!(doc["viewport"]["width"], serde_json::json!(800));
+        assert_eq!(doc["viewport"]["height"], serde_json::json!(600));
+        assert_eq!(doc["root"]["type"], serde_json::json!("block"));
+    }
+
+    #[test]
+    fn the_declared_backend_matches_what_shaping_actually_does() {
+        // The stub's closed form, transcribed from the non-Windows, non-macOS
+        // body of `TextShaper::shape` (crates/rustkit-layout/src/text.rs):
+        //     let advance = if c.is_ascii() { size * 0.5 } else { size };
+        // Measuring it is the only way to catch a constant that says one thing
+        // while the compiled `shape` does another.
+        let measure = |s: &str| {
+            rustkit_layout::measure_text_advanced(
+                s,
+                "system-ui, sans-serif",
+                16.0,
+                rustkit_css::FontWeight::NORMAL,
+                rustkit_css::FontStyle::Normal,
+            )
+            .width
+        };
+        let stub_holds = (measure(" ") - 8.0).abs() < 1e-3
+            && (measure("mm") - 16.0).abs() < 1e-3
+            && (measure("iiii") - 32.0).abs() < 1e-3;
+
+        if rustkit_layout::TEXT_METRICS_ARE_FONT_DERIVED {
+            assert!(
+                !stub_holds,
+                "this build claims font-derived advances, but ' ', 'mm' and \
+                 'iiii' all measure exactly font_size * 0.5 per character. No \
+                 real face gives a space and an 'm' the same advance, so the \
+                 stub is what ran and the claim is false — a parity receipt \
+                 taken here would be measured against a ruler, not a font."
+            );
+            assert!(
+                rustkit_layout::TEXT_SHAPER_BACKEND == "coretext"
+                    || rustkit_layout::TEXT_SHAPER_BACKEND == "directwrite",
+                "a font-derived build must name the backend that read the font"
+            );
+        } else {
+            assert!(
+                stub_holds,
+                "this build declares the stub, so the stub's closed form must \
+                 hold. If it no longer does, a real shaper was wired in on this \
+                 target and TEXT_METRICS_ARE_FONT_DERIVED is now understating \
+                 it — which makes every gate here refuse a board it could \
+                 attribute."
+            );
+            assert_eq!(
+                rustkit_layout::TEXT_SHAPER_BACKEND, "stub-0.5em",
+                "the name carried into the capture must say it is a stub, since \
+                 that string is what a reader of the board sees"
+            );
         }
     }
 }
