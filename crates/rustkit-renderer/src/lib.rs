@@ -4972,6 +4972,7 @@ impl Renderer {
 
         let mut cursor_x = x;
         let atlas_size = self.glyph_cache.atlas_size() as f32;
+        let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
         // Glyph entries are baseline-relative (ADVANCE CONTRACT): layout's
         // ascent when shipped, one per-run fallback otherwise.
         let baseline = y
@@ -4988,6 +4989,7 @@ impl Renderer {
                 font_size: (font_size * 10.0) as u32,
                 font_weight,
                 font_style,
+                web_face,
             };
 
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
@@ -5169,6 +5171,7 @@ impl Renderer {
 
         // Get atlas size before the loop to avoid borrow issues
         let atlas_size = self.glyph_cache.atlas_size() as f32;
+        let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
 
         for (char_idx, ch) in text.chars().enumerate() {
             let key = GlyphKey {
@@ -5181,6 +5184,7 @@ impl Renderer {
                 font_size: (font_size * 10.0) as u32,
                 font_weight,
                 font_style,
+                web_face,
             };
 
             // Color-glyph (emoji) path: paint the real color-bitmap artwork via

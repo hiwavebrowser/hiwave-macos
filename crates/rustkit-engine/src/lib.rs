@@ -4557,28 +4557,34 @@ impl Engine {
         // for every element, half of all cascade time.
         if let (Some(ix), Some(buckets)) = (index.as_ref(), indexed) {
             // Every rule in these buckets ends in the pseudo, and the index
-            // holds its prepared base selector, base keys and specificity:
-            // the same tests as the string path below, computed once.
-            let keyed = KeyedElement::of(tag_name, attributes);
+            // holds its prepared base selector and specificity. As in the
+            // cascade, a candidate goes straight to the matcher: the bucket
+            // it came from already stands in for the subject prefilter.
             for g in buckets.candidates(tag_name, attributes) {
                 let gi = g as usize;
                 let Some(prepared) = ix.pseudo_prepared[gi].as_deref() else {
                     continue;
                 };
+                #[cfg(test)]
+                CANDIDATE_VISITS.with(|n| n.set(n.get() + 1));
+                let matched = SelectorMatcher.selector_matches_prepared(
+                    prepared,
+                    tag_name,
+                    attributes,
+                    ancestors,
+                    siblings_before,
+                    sib,
+                );
                 // No base keys means an empty base, which admits any element.
-                let admitted = ix.pseudo_keys[gi]
-                    .as_deref()
-                    .is_none_or(|keys| Self::keys_may_match_keyed(keys, &keyed));
-                if admitted
-                    && SelectorMatcher.selector_matches_prepared(
-                        prepared,
-                        tag_name,
-                        attributes,
-                        ancestors,
-                        siblings_before,
-                        sib,
-                    )
-                {
+                debug_assert!(
+                    !matched
+                        || ix.pseudo_keys[gi]
+                            .as_deref()
+                            .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes)),
+                    "the subject prefilter rejects {:?}, which matches <{tag_name}>",
+                    ix.rule(stylesheets, g).selector
+                );
+                if matched {
                     matching_rules.push((ix.specificity[gi], ix.rule(stylesheets, g)));
                 }
             }
@@ -5210,28 +5216,40 @@ impl Engine {
             None => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).enumerate()),
         };
 
-        let keyed = KeyedElement::of(tag_name, attributes);
         for (rule_index, rule) in rules {
             // With an index, `rule_index` is the global index `g`.
-            let may_match = match index.as_ref() {
-                Some(ix) => Self::keys_may_match_keyed(&ix.keys[rule_index], &keyed),
-                None => self.rule_may_match(&rule.selector, tag_name, attributes),
-            };
-            if !may_match {
-                continue;
-            }
             let matched = match index.as_ref() {
-                Some(ix) => SelectorMatcher.matched_specificity(
-                    &ix.prepared[rule_index],
-                    &ix.member_specificity[rule_index],
-                    ix.specificity[rule_index],
-                    tag_name,
-                    attributes,
-                    ancestors,
-                    siblings_before,
-                    sib,
-                ),
+                // No subject prefilter here: a candidate is already filed
+                // under one of this element's own keys, so the prefilter
+                // passed 95-99.6% of them (wikipedia, cnn, github) and cost
+                // 7-8% of github's and cnn's cascade to say so. The matcher
+                // tests the same subject compound first. Debug builds hold
+                // the prefilter to its contract instead.
+                Some(ix) => {
+                    #[cfg(test)]
+                    CANDIDATE_VISITS.with(|n| n.set(n.get() + 1));
+                    let matched = SelectorMatcher.matched_specificity(
+                        &ix.prepared[rule_index],
+                        &ix.member_specificity[rule_index],
+                        ix.specificity[rule_index],
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    );
+                    debug_assert!(
+                        matched.is_none()
+                            || Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
+                        "the subject prefilter rejects {:?}, which matches <{tag_name}>",
+                        rule.selector
+                    );
+                    matched
+                }
                 None => {
+                    if !self.rule_may_match(&rule.selector, tag_name, attributes) {
+                        continue;
+                    }
                     let selector = rule.selector.trim();
                     SelectorMatcher.matched_specificity(
                         &SelectorMatcher.prepared_selector(selector),
@@ -8268,8 +8286,6 @@ impl Engine {
     /// once, instead of once per key of every candidate rule (11% of
     /// wikipedia's cascade went to those repeated attribute lookups).
     fn keys_may_match_keyed(keys: &[SubjectKey], element: &KeyedElement) -> bool {
-        #[cfg(test)]
-        PREFILTER_VISITS.with(|n| n.set(n.get() + 1));
         keys.iter().any(|k| {
             k.id.as_deref().map_or(true, |id| element.id == Some(id))
                 && k.tag
@@ -18261,8 +18277,9 @@ mod visual_rect_tests {
 thread_local! {
     /// How many times the full selector matcher ran on this thread.
     static FULL_SELECTOR_MATCHES: Cell<u64> = const { Cell::new(0) };
-    /// How many rules the subject prefilter was asked about on this thread.
-    static PREFILTER_VISITS: Cell<u64> = const { Cell::new(0) };
+    /// How many rule-index candidates were tried against an element on this
+    /// thread (the cascade's and the `::before`/`::after` lists').
+    static CANDIDATE_VISITS: Cell<u64> = const { Cell::new(0) };
     /// How many times a selector string was tokenized on this thread.
     static SELECTOR_TOKENIZATIONS: Cell<u64> = const { Cell::new(0) };
     /// How many selectors the ancestor filter rejected on this thread.
@@ -18657,7 +18674,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
-        PREFILTER_VISITS.with(|n| n.set(0));
+        CANDIDATE_VISITS.with(|n| n.set(0));
         let style = engine.compute_style_for_element(
             "div",
             &attrs(&[("class", "hit"), ("id", "main")]),
@@ -18668,13 +18685,13 @@ mod rule_prefilter_tests {
             SiblingContext::SOLE,
             None,
         );
-        let visits = PREFILTER_VISITS.with(|n| n.get());
+        let visits = CANDIDATE_VISITS.with(|n| n.get());
 
         assert_eq!(style.color, rustkit_css::Color::new(0, 0, 255, 1.0));
         assert!(
             visits <= 1,
             "1,500 rules filed under other subjects must not be visited; \
-             the prefilter ran {visits} times"
+             {visits} candidates were"
         );
     }
 
@@ -18926,7 +18943,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
-        PREFILTER_VISITS.with(|n| n.set(0));
+        CANDIDATE_VISITS.with(|n| n.set(0));
         let host = attrs(&[("class", "hit"), ("id", "main")]);
         let before = engine.create_pseudo_element(
             "div", &host, sheets, &vars, &[], &[], SiblingContext::SOLE, "::before",
@@ -18934,14 +18951,14 @@ mod rule_prefilter_tests {
         let after = engine.create_pseudo_element(
             "div", &host, sheets, &vars, &[], &[], SiblingContext::SOLE, "::after",
         );
-        let visits = PREFILTER_VISITS.with(|n| n.get());
+        let visits = CANDIDATE_VISITS.with(|n| n.get());
 
         assert!(before.is_some(), ".hit::before must still generate its box");
         assert!(after.is_none());
         assert!(
             visits <= 1,
             "1,200 pseudo rules filed under other subjects must not be \
-             visited; the prefilter ran {visits} times"
+             visited; {visits} candidates were"
         );
     }
 
@@ -19154,7 +19171,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
-        PREFILTER_VISITS.with(|n| n.set(0));
+        CANDIDATE_VISITS.with(|n| n.set(0));
         let style = engine.compute_style_for_element(
             "div",
             &attrs(&[("data-hit", ""), ("class", "card")]),
@@ -19165,13 +19182,13 @@ mod rule_prefilter_tests {
             SiblingContext::SOLE,
             None,
         );
-        let visits = PREFILTER_VISITS.with(|n| n.get());
+        let visits = CANDIDATE_VISITS.with(|n| n.get());
 
         assert_eq!(style.color, rustkit_css::Color::new(0, 0, 255, 1.0));
         assert!(
             visits <= 1,
             "1,500 attribute / :where / :is / :root rules the element can't \
-             match must not be visited; the prefilter ran {visits} times"
+             match must not be visited; {visits} candidates were"
         );
     }
 
@@ -22919,6 +22936,136 @@ mod css_url_base_engine_tests {
         let paths = requested.lock().unwrap().clone();
         assert!(paths.iter().any(|p| p == "/assets/font.woff2"), "font not fetched from the sheet's directory: {paths:?}");
         assert!(!paths.iter().any(|p| p == "/font.woff2"), "font fetched against the document URL: {paths:?}");
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod web_font_format_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    const AHEM_TTF: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+    const AHEM_WOFF: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.woff");
+    const AHEM_WOFF2: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.woff2");
+
+    // Four 20px lines of "XXXXX" at x=20, 30px apart from y=20. Ahem's "X"
+    // is a solid em square; Helvetica's is two strokes.
+    const PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+@font-face { font-family: FormatTtf; src: url(/Ahem.ttf) format("truetype"); }
+@font-face { font-family: FormatWoff; src: url(/Ahem.woff) format("woff"); }
+@font-face { font-family: FormatWoff2; src: url(/Ahem.woff2) format("woff2"); }
+body { margin: 20px; font-size: 20px; background: white; color: black; }
+p { margin: 0 0 10px 0; line-height: 20px; }
+</style></head><body>
+<p style="font-family: FormatTtf">XXXXX</p>
+<p style="font-family: FormatWoff">XXXXX</p>
+<p style="font-family: FormatWoff2">XXXXX</p>
+<p style="font-family: Helvetica">XXXXX</p>
+</body></html>"#;
+
+    fn serve() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (ctype, body): (&str, &[u8]) =
+                    match head.split_whitespace().nth(1).unwrap_or("") {
+                        "/" => ("text/html", PAGE.as_bytes()),
+                        "/Ahem.ttf" => ("font/ttf", AHEM_TTF),
+                        "/Ahem.woff" => ("font/woff", AHEM_WOFF),
+                        "/Ahem.woff2" => ("font/woff2", AHEM_WOFF2),
+                        _ => ("text/plain", b""),
+                    };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        port
+    }
+
+    /// Share of dark pixels in the 96x16 block inside line `line`'s five
+    /// glyph cells (2px in from every edge), read from a binary PPM.
+    fn ink(ppm: &[u8], line: usize) -> f32 {
+        let mut fields = Vec::new();
+        let mut pos = 0;
+        while fields.len() < 4 {
+            let start = pos;
+            while !ppm[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            fields.push(std::str::from_utf8(&ppm[start..pos]).unwrap());
+            pos += 1;
+        }
+        assert_eq!(fields[0], "P6");
+        let width: usize = fields[1].parse().unwrap();
+        let pixels = &ppm[pos..];
+        let top = 20 + 30 * line;
+        let mut dark = 0;
+        for y in top + 2..top + 18 {
+            for x in 22..118 {
+                let p = &pixels[(y * width + x) * 3..][..3];
+                if p.iter().all(|&c| c < 96) {
+                    dark += 1;
+                }
+            }
+        }
+        dark as f32 / (96.0 * 16.0)
+    }
+
+    #[test]
+    fn ttf_woff_and_woff2_faces_paint_their_own_glyphs_after_a_fallback_first_paint() {
+        let port = serve();
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 400,
+                height: 200,
+            })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // The document is laid out and painted once before its fonts are
+        // fetched, so the fallback has already drawn every "X" by the time
+        // the three faces install.
+        rt.block_on(engine.load_url(
+            view,
+            Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap(),
+        ))
+        .expect("load_url");
+        engine.render_view(view).expect("render");
+        let path = std::env::temp_dir().join(format!("rustkit-web-font-formats-{port}.ppm"));
+        engine
+            .capture_frame(view, path.to_str().unwrap())
+            .expect("capture");
+        let ppm = std::fs::read(&path).expect("frame");
+        let _ = std::fs::remove_file(&path);
+
+        for (line, format) in ["ttf", "woff", "woff2"].into_iter().enumerate() {
+            let share = ink(&ppm, line);
+            assert!(
+                share > 0.98,
+                "{format}: {:.0}% of the glyph cells are ink; Ahem fills them, a fallback font does not",
+                share * 100.0
+            );
+        }
+        let control = ink(&ppm, 3);
+        assert!(
+            (0.02..0.6).contains(&control),
+            "the Helvetica control line is {:.0}% ink; the probe is not reading glyph cells",
+            control * 100.0
+        );
     }
 }
 
