@@ -13889,3 +13889,56 @@ one. It cannot turn a passing job red, because a stub board has never passed —
 but if some lane runs Gate A on Linux and reads its exit code as meaningful,
 that lane was reading a number it should not have been, and this is the commit
 that says so out loud.
+
+### Addendum — #397 was born conflicted, and the engine suite on this seat is nondeterministic
+
+**The PR opened `dirty`.** `develop` moved from `b946849` to `e4a82f7` between
+this branch being cut and the PR being created — #395, #396 and `90be88d`
+(control type to paint) — so no Parity Gate job ran at all: with an
+uncomputable merge ref there is nothing for `pull_request` workflows to build.
+Only the Cursor reviewer check appeared, and it passed. **A PR that opens dirty
+looks like "CI hasn't started yet" and is actually "CI will never start."**
+Resolved by merging `develop` in (`d905157`), now `unstable` rather than
+`dirty`.
+
+The conflict was structural, not semantic: both sides appended a
+`#[cfg(test)]` module at the end of `crates/rustkit-engine/src/lib.rs`, so git
+could not tell which `mod` the shared attribute introduced. Both kept, no line
+of either changed. A merge and not a rebase, so `dd075ec` stays a valid
+checkout.
+
+**The finding worth carrying forward, and it is not mine:
+`cascade_wire_tests` is nondeterministic on this seat.** It fails exactly 6 of
+its 31 tests every run, and *which* 6 varies between identical runs of the same
+binary at the same commit. Two runs of pristine `e4a82f7` disagreed on one
+member — `a_shorthand_carrying_a_colour_still_sets_the_line` in the full-suite
+run, `a_pseudo_element_cascades_by_layer_too` in the module-only run. That is
+how I ruled my own change out, and it took two 12-minute runs to do it.
+`control_semantics_tests` is order-dependent in the same family: 3 passed in
+isolation and the same 3 failed inside the full suite, **on pristine
+`e4a82f7`**, which is why my first merged run looked like I had broken
+`develop`'s new tests.
+
+**This invalidates a comparison these digests have been making.** 09-29, 09-30
+and tonight's own first draft all certify a change with "the same N failures by
+name as unmodified `develop`". On this seat that sentence is not sound for
+`rustkit-engine`: the failure *count* is stable and the *membership* is not, so
+a name-level diff across two runs reports a change that no commit caused. The
+sound form is **count plus an A/B at the same base**, and where membership
+differs, a third run before concluding anything. `rustkit-layout` is unaffected
+— its 3 are the same 3 every time, and now explained.
+
+Numbers after the merge, A/B'd at `e4a82f7` rather than carried from the old
+base:
+
+```
+  rustkit-layout --lib   565 passed, 3 failed   (pristine: 565/3, same names)
+  rustkit-engine --lib   230 passed, 9 failed   (pristine: 228/9)
+                         +2 = this branch's two guards; all 9 are develop's
+```
+
+Everything the Linux A/B measured earlier in this entry was taken at
+`b946849` and was **not** re-taken: `90be88d` moves captures, so a re-run would
+differ by `develop`'s delta and not by this PR's. The PR body now says so
+rather than leaving the old base implied — the base-drift trap, met for the
+fifth consecutive night, this time inside my own write-up.
