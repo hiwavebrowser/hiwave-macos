@@ -1308,3 +1308,22 @@ trench/realsite/runs/20260930T0910Z-quiet-devc4047ab
 
 **Decisions for Pete:**
 1. Still open: **a quiet board slot.** Tonight's attempt started at load 3 and was at 17 ten minutes later. The same release build took 7m41s quiet and 22 min contended. Only the 04:30 job gives a trustworthy number.
+
+## 2026-09-30 22:17: #392 opened (`revert-layer`); linkedin's layered hero is back offline (82.9% -> 52.9%). Session close
+
+Same session as the section above; this replaces its "Next (1)".
+
+**Points: 29/60 -> 29/60** (no full board this session; the 05:34 quiet board on develop c4047ab stands: loads 17 · readable 9 · looks-right 3, scorable 29/60). Neither PR can move the board until linkedin serves the layered variant in a board run (about 1 fetch in 10); on the old variant linkedin already scores 3/3.
+
+**PRs opened this session (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#391 `atlas/rs-flex-item-intrinsic-height` @ 06926e5**: `height: fit-content` is content-sized for flex items and flex containers (section above).
+- **#392 `atlas/rs-revert-layer` @ 9a64034** (new, on develop 570e25d, independent of #391). CSS Cascade 5 §7.3.3: when the declaration that wins a property within a layer is `revert-layer`, that layer contributes nothing for it and the layers below stand; unlayered rolls back to the layered result; normal and `!important` are resolved separately. One helper (`reverted_layer_properties`) plus a skip in the two apply loops (elements, `::before/::after`). No change to matching, sorting or the rule index; an element with no `revert-layer` pays one length compare per matched declaration and no allocation (written into the body for the cascade lane). 7 pins, 5 fail first, 2 guards. Engine 266/266 serial. Campaign vs develop 570e25d: 26/26 identical, builtins 5/5 identical, ratchet identical.
+  - linkedin's saved layered page, offline: **82.9% -> 52.9%**; the hero heading, sign-in button and legal text are in the first viewport. The hand what-if on #391's binary gave 52.7%, so the two compose.
+  - Disclosed limits: a `revert-layer` longhand does not roll back a shorthand in the same layer; `revert` is still unimplemented.
+
+**Found:** engine unit tests built with `build_layout_from_document` have no viewport, so every `@media` rule is dropped. A pin that puts its rule under `@media` fails for that reason alone. linkedin's `@media` + `revert-layer` combination is therefore covered by the saved-page render, not a unit pin (said in #392).
+
+**Next:** (1) With #391 and #392 both in, re-render `scratch/li0930/li-new.html` and take the remaining causes in size order: the hero heading is larger than Chrome's and runs under the illustration, buttons and pills are unstyled grey boxes, nav labels overlap, the illustration is a flat box. (2) The grid item whose flex children keep the pre-grid width (column 452, `h2`/`p` 1025.6). (3) A quiet board once both land. (4) facebook `rk60`/`rk67`; `border-style: inset`.
+
+**Decisions for Pete:**
+1. Still open: **a quiet board slot.** Tonight's attempt started at load 3 and was at 17 ten minutes later; release builds took 8 to 22 min.
