@@ -1,0 +1,16 @@
+fix(layout): a fit-content height flex item keeps its content in a column
+
+content_border_height (the vertical automatic minimum, css-flexbox-1 §4.5)
+sent `height: fit-content` down the "already resolved" arm and read the
+box's own height. For a `flex: 1` item that is the 0 it was squeezed to, so
+the minimum was 0 and the item stayed 0 tall with its content painted over
+by the next sibling. `fit-content` is content-sized, as `auto` is.
+
+linkedin's layered-CSS variant wraps its whole page body in
+`flex: 1; display: grid; height: fit-content` inside an auto-height column:
+the wrapper was 0 tall around 5697px of content.
+
+Pin (both entry points, block and grid item; fails first): Chrome 148 has
+the item 80 tall and the next box at 80.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

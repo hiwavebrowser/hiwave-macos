@@ -1286,3 +1286,25 @@ trench/realsite/runs/20260930T0910Z-quiet-devc4047ab
 **Decisions for Pete:**
 1. Still open: **a quiet board slot.** No board fit this session (release builds took 13-15 min at load 11-14).
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop (the nesting file shows pre-existing fmt hunks, so I left formatting alone).
+
+## 2026-09-30 21:43: #391 opened (`height: fit-content` in flex, both sides); linkedin's layered variant: wrapper 0 px and 570 px pills fixed, hero still missing because `display: revert-layer` is not implemented (next)
+
+**Points: 29/60 -> 29/60** (no trustworthy board; the 05:34 quiet board on develop c4047ab stands: loads 17 · readable 9 · looks-right 3, scorable 29/60). The session started at load 3, so I built develop 570e25d (7m41s) and began a full board. Load went 4 -> 17 during chunk 1 (another lane began building), so I stopped after it. Chunk 1 alone, contended: 7/15 (loads 4 · readable 1 · looks-right 2; google 3, facebook 2 with LOOKS RIGHT 3.9%, instagram 1, wikipedia 1 with its oracle failed, youtube 0). Run: `trench/realsite/runs/20261001T0025Z-dev570e25d` (partial, not summarised, no trend row). #389 MERGED before the session (develop 570e25d).
+
+**PR (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#391 `atlas/rs-flex-item-intrinsic-height` @ 06926e5** (2 commits on develop 570e25d). `height: fit-content` is content-sized like `auto`, but three checks in `flex.rs` read it as a definite height.
+  1. **7a7300a, the item side.** `content_border_height` (the vertical automatic minimum, §4.5) returned the box's own height for `fit-content`. For a `flex: 1` item that is the 0 it was squeezed to. This is last session's open item: the bisect of `auyip7`/`auyguo`/`auyhpk` came down to `flex: 1` + `height: fit-content` (the grid is not needed).
+  2. **06926e5, the container side.** `has_definite_cross_size` and step 12 counted a `fit-content` container as definite, at whatever height the block pre-pass had stacked its items to. linkedin's topic pills were 570 px tall each (Chrome 32).
+  - Probes vs Chrome 148 (`scratch/s0930e/probe/`): 6 failing shapes now match exactly (0 -> 80, 192 -> 32, 392 -> 72), 10 controls unchanged. 2 pins through both entry points, both fail first. Layout 577/578 (the known font-cache flake, passes alone). Campaign vs develop 570e25d: 26/26 identical, builtins 5/5 identical, ratchet identical.
+  - **Honest:** linkedin's saved layered page goes 82.9% -> 78.2% offline. The section's structure is now Chrome's, but the hero above it is still missing, so everything sits ~530 px high. Commit 1 alone read 62.7%, which was flat grey matching by accident, not a better render (said so in the body).
+
+**Found:**
+1. **Why linkedin's layered hero is missing: `display: revert-layer`.** `@layer overrides { .auya89 { display: none } @media (min-width: 768px) { .auya83 { display: revert-layer } } }` hides the hero and then rolls back to the atoms layer's `display: grid` on desktop. The cascade drops the unknown keyword, so `none` stays. Resolving that one declaration by hand in the saved page gives **52.7%** with #391 (`scratch/s0930e/whatif_revert.py <bin>`; frame `li-whatif-revert.png`). The bundle has 12 `revert-layer` declarations (8 `display`, 4 `background-color`).
+2. In the same page, a grid item that is a column flex container keeps children laid out at its pre-grid width: the heading column is 452 wide, its `h2`/`p` are 1025.6 and run under the pills. `white-space: pre-wrap` is ruled out (7 probes wrap correctly, `mk3.py`).
+3. Three more shapes that differ from Chrome on develop too, listed in #391's body: a grid item is not laid out again at the height its parent flex gave it (`g-all-parent300`, 80 vs 280); a `1fr`-row grid around a wrapping row sizes from the pre-pass stack (next sibling at 192 vs 32); a row container around a `fit-content` wrapping item is 0 tall (`p-fit-in-row`).
+4. A campaign run at load 22 reported shelf and chrome_rustkit as "Capture failed: Timeout". Both binaries render them in ~4 s with identical frames (`builtin_time.py`), so it was load. The receipt in #391 is from a later clean run.
+
+**Next:** (1) `revert-layer` in the cascade: when a layer's winning declaration for a property is `revert-layer`, that layer contributes nothing for it and the lower layers' result stands. It has to cover every apply path (elements, `::before/::after`, the recorded/replay path near `layered_important_order`), and that function is where the cascade lane works, so keep the diff small and tell that lane. Pins: the linkedin shape above, a normal and an `!important` case, and unlayered `revert-layer` (rolls back to the layered result). (2) The stale-width grid item (finding 2). (3) A quiet board once #391 lands. (4) facebook `rk60`/`rk67`; `border-style: inset`.
+
+**Decisions for Pete:**
+1. Still open: **a quiet board slot.** Tonight's attempt started at load 3 and was at 17 ten minutes later. The same release build took 7m41s quiet and 22 min contended. Only the 04:30 job gives a trustworthy number.

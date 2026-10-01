@@ -1,0 +1,69 @@
+{
+  "id": "wikipedia",
+  "url": "https://en.wikipedia.org/wiki/Web_browser",
+  "chrome": [
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 68073
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 72940
+    }
+  ],
+  "oracle_capture": null,
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://en.wikipedia.org/wiki/Web_browser",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0025Z-dev570e25d/wikipedia/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0025Z-dev570e25d/wikipedia/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 4,
+      "bytes": 6983,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 28850,
+    "error": null,
+    "wall_ms": 29076,
+    "non_background_fraction": 0.0994
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "why": "chrome capture failed: page.screenshot: Timeout 30000ms exceeded.",
+    "oracle_failed": true
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "chrome capture failed",
+    "oracle_failed": true
+  },
+  "points": 1
+}

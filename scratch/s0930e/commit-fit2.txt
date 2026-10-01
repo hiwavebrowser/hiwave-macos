@@ -1,0 +1,17 @@
+fix(layout): a fit-content height flex container is sized by its lines
+
+Two container-side checks in layout_flex_container_at asked "is the height
+anything but auto" and so counted `height: fit-content` as a definite
+height: the cross size a row's lines stretch into, and the height step 12
+leaves alone. The height it then used was whatever the block pre-pass had
+stacked the items to. Six 32px pills on one line made a 192px container
+with every pill stretched to 192.
+
+linkedin's layered-CSS variant sizes its topic-pill rows this way
+(`display: flex; flex-wrap: wrap; height: fit-content`): each pill was 570
+tall instead of 32.
+
+Pin (both entry points, wrapping and not; fails first): Chrome 148 has the
+pills and the container 32 tall.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
