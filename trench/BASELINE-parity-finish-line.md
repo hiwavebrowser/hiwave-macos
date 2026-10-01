@@ -401,14 +401,28 @@ hold 2.**
 3. **RATIFIED — allow `*.blob.core.windows.net`** so a night here can read the
    macOS `gate-a.json` and Gate C's board directly. Asked six nights running;
    under decision 1 it stops being a convenience and becomes **the only way this
-   seat picks a unit at all**. Not yet applied at the time of writing — it is an
-   environment network-policy change, made in the cloud environment's settings,
-   not something a night can set for itself.
+   seat picks a unit at all**. **APPLIED by Pete and VERIFIED 2026-10-01**: the
+   `parity-oracle` artifact of run 36847605935 downloaded, its sha256 matched
+   GitHub's recorded digest (`5922d140…`), and it unpacked to `gate-a.json`,
+   `gate-b.json`, `finish-line.json`, `finish-line.md` and `forensic/<case>/`
+   (one heatmap per case).
 
-**Until 3 is actually applied, decisions 1 and 3 together leave the seat unable
-to select a unit.** That is a real and intended consequence, not an oversight:
-a night that cannot reach the macOS board should say so and work instrument or
-recorded units, rather than fall back to numbers decision 1 just retired.
+**Decision 3 is applied, so the seat can select units again — from the macOS
+artifact only.** Recipe (GitHub MCP tools; no token handling needed):
+
+1. `actions_list` `list_workflow_runs` on `parity.yml`, status `completed` — pick
+   the newest run whose engine you mean to measure (a `develop` push or nightly
+   for a receipt; a PR run measures that PR's merge ref, not `develop`).
+2. `actions_list` `list_workflow_run_artifacts` on that run → the
+   `parity-oracle` artifact id (kept 14 days; `parity-shard-N` holds the raw
+   captures, kept 7).
+3. `actions_get` `download_workflow_run_artifact` → a short-lived
+   `*.blob.core.windows.net` URL; `curl -L` it and unzip in the scratchpad.
+4. Check the zip's sha256 against the artifact's `digest` before trusting it.
+
+If the download is refused again, the policy change has been lost: say so,
+and work instrument or recorded units rather than fall back to numbers
+decision 1 retired.
 Night 71 obtained its macOS receipt by reading the `pr-aggregate` job logs
 through the GitHub API, which worked and is not a method to depend on — the
 receipt is in the job summary and the artifact, and only the artifact carries
