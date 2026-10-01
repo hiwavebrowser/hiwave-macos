@@ -1048,3 +1048,34 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **This lane can't measure while the real-site lane builds.** Load was 13–34 for the whole session and the instrument read 3–10× high, so there was no A/B and no ratio. Default: the launcher skips a cascade session when the 1-minute load is above ~6 at start, instead of spending the slot.
 2. **Build the tree snapshot (decision 1 from 07:50) behind a flag?** The probe prices it at about a third of the replay walk: roughly wikipedia 14.8× → 12.5×, plus ~100 ms on github. Default: yes, after the prefilter cuts, which are smaller and exact by construction.
 3. **The 3× exit is unlikely by 2026-10-11 at this slope.** wikipedia needs build 1 four times faster even with build 2 free. Default: keep the metric and the date, keep grinding, and report the gap at the end date rather than change the method now.
+
+## 2026-10-01 00:58
+
+**One PR opened, on hold: #395 (`atlas/cs-prefilter-hoist` @ 414768a). No ratio this session: load was 12–22 throughout (the real-site lane was building and testing), so the worst ratio of record stays 14.8× (wikipedia, develop 22092e6). Two exact prefilter cuts are now built, tested and receipt-identical, but the first counterbalanced read of them shows no win: 12 rounds, loaded, B/A between 0.94 and 1.15. The profile's promise (11% + 9%) has not turned into milliseconds.**
+
+| site | Chrome ms | before: ratio of record (develop 22092e6, 09-30 15:50) | this session: develop 570e25d, median of 12 at load 12–20 (does NOT count) | cut 1 / develop (#395, 414768a), median of 12 per-round | cuts 1+2 / develop (eb75327), median of 12 per-round |
+|---|---|---|---|---|---|
+| cnn | 210 | 735 → 3.5× | 2063 | 1.02 | 0.94 |
+| github | 110 | 1223 → 11.1× | 3615 | 1.04 | 1.08 |
+| wikipedia | 20 | 296 → **14.8×** | 1024 | 0.97 | 1.15 |
+
+- **The A/B.** Three binaries, 12 rounds, each of the six orders twice (6 AB + 6 BA for every pair), so it meets the counterbalance rule but not the quiet one. Per-round spread is 0.44–2.00. Cut 1 on github read at or above 1.0 in 10 of 12 rounds; cuts 1+2 on wikipedia in 7 of 12. Read: no evidence of a win, a hint of a small loss, nothing of record. Tool `cascade-target/tmp/ab3.py` (new, three-way), summary `tmp/ab3_summary.py`, log `tmp/ab3-pfh-cds.txt`.
+- **#395, cut 1** (+40 −8): `keys_may_match` read `id` and `class` out of the attribute map for every key of every candidate rule; `KeyedElement` reads them once per element. Same comparisons, same order. Opened ready (the lane can't set draft headless), with **HOLD in the title and the flat A/B in the body**.
+  - Receipt vs develop 570e25d: 26/26 both, avg 1.2%, diffPixels identical on all 26.
+  - Engine lib (headless): parallel 276/325, with 47 GPU-guard 120 s timeouts behind `the_layer_pins_selectors_match_the_box` (known develop). The same binary with `--test-threads=1`: 322/325 in 345 s. The 3 are wall-clock budgets in `page_script_tests`; all 3 pass on eb75327, which contains the commit.
+  - 7 commits behind develop b946849; `git merge-tree` clean, no new caller of the changed functions on develop's tip.
+- **Cut 2, pushed, no PR: `atlas/cs-candidates-scratch` @ eb75327** (stacked on cut 1; worktree `.worktrees/cs-dev-1a016c4`, which is no longer a detached scratch). `RuleBuckets::candidates` cloned the universal bucket into a fresh `Vec` per element and twice more for the pseudos, lowercased the tag into a new `String`, and always sorted. `candidates_into` fills a thread-local buffer kept between elements, lowers the tag only if it has an uppercase letter, and skips the sort when one bucket contributed. New test `a_reused_candidate_buffer_holds_only_the_current_elements_rules` compares it with the sorted union over five elements on one buffer. Receipt identical 26/26. Engine lib `--test-threads=1`: **326/326** in 238 s at load ~15.
+- **Why the cuts may be flat.** `KeyedElement::of` pays two lookups per element up front, three times per element (style, `::before`, `::after`), whether or not any candidate key asks for an id or class. The profile attributed 11% to `keys_may_match` inclusive; how much of that was the lookups was never measured. That was the gap: the cut was sized from an inclusive number.
+- **Instrument notes.**
+  - `--test-threads=1` runs the whole engine lib in 4–6 min with no GPU-guard timeouts. The parallel run took 32 min and lost 47 tests to the guard. Use serial in this lane until the guard hang is fixed.
+  - The shared-target trap bit again: a test run in `cs-dev-1a016c4` silently reused `cs-prefilter-hoist`'s test binary, because that artifact was newer than the edited source. The tell was 325 tests instead of 326 and no "Compiling rustkit-engine" line. `touch` the crate before every build in a second worktree, and check for the Compiling line.
+  - Aleph answered, but the hub index describes the hub tree's older engine (`RuleIndex::candidates`, no `RuleBuckets`), so engine navigation was Read plus python on the develop worktree. No hang or error.
+- **Build cost:** release parity-capture (engine only) 18 min 28 s at load 15–22.
+- **Saved:** binaries `cascade-target/pc-pfh-414768a`, `pc-cds-eb75327`. Receipts `receipt-pfh-{A-570e25d,B-414768a}.json`, `receipt-cds-B-eb75327.json`. Test logs `tmp/pfh-test{1,2,3}.log`, `tmp/pfh-test4-serial.log`, `tmp/cds-test2.log`. PR body `pr-pfh-body.md`.
+- **Open cs PRs:** 1 (#395, on hold), cap 3.
+- **Next session:** (1) If the load is under ~6: 5 AB + 5 BA of develop vs 414768a vs eb75327 with `ab3.py`, post it on #395, and either drop HOLD or close it. (2) If it stays flat, measure before cutting again: put in-process timers (local only) around `keys_may_match`, `candidates` and `active_rule_index` on wikipedia's build 1, so the next cut is sized from self time, not an inclusive profile share. (3) Do not open cut 2's PR until (1) says it helps.
+
+**Decisions for Pete**
+1. **#395 is on hold: exact and receipt-identical, but flat in 12 loaded rounds.** Default: nobody merges it until a quiet 5+5 read shows a win; if that read is flat too, the lane closes it and drops cut 2.
+2. **The lane has had no quiet machine for two sessions running (load 12–34), so it cannot prove or disprove any cut.** Default: give it a quiet window (pause the real-site lane's builds for one cascade hour a day), or have the launcher skip cascade sessions above load ~6. Carried over from 21:55.
+3. **Engine lib tests run serially in this lane (`--test-threads=1`) until the #380 GPU-guard hang is fixed.** Default: yes; the real-site lane still owns the fix.
