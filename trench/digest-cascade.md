@@ -1305,3 +1305,36 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **#408 has everything its body promised except a timing of its own head, and it is still a draft because a headless session cannot run `gh pr ready`.** Default: Prometheus or the next session that can marks it ready, and it merges on the board, the verify sweep and #404's 16-pair timing. Say "time the head first" and it waits for a quiet 10 minutes.
 2. **The board's 120 s kill leaves Chrome running** (one tree at 244% CPU for 9 minutes today). Default: the real-site lane fixes its own tool (kill the process group, not the parent); this lane only reports it here. Say so if you want this lane to open that PR instead.
 3. **Quiet time is now the scarce thing: 15 minutes in this session, none in the last.** Default: the next quiet window goes to the 10-pair timing of #408, and wikipedia's first build gets whatever is left; no launcher change.
+
+## 2026-10-01 17:08
+
+**One PR opened: #415 (`atlas/cs-engine-init-lock` @ 204ba3e), the test lock inversion Athena found, test-only. On develop a0583fa a parallel `cascade_wire_tests` run gave 17 passed, 14 failed in 1,701.56 s; on the branch, 31 passed in 31.85 s. No ratio was measured (load 13–26 all session). The worst ratio of record stays 14.1× (wikipedia).**
+
+| site | Chrome ms | before: of record (#404 binary, flag unset, 16 quiet runs, 08:55) | after: this session | with tree reuse on (08:55, same pairs), what #408 makes the default |
+|---|---|---|---|---|
+| cnn | 210 | 523.5 → 2.5× | not measured | 478.0 → 2.3× |
+| github | 110 | 844.0 → 7.7× | not measured | 701.5 → 6.4× |
+| wikipedia | 20 | 282.5 → **14.1×** | not measured | 208.5 → 10.4× |
+
+- **#415, what it is** (engine +14 −11, all inside `#[cfg(test)]` modules; two commits).
+  - `3b49e24` removes the four function-local `ENGINE_INIT` mutexes (`cascade_wire_tests`, `incremental_restyle_tests`, `windows_engine_pins`, `windows_a_leg_pins`). `Engine::new` takes the GPU test guard, which the thread keeps until it exits; a test building a second engine held the guard and waited for the mutex while a neighbour held the mutex and waited for the guard.
+  - `204ba3e` is **a fifth site that was not in the report**: `web_font_tests::test_engine` took `WEB_FONT_STATE` and then the guard, and one test there drops its engine and asks for a second. That lock protects process-wide font state, so it stays; the guard is now taken first. Found by reading, **not reproduced as a failure**. It is its own commit so it can be dropped.
+- **The proof.** `cargo test -p rustkit-engine --lib --no-fail-fast -- cascade_wire_tests`, default threads, one run each:
+  - develop a0583fa: 17 passed, 14 failed, 1,701.56 s. All 14 are the guard's 120 s panic (11 name `a_nested_rule_styles_the_parents_child` as holder, 3 name `the_layer_pins_selectors_match_the_box`).
+  - 204ba3e: 31 passed, 31.85 s.
+  - Whole lib suite on 204ba3e in parallel, three runs: 286 passed, 0 failed each (144 s, 179 s, 131 s). This is CI's command; earlier digests' 352 is the same suite with `--features headless`, which I did not run.
+- **Receipt on the 204ba3e binary:** 26/26, avg 1.1%. Against #408's receipt (develop c6b4841) 24 cases are equal and two moved: `card-grid` 1.3068% → 1.3074%, `css-selectors` 1.3819% → 1.3299%. Develop moved to a0583fa in between. I took no control receipt on a0583fa; that the two are develop's movement rests on the diff being `#[cfg(test)]`-only.
+- **#408:** still a draft at 63d24d1, MERGEABLE, no review decision. I did not try `gh pr ready` again and did nothing else to it.
+- **Not done:** any ratio or timing, `--features headless` tests, clippy, the `=0` control for the odd pinned dumps, wikipedia's first build.
+- **Aleph:** one call (`aleph_search ENGINE_INIT`), answered at once, no hang or error. It returned 295 lexical matches on "engine" and "init" and none for the static, so the hub index still does not describe develop's engine. A hook now blocks `grep` over the indexed tree; navigation was Read plus python on the cs worktree.
+- **Slips:** I read the pre-fix run's whole output file (750 lines of compiler warnings) to see 20 lines of results. Four commands were refused before I found the permitted shapes: `cd <worktree> && git …`, `git -C`, a `VAR=… cargo` prefix, and running a test binary directly. What works: a lone `cd` call, then git; `cargo … --manifest-path … --target-dir …`.
+- **Build cost:** debug engine test binary 6 min 36 s (new worktree), 1.5 min after the edit. Release parity-capture **37 min 17 s** at load 13–22, in a new worktree, for a receipt on a test-only diff. The pre-fix reproduction ran 28 minutes in the background beside it.
+- **Saved:** binary `cascade-target/pc-eil-204ba3e`, receipt `receipt-eil-204ba3e.json`, PR body `pr-eil-body.md`. Under `cascade-target/tmp/init-lock/`: `before-wire-run1.log` (develop, the 14 panics), `engine-tests-before-a0583fa` (that test binary), `after-full-run{1,2,3}.log`, `receipt.py`, build logs.
+- **State left behind:** new worktree `.worktrees/cs-engine-init-lock` on `atlas/cs-engine-init-lock` @ 204ba3e, clean. The shared target dir's release and debug artifacts are that head. `.worktrees/cs-tree-reuse-default` untouched.
+- **Open cs PRs:** 2 (#408 draft, #415), cap 3.
+- **Next session:** (1) #415: answer reviews. (2) #408: mark ready if permitted. (3) If load is under 6: `ab_flag.py pc-trd-63d24d1 x 10 RUSTKIT_TREE_REUSE=0` into #408. (4) Then wikipedia's first build, about 205 ms against a 60 ms budget; `.worktrees/cs-engine-init-lock` is at develop's tip with warm release artifacts, so branch from there.
+
+**Decisions for Pete**
+1. **#415 carries one fix beyond the four mutexes you approved: the web-font lock order (`204ba3e`).** Same inversion, one line, not reproduced. Default: it stays in #415 for the reviewers to judge; say "drop it" and I revert that commit (additively) and leave the site in a note.
+2. **A test-only PR cost a 37-minute release build to get the receipt gate 5 asks for.** Default: unchanged, every cs PR carries a receipt from its own head. Say so if a `#[cfg(test)]`-only diff may cite develop's receipt instead.
+3. **#408 is still a draft that a headless session cannot mark ready** (third session running). Default: Prometheus or you mark it ready; it merges on the board, the verify sweep and #404's 16-pair timing.
