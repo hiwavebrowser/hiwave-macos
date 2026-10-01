@@ -499,6 +499,7 @@ identify new ones.* Honest status:
 | **G3** | **`crates/` parity**: `git diff origin/develop -- crates/` empty unless the night declares an engine change — the live replacement for "byte-identical to master" | **NOT BUILT** |
 | **G4** | **single record**: the digest and baseline here must be a superset of `develop`'s; refuse if `develop` holds a line this branch lacks | **NOT BUILT** — the baseline *had* silently diverged (09-04 block missing from `develop`) |
 | **G5** | **receipt base provenance**: record the base SHA in `gate-a.json` / `finish-line.json`; flag any comparison across different bases | **NOT BUILT** — the base-drift trap has been rediscovered five nights running, and on 10-01 it caught the agent's own prediction |
+| **G7** | **one branch, one writer**: before pushing to the trench branch, `git fetch` and merge the remote; never force-push. Two sessions held this branch at once on 10-01 and the merge-base commit `e2dba9c` is literally *"docs: record why two trench sessions overlapped on one branch"* — it has happened at least twice | **NOT BUILT** — a rejected push is the only thing that currently catches it |
 | **G6** | **do not rebuild what exists**: before writing a new trench tool, search `scripts/` and `trench/tools/` for one that already does the job | process, **not enforceable in code** — and it is the one that cost the most on 10-01 |
 
 **Build order if a night is given guard work:** G5 first (it has failed five
