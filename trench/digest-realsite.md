@@ -1416,3 +1416,36 @@ trench/realsite/runs/20261001T0226Z-quiet-devaf4b95d
 1. **WOFF2 decoding: keep the OS path on macOS?** It works today and #398 puts header and size checks in front of it. It does not sanitise table contents the way Chrome does before handing a font to the OS. An in-engine decoder is needed for Windows and Linux anyway and needs Brotli (a pure-Rust crate, or our own). Recommendation: ship #398 as is; make the cross-platform decoder its own item and decide the Brotli dependency then.
 2. **Build contention, again.** Load was 13 to 25 all session with three lanes on this Mac. Release builds took 12 and 16 minutes (6 quiet), Chrome's oracle screenshots timed out, and the board A/B was unusable. Staggering the lanes, or giving the board a protected slot, is still open from last night.
 3. **Item 3's scope.** As written it covers "clip, border and shadow". Shadow corners and rounded clipping of images are not there at all today, so they are new work, not a representation change. Recommendation: one PR for the representation plus fill, border and clip (the queue item), a second for shadow corners and rounded image clips.
+
+## 2026-10-01 05:29 — daily QUIET board (quiet), develop 7ae0e68
+
+**28/60 (loads 18, readable 7, looks-right 3; scorable 27/57)** (load at start: { 6.75 5.76 5.31 })
+
+```
+google     PASS PASS 100.0% PASS   9.1% (cc   0.0%)  3/3  
+youtube    fail fail   0.0% fail    -   (cc   0.1%)  0/3  blank frame (0.25% non-background)
+facebook   PASS fail  58.7% PASS  13.5% (cc   8.3%)  2/3  
+instagram  PASS fail   0.0% fail  15.9% (cc   0.0%)  1/3  
+wikipedia  PASS fail  74.3% fail  15.2% (cc  14.9%)  1/3  
+lyft       PASS PASS 100.0% fail  17.9% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% fail    -   (cc   0.3%)  0/3  blank frame (1.50% non-background)
+x          PASS PASS  95.3% PASS  10.4% (cc   0.2%)  3/3  
+linkedin   PASS fail    -   fail    -   (cc    -  )  1/3  
+yahoo      PASS fail  58.0% fail  28.2% (cc   0.0%)  1/3  
+bing       PASS fail  14.0% fail  77.2% (cc   0.1%)  1/3  
+walmart    PASS fail  45.6% unst  63.6% (cc  37.0%)  1/3  
+microsoft  PASS fail  76.9% unst  55.1% (cc  17.8%)  1/3  
+apple      PASS PASS 100.0% fail  59.7% (cc   0.0%)  2/3  
+netflix    PASS PASS  82.9% fail  66.2% (cc   3.2%)  2/3  
+github     PASS fail  71.7% fail  75.3% (cc   0.1%)  1/3  
+shopify    PASS PASS  96.4% fail  18.7% (cc   0.0%)  2/3  
+squarespace PASS PASS  85.7% unst  77.1% (cc  73.2%)  2/3  
+cnn        PASS fail  40.8% fail  59.8% (cc   8.1%)  1/3  
+weather    PASS fail   9.7% unst  29.9% (cc  16.5%)  1/3  
+------------------------------------------------------------------------------
+POINTS 28/60   loads 18  readable 7  looks-right 3   unstable: walmart, microsoft, squarespace, weather   oracle failed: linkedin
+BLOCKED none
+ORACLE BLOCKED linkedin (top-level document HTTP 403)
+SCORABLE 27/57 on 19 sites
+trench/realsite/runs/20261001T0907Z-quiet-dev7ae0e68
+```
