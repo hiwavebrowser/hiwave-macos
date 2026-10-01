@@ -353,7 +353,7 @@ pub(crate) fn form_control_intrinsic_size(
                 // Inline listbox: 16px per visible row + 2px border.
                 (
                     widest + 2.0 * ua_scale,
-                    (16.0 * *size as f32 + 2.0) * ua_scale,
+                    list_box_row_height(font_size) * *size as f32 + 2.0 * ua_scale,
                 )
             } else {
                 // Dropdown: widest option plus the arrow well.
@@ -1263,7 +1263,41 @@ pub enum FormControlType {
         /// size > 1 (or `multiple`) renders as an inline listbox, not a
         /// dropdown — Chrome CfT-148 builds 16px per visible row + 2px.
         size: u32,
+        /// Every selected option, ascending. A list box paints each one:
+        /// `multiple` can carry several, and a list box whose options have
+        /// no `selected` carries none (HTML §4.10.7 — only a drop-down
+        /// falls back to its first option).
+        selected: Vec<usize>,
     },
+}
+
+/// What a `DisplayCommand::TextInput` is, beyond a line of text in a frame.
+/// The control's type used to stop at layout: every text-like control
+/// reached paint as the same command, so a password painted its value and a
+/// `<select>` painted as an input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextControlKind {
+    /// `<input>` of a text-like type.
+    #[default]
+    Text,
+    /// `<input type=password>`. `value` holds one bullet per character;
+    /// the characters themselves never enter the display list.
+    Password,
+    /// `<textarea>`.
+    TextArea,
+    /// A drop-down `<select>`: `value` is the selected option's label and
+    /// the painter adds the arrow.
+    MenuList,
+}
+
+/// The glyph a password field paints for each character of its value
+/// (Chrome's `-webkit-text-security: disc`).
+pub const PASSWORD_MASK: char = '\u{2022}';
+
+/// Height of one option row in a list box at `font_size` (Chrome CfT-148:
+/// 16px at the 13.333px UA control font).
+fn list_box_row_height(font_size: f32) -> f32 {
+    16.0 * font_size / (40.0 / 3.0)
 }
 
 /// Stacking context for z-index ordering.
@@ -6099,6 +6133,25 @@ pub enum DisplayCommand {
         /// a bare UA control). `rect` is the border box; the text line is
         /// seated inside border + padding, as Chrome's inner editor is.
         padding: [f32; 4],
+        /// Which control this is; see `TextControlKind`.
+        kind: TextControlKind,
+    },
+    /// Draw a list box (`<select>` with `size > 1` or `multiple`): one row
+    /// per option inside the frame, the selected rows highlighted, rows past
+    /// the frame clipped.
+    ListBox {
+        rect: Rect,
+        options: Vec<String>,
+        /// Indices into `options` of the selected rows.
+        selected: Vec<usize>,
+        row_height: f32,
+        font_size: f32,
+        font_family: String,
+        font_weight: u16,
+        text_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
     },
     /// Draw a button.
     Button {
@@ -8045,11 +8098,26 @@ impl DisplayList {
 
         match control {
             FormControlType::TextInput {
-                value, placeholder, ..
+                value,
+                placeholder,
+                input_type,
             } => {
+                // A password paints one bullet per character. Masked HERE,
+                // so the value is in no display command, dump or frame.
+                let password = input_type.eq_ignore_ascii_case("password");
+                let value = if password {
+                    value.chars().map(|_| PASSWORD_MASK).collect()
+                } else {
+                    value.clone()
+                };
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
-                    value: value.clone(),
+                    kind: if password {
+                        TextControlKind::Password
+                    } else {
+                        TextControlKind::Text
+                    },
+                    value,
                     placeholder: placeholder.clone(),
                     font_size,
                     font_family: font_family.clone(),
@@ -8079,6 +8147,7 @@ impl DisplayList {
             } => {
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
+                    kind: TextControlKind::TextArea,
                     value: value.clone(),
                     placeholder: placeholder.clone(),
                     font_size,
@@ -8195,10 +8264,35 @@ impl DisplayList {
             }
             FormControlType::Select {
                 options,
+                selected,
+                size,
+                ..
+            } if *size > 1 => {
+                self.commands.push(DisplayCommand::ListBox {
+                    rect,
+                    options: options.clone(),
+                    selected: selected.clone(),
+                    row_height: list_box_row_height(font_size),
+                    font_size,
+                    font_family: font_family.clone(),
+                    font_weight,
+                    text_color,
+                    background_color: bg_color,
+                    border_color: if border_color.a > 0.0 {
+                        border_color
+                    } else {
+                        Color::new(200, 200, 200, 1.0)
+                    },
+                    border_width,
+                });
+            }
+            FormControlType::Select {
+                options,
                 selected_index,
                 ..
             } => {
-                // Draw as a text input with dropdown arrow
+                // A drop-down: the selected option's label, and the arrow
+                // the painter draws for `MenuList`.
                 let display_text = selected_index
                     .and_then(|i| options.get(i))
                     .cloned()
@@ -8206,6 +8300,7 @@ impl DisplayList {
 
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
+                    kind: TextControlKind::MenuList,
                     value: display_text,
                     placeholder: String::new(),
                     font_size,
@@ -11202,6 +11297,95 @@ mod tests {
         assert_eq!(frame(none), 0.0);
     }
 
+    #[test]
+    fn a_password_control_paints_one_bullet_per_character() {
+        let mut field = n53_control(FormControlType::TextInput {
+            value: "pässword".to_string(),
+            placeholder: "Password".to_string(),
+            input_type: "password".to_string(),
+        });
+        field.dimensions.content = Rect::new(0.0, 0.0, 149.0, 19.0);
+        field.focused_caret = Some(3);
+        let list = DisplayList::build(&field);
+        let (value, placeholder, kind, caret) = list
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::TextInput {
+                    value,
+                    placeholder,
+                    kind,
+                    caret_position,
+                    ..
+                } => Some((value.clone(), placeholder.clone(), *kind, *caret_position)),
+                _ => None,
+            })
+            .expect("a TextInput command");
+        // Per character, not per byte: the caret index (in characters)
+        // still lands between the right two bullets.
+        assert_eq!(value, "\u{2022}".repeat(8));
+        assert_eq!(kind, TextControlKind::Password);
+        assert_eq!(caret, Some(3));
+        assert_eq!(placeholder, "Password");
+    }
+
+    #[test]
+    fn a_list_box_command_carries_its_rows_and_a_drop_down_does_not_become_one() {
+        let select = |size: u32, selected: Vec<usize>| {
+            let mut b = n53_control(FormControlType::Select {
+                options: ["Item 1", "Item 2", "Item 3", "Item 4"]
+                    .map(String::from)
+                    .to_vec(),
+                selected_index: Some(0),
+                size,
+                selected,
+            });
+            let mut cb = Dimensions::default();
+            cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+            b.layout(&cb);
+            DisplayList::build(&b).commands
+        };
+        // Three visible rows of 16px in the 50px box layout builds (Chrome
+        // CfT-148: options at +1, +17, +33; the fourth is scrolled out).
+        let commands = select(3, vec![1, 2]);
+        let list_box = commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::ListBox {
+                    rect,
+                    options,
+                    selected,
+                    row_height,
+                    ..
+                } => Some((*rect, options.len(), selected.clone(), *row_height)),
+                _ => None,
+            })
+            .expect("a ListBox command");
+        assert!((list_box.0.height - 50.0).abs() < 0.01, "{:?}", list_box.0);
+        assert!(
+            (list_box.3 - 16.0).abs() < 0.01,
+            "row height {}",
+            list_box.3
+        );
+        assert_eq!((list_box.1, list_box.2), (4, vec![1, 2]));
+        assert!(!commands
+            .iter()
+            .any(|c| matches!(c, DisplayCommand::TextInput { .. })));
+
+        // size 0 / 1 is a drop-down: its selected label, kind MenuList.
+        for size in [0, 1] {
+            let commands = select(size, Vec::new());
+            assert!(commands.iter().any(|c| matches!(
+                c,
+                DisplayCommand::TextInput { value, kind: TextControlKind::MenuList, .. }
+                    if value == "Item 1"
+            )));
+            assert!(!commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::ListBox { .. })));
+        }
+    }
+
     fn n53_text_input() -> LayoutBox {
         n53_control(FormControlType::TextInput {
             value: String::new(),
@@ -11503,6 +11687,7 @@ mod tests {
                 options: options.iter().map(|o| o.to_string()).collect(),
                 selected_index: None,
                 size,
+                selected: Vec::new(),
             })
         };
         let listbox = width(sel(&["Item 1", "Item 2", "Item 3", "Item 4"], 3));
@@ -12518,6 +12703,7 @@ mod tests {
                 size: 1,
                 options: vec!["A longer option text".to_string(), "Short".to_string()],
                 selected_index: None,
+                selected: Vec::new(),
             },
             FormControlType::TextArea {
                 rows: 2,
