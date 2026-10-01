@@ -1468,7 +1468,7 @@ fn is_zero_length(l: &Length) -> bool {
 }
 
 /// A layout box in the layout tree.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LayoutBox {
     /// Box type.
     pub box_type: BoxType,

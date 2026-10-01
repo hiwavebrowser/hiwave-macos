@@ -3071,6 +3071,43 @@ impl Engine {
     ) -> LayoutBox {
         let parse_started = cascade_timing_enabled().then(std::time::Instant::now);
 
+        // `@media` rules apply only where their queries match this view's
+        // viewport. Without a view (ad-hoc builds) there is no viewport to
+        // ask, so conditional rules stay out rather than guessing a size.
+        let viewport = self
+            .building_view
+            .get()
+            .and_then(|id| self.view_viewport(id));
+        let memo_key = StyleMemoKey {
+            view: self.building_view.get(),
+            document: document as *const Document,
+            external_sheets: external_stylesheets.len(),
+            viewport,
+            focus: self.building_focus.get(),
+            fonts: self.web_font_count(),
+        };
+
+        // RUSTKIT_TREE_REUSE=1: the images relayout takes the box tree the
+        // sheets relayout built instead of walking the DOM again.
+        let traced = self.style_trace.borrow().is_some();
+        if !traced && !self.building_view_has_edits() {
+            if let Some(tree) = self.reused_tree(&memo_key) {
+                if let Some(started) = parse_started {
+                    let ms = started.elapsed().as_secs_f64() * 1000.0;
+                    info!(
+                        parse_ms = 0.0,
+                        cascade_ms = ms,
+                        sheets_ms = 0.0,
+                        vars_ms = 0.0,
+                        index_ms = 0.0,
+                        walk_ms = ms,
+                        "Cascade timing"
+                    );
+                }
+                return tree;
+            }
+        }
+
         // Extract stylesheets from <style> elements
         let mut stylesheets = self.extract_stylesheets(document);
 
@@ -3081,13 +3118,6 @@ impl Engine {
         // Add external stylesheets (loaded from <link> elements)
         stylesheets.extend(external_stylesheets.iter().cloned());
 
-        // `@media` rules apply only where their queries match this view's
-        // viewport. Without a view (ad-hoc builds) there is no viewport to
-        // ask, so conditional rules stay out rather than guessing a size.
-        let viewport = self
-            .building_view
-            .get()
-            .and_then(|id| self.view_viewport(id));
         for sheet in &mut stylesheets {
             // A layer named inside an `@media` block that doesn't apply is
             // not declared, so its statement goes too. A statement's position
@@ -3126,20 +3156,8 @@ impl Engine {
 
         // A replayed style records no trace entries, so a traced build
         // always cascades in full.
-        let style_memo = self
-            .style_trace
-            .borrow()
-            .is_none()
-            .then(|| {
-                StyleMemoBuild::begin(StyleMemoKey {
-                    view: self.building_view.get(),
-                    document: document as *const Document,
-                    external_sheets: external_stylesheets.len(),
-                    viewport,
-                    focus: self.building_focus.get(),
-                    fonts: self.web_font_count(),
-                })
-            })
+        let style_memo = (!traced)
+            .then(|| StyleMemoBuild::begin(memo_key))
             .flatten();
 
         // Every element's cascade below consults this; it is dropped (and
@@ -3302,7 +3320,150 @@ impl Engine {
                 "Cascade timing"
             );
         }
+        if let Some(build) = &style_memo {
+            self.snapshot_tree(build, &root_box);
+        }
         root_box
+    }
+
+    /// True when the view being built holds typed text: a form control's
+    /// box carries it, and the style memo's key does not cover it.
+    fn building_view_has_edits(&self) -> bool {
+        self.building_view
+            .get()
+            .and_then(|id| self.views.get(&id))
+            .is_some_and(|v| !v.edit_states.is_empty())
+    }
+
+    /// The box tree an earlier build with this key left in the memo, with
+    /// every `<img>` box's natural size resolved again: images are what
+    /// loads between the two builds.
+    fn reused_tree(&self, key: &StyleMemoKey) -> Option<LayoutBox> {
+        let (mut tree, images) = STYLE_MEMO.with(|m| {
+            let mut slot = m.borrow_mut();
+            let memo = slot.as_mut()?;
+            if memo.tree_reuse != TreeReuse::Reuse || memo.key.as_ref() != Some(key) {
+                return None;
+            }
+            Some((memo.tree.take()?, std::mem::take(&mut memo.tree_images)))
+        })?;
+        let boxes = self.refresh_image_sizes(&mut tree, &images);
+        info!(boxes, images = images.len(), "Tree reuse");
+        Some(tree)
+    }
+
+    /// Leave a recording build's tree for the next build with its key, or
+    /// (RUSTKIT_TREE_REUSE=verify) compare it with the tree a replaying
+    /// build has just walked.
+    fn snapshot_tree(&self, build: &StyleMemoBuild, root_box: &LayoutBox) {
+        let mode = STYLE_MEMO.with(|m| m.borrow().as_ref().map(|memo| memo.tree_reuse));
+        if matches!(mode, None | Some(TreeReuse::Off)) || self.building_view_has_edits() {
+            return;
+        }
+        if build.use_ == MemoUse::Record {
+            STYLE_MEMO.with(|m| {
+                if let Some(memo) = m.borrow_mut().as_mut() {
+                    if !memo.tree_unusable {
+                        memo.tree = Some(root_box.clone());
+                    }
+                }
+            });
+        } else if mode == Some(TreeReuse::Verify) {
+            let taken = STYLE_MEMO.with(|m| {
+                let mut slot = m.borrow_mut();
+                let memo = slot.as_mut()?;
+                Some((memo.tree.take()?, std::mem::take(&mut memo.tree_images)))
+            });
+            let Some((mut tree, images)) = taken else {
+                return;
+            };
+            let boxes = self.refresh_image_sizes(&mut tree, &images);
+            let mut mismatches = 0usize;
+            count_tree_differences(&tree, root_box, &mut mismatches);
+            match mismatches {
+                0 => info!(boxes, mismatches, "Tree reuse verify"),
+                _ => warn!(boxes, mismatches, "Tree reuse verify"),
+            }
+            STYLE_MEMO.with(|m| {
+                if let Some(memo) = m.borrow_mut().as_mut() {
+                    memo.tree_mismatches = mismatches;
+                }
+            });
+        }
+    }
+
+    /// Resolve the natural size of every `<img>` box in a reused tree again,
+    /// as the walk would now. Returns the number of boxes in the tree.
+    fn refresh_image_sizes(
+        &self,
+        layout_box: &mut LayoutBox,
+        images: &HashMap<usize, (Option<f32>, Option<f32>)>,
+    ) -> usize {
+        // An inline `<svg>` box has no identity and nothing to refresh: its
+        // size comes from the DOM subtree, which has not changed.
+        let hints = layout_box
+            .identity
+            .as_ref()
+            .and_then(|identity| images.get(&identity.element_id));
+        if let (
+            BoxType::Image {
+                url,
+                natural_width,
+                natural_height,
+            },
+            Some((w, h)),
+        ) = (&mut layout_box.box_type, hints)
+        {
+            (*natural_width, *natural_height) = self.img_natural_size(url, *w, *h);
+        }
+        1 + layout_box
+            .children
+            .iter_mut()
+            .map(|child| self.refresh_image_sizes(child, images))
+            .sum::<usize>()
+    }
+
+    /// An `<img>`'s natural size, from what is loaded at layout time.
+    /// `src` is absolute; the hints are its `width=`/`height=` attributes.
+    fn img_natural_size(
+        &self,
+        src: &str,
+        explicit_width: Option<f32>,
+        explicit_height: Option<f32>,
+    ) -> (f32, f32) {
+        let loaded = Url::parse(src).ok().and_then(|parsed_url| {
+            if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
+                Some(cached)
+            } else if parsed_url.scheme() == "data" {
+                self.image_manager.load_blocking(parsed_url).ok()
+            } else {
+                None
+            }
+        });
+
+        // Vector images: the SVG's own sizing (viewBox/width/height)
+        // is the natural size the raster cache can't provide.
+        let svg_size = Url::parse(src).ok().and_then(|u| {
+            self.svg_cache.get(u.as_str()).map(|svg| {
+                svg.get_size(
+                    explicit_width.unwrap_or(300.0),
+                    explicit_height.unwrap_or(150.0),
+                )
+            })
+        });
+
+        match (&loaded, svg_size) {
+            (Some(image), _) => (image.natural_width as f32, image.natural_height as f32),
+            (None, Some((w, h))) => (w, h),
+            // Image unavailable at layout time: fall back to the
+            // width=/height= attributes, then the placeholder size.
+            (None, None) => match (explicit_width, explicit_height) {
+                (Some(w), Some(h)) => (w, h),
+                (Some(w), None) => (w, w), // Assume square if only width
+                (None, Some(h)) => (h, h), // Assume square if only height
+                (None, None) => (150.0, 150.0), // Default placeholder size
+            },
+        }
     }
 
     /// Build a layout box from a DOM node with stylesheet support.
@@ -3700,41 +3861,8 @@ impl Engine {
                         .map(|u| u.to_string())
                         .unwrap_or(src);
 
-                    let loaded = Url::parse(&src).ok().and_then(|parsed_url| {
-                        if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
-                            Some(cached)
-                        } else if parsed_url.scheme() == "data" {
-                            self.image_manager.load_blocking(parsed_url).ok()
-                        } else {
-                            None
-                        }
-                    });
-
-                    // Vector images: the SVG's own sizing (viewBox/width/height)
-                    // is the natural size the raster cache can't provide.
-                    let svg_size = Url::parse(&src).ok().and_then(|u| {
-                        self.svg_cache.get(u.as_str()).map(|svg| {
-                            svg.get_size(
-                                explicit_width.unwrap_or(300.0),
-                                explicit_height.unwrap_or(150.0),
-                            )
-                        })
-                    });
-
-                    let (natural_width, natural_height) = match (&loaded, svg_size) {
-                        (Some(image), _) => {
-                            (image.natural_width as f32, image.natural_height as f32)
-                        }
-                        (None, Some((w, h))) => (w, h),
-                        // Image unavailable at layout time: fall back to the
-                        // width=/height= attributes, then the placeholder size.
-                        (None, None) => match (explicit_width, explicit_height) {
-                            (Some(w), Some(h)) => (w, h),
-                            (Some(w), None) => (w, w), // Assume square if only width
-                            (None, Some(h)) => (h, h), // Assume square if only height
-                            (None, None) => (150.0, 150.0), // Default placeholder size
-                        },
-                    };
+                    let (natural_width, natural_height) =
+                        self.img_natural_size(&src, explicit_width, explicit_height);
 
                     let mut b = LayoutBox::new(
                         BoxType::Image {
@@ -3751,6 +3879,7 @@ impl Engine {
                         &tag_lower,
                         element_ids,
                     );
+                    note_snapshot_image(&b, explicit_width, explicit_height);
                     return b;
                 }
 
@@ -21268,6 +21397,72 @@ fn incremental_restyle_mode() -> RestyleMode {
     })
 }
 
+/// `RUSTKIT_TREE_REUSE`: off by default. `1` or `on` makes the images
+/// relayout take the box tree the sheets relayout built (with image sizes
+/// resolved again) instead of walking the DOM a second time; `verify` walks
+/// anyway and counts the boxes that differ from that tree. It rides the
+/// style memo, so it does nothing under `RUSTKIT_INCREMENTAL_RESTYLE=0`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TreeReuse {
+    Off,
+    Reuse,
+    Verify,
+}
+
+fn tree_reuse_from(value: Option<&str>) -> TreeReuse {
+    match value {
+        Some("1") | Some("on") => TreeReuse::Reuse,
+        Some("verify") => TreeReuse::Verify,
+        _ => TreeReuse::Off,
+    }
+}
+
+fn tree_reuse_mode() -> TreeReuse {
+    static MODE: std::sync::OnceLock<TreeReuse> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| tree_reuse_from(std::env::var("RUSTKIT_TREE_REUSE").ok().as_deref()))
+}
+
+/// A recording build with tree reuse on notes each `<img>` box's size
+/// hints under its identity, for `refresh_image_sizes`.
+fn note_snapshot_image(image_box: &LayoutBox, width: Option<f32>, height: Option<f32>) {
+    STYLE_MEMO.with(|m| {
+        if let Some(memo) = m.borrow_mut().as_mut() {
+            if memo.tree_reuse == TreeReuse::Off || memo.in_build != Some(MemoUse::Record) {
+                return;
+            }
+            match &image_box.identity {
+                Some(identity) => {
+                    memo.tree_images
+                        .insert(identity.element_id, (width, height));
+                }
+                None => memo.tree_unusable = true,
+            }
+        }
+    });
+}
+
+/// Count the boxes of `kept` that differ from the box at the same place in
+/// `fresh`; a box with a different number of children counts once.
+fn count_tree_differences(kept: &LayoutBox, fresh: &LayoutBox, differences: &mut usize) {
+    let shallow = |b: &LayoutBox| {
+        format!(
+            "{:?}",
+            (
+                (&b.box_type, &b.dimensions, &b.position, &b.offsets, &b.float, &b.clear),
+                (b.z_index, &b.stacking_context, &b.viewport, &b.sticky_state, &b.element_id),
+                (&b.identity, &b.link_href, &b.focused_caret, &b.node_id, &b.text_lines),
+                (&b.text_flow_first_offset, &b.root_element_height, b.children.len()),
+            )
+        )
+    };
+    if shallow(kept) != shallow(fresh) || !same_computed_style(&kept.style, &fresh.style) {
+        *differences += 1;
+    }
+    for (kept, fresh) in kept.children.iter().zip(&fresh.children) {
+        count_tree_differences(kept, fresh, differences);
+    }
+}
+
 /// The positioning a layout box takes from its computed style.
 struct BoxPositioning {
     position: Position,
@@ -21327,9 +21522,28 @@ struct StyleMemo {
     /// full, without a rule index (a replaying build does not build one).
     misses: usize,
     mismatches: usize,
+    tree_reuse: TreeReuse,
+    /// The recording build's finished, not yet laid out box tree.
+    tree: Option<LayoutBox>,
+    /// `width=`/`height=` of every `<img>` box in `tree`, by the box's
+    /// identity: what a reuse needs to resolve its natural size again.
+    tree_images: HashMap<usize, (Option<f32>, Option<f32>)>,
+    /// An `<img>` box the recording could not name. No tree is kept.
+    tree_unusable: bool,
+    /// Boxes a verifying build found different from the kept tree.
+    tree_mismatches: usize,
 }
 
 impl StyleMemo {
+    /// A recording starts: nothing kept for an earlier one describes it.
+    fn forget_tree(&mut self) {
+        self.tree = None;
+        self.tree_images.clear();
+        self.tree_unusable = false;
+        self.tree_mismatches = 0;
+    }
+
+
     fn memoized(&self) -> usize {
         self.styles.len() + self.pseudos.len()
     }
@@ -21359,10 +21573,15 @@ struct StyleMemoScope {
 
 impl StyleMemoScope {
     fn arm() -> Option<Self> {
-        Self::arm_with(incremental_restyle_mode())
+        Self::arm_with_tree(incremental_restyle_mode(), tree_reuse_mode())
     }
 
+    #[cfg(test)]
     fn arm_with(mode: RestyleMode) -> Option<Self> {
+        Self::arm_with_tree(mode, TreeReuse::Off)
+    }
+
+    fn arm_with_tree(mode: RestyleMode, tree_reuse: TreeReuse) -> Option<Self> {
         if mode == RestyleMode::Off {
             return None;
         }
@@ -21379,6 +21598,11 @@ impl StyleMemoScope {
                 hits: 0,
                 misses: 0,
                 mismatches: 0,
+                tree_reuse,
+                tree: None,
+                tree_images: HashMap::new(),
+                tree_unusable: false,
+                tree_mismatches: 0,
             })
         });
         Some(StyleMemoScope { owner: true })
@@ -21415,6 +21639,7 @@ impl StyleMemoBuild {
             let use_ = match &memo.key {
                 None => {
                     memo.key = Some(key);
+                    memo.forget_tree();
                     MemoUse::Record
                 }
                 Some(recorded) if *recorded == key => match memo.verify {
@@ -21428,6 +21653,7 @@ impl StyleMemoBuild {
                     memo.key = Some(key);
                     memo.styles.clear();
                     memo.pseudos.clear();
+                    memo.forget_tree();
                     MemoUse::Record
                 }
             };
@@ -21714,6 +21940,198 @@ mod incremental_restyle_tests {
             assert_eq!(hits, memoized, "the inner span replays the outer recording");
         }
         assert!(memo_counts().is_some(), "only the outer scope discards the memo");
+    }
+
+    const IMG_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+        .card { padding: 8px; }
+        .card::before { content: ">"; }
+        img { display: block; }
+        </style></head><body>
+        <div class="card"><p>One <b>two</b> three</p>
+        <img src="https://tree-reuse.test/a.png" width="40" height="30">
+        <img src="https://tree-reuse.test/b.png" width="25"></div>
+        <svg width="10" height="10"><rect width="10" height="10"/></svg>
+        <input type="text" value="typed"><ul><li>a</li><li>b</li></ul>
+        </body></html>"#;
+
+    fn kept_tree() -> Option<bool> {
+        STYLE_MEMO.with(|m| m.borrow().as_ref().map(|memo| memo.tree.is_some()))
+    }
+
+    #[test]
+    fn tree_reuse_reads_its_flag() {
+        assert_eq!(tree_reuse_from(None), TreeReuse::Off);
+        assert_eq!(tree_reuse_from(Some("0")), TreeReuse::Off);
+        assert_eq!(tree_reuse_from(Some("1")), TreeReuse::Reuse);
+        assert_eq!(tree_reuse_from(Some("on")), TreeReuse::Reuse);
+        assert_eq!(tree_reuse_from(Some("verify")), TreeReuse::Verify);
+    }
+
+    #[test]
+    fn a_reused_tree_paints_what_a_fresh_walk_paints() {
+        let e = engine();
+        for page in [PAGE, IMG_PAGE] {
+            let d = Document::parse_html(page).expect("parse");
+            let full = paint(&e, &d);
+
+            let _scope =
+                StyleMemoScope::arm_with_tree(RestyleMode::Reuse, TreeReuse::Reuse).expect("armed");
+            assert_eq!(paint(&e, &d), full);
+            assert_eq!(kept_tree(), Some(true), "the recording build keeps its tree");
+            assert_eq!(paint(&e, &d), full, "the reused tree lays out and paints the same");
+            assert_eq!(kept_tree(), Some(false), "the second build took the tree");
+            let (hits, _, _) = memo_counts().expect("memo");
+            assert_eq!(hits, 0, "a reused tree replays no style");
+            assert_eq!(paint(&e, &d), full, "a third build walks again");
+        }
+    }
+
+    #[test]
+    fn tree_reuse_off_keeps_no_tree() {
+        let e = engine();
+        let d = Document::parse_html(IMG_PAGE).expect("parse");
+        let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+        paint(&e, &d);
+        assert_eq!(kept_tree(), Some(false));
+    }
+
+    #[test]
+    fn tree_reuse_verify_finds_no_difference_from_a_fresh_walk() {
+        let e = engine();
+        for page in [PAGE, IMG_PAGE] {
+            let d = Document::parse_html(page).expect("parse");
+            let _scope = StyleMemoScope::arm_with_tree(RestyleMode::Reuse, TreeReuse::Verify)
+                .expect("armed");
+            paint(&e, &d);
+            assert_eq!(kept_tree(), Some(true));
+            paint(&e, &d);
+            assert_eq!(kept_tree(), Some(false), "the verifying build compared the tree");
+            let mismatches =
+                STYLE_MEMO.with(|m| m.borrow().as_ref().map(|memo| memo.tree_mismatches));
+            assert_eq!(mismatches, Some(0));
+        }
+    }
+
+    #[test]
+    fn tree_reuse_verify_counts_a_box_that_differs() {
+        let e = engine();
+        let d = Document::parse_html(IMG_PAGE).expect("parse");
+        let _scope =
+            StyleMemoScope::arm_with_tree(RestyleMode::Reuse, TreeReuse::Verify).expect("armed");
+        paint(&e, &d);
+        STYLE_MEMO.with(|m| {
+            let mut slot = m.borrow_mut();
+            let tree = slot.as_mut().and_then(|memo| memo.tree.as_mut()).expect("kept");
+            tree.children[0].z_index += 1;
+        });
+        paint(&e, &d);
+        let mismatches = STYLE_MEMO.with(|m| m.borrow().as_ref().map(|memo| memo.tree_mismatches));
+        assert_eq!(mismatches, Some(1));
+    }
+
+    /// The natural sizes of every `<img>` box, in tree order.
+    fn image_sizes(b: &LayoutBox, out: &mut Vec<(String, f32, f32)>) {
+        if let BoxType::Image {
+            url,
+            natural_width,
+            natural_height,
+        } = &b.box_type
+        {
+            if b.identity.is_some() {
+                out.push((url.clone(), *natural_width, *natural_height));
+            }
+        }
+        for child in &b.children {
+            image_sizes(child, out);
+        }
+    }
+
+    #[test]
+    fn a_reused_tree_resolves_image_sizes_again() {
+        fn zero_images(b: &mut LayoutBox) {
+            if let BoxType::Image {
+                natural_width,
+                natural_height,
+                ..
+            } = &mut b.box_type
+            {
+                (*natural_width, *natural_height) = (0.0, 0.0);
+            }
+            b.children.iter_mut().for_each(zero_images);
+        }
+
+        let e = engine();
+        let d = Document::parse_html(IMG_PAGE).expect("parse");
+        let mut fresh = Vec::new();
+        image_sizes(&e.build_layout_from_document(&d, &[]), &mut fresh);
+        assert_eq!(
+            fresh.iter().map(|(_, w, h)| (*w, *h)).collect::<Vec<_>>(),
+            [(40.0, 30.0), (25.0, 25.0)]
+        );
+
+        let _scope =
+            StyleMemoScope::arm_with_tree(RestyleMode::Reuse, TreeReuse::Reuse).expect("armed");
+        e.build_layout_from_document(&d, &[]);
+        // Stand in for sizes the recording build could not know yet.
+        STYLE_MEMO.with(|m| {
+            let mut slot = m.borrow_mut();
+            zero_images(slot.as_mut().and_then(|memo| memo.tree.as_mut()).expect("kept"));
+        });
+        let mut reused = Vec::new();
+        image_sizes(&e.build_layout_from_document(&d, &[]), &mut reused);
+        assert_eq!(kept_tree(), Some(false), "the build reused the tree");
+        assert_eq!(reused, fresh);
+    }
+
+    #[test]
+    fn a_tree_is_not_reused_under_another_key() {
+        let e = engine();
+        let first = Document::parse_html(IMG_PAGE).expect("parse");
+        let other_html = IMG_PAGE.replace("8px", "9px");
+        let other = Document::parse_html(&other_html).expect("parse");
+        let other_full = paint(&e, &other);
+
+        let _scope =
+            StyleMemoScope::arm_with_tree(RestyleMode::Reuse, TreeReuse::Reuse).expect("armed");
+        paint(&e, &first);
+        assert_eq!(paint(&e, &other), other_full, "another document walks its own tree");
+        assert_eq!(kept_tree(), Some(true), "and keeps that one");
+        assert_eq!(paint(&e, &other), other_full);
+    }
+
+    #[cfg(feature = "headless")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_image_relayout_reuses_the_tree_through_the_real_view_path() {
+        const HTML: &str = r#"<!DOCTYPE html><html><head><style>
+                p { color: rgb(1, 2, 3); font-weight: 700; }
+                img { width: 100px; height: auto; }
+            </style></head><body>
+                <p>styled</p>
+                <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+            </body></html>"#;
+        for tree_reuse in [TreeReuse::Reuse, TreeReuse::Verify] {
+            let mut e = engine();
+            let id = e
+                .create_headless_view(Bounds::new(0, 0, 800, 600))
+                .expect("headless view");
+            e.load_html(id, HTML).expect("initial view load");
+
+            let _scope =
+                StyleMemoScope::arm_with_tree(RestyleMode::Reuse, tree_reuse).expect("armed");
+            e.relayout(id).expect("sheets relayout keeps its tree");
+            assert_eq!(kept_tree(), Some(true));
+            assert_eq!(e.load_images(id).await.expect("load data image"), 1);
+            e.relayout(id).expect("images relayout");
+            assert_eq!(kept_tree(), Some(false), "{tree_reuse:?} must take the kept tree");
+            let (hits, _, memoized) = memo_counts().expect("memo");
+            match tree_reuse {
+                TreeReuse::Reuse => assert_eq!(hits, 0, "a reused tree replays no style"),
+                _ => assert_eq!(hits, memoized, "a verifying build walks"),
+            }
+            let mismatches =
+                STYLE_MEMO.with(|m| m.borrow().as_ref().map(|memo| memo.tree_mismatches));
+            assert_eq!(mismatches, Some(0));
+        }
     }
 
     #[cfg(feature = "headless")]
