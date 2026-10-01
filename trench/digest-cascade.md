@@ -1162,3 +1162,50 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **#399 is a 7–10% win on cnn and github and does nothing measurable for the worst site.** Default: reviewers merge it on the cnn and github numbers; the metric of record stays wikipedia's.
 2. **The worst ratio has sat at 14–15× for three sessions, and the two cuts today both land on other sites.** wikipedia needs the structural work (tree reuse on replay, then box construction). Default: the next sessions do only that, after the large-layer PR is opened, and report the gap on 2026-10-11 as already agreed.
 3. **A second quiet window showed up at 04:17–05:00** (load fell from 15 to under 6; I did not check what stopped). Default: no launcher change yet; if it repeats tomorrow, move the cascade session to start right after the real-site one instead of beside it.
+
+## 2026-10-01 06:40
+
+**One PR opened and merged within the session: #400 (`atlas/cs-vars-large-layer` @ cdf3484, merged 06:39 as develop 2301f3c, not by this lane), measured on a quiet machine first: github 0.84, below 1 in all 16 pairs; cnn and wikipedia flat. #399 merged at 05:19 (develop f16ad4e). Worst ratio of record: 14.7× → 14.2× (wikipedia, develop f16ad4e, 16 quiet runs); #399 is in that number, but it read flat on wikipedia, so take the 0.5 as the read. A walk probe on develop's tip then sized wikipedia's two builds by part: no part of the replay build is over 17%, so the tree snapshot is still the cut.**
+
+| site | Chrome ms | before: of record (develop 4a7ca75, 30 quiet runs, 05:00) | after: develop f16ad4e, median of 16 quiet runs | #400 cdf3484, same pairs | #400 / develop, per-pair median |
+|---|---|---|---|---|---|
+| cnn | 210 | 605.5 → 2.9× | 548.5 → **2.6×** | 545.0 → 2.6× | 0.990 (8 of 16 below 1) |
+| github | 110 | 1062.5 → 9.7× | 1001.0 → **9.1×** | 849.0 → 7.7× | **0.838** (16 of 16) |
+| wikipedia | 20 | 293.5 → **14.7×** | 284.0 → **14.2×** | 275.5 → 13.8× | 0.964 (11 of 16) |
+
+- **The machine was quiet from the start** (05:35, load 2.4–4.7) until about 06:18. Both release builds and all A/B pairs are from that window.
+- **#400, large-layer collapse** (rustkit-css, +83 −12, two new tests). 7647595 from the last session with develop f16ad4e merged in additively.
+  - A/B: `ab2.py`, 16 pairs in two runs (8 AB + 8 BA), load 2.4–4.2, none dropped. Logs `cascade-target/tmp/ab2-vll2-0548a.txt`, `ab2-vll2-0554b.txt`. github's medians differ by 152 ms; the 02:45 probe priced custom properties at 148 ms.
+  - Receipt vs develop f16ad4e: 26/26 both, avg 1.2%, diffPixels identical on all 26.
+  - Engine lib, serial, load 4–7: **338 passed, 0 failed** in 103 s. rustkit-css lib: 47/47.
+  - Pinned sites: github and wikipedia byte-identical in two runs. cnn differed in the first run (develop twice, branch once) and was identical in the second (branch twice, develop once), on the hashes the branch gave in the first. The difference was one origin-served image under a `<picture>` whose natural size changed, moving boxes by 0.17 px. Develop produces both variants, so it is the origin, not the binary.
+  - `cargo clippy -p rustkit-css -- -D warnings` fails with the same 7 errors on develop and on the branch.
+  - CI on cdf3484 was green (pr-aggregate included), R1 CLEAR and R2-STAMP PASS at cdf3484; merged at 06:39. Not run: the real-site board. **Develop's tip 2301f3c is not built**; the #400 column above is its number in all but the merge commit.
+- **Walk probe** (local only, never committed; patch `cascade-target/tmp/walk-timers/cs-walk-timers-f16ad4e.patch`, binary `pc-walk-timers2-f16ad4e`, logs `tmp/walk3-logs/`). Timers inside `build_layout_from_parent_style_and_path` on develop f16ad4e, median of 4 loads at load 5–9, so read the shares, not the ms:
+
+  | wikipedia | first build (walk 177 ms) | replay build (walk 98 ms) |
+  |---|---|---|
+  | element style (cascade, or the memo's clone on replay) | 94 ms, 53% | 16 ms, 17% |
+  | `::before`/`::after` | 27 ms, 15% | 14.5 ms, 15% |
+  | per-child work: child path, sibling context, sibling key, include | 15 ms, 9% | 17 ms, 17% |
+  | child prep: selector segments, same-tag totals | 10 ms, 5% (segments 7) | 12 ms, 12% (segments 9) |
+  | text nodes | 7 ms | 10 ms, 10% |
+  | tail (whitespace collapse) | 5 ms | 6 ms |
+  | positioning + identity | 4 ms | 5 ms |
+
+  - **The replay build has no hot spot.** Its largest parts are 17%, 17%, 15%, 12% and 10%. Cutting any one exactly buys 2–5% of wikipedia's load, under what 16 pairs can resolve (range 0.78–1.10). A snapshot of the first build's tree skips all of it.
+  - **Element identity is paid on every load.** Selector segments, the child path string and the reported selector are built for every element in both builds, for the parity join key. Segments plus child path are about 23 ms of wikipedia's 275 ms of walk in this run (8%), and 14% + 5% of cnn's replay walk; the reported selector was not timed on its own. A page load that dumps no layout does not read them.
+  - **The pseudo memo on replay costs almost as much as the element memo** (14.5 vs 16 ms), and most of its answers are "no pseudo". A second probe (`pc-walk-timers3-f16ad4e`, logs `tmp/walk4-logs/`, run at load 7–14, so only the counts are good) counted them: wikipedia asks 7,396 times and gets a style 709 times; cnn 3,676 and 99; github 1,998 and 137. Every lookup was a memo hit (`misses=0`). From the first probe that is about 1.1–1.3 µs per lookup that returns nothing, which is slow for one hash lookup. I did not find out why. It is worth about 9 ms on wikipedia's replay build (3% of the load) at most.
+  - cnn and github's first builds are 72% and 81% style. Their replay walks are 59 and 29 ms.
+- **Aleph:** answered on the first call (no hang, no error). The hub index still describes the hub tree, so engine navigation was Read plus python on the develop worktree.
+- **Slip:** I ran `difflib` over two 6,000-difference layout dumps and lost 2 minutes to the timeout. A structural walk of the two JSON trees answered in seconds.
+- **Build cost:** release parity-capture 5 min 21 s and 5 min 14 s (four crates) at load 3–6; probe builds 4 min 57 s and 6 min 07 s (engine only).
+- **Saved:** binaries `cascade-target/pc-dev-f16ad4e`, `pc-vll-merged` (cdf3484), `pc-walk-timers-f16ad4e`, `pc-walk-timers2-f16ad4e`. Receipts `receipt-vll-{A-f16ad4e,B-cdf3484}.json`. Test logs `tmp/vll2-enginetest.log`, `tmp/vll2-csstest.log`. Site dumps `tmp/vll2-site-equal{,-swapped}/`. PR body `pr-vll-body.md`.
+- **State left behind:** `.worktrees/cs-dev-ddbeae5` on `atlas/cs-vars-large-layer` @ cdf3484, clean. `.worktrees/cs-dev-1a016c4` detached at develop f16ad4e, clean (the probe was reverted). The shared target dir's release artifact is the probe build: `touch` the crate before building in any cs worktree.
+- **Open cs PRs:** 0, cap 3.
+- **Next session:** (1) Tree snapshot behind `RUSTKIT_TREE_REUSE`, off by default, with a verify mode that compares the snapshot with a fresh replay walk; start from `tmp/tree-clone-probe.patch`. (2) Only if cheap while reading `through_memo` for the snapshot: why a pseudo memo hit that returns nothing costs over 1 µs. (3) If quiet, build develop 2301f3c and take the ratio of record.
+
+**Decisions for Pete**
+1. **Both of today's merged cuts (#399, #400) land on cnn and github; wikipedia has not moved in four sessions (14.2–14.8×).** github went 9.7× → about 7.7×, cnn 2.9× → 2.6×. Default: the next sessions build only the tree snapshot (wikipedia's replay build, about a quarter of its load), behind a flag with a verify mode, and open no more small cuts for the other two sites until it is in.
+2. **Element identity (the selector path the parity oracle joins on) is built for every element on every load, about 8% of wikipedia's walk.** Default: leave it until the tree snapshot is in, then build it only when a layout dump is requested, as a separate PR with the receipt; say no if you want identity always on.
+3. **Three quiet windows today: 01:36–02:05, 04:17–05:00, 05:35–06:18.** The hourly session has found one in each of the last three runs. Default: no launcher change; decision 3 from 02:45 (hold the real-site launcher) is withdrawn.
