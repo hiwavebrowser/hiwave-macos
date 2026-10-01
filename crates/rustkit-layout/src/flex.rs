@@ -2495,7 +2495,12 @@ fn content_border_height(b: &LayoutBox) -> f32 {
     let pb = d.padding.vertical() + d.border.vertical();
     let pct_height = match b.style.height {
         Length::Px(h) => return spec_height_to_border_box(b, h),
-        Length::Auto => false,
+        // `fit-content` is content-sized like `auto`. On the `_` arm it read
+        // the box's own height, which for a squeezed `flex: 1` item is the 0
+        // it was squeezed to: linkedin's hero wrapper (`flex: 1; height:
+        // fit-content` in an auto-height column) stayed 0 tall around 5697px
+        // of content.
+        Length::Auto | Length::FitContent => false,
         Length::Percent(_) => true,
         // Any other length (vh, em, calc…) is already resolved.
         _ => return d.content.height + pb,
