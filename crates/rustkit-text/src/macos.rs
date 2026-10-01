@@ -471,9 +471,11 @@ pub const GLYPH_FALLBACK_FAMILIES: &[&str] = &[
     "Menlo",             // code/math symbols
 ];
 
+const EMOJI_FAMILY: &str = "Apple Color Emoji";
+
 /// The faces the colour-glyph path draws from, in its order
 /// (`GlyphRasterizer::resolve_color_font`).
-const COLOR_GLYPH_FAMILIES: &[&str] = &["Apple Color Emoji", "Apple Symbols"];
+const COLOR_GLYPH_FAMILIES: &[&str] = &[EMOJI_FAMILY, "Apple Symbols"];
 
 /// The face a character is drawn from when `primary` has no glyph for it,
 /// and its glyph id there. ONE function for layout (which takes the advance
@@ -486,10 +488,18 @@ const COLOR_GLYPH_FAMILIES: &[&str] = &["Apple Color Emoji", "Apple Symbols"];
 /// Apple Symbols' advance (22.3 to 22.6px in a 16px `<kbd>`), where the
 /// cascade, and Chrome, give Menlo's (21.23px).
 ///
-/// A character on the colour-glyph path (`is_emoji`) keeps that path's own
-/// faces first, because that is where paint draws it from. The fixed list
-/// is the last resort. `None` means no face has the character (Core Text
-/// answers with its LastResort face, which is not a glyph anyone meant).
+/// Two things come before the cascade. A character above Latin-1 that
+/// Apple Color Emoji has is taken from it, as it was when that face led the
+/// fixed list: `⏰` and `⌨` alone get a text face from the cascade, and
+/// Chrome's line for them is the emoji face's height (an `about` heading is
+/// 29px, and was 24 with the cascade first). ASCII and Latin-1 are left
+/// out because that face also has the digits, `#`, `*`, `©` and `®`, which
+/// are text unless a variation selector or keycap follows: a web font
+/// without digits drew x.com's year as wide emoji-face digits. And a
+/// character on the colour-glyph path (`is_emoji`) keeps that path's own
+/// faces, because that is where paint draws it from. The fixed list is the
+/// last resort. `None` means no face has the character (Core Text answers
+/// with its LastResort face, which is not a glyph anyone meant).
 pub fn fallback_face_for(primary: &CTFont, ch: char) -> Option<(CTFont, u16)> {
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -525,6 +535,11 @@ fn fallback_face_uncached(primary: &CTFont, ch: char) -> Option<(CTFont, u16)> {
         })
     };
 
+    if ch as u32 > 0xFF {
+        if let Some(hit) = named(&[EMOJI_FAMILY]) {
+            return Some(hit);
+        }
+    }
     if is_emoji(ch) {
         if let Some(hit) = named(COLOR_GLYPH_FAMILIES) {
             return Some(hit);
@@ -1894,11 +1909,19 @@ mod tests {
     #[test]
     fn fallback_keeps_emoji_faces_and_refuses_the_last_resort_face() {
         let helvetica = named_font("Helvetica", 16.0).expect("Helvetica is installed");
-        for ch in ['\u{2615}', '\u{1F3AF}'] {
+        // U+23F0 and U+2328 are outside `is_emoji`'s ranges; Apple Color
+        // Emoji has them, and Chrome's line for them is that face's height.
+        for ch in ['\u{2615}', '\u{1F3AF}', '\u{23F0}', '\u{2328}'] {
             let (face, glyph) = fallback_face_for(&helvetica, ch).expect("an emoji face");
             assert_eq!(family_name_or_empty(&face), "Apple Color Emoji", "{ch:?}");
             assert_ne!(glyph, 0);
         }
+        // Apple Color Emoji has the digits too (keycap bases). A face
+        // without digits takes them from a text face, not from it.
+        let dingbats = named_font("Zapf Dingbats", 16.0).expect("Zapf Dingbats is installed");
+        assert!(color_glyph_id(&dingbats, '2').is_none(), "Zapf Dingbats has a 2");
+        let (face, _) = fallback_face_for(&dingbats, '2').expect("a text face");
+        assert_ne!(family_name_or_empty(&face), "Apple Color Emoji");
         // U+0378 is unassigned: only LastResort answers for it.
         assert!(fallback_face_for(&helvetica, '\u{0378}').is_none());
         // Asked twice, the answer is the same (the second is the memo's).

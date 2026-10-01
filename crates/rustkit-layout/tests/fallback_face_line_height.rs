@@ -98,6 +98,17 @@ fn normal_line_height_unites_the_used_faces_like_chrome() {
         29.0
     );
 
+    // `⏰` and `⌨` are emoji outside `rustkit_text::is_emoji`'s ranges; their
+    // line is still the emoji face's (an `about` feature row and heading).
+    assert_eq!(
+        run_line_height(&s16, 16.0, &measure("\u{23F0} alarm", 16.0)),
+        26.0
+    );
+    assert_eq!(
+        run_line_height(&s16, 16.0, &measure("\u{2328}\u{FE0F} keys", 16.0)),
+        26.0
+    );
+
     // An explicit line-height ignores the used faces (Chrome: 24 stays 24).
     let fixed = style(16.0, LineHeight::Px(24.0));
     assert_eq!(
