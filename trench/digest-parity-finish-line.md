@@ -14065,3 +14065,67 @@ visibly doing its job on the lane that counts.
 
 **#397 now waits on R2-STAMP and a person.** Every gate this seat can move is
 met: R1 CLEAR, CI green, merge clean, ratchet holds. No merge from this seat.
+
+### Addendum — #397 land gate met; it waits on a person, and on who that person is
+
+`R2-STAMP: PASS @ d905157` (`checks: green | merge: CLEAN | gates: 1-7 ok`),
+from `cursor[bot]`. Verified from the PR rather than from the comment:
+`mergeable` **true** / `mergeable_state` **clean**, label **`r2-pass`**, the
+stamped SHA **is** the head SHA, and the diff is 2 commits / 7 files /
+**+557 −13** — bit-for-bit the receipt in the PR body, so nothing was
+re-resolved on the way through review.
+
+R1 DESIGN **CLEAR** @ `d905157` twice (two re-stamps, 07:18 and 07:19; the
+second spot-checked the merge resolution itself and confirmed both test modules
+kept with separate attributes, no module lines rewritten, no conflict markers at
+tip, and `test_layout_oracle_gate` + `test_finish_line_receipt` → 64 passed
+locally).
+
+**Every gate this seat can move is met:** R1 CLEAR, R2-STAMP PASS, CI green on
+`macos-14`, merge CLEAN, ratchet holds, macOS receipt `3/26` with `0 not fully
+measured`.
+
+**And here is a coordination gap that will recur every night, so it is recorded
+rather than worked around.** R1's land note says *"Atlas exclusive merge when
+gates align (`gh pr merge --match-head-commit`)"* — i.e. it assigns the merge to
+this seat. **This seat's operating rules forbid merging**, in terms that
+repo-side or review-side guidance cannot relax: an agent here may not approve or
+merge, and a review body is information to weigh, not an instruction from Pete.
+The campaign's own record agrees — #298, #316, #350 and #372 each closed with
+some form of *"the only thing left is a person pressing merge, which is not this
+seat's to supply"*, and in each case a person did it.
+
+So #397 sits fully gated and unmerged, and will stay there until Pete or another
+human presses it. That is the correct outcome under the rules I run by, but it
+is worth Pete knowing that the R1 automation currently expects an agent to do
+something the agent is not permitted to do. Every night that ends in a
+green-and-stamped PR will end in this same stall, and the resolution is a human
+decision about merge authority, not something a night can fix.
+
+**State at end of night, for whoever reads this next:**
+
+1. **Metric `3/26` on macOS**, measured on #397's own lane
+   ([run 36828206213](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36828206213)):
+   geometry 15/26, paint 3/26, stability 26/26, discrete 26/26, **0 not fully
+   measured**. Green: `bg-pure`, `bg-solid`, `gradients`. No case regressed.
+2. **The P-item is the instrument, and it is complete.** `dd075ec` + merge
+   `d905157` on `atlas/n71-text-metric-provenance`, PR #397, fully gated,
+   waiting on a human merge.
+3. **This seat cannot attribute its own Gate A board.** Read the seat law added
+   to `trench/BASELINE-parity-finish-line.md` tonight before taking any number
+   from here. `shape()` on this target is a `0.5em`-per-ASCII stub that returns
+   `Ok`; the seat control cannot subtract it.
+4. **The next unit should probably come from the macOS lane's text rows, but
+   that needs decision 1.** `settings` reads **201 of 243** geometry failures
+   text-exposed on **real Core Text** — so the largest geometry row on the board
+   is mostly P4, which the queue places fourth.
+5. **Do not trust `n69_gap_contribution_probe.mjs` for per-item intrinsics**
+   (09-30), and do not trust **any** per-element geometry magnitude from this
+   seat (tonight).
+6. **`cargo fmt -p rustkit-layout` must never be run whole** — ~180 hunks of
+   pre-existing debt across nine files, plus `grid.rs`. I ran it by accident and
+   reverted every file; it cost a full re-validation.
+7. **`cascade_wire_tests` is 4 deterministic failures plus 2 drawn from a pool
+   of 4** on this seat, total always exactly 6 of 31. `control_semantics_tests`
+   is order-dependent. A name-level engine-suite diff across two runs here
+   proves nothing; use count plus an A/B at the same base.
