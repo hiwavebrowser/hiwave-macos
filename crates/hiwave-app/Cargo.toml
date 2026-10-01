@@ -62,6 +62,8 @@ hiwave-analytics = { workspace = true }
 
 # RustKit engine (macOS only)
 [target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+cocoa = "0.25"
 rustkit-engine = { workspace = true, optional = true }
 rustkit-viewhost = { workspace = true, optional = true }
 rustkit-text = { workspace = true, optional = true }

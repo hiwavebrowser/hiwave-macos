@@ -10,6 +10,14 @@ on:
     # pr-swarm, which actually gates.
     branches: [master, main]
   workflow_dispatch:  # Allow manual triggers
+  # Weekly develop receipt (Pete, 2026-09-24: parity reports once a week;
+  # the real-site board is the daily focus). Per-run parity outputs are not
+  # committed in PRs (see .gitignore), so develop's numbers come from this
+  # run: it appends a `develop` row to metrics-history and writes a
+  # week-over-week per-case comparison. Mondays 04:00 UTC = Sunday midnight
+  # EDT, right after the Sunday-night parity trench.
+  schedule:
+    - cron: "0 4 * * 1"
 
 env:
   RUST_BACKTRACE: 1
@@ -25,6 +33,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Full history for metrics branch
+          # Scheduled runs measure develop; pushes measure the pushed ref.
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
+
+      - name: Resolve measured commit
+        id: rev
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "branch=develop" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -55,8 +75,8 @@ jobs:
           python3 scripts/extract_parity_metrics.py \
             --input parity-baseline/parity_test_results.json \
             --output parity-metrics.json \
-            --commit ${{ github.sha }} \
-            --branch ${{ github.ref_name }}
+            --commit ${{ steps.rev.outputs.sha }} \
+            --branch ${{ steps.rev.outputs.branch }}
 
       - name: Generate Job Summary
         run: |
@@ -67,13 +87,13 @@ jobs:
       - name: Upload metrics artifact
         uses: actions/upload-artifact@v4
         with:
-          name: parity-metrics-${{ github.sha }}
+          name: parity-metrics-${{ steps.rev.outputs.sha }}
           path: parity-metrics.json
           retention-days: 90
 
       # Store metrics history in a separate branch
       - name: Update metrics history
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' || github.event_name == 'schedule'
         run: |
           # Configure git
           git config user.name "github-actions[bot]"
@@ -98,7 +118,45 @@ jobs:
 
           # Copy new metrics with timestamp
           TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
-          cp parity-metrics.json "metrics/${TIMESTAMP}_${{ github.sha }}.json"
+          BRANCH="${{ steps.rev.outputs.branch }}"
+          # Night-over-night comparison: this run vs the previous run of the
+          # same branch, per case. Written before the new run is added so
+          # "previous" is unambiguous.
+          python3 - "$BRANCH" <<'PY' > "metrics/compare-${BRANCH}.md"
+          import glob, json, sys
+          branch = sys.argv[1]
+          new = json.load(open("parity-metrics.json"))
+          prev = None
+          for f in sorted(glob.glob("metrics/*_*.json"), reverse=True):
+              try:
+                  m = json.load(open(f))
+              except Exception:
+                  continue
+              if m.get("branch") == branch:
+                  prev = m
+                  break
+          print(f"# Parity {branch}: {new['commit'][:8]} ({new['timestamp']})\n")
+          if prev is None:
+              print(f"First {branch} run. avg {new['average_diff']:.4f}, {new['passed']}/{new['total']} passed.")
+              sys.exit()
+          print(f"vs previous {branch} run {prev['commit'][:8]} ({prev['timestamp']})\n")
+          print(f"avg {prev['average_diff']:.4f} -> {new['average_diff']:.4f} ({new['average_diff'] - prev['average_diff']:+.4f}); "
+                f"passed {prev['passed']}/{prev['total']} -> {new['passed']}/{new['total']}\n")
+          old = {t["name"]: t["diff"] for t in prev.get("tests", [])}
+          rows = [(t["name"], old.get(t["name"]), t["diff"]) for t in new.get("tests", [])]
+          moved = [r for r in rows if r[1] is None or abs(r[2] - r[1]) > 1e-9]
+          if not moved:
+              print("All cases byte-flat.")
+          else:
+              print("| case | before | after | change |\n|---|---:|---:|---:|")
+              for name, a, b in sorted(moved, key=lambda r: -(abs(r[2] - (r[1] or 0)))):
+                  a_s = "new" if a is None else f"{a:.4f}"
+                  d = "" if a is None else f"{b - a:+.4f}" + (" UP" if b > a else "")
+                  print(f"| {name} | {a_s} | {b:.4f} | {d} |")
+          PY
+          cat "metrics/compare-${BRANCH}.md" >> "$GITHUB_STEP_SUMMARY"
+          cp parity-metrics.json "metrics/${TIMESTAMP}_${{ steps.rev.outputs.sha }}.json"
+          cp parity-metrics.json "metrics/latest-${BRANCH}.json"
 
           # Append to history CSV for easy charting
           python3 -c "
@@ -131,7 +189,7 @@ jobs:
 
           # Commit and push
           git add metrics/
-          git commit -m "Add parity metrics for ${{ github.sha }}" || echo "No changes to commit"
+          git commit -m "Add parity metrics for ${{ steps.rev.outputs.branch }} ${{ steps.rev.outputs.sha }}" || echo "No changes to commit"
           git push origin metrics-history || echo "Push failed - may need to rebase"
 
       - name: Comment on PR with metrics

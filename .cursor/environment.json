@@ -1,0 +1,4 @@
+{
+  "name": "HiWave / RustKit (Linux dev)",
+  "install": "bash .cursor/install.sh"
+}

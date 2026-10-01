@@ -10,9 +10,15 @@ mod import;
 mod platform;
 
 use std::sync::{Arc, Mutex};
+// Used only by the WRY-content IPC/nav block, which is compiled out of the
+// default macos+rustkit build. Deleting this as an "unused import" broke
+// `--features webview-fallback` with E0433 at the two should_block call
+// sites: a green default build says nothing about a cfg arm your target
+// omits. Gate must match those sites, not the default target.
+#[cfg(any(not(target_os = "macos"), feature = "webview-fallback"))]
+use hiwave_shield::ResourceType;
 use muda::{Menu, MenuEvent};
 use platform::get_platform_manager;
-use hiwave_shield::ResourceType;
 #[cfg(target_os = "macos")]
 use platform::menu_ids;
 use tao::{
@@ -1822,6 +1828,98 @@ fn main() {
     info!("Inspector WebView created (between content and shelf, starts hidden)");
     info!("Four-WebView architecture initialized");
 
+    // DIAGNOSTIC: dump the contentView subview stack, bottom to top. Subview
+    // array order IS z-order (later = on top). A full session of clicking
+    // produced zero window-level click events, which means SOMETHING sits
+    // above the RustKit content view and consumes them — this names it
+    // instead of us guessing which view wry stacked where.
+    #[cfg(target_os = "macos")]
+    // Gated: the probe ends with a SYNTHETIC CLICK at (640,350), which on a
+    // real launch would click whatever the restored page has there. Set
+    // HIWAVE_DIAG=1 to run the stack dump + hitTest + click self-test.
+    if std::env::var("HIWAVE_DIAG").is_ok() {
+        unsafe {
+        use objc::{msg_send, sel, sel_impl};
+        use tao::platform::macos::WindowExtMacOS;
+        // ns_view IS the TaoView that hosts every WebView — dump ITS
+        // children (first probe dumped the window contentView, one level
+        // too high, and saw only TaoView itself).
+        let ns_view = window.ns_view() as cocoa::base::id;
+        let subviews: cocoa::base::id = msg_send![ns_view, subviews];
+        let count: usize = msg_send![subviews, count];
+        for idx in 0..count {
+            let v: cocoa::base::id = msg_send![subviews, objectAtIndex: idx];
+            let cls: cocoa::base::id = msg_send![v, className];
+            let utf8: *const std::os::raw::c_char = msg_send![cls, UTF8String];
+            let name = std::ffi::CStr::from_ptr(utf8).to_string_lossy();
+            let frame: cocoa::foundation::NSRect = msg_send![v, frame];
+            let hidden: bool = msg_send![v, isHidden];
+            info!(
+                z = idx,
+                class = %name,
+                x = frame.origin.x,
+                y = frame.origin.y,
+                w = frame.size.width,
+                h = frame.size.height,
+                hidden,
+                "subview stack (z asc = bottom to top)"
+            );
+        }
+
+        // hitTest is PURE — this asks AppKit "who would receive a click at
+        // point P" without any click happening. Points in TaoView coords
+        // (bottom-left origin). If the content region resolves to a
+        // WryWebView instead of our NSView, hit-test is being overridden
+        // and that IS the click-eating bug.
+        let superview: cocoa::base::id = msg_send![ns_view, superview];
+        for (label, x, y) in [
+            ("content-middle", 640.0f64, 350.0f64),
+            ("content-left-edge", 8.0, 350.0),
+            ("toolbar", 640.0, 760.0),
+        ] {
+            // hitTest: takes a point in the SUPERVIEW's coordinate system.
+            let pt = cocoa::foundation::NSPoint::new(x, y);
+            let hit: cocoa::base::id = msg_send![ns_view, hitTest: pt];
+            let who = if hit == cocoa::base::nil {
+                "nil".to_string()
+            } else {
+                let cls: cocoa::base::id = msg_send![hit, className];
+                let utf8: *const std::os::raw::c_char = msg_send![cls, UTF8String];
+                std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+            };
+            info!(label, x, y, owner = %who, "hitTest probe");
+        }
+        let _ = superview;
+
+        // Synthesize a click through the REAL dispatch path: window
+        // sendEvent -> hitTest -> view -> responder chain. If this does not
+        // produce our own "window-level click received" line, clicks die
+        // between the content NSView and TaoView — measured, not assumed —
+        // and the fix is real event handlers on the viewhost NSView.
+        let ns_window: cocoa::base::id = msg_send![ns_view, window];
+        let win_num: isize = msg_send![ns_window, windowNumber];
+        for (etype, label) in [(1usize, "synthetic mouseDown"), (2usize, "synthetic mouseUp")] {
+            let pt = cocoa::foundation::NSPoint::new(640.0, 350.0);
+            let ev: cocoa::base::id = msg_send![objc::class!(NSEvent),
+                mouseEventWithType: etype
+                location: pt
+                modifierFlags: 0usize
+                timestamp: 0.0f64
+                windowNumber: win_num
+                context: cocoa::base::nil
+                eventNumber: 0isize
+                clickCount: 1isize
+                pressure: 1.0f32];
+            if ev != cocoa::base::nil {
+                info!(label, "posting");
+                let _: () = msg_send![ns_window, sendEvent: ev];
+            } else {
+                info!(label, "NSEvent construction returned nil");
+            }
+        }
+        }
+    }
+
     // Check for debug mode via environment variable
     if std::env::var("HIWAVE_DEBUG").map(|v| v == "1").unwrap_or(false) {
         info!("Debug mode enabled via HIWAVE_DEBUG=1");
@@ -1890,6 +1988,9 @@ fn main() {
     // MouseInput without a position, so the CursorMoved stream is what makes
     // a click locatable.
     let cursor_position = std::rc::Rc::new(std::cell::Cell::new((0.0f64, 0.0f64)));
+    // tao delivers modifiers as their own event rather than on each KeyEvent,
+    // so the current state has to be carried between them.
+    let modifiers = std::rc::Rc::new(std::cell::Cell::new(tao::keyboard::ModifiersState::empty()));
     let click_proxy = proxy.clone();
 
     // Run the event loop
@@ -1909,6 +2010,25 @@ fn main() {
                 // MainEventsCleared, which this event wakes.
                 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    // First wheel event after a quiet gap logs at info, so a
+                    // flick is visible in a default-level session log without
+                    // flooding it (a trackpad flick emits ~50 events/s; the
+                    // rest stay trace). Restores the diagnosability #100
+                    // accidentally removed when the #95 diagnostic line was
+                    // replaced with wiring.
+                    thread_local! {
+                        static LAST_WHEEL: std::cell::Cell<std::time::Instant> =
+                            std::cell::Cell::new(std::time::Instant::now());
+                    }
+                    let quiet = LAST_WHEEL.with(|t| {
+                        let now = std::time::Instant::now();
+                        let gap = now.duration_since(t.get());
+                        t.set(now);
+                        gap > std::time::Duration::from_millis(500)
+                    });
+                    if quiet {
+                        info!(?delta, "wheel burst started (window loop)");
+                    }
                     let (dx, dy) = match delta {
                         tao::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
                         // Line deltas (external mice) arrive in rows/columns;
@@ -1920,6 +2040,12 @@ fn main() {
                         trace!(dx, dy, "content scrolled");
                     }
                 }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::ModifiersChanged(state),
+                ..
+            } => {
+                modifiers.set(state);
             }
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. },
@@ -1947,7 +2073,39 @@ fn main() {
                     let (cx, cy) = cursor_position.get();
                     let content_x = cx - *sidebar_width_for_events.lock().unwrap();
                     let content_y = cy - *chrome_height_for_events.lock().unwrap();
-                    if content_x >= 0.0 && content_y >= 0.0 {
+                    // info-level ON PURPOSE: a click that arrives but resolves
+                    // to nothing was previously indistinguishable from a click
+                    // eaten by a WebView layer above us. Clicks are rare;
+                    // this cannot flood. (Live session 2026-08-06: an entire
+                    // session of link-clicking produced zero log evidence
+                    // either way.)
+                    info!(cx, cy, content_x, content_y, "window-level click received");
+                    // Both bounds, not just the origin side (Prometheus, #104
+                    // R1): the delivery rule says clicks reaching this loop are
+                    // content-directed, but that is an inference about the UI
+                    // frame's behavior, not a geometric fact. A half-open gate
+                    // turns any leak into a navigation at whatever the hit test
+                    // finds under an out-of-bounds coordinate.
+                    let size = window.inner_size().to_logical::<f64>(window.scale_factor());
+                    let content_w = size.width
+                        - *sidebar_width_for_events.lock().unwrap()
+                        - if *right_sidebar_open_for_events.lock().unwrap() { SIDEBAR_WIDTH } else { 0.0 };
+                    let content_h = size.height
+                        - *chrome_height_for_events.lock().unwrap()
+                        - *shelf_height_for_events.lock().unwrap()
+                        - *inspector_height_for_events.lock().unwrap();
+                    if content_x >= 0.0
+                        && content_y >= 0.0
+                        && content_x < content_w
+                        && content_y < content_h
+                    {
+                        // Focus first, then navigate. A click that lands on a
+                        // form control focuses it; a click on anything else
+                        // clears focus, which is what makes a later keystroke
+                        // unambiguous about where it belongs.
+                        if let Some(tag) = view.focus_at_point(content_x as f32, content_y as f32) {
+                            info!(%tag, "Focused content element");
+                        }
                         if let Some(url) = view.link_at_point(content_x as f32, content_y as f32) {
                             info!(%url, "Link clicked");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
@@ -1969,6 +2127,57 @@ fn main() {
                 if key_event.state == tao::event::ElementState::Pressed {
                     if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                         use tao::keyboard::Key;
+
+                        // A focused form control claims keys first. Win32
+                        // virtual-key numbering because rustkit-dom's editing
+                        // model already speaks it (it predates any platform
+                        // wiring); mapping here keeps that model untouched.
+                        if view.has_focused_element() {
+                            let mods = modifiers.get();
+                            let (vk, text) = match &key_event.logical_key {
+                                Key::ArrowLeft => (0x25u32, String::new()),
+                                Key::ArrowRight => (0x27, String::new()),
+                                Key::Home => (0x24, String::new()),
+                                Key::End => (0x23, String::new()),
+                                Key::Backspace => (0x08, String::new()),
+                                Key::Delete => (0x2E, String::new()),
+                                Key::Enter => {
+                                    // Enter in a form field submits it. Done
+                                    // before the edit model sees the key: the
+                                    // model reports Submit but cannot
+                                    // navigate, and swallowing Enter into a
+                                    // single-line field would do nothing
+                                    // visible at all.
+                                    if let Some(url) = view.form_submit_url() {
+                                        info!(%url, "Form submitted");
+                                        let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                                        return;
+                                    }
+                                    (0x0D, String::new())
+                                }
+                                Key::Character(c) => (0, c.to_string()),
+                                _ => (0, String::new()),
+                            };
+                            if vk != 0 || !text.is_empty() {
+                                if view.handle_text_key(
+                                    vk,
+                                    &text,
+                                    mods.control_key() || mods.super_key(),
+                                    mods.shift_key(),
+                                    mods.alt_key(),
+                                ) {
+                                    // The edit lives in engine state, so
+                                    // nothing else would repaint it.
+                                    view.relayout();
+                                    return;
+                                }
+                            }
+                            // Focused but unhandled (e.g. Tab): swallow rather
+                            // than scroll — scrolling the page while a field
+                            // has focus is never what was meant.
+                            return;
+                        }
+
                         // scroll_by uses wheel sign convention: negative dy
                         // advances the page (natural scrolling).
                         let dy: Option<f32> = match key_event.logical_key {
@@ -2050,6 +2259,66 @@ fn main() {
             Event::MainEventsCleared => {
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    // Clicks come from the content NSView's own handlers in
+                    // VIEW-LOCAL coordinates — already viewport space, no
+                    // chrome-height/sidebar math and none of its staleness
+                    // bugs. The old window-loop MouseInput arm never fired:
+                    // events delivered to a child NSView do not surface as
+                    // tao window events (measured with a synthetic
+                    // sendEvent:, 2026-08-07).
+                    for click in rustkit_viewhost::drain_pending_clicks() {
+                        if click.down {
+                            continue;
+                        }
+                        info!(x = click.x, y = click.y, "content click (view-local)");
+                        if let Some(tag) = view.focus_at_point(click.x as f32, click.y as f32) {
+                            info!(%tag, "Focused content element");
+                            // ENGINE focus is not APPKIT focus: without
+                            // making the content view the window's first
+                            // responder, macOS keeps delivering keys to the
+                            // chrome WebView — observed live as "text entry
+                            // goes back up to the URL bar". First real
+                            // caller of ViewHost::focus, whose deadlock was
+                            // fixed preemptively in #116.
+                            view.grab_keyboard();
+                            view.relayout();
+                        }
+                        if let Some(url) = view.link_at_point(click.x as f32, click.y as f32) {
+                            info!(%url, "Link clicked");
+                            let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        }
+                    }
+                    for key in rustkit_viewhost::drain_pending_keys() {
+                        if key.cmd {
+                            continue; // menu shortcuts are not text
+                        }
+                        // macOS keyCodes -> the Win32 VK numbering the edit
+                        // model speaks. Text keys carry their characters.
+                        let (vk, text): (u32, &str) = match key.mac_keycode {
+                            51 => (0x08, ""),   // delete (backspace)
+                            117 => (0x2E, ""),  // forward delete
+                            123 => (0x25, ""),  // left
+                            124 => (0x27, ""),  // right
+                            115 => (0x24, ""),  // home
+                            119 => (0x23, ""),  // end
+                            36 | 76 => (0x0D, ""), // return / keypad enter
+                            48 => (0x09, ""),   // tab
+                            53 => (0x1B, ""),   // escape
+                            _ => (0, key.text.as_str()),
+                        };
+                        if vk == 0x0D {
+                            if let Some(url) = view.form_submit_url() {
+                                info!(%url, "Form submitted");
+                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                                continue;
+                            }
+                        }
+                        if (vk != 0 || !text.is_empty())
+                            && view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt)
+                        {
+                            view.relayout();
+                        }
+                    }
                     view.process_events();
                     view.render();
                 }
@@ -2147,7 +2416,19 @@ fn main() {
                         info!("Going back");
                         #[cfg(target_os = "macos")]
                         {
-                            // TODO: Implement history.back() in RustKit
+                            // Real navigation on RustKit; JS only reaches the
+                            // WRY fallback (page JS does not execute in
+                            // RustKit, so the old evaluate_script stub was a
+                            // silent no-op — live finding 2026-08-07).
+                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
+                                if !v.nav_back() {
+                                    info!("GoBack: nowhere to go");
+                                }
+                            } else {
+                                let _ = content_for_events.evaluate_script("history.back();");
+                            }
+                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
                             let _ = content_for_events.evaluate_script("history.back();");
                         }
                         #[cfg(not(target_os = "macos"))]
@@ -2159,7 +2440,19 @@ fn main() {
                         info!("Going forward");
                         #[cfg(target_os = "macos")]
                         {
-                            // TODO: Implement history.forward() in RustKit
+                            // Real navigation on RustKit; JS only reaches the
+                            // WRY fallback (page JS does not execute in
+                            // RustKit, so the old evaluate_script stub was a
+                            // silent no-op — live finding 2026-08-07).
+                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
+                                if !v.nav_forward() {
+                                    info!("GoForward: nowhere to go");
+                                }
+                            } else {
+                                let _ = content_for_events.evaluate_script("history.forward();");
+                            }
+                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
                             let _ = content_for_events.evaluate_script("history.forward();");
                         }
                         #[cfg(not(target_os = "macos"))]
@@ -2171,7 +2464,19 @@ fn main() {
                         info!("Reloading");
                         #[cfg(target_os = "macos")]
                         {
-                            // TODO: Implement reload in RustKit
+                            // Real navigation on RustKit; JS only reaches the
+                            // WRY fallback (page JS does not execute in
+                            // RustKit, so the old evaluate_script stub was a
+                            // silent no-op — live finding 2026-08-07).
+                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
+                                if !v.nav_reload() {
+                                    info!("Reload: nowhere to go");
+                                }
+                            } else {
+                                let _ = content_for_events.evaluate_script("location.reload();");
+                            }
+                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
                             let _ = content_for_events.evaluate_script("location.reload();");
                         }
                         #[cfg(not(target_os = "macos"))]

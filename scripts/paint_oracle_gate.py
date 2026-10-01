@@ -698,6 +698,11 @@ def compare_case(
             "within_fraction": None,
             "discrete_examined": 0,
             "discrete_unattributable": 0,
+            # None, not []: attribution never ran on a size mismatch, so "which
+            # elements were withheld" is UNKNOWN. An empty list would assert
+            # that none were, and a downstream ratchet would read every future
+            # discrete failure here as newly broken.
+            "discrete_withheld_selectors": None,
             "discrete_failures": 1,
             "failures": [failure.to_json()],
             "receipts": [failure.receipt()],
@@ -723,6 +728,18 @@ def compare_case(
     # Only geometrically exact elements reach the discrete detectors. Anything
     # else and the detector is reading pixels that belong to another box.
     scoped = [e for e in elements if e.get("selector") in attributable]
+    # The withheld SET, not just its size. A downstream ratchet cannot tell a
+    # newly BROKEN element from a newly MEASURABLE one without knowing which
+    # elements this run declined to speak about: every geometry fix enlarges
+    # this gate's jurisdiction, so a discrete failure can appear on an element
+    # that was silently skipped last time and was defective all along.
+    withheld_selectors = sorted(
+        {
+            e["selector"]
+            for e in elements
+            if e.get("selector") and e["selector"] not in attributable
+        }
+    )
     withheld = sum(
         1
         for e in elements
@@ -745,6 +762,7 @@ def compare_case(
         "within_fraction": within,
         "discrete_examined": len(scoped),
         "discrete_unattributable": withheld,
+        "discrete_withheld_selectors": withheld_selectors,
         "discrete_failures": sum(1 for f in failures if f.discrete),
         "failures": [f.to_json() for f in failures],
         "receipts": [f.receipt() for f in failures],
@@ -767,6 +785,9 @@ def unmeasured_case(case_id: str, reason: str) -> Dict[str, Any]:
         "within_fraction": None,
         "discrete_examined": 0,
         "discrete_unattributable": 0,
+        # UNKNOWN, not empty — this case was never opened. See the note on the
+        # size-mismatch return above.
+        "discrete_withheld_selectors": None,
         "discrete_failures": 0,
         "failures": [],
         "receipts": [],

@@ -16,6 +16,95 @@ env:
   UMBRELLA_PAT: ${{ secrets.UMBRELLA_PAT }}
 
 jobs:
+
+  # F1 — dual-build falsifier (banked after Linux #59, missed on the #110
+  # merge): an auto-merge can resurrect a deleted cfg(test) shape without
+  # conflict markers, and the lib build alone is blind to it. --no-run
+  # compiles every test target without executing the suite.
+  f1-test-compile:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: All test targets must COMPILE (F1)
+        run: cargo test --workspace --no-run
+
+  # F2 — the unit suites actually EXECUTE. F1 above compiles every test target
+  # and stops there (`--no-run`), the swarm jobs run the parity board, and the
+  # script-guards lane runs the Python guards. Nothing in this repository has
+  # ever executed a Rust test: every mutation-checked guard this campaign has
+  # written — the whole of its correctness evidence — has run exactly once, on
+  # the seat of the night that wrote it, and never again.
+  #
+  # That is the same argument that put `script-guards` here, applied to the
+  # other half of the suite. A guard nobody runs is the decoration this
+  # campaign keeps warning about, and by its own standard an unrun guard is
+  # not evidence.
+  #
+  # Scope is the two suites the campaign's own working rule names as mandatory
+  # before every commit, not `--workspace`: hiwave-app and hiwave-smoke need a
+  # window server and rustkit-media needs an audio device, so a workspace run
+  # would red-lock on the environment rather than on the engine.
+  #
+  # macos-14 on purpose. Two of #199's justify tests are green on CoreText and
+  # red on a Linux font stack (measured 2026-09-17), so a ubuntu lane would
+  # red-lock on font substitution and teach everyone to ignore it.
+  #
+  # ADVISORY for one cycle, same posture as Gates A and B under ratified
+  # decision 2: this lane has never run anywhere, so its colour on macos-14 is
+  # unknown and a blocking lane of unknown colour is a red lock, not a gate.
+  # Advisory means VISIBLE, not ignored — the receipt goes to the job summary,
+  # including did-not-run, so the first run establishes the colour and the
+  # flip to blocking deletes one `continue-on-error` line.
+  unit-suites:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Campaign unit suites must PASS (F2, advisory)
+        id: unit_suites
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          summary="$RUNNER_TEMP/unit-suites.md"
+          {
+            echo "## Rust unit suites — advisory cycle"
+            echo
+            echo "The suites this campaign requires green before every commit."
+            echo "Advisory for one cycle; the flip to blocking removes one line."
+            echo
+            echo "| suite | result line | verdict |"
+            echo "|---|---|---|"
+          } > "$summary"
+          status=0
+          for pkg in rustkit-layout rustkit-engine; do
+            log="$RUNNER_TEMP/$pkg.log"
+            echo "::group::cargo test -p $pkg --lib"
+            if cargo test -p "$pkg" --lib --no-fail-fast 2>&1 | tee "$log"; then rc=0; else rc=1; fi
+            echo "::endgroup::"
+            # A suite that compiled, reported nothing and exited 0 is a
+            # did-not-run wearing a green check — the exact shape this
+            # campaign calls an instrument lie. `test result:` is cargo's
+            # own per-target line; no line means no target ran.
+            ran=$(grep -cE '^test result:' "$log" || true)
+            line=$(grep -E '^test result:' "$log" | head -1 || true)
+            if [ "$ran" -eq 0 ]; then
+              echo "| \`$pkg --lib\` | (none) | **DID NOT RUN** — no \`test result:\` line, so nothing executed |" >> "$summary"
+              status=1
+            elif [ "$rc" -ne 0 ]; then
+              echo "| \`$pkg --lib\` | $line | **RED** |" >> "$summary"
+              status=1
+            else
+              echo "| \`$pkg --lib\` | $line | green |" >> "$summary"
+            fi
+          done
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          exit $status
   # ===========================================================================
   # Join-key contract (~1m). Cheap, corpus-wide, no Rust and no swarm.
   # ===========================================================================
@@ -315,6 +404,23 @@ jobs:
       # receipt did not run" are different facts that must not print the
       # same.
       # -----------------------------------------------------------------
+      - name: Ratchet — regression gate (blocking on regression only)
+        if: always()
+        run: |
+          # pipefail is load-bearing: without it `rc=$?` reads TEE's exit
+          # code and a crashed ratchet passes the step — observed on run
+          # 31624496939, where a Traceback concluded "success".
+          set +e -o pipefail
+          python3 scripts/ratchet_gate.py --gate-a parity-results/gate-a.json --gate-b parity-results/gate-b.json | tee parity-results/ratchet.txt
+          rc=$?
+          set -e +o pipefail
+          echo "ratchet exit code: $rc"
+          if [ "$rc" = "1" ]; then
+            echo "::error::Ratchet REGRESSION — a case is worse than the committed floor"
+            exit 1
+          elif [ "$rc" = "2" ]; then
+            echo "::warning::Ratchet holds — absolute red exists but nothing regressed"
+          fi
       - name: Finish line — N/26 (receipt, non-gating)
         id: finish_line
         if: always()
@@ -611,9 +717,13 @@ jobs:
           fi
           RUNS=$(IFS=,; echo "${RUN_IDS[*]}")
           echo "Merging runs: $RUNS"
+          # E0a: stamp which engine produced this report, so a regression
+          # compare against an older artifact is visibly cross-engine.
           python3 scripts/parity_aggregate.py \
             --runs "$RUNS" \
             --results-root parity-results \
+            --engine-sha "${{ github.sha }}" \
+            --receipt-run "${{ github.run_id }}" \
             --output parity-results/nightly_aggregate.json
 
       - name: Gate check (nightly)
@@ -684,6 +794,23 @@ jobs:
       # Same receipt as the PR lane, same non-gating contract. Nightly is
       # where the number is tracked over time, so it must be computed here
       # rather than inferred from whenever the PR lane last ran.
+      - name: Ratchet — regression gate (blocking on regression only)
+        if: always()
+        run: |
+          # pipefail is load-bearing: without it `rc=$?` reads TEE's exit
+          # code and a crashed ratchet passes the step — observed on run
+          # 31624496939, where a Traceback concluded "success".
+          set +e -o pipefail
+          python3 scripts/ratchet_gate.py --gate-a parity-results/gate-a.json --gate-b parity-results/gate-b.json | tee parity-results/ratchet.txt
+          rc=$?
+          set -e +o pipefail
+          echo "ratchet exit code: $rc"
+          if [ "$rc" = "1" ]; then
+            echo "::error::Ratchet REGRESSION — a case is worse than the committed floor"
+            exit 1
+          elif [ "$rc" = "2" ]; then
+            echo "::warning::Ratchet holds — absolute red exists but nothing regressed"
+          fi
       - name: Finish line — N/26 (receipt, non-gating)
         if: always()
         continue-on-error: true
@@ -764,10 +891,20 @@ jobs:
           name: nightly-aggregate
           path: parity-results/previous/
           search_artifacts: true
-          workflow_conclusion: success
+          # E0 (2026-08-15): "success" self-locked the lane. Once one nightly
+          # failed its own regression check, every later nightly compared
+          # against the last green artifact (Aug-3 fossil, pre-#110 engine),
+          # failed the cross-engine compare, and so never became the new
+          # baseline. "completed" picks up the newest artifact regardless of
+          # that run's conclusion, so the comparison window moves again.
+          workflow_conclusion: completed
           if_no_artifact_found: ignore
 
       - name: Regression check
+        # E0: advisory — the ratchet gate is the only blocking layer. A red
+        # regression report must not red the workflow, or its artifact upload
+        # becomes the next fossil.
+        continue-on-error: true
         if: hashFiles('parity-results/previous/nightly_aggregate.json') != ''
         run: |
           python3 scripts/parity_aggregate.py \

@@ -93,11 +93,19 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
     }
 }
 
+/// Product user agent for live URLs; keep in sync with parity-capture.
+const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0";
+
 /// Parse command line arguments
 struct Args {
     duration_ms: u64,
     dump_frame: Option<String>,
     html_file: Option<String>,
+    /// Live URL to load through `Engine::load_url` (overrides --html-file).
+    url: Option<String>,
+    /// Skip the scripted sidebar/shelf layout churn so the content view stays
+    /// at the full --width x --height (implied by --url: viewing, not stress).
+    static_layout: bool,
     width: u32,
     height: u32,
     perf_output: Option<String>,
@@ -112,6 +120,8 @@ impl Args {
         let mut duration_ms = 4000u64;
         let mut dump_frame = None;
         let mut html_file = None;
+        let mut url = None;
+        let mut static_layout = false;
         let mut width = 1100u32;
         let mut height = 640u32;
         let mut perf_output = None;
@@ -131,6 +141,12 @@ impl Args {
                 }
                 "--html-file" => {
                     html_file = args.next();
+                }
+                "--url" => {
+                    url = args.next();
+                }
+                "--static" => {
+                    static_layout = true;
                 }
                 "--width" => {
                     if let Some(val) = args.next() {
@@ -162,6 +178,8 @@ impl Args {
             duration_ms,
             dump_frame,
             html_file,
+            static_layout: static_layout || url.is_some(),
+            url,
             width,
             height,
             perf_output,
@@ -238,12 +256,15 @@ impl Args {
     }
 }
 
-fn spawn_scripted_flow(proxy: EventLoopProxy<UserEvent>, duration_ms: u64) {
+fn spawn_scripted_flow(proxy: EventLoopProxy<UserEvent>, duration_ms: u64, static_layout: bool) {
     std::thread::spawn(move || {
         let start = Instant::now();
 
-        // Phase 1: sidebar drag simulation
-        for i in 0..30 {
+        // Phase 1: sidebar drag simulation. It ends with a 232px left
+        // sidebar, the 220px right one open and a 120px shelf, so a
+        // 1280x800 request shows content at 828x680. --static (and --url)
+        // skip it so the page is viewed at the requested size.
+        for i in 0..if static_layout { 0 } else { 30 } {
             let left = (i as f64) * 8.0; // 0..240
             let right_open = i % 10 >= 5;
             let shelf = if i % 2 == 0 { 0.0 } else { 120.0 };
@@ -350,10 +371,14 @@ fn main() {
     // Content area (using RustKit engine)
     // Use parity testing config to disable animations for deterministic capture
     let engine_start = Instant::now();
-    let mut engine = EngineBuilder::new()
-        .with_config(rustkit_engine::EngineConfig::for_parity_testing())
-        .build()
-        .expect("Failed to create RustKit engine");
+    // A live URL is fetched with the product's user agent, so sites serve
+    // what they serve HiWave users (same UA as `parity-capture --url`).
+    let mut builder = EngineBuilder::new()
+        .with_config(rustkit_engine::EngineConfig::for_parity_testing());
+    if args.url.is_some() {
+        builder = builder.user_agent(PRODUCT_USER_AGENT);
+    }
+    let mut engine = builder.build().expect("Failed to create RustKit engine");
     perf.record("engine_init", engine_start.elapsed());
 
     // Get the raw window handle for creating the RustKit view
@@ -376,12 +401,27 @@ fn main() {
         .expect("Failed to create RustKit content view");
     perf.record("view_create", view_start.elapsed());
 
-    // Load test content into the RustKit view (from file or default)
-    let test_html = args.load_html_content();
-
+    // Load content: a live URL through the browser's navigation path
+    // (document, then stylesheets/fonts/images), else the HTML file/default.
     let load_start = Instant::now();
-    if let Err(e) = engine.load_html(content_view_id, &test_html) {
-        error!(?e, "Failed to load HTML into RustKit view");
+    if let Some(raw) = args.url.as_deref() {
+        match url::Url::parse(raw) {
+            Ok(u) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create tokio runtime");
+                if let Err(e) = rt.block_on(engine.load_url(content_view_id, u)) {
+                    error!(?e, url = raw, "Failed to load URL into RustKit view");
+                }
+            }
+            Err(e) => error!(?e, url = raw, "Invalid --url"),
+        }
+    } else {
+        let test_html = args.load_html_content();
+        if let Err(e) = engine.load_html(content_view_id, &test_html) {
+            error!(?e, "Failed to load HTML into RustKit view");
+        }
     }
     perf.record("html_load", load_start.elapsed());
 
@@ -392,7 +432,7 @@ fn main() {
     }
     perf.record("render", render_start.elapsed());
 
-    spawn_scripted_flow(proxy, args.duration_ms);
+    spawn_scripted_flow(proxy, args.duration_ms, args.static_layout);
 
     let mut last_layout = (0.0_f64, false, 0.0_f64);
     let start = Instant::now();

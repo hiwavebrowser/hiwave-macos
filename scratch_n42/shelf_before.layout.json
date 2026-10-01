@@ -1,0 +1,580 @@
+{
+  "root": {
+    "border": {
+      "bottom": 0.0,
+      "left": 0.0,
+      "right": 0.0,
+      "top": 0.0
+    },
+    "border_box": {
+      "height": 120.0,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "children": [
+      {
+        "border": {
+          "bottom": 0.0,
+          "left": 0.0,
+          "right": 0.0,
+          "top": 0.0
+        },
+        "border_box": {
+          "height": 120.0,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "children": [
+          {
+            "border": {
+              "bottom": 1.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "border_box": {
+              "height": 41.0,
+              "width": 1280.0,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "children": [
+              {
+                "border": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "border_box": {
+                  "height": 15.0,
+                  "width": 104.81521606445312,
+                  "x": 16.0,
+                  "y": 12.5
+                },
+                "children": [
+                  {
+                    "rect": {
+                      "height": 15.0,
+                      "width": 104.81521606445312,
+                      "x": 16.0,
+                      "y": 12.5
+                    },
+                    "text": "Command Palette",
+                    "type": "text"
+                  }
+                ],
+                "content_rect": {
+                  "height": 15.0,
+                  "width": 104.81521606445312,
+                  "x": 16.0,
+                  "y": 12.5
+                },
+                "element_id": 3,
+                "margin": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "margin_box": {
+                  "height": 15.0,
+                  "width": 104.81521606445312,
+                  "x": 16.0,
+                  "y": 12.5
+                },
+                "padding": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "padding_box": {
+                  "height": 15.0,
+                  "width": 104.81521606445312,
+                  "x": 16.0,
+                  "y": 12.5
+                },
+                "selector": "body > div.shelf-header:nth-of-type(1) > span.shelf-title",
+                "tag": "span",
+                "type": "inline"
+              },
+              {
+                "rect": {
+                  "height": 0.0,
+                  "width": 0.0,
+                  "x": 120.81521606445312,
+                  "y": 8.0
+                },
+                "text": " ",
+                "type": "text"
+              },
+              {
+                "control_type": "Button { label: \"×\", button_type: \"button\" }",
+                "rect": {
+                  "height": 24.0,
+                  "width": 24.0,
+                  "x": 1240.0,
+                  "y": 8.0
+                },
+                "type": "form_control"
+              }
+            ],
+            "content_rect": {
+              "height": 24.0,
+              "width": 1248.0,
+              "x": 16.0,
+              "y": 8.0
+            },
+            "element_id": 2,
+            "margin": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "margin_box": {
+              "height": 41.0,
+              "width": 1280.0,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "padding": {
+              "bottom": 8.0,
+              "left": 16.0,
+              "right": 16.0,
+              "top": 8.0
+            },
+            "padding_box": {
+              "height": 40.0,
+              "width": 1280.0,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "selector": "body > div.shelf-header:nth-of-type(1)",
+            "tag": "div",
+            "type": "block"
+          },
+          {
+            "border": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "border_box": {
+              "height": 157.0,
+              "width": 1280.0,
+              "x": 0.0,
+              "y": 35.0
+            },
+            "children": [
+              {
+                "border": {
+                  "bottom": 1.0,
+                  "left": 1.0,
+                  "right": 1.0,
+                  "top": 1.0
+                },
+                "border_box": {
+                  "height": 41.0,
+                  "width": 1248.0,
+                  "x": 16.0,
+                  "y": 47.0
+                },
+                "children": [
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 18.0,
+                      "width": 18.0,
+                      "x": 29.0,
+                      "y": 58.5
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 18.0,
+                          "width": 4.1875,
+                          "x": 29.0,
+                          "y": 58.5
+                        },
+                        "text": " ",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 18.0,
+                      "width": 18.0,
+                      "x": 29.0,
+                      "y": 58.5
+                    },
+                    "element_id": 6,
+                    "margin": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 10.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 18.0,
+                      "width": 28.0,
+                      "x": 29.0,
+                      "y": 58.5
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 18.0,
+                      "width": 18.0,
+                      "x": 29.0,
+                      "y": 58.5
+                    },
+                    "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg",
+                    "tag": "svg",
+                    "type": "block"
+                  },
+                  {
+                    "control_type": "TextInput { value: \"\", placeholder: \"Type a command or search...\", input_type: \"text\" }",
+                    "rect": {
+                      "height": 39.0,
+                      "width": 1194.0,
+                      "x": 57.0,
+                      "y": 48.0
+                    },
+                    "type": "form_control"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 43.0,
+                      "width": 1226.0,
+                      "x": 27.0,
+                      "y": 46.0
+                    },
+                    "children": [],
+                    "content_rect": {
+                      "height": 43.0,
+                      "width": 1226.0,
+                      "x": 27.0,
+                      "y": 46.0
+                    },
+                    "margin": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 43.0,
+                      "width": 1226.0,
+                      "x": 27.0,
+                      "y": 46.0
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 43.0,
+                      "width": 1226.0,
+                      "x": 27.0,
+                      "y": 46.0
+                    },
+                    "type": "inline"
+                  }
+                ],
+                "content_rect": {
+                  "height": 39.0,
+                  "width": 1222.0,
+                  "x": 29.0,
+                  "y": 48.0
+                },
+                "element_id": 5,
+                "margin": {
+                  "bottom": 12.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "margin_box": {
+                  "height": 53.0,
+                  "width": 1248.0,
+                  "x": 16.0,
+                  "y": 47.0
+                },
+                "padding": {
+                  "bottom": 0.0,
+                  "left": 12.0,
+                  "right": 12.0,
+                  "top": 0.0
+                },
+                "padding_box": {
+                  "height": 39.0,
+                  "width": 1246.0,
+                  "x": 17.0,
+                  "y": 48.0
+                },
+                "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1)",
+                "tag": "div",
+                "type": "block"
+              },
+              {
+                "border": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "border_box": {
+                  "height": 56.0,
+                  "width": 1248.0,
+                  "x": 16.0,
+                  "y": 79.0
+                },
+                "children": [
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 56.0,
+                      "width": 1248.0,
+                      "x": 16.0,
+                      "y": 79.0
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 16.0,
+                          "width": 160.6845703125,
+                          "x": 559.65771484375,
+                          "y": 99.0
+                        },
+                        "text": "Type to search commands",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 16.0,
+                      "width": 1208.0,
+                      "x": 36.0,
+                      "y": 99.0
+                    },
+                    "element_id": 10,
+                    "margin": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 56.0,
+                      "width": 1248.0,
+                      "x": 16.0,
+                      "y": 79.0
+                    },
+                    "padding": {
+                      "bottom": 20.0,
+                      "left": 20.0,
+                      "right": 20.0,
+                      "top": 20.0
+                    },
+                    "padding_box": {
+                      "height": 56.0,
+                      "width": 1248.0,
+                      "x": 16.0,
+                      "y": 79.0
+                    },
+                    "selector": "body > div.command-palette:nth-of-type(2) > div.command-results:nth-of-type(2) > div.command-empty",
+                    "tag": "div",
+                    "type": "block"
+                  }
+                ],
+                "content_rect": {
+                  "height": 56.0,
+                  "width": 1248.0,
+                  "x": 16.0,
+                  "y": 79.0
+                },
+                "element_id": 9,
+                "margin": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "margin_box": {
+                  "height": 56.0,
+                  "width": 1248.0,
+                  "x": 16.0,
+                  "y": 79.0
+                },
+                "padding": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "padding_box": {
+                  "height": 56.0,
+                  "width": 1248.0,
+                  "x": 16.0,
+                  "y": 79.0
+                },
+                "selector": "#commandResults",
+                "tag": "div",
+                "type": "block"
+              }
+            ],
+            "content_rect": {
+              "height": 133.0,
+              "width": 1248.0,
+              "x": 16.0,
+              "y": 47.0
+            },
+            "element_id": 4,
+            "margin": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "margin_box": {
+              "height": 157.0,
+              "width": 1280.0,
+              "x": 0.0,
+              "y": 35.0
+            },
+            "padding": {
+              "bottom": 12.0,
+              "left": 16.0,
+              "right": 16.0,
+              "top": 12.0
+            },
+            "padding_box": {
+              "height": 157.0,
+              "width": 1280.0,
+              "x": 0.0,
+              "y": 35.0
+            },
+            "selector": "body > div.command-palette:nth-of-type(2)",
+            "tag": "div",
+            "type": "block"
+          },
+          {
+            "rect": {
+              "height": 0.0,
+              "width": 0.0,
+              "x": 0.0,
+              "y": 174.0
+            },
+            "text": " ",
+            "type": "text"
+          },
+          {
+            "rect": {
+              "height": 0.0,
+              "width": 0.0,
+              "x": 4.1875,
+              "y": 174.0
+            },
+            "text": " ",
+            "type": "text"
+          }
+        ],
+        "content_rect": {
+          "height": 120.0,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "element_id": 1,
+        "margin": {
+          "bottom": 0.0,
+          "left": 0.0,
+          "right": 0.0,
+          "top": 0.0
+        },
+        "margin_box": {
+          "height": 120.0,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "padding": {
+          "bottom": 0.0,
+          "left": 0.0,
+          "right": 0.0,
+          "top": 0.0
+        },
+        "padding_box": {
+          "height": 120.0,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "selector": "html > body",
+        "tag": "body",
+        "type": "block"
+      }
+    ],
+    "content_rect": {
+      "height": 120.0,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "margin": {
+      "bottom": 0.0,
+      "left": 0.0,
+      "right": 0.0,
+      "top": 0.0
+    },
+    "margin_box": {
+      "height": 120.0,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "padding": {
+      "bottom": 0.0,
+      "left": 0.0,
+      "right": 0.0,
+      "top": 0.0
+    },
+    "padding_box": {
+      "height": 120.0,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "type": "block"
+  },
+  "version": 1,
+  "viewport": {
+    "height": 120,
+    "width": 1280
+  }
+}

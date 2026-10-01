@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body { margin: 0; font: 16px/1 Arial, sans-serif; background: #fff; }
+  .row { position: relative; height: 60px; margin: 10px; background: #eef; }
+  .row .label { position: absolute; left: 0; top: 0; font-size: 12px; color: #333; }
+
+  /* A: abspos child with bottom: in a relative parent of definite height */
+  .a .knob { position: absolute; left: 4px; bottom: 4px; width: 20px; height: 20px; background: #d33; }
+
+  /* B: abspos child with right: in a relative parent of definite width */
+  .b .knob { position: absolute; right: 4px; top: 4px; width: 20px; height: 20px; background: #3a3; }
+
+  /* C: the settings idiom — relative wrapper > abspos inset:0 slider (auto size) > abspos knob with bottom: */
+  .c .toggle { position: relative; display: inline-flex; width: 48px; height: 26px; margin: 17px 100px; }
+  .c .slider { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #ccd; border: 1px solid #99a; border-radius: 26px; }
+  .c .knob { position: absolute; left: 2px; bottom: 2px; width: 20px; height: 20px; background: #33d; border-radius: 50%; }
+
+  /* D: same as C but the knob is a ::before pseudo box */
+  .d .toggle { position: relative; display: inline-flex; width: 48px; height: 26px; margin: 17px 100px; }
+  .d .slider { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #ccd; border: 1px solid #99a; border-radius: 26px; }
+  .d .slider::before { content: ""; position: absolute; left: 2px; bottom: 2px; width: 20px; height: 20px; background: #a3a; border-radius: 50%; }
+
+  /* E: abspos child with bottom: in an auto-height relative parent (content-sized) */
+  .e { height: auto; padding: 8px 0; }
+  .e p { margin: 0; line-height: 24px; }
+  .e .knob { position: absolute; right: 4px; bottom: 4px; width: 20px; height: 20px; background: #da3; }
+
+  /* F: abspos child with bottom+right in an abspos inset:0 parent inside a relative row */
+  .f .fill { position: absolute; inset: 0; background: #dfd; }
+  .f .knob { position: absolute; right: 4px; bottom: 4px; width: 20px; height: 20px; background: #3aa; }
+</style></head>
+<body>
+  <div class="row a" id="a"><span class="label">A bottom in relative</span><div class="knob"></div></div>
+  <div class="row b" id="b"><span class="label">B right in relative</span><div class="knob"></div></div>
+  <div class="row c" id="c"><span class="label">C toggle idiom, real knob</span><span class="toggle"><span class="slider"><span class="knob"></span></span></span></div>
+  <div class="row d" id="d"><span class="label">D toggle idiom, ::before knob</span><span class="toggle"><span class="slider"></span></span></div>
+  <div class="row e" id="e"><span class="label">E bottom in auto-height relative</span><p>line one</p><p>line two</p><div class="knob"></div></div>
+  <div class="row f" id="f"><span class="label">F bottom+right in inset:0 parent</span><div class="fill"><div class="knob"></div></div></div>
+</body></html>

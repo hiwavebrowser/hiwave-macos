@@ -451,6 +451,27 @@ def aggregate_from_attribution_files(files: List[Path]) -> Dict[str, Any]:
 
 
 # ============================================================================
+# Provenance (E0a)
+# ============================================================================
+
+def stamp_provenance(report: Dict[str, Any], engine_sha: Optional[str],
+                     receipt_run: Optional[str]) -> Dict[str, Any]:
+    """Record which engine produced a report.
+
+    E0a: nightly regression comparisons ran cross-engine for a week without
+    anyone being able to tell from the JSON (the Aug-3 fossil vs post-#110
+    master). A report that names its engine makes that class of comparison
+    visible instead of silent.
+    """
+    if engine_sha or receipt_run:
+        report["provenance"] = {
+            "engine_sha": engine_sha,
+            "receipt_run": receipt_run,
+        }
+    return report
+
+
+# ============================================================================
 # Regression detection
 # ============================================================================
 
@@ -546,9 +567,23 @@ def compare_reports(
     total_regression = sum(r["delta"] for r in regressions)
     total_improvement = sum(abs(i["delta"]) for i in improvements)
     
+    # E0a: carry both sides' provenance (absent on pre-E0a reports) and flag
+    # engine mismatch. Advisory only — the compare still runs, but a
+    # cross-engine delta can no longer masquerade as a same-engine one.
+    base_prov = baseline.get("provenance")
+    cur_prov = current.get("provenance")
+    cross_engine = bool(
+        base_prov and cur_prov
+        and base_prov.get("engine_sha") and cur_prov.get("engine_sha")
+        and base_prov["engine_sha"] != cur_prov["engine_sha"]
+    )
+
     return {
         "timestamp": datetime.now().isoformat(),
         "regression_budget": regression_budget,
+        "baseline_provenance": base_prov,
+        "current_provenance": cur_prov,
+        "cross_engine": cross_engine,
         "summary": {
             "regressions": len(regressions),
             "improvements": len(improvements),
@@ -598,6 +633,13 @@ def main():
     parser.add_argument("--regression-budget", type=float, default=0.1,
                         help="Max allowed regression per case (default: 0.1%)")
     
+    # Provenance (E0a) — who produced this report
+    parser.add_argument("--engine-sha", type=str, default=None,
+                        help="Engine commit SHA this report measures (stamped "
+                             "into the report as provenance)")
+    parser.add_argument("--receipt-run", type=str, default=None,
+                        help="CI run id that produced the captures")
+
     # Output
     parser.add_argument("--output", "-o", type=str, default=None,
                         help="Output path for aggregate report")
@@ -636,7 +678,13 @@ def main():
         current = load_report(args.current)
         
         comparison = compare_reports(baseline, current, args.regression_budget)
-        
+
+        if comparison["cross_engine"]:
+            print("WARNING: cross-engine comparison — baseline engine "
+                  f"{comparison['baseline_provenance']['engine_sha']} != current "
+                  f"{comparison['current_provenance']['engine_sha']}. "
+                  "Deltas attribute environment+engine together, not the engine.")
+
         # Output
         output_path = args.output or "regression_report.json"
         with open(output_path, "w") as f:
@@ -699,7 +747,9 @@ def main():
     if not report:
         print("Error: No data to aggregate")
         sys.exit(1)
-    
+
+    stamp_provenance(report, args.engine_sha, args.receipt_run)
+
     # Save output
     if args.output:
         output_path = Path(args.output)

@@ -34,6 +34,7 @@ pub fn render_image(
     object_fit: ObjectFit,
     object_position: (f32, f32),
     opacity: f32,
+    current_color: Color,
 ) -> DisplayCommand {
     let draw_rect = object_fit.compute_rect(container, natural_width, natural_height, object_position);
 
@@ -43,6 +44,7 @@ pub fn render_image(
         dest_rect: draw_rect.dest,
         object_fit,
         opacity,
+        current_color,
     }
 }
 
@@ -354,6 +356,7 @@ mod tests {
             ObjectFit::Contain,
             (0.5, 0.5),
             1.0,
+            Color::BLACK,
         );
 
         if let DisplayCommand::Image { dest_rect, .. } = cmd {
@@ -363,6 +366,40 @@ mod tests {
             assert!((dest_rect.y - 50.0).abs() < 0.001); // Centered vertically
         } else {
             panic!("Expected Image command");
+        }
+    }
+
+    #[test]
+    fn test_image_command_carries_the_boxes_css_color() {
+        // An inline <svg> icon is painted through the Image command, and
+        // its `currentColor` shapes need the box's computed CSS color at
+        // paint time — the command is the only thing that crosses from
+        // layout to the vector splice, so it has to carry the color.
+        let container = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 14.0,
+            height: 14.0,
+        };
+        let css = Color::new(148, 163, 184, 1.0);
+        let cmd = render_image(
+            "inline-svg:abc",
+            container,
+            14.0,
+            14.0,
+            ObjectFit::Fill,
+            (0.5, 0.5),
+            1.0,
+            css,
+        );
+        match cmd {
+            DisplayCommand::Image { current_color, .. } => {
+                assert_eq!(
+                    (current_color.r, current_color.g, current_color.b),
+                    (148, 163, 184)
+                );
+            }
+            other => panic!("Expected Image command, got {other:?}"),
         }
     }
 

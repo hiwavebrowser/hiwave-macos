@@ -1,0 +1,56 @@
+fix(layout): a parent's open edges never collapsed margins with its children, and form controls dropped their author margins
+
+CSS 2.1 §8.3.1 parent/child through-collapse was openly not performed:
+layout_block_with_collapse gave every child list a fresh context and the
+comment said so. So `.section-title{margin-bottom:10px}` followed by an
+unpadded wrapper whose first child had `margin-top:4px` laid that child at
+10 + 4 where Chrome puts it at max(10, 4); a wrapper-in-wrapper doubled it;
+and the last child's bottom margin, when the parent's bottom edge was open,
+was silently dropped instead of adjoining the parent's own bottom margin.
+css-selectors carried one +4 per wrapper level and every later section rode
+on it.
+
+Now:
+- Top edge: before positioning, a box adjoins its first in-flow block
+  child's top margin — recursively down the chain of open first children
+  (no border/padding-top, not a formatting root, no line box or float in
+  between) — into the same context as its own top margin and the previous
+  sibling's bottom margin. The first child takes a
+  `first_child_top_adjoined` flag and contributes no top margin of its own.
+- Bottom edge: when should_collapse_with_last_child() holds, the last
+  child's pending margin stays in the child context
+  (`last_child_collapses_through`) and is absorbed into the parent's
+  context next to the parent's own bottom margin. Closed edges and
+  formatting roots keep the margin inside the box (which is also new for
+  flex/grid item re-layouts, where it used to be dropped).
+- Formatting roots: a context flag `children_are_formatting_roots` marks
+  flex/grid items (set by the container) and the root element (set by the
+  engine) — their own margins never collapse through them with their
+  children's (css-flexbox-1 §4; the root element's box margins do not
+  collapse).
+
+Form controls: layout_form_control never resolved margin-*, so a
+`button{margin:4px}` / `input{margin:4px 0}` row measured its bare rect
+(33.5 / 37.5 vs Chrome 39 / 43). Margins now resolve from style into the
+margin box; the inline path already places from the margin edge.
+
+baseline_is_bottom_edge: author-padded controls kept the bottom-edge model
+because it "measured closer" — a calibration made while the margins were
+missing. With margins in the margin box the hang model builds Chrome's 39
+and the bottom-edge model overshoots to 41.5, so every text-line control
+now uses the hang model; checkbox/radio (no inner text line) use the
+bottom-edge baseline (Blink), which builds css-selectors' 23px
+checkbox+label line.
+
+Tests: rustkit-layout 308 -> 315 (first-child through an open parent;
+chain through two wrappers; last-child adjoins the next sibling and does
+not inflate the parent; padded parent keeps the margin inside; flex item
+keeps both edge margins inside; root element does not collapse with body;
+form control carries its author margins). rustkit-engine 69/69.
+
+Board receipts in the next commit. Ledger: percent margins in the
+through-chain resolve against the top box's content width; a label's text
+next to a bottom-edge checkbox does not yet drop to the checkbox baseline
+(Slice C vertical-align, css-selectors' last 1 geometry mismatch);
+out-of-flow children are still laid out against the parent's live margin
+context (pre-existing).

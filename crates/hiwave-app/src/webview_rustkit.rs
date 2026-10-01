@@ -3,7 +3,6 @@
 //! This module provides the RustKit engine as the default WebView backend for content rendering.
 //! It wraps `rustkit_engine::Engine` and provides a WRY-like interface.
 
-#![allow(dead_code)]
 
 use super::shield_adapter::create_shield_interceptor_with_counter;
 use super::webview::IWebContent;
@@ -129,6 +128,118 @@ impl RustKitView {
     pub fn render(&self) {
         let mut engine = self.engine.borrow_mut();
         engine.render_all_views();
+    }
+
+    /// Go back in this view's navigation history.
+    ///
+    /// Uses the view-local history Vec (every navigate() and load records
+    /// into it, including engine link clicks routed through
+    /// UserEvent::Navigate). NOT the SessionHistory-canonical shape from
+    /// the fleet pin — the full #81-style port is the named follow-up; this
+    /// makes the button work tonight without inventing a third stack.
+    pub fn nav_back(&self) -> bool {
+        let target = {
+            let mut index = self.history_index.borrow_mut();
+            if *index == 0 {
+                return false;
+            }
+            *index -= 1;
+            self.history.borrow()[*index].clone()
+        };
+        *self.current_url.borrow_mut() = Some(target.to_string());
+        self.load_url_blocking(target.as_str());
+        true
+    }
+
+    /// Go forward in this view's navigation history.
+    pub fn nav_forward(&self) -> bool {
+        let target = {
+            let mut index = self.history_index.borrow_mut();
+            let len = self.history.borrow().len();
+            if *index + 1 >= len {
+                return false;
+            }
+            *index += 1;
+            self.history.borrow()[*index].clone()
+        };
+        *self.current_url.borrow_mut() = Some(target.to_string());
+        self.load_url_blocking(target.as_str());
+        true
+    }
+
+    /// Reload the current page.
+    pub fn nav_reload(&self) -> bool {
+        let url = self.current_url.borrow().clone();
+        match url {
+            Some(u) => {
+                self.load_url_blocking(&u);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Route OS keyboard delivery to the content view (first responder).
+    pub fn grab_keyboard(&self) {
+        let engine = self.engine.borrow();
+        if let Some(view_id) = self.view_id {
+            engine.grab_keyboard(view_id);
+        }
+    }
+
+    /// Deliver a key to the focused form control, if any.
+    ///
+    /// Returns true when the control consumed it (value or caret changed),
+    /// which tells the caller NOT to fall back to scrolling.
+    pub fn handle_text_key(
+        &self,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> bool {
+        let mut engine = self.engine.borrow_mut();
+        self.view_id
+            .map(|view_id| engine.handle_text_key(view_id, key_code, key, ctrl, shift, alt))
+            .unwrap_or(false)
+    }
+
+    /// URL to navigate to if the focused field's form were submitted.
+    /// `None` when there is no form, no fields, or the form is not a GET.
+    pub fn form_submit_url(&self) -> Option<String> {
+        let engine = self.engine.borrow();
+        self.view_id
+            .and_then(|view_id| engine.form_submission_for_focus(view_id))
+            .filter(|sub| sub.is_self_target())
+            .map(|sub| sub.url)
+    }
+
+    /// Whether a content element currently holds focus.
+    pub fn has_focused_element(&self) -> bool {
+        let engine = self.engine.borrow();
+        self.view_id
+            .and_then(|view_id| engine.focused_node(view_id))
+            .is_some()
+    }
+
+    /// Rebuild layout and repaint after an edit changed a control's value.
+    pub fn relayout(&self) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            if let Err(e) = engine.relayout(view_id) {
+                debug!(error = %e, "relayout after edit failed");
+            }
+        }
+    }
+
+    /// Focus whatever focusable element sits at these viewport coordinates,
+    /// clearing focus when nothing focusable is there. Returns the focused
+    /// element's tag name.
+    pub fn focus_at_point(&self, x: f32, y: f32) -> Option<String> {
+        let mut engine = self.engine.borrow_mut();
+        self.view_id
+            .and_then(|view_id| engine.focus_at_point(view_id, x, y))
     }
 
     /// Resolve a click at viewport coordinates to a link URL, if any.

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body { margin: 0; font: 16px/1 Arial, sans-serif; background: #fff; }
+  .row { position: relative; height: 60px; margin: 10px; background: #eef; }
+  .row .label { position: absolute; left: 0; top: 0; font-size: 12px; color: #333; }
+
+  /* A: the about idiom — overflow:hidden button, ::before inset:0 translated a full width left.
+     Chrome paints no yellow at all. */
+  .a .btn { position: absolute; left: 100px; top: 15px; width: 200px; height: 40px; background: #36c; overflow: hidden; border-radius: 8px; }
+  .a .btn::before { content: ""; position: absolute; inset: 0; background: #fc0; transform: translateX(-100%); }
+
+  /* B: same, translated half a width — the left half of the button is yellow, nothing outside it. */
+  .b .btn { position: absolute; left: 100px; top: 15px; width: 200px; height: 40px; background: #36c; overflow: hidden; }
+  .b .btn::before { content: ""; position: absolute; inset: 0; background: #fc0; transform: translateX(-50%); }
+
+  /* C: the clipper itself is transformed — its clip moves with it. Red covers exactly the moved 100px box. */
+  .c .mover { position: absolute; left: 100px; top: 15px; width: 100px; height: 40px; background: #ccc; overflow: hidden; transform: translateX(100px); }
+  .c .mover .wide { width: 300px; height: 40px; background: #c33; }
+
+  /* D: text inside a translated descendant of a clipper — glyphs clip where they land. */
+  .d .btn { position: absolute; left: 100px; top: 15px; width: 200px; height: 40px; background: #36c; overflow: hidden; color: #fff; }
+  .d .btn .slide { position: absolute; left: 0; top: 0; width: 200px; height: 40px; line-height: 40px; background: #393; transform: translateX(120px); white-space: nowrap; }
+
+  /* E: a scaled clipper with a radius — the child fills a 120x40 rounded box. */
+  .e .scaled { position: absolute; left: 100px; top: 10px; width: 60px; height: 20px; overflow: hidden; border-radius: 10px; background: #3a3; transform: scale(2); transform-origin: 0 0; }
+  .e .scaled .fill { width: 60px; height: 20px; background: #a3a; }
+
+  /* F: control — a centred translate(-50%,-50%) blob with no clipper around it. */
+  .f .hero { position: absolute; left: 100px; top: 10px; width: 200px; height: 40px; }
+  .f .hero::before { content: ""; position: absolute; top: 50%; left: 50%; width: 100px; height: 30px; background: #9cf; transform: translate(-50%, -50%); }
+</style></head>
+<body>
+  <div class="row a" id="a"><span class="label">A translateX(-100%) inside overflow:hidden</span><div class="btn"></div></div>
+  <div class="row b" id="b"><span class="label">B translateX(-50%) inside overflow:hidden</span><div class="btn"></div></div>
+  <div class="row c" id="c"><span class="label">C translated clipper</span><div class="mover"><div class="wide"></div></div></div>
+  <div class="row d" id="d"><span class="label">D text in translated child</span><div class="btn"><div class="slide">slide text here</div></div></div>
+  <div class="row e" id="e"><span class="label">E scaled rounded clipper</span><div class="scaled"><div class="fill"></div></div></div>
+  <div class="row f" id="f"><span class="label">F control: centred translate</span><div class="hero"></div></div>
+</body></html>

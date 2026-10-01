@@ -5,7 +5,12 @@
 use crate::RendererError;
 use hashbrown::HashMap;
 #[cfg(windows)]
-use rustkit_text::{FontCollection as RkFontCollection, FontStretch as RkFontStretch, FontStyle as RkFontStyle, FontWeight as RkFontWeight};
+use rustkit_text::{
+    FontCollection as RkFontCollection, FontStretch as RkFontStretch, FontStyle as RkFontStyle,
+    FontWeight as RkFontWeight,
+};
+#[cfg(windows)]
+use windows::Win32::Graphics::DirectWrite::*;
 
 /// Key for identifying a specific glyph.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -15,6 +20,59 @@ pub struct GlyphKey {
     pub font_size: u32, // Fixed-point (size * 10)
     pub font_weight: u16,
     pub font_style: u8, // 0 = normal, 1 = italic
+    /// Horizontal subpixel phase, `0..SUBPIXEL_QUANTIZE`.
+    ///
+    /// WHY THIS EXISTS: every glyph was rasterized ONCE at phase 0 into an
+    /// integer-sized atlas bitmap, then drawn at arbitrary FRACTIONAL device
+    /// positions and bilinearly resampled. Chrome rasterizes AT the phase.
+    /// Measured baselines on fixtures/typography.html land at .081/.280/.120/
+    /// .960/.200/.441/.880 -- arbitrary phases on every line -- which is the
+    /// mechanism behind the bimodal text diff tail.
+    ///
+    /// PRODUCTION IS FROZEN AT PHASE 0 IN THIS COMMIT, DELIBERATELY. The
+    /// rasterizer still draws a phase-0 bitmap for every phase, so emitting
+    /// multi-phase keys now would mint up to SUBPIXEL_QUANTIZE BYTE-IDENTICAL
+    /// atlas entries per glyph: more memory, more eviction pressure, and not
+    /// one pixel different. The call-site flip belongs in the same commit as
+    /// the rasterizer that can honor it.
+    pub subpixel_phase: u8,
+    /// Which document-registered (`@font-face`) file `font_family` resolves
+    /// to, from [`GlyphKey::web_face_for`]; 0 when it is a platform font.
+    ///
+    /// WHY THIS EXISTS: a family name does not say which face draws it. The
+    /// first paint of a page runs before its web fonts arrive, so the
+    /// fallback's bitmaps were cached under the web font's NAME and every
+    /// later frame reused them: text measured with the web font and drawn
+    /// with Helvetica's glyphs. The same collision let a second document
+    /// that declares the same family name with another file reuse the first
+    /// document's glyphs.
+    pub web_face: u64,
+}
+
+impl GlyphKey {
+    /// The `web_face` of a run: one registry lookup per run, not per glyph.
+    pub fn web_face_for(font_family: &str, font_weight: u16, font_style: u8) -> u64 {
+        rustkit_text::webfonts::face_id(font_family, font_weight, font_style == 1)
+    }
+}
+
+/// Number of horizontal subpixel phases a glyph may be rasterized at.
+///
+/// 4 (quarter-pixel) is the industry default: it is the point where added
+/// positional accuracy stops being visible at normal text sizes while atlas
+/// cost still grows linearly. 3 is the LCD-subpixel-triad choice and belongs
+/// to a different rendering mode, not to this key.
+pub const SUBPIXEL_QUANTIZE: u8 = 4;
+
+/// Quantize a fractional device X into a phase bucket.
+///
+/// Takes the FRACTIONAL part, so it is correct for any x including negatives:
+/// `-0.25` and `0.75` are the same phase, because what a rasterizer needs is
+/// the offset within the pixel, not the pixel.
+pub fn subpixel_phase_for(x: f32) -> u8 {
+    let frac = x - x.floor();
+    let phase = (frac * SUBPIXEL_QUANTIZE as f32).floor() as i32;
+    phase.clamp(0, SUBPIXEL_QUANTIZE as i32 - 1) as u8
 }
 
 /// Cached glyph entry.
@@ -244,7 +302,9 @@ impl GlyphCache {
             );
             rasterizer.rasterize_char_color(key.codepoint)
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        let raster = rasterize_glyph_directwrite_color(key, key.font_size as f32 / 10.0);
+        #[cfg(not(any(target_os = "macos", windows)))]
         let raster: Option<(Vec<u8>, u32, u32, f32, f32, f32)> = None;
 
         let (rgba, gw, gh, advance, bearing_x, bearing_y) = raster?;
@@ -257,7 +317,11 @@ impl GlyphCache {
             wgpu::TexelCopyTextureInfo {
                 texture: &self.color_atlas,
                 mip_level: 0,
-                origin: wgpu::Origin3d { x: ax + 1, y: ay + 1, z: 0 },
+                origin: wgpu::Origin3d {
+                    x: ax + 1,
+                    y: ay + 1,
+                    z: 0,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             &rgba,
@@ -266,7 +330,11 @@ impl GlyphCache {
                 bytes_per_row: Some(gw * 4),
                 rows_per_image: Some(gh),
             },
-            wgpu::Extent3d { width: gw, height: gh, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: gw,
+                height: gh,
+                depth_or_array_layers: 1,
+            },
         );
 
         let u0 = (ax + 1) as f32 / self.atlas_size as f32;
@@ -326,7 +394,7 @@ impl GlyphCache {
         key: &GlyphKey,
     ) -> Option<GlyphEntry> {
         let font_size = key.font_size as f32 / 10.0;
-        
+
         // Use platform-specific glyph rasterization
         #[cfg(target_os = "macos")]
         let raster_result = {
@@ -339,7 +407,7 @@ impl GlyphCache {
                 match key.font_family.as_str() {
                     "ParityTest" | "'ParityTest'" => "Noto Sans",
                     "Noto Sans" | "'Noto Sans'" => "Noto Sans",
-                    other => other
+                    other => other,
                 }
             };
             let rasterizer = rustkit_text::macos::GlyphRasterizer::with_style(
@@ -348,49 +416,72 @@ impl GlyphCache {
                 key.font_weight,
                 italic,
             );
-            rasterizer.rasterize_char(key.codepoint)
+            rasterizer.rasterize_char(key.codepoint, 0.0)
         };
-        
+
         #[cfg(windows)]
         let raster_result = {
-            // Windows fallback - use simple placeholder
-            let (glyph_width, glyph_height) = estimate_glyph_size(key.codepoint, font_size);
-            let glyph_width = glyph_width.max(1).min(256);
-            let glyph_height = glyph_height.max(1).min(256);
-            
-            let mut bitmap = vec![0u8; (glyph_width * glyph_height) as usize];
-            if key.codepoint.is_ascii_graphic() || key.codepoint.is_alphabetic() {
-                for y in 0..glyph_height {
-                    for x in 0..glyph_width {
-                        let idx = (y * glyph_width + x) as usize;
-                        let border = x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
-                        bitmap[idx] = if border { 255 } else { 200 };
+            // DirectWrite rasterization (ported from hiwave-windows glyph.rs,
+            // including the July-2026 ClearType fallback: NATURAL rendering
+            // mode reports EMPTY aliased bounds for most glyphs, which used to
+            // turn every glyph into a tofu box). The bordered-box placeholder
+            // below is the last resort when DirectWrite cannot produce a
+            // bitmap for this glyph.
+            rasterize_glyph_directwrite(key, font_size).or_else(|| {
+                let (glyph_width, glyph_height) = estimate_glyph_size(key.codepoint, font_size);
+                let glyph_width = glyph_width.max(1).min(256);
+                let glyph_height = glyph_height.max(1).min(256);
+
+                let mut bitmap = vec![0u8; (glyph_width * glyph_height) as usize];
+                if key.codepoint.is_ascii_graphic() || key.codepoint.is_alphabetic() {
+                    for y in 0..glyph_height {
+                        for x in 0..glyph_width {
+                            let idx = (y * glyph_width + x) as usize;
+                            let border =
+                                x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
+                            bitmap[idx] = if border { 255 } else { 200 };
+                        }
                     }
                 }
-            }
-            Some((bitmap, glyph_width, glyph_height, glyph_width as f32, 0.0f32, font_size * 0.8))
+                Some((
+                    bitmap,
+                    glyph_width,
+                    glyph_height,
+                    glyph_width as f32,
+                    0.0f32,
+                    font_size * 0.8,
+                ))
+            })
         };
-        
+
         #[cfg(not(any(target_os = "macos", windows)))]
         let raster_result: Option<(Vec<u8>, u32, u32, f32, f32, f32)> = {
             // Fallback for other platforms
             let (glyph_width, glyph_height) = estimate_glyph_size(key.codepoint, font_size);
             let glyph_width = glyph_width.max(1).min(256);
             let glyph_height = glyph_height.max(1).min(256);
-            
+
             let mut bitmap = vec![0u8; (glyph_width * glyph_height) as usize];
             if key.codepoint.is_ascii_graphic() || key.codepoint.is_alphabetic() {
                 for y in 0..glyph_height {
                     for x in 0..glyph_width {
                         let idx = (y * glyph_width + x) as usize;
-                        let border = x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
+                        let border =
+                            x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
                         bitmap[idx] = if border { 255 } else { 200 };
                     }
                 }
             }
-            Some((bitmap, glyph_width, glyph_height, glyph_width as f32, 0.0f32, font_size * 0.8))
+            Some((
+                bitmap,
+                glyph_width,
+                glyph_height,
+                glyph_width as f32,
+                0.0f32,
+                font_size * 0.8,
+            ))
         };
-        
+
         let (bitmap, glyph_width, glyph_height, advance, bearing_x, bearing_y) = raster_result?;
 
         let glyph_width = glyph_width.max(1).min(256);
@@ -455,7 +546,7 @@ impl GlyphCache {
 
         // x_offset: horizontal bearing adjustment
         let x_offset = bearing_x;
-        
+
         let entry = GlyphEntry {
             tex_coords: [u0, v0, u1, v1],
             offset: [x_offset, y_offset],
@@ -510,7 +601,7 @@ impl GlyphCache {
 #[allow(dead_code)]
 fn estimate_glyph_size(ch: char, font_size: f32) -> (u32, u32) {
     let height = font_size.ceil() as u32;
-    
+
     // Estimate width based on character type
     let width_factor = match ch {
         ' ' => 0.3,
@@ -519,31 +610,535 @@ fn estimate_glyph_size(ch: char, font_size: f32) -> (u32, u32) {
         _ if ch.is_ascii() => 0.6,
         _ => 0.8, // CJK and other wide characters
     };
-    
+
     let width = (font_size * width_factor).ceil() as u32;
     (width.max(1), height.max(1))
 }
 
+/// Rasterize one glyph with DirectWrite into an 8-bit coverage bitmap.
+///
+/// Returns `(bitmap, width, height, advance, bearing_x, bearing_y)` in the
+/// same BASELINE-relative contract the macOS path uses: `bearing_y` is the
+/// distance from the baseline UP to the bitmap's top row, so the shared
+/// upload code below sets `offset[1] = -bearing_y`. DirectWrite reports the
+/// texture bounds relative to a baseline origin of (0, 0) with y down, so
+/// `bearing_y = -bounds.top` and `bearing_x = bounds.left`.
+///
+/// The rendering-mode dance is the load-bearing part (hiwave-windows #7,
+/// 2026-07-10): `CreateGlyphRunAnalysis` in NATURAL mode returns SUCCESS with
+/// an EMPTY rect from `GetAlphaTextureBounds(ALIASED_1x1)` for most glyphs;
+/// only the CLEARTYPE_3x1 texture is populated, and the alpha texture must
+/// be read in the SAME mode the bounds came from (an aliased read of a
+/// ClearType analysis returns success-but-zeros, i.e. invisible text).
+///
+/// Subpixel phase is not applied on this path: production is frozen at
+/// phase 0 (see `GlyphKey::subpixel_phase`), and DirectWrite already
+/// positions at the integer baseline origin we pass.
+#[cfg(windows)]
+fn rasterize_glyph_directwrite(
+    key: &GlyphKey,
+    font_size: f32,
+) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+    unsafe {
+        // COM must be initialised on this thread; a repeat call is harmless.
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let factory: IDWriteFactory =
+            match DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("Failed to create DWrite factory: {:?}", e);
+                    return None;
+                }
+            };
+
+        let mut collection: Option<IDWriteFontCollection> = None;
+        if factory.GetSystemFontCollection(&mut collection, false).is_err() {
+            return None;
+        }
+        let collection = collection?;
+
+        // Family lookup with the same fallback ladder the Windows tree used.
+        let family_wide: Vec<u16> =
+            key.font_family.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut index: u32 = 0;
+        let mut exists = windows::core::BOOL(0);
+        let direct = !key.font_family.is_empty()
+            && collection
+                .FindFamilyName(PCWSTR(family_wide.as_ptr()), &mut index, &mut exists)
+                .is_ok()
+            && exists.as_bool();
+        if !direct {
+            let mut found = false;
+            for fallback in ["Segoe UI", "Arial", "Tahoma"] {
+                let fb_wide: Vec<u16> =
+                    fallback.encode_utf16().chain(std::iter::once(0)).collect();
+                if collection
+                    .FindFamilyName(PCWSTR(fb_wide.as_ptr()), &mut index, &mut exists)
+                    .is_ok()
+                    && exists.as_bool()
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return None;
+            }
+        }
+
+        let family = collection.GetFontFamily(index).ok()?;
+        let dw_weight = DWRITE_FONT_WEIGHT(key.font_weight as i32);
+        let dw_stretch = DWRITE_FONT_STRETCH(5); // Normal
+        let dw_style = if key.font_style == 1 {
+            DWRITE_FONT_STYLE_ITALIC
+        } else {
+            DWRITE_FONT_STYLE_NORMAL
+        };
+        let font = family
+            .GetFirstMatchingFont(dw_weight, dw_stretch, dw_style)
+            .ok()?;
+        let face = font.CreateFontFace().ok()?;
+
+        let codepoint = key.codepoint as u32;
+        let mut glyph_indices = [0u16; 1];
+        if face
+            .GetGlyphIndices(&codepoint as *const u32, 1, glyph_indices.as_mut_ptr())
+            .is_err()
+        {
+            return None;
+        }
+        let glyph_index = glyph_indices[0];
+        if glyph_index == 0 {
+            return None;
+        }
+
+        let mut font_metrics = DWRITE_FONT_METRICS::default();
+        face.GetMetrics(&mut font_metrics);
+        let design_units_per_em = font_metrics.designUnitsPerEm as f32;
+        if design_units_per_em <= 0.0 {
+            return None;
+        }
+
+        let mut glyph_metrics = [DWRITE_GLYPH_METRICS::default()];
+        if face
+            .GetDesignGlyphMetrics(&glyph_index, 1, glyph_metrics.as_mut_ptr(), false)
+            .is_err()
+        {
+            return None;
+        }
+        let advance_width = glyph_metrics[0].advanceWidth as f32 * font_size / design_units_per_em;
+
+        // Whitespace has an advance but no ink: a 1x1 empty bitmap keeps the
+        // shared upload path happy and paints nothing.
+        if key.codepoint.is_whitespace() {
+            return Some((vec![0u8; 1], 1, 1, advance_width, 0.0, 0.0));
+        }
+
+        let glyph_run = DWRITE_GLYPH_RUN {
+            fontFace: std::mem::ManuallyDrop::new(Some(face.clone())),
+            fontEmSize: font_size,
+            glyphCount: 1,
+            glyphIndices: &glyph_index,
+            glyphAdvances: std::ptr::null(),
+            glyphOffsets: std::ptr::null(),
+            isSideways: windows::core::BOOL(0),
+            bidiLevel: 0,
+        };
+        // Every early return below must release the ManuallyDrop face.
+        let release = |run: DWRITE_GLYPH_RUN| {
+            std::mem::ManuallyDrop::into_inner(run.fontFace);
+        };
+
+        let analysis: IDWriteGlyphRunAnalysis = match factory.CreateGlyphRunAnalysis(
+            &glyph_run,
+            1.0, // pixels per DIP
+            None,
+            DWRITE_RENDERING_MODE_NATURAL,
+            DWRITE_MEASURING_MODE_NATURAL,
+            0.0, // baseline origin x
+            0.0, // baseline origin y
+        ) {
+            Ok(a) => a,
+            Err(_) => {
+                release(glyph_run);
+                return None;
+            }
+        };
+
+        let non_empty =
+            |b: &windows::Win32::Foundation::RECT| b.right > b.left && b.bottom > b.top;
+        let (bounds, use_cleartype) =
+            match analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1) {
+                Ok(b) if non_empty(&b) => (b, false),
+                _ => match analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_CLEARTYPE_3x1) {
+                    Ok(b) if non_empty(&b) => (b, true),
+                    _ => {
+                        release(glyph_run);
+                        return None;
+                    }
+                },
+            };
+
+        let tex_width = (bounds.right - bounds.left) as u32;
+        let tex_height = (bounds.bottom - bounds.top) as u32;
+        if tex_width == 0 || tex_height == 0 || tex_width > 256 || tex_height > 256 {
+            release(glyph_run);
+            return None;
+        }
+
+        let mut alpha_values = vec![0u8; (tex_width * tex_height) as usize];
+        let tex_ok = if use_cleartype {
+            let mut ct_values = vec![0u8; (tex_width * tex_height * 3) as usize];
+            let ok = analysis
+                .CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &bounds, ct_values.as_mut_slice())
+                .is_ok();
+            if ok {
+                for i in 0..(tex_width * tex_height) as usize {
+                    let r = ct_values[i * 3] as u32;
+                    let g = ct_values[i * 3 + 1] as u32;
+                    let b = ct_values[i * 3 + 2] as u32;
+                    alpha_values[i] = ((r + g + b) / 3) as u8;
+                }
+            }
+            ok
+        } else {
+            analysis
+                .CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &bounds, alpha_values.as_mut_slice())
+                .is_ok()
+        };
+        release(glyph_run);
+        if !tex_ok {
+            return None;
+        }
+
+        let bearing_x = bounds.left as f32;
+        let bearing_y = -(bounds.top as f32);
+        Some((alpha_values, tex_width, tex_height, advance_width, bearing_x, bearing_y))
+    }
+}
+
+/// Rasterize a colour glyph (emoji) to premultiplied RGBA, the Windows
+/// counterpart of `rasterize_char_color` on macOS.
+///
+/// Chrome on Windows draws emoji from **Segoe UI Emoji**, so that family is
+/// used whatever the run's `font-family` says: the point of the colour path
+/// is to paint the artwork the baseline shows. The drawing goes through
+/// Direct2D's `DrawTextLayout` with `ENABLE_COLOR_FONT`, which renders every
+/// colour glyph format the OS knows (COLRv0 layers, and on Windows 11 the
+/// COLRv1 paint trees Segoe UI Emoji now ships), into a WIC bitmap that is
+/// then cropped to its ink. `IDWriteFactory2::TranslateColorGlyphRun` was
+/// tried first: it only yields the flat COLRv0 layers, which differ from
+/// Chrome's COLRv1 rendering more than the missing glyph did.
+///
+/// Returns `(rgba, width, height, advance, bearing_x, bearing_y)` with the
+/// same bitmap-edge contract as the grayscale rasterizer: `bearing_x` and
+/// `bearing_y` place the bitmap's top-left at `(pen + bearing_x,
+/// baseline - bearing_y)`. `None` means "nothing painted" and the caller
+/// falls back to the grayscale path.
+#[cfg(windows)]
+fn rasterize_glyph_directwrite_color(
+    key: &GlyphKey,
+    font_size: f32,
+) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+    use windows::core::w;
+    use windows::Win32::Graphics::Direct2D::Common::*;
+    use windows::Win32::Graphics::Direct2D::*;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    };
+
+    if font_size <= 0.0 || !font_size.is_finite() {
+        return None;
+    }
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let dwrite: IDWriteFactory =
+            DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+        let format = dwrite
+            .CreateTextFormat(
+                w!("Segoe UI Emoji"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                font_size,
+                w!("en-us"),
+            )
+            .ok()?;
+        // No wrapping: the layout is one glyph, and the box below is sized
+        // to hold any emoji at this size with room for overhang.
+        let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        let mut text: Vec<u16> = [0u16; 2].to_vec();
+        let n = key.codepoint.encode_utf16(&mut text).len();
+        text.truncate(n);
+        let pad = (font_size * 0.5).ceil();
+        let box_w = (font_size * 2.0 + pad * 2.0).ceil();
+        let box_h = (font_size * 2.0 + pad * 2.0).ceil();
+        let layout = dwrite.CreateTextLayout(&text, &format, box_w, box_h).ok()?;
+
+        // Where DirectWrite puts the baseline inside the layout, and the
+        // glyph's advance.
+        let mut line_metrics = [DWRITE_LINE_METRICS::default()];
+        let mut line_count = 0u32;
+        let _ = layout.GetLineMetrics(Some(&mut line_metrics), &mut line_count);
+        if line_count == 0 {
+            return None;
+        }
+        let baseline_in_layout = line_metrics[0].baseline;
+        let mut text_metrics = DWRITE_TEXT_METRICS::default();
+        layout.GetMetrics(&mut text_metrics).ok()?;
+        let advance = text_metrics.widthIncludingTrailingWhitespace;
+
+        // A transparent premultiplied BGRA bitmap for Direct2D to draw into.
+        let wic: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let (bw, bh) = (box_w as u32, box_h as u32);
+        let bitmap = wic
+            .CreateBitmap(bw, bh, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand)
+            .ok()?;
+        let d2d: ID2D1Factory =
+            D2D1CreateFactory::<ID2D1Factory>(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
+        let props = D2D1_RENDER_TARGET_PROPERTIES {
+            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            usage: D2D1_RENDER_TARGET_USAGE_NONE,
+            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+        };
+        let rt = d2d.CreateWicBitmapRenderTarget(&bitmap, &props).ok()?;
+        // Grayscale antialiasing: there is no opaque background to ClearType
+        // against, and the atlas is sampled with plain alpha blending.
+        rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        let black = D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+        let brush = rt.CreateSolidColorBrush(&black, None).ok()?;
+        let origin = windows_numerics::Vector2 { X: pad, Y: pad };
+        rt.BeginDraw();
+        rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+        // The brush only colours layers that ask for the text colour; the
+        // rest is the font's own palette.
+        rt.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        rt.EndDraw(None, None).ok()?;
+
+        let stride = bw * 4;
+        let mut pixels = vec![0u8; (stride * bh) as usize];
+        bitmap.CopyPixels(std::ptr::null(), stride, &mut pixels).ok()?;
+
+        // Crop to the ink. Everything is relative to `origin` (the pen) and
+        // the baseline row inside the box.
+        let (mut x0, mut y0, mut x1, mut y1) = (bw, bh, 0u32, 0u32);
+        for y in 0..bh {
+            for x in 0..bw {
+                if pixels[((y * bw + x) * 4 + 3) as usize] != 0 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
+        }
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let width = x1 - x0;
+        let height = y1 - y0;
+        if width > 256 || height > 256 {
+            return None;
+        }
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let o = ((y * bw + x) * 4) as usize;
+                // PBGRA to premultiplied RGBA.
+                rgba.extend_from_slice(&[pixels[o + 2], pixels[o + 1], pixels[o], pixels[o + 3]]);
+            }
+        }
+        let bearing_x = x0 as f32 - origin.X;
+        let bearing_y = (origin.Y + baseline_in_layout) - y0 as f32;
+        Some((rgba, width, height, advance, bearing_x, bearing_y))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    fn key_at(phase: u8) -> GlyphKey {
+        GlyphKey {
+            codepoint: 'a',
+            font_family: "Helvetica".to_string(),
+            font_size: 160,
+            font_weight: 400,
+            font_style: 0,
+            subpixel_phase: phase,
+            web_face: 0,
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_web_font_that_arrives_later_does_not_reuse_the_fallbacks_glyphs() {
+        use rustkit_text::webfonts::{self, WebFontFace};
+        use std::sync::Arc;
+        let face = |bytes: &[u8]| WebFontFace {
+            family: "GlyphKeyLateFont".to_string(),
+            weight: 400,
+            italic: false,
+            data: Arc::new(bytes.to_vec()),
+        };
+        let key = || GlyphKey {
+            web_face: GlyphKey::web_face_for("GlyphKeyLateFont, sans-serif", 400, 0),
+            font_family: "GlyphKeyLateFont, sans-serif".to_string(),
+            ..key_at(0)
+        };
+
+        // First paint: the document's font has not arrived, the fallback draws.
+        webfonts::clear();
+        let before = key();
+        assert_eq!(before.web_face, 0);
+
+        // The font arrives. Same family string, another cache entry.
+        let ttf = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+        webfonts::install("glyph-key-a", &[face(ttf)]);
+        let loaded = key();
+        assert_ne!(
+            loaded, before,
+            "the fallback's bitmap was reused for the web font"
+        );
+        assert_eq!(
+            key(),
+            loaded,
+            "one face is one entry however often it is drawn"
+        );
+
+        // Another document, the same family name, another file.
+        let woff2 = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.woff2");
+        webfonts::install("glyph-key-b", &[face(woff2)]);
+        assert_ne!(
+            key(),
+            loaded,
+            "another document's file drew this document's text"
+        );
+
+        // Back on the first document its glyphs are still cached.
+        webfonts::install("glyph-key-c", &[face(ttf)]);
+        assert_eq!(key(), loaded);
+        webfonts::clear();
+    }
+
+    #[test]
+    fn one_glyph_occupies_at_most_quantize_cache_slots() {
+        // ATLAS GROWTH BOUND (Argos's soft note on #131). The phase field
+        // multiplies cache entries per glyph, and this cache has NO eviction
+        // -- `clear()` is the only reset -- so the growth FACTOR is the whole
+        // safety story. It must be exactly SUBPIXEL_QUANTIZE, not "however
+        // many distinct fractions a page happens to produce".
+        use std::collections::HashSet;
+        let mut keys = HashSet::new();
+        // Sweep far more x positions than there are phases; the bucket count,
+        // not the position count, must bound the entries.
+        for i in 0..500 {
+            let x = i as f32 * 0.013;
+            keys.insert(key_at(subpixel_phase_for(x)));
+        }
+        assert_eq!(
+            keys.len(),
+            SUBPIXEL_QUANTIZE as usize,
+            "500 distinct x positions must collapse to exactly {} cache slots",
+            SUBPIXEL_QUANTIZE
+        );
+    }
+
+    #[test]
+    fn the_growth_bound_is_the_only_thing_this_unit_guarantees() {
+        // Deliberate documentation-as-test. Paying 4x atlas for a glyph is
+        // only worth it if the four phases produce four DIFFERENT bitmaps --
+        // and Atlas measured that CoreGraphics grid-fits glyph origins and
+        // rounds the offset away by default: at 36px, phases .25 and .50 gave
+        // a 0.00px and a 1.00px shift, i.e. TWO bitmaps in FOUR slots. That is
+        // fixed in the rasterizer half (#132, subpixel positioning on,
+        // subpixel quantization off), NOT here.
+        //
+        // This test exists so a reader of THIS file learns that the key alone
+        // does not buy distinct rendering, and does not mistake a green suite
+        // here for a working subpixel pipeline.
+        assert_eq!(SUBPIXEL_QUANTIZE, 4);
+    }
+
+    #[test]
+    fn glyphs_at_different_phases_are_different_cache_entries() {
+        // THE POINT OF THE WHOLE UNIT. Before the phase field, a glyph at
+        // x=10.0 and the same glyph at x=10.5 collided on one key, so both got
+        // the phase-0 bitmap and the .5 one was resampled into blur.
+        assert_ne!(key_at(0), key_at(2));
+    }
+
+    #[test]
+    fn the_same_phase_is_the_same_entry() {
+        // The other direction: phases must still SHARE, or the cache degrades
+        // into one entry per draw and the atlas grows without bound.
+        assert_eq!(key_at(2), key_at(2));
+    }
+
+    #[test]
+    fn phase_quantization_buckets_the_fraction() {
+        assert_eq!(subpixel_phase_for(10.0), 0);
+        assert_eq!(subpixel_phase_for(10.24), 0);
+        assert_eq!(subpixel_phase_for(10.25), 1);
+        assert_eq!(subpixel_phase_for(10.5), 2);
+        assert_eq!(subpixel_phase_for(10.75), 3);
+        assert_eq!(subpixel_phase_for(10.999), 3, "never reaches QUANTIZE");
+    }
+
+    #[test]
+    fn a_negative_x_phases_by_its_fraction_not_its_sign() {
+        // Text can be laid out at a negative device X (scrolled, or a run that
+        // starts left of the viewport). Using the raw value rather than the
+        // fractional part would produce a negative bucket and panic on cast.
+        assert_eq!(subpixel_phase_for(-0.25), 3, "-0.25 sits at .75 of a pixel");
+        assert_eq!(subpixel_phase_for(-1.0), 0);
+    }
+
+    #[test]
+    fn every_phase_is_in_range() {
+        for i in 0..400 {
+            let x = i as f32 * 0.017 - 3.0;
+            let p = subpixel_phase_for(x);
+            assert!(p < SUBPIXEL_QUANTIZE, "phase {p} out of range for x={x}");
+        }
+    }
     use super::*;
 
     #[test]
     fn test_glyph_key_hash() {
         let key1 = GlyphKey {
+            subpixel_phase: 0,
             codepoint: 'A',
             font_family: "Arial".to_string(),
             font_size: 160,
             font_weight: 400,
             font_style: 0,
+            web_face: 0,
         };
 
         let key2 = GlyphKey {
+            subpixel_phase: 0,
             codepoint: 'A',
             font_family: "Arial".to_string(),
             font_size: 160,
             font_weight: 400,
             font_style: 0,
+            web_face: 0,
         };
 
         assert_eq!(key1, key2);
@@ -552,19 +1147,23 @@ mod tests {
     #[test]
     fn test_glyph_key_different() {
         let key1 = GlyphKey {
+            subpixel_phase: 0,
             codepoint: 'A',
             font_family: "Arial".to_string(),
             font_size: 160,
             font_weight: 400,
             font_style: 0,
+            web_face: 0,
         };
 
         let key2 = GlyphKey {
+            subpixel_phase: 0,
             codepoint: 'B',
             font_family: "Arial".to_string(),
             font_size: 160,
             font_weight: 400,
             font_style: 0,
+            web_face: 0,
         };
 
         assert_ne!(key1, key2);
@@ -575,7 +1174,7 @@ mod tests {
         let (w, h) = estimate_glyph_size('A', 16.0);
         assert!(w > 0);
         assert!(h > 0);
-        
+
         let (narrow_w, _) = estimate_glyph_size('i', 16.0);
         let (wide_w, _) = estimate_glyph_size('M', 16.0);
         assert!(narrow_w < wide_w);

@@ -155,6 +155,10 @@ pub struct TreeBuilder<S: TreeSink> {
     foster_parenting: bool,
     /// Buffer for accumulating consecutive text characters
     text_buffer: String,
+    /// HTML §13.2.6.4.7, "pre"/"listing" start tags: "If the next token is
+    /// a U+000A LINE FEED character token, then ignore that token". Set by
+    /// the start tag, consumed by whatever token comes next.
+    ignore_lf: bool,
     /// Pending table character tokens (for InTableText mode)
     pending_table_chars: Vec<char>,
     /// Document quirks mode
@@ -182,6 +186,7 @@ impl<S: TreeSink> TreeBuilder<S> {
             template_insertion_modes: Vec::new(),
             foster_parenting: false,
             text_buffer: String::new(),
+            ignore_lf: false,
             pending_table_chars: Vec::new(),
             quirks_mode: QuirksMode::NoQuirks,
             fragment_context: None,
@@ -229,6 +234,7 @@ impl<S: TreeSink> TreeBuilder<S> {
             template_insertion_modes: template_modes,
             foster_parenting: false,
             text_buffer: String::new(),
+            ignore_lf: false,
             pending_table_chars: Vec::new(),
             quirks_mode: QuirksMode::NoQuirks,
             fragment_context: Some(context),
@@ -530,8 +536,14 @@ impl<S: TreeSink> TreeBuilder<S> {
 
         // Check if this element is already on the stack as the current node or near top
         // Simple heuristic: if the element name is anywhere in open_elements after the body, skip
-        let body_idx = self.open_elements.iter().position(|(n, _)| n == "body").unwrap_or(0);
-        for i in (body_idx + 1)..self.open_elements.len() {
+        // A fragment's stack has no body: then the whole stack counts (a
+        // formatting element at index 0 is open, not one to reopen).
+        let after_body = self
+            .open_elements
+            .iter()
+            .position(|(n, _)| n == "body")
+            .map_or(0, |i| i + 1);
+        for i in after_body..self.open_elements.len() {
             if self.open_elements[i].0 == last_name {
                 // Already have this formatting element open, don't reconstruct
                 return;
@@ -551,7 +563,7 @@ impl<S: TreeSink> TreeBuilder<S> {
                 }
                 FormattingEntry::Element { name, .. } => {
                     // Check if in open elements (after body)
-                    let in_stack = self.open_elements[body_idx + 1..].iter()
+                    let in_stack = self.open_elements[after_body..].iter()
                         .any(|(n, _)| n == name);
                     if in_stack {
                         reconstruct_start += 1;
@@ -963,10 +975,19 @@ impl<S: TreeSink> TreeBuilder<S> {
     }
 
     fn handle_in_body(&mut self, token: Token) -> ParseResult<()> {
+        // Armed by a "pre"/"listing" start tag for exactly the NEXT token.
+        let ignore_lf = std::mem::take(&mut self.ignore_lf);
         match token {
             Token::Character(ch) => {
                 if ch == '\0' {
                     // Ignore null characters
+                    return Ok(());
+                }
+                // HTML §13.2.6.4.7: the newline authors put right after
+                // `<pre>` is markup, not content. Chrome drops it; keeping
+                // it gave every `<pre>\n...` block an empty first line
+                // once `white-space: pre` made newlines line boxes.
+                if ignore_lf && ch == '\n' {
                     return Ok(());
                 }
 
@@ -1051,6 +1072,10 @@ impl<S: TreeSink> TreeBuilder<S> {
 
                 if !is_void && !self_closing {
                     self.open_elements.push((name.clone(), node_id.clone()));
+
+                    if matches!(name.as_str(), "pre" | "listing") {
+                        self.ignore_lf = true;
+                    }
 
                     // Track formatting elements
                     if Self::is_formatting_element(&name) {
@@ -2282,6 +2307,22 @@ mod tests {
         assert!(result.events.contains(&"start:html".to_string()));
         assert!(result.events.contains(&"start:head".to_string()));
         assert!(result.events.contains(&"start:body".to_string()));
+    }
+
+    #[test]
+    fn pre_drops_the_newline_right_after_its_start_tag_only() {
+        // HTML §13.2.6.4.7: `<pre>\n` — the first LF is ignored; every later
+        // one (and one after any other tag) is content.
+        let html = "<pre>\nfirst\n\nthird\n</pre><div>\nx</div>";
+        let tokens = tokenize(html).unwrap();
+        let sink = TestSink::new();
+        let result = build_tree(tokens, sink).unwrap();
+        let texts: Vec<&String> = result
+            .events
+            .iter()
+            .filter(|e| e.starts_with("text:"))
+            .collect();
+        assert_eq!(texts, ["text:first\n\nthird\n", "text:\nx"]);
     }
 
     #[test]

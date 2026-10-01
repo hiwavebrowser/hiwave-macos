@@ -8,20 +8,42 @@
 //! Unlike hiwave-smoke, this does NOT require a display and can run in CI.
 
 use clap::Parser;
-use rustkit_engine::{EngineBuilder, EngineConfig};
+use rustkit_engine::{EngineBuilder, EngineConfig, ScriptOutcome, ScriptRecord};
 use rustkit_viewhost::Bounds;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tracing::{error, warn};
+use url::Url;
 
 #[derive(Parser, Debug)]
 #[command(name = "parity-capture")]
 #[command(about = "Headless frame capture for parity testing")]
+#[command(group(clap::ArgGroup::new("source").required(true).args(["html_file", "url"])))]
 struct Args {
     /// Path to HTML file to render
     #[arg(long)]
-    html_file: String,
+    html_file: Option<String>,
+
+    /// Live URL to load through `Engine::load_url` (document + subresources
+    /// over the network), for the real-site board
+    #[arg(long)]
+    url: Option<String>,
+
+    /// Hard wall-clock limit for the whole capture, in milliseconds. On
+    /// expiry the process prints a `timeout` result and exits 3.
+    #[arg(long, default_value = "30000")]
+    timeout_ms: u64,
+
+    /// Output path for display-list JSON (paint commands, including text runs)
+    #[arg(long)]
+    dump_display_list: Option<String>,
+
+    /// Output path for the page's script log (URL mode: one record per
+    /// `<script>`, plus exceptions from lifecycle listeners and timers)
+    #[arg(long)]
+    dump_scripts: Option<String>,
 
     /// Viewport width
     #[arg(long, default_value = "1280")]
@@ -30,6 +52,13 @@ struct Args {
     /// Viewport height
     #[arg(long, default_value = "800")]
     height: u32,
+
+    /// After loading at --width x --height, resize the view to `WxH` (through
+    /// `Engine::resize_view`, as a window resize does) and capture at the new
+    /// size. Compare against a fresh load at `WxH` to find layout that stays
+    /// stale across a resize.
+    #[arg(long, value_parser = parse_size)]
+    resize_to: Option<(u32, u32)>,
 
     /// Output path for PPM frame
     #[arg(long)]
@@ -47,13 +76,58 @@ struct Args {
 #[derive(Serialize, Deserialize)]
 struct CaptureResult {
     status: String,
-    html_file: String,
+    html_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    url: Option<String>,
     width: u32,
     height: u32,
     frame_path: Option<String>,
     layout_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    display_list_path: Option<String>,
     layout_stats: Option<LayoutStats>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    script_stats: Option<ScriptStats>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    elapsed_ms: Option<u64>,
     error: Option<String>,
+}
+
+impl CaptureResult {
+    fn new(args: &Args) -> Self {
+        CaptureResult {
+            status: "ok".to_string(),
+            html_file: args.html_file.clone(),
+            url: args.url.clone(),
+            width: args.width,
+            height: args.height,
+            frame_path: None,
+            layout_path: None,
+            display_list_path: None,
+            layout_stats: None,
+            script_stats: None,
+            elapsed_ms: None,
+            error: None,
+        }
+    }
+
+    fn failed(mut self, status: &str, error: String) -> Self {
+        self.status = status.to_string();
+        self.error = Some(error);
+        self
+    }
+}
+
+/// Totals over a URL capture's script log.
+#[derive(Serialize, Deserialize)]
+struct ScriptStats {
+    ran: u32,
+    threw: u32,
+    skipped: u32,
+    fetch_failed: u32,
+    over_budget: u32,
+    bytes: u64,
+    elapsed_ms: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,13 +149,32 @@ fn main() {
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
     tracing_subscriber::fmt()
         .with_env_filter(&filter)
+        .with_writer(std::io::stderr)
         .init();
 
-    let result = run_capture(&args);
-    
+    // Hard wall-clock limit. A live page can stall the engine anywhere
+    // (network, layout, paint) and nothing inside the engine can be trusted
+    // to give up, so the limit is enforced from outside the capture thread.
+    {
+        let limit = Duration::from_millis(args.timeout_ms);
+        let timeout_result = CaptureResult::new(&args).failed(
+            "timeout",
+            format!("capture exceeded {} ms", args.timeout_ms),
+        );
+        std::thread::spawn(move || {
+            std::thread::sleep(limit);
+            println!("{}", serde_json::to_string(&timeout_result).unwrap());
+            std::process::exit(3);
+        });
+    }
+
+    let started = Instant::now();
+    let mut result = run_capture(&args);
+    result.elapsed_ms = Some(started.elapsed().as_millis() as u64);
+
     // Output JSON result
     println!("{}", serde_json::to_string(&result).unwrap());
-    
+
     // Exit with appropriate code
     if result.status == "ok" {
         std::process::exit(0);
@@ -90,45 +183,50 @@ fn main() {
     }
 }
 
+/// The user agent the shipping RustKit content view sends
+/// (hiwave-app/src/webview_rustkit.rs). Live sites branch on it, so a URL
+/// capture must present as the product does, not as a test tool.
+const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0";
+
 fn run_capture(args: &Args) -> CaptureResult {
-    // Read HTML file
-    let html_content = match fs::read_to_string(&args.html_file) {
-        Ok(content) => preprocess_html(&content, Path::new(&args.html_file)),
-        Err(e) => {
-            return CaptureResult {
-                status: "error".to_string(),
-                html_file: args.html_file.clone(),
-                width: args.width,
-                height: args.height,
-                frame_path: None,
-                layout_path: None,
-                layout_stats: None,
-                error: Some(format!("Failed to read HTML file: {}", e)),
-            };
-        }
+    let mut result = CaptureResult::new(args);
+
+    // Read HTML file (URL mode fetches inside the engine instead)
+    let html_content = match &args.html_file {
+        Some(html_file) => match fs::read_to_string(html_file) {
+            Ok(content) => Some(preprocess_html(&content, Path::new(html_file))),
+            Err(e) => {
+                return result.failed("error", format!("Failed to read HTML file: {}", e));
+            }
+        },
+        None => None,
+    };
+    let url = match &args.url {
+        Some(raw) => match Url::parse(raw) {
+            Ok(u) => Some(u),
+            Err(e) => return result.failed("error", format!("Invalid URL: {}", e)),
+        },
+        None => None,
     };
 
-    // Create engine with parity testing config (animations disabled)
+    // Create engine with parity testing config (animations disabled).
+    // Fixture mode keeps its historical test-tool UA; URL mode sends the
+    // product's. URL mode runs the page's scripts, as the browser does;
+    // fixture mode does not (the campaign fixtures are static pages).
+    let user_agent = if url.is_some() {
+        PRODUCT_USER_AGENT
+    } else {
+        "ParityCapture/1.0"
+    };
     let engine_result = EngineBuilder::new()
         .with_config(EngineConfig::for_parity_testing())
-        .user_agent("ParityCapture/1.0")
-        .javascript_enabled(false)
+        .user_agent(user_agent)
+        .javascript_enabled(url.is_some())
         .build();
 
     let mut engine = match engine_result {
         Ok(e) => e,
-        Err(e) => {
-            return CaptureResult {
-                status: "error".to_string(),
-                html_file: args.html_file.clone(),
-                width: args.width,
-                height: args.height,
-                frame_path: None,
-                layout_path: None,
-                layout_stats: None,
-                error: Some(format!("Failed to create engine: {:?}", e)),
-            };
-        }
+        Err(e) => return result.failed("error", format!("Failed to create engine: {:?}", e)),
     };
 
     // Create headless view
@@ -142,97 +240,150 @@ fn run_capture(args: &Args) -> CaptureResult {
     let view_id = match engine.create_headless_view(bounds) {
         Ok(id) => id,
         Err(e) => {
-            return CaptureResult {
-                status: "error".to_string(),
-                html_file: args.html_file.clone(),
-                width: args.width,
-                height: args.height,
-                frame_path: None,
-                layout_path: None,
-                layout_stats: None,
-                error: Some(format!("Failed to create headless view: {:?}", e)),
-            };
+            return result.failed("error", format!("Failed to create headless view: {:?}", e));
         }
     };
 
-    // Load HTML
-    if let Err(e) = engine.load_html(view_id, &html_content) {
-        return CaptureResult {
-            status: "error".to_string(),
-            html_file: args.html_file.clone(),
-            width: args.width,
-            height: args.height,
-            frame_path: None,
-            layout_path: None,
-            layout_stats: None,
-            error: Some(format!("Failed to load HTML: {:?}", e)),
+    // Load: either the fixture HTML, or the live URL through the same
+    // navigation path the browser uses (document fetch, then stylesheets,
+    // fonts and images via load_subresources).
+    if let Some(url) = url {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
         };
+        if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
+            return result.failed("error", format!("Failed to load URL: {:?}", e));
+        }
+        if let Some(log) = engine.script_log(view_id) {
+            result.script_stats = Some(script_stats(log));
+            if let Some(ref path) = args.dump_scripts {
+                if let Err(e) = fs::write(path, script_log_json(log).to_string()) {
+                    error!("Failed to write script log: {:?}", e);
+                }
+            }
+        }
+    } else if let Some(html) = html_content {
+        if let Err(e) = engine.load_html(view_id, &html) {
+            return result.failed("error", format!("Failed to load HTML: {:?}", e));
+        }
+    }
+
+    if let Some((width, height)) = args.resize_to {
+        let bounds = Bounds {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        if let Err(e) = engine.resize_view(view_id, bounds) {
+            return result.failed("error", format!("Failed to resize view: {:?}", e));
+        }
+        result.width = width;
+        result.height = height;
     }
 
     // Render
     if let Err(e) = engine.render_view(view_id) {
-        return CaptureResult {
-            status: "error".to_string(),
-            html_file: args.html_file.clone(),
-            width: args.width,
-            height: args.height,
-            frame_path: None,
-            layout_path: None,
-            layout_stats: None,
-            error: Some(format!("Failed to render: {:?}", e)),
-        };
+        return result.failed("error", format!("Failed to render: {:?}", e));
     }
 
     // Capture frame if requested
-    let frame_path = if let Some(ref path) = args.dump_frame {
+    if let Some(ref path) = args.dump_frame {
         if let Err(e) = engine.capture_frame(view_id, path) {
             error!("Failed to capture frame: {:?}", e);
-            None
         } else {
-            Some(path.clone())
+            result.frame_path = Some(path.clone());
         }
-    } else {
-        None
-    };
+    }
 
     // Export layout if requested
-    let (layout_path, layout_stats) = if let Some(ref path) = args.dump_layout {
+    if let Some(ref path) = args.dump_layout {
         match engine.export_layout_json(view_id, path) {
             Ok(()) => {
+                result.layout_path = Some(path.clone());
                 // Read back the file to analyze
                 match fs::read_to_string(path) {
-                    Ok(layout_json) => {
-                        let stats = analyze_layout_json(&layout_json);
-                        (Some(path.clone()), stats)
-                    }
-                    Err(e) => {
-                        error!("Failed to read layout file: {:?}", e);
-                        (Some(path.clone()), None)
-                    }
+                    Ok(layout_json) => result.layout_stats = analyze_layout_json(&layout_json),
+                    Err(e) => error!("Failed to read layout file: {:?}", e),
                 }
             }
-            Err(e) => {
-                error!("Failed to export layout: {:?}", e);
-                (None, None)
-            }
+            Err(e) => error!("Failed to export layout: {:?}", e),
         }
-    } else {
-        (None, None)
-    };
+    }
+
+    // Export display list if requested
+    if let Some(ref path) = args.dump_display_list {
+        match engine.export_display_list_json(view_id, path) {
+            Ok(()) => result.display_list_path = Some(path.clone()),
+            Err(e) => error!("Failed to export display list: {:?}", e),
+        }
+    }
 
     // Clean up
     let _ = engine.destroy_view(view_id);
 
-    CaptureResult {
-        status: "ok".to_string(),
-        html_file: args.html_file.clone(),
-        width: args.width,
-        height: args.height,
-        frame_path,
-        layout_path,
-        layout_stats,
-        error: None,
+    result
+}
+
+/// `WxH`, e.g. `1024x768`.
+fn parse_size(s: &str) -> Result<(u32, u32), String> {
+    let (w, h) = s
+        .split_once('x')
+        .ok_or_else(|| format!("expected WxH, got {s:?}"))?;
+    let w = w.parse().map_err(|e| format!("width {w:?}: {e}"))?;
+    let h = h.parse().map_err(|e| format!("height {h:?}: {e}"))?;
+    Ok((w, h))
+}
+
+fn script_stats(log: &[ScriptRecord]) -> ScriptStats {
+    let mut stats = ScriptStats {
+        ran: 0,
+        threw: 0,
+        skipped: 0,
+        fetch_failed: 0,
+        over_budget: 0,
+        bytes: 0,
+        elapsed_ms: 0,
+    };
+    for record in log {
+        match record.outcome {
+            ScriptOutcome::Ran => stats.ran += 1,
+            ScriptOutcome::Threw(_) => stats.threw += 1,
+            ScriptOutcome::Skipped(_) => stats.skipped += 1,
+            ScriptOutcome::FetchFailed(_) => stats.fetch_failed += 1,
+            ScriptOutcome::OverBudget => stats.over_budget += 1,
+        }
+        stats.bytes += record.bytes as u64;
+        stats.elapsed_ms += record.elapsed_ms;
     }
+    stats
+}
+
+fn script_log_json(log: &[ScriptRecord]) -> serde_json::Value {
+    let records: Vec<_> = log
+        .iter()
+        .map(|r| {
+            let (outcome, detail) = match &r.outcome {
+                ScriptOutcome::Ran => ("ran", None),
+                ScriptOutcome::Threw(m) => ("threw", Some(m.clone())),
+                ScriptOutcome::Skipped(why) => ("skipped", Some(why.to_string())),
+                ScriptOutcome::FetchFailed(m) => ("fetch_failed", Some(m.clone())),
+                ScriptOutcome::OverBudget => ("over_budget", None),
+            };
+            serde_json::json!({
+                "source": r.source,
+                "bytes": r.bytes,
+                "elapsed_ms": r.elapsed_ms,
+                "outcome": outcome,
+                "detail": detail,
+            })
+        })
+        .collect();
+    serde_json::json!({ "scripts": records })
 }
 
 /// Mirror the Chrome capture pipeline's CSS inputs for a file loaded via
@@ -262,7 +413,17 @@ fn preprocess_html(html: &str, html_path: &Path) -> String {
 }
 
 fn is_micro_suite_path(html_path: &Path) -> bool {
-    let p = html_path.to_string_lossy();
+    // Canonicalize first: the separator-delimited patterns below require a
+    // LEADING separator, so a repo-relative invocation ("websuite/micro/x")
+    // never matched and the reset was silently skipped — while CI passes
+    // absolute paths and always matched. Local captures therefore rendered
+    // micro cases WITHOUT the reset Chrome's oracle applies (line-height
+    // 1.5 vs metrics-normal, ~5px per line), an invisible capture-
+    // environment asymmetry between every local board and CI.
+    let canon = html_path
+        .canonicalize()
+        .unwrap_or_else(|_| html_path.to_path_buf());
+    let p = canon.to_string_lossy();
     p.contains("/websuite/micro/") || p.contains("\\websuite\\micro\\")
 }
 
@@ -514,6 +675,21 @@ mod tests {
         let reset = out.find("data-parity-reset").unwrap();
         let fixture = out.find("<style>b{}").unwrap();
         assert!(reset < fixture);
+    }
+
+    #[test]
+    fn micro_suite_detection_accepts_relative_paths() {
+        // The predicate must not depend on how the caller spelled the path:
+        // CI passes absolute, humans pass relative, and the reset injection
+        // silently diverging between them is a capture-environment asymmetry
+        // (see the canonicalize comment on is_micro_suite_path).
+        // Canonicalization needs a real file, so use one from the tree.
+        let real = Path::new("websuite/micro/gradients/index.html");
+        if real.exists() {
+            assert!(is_micro_suite_path(real),
+                "relative micro path must be detected");
+        }
+        assert!(!is_micro_suite_path(Path::new("websuite/cases/x/index.html")));
     }
 
     #[test]

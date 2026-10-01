@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>n53: inline-block baseline + bare control widths</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { font-family: system-ui, -apple-system, sans-serif; font-size: 16px; line-height: 1.5; }
+  body { padding: 20px; background: #fff; }
+  h2 { font-size: 14px; margin: 16px 0 6px; }
+  .box { border: 2px solid #333; padding: 10px; background: #fff; }
+  .row { margin: 8px 0; }
+  label { display: inline-block; width: 120px; font-size: 12px; }
+  .pill { display: inline-block; padding: 2px 8px; font-size: 11px; background: #dde; }
+  .tall { display: inline-block; font-size: 24px; background: #fdd; }
+  .clip { display: inline-block; overflow: hidden; height: 30px; width: 60px; background: #dfd; }
+</style>
+</head>
+<body>
+  <h2>A. inline-block label beside a bare input (Chrome: label 5px below the row top)</h2>
+  <div class="box" id="a">
+    <div class="row"><label>Text:</label><input type="text" placeholder="Default size"></div>
+    <div class="row"><label>Email:</label><input type="email" placeholder="Email"></div>
+  </div>
+
+  <h2>B. wrapped inline-block hangs the row off its second line; checkbox on the bottom edge</h2>
+  <div class="box" id="b">
+    <div class="row">
+      <input type="checkbox" id="cb1"> <label for="cb1">Checkbox 1</label>
+      <input type="checkbox" id="cb2" checked> <label for="cb2">Checkbox 2 (checked, wraps)</label>
+    </div>
+  </div>
+
+  <h2>C. textarea alone on a line: the strut hangs below its bottom edge</h2>
+  <div class="box" id="c">
+    <textarea placeholder="Default textarea"></textarea>
+  </div>
+  <div class="box" id="c2">
+    <textarea rows="5" cols="40" placeholder="5 rows, 40 cols"></textarea>
+  </div>
+
+  <h2>D. button-type inputs are push buttons; bare widths</h2>
+  <div class="box" id="d">
+    <input type="submit" value="Submit">
+    <input type="reset" value="Reset">
+    <input type="submit">
+    <input type="button" value="Plain">
+    <select><option>Option 1</option><option>A longer option text</option></select>
+    <select multiple size="3"><option>Item 1</option><option>Item 2</option><option>Item 3</option><option>Item 4</option></select>
+  </div>
+
+  <h2>E. mixed inline-blocks on one line: pill, tall, overflow-clipped (bottom edge)</h2>
+  <div class="box" id="e">
+    plain text <span class="pill">pill</span> <span class="tall">Tall</span> <span class="clip">clipped text</span> after
+  </div>
+</body>
+</html>

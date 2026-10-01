@@ -116,27 +116,39 @@ impl LineBreaker {
     /// Returns an iterator over `BreakOpportunity` structs indicating where
     /// line breaks can occur.
     pub fn break_opportunities<'a>(&self, text: &'a str) -> impl Iterator<Item = BreakOpportunity> + 'a {
-        let word_break = self.word_break;
-        let _overflow_wrap = self.overflow_wrap; // Reserved for future use
+        // UAX #14 break opportunities. In keep-all mode a complete
+        // implementation would suppress breaks within CJK; for now all
+        // UAX #14 breaks are allowed there (pre-existing simplification).
+        let mut ops: Vec<BreakOpportunity> = linebreaks(text)
+            .map(|(offset, break_op)| BreakOpportunity {
+                offset,
+                kind: match break_op {
+                    UnicodeBreakOp::Mandatory => BreakKind::Mandatory,
+                    UnicodeBreakOp::Allowed => BreakKind::Allowed,
+                },
+            })
+            .collect();
 
-        // Get UAX #14 break opportunities
-        linebreaks(text).filter_map(move |(offset, break_op)| {
-            let kind = match break_op {
-                UnicodeBreakOp::Mandatory => BreakKind::Mandatory,
-                UnicodeBreakOp::Allowed => {
-                    // Check if this break is allowed by word-break property
-                    if word_break == WordBreak::KeepAll {
-                        // In keep-all mode, check if we're breaking within CJK
-                        // For simplicity, we allow all UAX #14 breaks but a more
-                        // complete implementation would check character classes
-                        BreakKind::Allowed
-                    } else {
-                        BreakKind::Allowed
-                    }
+        // css-text-3 §4.2 `word-break: break-all`: breaking is allowed
+        // between any two typographic character units, so every grapheme
+        // boundary UAX #14 did not already surface is a REAL soft wrap
+        // opportunity (used in normal line filling), not an emergency one.
+        if self.word_break == WordBreak::BreakAll {
+            use crate::segmentation::grapheme_boundaries;
+            let existing: std::collections::HashSet<usize> =
+                ops.iter().map(|op| op.offset).collect();
+            for offset in grapheme_boundaries(text).into_iter().skip(1) {
+                if !existing.contains(&offset) {
+                    ops.push(BreakOpportunity {
+                        offset,
+                        kind: BreakKind::Allowed,
+                    });
                 }
-            };
-            Some(BreakOpportunity { offset, kind })
-        })
+            }
+            ops.sort_by_key(|op| op.offset);
+        }
+
+        ops.into_iter()
     }
 
     /// Get break opportunities as byte offsets.
@@ -388,6 +400,36 @@ mod tests {
         let breaks: Vec<_> = breaker.break_opportunities(text).collect();
         // Should have break opportunity after comma+space
         assert!(breaks.iter().any(|b| b.offset == 7));
+    }
+
+    #[test]
+    fn break_all_adds_normal_opportunities_between_letters() {
+        let normal = LineBreaker::new(WordBreak::Normal, OverflowWrap::Normal);
+        assert!(!normal.can_break_at("ab", 1));
+
+        let break_all = LineBreaker::new(WordBreak::BreakAll, OverflowWrap::Normal);
+        let opportunity = break_all
+            .break_opportunities("ab")
+            .find(|op| op.offset == 1)
+            .expect("break-all should allow a break between adjacent letters");
+
+        assert_eq!(opportunity.kind, BreakKind::Allowed);
+    }
+
+    #[test]
+    fn break_all_preserves_grapheme_clusters() {
+        let breaker = LineBreaker::new(WordBreak::BreakAll, OverflowWrap::Normal);
+        let text = "a\u{0301}b";
+        let offsets = breaker.break_offsets(text);
+
+        assert!(
+            offsets.contains(&3),
+            "break-all should allow a break after the combined grapheme: {offsets:?}"
+        );
+        assert!(
+            !offsets.contains(&1) && !offsets.contains(&2),
+            "break-all must not split a base character from its combining mark: {offsets:?}"
+        );
     }
 
     #[test]

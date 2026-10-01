@@ -22,6 +22,7 @@
 pub mod bidi;
 pub mod line_break;
 pub mod segmentation;
+pub mod webfonts;
 
 use thiserror::Error;
 
@@ -90,6 +91,9 @@ mod win;
 
 #[cfg(windows)]
 pub use win::{FontCollection, FontFace, FontFamily, Font};
+
+pub mod emoji;
+pub use emoji::is_emoji;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

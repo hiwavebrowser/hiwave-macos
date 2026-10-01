@@ -9,10 +9,10 @@
 //! mirrors the most common blocking rules. Full adblock filtering still happens
 //! at the navigation level.
 
-#![allow(dead_code)]
 
 use hiwave_shield::ResourceType as ShieldResourceType;
-use rustkit_net::{InterceptAction, InterceptHandler, Request};
+use url::Url;
+use rustkit_net::{InterceptAction, InterceptHandler, Request, RequestDestination};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -55,8 +55,10 @@ pub struct ShieldInterceptHandler {
     enabled: Arc<AtomicBool>,
     /// Counter for blocked requests.
     blocked_count: Arc<AtomicU64>,
-    /// Set of blocked domain patterns.
+    /// Set of blocked domain patterns (fallback + tests).
     blocked_domains: HashSet<String>,
+    /// Per-destination attempted/blocked census.
+    census: Arc<ShieldCensus>,
     /// Callback to notify when a request is blocked (for UI updates).
     on_blocked: Option<Box<dyn Fn(&str) + Send + Sync>>,
 }
@@ -64,6 +66,10 @@ pub struct ShieldInterceptHandler {
 impl ShieldInterceptHandler {
     /// Create a new shield intercept handler with default blocked domains.
     pub fn new() -> Self {
+        // Kick the background engine build immediately so the
+        // allow-until-ready window starts closing at construction, not at
+        // the first request.
+        let _ = shield_worker();
         let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
             .iter()
             .map(|s| s.to_string())
@@ -73,12 +79,16 @@ impl ShieldInterceptHandler {
             enabled: Arc::new(AtomicBool::new(true)),
             blocked_count: Arc::new(AtomicU64::new(0)),
             blocked_domains,
+            census: Arc::new(ShieldCensus::default()),
             on_blocked: None,
         }
     }
 
     /// Create with a shared counter for tracking blocked requests.
     pub fn with_counter(blocked_count: Arc<AtomicU64>) -> Self {
+        // Production constructor (webview_rustkit path): start closing the
+        // pending window here too, not only in new().
+        let _ = shield_worker();
         let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
             .iter()
             .map(|s| s.to_string())
@@ -88,6 +98,7 @@ impl ShieldInterceptHandler {
             enabled: Arc::new(AtomicBool::new(true)),
             blocked_count,
             blocked_domains,
+            census: Arc::new(ShieldCensus::default()),
             on_blocked: None,
         }
     }
@@ -201,33 +212,193 @@ impl InterceptHandler for ShieldInterceptHandler {
     fn intercept(&self, request: &Request) -> InterceptAction {
         trace!(url = %request.url, "Shield checking request");
 
-        if !self.enabled.load(Ordering::Relaxed) {
+        // Privacy pin 2026-09-29: interception happens BEFORE bytes; the
+        // census counts every attempt per destination so "blocked" is a
+        // measured quantity, not an inference from failures.
+        let dest = request.destination;
+        self.census.attempted(dest);
+
+        // Global kill-switch (debugging): HIWAVE_SHIELD_OFF=1 wins over
+        // everything, read once per process.
+        static KILL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let killed = *KILL.get_or_init(|| std::env::var("HIWAVE_SHIELD_OFF").is_ok());
+        if killed || !self.enabled.load(Ordering::Relaxed) {
             return InterceptAction::Allow;
         }
 
-        // Check if the host is in our blocked list
-        let should_block = request.url.host_str()
-            .map(|host| self.should_block_host(host))
-            .unwrap_or(false);
+        // TOP-LEVEL DOCUMENTS ARE NEVER BLOCKED. EasyList carries rules that
+        // match ad-tech hosts a user may still navigate to on purpose; the
+        // shield's job is protecting a page's subresource graph, not
+        // refusing navigations. (Per-site deny of navigations is product
+        // policy above this layer, not a filter-list outcome.)
+        if dest == RequestDestination::Document {
+            return InterceptAction::Allow;
+        }
 
-        if should_block {
-            // Increment counter
+        // First party = the document that made the request. The loader
+        // carries it as the (policy-governed) referrer; a subresource with
+        // no referrer context is judged against its own origin, which
+        // disables third-party-only rules rather than inventing a party.
+        let source = request.referrer.as_ref().unwrap_or(&request.url);
+
+        let blocked = match shared_block(&request.url, source, dest_to_shield(dest)) {
+            Some(verdict) => verdict,
+            None => {
+                // PENDING FLOOR (Prometheus R1 on this PR): while EasyList is
+                // still compiling/downloading, the interim domain list keeps
+                // blocking — the pre-PR tip protected from the FIRST
+                // subresource and this PR must never lower that, not even
+                // for a measured window (and a failed init-thread spawn must
+                // not mean permanent allow). The census still counts the
+                // window so the upgrade's coverage delta stays a number.
+                self.census.engine_pending.fetch_add(1, Ordering::Relaxed);
+                request
+                    .url
+                    .host_str()
+                    .map(|host| self.should_block_host(host))
+                    .unwrap_or(false)
+            }
+        };
+
+        if blocked {
+            self.census.blocked(dest);
             self.blocked_count.fetch_add(1, Ordering::Relaxed);
-
-            debug!(
-                url = %request.url,
-                "Shield blocked sub-resource request"
-            );
-
-            // Notify callback if set
+            debug!(url = %request.url, ?dest, "Shield blocked request");
             if let Some(ref callback) = self.on_blocked {
                 callback(request.url.as_str());
             }
-
             InterceptAction::Block
         } else {
             InterceptAction::Allow
         }
+    }
+}
+
+
+/// The ONE filter engine per process, owned by a dedicated worker thread.
+///
+/// Two constraints meet here. #346's scar: with_filter_lists() can DOWNLOAD
+/// EasyList on a stale cache and compiles ~60k rules — seconds, never on a
+/// request path, never per handler. And adblock-rust's inner resource
+/// backend is !Sync + !Send (caught by f1-test-compile on the Mac CI; this
+/// Linux seat cannot compile the app crate — the declared platform split),
+/// so no shared static can hold the engine at all. The engine therefore
+/// lives on ONE worker thread that answers queries over channels: a check
+/// is two channel hops (~µs) against a network fetch it may save. While the
+/// worker is still building — or if it ever dies — callers get None and use
+/// the pending FLOOR, so protection never drops below the pre-EasyList tip.
+struct ShieldQuery {
+    url: String,
+    source: String,
+    resource_type: hiwave_shield::ResourceType,
+    reply: std::sync::mpsc::Sender<bool>,
+}
+
+fn shield_worker() -> Option<std::sync::mpsc::Sender<ShieldQuery>> {
+    use std::sync::mpsc;
+    static WORKER: std::sync::OnceLock<Option<std::sync::Mutex<mpsc::Sender<ShieldQuery>>>> =
+        std::sync::OnceLock::new();
+    static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    let slot = WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<ShieldQuery>();
+        let spawned = std::thread::Builder::new()
+            .name("shield-filter-worker".into())
+            .spawn(move || {
+                let engine = hiwave_shield::AdBlocker::with_filter_lists();
+                READY.store(true, std::sync::atomic::Ordering::Release);
+                tracing::info!("shield filter engine ready");
+                while let Ok(q) = rx.recv() {
+                    let verdict = match (Url::parse(&q.url), Url::parse(&q.source)) {
+                        (Ok(url), Ok(source)) => {
+                            engine.should_block(&url, &source, q.resource_type)
+                        }
+                        _ => false,
+                    };
+                    let _ = q.reply.send(verdict);
+                }
+            })
+            .is_ok();
+        if spawned {
+            Some(std::sync::Mutex::new(tx))
+        } else {
+            None
+        }
+    });
+    // Not ready yet (still downloading/compiling) => None => pending floor.
+    if !READY.load(std::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    slot.as_ref()
+        .and_then(|m| m.lock().ok().map(|tx| tx.clone()))
+}
+
+/// Ask the worker; None means "floor decides" (building, dead, or hop failed).
+fn shared_block(url: &Url, source: &Url, rt: hiwave_shield::ResourceType) -> Option<bool> {
+    let tx = shield_worker()?;
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    tx.send(ShieldQuery {
+        url: url.as_str().to_string(),
+        source: source.as_str().to_string(),
+        resource_type: rt,
+        reply: reply_tx,
+    })
+    .ok()?;
+    reply_rx
+        .recv_timeout(std::time::Duration::from_millis(250))
+        .ok()
+}
+
+/// Map the loader's fetch destination onto adblock-rust's resource type.
+fn dest_to_shield(dest: RequestDestination) -> hiwave_shield::ResourceType {
+    use hiwave_shield::ResourceType as R;
+    match dest {
+        RequestDestination::Document => R::Document,
+        RequestDestination::Style => R::Stylesheet,
+        RequestDestination::Script => R::Script,
+        RequestDestination::Image => R::Image,
+        RequestDestination::Font => R::Font,
+        RequestDestination::Other => R::Other,
+    }
+}
+
+/// Per-destination attempted/blocked counters — the census the privacy pin
+/// requires so the board can separate "tracker blocked" (working as
+/// intended) from "site failed".
+#[derive(Default)]
+pub struct ShieldCensus {
+    attempted: [AtomicU64; 6],
+    blocked: [AtomicU64; 6],
+    /// Requests that passed unchecked while the filter engine was still
+    /// building at startup (the allow-until-ready window).
+    pub engine_pending: AtomicU64,
+}
+
+impl ShieldCensus {
+    fn idx(dest: RequestDestination) -> usize {
+        match dest {
+            RequestDestination::Document => 0,
+            RequestDestination::Style => 1,
+            RequestDestination::Script => 2,
+            RequestDestination::Image => 3,
+            RequestDestination::Font => 4,
+            RequestDestination::Other => 5,
+        }
+    }
+    fn attempted(&self, d: RequestDestination) {
+        self.attempted[Self::idx(d)].fetch_add(1, Ordering::Relaxed);
+    }
+    fn blocked(&self, d: RequestDestination) {
+        self.blocked[Self::idx(d)].fetch_add(1, Ordering::Relaxed);
+    }
+    /// (attempted, blocked) per destination, in enum order.
+    pub fn snapshot(&self) -> [(u64, u64); 6] {
+        std::array::from_fn(|i| {
+            (
+                self.attempted[i].load(Ordering::Relaxed),
+                self.blocked[i].load(Ordering::Relaxed),
+            )
+        })
     }
 }
 
@@ -285,6 +456,8 @@ mod tests {
             timeout: None,
             credentials: Default::default(),
             referrer: None,
+            referrer_policy: Default::default(),
+            destination: RequestDestination::Other,
         }
     }
 

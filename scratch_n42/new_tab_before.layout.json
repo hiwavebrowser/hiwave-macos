@@ -1,0 +1,4685 @@
+{
+  "root": {
+    "border": {
+      "bottom": 0.0,
+      "left": 0.0,
+      "right": 0.0,
+      "top": 0.0
+    },
+    "border_box": {
+      "height": 800.0,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "children": [
+      {
+        "border": {
+          "bottom": 0.0,
+          "left": 0.0,
+          "right": 0.0,
+          "top": 0.0
+        },
+        "border_box": {
+          "height": 800.0,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "children": [
+          {
+            "border": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "border_box": {
+              "height": 800.0,
+              "width": 800.0,
+              "x": 640.0,
+              "y": -400.0
+            },
+            "children": [],
+            "content_rect": {
+              "height": 800.0,
+              "width": 800.0,
+              "x": 640.0,
+              "y": -400.0
+            },
+            "element_id": 2,
+            "margin": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "margin_box": {
+              "height": 800.0,
+              "width": 800.0,
+              "x": 640.0,
+              "y": -400.0
+            },
+            "padding": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "padding_box": {
+              "height": 800.0,
+              "width": 800.0,
+              "x": 640.0,
+              "y": -400.0
+            },
+            "selector": "body > div.ambient-glow:nth-of-type(1)",
+            "tag": "div",
+            "type": "block"
+          },
+          {
+            "border": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "border_box": {
+              "height": 713.375,
+              "width": 745.375,
+              "x": 340.0,
+              "y": 315.6875
+            },
+            "children": [
+              {
+                "border": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "border_box": {
+                  "height": 56.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 347.6875
+                },
+                "children": [
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 56.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 347.6875
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 56.0,
+                          "width": 220.6738739013672,
+                          "x": 529.6630859375,
+                          "y": 347.6875
+                        },
+                        "text": "HIWAVE",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 56.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 347.6875
+                    },
+                    "element_id": 5,
+                    "margin": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 56.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 347.6875
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 56.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 347.6875
+                    },
+                    "selector": "body > div.container:nth-of-type(2) > div.logo-wrapper:nth-of-type(1) > h1.logo",
+                    "tag": "h1",
+                    "type": "block"
+                  }
+                ],
+                "content_rect": {
+                  "height": 56.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 347.6875
+                },
+                "element_id": 4,
+                "margin": {
+                  "bottom": 8.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "margin_box": {
+                  "height": 64.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 347.6875
+                },
+                "padding": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "padding_box": {
+                  "height": 56.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 347.6875
+                },
+                "selector": "body > div.container:nth-of-type(2) > div.logo-wrapper:nth-of-type(1)",
+                "tag": "div",
+                "type": "block"
+              },
+              {
+                "border": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "border_box": {
+                  "height": 18.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 411.6875
+                },
+                "children": [
+                  {
+                    "rect": {
+                      "height": 18.0,
+                      "width": 337.27880859375,
+                      "x": 471.360595703125,
+                      "y": 411.6875
+                    },
+                    "text": "Freedom. Flow. Focus. Your wave, your choice.",
+                    "type": "text"
+                  }
+                ],
+                "content_rect": {
+                  "height": 18.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 411.6875
+                },
+                "element_id": 6,
+                "margin": {
+                  "bottom": 48.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "margin_box": {
+                  "height": 66.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 411.6875
+                },
+                "padding": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "padding_box": {
+                  "height": 18.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 411.6875
+                },
+                "selector": "body > div.container:nth-of-type(2) > p.tagline",
+                "tag": "p",
+                "type": "block"
+              },
+              {
+                "border": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "border_box": {
+                  "height": 22.375,
+                  "width": 500.0,
+                  "x": 390.0,
+                  "y": 477.6875
+                },
+                "children": [
+                  {
+                    "control_type": "TextInput { value: \"\", placeholder: \"Search or enter URL...\", input_type: \"text\" }",
+                    "rect": {
+                      "height": 19.0,
+                      "width": 500.0,
+                      "x": 390.0,
+                      "y": 477.6875
+                    },
+                    "type": "form_control"
+                  }
+                ],
+                "content_rect": {
+                  "height": 22.375,
+                  "width": 500.0,
+                  "x": 390.0,
+                  "y": 477.6875
+                },
+                "element_id": 7,
+                "margin": {
+                  "bottom": 32.0,
+                  "left": 18.0,
+                  "right": 18.0,
+                  "top": 0.0
+                },
+                "margin_box": {
+                  "height": 54.375,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 477.6875
+                },
+                "padding": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "padding_box": {
+                  "height": 22.375,
+                  "width": 500.0,
+                  "x": 390.0,
+                  "y": 477.6875
+                },
+                "selector": "body > div.container:nth-of-type(2) > div.search-container:nth-of-type(2)",
+                "tag": "div",
+                "type": "block"
+              },
+              {
+                "border": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "border_box": {
+                  "height": 449.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 548.0625
+                },
+                "children": [
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 15.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 548.0625
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 15.0,
+                          "width": 146.75286865234375,
+                          "x": 566.62353515625,
+                          "y": 548.0625
+                        },
+                        "text": "Keyboard Shortcuts",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 15.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 548.0625
+                    },
+                    "element_id": 9,
+                    "margin": {
+                      "bottom": 24.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 39.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 548.0625
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 15.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 548.0625
+                    },
+                    "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts-title:nth-of-type(1)",
+                    "tag": "div",
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 410.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 587.0625
+                    },
+                    "children": [
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 372.0,
+                          "y": 587.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 600.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 600.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 600.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 600.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 387.0,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 28.8984375,
+                                  "x": 396.0,
+                                  "y": 608.5625
+                                },
+                                "text": "Ctrl",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 28.8984375,
+                              "x": 396.0,
+                              "y": 608.5625
+                            },
+                            "element_id": 12,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 387.0,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 44.8984375,
+                              "x": 388.0,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 4.115234375,
+                              "x": 441.8984375,
+                              "y": 607.0625
+                            },
+                            "text": "/",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 454.013671875,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 463.013671875,
+                                  "y": 608.5625
+                                },
+                                "text": "Cmd",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 21.673828125,
+                              "x": 463.013671875,
+                              "y": 608.5625
+                            },
+                            "element_id": 13,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 454.013671875,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 37.673828125,
+                              "x": 455.013671875,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 501.6875,
+                              "y": 607.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 518.35546875,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 7.224609375,
+                                  "x": 527.35546875,
+                                  "y": 608.5625
+                                },
+                                "text": "K",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 7.224609375,
+                              "x": 527.35546875,
+                              "y": 608.5625
+                            },
+                            "element_id": 14,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 518.35546875,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 23.224609375,
+                              "x": 519.35546875,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > kbd:nth-of-type(3)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 642.8173828125,
+                              "y": 600.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 34.0,
+                              "width": 66.0966796875,
+                              "x": 551.580078125,
+                              "y": 598.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 34.0,
+                                  "width": 66.0966796875,
+                                  "x": 551.580078125,
+                                  "y": 598.5625
+                                },
+                                "text": "Command Palette",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 34.0,
+                              "width": 66.0966796875,
+                              "x": 551.580078125,
+                              "y": 598.5625
+                            },
+                            "element_id": 15,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 34.0,
+                              "width": 66.0966796875,
+                              "x": 551.580078125,
+                              "y": 598.5625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 34.0,
+                              "width": 66.0966796875,
+                              "x": 551.580078125,
+                              "y": 598.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 34.0,
+                          "width": 150.0,
+                          "x": 387.0,
+                          "y": 598.5625
+                        },
+                        "element_id": 11,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 372.0,
+                          "y": 587.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 55.0,
+                          "width": 178.0,
+                          "x": 373.0,
+                          "y": 588.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 564.0,
+                          "y": 587.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 650.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 650.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 650.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 650.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 579.0,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 28.8984375,
+                                  "x": 588.0,
+                                  "y": 608.5625
+                                },
+                                "text": "Ctrl",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 28.8984375,
+                              "x": 588.0,
+                              "y": 608.5625
+                            },
+                            "element_id": 17,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 579.0,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 44.8984375,
+                              "x": 580.0,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 4.115234375,
+                              "x": 633.8984375,
+                              "y": 607.0625
+                            },
+                            "text": "/",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 646.013671875,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 655.013671875,
+                                  "y": 608.5625
+                                },
+                                "text": "Cmd",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 21.673828125,
+                              "x": 655.013671875,
+                              "y": 608.5625
+                            },
+                            "element_id": 18,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 646.013671875,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 37.673828125,
+                              "x": 647.013671875,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 693.6875,
+                              "y": 607.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 710.35546875,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 7.224609375,
+                                  "x": 719.35546875,
+                                  "y": 608.5625
+                                },
+                                "text": "T",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 7.224609375,
+                              "x": 719.35546875,
+                              "y": 608.5625
+                            },
+                            "element_id": 19,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 710.35546875,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 23.224609375,
+                              "x": 711.35546875,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > kbd:nth-of-type(3)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 671.740234375,
+                              "y": 650.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 34.0,
+                              "width": 28.779296875,
+                              "x": 743.580078125,
+                              "y": 598.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 34.0,
+                                  "width": 28.779296875,
+                                  "x": 743.580078125,
+                                  "y": 598.5625
+                                },
+                                "text": "New Tab",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 34.0,
+                              "width": 28.779296875,
+                              "x": 743.580078125,
+                              "y": 598.5625
+                            },
+                            "element_id": 20,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 34.0,
+                              "width": 28.779296875,
+                              "x": 743.580078125,
+                              "y": 598.5625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 34.0,
+                              "width": 28.779296875,
+                              "x": 743.580078125,
+                              "y": 598.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 34.0,
+                          "width": 150.0,
+                          "x": 579.0,
+                          "y": 598.5625
+                        },
+                        "element_id": 16,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 564.0,
+                          "y": 587.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 55.0,
+                          "width": 178.0,
+                          "x": 565.0,
+                          "y": 588.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 756.0,
+                          "y": 587.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 700.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 700.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 700.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 700.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 771.0,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 28.8984375,
+                                  "x": 780.0,
+                                  "y": 608.5625
+                                },
+                                "text": "Ctrl",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 28.8984375,
+                              "x": 780.0,
+                              "y": 608.5625
+                            },
+                            "element_id": 22,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 771.0,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 44.8984375,
+                              "x": 772.0,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 4.115234375,
+                              "x": 825.8984375,
+                              "y": 607.0625
+                            },
+                            "text": "/",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 838.013671875,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 847.013671875,
+                                  "y": 608.5625
+                                },
+                                "text": "Cmd",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 21.673828125,
+                              "x": 847.013671875,
+                              "y": 608.5625
+                            },
+                            "element_id": 23,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 838.013671875,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 37.673828125,
+                              "x": 839.013671875,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 885.6875,
+                              "y": 607.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 902.35546875,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 7.224609375,
+                                  "x": 911.35546875,
+                                  "y": 608.5625
+                                },
+                                "text": "W",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 7.224609375,
+                              "x": 911.35546875,
+                              "y": 608.5625
+                            },
+                            "element_id": 24,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 902.35546875,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 23.224609375,
+                              "x": 903.35546875,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > kbd:nth-of-type(3)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 667.92578125,
+                              "y": 700.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 34.0,
+                              "width": 36.408203125,
+                              "x": 935.580078125,
+                              "y": 598.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 34.0,
+                                  "width": 36.408203125,
+                                  "x": 935.580078125,
+                                  "y": 598.5625
+                                },
+                                "text": "Close Tab",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 34.0,
+                              "width": 36.408203125,
+                              "x": 935.580078125,
+                              "y": 598.5625
+                            },
+                            "element_id": 25,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 34.0,
+                              "width": 36.408203125,
+                              "x": 935.580078125,
+                              "y": 598.5625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 34.0,
+                              "width": 36.408203125,
+                              "x": 935.580078125,
+                              "y": 598.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 34.0,
+                          "width": 150.0,
+                          "x": 771.0,
+                          "y": 598.5625
+                        },
+                        "element_id": 21,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 756.0,
+                          "y": 587.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 55.0,
+                          "width": 178.0,
+                          "x": 757.0,
+                          "y": 588.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 948.0,
+                          "y": 587.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 750.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 750.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 750.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 750.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 963.0,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 28.8984375,
+                                  "x": 972.0,
+                                  "y": 608.5625
+                                },
+                                "text": "Ctrl",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 28.8984375,
+                              "x": 972.0,
+                              "y": 608.5625
+                            },
+                            "element_id": 27,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 963.0,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 44.8984375,
+                              "x": 964.0,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 1017.8984375,
+                              "y": 607.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 54.123046875,
+                              "x": 1034.56640625,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 36.123046875,
+                                  "x": 1043.56640625,
+                                  "y": 608.5625
+                                },
+                                "text": "Shift",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 36.123046875,
+                              "x": 1043.56640625,
+                              "y": 608.5625
+                            },
+                            "element_id": 28,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 54.123046875,
+                              "x": 1034.56640625,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 52.123046875,
+                              "x": 1035.56640625,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 1096.689453125,
+                              "y": 607.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 1113.357421875,
+                              "y": 603.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 7.224609375,
+                                  "x": 1122.357421875,
+                                  "y": 608.5625
+                                },
+                                "text": "S",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 7.224609375,
+                              "x": 1122.357421875,
+                              "y": 608.5625
+                            },
+                            "element_id": 29,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 1113.357421875,
+                              "y": 603.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 23.224609375,
+                              "x": 1114.357421875,
+                              "y": 604.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > kbd:nth-of-type(3)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 673.9404296875,
+                              "y": 750.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 34.0,
+                              "width": 43.380859375,
+                              "x": 1146.58203125,
+                              "y": 598.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 34.0,
+                                  "width": 43.380859375,
+                                  "x": 1146.58203125,
+                                  "y": 598.5625
+                                },
+                                "text": "Shelve Tab",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 34.0,
+                              "width": 43.380859375,
+                              "x": 1146.58203125,
+                              "y": 598.5625
+                            },
+                            "element_id": 30,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 34.0,
+                              "width": 43.380859375,
+                              "x": 1146.58203125,
+                              "y": 598.5625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 34.0,
+                              "width": 43.380859375,
+                              "x": 1146.58203125,
+                              "y": 598.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 34.0,
+                          "width": 150.0,
+                          "x": 963.0,
+                          "y": 598.5625
+                        },
+                        "element_id": 26,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 948.0,
+                          "y": 587.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 55.0,
+                          "width": 178.0,
+                          "x": 949.0,
+                          "y": 588.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 372.0,
+                          "y": 739.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 800.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 800.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 800.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 800.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 387.0,
+                              "y": 755.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 28.8984375,
+                                  "x": 396.0,
+                                  "y": 760.5625
+                                },
+                                "text": "Ctrl",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 28.8984375,
+                              "x": 396.0,
+                              "y": 760.5625
+                            },
+                            "element_id": 32,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 387.0,
+                              "y": 755.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 44.8984375,
+                              "x": 388.0,
+                              "y": 756.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 4.115234375,
+                              "x": 441.8984375,
+                              "y": 759.0625
+                            },
+                            "text": "/",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 454.013671875,
+                              "y": 755.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 463.013671875,
+                                  "y": 760.5625
+                                },
+                                "text": "Cmd",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 21.673828125,
+                              "x": 463.013671875,
+                              "y": 760.5625
+                            },
+                            "element_id": 33,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 454.013671875,
+                              "y": 755.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 37.673828125,
+                              "x": 455.013671875,
+                              "y": 756.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 501.6875,
+                              "y": 759.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 518.35546875,
+                              "y": 755.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 7.224609375,
+                                  "x": 527.35546875,
+                                  "y": 760.5625
+                                },
+                                "text": "L",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 7.224609375,
+                              "x": 527.35546875,
+                              "y": 760.5625
+                            },
+                            "element_id": 34,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 518.35546875,
+                              "y": 755.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 23.224609375,
+                              "x": 519.35546875,
+                              "y": 756.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > kbd:nth-of-type(3)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 660.81640625,
+                              "y": 800.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 34.0,
+                              "width": 53.56640625,
+                              "x": 551.580078125,
+                              "y": 750.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 34.0,
+                                  "width": 53.56640625,
+                                  "x": 551.580078125,
+                                  "y": 750.5625
+                                },
+                                "text": "Address Bar",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 34.0,
+                              "width": 53.56640625,
+                              "x": 551.580078125,
+                              "y": 750.5625
+                            },
+                            "element_id": 35,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 34.0,
+                              "width": 53.56640625,
+                              "x": 551.580078125,
+                              "y": 750.5625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 34.0,
+                              "width": 53.56640625,
+                              "x": 551.580078125,
+                              "y": 750.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 34.0,
+                          "width": 150.0,
+                          "x": 387.0,
+                          "y": 750.5625
+                        },
+                        "element_id": 31,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 372.0,
+                          "y": 739.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 55.0,
+                          "width": 178.0,
+                          "x": 373.0,
+                          "y": 740.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 564.0,
+                          "y": 739.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 850.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 850.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 850.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 850.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 579.0,
+                              "y": 755.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 28.8984375,
+                                  "x": 588.0,
+                                  "y": 760.5625
+                                },
+                                "text": "Ctrl",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 28.8984375,
+                              "x": 588.0,
+                              "y": 760.5625
+                            },
+                            "element_id": 37,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 579.0,
+                              "y": 755.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 44.8984375,
+                              "x": 580.0,
+                              "y": 756.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 4.115234375,
+                              "x": 633.8984375,
+                              "y": 759.0625
+                            },
+                            "text": "/",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 646.013671875,
+                              "y": 755.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 655.013671875,
+                                  "y": 760.5625
+                                },
+                                "text": "Cmd",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 21.673828125,
+                              "x": 655.013671875,
+                              "y": 760.5625
+                            },
+                            "element_id": 38,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 646.013671875,
+                              "y": 755.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 37.673828125,
+                              "x": 647.013671875,
+                              "y": 756.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 693.6875,
+                              "y": 759.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 710.35546875,
+                              "y": 755.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 7.224609375,
+                                  "x": 719.35546875,
+                                  "y": 760.5625
+                                },
+                                "text": "R",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 7.224609375,
+                              "x": 719.35546875,
+                              "y": 760.5625
+                            },
+                            "element_id": 39,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 710.35546875,
+                              "y": 755.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 23.224609375,
+                              "x": 711.35546875,
+                              "y": 756.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > kbd:nth-of-type(3)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 662.935546875,
+                              "y": 850.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 34.0,
+                              "width": 44.37890625,
+                              "x": 743.580078125,
+                              "y": 750.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 34.0,
+                                  "width": 44.37890625,
+                                  "x": 743.580078125,
+                                  "y": 750.5625
+                                },
+                                "text": "Reload (F5)",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 34.0,
+                              "width": 44.37890625,
+                              "x": 743.580078125,
+                              "y": 750.5625
+                            },
+                            "element_id": 40,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 34.0,
+                              "width": 44.37890625,
+                              "x": 743.580078125,
+                              "y": 750.5625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 34.0,
+                              "width": 44.37890625,
+                              "x": 743.580078125,
+                              "y": 750.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 34.0,
+                          "width": 150.0,
+                          "x": 579.0,
+                          "y": 750.5625
+                        },
+                        "element_id": 36,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 564.0,
+                          "y": 739.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 55.0,
+                          "width": 178.0,
+                          "x": 565.0,
+                          "y": 740.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 756.0,
+                          "y": 739.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 900.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 900.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 900.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 900.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 771.0,
+                              "y": 755.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 28.8984375,
+                                  "x": 780.0,
+                                  "y": 760.5625
+                                },
+                                "text": "Ctrl",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 28.8984375,
+                              "x": 780.0,
+                              "y": 760.5625
+                            },
+                            "element_id": 42,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 771.0,
+                              "y": 755.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 44.8984375,
+                              "x": 772.0,
+                              "y": 756.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 4.115234375,
+                              "x": 825.8984375,
+                              "y": 759.0625
+                            },
+                            "text": "/",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 838.013671875,
+                              "y": 755.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 847.013671875,
+                                  "y": 760.5625
+                                },
+                                "text": "Cmd",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 21.673828125,
+                              "x": 847.013671875,
+                              "y": 760.5625
+                            },
+                            "element_id": 43,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 838.013671875,
+                              "y": 755.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 37.673828125,
+                              "x": 839.013671875,
+                              "y": 756.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 885.6875,
+                              "y": 759.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 902.35546875,
+                              "y": 755.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 7.224609375,
+                                  "x": 911.35546875,
+                                  "y": 760.5625
+                                },
+                                "text": "B",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 7.224609375,
+                              "x": 911.35546875,
+                              "y": 760.5625
+                            },
+                            "element_id": 44,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 25.224609375,
+                              "x": 902.35546875,
+                              "y": 755.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 23.224609375,
+                              "x": 903.35546875,
+                              "y": 756.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > kbd:nth-of-type(3)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 651.29052734375,
+                              "y": 900.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 34.0,
+                              "width": 49.5810546875,
+                              "x": 935.580078125,
+                              "y": 750.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 34.0,
+                                  "width": 49.5810546875,
+                                  "x": 935.580078125,
+                                  "y": 750.5625
+                                },
+                                "text": "Toggle Sidebar",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 34.0,
+                              "width": 49.5810546875,
+                              "x": 935.580078125,
+                              "y": 750.5625
+                            },
+                            "element_id": 45,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 34.0,
+                              "width": 49.5810546875,
+                              "x": 935.580078125,
+                              "y": 750.5625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 34.0,
+                              "width": 49.5810546875,
+                              "x": 935.580078125,
+                              "y": 750.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 34.0,
+                          "width": 150.0,
+                          "x": 771.0,
+                          "y": 750.5625
+                        },
+                        "element_id": 41,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 756.0,
+                          "y": 739.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 55.0,
+                          "width": 178.0,
+                          "x": 757.0,
+                          "y": 740.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 47.0,
+                          "width": 180.0,
+                          "x": 948.0,
+                          "y": 739.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 950.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 950.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 950.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 950.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 44.58222198486328,
+                              "x": 963.0,
+                              "y": 750.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 974.4542236328125,
+                                  "y": 755.5625
+                                },
+                                "text": "Alt",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 26.58222198486328,
+                              "x": 972.0,
+                              "y": 755.5625
+                            },
+                            "element_id": 47,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 44.58222198486328,
+                              "x": 963.0,
+                              "y": 750.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 42.58222198486328,
+                              "x": 964.0,
+                              "y": 751.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 1015.5822143554688,
+                              "y": 754.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 50.16688919067383,
+                              "x": 1032.250244140625,
+                              "y": 750.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 28.8984375,
+                                  "x": 1042.884521484375,
+                                  "y": 755.5625
+                                },
+                                "text": "Left",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 32.16688919067383,
+                              "x": 1041.250244140625,
+                              "y": 755.5625
+                            },
+                            "element_id": 48,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 50.16688919067383,
+                              "x": 1032.250244140625,
+                              "y": 750.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 48.16688919067383,
+                              "x": 1033.250244140625,
+                              "y": 751.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 669.8466796875,
+                              "y": 950.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 17.0,
+                              "width": 31.759765625,
+                              "x": 1090.4171142578125,
+                              "y": 754.0625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 17.0,
+                                  "width": 31.759765625,
+                                  "x": 1090.4171142578125,
+                                  "y": 754.0625
+                                },
+                                "text": "Back",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 17.0,
+                              "width": 31.759765625,
+                              "x": 1090.4171142578125,
+                              "y": 754.0625
+                            },
+                            "element_id": 49,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 17.0,
+                              "width": 31.759765625,
+                              "x": 1090.4171142578125,
+                              "y": 754.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 17.0,
+                              "width": 31.759765625,
+                              "x": 1090.4171142578125,
+                              "y": 754.0625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 24.0,
+                          "width": 150.0,
+                          "x": 963.0,
+                          "y": 750.5625
+                        },
+                        "element_id": 46,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 47.0,
+                          "width": 180.0,
+                          "x": 948.0,
+                          "y": 739.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 45.0,
+                          "width": 178.0,
+                          "x": 949.0,
+                          "y": 740.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 47.0,
+                          "width": 180.0,
+                          "x": 372.0,
+                          "y": 891.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1000.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1000.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1000.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1000.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 387.0,
+                              "y": 902.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 396.0,
+                                  "y": 907.5625
+                                },
+                                "text": "Alt",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 21.673828125,
+                              "x": 396.0,
+                              "y": 907.5625
+                            },
+                            "element_id": 51,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 387.0,
+                              "y": 902.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 37.673828125,
+                              "x": 388.0,
+                              "y": 903.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 434.673828125,
+                              "y": 906.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 54.123046875,
+                              "x": 451.341796875,
+                              "y": 902.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 36.123046875,
+                                  "x": 460.341796875,
+                                  "y": 907.5625
+                                },
+                                "text": "Right",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 36.123046875,
+                              "x": 460.341796875,
+                              "y": 907.5625
+                            },
+                            "element_id": 52,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 54.123046875,
+                              "x": 451.341796875,
+                              "y": 902.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 52.123046875,
+                              "x": 452.341796875,
+                              "y": 903.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 662.80859375,
+                              "y": 1000.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 17.0,
+                              "width": 53.060546875,
+                              "x": 513.46484375,
+                              "y": 906.0625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 17.0,
+                                  "width": 53.060546875,
+                                  "x": 513.46484375,
+                                  "y": 906.0625
+                                },
+                                "text": "Forward",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 17.0,
+                              "width": 53.060546875,
+                              "x": 513.46484375,
+                              "y": 906.0625
+                            },
+                            "element_id": 53,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 17.0,
+                              "width": 53.060546875,
+                              "x": 513.46484375,
+                              "y": 906.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 17.0,
+                              "width": 53.060546875,
+                              "x": 513.46484375,
+                              "y": 906.0625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 24.0,
+                          "width": 150.0,
+                          "x": 387.0,
+                          "y": 902.5625
+                        },
+                        "element_id": 50,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 47.0,
+                          "width": 180.0,
+                          "x": 372.0,
+                          "y": 891.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 45.0,
+                          "width": 178.0,
+                          "x": 373.0,
+                          "y": 892.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 47.0,
+                          "width": 180.0,
+                          "x": 564.0,
+                          "y": 891.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1050.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1050.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1050.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1050.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 42.87752151489258,
+                              "x": 579.0,
+                              "y": 902.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 589.6018676757812,
+                                  "y": 907.5625
+                                },
+                                "text": "Alt",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 24.877521514892578,
+                              "x": 588.0,
+                              "y": 907.5625
+                            },
+                            "element_id": 55,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 42.87752151489258,
+                              "x": 579.0,
+                              "y": 902.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 40.87752151489258,
+                              "x": 580.0,
+                              "y": 903.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 629.8775024414062,
+                              "y": 906.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 48.2486457824707,
+                              "x": 646.5454711914062,
+                              "y": 902.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 28.8984375,
+                                  "x": 656.2205810546875,
+                                  "y": 907.5625
+                                },
+                                "text": "Home",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 30.248645782470703,
+                              "x": 655.5454711914062,
+                              "y": 907.5625
+                            },
+                            "element_id": 56,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 48.2486457824707,
+                              "x": 646.5454711914062,
+                              "y": 902.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 46.2486457824707,
+                              "x": 647.5454711914062,
+                              "y": 903.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 666.6064453125,
+                              "y": 1050.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 17.0,
+                              "width": 38.240234375,
+                              "x": 702.7941284179688,
+                              "y": 906.0625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 17.0,
+                                  "width": 38.240234375,
+                                  "x": 702.7941284179688,
+                                  "y": 906.0625
+                                },
+                                "text": "Home",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 17.0,
+                              "width": 38.240234375,
+                              "x": 702.7941284179688,
+                              "y": 906.0625
+                            },
+                            "element_id": 57,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 17.0,
+                              "width": 38.240234375,
+                              "x": 702.7941284179688,
+                              "y": 906.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 17.0,
+                              "width": 38.240234375,
+                              "x": 702.7941284179688,
+                              "y": 906.0625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 24.0,
+                          "width": 150.0,
+                          "x": 579.0,
+                          "y": 902.5625
+                        },
+                        "element_id": 54,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 47.0,
+                          "width": 180.0,
+                          "x": 564.0,
+                          "y": 891.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 45.0,
+                          "width": 178.0,
+                          "x": 565.0,
+                          "y": 892.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 756.0,
+                          "y": 891.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1100.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1100.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1100.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1100.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 771.0,
+                              "y": 907.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 28.8984375,
+                                  "x": 780.0,
+                                  "y": 912.5625
+                                },
+                                "text": "Ctrl",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 28.8984375,
+                              "x": 780.0,
+                              "y": 912.5625
+                            },
+                            "element_id": 59,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 46.8984375,
+                              "x": 771.0,
+                              "y": 907.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 44.8984375,
+                              "x": 772.0,
+                              "y": 908.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11) > kbd:nth-of-type(1)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 17.0,
+                              "width": 8.66796875,
+                              "x": 825.8984375,
+                              "y": 911.0625
+                            },
+                            "text": "+",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 842.56640625,
+                              "y": 907.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 851.56640625,
+                                  "y": 912.5625
+                                },
+                                "text": "1-9",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 21.673828125,
+                              "x": 851.56640625,
+                              "y": 912.5625
+                            },
+                            "element_id": 60,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 39.673828125,
+                              "x": 842.56640625,
+                              "y": 907.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 37.673828125,
+                              "x": 843.56640625,
+                              "y": 908.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11) > kbd:nth-of-type(2)",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 646.1328125,
+                              "y": 1100.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 34.0,
+                              "width": 47.415924072265625,
+                              "x": 890.240234375,
+                              "y": 902.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 34.0,
+                                  "width": 47.263671875,
+                                  "x": 890.240234375,
+                                  "y": 902.5625
+                                },
+                                "text": "Switch Tabs",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 34.0,
+                              "width": 47.415924072265625,
+                              "x": 890.240234375,
+                              "y": 902.5625
+                            },
+                            "element_id": 61,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 34.0,
+                              "width": 47.415924072265625,
+                              "x": 890.240234375,
+                              "y": 902.5625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 34.0,
+                              "width": 47.415924072265625,
+                              "x": 890.240234375,
+                              "y": 902.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 34.0,
+                          "width": 150.0,
+                          "x": 771.0,
+                          "y": 902.5625
+                        },
+                        "element_id": 58,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 756.0,
+                          "y": 891.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 55.0,
+                          "width": 178.0,
+                          "x": 757.0,
+                          "y": 892.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11)",
+                        "tag": "div",
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 1.0,
+                          "left": 1.0,
+                          "right": 1.0,
+                          "top": 1.0
+                        },
+                        "border_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 948.0,
+                          "y": 891.0625
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1150.0625
+                            },
+                            "children": [],
+                            "content_rect": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1150.0625
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1150.0625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 18.84375,
+                              "width": 3.0,
+                              "x": 389.0,
+                              "y": 1150.0625
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "border": {
+                              "bottom": 1.0,
+                              "left": 1.0,
+                              "right": 1.0,
+                              "top": 1.0
+                            },
+                            "border_box": {
+                              "height": 24.0,
+                              "width": 45.050960540771484,
+                              "x": 963.0,
+                              "y": 907.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 14.0,
+                                  "width": 21.673828125,
+                                  "x": 974.6885375976562,
+                                  "y": 912.5625
+                                },
+                                "text": "Esc",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 14.0,
+                              "width": 27.050960540771484,
+                              "x": 972.0,
+                              "y": 912.5625
+                            },
+                            "element_id": 63,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 24.0,
+                              "width": 45.050960540771484,
+                              "x": 963.0,
+                              "y": 907.5625
+                            },
+                            "padding": {
+                              "bottom": 4.0,
+                              "left": 8.0,
+                              "right": 8.0,
+                              "top": 4.0
+                            },
+                            "padding_box": {
+                              "height": 22.0,
+                              "width": 43.050960540771484,
+                              "x": 964.0,
+                              "y": 908.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(12) > kbd",
+                            "tag": "kbd",
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 0.0,
+                              "width": 0.0,
+                              "x": 595.88671875,
+                              "y": 1150.0625
+                            },
+                            "text": " ",
+                            "type": "text"
+                          },
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 34.0,
+                              "width": 96.94904327392578,
+                              "x": 1016.0509643554688,
+                              "y": 902.5625
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 34.0,
+                                  "width": 74.5322265625,
+                                  "x": 1016.0509643554688,
+                                  "y": 902.5625
+                                },
+                                "text": "Stop/Close Sidebar",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 34.0,
+                              "width": 96.94904327392578,
+                              "x": 1016.0509643554688,
+                              "y": 902.5625
+                            },
+                            "element_id": 64,
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 34.0,
+                              "width": 96.94904327392578,
+                              "x": 1016.0509643554688,
+                              "y": 902.5625
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 34.0,
+                              "width": 96.94904327392578,
+                              "x": 1016.0509643554688,
+                              "y": 902.5625
+                            },
+                            "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(12) > span.shortcut-label",
+                            "tag": "span",
+                            "type": "inline"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 34.0,
+                          "width": 150.0,
+                          "x": 963.0,
+                          "y": 902.5625
+                        },
+                        "element_id": 62,
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 57.0,
+                          "width": 180.0,
+                          "x": 948.0,
+                          "y": 891.0625
+                        },
+                        "padding": {
+                          "bottom": 10.5,
+                          "left": 14.0,
+                          "right": 14.0,
+                          "top": 10.5
+                        },
+                        "padding_box": {
+                          "height": 55.0,
+                          "width": 178.0,
+                          "x": 949.0,
+                          "y": 892.0625
+                        },
+                        "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(12)",
+                        "tag": "div",
+                        "type": "block"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 410.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 587.0625
+                    },
+                    "element_id": 10,
+                    "margin": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 410.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 587.0625
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 410.0,
+                      "width": 536.0,
+                      "x": 372.0,
+                      "y": 587.0625
+                    },
+                    "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2)",
+                    "tag": "div",
+                    "type": "block"
+                  }
+                ],
+                "content_rect": {
+                  "height": 449.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 548.0625
+                },
+                "element_id": 8,
+                "margin": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 48.0
+                },
+                "margin_box": {
+                  "height": 497.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 500.0625
+                },
+                "padding": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "padding_box": {
+                  "height": 449.0,
+                  "width": 536.0,
+                  "x": 372.0,
+                  "y": 548.0625
+                },
+                "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3)",
+                "tag": "div",
+                "type": "block"
+              }
+            ],
+            "content_rect": {
+              "height": 649.375,
+              "width": 681.375,
+              "x": 372.0,
+              "y": 347.6875
+            },
+            "element_id": 3,
+            "margin": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "margin_box": {
+              "height": 713.375,
+              "width": 745.375,
+              "x": 340.0,
+              "y": 315.6875
+            },
+            "padding": {
+              "bottom": 32.0,
+              "left": 32.0,
+              "right": 32.0,
+              "top": 32.0
+            },
+            "padding_box": {
+              "height": 713.375,
+              "width": 745.375,
+              "x": 340.0,
+              "y": 315.6875
+            },
+            "selector": "body > div.container:nth-of-type(2)",
+            "tag": "div",
+            "type": "block"
+          },
+          {
+            "border": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "border_box": {
+              "height": 15.0,
+              "width": 1280.0,
+              "x": 0.0,
+              "y": 769.0
+            },
+            "children": [
+              {
+                "rect": {
+                  "height": 15.0,
+                  "width": 93.5625,
+                  "x": 0.0,
+                  "y": 769.0
+                },
+                "text": "HiWave v0.1.0 - ",
+                "type": "text"
+              },
+              {
+                "border": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "border_box": {
+                  "height": 14.1328125,
+                  "width": 46.78125,
+                  "x": 93.5625,
+                  "y": 769.43359375
+                },
+                "children": [
+                  {
+                    "rect": {
+                      "height": 15.0,
+                      "width": 46.78125,
+                      "x": 93.5625,
+                      "y": 769.43359375
+                    },
+                    "text": "Settings",
+                    "type": "text"
+                  }
+                ],
+                "content_rect": {
+                  "height": 14.1328125,
+                  "width": 46.78125,
+                  "x": 93.5625,
+                  "y": 769.43359375
+                },
+                "element_id": 66,
+                "margin": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "margin_box": {
+                  "height": 14.1328125,
+                  "width": 46.78125,
+                  "x": 93.5625,
+                  "y": 769.43359375
+                },
+                "padding": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "padding_box": {
+                  "height": 14.1328125,
+                  "width": 46.78125,
+                  "x": 93.5625,
+                  "y": 769.43359375
+                },
+                "selector": "body > div.footer:nth-of-type(3) > a",
+                "tag": "a",
+                "type": "inline"
+              }
+            ],
+            "content_rect": {
+              "height": 15.0,
+              "width": 1280.0,
+              "x": 0.0,
+              "y": 769.0
+            },
+            "element_id": 65,
+            "margin": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "margin_box": {
+              "height": 15.0,
+              "width": 1280.0,
+              "x": 0.0,
+              "y": 769.0
+            },
+            "padding": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "padding_box": {
+              "height": 15.0,
+              "width": 1280.0,
+              "x": 0.0,
+              "y": 769.0
+            },
+            "selector": "body > div.footer:nth-of-type(3)",
+            "tag": "div",
+            "type": "block"
+          }
+        ],
+        "content_rect": {
+          "height": 800.0,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "element_id": 1,
+        "margin": {
+          "bottom": 0.0,
+          "left": 0.0,
+          "right": 0.0,
+          "top": 0.0
+        },
+        "margin_box": {
+          "height": 800.0,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "padding": {
+          "bottom": 0.0,
+          "left": 0.0,
+          "right": 0.0,
+          "top": 0.0
+        },
+        "padding_box": {
+          "height": 800.0,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "selector": "html > body",
+        "tag": "body",
+        "type": "block"
+      }
+    ],
+    "content_rect": {
+      "height": 800.0,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "margin": {
+      "bottom": 0.0,
+      "left": 0.0,
+      "right": 0.0,
+      "top": 0.0
+    },
+    "margin_box": {
+      "height": 800.0,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "padding": {
+      "bottom": 0.0,
+      "left": 0.0,
+      "right": 0.0,
+      "top": 0.0
+    },
+    "padding_box": {
+      "height": 800.0,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "type": "block"
+  },
+  "version": 1,
+  "viewport": {
+    "height": 800,
+    "width": 1280
+  }
+}

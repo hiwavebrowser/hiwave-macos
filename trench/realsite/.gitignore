@@ -1,0 +1,3 @@
+# Per-site artifact dirs (screenshots, PPM frames, display lists) are
+# ~5 MB per site per run; only the per-site JSON and summary.json are kept.
+runs/*/*/

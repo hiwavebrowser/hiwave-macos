@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>n52: a grid item's rem padding resolved against its own font size; a column flex item measured its children's margin-box sum</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 16px; background: #fff; color: #222; }
+  .label { font: 12px monospace; color: #888; margin: 8px 0 2px; }
+
+  /* A: the new_tab shortcut idiom verbatim — a grid of flex rows whose padding/gap are in rem
+     while the row's font-size is 14px. Chrome: every row 60 tall (two-line label) / 50 (one-line),
+     first key at x 17 inside the row. Before: 57 / 47 and x 15 (0.75rem/1rem read as 10.5/14). */
+  .shortcuts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; width: 536px; }
+  .shortcut { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem; background: #eef; border: 1px solid #99c; border-radius: 8px; font-size: 0.875rem; }
+  .shortcut kbd { background: #fff; padding: 0.25rem 0.5rem; border-radius: 4px; font-family: monospace; font-size: 0.75rem; border: 1px solid #aaa; font-weight: 600; }
+  .shortcut-label { flex: 1; text-align: left; }
+
+  /* B: the same rows in px (control — was already right) */
+  .px .shortcuts { gap: 12px; }
+  .px .shortcut { gap: 8px; padding: 12px 16px; font-size: 14px; }
+  .px .shortcut kbd { padding: 4px 8px; font-size: 12px; }
+
+  /* C: a column flex container whose block item holds a margined seam:
+     search box margin-bottom 2rem, next section margin-top 3rem. Chrome: the seam is 48 and the
+     item is 16 + 20 + 48 + 20 + 16 = 120 tall. Before: 152 (the 32 the seam absorbed was charged
+     again as empty space under the last child). */
+  .col { display: flex; flex-direction: column; align-items: center; width: 400px; background: #fee; }
+  .card { padding: 16px; background: #ffe; border: 1px solid #cc9; width: 300px; }
+  .sc { margin: 0 auto 2rem; height: 20px; background: #dfd; }
+  .sec { margin-top: 3rem; height: 20px; background: #fdd; }
+
+  /* D: a column flex item with no padding keeps its last child's bottom margin inside
+     (a flex item is a formatting-context root). Chrome: 36 tall. */
+  .bare { width: 300px; background: #eef; }
+  .p { height: 20px; margin-bottom: 16px; background: #dde; }
+</style>
+</head>
+<body>
+<div class="label">A: grid of flex rows, rem padding (Chrome rows 60 / 50)</div>
+<div class="shortcuts" id="a">
+  <div class="shortcut"><kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>K</kbd> <span class="shortcut-label">Command Palette</span></div>
+  <div class="shortcut"><kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>T</kbd> <span class="shortcut-label">New Tab</span></div>
+  <div class="shortcut"><kbd>Alt</kbd>+<kbd>Left</kbd> <span class="shortcut-label">Back</span></div>
+  <div class="shortcut"><kbd>Alt</kbd>+<kbd>Right</kbd> <span class="shortcut-label">Forward</span></div>
+</div>
+
+<div class="label">B: the same rows in px (control)</div>
+<div class="px"><div class="shortcuts" id="b">
+  <div class="shortcut"><kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>K</kbd> <span class="shortcut-label">Command Palette</span></div>
+  <div class="shortcut"><kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>T</kbd> <span class="shortcut-label">New Tab</span></div>
+</div></div>
+
+<div class="label">C: column flex item with a collapsed seam inside (Chrome item 120)</div>
+<div class="col"><div class="card" id="c"><div class="sc"></div><div class="sec"></div></div></div>
+
+<div class="label">D: bare column flex item keeps its last child's bottom margin (Chrome 36)</div>
+<div class="col"><div class="bare" id="d"><div class="p"></div></div></div>
+</body>
+</html>

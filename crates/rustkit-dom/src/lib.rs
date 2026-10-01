@@ -83,6 +83,9 @@ pub enum NodeType {
         target: String,
         data: String,
     },
+    /// A script-created `DocumentFragment`. Never in the document tree:
+    /// inserting one moves its children instead.
+    DocumentFragment,
 }
 
 /// A DOM node.
@@ -267,10 +270,11 @@ impl Node {
 pub struct Document {
     /// Root node of the document.
     root: Rc<Node>,
-    /// All nodes indexed by ID.
-    nodes: HashMap<NodeId, Rc<Node>>,
+    /// All nodes indexed by ID. A `RefCell` so script can create nodes and
+    /// replace a node's data through a shared `Rc<Document>`.
+    nodes: RefCell<HashMap<NodeId, Rc<Node>>>,
     /// Elements indexed by ID attribute.
-    elements_by_id: HashMap<String, Rc<Node>>,
+    elements_by_id: RefCell<HashMap<String, Rc<Node>>>,
     /// Next node ID.
     next_id: Cell<usize>,
 }
@@ -302,7 +306,7 @@ impl DocumentSink {
         self.doc.next_id.set(self.doc.next_id.get() + 1);
 
         let node = Node::new(id, node_type);
-        self.doc.nodes.insert(id, node.clone());
+        self.doc.nodes.borrow_mut().insert(id, node.clone());
         node
     }
 }
@@ -338,7 +342,10 @@ impl rustkit_html::TreeSink for DocumentSink {
 
         // Index by ID attribute
         if let Some(id) = node.get_attribute("id") {
-            self.doc.elements_by_id.insert(id.to_string(), node.clone());
+            self.doc
+                .elements_by_id
+                .borrow_mut()
+                .insert(id.to_string(), node.clone());
         }
 
         let parent = self.current_parent();
@@ -468,8 +475,8 @@ impl Document {
 
         Self {
             root,
-            nodes,
-            elements_by_id: HashMap::new(),
+            nodes: RefCell::new(nodes),
+            elements_by_id: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
         }
     }
@@ -481,7 +488,7 @@ impl Document {
         let sink = DocumentSink::new();
         let sink = rustkit_html::parse(html, sink).map_err(|e| DomError::ParseError(e.to_string()))?;
 
-        debug!(node_count = sink.doc.nodes.len(), "HTML parsed");
+        debug!(node_count = sink.doc.nodes.borrow().len(), "HTML parsed");
         Ok(sink.doc)
     }
 
@@ -529,7 +536,7 @@ impl Document {
 
     /// Get element by ID.
     pub fn get_element_by_id(&self, id: &str) -> Option<Rc<Node>> {
-        self.elements_by_id.get(id).cloned()
+        self.elements_by_id.borrow().get(id).cloned()
     }
 
     /// Get elements by tag name, in document order.
@@ -569,7 +576,105 @@ impl Document {
 
     /// Get node by ID.
     pub fn get_node(&self, id: NodeId) -> Option<Rc<Node>> {
-        self.nodes.get(&id).cloned()
+        self.nodes.borrow().get(&id).cloned()
+    }
+
+    /// Create a detached node with a fresh NodeId (`createElement`,
+    /// `createTextNode`). It joins the node table, so it can be looked up
+    /// by id before and after it is inserted.
+    pub fn create_node(&self, node_type: NodeType) -> Rc<Node> {
+        let id = NodeId::new(self.next_id.get());
+        self.next_id.set(id.raw() + 1);
+        let node = Node::new(id, node_type);
+        self.nodes.borrow_mut().insert(id, node.clone());
+        node
+    }
+
+    /// Replace the data of node `id` (its attributes, or its text) with
+    /// `node_type`, keeping its NodeId and its place in the tree.
+    ///
+    /// A node's data is not interior-mutable, so this builds a new `Rc<Node>`
+    /// with the same NodeId and splices it in where the old one was: parent,
+    /// siblings, children, listeners and the node/id tables all move to it.
+    /// The old `Rc` is left detached and empty. Anything that names nodes by
+    /// NodeId (script wrappers, the engine's focus and layout identity) sees
+    /// one node throughout. Returns the new node, or `None` for an unknown
+    /// id or the document root.
+    pub fn replace_node_data(&self, id: NodeId, node_type: NodeType) -> Option<Rc<Node>> {
+        let old = self.get_node(id)?;
+        if Rc::ptr_eq(&old, &self.root) {
+            return None;
+        }
+        let new = Node::new(id, node_type);
+        new.event_target.adopt_listeners(&old.event_target);
+
+        let children = std::mem::take(&mut *old.children.borrow_mut());
+        for child in &children {
+            *child.parent.borrow_mut() = Some(Rc::downgrade(&new));
+        }
+        *new.children.borrow_mut() = children;
+
+        let prev = old.prev_sibling.borrow_mut().take();
+        let next = old.next_sibling.borrow_mut().take();
+        if let Some(p) = prev.as_ref().and_then(|w| w.upgrade()) {
+            *p.next_sibling.borrow_mut() = Some(Rc::downgrade(&new));
+        }
+        if let Some(n) = next.as_ref().and_then(|w| w.upgrade()) {
+            *n.prev_sibling.borrow_mut() = Some(Rc::downgrade(&new));
+        }
+        *new.prev_sibling.borrow_mut() = prev;
+        *new.next_sibling.borrow_mut() = next;
+
+        let parent = old.parent.borrow_mut().take();
+        if let Some(p) = parent.as_ref().and_then(|w| w.upgrade()) {
+            for slot in p.children.borrow_mut().iter_mut() {
+                if Rc::ptr_eq(slot, &old) {
+                    *slot = new.clone();
+                }
+            }
+        }
+        *new.parent.borrow_mut() = parent;
+
+        self.nodes.borrow_mut().insert(id, new.clone());
+        let mut by_id = self.elements_by_id.borrow_mut();
+        by_id.retain(|_, n| n.id != id);
+        if let Some(value) = new.get_attribute("id").filter(|v| !v.is_empty()) {
+            by_id.entry(value.to_string()).or_insert_with(|| new.clone());
+        }
+        drop(by_id);
+        Some(new)
+    }
+
+    /// Parse `html` as the contents of a `context` element (the HTML
+    /// fragment parsing algorithm behind `innerHTML`) and adopt the result
+    /// into this document. Returns the top-level nodes in order, detached
+    /// and with fresh NodeIds; ids in the fragment join the id table.
+    pub fn parse_fragment(&self, html: &str, context: &str) -> Result<Vec<Rc<Node>>, DomError> {
+        let sink = rustkit_html::parse_fragment(html, DocumentSink::new(), context)
+            .map_err(|e| DomError::ParseError(e.to_string()))?;
+        Ok(sink
+            .doc
+            .root
+            .children()
+            .iter()
+            .map(|n| self.adopt_subtree(n))
+            .collect())
+    }
+
+    /// Copy `node` and its descendants (from another Document) into this
+    /// one as a detached subtree.
+    fn adopt_subtree(&self, node: &Rc<Node>) -> Rc<Node> {
+        let copy = self.create_node(node.node_type.clone());
+        if let Some(value) = copy.get_attribute("id").filter(|v| !v.is_empty()) {
+            self.elements_by_id
+                .borrow_mut()
+                .entry(value.to_string())
+                .or_insert_with(|| copy.clone());
+        }
+        for child in node.children() {
+            copy.append_child(self.adopt_subtree(&child));
+        }
+        copy
     }
 
     /// Get the title of the document.
@@ -835,5 +940,310 @@ mod tests {
         let doc = Document::parse_html(html).unwrap();
 
         assert!(doc.body().is_some(), "should have body with meta and title");
+    }
+}
+
+// ── ported from hiwave-windows: parser robustness pins (the shell's
+//    chrome.html, ~100KB <style> blocks, <meta>/charset/title-only heads). ──
+#[cfg(test)]
+mod windows_parser_pins {
+    use super::*;
+
+
+    #[test]
+    fn test_chrome_html() {
+        // Read the actual chrome.html file
+        let html = include_str!("../../hiwave-app/src/ui/chrome.html");
+        
+        eprintln!("chrome.html length: {}", html.len());
+        
+        let doc = Document::parse_html(html).unwrap();
+        
+        // Debug: print structure
+        eprintln!("root children: {}", doc.root().children().len());
+        for (i, child) in doc.root().children().iter().enumerate() {
+            if let Some(tag) = child.tag_name() {
+                eprintln!("  root child {}: {}", i, tag);
+            } else if let NodeType::DocumentType { name, .. } = &child.node_type {
+                eprintln!("  root child {}: doctype:{}", i, name);
+            }
+        }
+        
+        if let Some(html_elem) = doc.document_element() {
+            eprintln!("html children count: {}", html_elem.children().len());
+            for (i, child) in html_elem.children().iter().take(5).enumerate() {
+                eprintln!("  html child {}: {:?}", i, child.tag_name());
+            }
+        }
+        
+        assert!(doc.document_element().is_some(), "should have html");
+        assert!(doc.head().is_some(), "should have head");
+        assert!(doc.body().is_some(), "chrome.html should have body - this is the actual issue!");
+    }
+
+    #[test]
+    fn test_very_large_style_block() {
+        // 103KB of CSS like chrome.html
+        let css = ".a{color:red;} ".repeat(6900);  // ~103KB
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html>
+<head>
+<style>{}</style>
+</head>
+<body>
+<p id="test">Hello</p>
+</body>
+</html>"#,
+            css
+        );
+        
+        eprintln!("HTML length: {}", html.len());
+        
+        let doc = Document::parse_html(&html).unwrap();
+        
+        if let Some(html_elem) = doc.document_element() {
+            eprintln!("html children count: {}", html_elem.children().len());
+            for (i, child) in html_elem.children().iter().take(5).enumerate() {
+                eprintln!("  html child {}: {:?}", i, child.tag_name());
+            }
+        }
+        
+        assert!(doc.body().is_some(), "should have body with 103KB style block");
+    }
+
+    #[test]
+    fn test_chrome_html_with_meta() {
+        // Exact structure like chrome.html
+        let css = ".a{color:red;} ".repeat(6900);  // ~103KB
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HiWave</title>
+    <style>
+        {}</style>
+</head>
+<body>
+<p id="test">Hello</p>
+</body>
+</html>"#,
+            css
+        );
+        
+        eprintln!("HTML length: {}", html.len());
+        
+        let doc = Document::parse_html(&html).unwrap();
+        
+        if let Some(html_elem) = doc.document_element() {
+            eprintln!("html children count: {}", html_elem.children().len());
+            for (i, child) in html_elem.children().iter().take(5).enumerate() {
+                eprintln!("  html child {}: {:?}", i, child.tag_name());
+            }
+        }
+        
+        assert!(doc.body().is_some(), "should have body with meta tags and style block");
+    }
+
+    #[test]
+    fn test_with_charset_meta() {
+        let html = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <style>.a{color:red;}</style>
+</head>
+<body>
+<p>Test</p>
+</body>
+</html>"#;
+        
+        let doc = Document::parse_html(html).unwrap();
+        
+        if let Some(html_elem) = doc.document_element() {
+            eprintln!("html children count: {}", html_elem.children().len());
+            for (i, child) in html_elem.children().iter().take(5).enumerate() {
+                eprintln!("  html child {}: {:?}", i, child.tag_name());
+            }
+        }
+        
+        assert!(doc.body().is_some(), "should have body with charset meta");
+    }
+
+    #[test]
+    fn test_title_only() {
+        let html = r#"<!DOCTYPE html>
+<html>
+<head>
+<title>Test</title>
+</head>
+<body>
+<p>Hello</p>
+</body>
+</html>"#;
+        
+        let doc = Document::parse_html(html).unwrap();
+        
+        if let Some(html_elem) = doc.document_element() {
+            eprintln!("html children count: {}", html_elem.children().len());
+            for (i, child) in html_elem.children().iter().enumerate() {
+                eprintln!("  html child {}: {:?}", i, child.tag_name());
+            }
+        }
+        
+        assert!(doc.body().is_some(), "should have body with title");
+    }
+}
+
+/// Script writes to a node's own data (js-ladder mutation surface).
+#[cfg(test)]
+mod node_write_tests {
+    use super::*;
+
+    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    fn element(tag: &str, pairs: &[(&str, &str)]) -> NodeType {
+        NodeType::Element {
+            tag_name: tag.to_string(),
+            namespace: String::from("http://www.w3.org/1999/xhtml"),
+            attributes: attrs(pairs),
+        }
+    }
+
+    #[test]
+    fn replacing_node_data_keeps_its_id_and_place_in_the_tree() {
+        let doc = Document::parse_html(
+            "<html><body><p>a</p><div id=d class=x><i>1</i><b>2</b></div><p>c</p></body></html>",
+        )
+        .unwrap();
+        let old = doc.get_element_by_id("d").unwrap();
+        let id = old.id;
+        let (prev, next) = (old.previous_sibling().unwrap(), old.next_sibling().unwrap());
+        let kids: Vec<NodeId> = old.children().iter().map(|c| c.id).collect();
+
+        let new = doc
+            .replace_node_data(id, element("div", &[("id", "d"), ("class", "y")]))
+            .unwrap();
+
+        assert_eq!(new.id, id);
+        assert_eq!(new.get_attribute("class"), Some("y"));
+        assert!(Rc::ptr_eq(&doc.get_node(id).unwrap(), &new));
+        assert!(Rc::ptr_eq(&doc.get_element_by_id("d").unwrap(), &new));
+        // Same place: parent, both siblings and every child point at the new node.
+        let body = doc.body().unwrap();
+        assert!(body.children().iter().any(|c| Rc::ptr_eq(c, &new)));
+        assert!(!body.children().iter().any(|c| Rc::ptr_eq(c, &old)));
+        assert!(Rc::ptr_eq(&prev.next_sibling().unwrap(), &new));
+        assert!(Rc::ptr_eq(&next.previous_sibling().unwrap(), &new));
+        assert_eq!(new.children().iter().map(|c| c.id).collect::<Vec<_>>(), kids);
+        for child in new.children() {
+            assert!(Rc::ptr_eq(&child.parent().unwrap(), &new));
+        }
+        assert_eq!(new.text_content(), "12");
+        // The old Rc is left detached and empty.
+        assert!(old.parent().is_none() && old.children().is_empty());
+    }
+
+    #[test]
+    fn replacing_data_moves_the_id_table_entry() {
+        let doc = Document::parse_html("<html><body><div id=a></div></body></html>").unwrap();
+        let id = doc.get_element_by_id("a").unwrap().id;
+        doc.replace_node_data(id, element("div", &[("id", "b")])).unwrap();
+        assert!(doc.get_element_by_id("a").is_none());
+        assert_eq!(doc.get_element_by_id("b").unwrap().id, id);
+        doc.replace_node_data(id, element("div", &[])).unwrap();
+        assert!(doc.get_element_by_id("b").is_none());
+    }
+
+    #[test]
+    fn replacing_text_data_changes_the_parents_text() {
+        let doc = Document::parse_html("<html><body><p id=p>old</p></body></html>").unwrap();
+        let p = doc.get_element_by_id("p").unwrap();
+        let text = p.first_child().unwrap();
+        doc.replace_node_data(text.id, NodeType::Text("new".into())).unwrap();
+        assert_eq!(p.text_content(), "new");
+    }
+
+    #[test]
+    fn the_root_and_unknown_ids_are_not_replaced() {
+        let doc = Document::parse_html("<html><body></body></html>").unwrap();
+        assert!(doc.replace_node_data(doc.root().id, NodeType::Document).is_none());
+        assert!(doc.replace_node_data(NodeId::new(99_999), NodeType::Text(String::new())).is_none());
+    }
+
+    #[test]
+    fn created_nodes_get_fresh_ids_and_can_be_inserted() {
+        let doc = Document::parse_html("<html><body><p>x</p></body></html>").unwrap();
+        let mut max = 0;
+        doc.traverse(|n| max = max.max(n.id.raw()));
+        let span = doc.create_node(element("span", &[]));
+        let text = doc.create_node(NodeType::Text("hi".into()));
+        assert!(span.id.raw() > max && text.id.raw() > span.id.raw());
+        assert!(span.parent().is_none());
+        assert!(Rc::ptr_eq(&doc.get_node(span.id).unwrap(), &span));
+        span.append_child(text);
+        doc.body().unwrap().append_child(span);
+        assert_eq!(doc.body().unwrap().text_content(), "xhi");
+    }
+
+    #[test]
+    fn replacing_data_keeps_the_nodes_listeners() {
+        let doc = Document::parse_html("<html><body><a id=a>x</a></body></html>").unwrap();
+        let old = doc.get_element_by_id("a").unwrap();
+        old.event_target.add_event_listener(
+            "click",
+            Box::new(|_| {}),
+            AddEventListenerOptions::default(),
+        );
+        let new = doc
+            .replace_node_data(old.id, element("a", &[("id", "a"), ("href", "#")]))
+            .unwrap();
+        assert!(new.event_target.has_listeners("click"));
+        assert!(!old.event_target.has_listeners("click"));
+    }
+
+    fn shape(node: &Rc<Node>) -> String {
+        match &node.node_type {
+            NodeType::Element { tag_name, .. } => format!(
+                "{}({})",
+                tag_name,
+                node.children().iter().map(shape).collect::<Vec<_>>().join(",")
+            ),
+            NodeType::Text(t) => format!("'{}'", t),
+            NodeType::Comment(c) => format!("!{}", c),
+            _ => "?".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_fragment_parses_as_detached_nodes_of_this_document() {
+        let doc = Document::parse_html("<html><body><p>x</p></body></html>").unwrap();
+        let mut max = 0;
+        doc.traverse(|n| max = max.max(n.id.raw()));
+        let nodes = doc
+            .parse_fragment("a<b id=n class=k>b<i>c</i></b><!--d--><br>e", "div")
+            .unwrap();
+        let shapes: Vec<String> = nodes.iter().map(shape).collect();
+        assert_eq!(shapes, ["'a'", "b('b',i('c'))", "!d", "br()", "'e'"]);
+        for n in &nodes {
+            assert!(n.parent().is_none());
+            assert!(n.id.raw() > max);
+            assert!(Rc::ptr_eq(&doc.get_node(n.id).unwrap(), n));
+        }
+        assert_eq!(nodes[1].get_attribute("class"), Some("k"));
+        assert!(Rc::ptr_eq(&doc.get_element_by_id("n").unwrap(), &nodes[1]));
+    }
+
+    #[test]
+    fn a_fragment_does_not_imply_html_or_body() {
+        let doc = Document::parse_html("<html><body></body></html>").unwrap();
+        let nodes = doc.parse_fragment("<li>1</li><li>2</li>", "ul").unwrap();
+        let shapes: Vec<String> = nodes.iter().map(shape).collect();
+        assert_eq!(shapes, ["li('1')", "li('2')"]);
+        assert!(doc.parse_fragment("", "div").unwrap().is_empty());
     }
 }
