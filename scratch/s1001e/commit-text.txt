@@ -1,0 +1,19 @@
+feat(text): rasterize a glyph by id from a face layout already chose
+
+Groundwork for slice S0 of docs/SHAPED_RUN_CONTRACT_2026-09-30.md.
+
+- GlyphRasterizer::rasterize_glyph_id draws glyph N of the rasterizer's
+  own face: no character lookup, no fallback face. rasterize_char now
+  ends there once it has found the character's glyph, so both entries
+  return the same bitmap for the same glyph (the body is moved, not
+  changed).
+- intern_face / face_font: the faces layout has shaped with, by id and
+  size, so paint can be handed the font object layout measured with
+  instead of a CSS family list. The table is bounded; when it turns over
+  the web-font generation is bumped so layout shapes (and records) again.
+- css_list_resolutions: a per-thread count of family-list resolutions,
+  so a test can show a paint path makes none.
+
+No caller yet; no behaviour change.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

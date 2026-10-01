@@ -1,0 +1,6 @@
+The 26 campaign pages, each captured once by each binary (`--dump-frame`, plus the fix arm's display-list dump):
+
+- **1,025 of 1,074 text commands carry a run.** The 49 without one: 45 hold an emoji and 4 a symbol the face lacks (`⏰`, `⌨`, `🆓`). Both are outside the slice by design.
+- Faces the runs name: `.SFNS-Regular` 634, `.SFNS-Bold` 183, `Georgia` 59, `Menlo-Regular` 58, `Menlo-Bold` 30, `.SFNS-Semibold` 22, `.SFNS-Medium` 21, `Georgia-Bold` 13, `.SFNS-Light` 2, `Georgia-Italic` 2, `.SFNS-RegularItalic` 1.
+- **25 of 26 frames are byte-identical between the arms.** On those pages the run path put every glyph where the character path puts it, with the same bitmap.
+- **The one frame that differs is `css-selectors`, in one line:** "Lang prefix |= (should be italic)", 14px italic `-apple-system`, 1,294 pixels inside (35,773)-(236,787). Layout measured it in `.SFNS-RegularItalic`. The character path resolved the same list a second time and drew a different italic at those advances (upright `|`, plain `l`). The run draws the system italic, which is what Chrome's baseline shows. `diff_pct` 1.3819 -> 1.3299; Gate B paint 0.94281 -> 0.94307. This is the macOS form of the defect the contract describes: paint and layout disagreeing about the face. `italic_system_text_is_drawn_in_the_face_layout_measured` pins the new behaviour.

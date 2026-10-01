@@ -1,0 +1,9 @@
+test(renderer): italic system text is drawn in the face layout measured
+
+Test only. The one campaign frame S0 changes is css-selectors' "Lang
+prefix |= (should be italic)": layout measured it in the system italic
+and the character path drew another face at those advances. Pins that a
+run for that style names the system italic and that the rasterizer is
+handed that face.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

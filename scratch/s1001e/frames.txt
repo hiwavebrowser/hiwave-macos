@@ -1,0 +1,30 @@
+RustKit frames only, no Chrome: each site captured develop, fix, develop, fix at 1280x800 (`scratch/s1001e/s0_ab.py` on the hub). "within" is the site's own variance between two captures by the same binary; "across" is the four develop-fix pairs. The last column is from the fix arm's display list. All 20 board sites were attempted; `nan` is a capture that failed.
+
+```
+google       within develop   3.75%  within fix   3.75%  across   3.75%   0.00%   0.00%   3.75%  | 15/15 text commands carry a run (HelveticaNeue 10, ArialMT 2, Helvetica 2)
+wikipedia    within develop   0.00%  within fix   0.00%  across   7.18%   7.18%   7.18%   7.18%  | 2942/2942 text commands carry a run (.SFNS-Regular 2312, .SFNS-Bold 513, .SFNS-RegularItalic 61)
+x            within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 0/40 text commands carry a run ()
+facebook     within develop   0.00%  within fix    nan%  across    nan%    nan%    nan%    nan%  | 41/43 text commands carry a run (.SFNS-Regular 32, .SFNS-Semibold 5, font00000000306ecea8 4)
+shopify      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 8/285 text commands carry a run (ShopifyInterBeta029-Regular 6, Menlo-Regular 2)
+lyft         within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 155/155 text commands carry a run (RebelSansTextVF-Reg 154, RebelSansDisplay-VF-Regular 1)
+apple        within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 262/262 text commands carry a run (SFProText-Regular 186, SFProDisplay-Regular 29, SFProText-Semibold 23)
+github       within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  | no display list
+linkedin     within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 189/189 text commands carry a run (.SFNS-Semibold 136, .SFNS-Regular 53)
+microsoft    within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 304/304 text commands carry a run (SegoeUI 304)
+bing         within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 10/10 text commands carry a run (Tahoma 9, Tahoma-Bold 1)
+yahoo        within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 57/57 text commands carry a run (YahooProductSans-VF 32, CentraNo2-Medium 17, CentraNo2-Bold 8)
+netflix      within develop   2.33%  within fix  12.62%  across  12.66%   2.23%  12.58%   2.30%  | 106/106 text commands carry a run (font00000000306ed14e 106)
+walmart      within develop  10.08%  within fix  23.03%  across  31.62%  10.08%  23.03%   0.00%  | 73/91 text commands carry a run (EverydaySansUIWeb-Regular 67, ArialMT 4, EverydaySansUIWeb-Bold 2)
+squarespace  within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  | no display list
+cnn          within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  | no display list
+weather      within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  | no display list
+instagram    within develop    nan%  within fix    nan%  across    nan%    nan%    nan%   0.00%  | no display list
+youtube      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 0/0 text commands carry a run ()
+reddit       within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  | 0/0 text commands carry a run ()
+```
+
+- **Identical between the arms (0.00% across):** x, shopify, lyft, apple, linkedin, microsoft, bing, yahoo. google is 0.00% within each of its two page variants (Google serves two; the 3.75% is the variant, and each binary got both). youtube and reddit are blank on both arms (no text commands).
+- **wikipedia changes: 7.18% of the frame**, 0.00% within each arm, so it is this change. All 2,942 of its text commands carry a run in the system font, because the page asks for `sans-serif` (finding 1 below). Scored with the board's own diff against this morning's stored Chrome frames (run `20261001T0907Z-quiet-dev7ae0e68`): **15.20% on develop, 15.15% here** against Chrome capture a; 16.92% and 16.83% against capture b. LOOKS RIGHT stays a fail on both, by the same margin.
+- **netflix and walmart vary between captures by more than they differ between arms** (rotating content). netflix: 2.33% between the two develop captures, and 2.23% and 2.30% for two of the develop-fix pairs; its first fix capture is the outlier against everything, the other fix capture included. walmart: one develop-fix pair is 0.00%.
+- Web-font runs paint the same pixels as the character path: lyft 155 of 155 commands in `RebelSans`, apple 262 of 262 in `SFPro*`, microsoft 304 of 304 in `SegoeUI`, yahoo 57 of 57, all 0.00% across.
+- **Not measured:** github, squarespace, cnn and weather failed to capture on both arms; facebook's second fix capture and three of instagram's four failed (machine load 12 to 21). No scoring board was run; no points are claimed.

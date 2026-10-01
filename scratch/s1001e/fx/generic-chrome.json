@@ -1,0 +1,137 @@
+{
+ "unstyled": {
+  "rect": [
+   10,
+   10,
+   199.515625,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "sans": {
+  "rect": [
+   10,
+   34,
+   217.015625,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "serif": {
+  "rect": [
+   10,
+   58,
+   199.515625,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "mono": {
+  "rect": [
+   10,
+   82,
+   268.84375,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "nsans": {
+  "rect": [
+   10,
+   106,
+   217.015625,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "nserif": {
+  "rect": [
+   10,
+   130,
+   199.515625,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "nmono": {
+  "rect": [
+   10,
+   154,
+   268.84375,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "none": {
+  "rect": [
+   10,
+   178,
+   199.515625,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "helv": {
+  "rect": [
+   10,
+   202,
+   217.015625,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "times": {
+  "rect": [
+   10,
+   226,
+   199.515625,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "tnr": {
+  "rect": [
+   10,
+   250,
+   199.515625,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "menlo": {
+  "rect": [
+   10,
+   274,
+   269.71875,
+   19
+  ],
+  "display": "inline-block"
+ },
+ "sys": {
+  "rect": [
+   10,
+   299,
+   220.78125,
+   18
+  ],
+  "display": "inline-block"
+ },
+ "cursive": {
+  "rect": [
+   10,
+   324,
+   200.453125,
+   25
+  ],
+  "display": "inline-block"
+ },
+ "fantasy": {
+  "rect": [
+   10,
+   355,
+   208.015625,
+   25
+  ],
+  "display": "inline-block"
+ }
+}

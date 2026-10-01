@@ -1,0 +1,1 @@
+rustkit-layout 591/591 (9 new), rustkit-renderer 114/114 (4 new), rustkit-text 94/94. `cargo check --tests` is clean for rustkit-engine, rustkit-svg and parity-capture. The full engine suite was not run locally.

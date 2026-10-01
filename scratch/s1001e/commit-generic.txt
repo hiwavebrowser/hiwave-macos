@@ -1,0 +1,18 @@
+fix(layout): `serif` and `monospace` after missing families resolve as the generic
+
+FontFamilyChain::from_css_value expanded `sans-serif` and the system
+keywords when they appeared after the first family, but pushed `serif`
+and `monospace` into the chain as if they were font names. No font has
+those names, so the walk went past them to the system font appended at
+the end: `Consolas, monospace` was measured in a proportional face while
+paint, which maps the keyword itself, drew Menlo at those advances.
+
+Chrome 148, 28 characters at 16px: `X, monospace` 268.84, `X, serif`
+199.52. Layout gave 220.78 (the system font) for both; it now gives
+269.72 (Menlo) and 199.51 (Times New Roman), the same as the keyword
+alone.
+
+Test: a_generic_after_missing_families_resolves_as_the_generic fails
+with the new arm disabled (left 220.78, right 269.72) and passes with it.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

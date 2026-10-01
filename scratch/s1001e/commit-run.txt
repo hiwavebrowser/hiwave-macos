@@ -1,0 +1,35 @@
+feat(layout,renderer): DisplayCommand::Text carries the shaped run (S0)
+
+Slice S0 of docs/SHAPED_RUN_CONTRACT_2026-09-30.md, sections 5 and 7.
+
+Layout shaped every line, kept a Vec<f32> of per-character advances and
+threw the rest away; paint then resolved the CSS font-family list a
+second time and looked every character up again. The Text command now
+carries the frozen run (GlyphRun): the face layout selected, glyph ids,
+advances with letter-spacing, word-spacing and justification already in
+them, offsets, UTF-16 cluster ranges, direction, script and line
+metrics. Paint places those glyph ids from that face. Its glyph key is
+(face id, glyph id, size); the family string is not in it.
+
+- rustkit-layout: FaceIdentity, GlyphRun, RunGlyph. The macOS shaper
+  names the face it selected. shape_line is the one shape call behind
+  shape_line_advances (unchanged result) and shape_line_run. The emitter
+  freezes the run, cuts it with the characters for text-overflow, and
+  still fills `advances` and `ascent`.
+- rustkit-renderer: RunGlyphKey, rasterize_run_glyph, draw_glyph_run.
+  A run whose face the rasterizer no longer holds is painted through the
+  old path, which is otherwise untouched.
+- rustkit-engine: the display-list dump shows each text op's run (face,
+  glyph count, cluster count) or null.
+
+Outside the slice, on today's path: a line with a character the face
+cannot draw or an emoji, GradientText, form controls, SVG text, and
+every platform whose shaper does not name its face (Windows, Linux).
+
+Tests: the run's projection equals shape_line_advances to the bit on the
+kerning corpus and pen positions follow it; a non-1:1 cluster keeps its
+range where the old function returns None; the run names Georgia /
+Georgia-Bold for a Georgia list; painting a run resolves no family list
+and its bitmaps equal the character path's byte for byte.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
