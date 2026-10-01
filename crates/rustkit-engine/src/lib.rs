@@ -3176,6 +3176,13 @@ impl Engine {
             )),
         };
 
+        // Off unless RUSTKIT_STYLE_SHARE asks for it. A shared style records
+        // no trace entries, so a traced build never shares.
+        let _style_share = StyleShareScope::install(match traced {
+            true => StyleShareMode::Off,
+            false => style_share_mode(),
+        });
+
         let walk_started = mark();
 
         // A trace describes ONE build. Keeping entries from the previous
@@ -3713,17 +3720,19 @@ impl Engine {
                 }
 
                 // Create computed style based on element, attributes, and stylesheets
-                let mut style = memoized_style(node.id, || {
-                    self.compute_style_for_element(
-                        tag_name,
-                        attributes,
-                        stylesheets,
-                        css_vars,
-                        ancestors,
-                        siblings_before,
-                        sib,
-                        parent_style,
-                    )
+                let (mut style, share_id) = style_share_tracked(|| {
+                    memoized_style(node.id, || {
+                        self.compute_style_for_element(
+                            tag_name,
+                            attributes,
+                            stylesheets,
+                            css_vars,
+                            ancestors,
+                            siblings_before,
+                            sib,
+                            parent_style,
+                        )
+                    })
                 });
 
                 // CSS computed-value resolution: font-size absolutizes at
@@ -4344,6 +4353,11 @@ impl Engine {
                     Some(s) => s,
                     None => &layout_box.style,
                 };
+                // Style sharing keys a child's cascade on its parent's style.
+                // Everything done to this style since the cascade (font-size,
+                // line-height, blockification) was a function of the style
+                // and the parent's, so `share_id` still names it.
+                let share_parent = StyleShareParent::enter(children_parent_style, share_id);
                 for (child_index, child) in child_nodes.iter().enumerate() {
                     let child_path = Self::child_selector_path(
                         selector_path,
@@ -4416,6 +4430,7 @@ impl Engine {
                         Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     }
                 }
+                drop(share_parent);
 
                 // Check for ::after pseudo-element
                 if let Some(after_box) = memoized_pseudo_style(node.id, Pseudo::After, || {
@@ -5418,6 +5433,26 @@ impl Engine {
             _ => matching_rules.as_slice(),
         };
 
+        // Style sharing: everything below reads only the parent's style, the
+        // tag, the matched rules in this order, the inline style and whether
+        // a UA rule hid the element. An earlier element with the same five
+        // already has this style. Only under the build's own rule index,
+        // whose rule numbers the key holds.
+        let share = match (index.is_some(), parent_style) {
+            (true, Some(parent)) => style_share_lookup(parent, || StyleShareKey {
+                parent: 0,
+                tag: tag_name.to_string(),
+                rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
+                inline: attributes.get("style").cloned(),
+                ua_hidden: style.display == rustkit_css::Display::None,
+            }),
+            _ => StyleShared::Untracked,
+        };
+        let share = match share {
+            StyleShared::Hit(shared) => return *shared,
+            other => other,
+        };
+
         // Custom properties first: every `var()` below resolves against THIS
         // element's map. Winners come from the same matched, sorted rules as
         // everything else, in the same importance order as the loop below,
@@ -5569,6 +5604,8 @@ impl Engine {
         zero_width_of_borderless_sides(&mut style);
 
         style.custom_properties = vars;
+
+        style_share_store(share, &style);
 
         if recording {
             let id = attributes.get("id").cloned();
@@ -21494,6 +21531,295 @@ fn tree_reuse_mode() -> TreeReuse {
     *MODE.get_or_init(|| tree_reuse_from(std::env::var("RUSTKIT_TREE_REUSE").ok().as_deref()))
 }
 
+/// `RUSTKIT_STYLE_SHARE`: off by default. `1` or `on` hands an element the
+/// style an earlier element of the same build computed from the same parent
+/// style, tag, matched rules, inline style and UA hiding, instead of applying
+/// the declarations again. `verify` applies them anyway and counts the styles
+/// that differ from the shared one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StyleShareMode {
+    Off,
+    Share,
+    Verify,
+}
+
+fn style_share_from(value: Option<&str>) -> StyleShareMode {
+    match value {
+        Some("1") | Some("on") => StyleShareMode::Share,
+        Some("verify") => StyleShareMode::Verify,
+        _ => StyleShareMode::Off,
+    }
+}
+
+fn style_share_mode() -> StyleShareMode {
+    #[cfg(test)]
+    if let Some(mode) = STYLE_SHARE_TEST_MODE.with(|m| m.get()) {
+        return mode;
+    }
+    static MODE: std::sync::OnceLock<StyleShareMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| style_share_from(std::env::var("RUSTKIT_STYLE_SHARE").ok().as_deref()))
+}
+
+/// Everything the cascade reads once the matching rules are known. `parent`
+/// is the share id of the parent's style: equal ids mean equal styles.
+/// `rules` holds each matched rule's number and the specificity it matched
+/// with, in cascade order.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct StyleShareKey {
+    parent: u64,
+    tag: String,
+    rules: Vec<(usize, (usize, usize, usize))>,
+    inline: Option<String>,
+    ua_hidden: bool,
+}
+
+/// What `style_share_lookup` found for one element.
+enum StyleShared {
+    /// No sharing in this build, or the parent's style has no share id.
+    Untracked,
+    /// An earlier element's style, to use as is.
+    Hit(Box<ComputedStyle>),
+    /// Nothing stored under this key yet: compute, then store.
+    Miss(StyleShareKey),
+    /// Verify mode: compute anyway and compare with the style under this key.
+    Check(StyleShareKey),
+}
+
+/// One build's shared styles.
+struct StyleShare {
+    verify: bool,
+    /// The styles computed so far, each with its share id.
+    styles: HashMap<StyleShareKey, (u64, ComputedStyle)>,
+    /// The enclosing elements whose children are being built, innermost
+    /// last: the address of the style their children inherit from, and its
+    /// share id when it has one.
+    parents: Vec<(*const ComputedStyle, Option<u64>)>,
+    /// Verify mode: the first parent style seen under each share id.
+    parent_styles: HashMap<u64, ComputedStyle>,
+    /// The share id of the style the cascade last produced, for the walk.
+    last_id: Option<u64>,
+    next_id: u64,
+    hits: usize,
+    misses: usize,
+    untracked: usize,
+    mismatches: usize,
+    parent_mismatches: usize,
+}
+
+impl StyleShare {
+    fn fresh_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+}
+
+thread_local! {
+    /// Set by `StyleShareScope` for the span of one layout build.
+    static STYLE_SHARE: std::cell::RefCell<Option<StyleShare>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Overrides `RUSTKIT_STYLE_SHARE` for the builds of one test.
+    static STYLE_SHARE_TEST_MODE: Cell<Option<StyleShareMode>> = const { Cell::new(None) };
+    /// The last build's (hits, misses, mismatches, parent mismatches).
+    static STYLE_SHARE_LAST: Cell<(usize, usize, usize, usize)> = const { Cell::new((0, 0, 0, 0)) };
+}
+
+/// Arms style sharing for one layout build. Dropping it (also on unwind)
+/// restores what was there before, so no shared style or share id outlives
+/// the sheets, viewport and fonts it was computed under.
+struct StyleShareScope {
+    armed: bool,
+    previous: Option<StyleShare>,
+}
+
+impl StyleShareScope {
+    fn install(mode: StyleShareMode) -> Self {
+        if mode == StyleShareMode::Off {
+            return StyleShareScope {
+                armed: false,
+                previous: None,
+            };
+        }
+        let share = StyleShare {
+            verify: mode == StyleShareMode::Verify,
+            styles: HashMap::new(),
+            parents: Vec::new(),
+            parent_styles: HashMap::new(),
+            last_id: None,
+            next_id: 0,
+            hits: 0,
+            misses: 0,
+            untracked: 0,
+            mismatches: 0,
+            parent_mismatches: 0,
+        };
+        StyleShareScope {
+            armed: true,
+            previous: STYLE_SHARE.with(|s| s.replace(Some(share))),
+        }
+    }
+}
+
+impl Drop for StyleShareScope {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let ended = STYLE_SHARE.with(|s| s.replace(self.previous.take()));
+        if let Some(share) = ended {
+            info!(
+                verify = share.verify,
+                hits = share.hits,
+                misses = share.misses,
+                untracked = share.untracked,
+                mismatches = share.mismatches,
+                parent_mismatches = share.parent_mismatches,
+                "Style share"
+            );
+            #[cfg(test)]
+            STYLE_SHARE_LAST.with(|l| {
+                l.set((
+                    share.hits,
+                    share.misses,
+                    share.mismatches,
+                    share.parent_mismatches,
+                ))
+            });
+        }
+    }
+}
+
+/// Run one element's cascade and report the share id of the style it
+/// produced. `None` when the cascade did not run (a replayed style) or the
+/// build does not share: that element's children then share nothing.
+fn style_share_tracked<T>(cascade: impl FnOnce() -> T) -> (T, Option<u64>) {
+    let take = || STYLE_SHARE.with(|s| s.borrow_mut().as_mut().and_then(|s| s.last_id.take()));
+    take();
+    let style = cascade();
+    (style, take())
+}
+
+/// Marks `style` as the one the elements built inside this scope inherit
+/// from. A child's cascade is keyed on `id` only while the scope is alive
+/// and only when it is handed this very style.
+struct StyleShareParent {
+    entered: bool,
+}
+
+impl StyleShareParent {
+    fn enter(style: &ComputedStyle, id: Option<u64>) -> Self {
+        let entered = STYLE_SHARE.with(|s| {
+            let mut slot = s.borrow_mut();
+            let Some(share) = slot.as_mut() else {
+                return false;
+            };
+            if let (true, Some(id)) = (share.verify, id) {
+                let differs = share
+                    .parent_styles
+                    .get(&id)
+                    .map(|first| !same_computed_style(first, style));
+                match differs {
+                    None => {
+                        share.parent_styles.insert(id, style.clone());
+                    }
+                    Some(true) => {
+                        share.parent_mismatches += 1;
+                        warn!(id, "Style share: two parent styles differ under one share id");
+                    }
+                    Some(false) => {}
+                }
+            }
+            share.parents.push((style as *const ComputedStyle, id));
+            true
+        });
+        StyleShareParent { entered }
+    }
+}
+
+impl Drop for StyleShareParent {
+    fn drop(&mut self) {
+        if self.entered {
+            STYLE_SHARE.with(|s| {
+                if let Some(share) = s.borrow_mut().as_mut() {
+                    share.parents.pop();
+                }
+            });
+        }
+    }
+}
+
+/// Look one element up. `key` is built only when the build shares and
+/// `parent` is the style the innermost `StyleShareParent` scope named; its
+/// `parent` field is filled in here.
+fn style_share_lookup(parent: &ComputedStyle, key: impl FnOnce() -> StyleShareKey) -> StyleShared {
+    STYLE_SHARE.with(|s| {
+        let mut slot = s.borrow_mut();
+        let Some(share) = slot.as_mut() else {
+            return StyleShared::Untracked;
+        };
+        let parent_id = match share.parents.last() {
+            Some((style, Some(id))) if std::ptr::eq(*style, parent) => *id,
+            _ => {
+                // A style nothing else can be told equal to: its own id.
+                share.untracked += 1;
+                share.last_id = Some(share.fresh_id());
+                return StyleShared::Untracked;
+            }
+        };
+        let mut key = key();
+        key.parent = parent_id;
+        let found = share
+            .styles
+            .get(&key)
+            .map(|(id, style)| (*id, (!share.verify).then(|| Box::new(style.clone()))));
+        match found {
+            Some((id, style)) => {
+                share.hits += 1;
+                share.last_id = Some(id);
+                match style {
+                    Some(style) => StyleShared::Hit(style),
+                    None => StyleShared::Check(key),
+                }
+            }
+            None => {
+                share.misses += 1;
+                StyleShared::Miss(key)
+            }
+        }
+    })
+}
+
+/// The cascade finished for an element `style_share_lookup` did not answer.
+fn style_share_store(found: StyleShared, style: &ComputedStyle) {
+    STYLE_SHARE.with(|s| {
+        let mut slot = s.borrow_mut();
+        let Some(share) = slot.as_mut() else {
+            return;
+        };
+        match found {
+            StyleShared::Miss(key) => {
+                let id = share.fresh_id();
+                share.last_id = Some(id);
+                share.styles.insert(key, (id, style.clone()));
+            }
+            StyleShared::Check(key) => {
+                let differs = share
+                    .styles
+                    .get(&key)
+                    .is_some_and(|(_, shared)| !same_computed_style(shared, style));
+                if differs {
+                    share.mismatches += 1;
+                    warn!(?key, "Style share: shared style differs from a fresh cascade");
+                }
+            }
+            StyleShared::Untracked | StyleShared::Hit(_) => {}
+        }
+    });
+}
+
 /// A recording build with tree reuse on notes each `<img>` box's size
 /// hints under its identity, for `refresh_image_sizes`.
 fn note_snapshot_image(image_box: &LayoutBox, width: Option<f32>, height: Option<f32>) {
@@ -21864,6 +22190,178 @@ fn same_computed_style(a: &ComputedStyle, b: &ComputedStyle) -> bool {
         format!("{s:?}")
     };
     strip(a) == strip(b)
+}
+
+#[cfg(test)]
+mod style_share_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, DisplayList, Rect};
+
+    fn engine() -> Engine {
+        Engine::new(EngineConfig::default()).expect("engine")
+    }
+
+    /// Repeats (list items, their links, the notes) next to everything that
+    /// must keep two look-alikes apart: a parent with another font size, an
+    /// inline style, a positional rule, a `hidden` attribute, a custom
+    /// property set on one parent only.
+    const PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+        :root { --accent: #c00; }
+        html { font-size: 15px; line-height: 1.4; }
+        body { margin: 0; font-family: sans-serif; }
+        ul li { padding: 2px 4px; color: var(--accent); }
+        ul li a { font-size: 1.2em; text-decoration: none; border-left: 0.5em solid; }
+        li:nth-child(2n) { background: #eee; }
+        #big { font-size: 30px; }
+        #green { --accent: #080; }
+        .note { margin: 1em; padding: 3px; }
+        div.gone { display: block; }
+        </style></head><body>
+        <ul><li><a href="/1">one</a></li><li><a href="/2">two</a></li><li><a href="/3">three</a></li><li><a href="/4">four</a></li></ul>
+        <ul id="big"><li><a href="/5">five</a></li><li><a href="/6">six</a></li><li><a href="/7">seven</a></li></ul>
+        <ul id="green"><li><a href="/8">eight</a></li><li><a href="/9">nine</a></li><li><a href="/10">ten</a></li></ul>
+        <p class="note">a</p><p class="note" style="color: green">b</p><p class="note">c</p>
+        <div hidden>unseen</div><div>seen</div><div class="gone" hidden>shown anyway</div>
+        </body></html>"#;
+
+    struct Mode;
+
+    impl Mode {
+        fn set(mode: StyleShareMode) -> Self {
+            STYLE_SHARE_TEST_MODE.with(|m| m.set(Some(mode)));
+            Mode
+        }
+    }
+
+    impl Drop for Mode {
+        fn drop(&mut self) {
+            STYLE_SHARE_TEST_MODE.with(|m| m.set(None));
+        }
+    }
+
+    /// The page's display list under `mode`, and the build's
+    /// (hits, misses, mismatches, parent mismatches).
+    fn paint(e: &Engine, mode: StyleShareMode) -> (String, (usize, usize, usize, usize)) {
+        let _mode = Mode::set(mode);
+        STYLE_SHARE_LAST.with(|l| l.set((0, 0, 0, 0)));
+        let d = Document::parse_html(PAGE).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        root.layout(&cb);
+        let painted = DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (painted, STYLE_SHARE_LAST.with(|l| l.get()))
+    }
+
+    #[test]
+    fn sharing_is_off_unless_asked_for() {
+        assert_eq!(style_share_from(None), StyleShareMode::Off);
+        assert_eq!(style_share_from(Some("0")), StyleShareMode::Off);
+        assert_eq!(style_share_from(Some("")), StyleShareMode::Off);
+        assert_eq!(style_share_from(Some("1")), StyleShareMode::Share);
+        assert_eq!(style_share_from(Some("on")), StyleShareMode::Share);
+        assert_eq!(style_share_from(Some("verify")), StyleShareMode::Verify);
+    }
+
+    #[test]
+    fn a_sharing_build_paints_what_a_full_cascade_paints() {
+        let e = engine();
+        let (full, off) = paint(&e, StyleShareMode::Off);
+        let (shared, (hits, misses, _, _)) = paint(&e, StyleShareMode::Share);
+
+        assert!(!full.contains("unseen") && full.contains("anyway"), "the page's own traps");
+        assert_eq!(off, (0, 0, 0, 0), "an unshared build keeps no share state");
+        // Odd and even items differ (`:nth-child(2n)`), and so do the links
+        // inside them. The first list's third and fourth items repeat its
+        // first and second, links included (4); the other two lists' third
+        // items repeat their first (2 each); the third note repeats the
+        // first (1). Nothing is shared across the lists or with the inline-
+        // styled note.
+        assert_eq!((hits, misses), (9, 20), "shared and computed styles");
+        assert_eq!(shared, full);
+    }
+
+    #[test]
+    fn verify_mode_finds_no_difference_between_a_shared_and_a_fresh_style() {
+        let e = engine();
+        let (full, _) = paint(&e, StyleShareMode::Off);
+        let (_, (shared_hits, _, _, _)) = paint(&e, StyleShareMode::Share);
+        let (verified, (hits, _, mismatches, parent_mismatches)) =
+            paint(&e, StyleShareMode::Verify);
+
+        assert_eq!(hits, shared_hits, "verify checks every style a sharing build shares");
+        assert_eq!(mismatches, 0);
+        assert_eq!(parent_mismatches, 0);
+        assert_eq!(verified, full);
+    }
+
+    #[test]
+    fn an_element_whose_parent_is_not_the_enclosing_scope_shares_nothing() {
+        let _scope = StyleShareScope::install(StyleShareMode::Share);
+        let named = ComputedStyle::new();
+        let other = ComputedStyle::new();
+        let key = || StyleShareKey {
+            parent: 0,
+            tag: "p".to_string(),
+            rules: Vec::new(),
+            inline: None,
+            ua_hidden: false,
+        };
+
+        // No scope at all, then a scope naming another style, then a scope
+        // whose own style has no share id.
+        assert!(matches!(style_share_lookup(&other, key), StyleShared::Untracked));
+        let parent = StyleShareParent::enter(&named, Some(7));
+        assert!(matches!(style_share_lookup(&other, key), StyleShared::Untracked));
+        let unnamed = StyleShareParent::enter(&other, None);
+        assert!(matches!(style_share_lookup(&other, key), StyleShared::Untracked));
+        drop(unnamed);
+
+        // Under the named parent: a miss, then a hit once stored.
+        let miss = style_share_lookup(&named, key);
+        assert!(matches!(miss, StyleShared::Miss(_)));
+        style_share_store(miss, &ComputedStyle::new());
+        assert!(matches!(style_share_lookup(&named, key), StyleShared::Hit(_)));
+
+        // The scope ends: the same style is no longer a known parent.
+        drop(parent);
+        assert!(matches!(style_share_lookup(&named, key), StyleShared::Untracked));
+    }
+
+    #[test]
+    fn every_untracked_or_computed_style_gets_an_id_of_its_own() {
+        let _scope = StyleShareScope::install(StyleShareMode::Share);
+        let named = ComputedStyle::new();
+        let key = |tag: &'static str| {
+            move || StyleShareKey {
+                parent: 0,
+                tag: tag.to_string(),
+                rules: Vec::new(),
+                inline: None,
+                ua_hidden: false,
+            }
+        };
+        let (_, untracked) = style_share_tracked(|| style_share_lookup(&named, key("p")));
+        let _parent = StyleShareParent::enter(&named, untracked);
+        let id_of = |tag: &'static str| {
+            style_share_tracked(|| {
+                let found = style_share_lookup(&named, key(tag));
+                style_share_store(found, &ComputedStyle::new());
+            })
+            .1
+        };
+        let (p, div, p_again) = (id_of("p"), id_of("div"), id_of("p"));
+
+        assert!(untracked.is_some());
+        assert!(p.is_some() && p != untracked && p != div);
+        assert_eq!(p_again, p, "a shared style keeps the id it was stored under");
+        assert_eq!(style_share_tracked(|| ()).1, None, "no cascade, no id");
+    }
 }
 
 #[cfg(test)]
