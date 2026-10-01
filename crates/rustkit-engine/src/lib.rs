@@ -4545,7 +4545,9 @@ impl Engine {
             // holds its prepared base selector, base keys and specificity:
             // the same tests as the string path below, computed once.
             let keyed = KeyedElement::of(tag_name, attributes);
-            for g in buckets.candidates(tag_name, attributes) {
+            let mut candidates = take_candidate_scratch();
+            buckets.candidates_into(&keyed, &mut candidates);
+            for &g in &candidates {
                 let gi = g as usize;
                 let Some(prepared) = ix.pseudo_prepared[gi].as_deref() else {
                     continue;
@@ -4567,6 +4569,7 @@ impl Engine {
                     matching_rules.push((ix.specificity[gi], ix.rule(stylesheets, g)));
                 }
             }
+            return_candidate_scratch(candidates);
         }
         // Without an index (or for another pseudo), walk every rule.
         let unindexed = indexed.is_none();
@@ -5180,16 +5183,16 @@ impl Engine {
         // element's id, classes, tag or the universal bucket can pass
         // `rule_may_match`; the rest are never visited.
         let index = active_rule_index(stylesheets);
+        let keyed = KeyedElement::of(tag_name, attributes);
+        let mut candidates = take_candidate_scratch();
         let rules: Box<dyn Iterator<Item = (usize, &Rule)>> = match index.as_ref() {
-            Some(ix) => Box::new(
-                ix.candidates(tag_name, attributes)
-                    .into_iter()
-                    .map(|g| (g as usize, ix.rule(stylesheets, g))),
-            ),
+            Some(ix) => {
+                ix.main.candidates_into(&keyed, &mut candidates);
+                Box::new(candidates.iter().map(|&g| (g as usize, ix.rule(stylesheets, g))))
+            }
             None => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).enumerate()),
         };
 
-        let keyed = KeyedElement::of(tag_name, attributes);
         for (rule_index, rule) in rules {
             // With an index, `rule_index` is the global index `g`.
             let may_match = match index.as_ref() {
@@ -5228,6 +5231,7 @@ impl Engine {
                 matching_rules.push((rule, specificity, rule_index));
             }
         }
+        return_candidate_scratch(candidates);
 
         // Sort by cascade layer, then specificity, then source order (lower
         // first, so they get overwritten by higher). CSS Cascade 5 §6.4:
@@ -18624,6 +18628,60 @@ mod rule_prefilter_tests {
     }
 
     #[test]
+    fn a_reused_candidate_buffer_holds_only_the_current_elements_rules() {
+        // One buffer serves every element's candidate list. Each fill must be
+        // the union of the element's own buckets, ascending with no repeats:
+        // nothing left over from the element before, a rule filed under two
+        // of the element's keys once, an uppercase tag under its lowercase
+        // bucket.
+        let sheet = Stylesheet::parse(
+            "* { color: red }\n.a { color: red }\n.a, .b { color: red }\n\
+             #x.a { color: red }\ndiv { color: red }\n[data-k] { color: red }\n\
+             span { color: red }\n",
+        )
+        .expect("css");
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let ix = engine.build_rule_index(std::slice::from_ref(&sheet));
+        let buckets = &ix.main;
+        let union = |tag: &str, attributes: &HashMap<String, String>| {
+            let mut all = buckets.universal.clone();
+            let lists = attributes
+                .get("id")
+                .and_then(|id| buckets.by_id.get(id))
+                .into_iter()
+                .chain(
+                    attributes
+                        .get("class")
+                        .into_iter()
+                        .flat_map(|c| c.split_whitespace())
+                        .filter_map(|c| buckets.by_class.get(c)),
+                )
+                .chain(attributes.keys().filter_map(|k| buckets.by_attr.get(k)))
+                .chain(buckets.by_tag.get(&tag.to_ascii_lowercase()));
+            for list in lists {
+                all.extend_from_slice(list);
+            }
+            all.sort_unstable();
+            all.dedup();
+            all
+        };
+
+        let mut out = vec![98, 99];
+        for (tag, attributes) in [
+            ("div", attrs(&[("class", "a b a"), ("id", "x"), ("data-k", "1")])),
+            ("SPAN", attrs(&[])),
+            ("p", attrs(&[("class", "b")])),
+            ("p", attrs(&[])),
+            ("div", attrs(&[("class", "a")])),
+        ] {
+            buckets.candidates_into(&KeyedElement::of(tag, &attributes), &mut out);
+            assert_eq!(out, union(tag, &attributes), "<{tag}> {attributes:?}");
+        }
+        buckets.candidates_into(&KeyedElement::of("SPAN", &attrs(&[])), &mut out);
+        assert!(out.contains(&6) && !out.contains(&4), "span's rules, not div's: {out:?}");
+    }
+
+    #[test]
     fn pseudo_elements_only_run_the_matcher_on_rules_that_can_apply() {
         // create_pseudo_element walked every rule and ran the FULL matcher on
         // each `…::before` base selector, allocating twice per rule.
@@ -20712,35 +20770,69 @@ impl RuleBuckets {
         }
     }
 
-    /// Candidate global rule indices for an element, ascending, no repeats.
-    fn candidates(&self, tag_name: &str, attributes: &HashMap<String, String>) -> Vec<u32> {
-        let mut out: Vec<u32> = self.universal.clone();
-        if let Some(id) = attributes.get("id") {
-            if let Some(v) = self.by_id.get(id.as_str()) {
-                out.extend_from_slice(v);
-            }
+    /// Candidate global rule indices for an element, ascending, no repeats,
+    /// written over `out`. The caller keeps `out` between elements
+    /// (`CANDIDATE_SCRATCH`): a fresh list per element, regrown bucket by
+    /// bucket, was 9% of wikipedia's cascade.
+    fn candidates_into(&self, element: &KeyedElement, out: &mut Vec<u32>) {
+        out.clear();
+        out.extend_from_slice(&self.universal);
+        // How many non-empty lists went in. Each list is ascending with no
+        // repeats, so a single one is already the answer.
+        let mut lists = usize::from(!self.universal.is_empty());
+        let mut add = |v: &Vec<u32>| {
+            out.extend_from_slice(v);
+            lists += 1;
+        };
+        if let Some(v) = element.id.and_then(|id| self.by_id.get(id)) {
+            add(v);
         }
-        if let Some(classes) = attributes.get("class") {
+        if let Some(classes) = element.class {
             for c in classes.split_whitespace() {
                 if let Some(v) = self.by_class.get(c) {
-                    out.extend_from_slice(v);
+                    add(v);
                 }
             }
         }
         if !self.by_attr.is_empty() {
-            for name in attributes.keys() {
+            for name in element.attributes.keys() {
                 if let Some(v) = self.by_attr.get(name.as_str()) {
-                    out.extend_from_slice(v);
+                    add(v);
                 }
             }
         }
-        if let Some(v) = self.by_tag.get(tag_name.to_ascii_lowercase().as_str()) {
-            out.extend_from_slice(v);
+        // Buckets are keyed by lowercase tag; only an uppercase one needs a
+        // lowered copy to look up.
+        let tag = element.tag_name;
+        let by_tag = if tag.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.by_tag.get(tag.to_ascii_lowercase().as_str())
+        } else {
+            self.by_tag.get(tag)
+        };
+        if let Some(v) = by_tag {
+            add(v);
         }
-        out.sort_unstable();
-        out.dedup();
-        out
+        if lists > 1 {
+            out.sort_unstable();
+            out.dedup();
+        }
     }
+}
+
+thread_local! {
+    /// The candidate list of the element being styled, kept between elements
+    /// for its allocation. A user takes it and puts it back when done; a
+    /// nested user finds an empty list and allocates its own.
+    static CANDIDATE_SCRATCH: std::cell::RefCell<Vec<u32>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn take_candidate_scratch() -> Vec<u32> {
+    CANDIDATE_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+fn return_candidate_scratch(scratch: Vec<u32>) {
+    CANDIDATE_SCRATCH.with(|c| *c.borrow_mut() = scratch);
 }
 
 /// What a rule's subject keys are tested against, read off an element once:
@@ -20801,11 +20893,6 @@ impl RuleIndex {
             stylesheets.len(),
             stylesheets.iter().map(|s| s.rules.len()).sum(),
         )
-    }
-
-    /// Candidate global rule indices for an element, ascending, no repeats.
-    fn candidates(&self, tag_name: &str, attributes: &HashMap<String, String>) -> Vec<u32> {
-        self.main.candidates(tag_name, attributes)
     }
 
     fn rule<'a>(&self, stylesheets: &'a [Stylesheet], g: u32) -> &'a Rule {
