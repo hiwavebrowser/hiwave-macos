@@ -4667,9 +4667,15 @@ impl Engine {
             } else {
                 &matching_rules
             };
+            let reverted = reverted_layer_properties(rules.iter().map(|r| r.1), important_pass);
             for (_, rule) in rules {
                 for declaration in &rule.declarations {
                     if declaration.important != important_pass {
+                        continue;
+                    }
+                    if !reverted.is_empty()
+                        && reverted.contains(&(rule.layer_order, declaration.property.as_str()))
+                    {
                         continue;
                     }
                     let value_str = match &declaration.value {
@@ -5312,9 +5318,18 @@ impl Engine {
         // `style="color: red !important"` handed "red !important" to the
         // value parser, which dropped the declaration.
         for important_pass in [false, true] {
+            let reverted = reverted_layer_properties(
+                rules_for(important_pass).iter().map(|r| r.0),
+                important_pass,
+            );
             for (rule, specificity, _) in rules_for(important_pass) {
                 for decl in &rule.declarations {
                     if decl.important != important_pass {
+                        continue;
+                    }
+                    if !reverted.is_empty()
+                        && reverted.contains(&(rule.layer_order, decl.property.as_str()))
+                    {
                         continue;
                     }
                     // Extract string value from PropertyValue
@@ -19327,6 +19342,73 @@ mod cascade_wire_tests {
         assert_eq!(background_of(css, X, 7.0), GREEN);
     }
 
+    // `revert-layer` (CSS Cascade 5 §7.3.3): linkedin's layered bundle hides
+    // its hero with `display: none` and shows it on desktop with
+    // `display: revert-layer`, both in the `overrides` layer.
+    const RED: (u8, u8, u8) = (255, 0, 0);
+
+    #[test]
+    fn revert_layer_rolls_back_to_the_layer_below() {
+        let css = "@layer a, b; @layer a { .c { background-color: #0f0 } } \
+                   @layer b { .c { background-color: #f00 } #x { background-color: revert-layer } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn revert_layer_only_counts_when_it_wins_its_own_layer() {
+        // The layer's winner is the id rule's red, so the lower-specificity
+        // `revert-layer` is an ordinary loser.
+        let css = "@layer a, b; @layer a { .c { background-color: #0f0 } } \
+                   @layer b { #x { background-color: #f00 } .c { background-color: revert-layer } }";
+        assert_eq!(background_of(css, X, 50.0), RED);
+    }
+
+    #[test]
+    fn revert_layer_leaves_the_layers_above_alone() {
+        let css = "@layer a, b, c; @layer a { .c { background-color: #f00 } } \
+                   @layer b { .c { background-color: revert-layer } } \
+                   @layer c { .c { background-color: #0f0 } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn an_unlayered_revert_layer_rolls_back_to_the_layered_result() {
+        let css = "@layer a { .c { background-color: #0f0 } } \
+                   .c { background-color: #f00 } #x { background-color: revert-layer }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn an_important_revert_layer_rolls_back_among_important_declarations() {
+        // Important layers run in reverse, so `b` is the lower one here.
+        let css = "@layer a, b; @layer b { .c { background-color: #0f0 !important } } \
+                   @layer a { .c { background-color: #f00 !important } \
+                              #x { background-color: revert-layer !important } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn revert_layer_shows_what_the_same_layer_hid() {
+        // linkedin's shape: `display: none`, then `revert-layer` in the same
+        // layer, back to the atoms layer's display. A hidden box is not in
+        // the tree at all, so `background_of` panics without the rollback.
+        // (linkedin puts the `revert-layer` under `@media`; an ad-hoc build
+        // has no viewport and keeps no conditional rule, so that part is
+        // checked on the saved page with a release build instead.)
+        let css = "@layer atoms, overrides; \
+                   @layer atoms { .c { display: grid; background-color: #0f0 } } \
+                   @layer overrides { .c { display: none } #x { display: revert-layer } }";
+        assert_eq!(background_of(css, X, 50.0), GREEN);
+    }
+
+    #[test]
+    fn a_pseudo_element_reverts_its_layer_too() {
+        let css = "@layer a, b; \
+                   @layer a { #x::before { content: \"\"; display: block; width: 7px; background-color: #0f0 } } \
+                   @layer b { #x::before { background-color: #f00 } #x::before { background-color: revert-layer } }";
+        assert_eq!(background_of(css, X, 7.0), GREEN);
+    }
+
     // CSS nesting: linkedin's layered bundle stacks its hero with
     // `.stack { display: grid; & > * { grid-area: 1/-1 } }`.
     const IN_P: &str = r#"<div class="p"><div id="x" class="c" style="width:50px;height:10px"></div></div>"#;
@@ -20750,6 +20832,51 @@ fn layered_important_order<'a>(
             .cmp(&(std::cmp::Reverse(b.0.layer_order), b.1, b.2))
     });
     Some(out)
+}
+
+/// CSS Cascade 5 §7.3.3, `revert-layer`: the (layer, property) pairs one
+/// importance pass must skip. When the declaration that wins a property
+/// WITHIN a layer is `revert-layer`, that layer contributes nothing for the
+/// property and the result of the layers below it stands. In the unlayered
+/// rules it rolls back to the layered result. `rules` is in the pass's cascade
+/// order, so the last declaration seen for a pair is its winner.
+///
+/// The keyword was dropped as an unknown value, which left the same layer's
+/// earlier declaration in force: linkedin hides its hero with
+/// `.h { display: none }` and shows it on desktop with
+/// `@media (min-width: 768px) { .d { display: revert-layer } }`, both in one
+/// layer, so the hero never appeared.
+///
+/// Pairs are matched by property name, so a `revert-layer` longhand does not
+/// roll back a shorthand declared in the same layer. Empty (no allocation) on
+/// any element no `revert-layer` declaration reaches.
+fn reverted_layer_properties<'a>(
+    rules: impl Iterator<Item = &'a Rule>,
+    important: bool,
+) -> Vec<(u32, &'a str)> {
+    let mut winners: Vec<((u32, &'a str), bool)> = Vec::new();
+    for rule in rules {
+        for decl in &rule.declarations {
+            if decl.important != important {
+                continue;
+            }
+            let reverts = matches!(
+                &decl.value,
+                rustkit_css::PropertyValue::Specified(s)
+                    if s.len() >= 12 && s.trim().eq_ignore_ascii_case("revert-layer")
+            );
+            if !reverts && winners.is_empty() {
+                continue;
+            }
+            let key = (rule.layer_order, decl.property.as_str());
+            match winners.iter_mut().find(|w| w.0 == key) {
+                Some(w) => w.1 = reverts,
+                None if reverts => winners.push((key, true)),
+                None => {}
+            }
+        }
+    }
+    winners.into_iter().filter(|w| w.1).map(|w| w.0).collect()
 }
 
 /// The selector a `…::before`/`…:before` rule matches its host with, as
