@@ -1,0 +1,28 @@
+fix(text, renderer): paint web fonts with their own glyphs; validate WOFF/WOFF2 before install
+
+A page's first paint runs before its web fonts are fetched. The renderer's
+glyph cache was keyed by family NAME, so the fallback's bitmaps were stored
+under the web font's name and reused on every later frame: text was measured
+with the web font and drawn with Helvetica's glyphs, for TTF, WOFF and WOFF2
+alike. The same key let a second document that declares the same family name
+with another file reuse the first document's glyphs.
+
+- GlyphKey carries `web_face`: the identity (content hash) of the
+  document-registered file the family resolves to, 0 for platform fonts.
+  One registry lookup per text run. The same file is the same entry however
+  often it is installed, so swapping views does not churn the atlas.
+- webfonts::inspect identifies sfnt / TTC / WOFF / WOFF2 from the bytes and
+  checks the header and table directory against the bytes received, with a
+  32 MiB cap on the file and a 128 MiB cap on the decoded size a WOFF/WOFF2
+  directory adds up to or declares. install() runs it before the bytes reach
+  Core Graphics. Core Graphics already decodes WOFF and WOFF2; the module
+  comment that said they install as nothing was out of date.
+- Ahem as WOFF and WOFF2 next to the TTF fixture (made with fontTools).
+
+Tests: an engine test serves one page with the three formats over HTTP and
+reads the captured frame (fails on develop e4a82f7: the glyph cells hold
+Helvetica's strokes, not Ahem's squares); a renderer test for the key across
+late arrival and two documents; text tests for each container's rejections
+and for glyphs decoded from WOFF and WOFF2.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

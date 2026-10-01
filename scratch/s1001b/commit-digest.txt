@@ -1,0 +1,3 @@
+trench(realsite): digest 2026-10-01 04:00 — #398 (web fonts painted with fallback glyphs; WOFF/WOFF2 header validation) opened; queue item 3 mapped, not started; board 28/60 unchanged (no scoring run)
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

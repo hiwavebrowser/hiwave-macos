@@ -1,0 +1,88 @@
+{
+  "id": "x",
+  "url": "https://x.com/",
+  "chrome": [
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://x.com/",
+      "title": "X. It\u2019s what\u2019s happening / X",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c0-1-A/x/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c0-1-A/x/chrome-a.png",
+      "elapsed_ms": 57516
+    },
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://x.com/",
+      "title": "X. It\u2019s what\u2019s happening / X",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c0-1-A/x/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c0-1-A/x/chrome-b.png",
+      "elapsed_ms": 61647
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://x.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c0-1-A/x/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c0-1-A/x/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 6,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 6239,
+      "elapsed_ms": 23
+    },
+    "elapsed_ms": 8085,
+    "error": null,
+    "wall_ms": 8319,
+    "non_background_fraction": 0.1049
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 28,
+    "rustkit_words": 41,
+    "ratio": 0.7857,
+    "missing_sample": [
+      "home",
+      "scan",
+      "something",
+      "the",
+      "went",
+      "wrong"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0,
+    "diff": 8.92265625
+  },
+  "points": 2
+}

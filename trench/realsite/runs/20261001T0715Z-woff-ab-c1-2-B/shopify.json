@@ -1,0 +1,83 @@
+{
+  "id": "shopify",
+  "url": "https://www.shopify.com/",
+  "chrome": [
+    {
+      "url": "https://www.shopify.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.shopify.com/",
+      "title": "Shopify: The All-in-One Commerce Platform for Businesses - Shopify",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/shopify/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/shopify/chrome-a.png",
+      "elapsed_ms": 46165
+    },
+    {
+      "url": "https://www.shopify.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.shopify.com/",
+      "title": "Shopify: The All-in-One Commerce Platform for Businesses - Shopify",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/shopify/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/shopify/chrome-b.png",
+      "elapsed_ms": 69521
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.shopify.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/shopify/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20261001T0715Z-woff-ab-c1-2-B/shopify/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 3,
+      "threw": 3,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 363401,
+      "elapsed_ms": 321
+    },
+    "elapsed_ms": 26382,
+    "error": null,
+    "wall_ms": 26530,
+    "non_background_fraction": 0.3638
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 30,
+    "rustkit_words": 116,
+    "ratio": 0.9667,
+    "missing_sample": [
+      "we"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.27724609375,
+    "diff": 18.8208984375
+  },
+  "points": 2
+}

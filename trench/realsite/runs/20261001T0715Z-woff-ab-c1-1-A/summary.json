@@ -1,0 +1,31 @@
+{
+  "ts": "20261001T073327Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 4,
+  "points": 2,
+  "max_points": 12,
+  "loads": 1,
+  "readable": 1,
+  "looks_right": 0,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [
+    "github"
+  ],
+  "oracle_blocked": {},
+  "blocked": {},
+  "per_site": {
+    "lyft": 2,
+    "apple": 0,
+    "github": 0,
+    "shopify": 0
+  },
+  "scorable_sites": 4,
+  "scorable_points": 2,
+  "scorable_max": 12,
+  "full_run": false
+}
