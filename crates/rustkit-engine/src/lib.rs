@@ -442,7 +442,7 @@ const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
 
 /// One `<script>` after fetching: its log label, then its source text or
 /// the reason it will not run.
-type FetchedScript = (String, Result<(ScriptTiming, String), ScriptOutcome>);
+type FetchedScript = (String, usize, Result<(ScriptTiming, String), ScriptOutcome>);
 
 /// What happened to one piece of page script on the load path.
 #[derive(Debug, Clone, PartialEq)]
@@ -1832,7 +1832,7 @@ impl Engine {
             Inline(String),
             External(Url),
         }
-        let mut entries: Vec<(String, Result<(ScriptTiming, Body), &'static str>)> = Vec::new();
+        let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), &'static str>)> = Vec::new();
         let mut index = 0usize;
         document.traverse(|node| {
             if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
@@ -1852,7 +1852,7 @@ impl Engine {
                     .map_err(|_| "unparseable src"),
                 None => Ok((timing, Body::Inline(node.text_content()))),
             });
-            entries.push((label, entry));
+            entries.push((label, node.id.raw(), entry));
         });
         if entries.is_empty() {
             return None;
@@ -1867,7 +1867,7 @@ impl Engine {
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         Some(
-            futures::stream::iter(entries.into_iter().map(move |(label, entry)| {
+            futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry)| {
                 let loader = loader.clone();
                 let referrer = referrer.clone();
                 async move {
@@ -1895,7 +1895,7 @@ impl Engine {
                                 .unwrap_or(Err(ScriptOutcome::OverBudget))
                         }
                     };
-                    (label, result)
+                    (label, node_id, result)
                 }
             }))
             .buffered(MAX_CONCURRENT_SCRIPT_LOADS)
@@ -1927,10 +1927,10 @@ impl Engine {
         bindings.set_loop_iteration_limit(loop_limit);
 
         // Execution order: classic, defer, async (stable within each).
-        let mut runnable: Vec<(String, ScriptTiming, String)> = Vec::new();
-        for (label, result) in fetched {
+        let mut runnable: Vec<(String, ScriptTiming, String, usize)> = Vec::new();
+        for (label, node_id, result) in fetched {
             match result {
-                Ok((timing, text)) => runnable.push((label, timing, text)),
+                Ok((timing, text)) => runnable.push((label, timing, text, node_id)),
                 Err(outcome) => log.push(ScriptRecord {
                     source: label,
                     bytes: 0,
@@ -1939,7 +1939,7 @@ impl Engine {
                 }),
             }
         }
-        runnable.sort_by_key(|(_, timing, _)| match timing {
+        runnable.sort_by_key(|(_, timing, _, _)| match timing {
             ScriptTiming::Classic => 0,
             ScriptTiming::Defer => 1,
             ScriptTiming::Async => 2,
@@ -1974,7 +1974,7 @@ impl Engine {
         };
 
         let _ = bindings.set_ready_state("loading");
-        for (label, _, text) in runnable {
+        for (label, _, text, node_id) in runnable {
             if poisoned.get() || started.elapsed() >= budget {
                 log.push(ScriptRecord {
                     source: label,
@@ -2003,7 +2003,11 @@ impl Engine {
             }
             info!(source = %label, bytes = text.len(), "Running page script");
             let record = run(label, text.len(), &|| {
-                bindings.evaluate(&text).map(|_| ()).map_err(strip)
+                // `document.currentScript` is this element while it runs.
+                let _ = bindings.set_current_script(Some(node_id));
+                let result = bindings.evaluate(&text).map(|_| ()).map_err(strip);
+                let _ = bindings.set_current_script(None);
+                result
             });
             log.push(record);
         }
@@ -2331,7 +2335,7 @@ impl Engine {
         if let Some((fetched, fetch_done)) = scripts {
             let timed_out = fetched
                 .iter()
-                .any(|(_, r)| matches!(r, Err(ScriptOutcome::OverBudget)));
+                .any(|(_, _, r)| matches!(r, Err(ScriptOutcome::OverBudget)));
             let budget = if timed_out {
                 std::time::Duration::ZERO
             } else {
@@ -20456,6 +20460,54 @@ window.addEventListener('load', function () {
         // not started either.
         assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
         assert_eq!(engine.execute_script(view, "typeof slow").unwrap(), r#"String("undefined")"#);
+    }
+
+    /// `document.currentScript` is the classic <script> element while it
+    /// runs and null otherwise. x.com ends inline scripts with
+    /// `document.currentScript.remove()`; before this, that threw
+    /// "cannot convert 'null' or 'undefined' to object" on 5 of its 7
+    /// scripts, and webpack's `publicPath` detection (cnn) failed the same
+    /// way.
+    #[test]
+    fn document_current_script_names_the_running_script_element() {
+        let page = r#"<html><head>
+<script id="first">
+var seen = [];
+seen.push('first:' + document.currentScript.id);
+document.currentScript.remove();
+</script>
+<script id="ext" src="/ext.js"></script>
+<script id="third">seen.push('third:' + document.currentScript.tagName);</script>
+</head><body><div id="after">x</div></body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            (
+                "/ext.js",
+                "text/javascript",
+                "seen.push('ext:' + document.currentScript.id + ':' + /ext[.]js$/.test(document.currentScript.src));".into(),
+            ),
+        ]);
+        let (mut engine, view) = load(EngineConfig::default(), port);
+
+        assert_eq!(
+            engine.execute_script(view, "seen.join(',')").unwrap(),
+            r#"String("first:first,ext:ext:true,third:SCRIPT")"#
+        );
+        // Between scripts it is null again.
+        assert_eq!(
+            engine.execute_script(view, "String(document.currentScript)").unwrap(),
+            r#"String("null")"#
+        );
+        // `remove()` really removed the element, and no script failed.
+        assert_eq!(
+            engine.execute_script(view, "String(document.getElementById('first'))").unwrap(),
+            r#"String("null")"#
+        );
+        let log = engine.script_log(view).unwrap();
+        assert!(
+            log.iter().all(|r| r.outcome == ScriptOutcome::Ran),
+            "{log:#?}"
+        );
     }
 
     #[test]

@@ -1046,6 +1046,17 @@ impl DomBindings {
             .set_loop_iteration_limit(max_iterations);
     }
 
+    /// Name the `<script>` element being run, as `document.currentScript`
+    /// sees it; `None` between scripts. `node` is the element's raw NodeId.
+    pub fn set_current_script(&self, node: Option<usize>) -> Result<(), BindingError> {
+        let script = match node {
+            Some(id) => format!("document.__rkSetCurrentScript({id});"),
+            None => "document.__rkSetCurrentScript(null);".to_string(),
+        };
+        self.runtime.borrow_mut().evaluate_script(&script)?;
+        Ok(())
+    }
+
     /// Set `document.readyState` (`loading` / `interactive` / `complete`).
     pub fn set_ready_state(&self, state: &str) -> Result<(), BindingError> {
         self.runtime
