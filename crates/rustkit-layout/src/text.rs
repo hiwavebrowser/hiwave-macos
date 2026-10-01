@@ -3798,6 +3798,7 @@ mod font_resolve_tests {
         let shaper = TextShaper::new();
         let chain = FontFamilyChain::new("NoSuchFamilyForTheResolveCache").with_fallback("Helvetica");
         let before = RESOLUTIONS.with(Cell::get);
+        let generation = rustkit_text::webfonts::generation();
         let mut widths = Vec::new();
         for _ in 0..200 {
             let run = shaper
@@ -3805,10 +3806,16 @@ mod font_resolve_tests {
                 .unwrap();
             widths.push(run.metrics.width);
         }
-        // 2 per shape uncached (400). Cached: 2, plus 2 more if the other
-        // test's install bumps the web-font generation mid-loop.
+        // 2 per shape uncached (400). Cached: 2, plus 2 more each time
+        // another test's install bumps the web-font generation mid-loop.
+        // The generation is process-wide and several tests install, so
+        // count the bumps instead of allowing for one.
+        let bumps = (rustkit_text::webfonts::generation() - generation) as usize;
         let resolved = RESOLUTIONS.with(Cell::get) - before;
-        assert!(resolved <= 4, "{resolved} resolutions for 200 identical shapes");
+        assert!(
+            resolved <= 2 + 2 * bumps,
+            "{resolved} resolutions for 200 identical shapes across {bumps} generation bumps"
+        );
         assert!(widths.iter().all(|w| *w == widths[0] && *w > 0.0), "{:?}", &widths[..3]);
         assert_eq!(
             shaper
@@ -3827,10 +3834,24 @@ mod font_resolve_tests {
                 .shape("x", &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
                 .unwrap()
         };
-        shape();
+        // Other tests install web-font sets on their own threads, and the
+        // generation is process-wide: only judge a hit when it held still
+        // (as `a_new_web_font_set_invalidates_shaped_runs` does). Judging
+        // it unconditionally failed about one parallel run in two.
+        let mut judged = false;
+        for _ in 0..20 {
+            let generation = rustkit_text::webfonts::generation();
+            shape();
+            let before = RESOLUTIONS.with(Cell::get);
+            shape();
+            if rustkit_text::webfonts::generation() == generation {
+                assert_eq!(RESOLUTIONS.with(Cell::get), before, "second shape is a cache hit");
+                judged = true;
+                break;
+            }
+        }
+        assert!(judged, "the web-font generation never held still");
         let before = RESOLUTIONS.with(Cell::get);
-        shape();
-        assert_eq!(RESOLUTIONS.with(Cell::get), before, "second shape is a cache hit");
         rustkit_text::webfonts::install(
             "font-resolve-cache-test",
             &[rustkit_text::webfonts::WebFontFace {
