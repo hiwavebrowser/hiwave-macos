@@ -423,3 +423,74 @@ reported as context for decision 1 and **Pete did not rule on it.** The 08-12
 geometry-first amendment stands as written. A next night may not read "units
 come from macOS" as "P4 is now first"; if the queue is to move, that is its own
 decision with its own ratification.
+
+## Branch law v2 (RATIFIED by Pete 2026-10-01) — SUPERSEDES the 08-12 branch law
+
+**The trench branch and `develop` merge continuously, both ways.** Pete's
+direction, verbatim in substance: the two must keep merging to and from each
+other or we repeat or undo work; a night **starts** from the latest merged
+`develop`, with an eye on PRs that may land before the night ends, and **ends**
+by promoting its own PR back to `develop`.
+
+### What the old law got wrong
+
+The 08-12 law said engine changes never land here and PRs must keep `crates/`
+byte-identical to **master**. Its goal — an attributable `N/26` — was right. Its
+mechanism froze the branch: it never said to *take* `develop`, so the branch sat
+at `e2dba9c` (08-09) for seven weeks. By 10-01 it was **839 behind, 138 ahead**,
+`crates/` diverged by 74 files / −51,395 lines. The law's own test read as
+compliant the whole time, because `crates/` *was* byte-identical to a master —
+just one from seven weeks earlier. **A frozen branch satisfies "byte-identical"
+perfectly and means nothing.**
+
+Attributability never depended on the freeze anyway. It comes from the PR's own
+macOS lane measuring its own head, plus a base-matched A/B. That is how every
+receipt since P0b was actually taken.
+
+### The two failures it caused, both observed on night 71
+
+- **Work stranded.** `scripts/geometry_attribution.py` + its test — 1,511 lines,
+  three commits, mutation-checked — existed only here and had **never reached
+  `develop`**. Recovered by the 10-01 merge.
+- **Work repeated.** Not knowing that, night 71 wrote
+  `trench/tools/n71_root_defects.py` and `n71_root_classes.py` from scratch to
+  split Gate A's failures into roots — **which `geometry_attribution.py` already
+  did, better** (it subtracts the nearest common ancestor's delta per axis;
+  the n71 tool only asks whether every ancestor is green). It also has a
+  font-sensitivity board. Two tools, same job, written seven weeks apart by the
+  same campaign, because one was invisible from the other's branch.
+
+### Night procedure
+
+1. **Start:** `git fetch`, then branch from the **latest merged `develop`**.
+   List open PRs against `develop` and note any that could land tonight and
+   touch the same files.
+2. **During:** engine or gate changes go on that develop-cut branch as usual.
+3. **End:** open the PR back to `develop` and drive it to green. The trench
+   record (`trench/`) rides the same lane — it is no longer a separate
+   long-lived branch's private property.
+
+### Guards — what exists, and what does not yet
+
+Pete's standard: *enough guards that neither chain poisons the other; if not,
+identify new ones.* Honest status:
+
+| | guard | state |
+|---|---|---|
+| **existing** | the PR's own macOS lane measures its own head | works |
+| | the ratchet's committed per-case floors catch regressions | works |
+| | Gate A / B / receipt refusals — unmeasured is never green, and since `dd075ec` unattributable is never green | works |
+| **G1** | **start-of-night preflight**: assert the working branch contains `origin/develop`'s tip; refuse to pick a unit otherwise | **NOT BUILT** — night 71 caught the 839-commit drift by chance |
+| **G2** | **merge safety**: after merging `develop`, assert no deletions outside the night's declared files | run by hand on 10-01, **not automated** |
+| **G3** | **`crates/` parity**: `git diff origin/develop -- crates/` empty unless the night declares an engine change — the live replacement for "byte-identical to master" | **NOT BUILT** |
+| **G4** | **single record**: the digest and baseline here must be a superset of `develop`'s; refuse if `develop` holds a line this branch lacks | **NOT BUILT** — the baseline *had* silently diverged (09-04 block missing from `develop`) |
+| **G5** | **receipt base provenance**: record the base SHA in `gate-a.json` / `finish-line.json`; flag any comparison across different bases | **NOT BUILT** — the base-drift trap has been rediscovered five nights running, and on 10-01 it caught the agent's own prediction |
+| **G6** | **do not rebuild what exists**: before writing a new trench tool, search `scripts/` and `trench/tools/` for one that already does the job | process, **not enforceable in code** — and it is the one that cost the most on 10-01 |
+
+**Build order if a night is given guard work:** G5 first (it has failed five
+times and silently corrupts conclusions), then G1 and G3 (cheap, and they make
+the whole arrangement self-checking), then G4. G2 is nearly free once G1 exists.
+
+**No guard here may be read as making an unattributable number attributable.**
+These protect the *branches* from each other. The seat law above still governs
+what this seat's numbers mean.
