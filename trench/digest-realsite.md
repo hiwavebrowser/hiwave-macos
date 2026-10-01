@@ -1582,3 +1582,36 @@ trench/realsite/runs/20261001T0907Z-quiet-dev7ae0e68
 3. **Ligatures on macOS.** The run can carry them, but the shaper keeps them off. Turning them on changes advances wherever a face has an `fi` ligature. Recommendation: its own slice after the fallback-boundary slice, with a fixture measured in Chrome.
 
 **14:22 addendum (supersedes "open as #411" above):** **#411 MERGED** at head 104feb7 before the session stopped. So decision 1 is no longer a choice: wikipedia's text is drawn in the system font on develop until the generic-family fix lands, and that fix is this lane's next PR. #412 is open at d251d02 with CI still running.
+
+## 2026-10-01 14:54 — daily QUIET board (quiet), develop 2b764be
+
+**26/60 (loads 16, readable 7, looks-right 3; scorable 25/57)** (load at start: { 8.91 7.12 6.81 })
+
+```
+google     PASS PASS 100.0% PASS   8.4% (cc   0.3%)  3/3  
+youtube    fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.25% non-background)
+facebook   PASS fail  58.7% PASS  13.6% (cc   0.0%)  2/3  
+instagram  fail fail   0.0% fail    -   (cc   7.2%)  0/3  blank frame (0.59% non-background)
+wikipedia  PASS fail  28.9% unst  44.2% (cc  42.5%)  1/3  
+lyft       PASS PASS 100.0% fail  17.9% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% fail    -   (cc   0.1%)  0/3  blank frame (1.50% non-background)
+x          PASS PASS  95.3% PASS  10.4% (cc   0.2%)  3/3  
+linkedin   PASS fail    -   fail    -   (cc    -  )  1/3  
+yahoo      PASS fail  26.5% fail  28.5% (cc   5.9%)  1/3  
+bing       PASS fail  11.9% fail  82.2% (cc  10.4%)  1/3  
+walmart    PASS fail  72.9% unst  96.2% (cc  85.1%)  1/3  
+microsoft  fail fail   0.0% unst    -   (cc  18.0%)  0/3  blank frame (0.96% non-background)
+apple      PASS PASS 100.0% fail  54.8% (cc   0.0%)  2/3  
+netflix    PASS PASS  90.6% fail  66.0% (cc   1.9%)  2/3  
+github     PASS fail  71.7% fail  75.3% (cc   0.0%)  1/3  
+shopify    PASS PASS  96.5% fail  18.7% (cc   0.0%)  2/3  
+squarespace PASS PASS  85.7% unst  77.3% (cc  77.1%)  2/3  
+cnn        PASS fail  47.9% fail  55.6% (cc   0.1%)  1/3  
+weather    PASS fail   9.9% fail  30.4% (cc  14.7%)  1/3  
+------------------------------------------------------------------------------
+POINTS 26/60   loads 16  readable 7  looks-right 3   unstable: wikipedia, walmart, microsoft, squarespace   oracle failed: linkedin
+BLOCKED none
+ORACLE BLOCKED linkedin (top-level document HTTP 403)
+SCORABLE 25/57 on 19 sites
+trench/realsite/runs/20261001T1832Z-quiet-dev2b764be
+```
