@@ -1079,3 +1079,49 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **#395 is on hold: exact and receipt-identical, but flat in 12 loaded rounds.** Default: nobody merges it until a quiet 5+5 read shows a win; if that read is flat too, the lane closes it and drops cut 2.
 2. **The lane has had no quiet machine for two sessions running (load 12–34), so it cannot prove or disprove any cut.** Default: give it a quiet window (pause the real-site lane's builds for one cascade hour a day), or have the launcher skip cascade sessions above load ~6. Carried over from 21:55.
 3. **Engine lib tests run serially in this lane (`--test-threads=1`) until the #380 GPU-guard hang is fixed.** Default: yes; the real-site lane still owns the fix.
+
+## 2026-10-01 02:45
+
+**The machine was quiet for 26 minutes (load 2.2–4.2), the first quiet window in three sessions, and it settled the open question: both prefilter cuts are flat. Worst ratio of record: 14.8× → 14.4× (wikipedia, develop 570e25d, 20 quiet runs); the change is the quieter read, not a cut. No PR opened. #395 was merged at 05:26Z while still titled HOLD; it is exact and harmless, so no revert. Cut 2 is dropped. The rest of the session measured self time in-process, and that names the next cuts with real milliseconds.**
+
+| site | Chrome ms | before: ratio of record (develop 22092e6, 09-30 15:50, load 3–5) | after: develop 570e25d, median of 20 quiet runs | #395's commit 414768a, same rounds | cut 1 / develop, per-round median | cuts 1+2 (eb75327) / develop |
+|---|---|---|---|---|---|---|
+| cnn | 210 | 735 → 3.5× | 621.5 → **3.0×** | 602.5 → 2.9× | 0.957 (15 of 20 rounds below 1) | 0.977 |
+| github | 110 | 1223 → 11.1× | 1087.5 → **9.9×** | 1085.5 → 9.9× | 1.000 (9 of 20) | 0.982 |
+| wikipedia | 20 | 296 → **14.8×** | 287.5 → **14.4×** | 288.0 → 14.4× | 0.990 (10 of 20) | 0.995 |
+
+- **The A/B.** Three binaries, one load per page per round, order rotated through all six permutations (`ab3.py`), 24 rounds from 01:36 to 02:06. The last 4 were dropped: the real-site session started and load went to 5–7 (one round read 5×). The 20 kept rounds are the orders ABC CBA BCA BAC CAB ACB three times plus ABC CBA. Per-round range 0.81–1.40. Logs `cascade-target/tmp/ab3-quiet-0135-{a,b,c}.txt`.
+  - The first 12 rounds alone read 0.94 for cut 1 on wikipedia. With 20 it is 0.990. Twelve rounds are not enough at this noise level.
+  - **Develop's tip (e4a82f7 = #395 + #396) was not built**, so there is no number for it. 414768a is #395's head on the old base.
+  - Posted on #395: https://github.com/hiwavebrowser/hiwave-macos/pull/395#issuecomment-5925748631
+- **Cut 2 dropped** (`atlas/cs-candidates-scratch` @ eb75327, no PR): 0.991 / 0.986 / 0.995 against cut 1. This is the default from decision 1 at 00:58.
+- **Self-time probe** (local only, never committed; patch `cascade-target/tmp/selftime-probe.patch`, binaries `pc-selftime-probe{,2,3}`, runner `tmp/probe_slots.py`, results `tmp/selftime-probe-run{1,2,3}.txt`). Timers and counters inside `compute_style_for_element`, on develop's tip plus cut 2. First build of each page, median of 3 loads at load 6–7, so read the shares, not the absolute ms:
+
+  | first build's walk | wikipedia (191 ms) | github (586 ms) | cnn (351 ms) |
+  |---|---|---|---|
+  | outside style (box construction, text) | **76 ms, 40%** | 33 ms, 6% | 56 ms, 16% |
+  | candidate loop: prefilter + selector match | 41 ms, 22% | **202 ms, 34%** | **139 ms, 40%** |
+  | of that, the prefilter alone | 8 ms | 72 ms | 50 ms |
+  | sort + custom properties | 3 ms | **167 ms, 28%** | 11 ms |
+  | apply declarations | 22 ms, 11% | 53 ms | 55 ms, 16% |
+  | `ComputedStyle::new` + inherit | 14 ms, 7% | 6 ms | 9 ms |
+  | candidate list | 7 ms | 20 ms | 12 ms |
+  | `::before`/`::after` styles | 18 ms, 10% | 19 ms | 13 ms |
+  | elements / candidates per element / admitted by prefilter / matched | 3,841 / 33 / 95% / 6.7% | 1,155 / 469 / 99.6% / 4.8% | 2,161 / 128 / 98.6% / 7.9% |
+
+  - **The prefilter rejects almost nothing.** A rule is already a candidate because one of its keys is in the element's buckets, so `keys_may_match_keyed` passes 95–99.6% of them, and the matcher is the one that says no. That is why hoisting its lookups (cut 1) bought nothing. Its doc comment says it can never reject a rule the matcher would accept, so **skipping it on the indexed path is exact**, and is worth about 8 / 72 / 50 ms (3% / 7% / 8% of a load). Small on wikipedia, but it is a few deleted lines.
+  - **Where candidates come from:** wikipedia 74% from the tag bucket; github 59% from the universal bucket (about 277 rules tried on every element). **Where they die:** the ancestor filter rejects 64% (wikipedia) and 85% (github, cnn) of selector tries; 8–25% fail on the subject compound; 3–9% reach the combinator walk.
+  - **github's custom properties: 148 ms, 14% of its load.** 24,145 declarations on 233 elements. The 9 calls with the theme rules (about 2,485 vars each) cost only 12–16 ms. The other 224 elements declare 8 vars each and cost about 300–600 µs each. So the cost is per declaring element, not per variable. What scales with the inherited set has not been located yet.
+  - **wikipedia is flat.** Of ~288 ms: outside-style walk 76, replay build 66, matching 41, sheets and index about 30, apply 22, pseudo 18, new+inherit 14. No single exact cut is worth more than a few percent; the two large blocks are structural (tree reuse on replay, cheaper box construction).
+- **Instrument note: the two modes are the machine, not the engine.** In the probe runs the same page did identical work (same element, candidate and match counts) at two speeds: github's style pass took 251 and 265 ms in two loads and 505 ms in the third. A 2× step with identical work points at core placement (performance vs efficiency cores). Not verified. It is the same split seen on wikipedia since 09-30 (196 vs 318 ms).
+- **State left behind.** `.worktrees/cs-dev-1a016c4` (`atlas/cs-candidates-scratch`) has develop merged in locally as d332213, clean, not pushed; the branch is dropped, so it can stay local. `.worktrees/cs-dev-ddbeae5` is detached at develop e4a82f7, unbuilt. The shared target dir's engine artifact is the probe build: `touch` the crate before building in any cs worktree.
+- **Aleph:** answered (no hang, no error), but the hub index has no entry for develop's `keys_may_match_keyed`, so engine navigation was Read plus python on the develop worktree, as in the last two sessions.
+- **Build cost:** release parity-capture 6 min 17 s (four crates) and 5 min 54 s (engine only) at load 6–12; a third engine-only build took about 11 min at load 13–17.
+- **Mistake:** I read a 740-line build log whole. Read only the Compiling/Finished lines.
+- **Open cs PRs:** 0, cap 3.
+- **Next session:** (1) If load is under ~6, build develop's tip and take the ratio of record with `ab3.py` rotation against `pc-dev-570e25d`. (2) Cut, exact, small: skip `keys_may_match_keyed` on the indexed path in `compute_style_for_element` and `pseudo_element_style` (check the tests that count `PREFILTER_VISITS`). (3) github: find what in `element_custom_properties` costs 300–600 µs for an 8-variable element, then cut it. (4) wikipedia: time the 76 ms outside-style walk by part (the 09-30 walk timers are in `cs-walk-timers.py`), and build the tree snapshot behind `RUSTKIT_TREE_REUSE`.
+
+**Decisions for Pete**
+1. **#395 merged while its title said HOLD, with no measured win.** It is exact and receipt-identical, and the quiet read shows no loss, so nothing needs undoing. Default: leave it merged; from now on this lane opens a speed PR only after a quiet counterbalanced read, so a hold is never needed.
+2. **The 3× exit is not reachable by 2026-10-11 with exact small cuts.** cnn is at 3.0× and github at 9.9×, but wikipedia at 14.4× has no hot spot: its largest blocks are box construction (76 ms) and the replay build (66 ms), against a 60 ms budget for the whole load. Default: keep the metric and the date, spend the remaining sessions on the two structural cuts (tree reuse on replay, then box construction), and report the gap on the end date.
+3. **Quiet windows exist around 01:30–02:00.** This one ended when the real-site session started at 02:05. Default: start the cascade session at 01:30 and hold the real-site launcher until 02:15, so the lane gets one clean read a night. Carried over from 21:55 and 00:58 in a narrower form.
