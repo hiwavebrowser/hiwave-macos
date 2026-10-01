@@ -13942,3 +13942,56 @@ Everything the Linux A/B measured earlier in this entry was taken at
 differ by `develop`'s delta and not by this PR's. The PR body now says so
 rather than leaving the old base implied — the base-drift trap, met for the
 fifth consecutive night, this time inside my own write-up.
+
+### Addendum — the `cascade_wire_tests` shape, measured properly
+
+The characterisation two addenda up ("fails exactly 6 of 31, which 6 varies")
+was built on two runs and is **too vague to be useful**. A third run finished
+before I killed the sweep, and the three together give a much more specific
+shape. All three on **pristine `e4a82f7`**, no local modification:
+
+| run | the 6 |
+|---|---|
+| full suite | `a_nested_rule…` · `a_shorthand_carrying_a_colour…` + the core 4 |
+| module only, 1 | `a_nested_rule…` · `a_pseudo_element…` + the core 4 |
+| module only, 2 | `a_later_layer…` · `a_pseudo_element…` + the core 4 |
+
+**Always fails, all three runs (4):** `a_percentage_offset_is_refused_rather_than_approximated`,
+`the_overflow_shorthand_sets_both_axes`, `the_rule_after_a_nested_rule_still_applies`,
+`the_single_number_shorthand_zeroes_the_basis`.
+
+**Rotating: exactly 2 more slots, drawn from a pool of 4** —
+`a_later_layer_beats_an_earlier_one_whatever_the_specificity`,
+`a_nested_rule_under_a_complex_parent_list_matches`,
+`a_pseudo_element_cascades_by_layer_too`,
+`a_shorthand_carrying_a_colour_still_sets_the_line`.
+
+So the total is **always exactly 6**, never 5 and never 7, while two of the six
+names rotate. That is not the signature of generic flakiness — a flaky test
+moves the count. A fixed count with a rotating tail is the signature of
+something **bounded**: a shared structure with a capacity, where a fixed number
+of entries survive and which ones depends on insertion order. `rustkit-layout`
+has at least one such thing on the text path —
+`measure_text_with_spacing`'s memo clears wholesale at `MAX_ENTRIES` rather
+than evicting — and the engine has a `RuleIndexScope`. **That is a hypothesis
+and I did not verify it**; what is measured is the 4-plus-2-of-4 shape, and the
+mechanism is somebody's unit, not a guess to write into the record as fact.
+
+Two corrections to this file and to #397 follow from it, and both matter more
+than the extra precision:
+
+1. **"Which 6 varies" invites the wrong read.** It sounds like noise to wait
+   out. A deterministic core of 4 means there are four real failures on this
+   seat that a name-level diff will show every time, and only the two-slot tail
+   is unstable. A night can legitimately work the core 4; it cannot conclude
+   anything from the tail.
+2. **One re-run is not enough to call the tail.** I ruled my own change out on
+   a single disagreeing pair, which happened to be right. With a 2-of-4 draw,
+   two runs can agree by chance often enough that agreement proves nothing —
+   the sound check is the count first, then membership of the core, and only
+   then the tail.
+
+Cost noted for whoever budgets a night: each of these runs is ~12 minutes, and
+establishing this shape took four of them (~50 min) on top of the merge
+validation. The nondeterminism, not the change, is what consumed the back half
+of this night.
