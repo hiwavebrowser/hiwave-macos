@@ -13721,7 +13721,7 @@ nights; they are the stub, failing honestly, in the one place that did report it
 
 ### Commits
 
-On `atlas/n71-text-metric-provenance` (off `develop`, PR to follow):
+On `atlas/n71-text-metric-provenance` (off `develop`), **PR #397**:
 
 - `dd075ec` — a capture declares which shaper produced its advances, and Gate A
   and the receipt refuse to attribute one that came from no font.
@@ -13862,3 +13862,30 @@ SwiftShader ICD, A/B-verified against unmodified `develop` as the same nine.
 - `Err(_)` in `shape_text_metrics` has a careful fallback that recomputes
   letter- and word-spacing by hand. It is unreachable on this seat, because the
   stub it exists to stand in for is what `Ok` returns.
+
+### Addendum — #397 open, waiting on CI and review
+
+[PR #397](https://github.com/hiwavebrowser/hiwave-macos/pull/397) against
+`develop` at `dd075ec`. Watched. Its own Parity Gate on `macos-14` is what
+measures the metric for this change, and the prediction is **`3/26 -> 3/26`
+with all four columns unchanged**, for the same reason #372's was: a change
+whose captures are bit-identical cannot move a count-and-fraction receipt.
+That prediction is cheap and I am recording it so a future night can check the
+lane against it rather than against this file.
+
+**Read the base-drift trap before comparing any per-case count in that run to
+#372's.** This PR's base is `develop b946849`; #372's was `6e26932`, #373..#390
+later, and `parity.yml` passes no `ref:` to `actions/checkout@v4`, so the lane
+builds the merge ref. The rule 09-29 and 09-30 both recorded still holds
+verbatim: **the PR lane's number is never comparable to the previous PR lane's
+number.** For this PR the base-matched Linux A/B says the change moves the
+count by exactly zero and the captures are hash-identical, so any delta the
+lane reports is not this PR's under any reading.
+
+One thing a reviewer should push back on if they disagree: Gate A's
+`gate_passes` now refuses an unattributable board, and on any Linux CI job that
+runs Gate A this converts an already-red advisory result into a differently-red
+one. It cannot turn a passing job red, because a stub board has never passed —
+but if some lane runs Gate A on Linux and reads its exit code as meaningful,
+that lane was reading a number it should not have been, and this is the commit
+that says so out loud.
