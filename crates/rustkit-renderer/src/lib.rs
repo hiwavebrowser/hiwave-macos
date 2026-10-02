@@ -170,6 +170,37 @@ pub struct CachedTexture {
     pub height: u32,
 }
 
+/// Shrink an RGBA image so neither side exceeds `limit`, keeping its aspect.
+/// Box filter: each output pixel is the mean of the source pixels it covers.
+/// Returns `(width, height, pixels)`.
+pub(crate) fn downscale_rgba_to_fit(width: u32, height: u32, data: &[u8], limit: u32) -> (u32, u32, Vec<u8>) {
+    let limit = limit.max(1);
+    let scale = (limit as f64 / width as f64).min(limit as f64 / height as f64).min(1.0);
+    let out_w = ((width as f64 * scale).floor() as u32).clamp(1, limit);
+    let out_h = ((height as f64 * scale).floor() as u32).clamp(1, limit);
+    let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
+    for oy in 0..out_h {
+        let y0 = (oy as u64 * height as u64 / out_h as u64) as u32;
+        let y1 = (((oy + 1) as u64 * height as u64 / out_h as u64) as u32).max(y0 + 1).min(height);
+        for ox in 0..out_w {
+            let x0 = (ox as u64 * width as u64 / out_w as u64) as u32;
+            let x1 = (((ox + 1) as u64 * width as u64 / out_w as u64) as u32).max(x0 + 1).min(width);
+            let mut acc = [0u64; 4];
+            for y in y0..y1 {
+                let row = (y as usize * width as usize + x0 as usize) * 4;
+                for px in data[row..row + (x1 - x0) as usize * 4].chunks_exact(4) {
+                    for c in 0..4 {
+                        acc[c] += px[c] as u64;
+                    }
+                }
+            }
+            let n = ((y1 - y0) as u64 * (x1 - x0) as u64).max(1);
+            out.extend(acc.iter().map(|&v| ((v + n / 2) / n) as u8));
+        }
+    }
+    (out_w, out_h, out)
+}
+
 /// Texture cache for images.
 pub struct TextureCache {
     textures: HashMap<String, CachedTexture>,
@@ -208,11 +239,27 @@ impl TextureCache {
         data: &[u8],
     ) -> &CachedTexture {
         if !self.textures.contains_key(key) {
+            // An image larger than the device allows in either direction
+            // (8192 under wgpu's default limits; hulu ships an 11501 px
+            // sprite) is downscaled to fit. `create_texture` would otherwise
+            // raise a validation error that takes the whole page down. The
+            // cache entry keeps the intrinsic size: background sizing reads
+            // it, and drawing samples by UV so the smaller texture is
+            // stretched back over the same rect.
+            let limit = device.limits().max_texture_dimension_2d;
+            let scaled;
+            let (tex_w, tex_h, data) = if width > limit || height > limit {
+                let (w, h, px) = downscale_rgba_to_fit(width, height, data, limit);
+                scaled = px;
+                (w, h, scaled.as_slice())
+            } else {
+                (width, height, data)
+            };
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(key),
                 size: wgpu::Extent3d {
-                    width,
-                    height,
+                    width: tex_w,
+                    height: tex_h,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -237,12 +284,12 @@ impl TextureCache {
                 data,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * width),
-                    rows_per_image: Some(height),
+                    bytes_per_row: Some(4 * tex_w),
+                    rows_per_image: Some(tex_h),
                 },
                 wgpu::Extent3d {
-                    width,
-                    height,
+                    width: tex_w,
+                    height: tex_h,
                     depth_or_array_layers: 1,
                 },
             );
@@ -313,6 +360,8 @@ pub struct Renderer {
     // Blit pipeline for copying RGBA textures (unlike texture_pipeline which treats R as alpha)
     blit_pipeline: wgpu::RenderPipeline,
     color_glyph_pipeline: wgpu::RenderPipeline,
+    // Image pipeline: the blit shader composited source-over (straight alpha)
+    image_pipeline: wgpu::RenderPipeline,
     // Blit pipeline for Rgba8Unorm targets (for blitting to filter textures)
     blit_pipeline_rgba: wgpu::RenderPipeline,
 
@@ -534,6 +583,14 @@ impl Renderer {
             &texture_bind_group_layout,
         );
 
+        // Image pipeline: blit shader + source-over blend for straight alpha.
+        let image_pipeline = pipeline::create_image_pipeline(
+            &device,
+            surface_format,
+            &uniform_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
         // Create blit pipeline for Rgba8Unorm targets (blitting to filter textures)
         let blit_pipeline_rgba = pipeline::create_blit_pipeline(
             &device,
@@ -597,6 +654,7 @@ impl Renderer {
             _texture_pipeline_rgba: texture_pipeline_rgba,
             blit_pipeline,
             color_glyph_pipeline,
+            image_pipeline,
             blit_pipeline_rgba,
             backdrop_filter_pipelines,
             gradient_pipeline,
@@ -2009,19 +2067,29 @@ impl Renderer {
                 font_style,
                 advances,
                 ascent,
+                run,
             } => {
-                self.draw_text_with_metrics(
-                    text,
-                    *x,
-                    *y,
-                    *color,
-                    *font_size,
-                    font_family,
-                    *font_weight,
-                    *font_style,
-                    advances.as_deref(),
-                    *ascent,
-                );
+                // SHAPED-RUN CONTRACT (S0): a command that carries its run
+                // is painted from the run. The family-list path below is
+                // for commands without one, and for a run whose face the
+                // rasterizer no longer holds.
+                let painted_from_run = run
+                    .as_deref()
+                    .is_some_and(|run| self.draw_glyph_run(run, *x, *y, *color, *ascent));
+                if !painted_from_run {
+                    self.draw_text_with_metrics(
+                        text,
+                        *x,
+                        *y,
+                        *color,
+                        *font_size,
+                        font_family,
+                        *font_weight,
+                        *font_style,
+                        advances.as_deref(),
+                        *ascent,
+                    );
+                }
             }
 
             DisplayCommand::TextDecoration {
@@ -2067,10 +2135,12 @@ impl Renderer {
                 spread_radius,
                 color,
                 rect,
+                border_radius,
                 inset,
             } => {
                 self.draw_box_shadow(
                     *rect,
+                    *border_radius,
                     *offset_x,
                     *offset_y,
                     *blur_radius,
@@ -2111,6 +2181,7 @@ impl Renderer {
                 font_family,
                 font_weight,
                 padding,
+                kind,
             } => {
                 self.draw_text_input(
                     *rect,
@@ -2127,6 +2198,35 @@ impl Renderer {
                     font_family,
                     *font_weight,
                     *padding,
+                    *kind,
+                );
+            }
+
+            DisplayCommand::ListBox {
+                rect,
+                options,
+                selected,
+                row_height,
+                font_size,
+                font_family,
+                font_weight,
+                text_color,
+                background_color,
+                border_color,
+                border_width,
+            } => {
+                self.draw_list_box(
+                    *rect,
+                    options,
+                    selected,
+                    *row_height,
+                    *font_size,
+                    font_family,
+                    *font_weight,
+                    *text_color,
+                    *background_color,
+                    *border_color,
+                    *border_width,
                 );
             }
 
@@ -2454,51 +2554,84 @@ impl Renderer {
     }
 
     /// Draw a rounded rectangle using SDF-based rendering.
+    ///
+    /// Each corner is a quarter ellipse `(h, v)`; the interior is painted as
+    /// horizontal bands split wherever a corner starts or ends, so no two
+    /// quads overlap whatever the four corners are (a translucent fill must
+    /// not be painted twice).
     fn draw_rounded_rect(&mut self, rect: Rect, color: Color, radius: rustkit_layout::BorderRadius) {
         // For small radii or very small rects, fall back to solid rect
-        let max_radius = radius.top_left.max(radius.top_right).max(radius.bottom_left).max(radius.bottom_right);
+        let radius = radius.fitted(rect.width, rect.height);
+        let max_radius = radius.top_left.h.max(radius.top_right.h).max(radius.bottom_left.h).max(radius.bottom_right.h);
         if max_radius < 1.0 || rect.width < 4.0 || rect.height < 4.0 {
             self.draw_solid_rect(rect, color);
             return;
         }
 
-        // Clamp radii to half the rect dimensions
-        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
-        let r_tl = radius.top_left.min(max_r);
-        let r_tr = radius.top_right.min(max_r);
-        let r_br = radius.bottom_right.min(max_r);
-        let r_bl = radius.bottom_left.min(max_r);
+        // A corner under one pixel on either axis is painted square: it has
+        // no pixel of its own to antialias.
+        let square_if_tiny = |c: rustkit_layout::CornerRadius| {
+            if c.h < 1.0 || c.v < 1.0 {
+                rustkit_layout::CornerRadius::default()
+            } else {
+                c
+            }
+        };
+        // Quadrant order: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
+        let corners = [
+            square_if_tiny(radius.top_left),
+            square_if_tiny(radius.top_right),
+            square_if_tiny(radius.bottom_right),
+            square_if_tiny(radius.bottom_left),
+        ];
+        let [tl, tr, br, bl] = corners;
 
-        // Draw the interior (non-corner) regions as solid rects for efficiency
-        // Top edge (between corners)
-        if rect.width > r_tl + r_tr {
-            self.draw_solid_rect(
-                Rect::new(rect.x + r_tl, rect.y, rect.width - r_tl - r_tr, r_tl.max(r_tr)),
-                color,
-            );
-        }
-        // Bottom edge (between corners)
-        if rect.width > r_bl + r_br {
-            self.draw_solid_rect(
-                Rect::new(rect.x + r_bl, rect.y + rect.height - r_bl.max(r_br), rect.width - r_bl - r_br, r_bl.max(r_br)),
-                color,
-            );
-        }
-        // Middle section (full width, between top and bottom corner rows)
-        let top_corner_height = r_tl.max(r_tr);
-        let bottom_corner_height = r_bl.max(r_br);
-        if rect.height > top_corner_height + bottom_corner_height {
-            self.draw_solid_rect(
-                Rect::new(rect.x, rect.y + top_corner_height, rect.width, rect.height - top_corner_height - bottom_corner_height),
-                color,
-            );
+        // Interior bands between the corner boxes.
+        let mut cuts = [
+            0.0,
+            tl.v,
+            tr.v,
+            rect.height - bl.v,
+            rect.height - br.v,
+            rect.height,
+        ];
+        cuts.sort_by(|a, b| a.total_cmp(b));
+        for band in cuts.windows(2) {
+            let (y0, y1) = (band[0], band[1]);
+            if y1 <= y0 {
+                continue;
+            }
+            let left = if y1 <= tl.v {
+                tl.h
+            } else if y0 >= rect.height - bl.v {
+                bl.h
+            } else {
+                0.0
+            };
+            let right = if y1 <= tr.v {
+                tr.h
+            } else if y0 >= rect.height - br.v {
+                br.h
+            } else {
+                0.0
+            };
+            if rect.width > left + right {
+                self.draw_solid_rect(
+                    Rect::new(
+                        rect.x + left,
+                        rect.y + y0,
+                        rect.width - left - right,
+                        y1 - y0,
+                    ),
+                    color,
+                );
+            }
         }
 
         // Draw corners using SDF
-        self.draw_rounded_corner(rect.x, rect.y, r_tl, color, 0); // top-left
-        self.draw_rounded_corner(rect.x + rect.width - r_tr, rect.y, r_tr, color, 1); // top-right
-        self.draw_rounded_corner(rect.x + rect.width - r_br, rect.y + rect.height - r_br, r_br, color, 2); // bottom-right
-        self.draw_rounded_corner(rect.x, rect.y + rect.height - r_bl, r_bl, color, 3); // bottom-left
+        for quadrant in 0..4u8 {
+            self.draw_rounded_corner(rect, corners, quadrant, color);
+        }
     }
 
     /// Smoothstep interpolation function matching WGSL's smoothstep.
@@ -2529,81 +2662,70 @@ impl Renderer {
             return 1.0;
         }
 
-        // Clamp radii to half the rect dimensions
-        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
-        let r_tl = radius.top_left.min(max_r);
-        let r_tr = radius.top_right.min(max_r);
-        let r_br = radius.bottom_right.min(max_r);
-        let r_bl = radius.bottom_left.min(max_r);
+        let radius = radius.fitted(rect.width, rect.height);
 
-        // Check each corner
+        // Distance of the point from each of the rect's four edges
         let local_x = px - rect.x;
         let local_y = py - rect.y;
         let right_x = rect.width - local_x;
         let bottom_y = rect.height - local_y;
 
-        // Top-left corner: use smoothstep SDF antialiasing to match GPU shader
-        if local_x < r_tl && local_y < r_tl {
-            let dx = r_tl - local_x;
-            let dy = r_tl - local_y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let sdf = dist - r_tl;
-            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
+        // Each corner the point falls in: smoothstep SDF antialiasing to
+        // match the GPU shader. Two diagonally opposite corners can both
+        // hold the point when their boxes overlap; it must be inside both.
+        let mut coverage = 1.0_f32;
+        for (corner, ex, ey) in [
+            (radius.top_left, local_x, local_y),
+            (radius.top_right, right_x, local_y),
+            (radius.bottom_right, right_x, bottom_y),
+            (radius.bottom_left, local_x, bottom_y),
+        ] {
+            if ex < corner.h && ey < corner.v {
+                let sdf = -ellipse_edge_distance(corner.h - ex, corner.v - ey, corner.h, corner.v);
+                coverage = coverage.min(1.0 - Self::smoothstep(-0.5, 0.5, sdf));
+            }
         }
-
-        // Top-right corner: use smoothstep SDF antialiasing to match GPU shader
-        if right_x < r_tr && local_y < r_tr {
-            let dx = r_tr - right_x;
-            let dy = r_tr - local_y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let sdf = dist - r_tr;
-            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
-        }
-
-        // Bottom-right corner: use smoothstep SDF antialiasing to match GPU shader
-        if right_x < r_br && bottom_y < r_br {
-            let dx = r_br - right_x;
-            let dy = r_br - bottom_y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let sdf = dist - r_br;
-            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
-        }
-
-        // Bottom-left corner: use smoothstep SDF antialiasing to match GPU shader
-        if local_x < r_bl && bottom_y < r_bl {
-            let dx = r_bl - local_x;
-            let dy = r_bl - bottom_y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let sdf = dist - r_bl;
-            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
-        }
-
-        // Inside the rect, not in a corner region
-        1.0
+        coverage
     }
 
-    /// Draw a single rounded corner using pixel-based SDF with anti-aliasing.
-    /// quadrant: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
-    fn draw_rounded_corner(&mut self, x: f32, y: f32, radius: f32, color: Color, quadrant: u8) {
-        if radius < 1.0 {
+    /// Draw one corner of a rounded rect, pixel by pixel, with anti-aliasing.
+    ///
+    /// `corners` are the fitted radii in quadrant order (0=top-left,
+    /// 1=top-right, 2=bottom-right, 3=bottom-left). The corner's box is
+    /// `h` x `v` and its curve is the quarter ellipse centred on the box's
+    /// inner corner.
+    fn draw_rounded_corner(
+        &mut self,
+        rect: Rect,
+        corners: [rustkit_layout::CornerRadius; 4],
+        quadrant: u8,
+        color: Color,
+    ) {
+        let corner = corners[quadrant as usize];
+        if corner.is_zero() {
             return;
         }
+        let (h, v) = (corner.h, corner.v);
+        let (x, y) = corner_box_origin(rect, corner, quadrant);
 
-        // Calculate center of the corner circle
+        // Calculate center of the corner ellipse
         let (cx, cy) = match quadrant {
-            0 => (x + radius, y + radius), // top-left: center is inside
-            1 => (x, y + radius),          // top-right: center is to the left
-            2 => (x, y),                   // bottom-right: center is up-left
-            3 => (x + radius, y),          // bottom-left: center is up
+            0 => (x + h, y + v), // top-left: center is inside
+            1 => (x, y + v),     // top-right: center is to the left
+            2 => (x, y),         // bottom-right: center is up-left
+            3 => (x + h, y),     // bottom-left: center is up
             _ => return,
         };
+        // Only the diagonally opposite corner's box can reach into this one
+        // (adjacent corners are fitted not to).
+        let opposite = (quadrant + 2) % 4;
+        let overlaps_opposite = corner_boxes_overlap(rect, corner, corners[opposite as usize]);
 
         // Draw corner using small rectangles with AA
         let step = 1.0;
-        let mut py = y;
-        while py < y + radius {
-            let mut px = x;
-            while px < x + radius {
+        let columns = corner_cells(x, h, quadrant == 0 || quadrant == 3);
+        for (py, cell_y, cell_h) in corner_cells(y, v, quadrant == 0 || quadrant == 1) {
+            for &(px, cell_x, cell_w) in &columns {
                 // Calculate distance from pixel center to corner center
                 let dx = match quadrant {
                     0 | 3 => cx - (px + step / 2.0), // left corners: measure from right edge
@@ -2613,35 +2735,34 @@ impl Renderer {
                     0 | 1 => cy - (py + step / 2.0), // top corners: measure from bottom edge
                     _ => (py + step / 2.0) - cy,    // bottom corners: measure from top edge
                 };
-                
-                let dist = (dx * dx + dy * dy).sqrt();
-                
+
                 // Use signed distance field for anti-aliasing
                 // Distance to edge (positive = inside, negative = outside)
-                let signed_dist = radius - dist;
-                
-                if signed_dist >= 1.0 {
-                    // Fully inside
-                    self.draw_solid_rect(Rect::new(px, py, step, step), color);
-                } else if signed_dist > -1.0 {
-                    // Edge pixel - apply anti-aliasing
-                    // Coverage is 0.5 + signed_dist * 0.5 (clamped to 0-1)
-                    let coverage = (signed_dist * 0.5 + 0.5).clamp(0.0, 1.0);
-                    if coverage > 0.01 {
-                        let aa_color = Color::new(
-                            color.r,
-                            color.g,
-                            color.b,
-                            color.a * coverage,
-                        );
-                        self.draw_solid_rect(Rect::new(px, py, step, step), aa_color);
+                let signed_dist = ellipse_edge_distance(dx, dy, h, v);
+                let mut coverage = corner_coverage(signed_dist);
+
+                if overlaps_opposite {
+                    let (pcx, pcy) = (px + step / 2.0, py + step / 2.0);
+                    match corner_distance_at(rect, corners[opposite as usize], opposite, pcx, pcy) {
+                        // The pixel is in both boxes. The lower quadrant
+                        // paints it, with the smaller of the two coverages.
+                        Some(_) if opposite < quadrant => coverage = 0.0,
+                        Some(other) => coverage = coverage.min(corner_coverage(other)),
+                        None => {}
                     }
                 }
+
+                let cell = Rect::new(cell_x, cell_y, cell_w, cell_h);
+                if coverage >= 1.0 {
+                    // Fully inside
+                    self.draw_solid_rect(cell, color);
+                } else if coverage > 0.01 {
+                    // Edge pixel - apply anti-aliasing
+                    let aa_color = Color::new(color.r, color.g, color.b, color.a * coverage);
+                    self.draw_solid_rect(cell, aa_color);
+                }
                 // else: outside, don't draw
-                
-                px += step;
             }
-            py += step;
         }
     }
 
@@ -2825,13 +2946,13 @@ impl Renderer {
     
     /// Draw solid borders whose corners are rounded.
     ///
-    /// `widths`/`colors` are `[top, right, bottom, left]`. Radii are clamped
-    /// exactly as `draw_rounded_rect` clamps the background, so the ring and
+    /// `widths`/`colors` are `[top, right, bottom, left]`. Radii are fitted
+    /// exactly as `draw_rounded_rect` fits the background, so the ring and
     /// the fill it sits on share one outer curve. Each corner box is
     /// `max(radius, side width)` on each axis and is painted per pixel:
-    /// coverage = outer curve − inner (padding-edge) curve, where the inner
-    /// curve is the ellipse `(r − vertical width, r − horizontal width)`
-    /// about the same centre (CSS Backgrounds 3 §5.2), square when either
+    /// coverage = outer curve − inner (padding-edge) curve, where the outer
+    /// curve is the corner's ellipse `(h, v)` and the inner one the ellipse
+    /// `(h − vertical width, v − horizontal width)` about the same centre (CSS Backgrounds 3 §5.2), square when either
     /// is ≤ 0. Between corner boxes each side is a plain strip. A corner
     /// pixel takes the colour of the side on its half of the line from the
     /// outer corner to the inner corner.
@@ -2858,20 +2979,22 @@ impl Renderer {
             return;
         }
 
-        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
+        let radius = radius.fitted(rect.width, rect.height);
         let half_w = rect.width / 2.0;
         let half_h = rect.height / 2.0;
-        // (radius, vertical side width, horizontal side width,
+        // (radii, vertical side width, horizontal side width,
         //  vertical colour, horizontal colour, corner index)
         let corners = [
-            (radius.top_left.min(max_r), l, t, colors[3], colors[0], 0u8),
-            (radius.top_right.min(max_r), r, t, colors[1], colors[0], 1u8),
-            (radius.bottom_right.min(max_r), r, b, colors[1], colors[2], 2u8),
-            (radius.bottom_left.min(max_r), l, b, colors[3], colors[2], 3u8),
+            (radius.top_left, l, t, colors[3], colors[0], 0u8),
+            (radius.top_right, r, t, colors[1], colors[0], 1u8),
+            (radius.bottom_right, r, b, colors[1], colors[2], 2u8),
+            (radius.bottom_left, l, b, colors[3], colors[2], 3u8),
         ];
-        // Corner box extents: width along x, height along y.
-        let cw = |rad: f32, vw: f32| rad.max(vw).min(half_w);
-        let ch = |rad: f32, hw: f32| rad.max(hw).min(half_h);
+        // Corner box extents: width along x, height along y. A side wider
+        // than half the box stops at the middle; a fitted radius is already
+        // kept clear of its neighbour.
+        let cw = |rad: rustkit_layout::CornerRadius, vw: f32| rad.h.max(vw.min(half_w));
+        let ch = |rad: rustkit_layout::CornerRadius, hw: f32| rad.v.max(hw.min(half_h));
         let (tl_w, tl_h) = (cw(corners[0].0, l), ch(corners[0].0, t));
         let (tr_w, tr_h) = (cw(corners[1].0, r), ch(corners[1].0, t));
         let (br_w, br_h) = (cw(corners[2].0, r), ch(corners[2].0, b));
@@ -2912,26 +3035,23 @@ impl Renderer {
             }
             let box_x = if q == 0 || q == 3 { rect.x } else { right - bw };
             let box_y = if q == 0 || q == 1 { rect.y } else { bottom - bh };
-            let (rx, ry) = (rad - vw, rad - hw);
-            let mut py = box_y;
-            while py < box_y + bh - 0.001 {
-                let ph = (box_y + bh - py).min(1.0);
-                let mut px = box_x;
-                while px < box_x + bw - 0.001 {
-                    let pw = (box_x + bw - px).min(1.0);
+            let (rx, ry) = (rad.h - vw, rad.v - hw);
+            let columns = corner_cells(box_x, bw, q == 0 || q == 3);
+            for (_, py, ph) in corner_cells(box_y, bh, q == 0 || q == 1) {
+                for &(_, px, pw) in &columns {
                     let (cx, cy) = (px + pw * 0.5, py + ph * 0.5);
                     // Distances from the corner's two outer edges.
                     let ex = if q == 0 || q == 3 { cx - rect.x } else { right - cx };
                     let ey = if q == 0 || q == 1 { cy - rect.y } else { bottom - cy };
 
-                    let outer = if rad > 0.0 && ex < rad && ey < rad {
-                        let d = ((rad - ex).powi(2) + (rad - ey).powi(2)).sqrt();
-                        ((rad - d) * 0.5 + 0.5).clamp(0.0, 1.0)
+                    let outer = if !rad.is_zero() && ex < rad.h && ey < rad.v {
+                        let d = ellipse_edge_distance(rad.h - ex, rad.v - ey, rad.h, rad.v);
+                        (d * 0.5 + 0.5).clamp(0.0, 1.0)
                     } else {
                         1.0
                     };
-                    let inner = if rx > 0.0 && ry > 0.0 && ex < rad && ey < rad {
-                        let k = (((rad - ex) / rx).powi(2) + ((rad - ey) / ry).powi(2)).sqrt();
+                    let inner = if rx > 0.0 && ry > 0.0 && ex < rad.h && ey < rad.v {
+                        let k = (((rad.h - ex) / rx).powi(2) + ((rad.v - ey) / ry).powi(2)).sqrt();
                         ((1.0 - k) * rx.min(ry) * 0.5 + 0.5).clamp(0.0, 1.0)
                     } else {
                         (ex - vw + 0.5).clamp(0.0, 1.0) * (ey - hw + 0.5).clamp(0.0, 1.0)
@@ -2947,9 +3067,7 @@ impl Renderer {
                             Color::new(c.r, c.g, c.b, c.a * coverage),
                         );
                     }
-                    px += 1.0;
                 }
-                py += 1.0;
             }
         }
     }
@@ -2957,11 +3075,17 @@ impl Renderer {
     /// Draw a box shadow.
     /// 
     /// For now, this uses a simplified approach:
-    /// - Outer shadows: Draw multiple semi-transparent rectangles with increasing offsets
+    /// - Outer shadows: semi-transparent rectangles with increasing offsets,
+    ///   clipped to outside the border box (`outer_shadow_paint_rects`)
     /// - Inset shadows: Draw gradient-like rectangles inside the box
+    ///
+    /// `radius` is the box's border-box corner radii. An outer shadow takes
+    /// its shape from them; an inset shadow does not use them yet.
+    #[allow(clippy::too_many_arguments)]
     fn draw_box_shadow(
         &mut self,
         rect: Rect,
+        radius: rustkit_layout::BorderRadius,
         offset_x: f32,
         offset_y: f32,
         blur_radius: f32,
@@ -2995,36 +3119,40 @@ impl Renderer {
         if shadow_rect.width <= 0.0 || shadow_rect.height <= 0.0 {
             return;
         }
-        
-        // For blur, we draw multiple layers with decreasing opacity
-        // This is a simplified approximation - real blur would use GPU shaders
+
+        if !inset {
+            let shadow_radius = radius.spread(spread_radius);
+            for (r, alpha) in Self::outer_shadow_paint_rects(
+                rect,
+                radius,
+                shadow_rect,
+                shadow_radius,
+                blur_radius,
+                color.a,
+            ) {
+                self.draw_solid_rect(r, Color::new(color.r, color.g, color.b, alpha));
+            }
+            return;
+        }
+
+        // Inset: for blur, draw multiple layers with decreasing opacity, shrinking
+        // inward. This is a simplified approximation - real blur would use GPU shaders
         if blur_radius > 0.0 {
             let steps = (blur_radius / 2.0).ceil().max(1.0) as u32;
             let step_size = blur_radius / steps as f32;
-            
+
             for i in 0..steps {
                 let layer = steps - i; // Draw outer layers first
                 let expansion = step_size * layer as f32;
                 let layer_alpha = color.a / (steps as f32 * 1.5); // Fade out
-                
-                let layer_rect = if inset {
-                    // Inset shadows shrink inward
-                    Rect::new(
-                        shadow_rect.x + expansion,
-                        shadow_rect.y + expansion,
-                        shadow_rect.width - expansion * 2.0,
-                        shadow_rect.height - expansion * 2.0,
-                    )
-                } else {
-                    // Outer shadows expand outward
-                    Rect::new(
-                        shadow_rect.x - expansion,
-                        shadow_rect.y - expansion,
-                        shadow_rect.width + expansion * 2.0,
-                        shadow_rect.height + expansion * 2.0,
-                    )
-                };
-                
+
+                let layer_rect = Rect::new(
+                    shadow_rect.x + expansion,
+                    shadow_rect.y + expansion,
+                    shadow_rect.width - expansion * 2.0,
+                    shadow_rect.height - expansion * 2.0,
+                );
+
                 if layer_rect.width > 0.0 && layer_rect.height > 0.0 {
                     let layer_color = Color::new(color.r, color.g, color.b, layer_alpha);
                     self.draw_solid_rect(layer_rect, layer_color);
@@ -3034,6 +3162,73 @@ impl Renderer {
             // No blur - just draw solid shadow
             self.draw_solid_rect(shadow_rect, color);
         }
+    }
+
+    /// The rects (with alpha) that paint an outer box shadow. `shadow_rect`
+    /// is the border box moved by the offset and grown by the spread; blur
+    /// is approximated by expanding layers, outermost first. Each layer is
+    /// clipped to outside the border box (CSS Backgrounds 3 §7.1), so a
+    /// transparent box shows what is behind it, not its own shadow.
+    ///
+    /// `box_radius` is the border box's corner radii and `shadow_radius` the
+    /// shadow shape's (the box's, spread). The hole follows the box's curve
+    /// and each layer its own, grown with the layer; a square box gets
+    /// exactly the rects it always did.
+    fn outer_shadow_paint_rects(
+        border_box: Rect,
+        box_radius: rustkit_layout::BorderRadius,
+        shadow_rect: Rect,
+        shadow_radius: rustkit_layout::BorderRadius,
+        blur_radius: f32,
+        alpha: f32,
+    ) -> Vec<(Rect, f32)> {
+        let mut layers = Vec::new();
+        if blur_radius > 0.0 {
+            let steps = (blur_radius / 2.0).ceil().max(1.0) as u32;
+            let step_size = blur_radius / steps as f32;
+            for i in 0..steps {
+                let expansion = step_size * (steps - i) as f32;
+                layers.push((
+                    Rect::new(
+                        shadow_rect.x - expansion,
+                        shadow_rect.y - expansion,
+                        shadow_rect.width + expansion * 2.0,
+                        shadow_rect.height + expansion * 2.0,
+                    ),
+                    shadow_radius.spread(expansion),
+                    alpha / (steps as f32 * 1.5),
+                ));
+            }
+        } else {
+            layers.push((shadow_rect, shadow_radius, alpha));
+        }
+        layers
+            .into_iter()
+            .flat_map(|(r, radius, a)| {
+                rounded_difference_pieces(r, radius, border_box, box_radius)
+                    .into_iter()
+                    .map(move |(p, coverage)| (p, a * coverage))
+            })
+            .collect()
+    }
+
+    /// `a` minus `b`, as up to four disjoint rects: full-width bands above
+    /// and below `b`, then the left and right pieces beside it.
+    fn rect_minus(a: Rect, b: Rect) -> Vec<Rect> {
+        let Some(hole) = a.intersect(&b) else {
+            return vec![a];
+        };
+        let (a_right, a_bottom) = (a.x + a.width, a.y + a.height);
+        let (h_right, h_bottom) = (hole.x + hole.width, hole.y + hole.height);
+        [
+            Rect::new(a.x, a.y, a.width, hole.y - a.y),
+            Rect::new(a.x, h_bottom, a.width, a_bottom - h_bottom),
+            Rect::new(a.x, hole.y, hole.x - a.x, hole.height),
+            Rect::new(h_right, hole.y, a_right - h_right, hole.height),
+        ]
+        .into_iter()
+        .filter(|r| r.width > 0.0 && r.height > 0.0)
+        .collect()
     }
 
     /// Apply a backdrop filter (blur, grayscale, etc.) to pixels behind the element.
@@ -3207,10 +3402,10 @@ impl Renderer {
             repeating: if repeating { 1 } else { 0 },
             repeat_length,
             num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
-            radius_tl: border_radius.top_left,
-            radius_tr: border_radius.top_right,
-            radius_br: border_radius.bottom_right,
-            radius_bl: border_radius.bottom_left,
+            radius_tl: border_radius.top_left.h,
+            radius_tr: border_radius.top_right.h,
+            radius_br: border_radius.bottom_right.h,
+            radius_bl: border_radius.bottom_left.h,
             debug_mode: std::env::var("RUSTKIT_GPU_DEBUG")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
@@ -3340,10 +3535,10 @@ impl Renderer {
             repeating: if repeating { 1 } else { 0 },
             repeat_length,
             num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
-            radius_tl: border_radius.top_left,
-            radius_tr: border_radius.top_right,
-            radius_br: border_radius.bottom_right,
-            radius_bl: border_radius.bottom_left,
+            radius_tl: border_radius.top_left.h,
+            radius_tr: border_radius.top_right.h,
+            radius_br: border_radius.bottom_right.h,
+            radius_bl: border_radius.bottom_left.h,
             // Debug mode: 0=normal, 1=t-value, 2=direction, 3=position, 4=coverage, 5=raw-t
             //            6=first-stop, 7=num-stops, 8=interp-color
             // Set via RUSTKIT_GPU_DEBUG=N environment variable
@@ -3491,10 +3686,10 @@ impl Renderer {
             repeating: if repeating { 1 } else { 0 },
             repeat_length,
             num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
-            radius_tl: border_radius.top_left,
-            radius_tr: border_radius.top_right,
-            radius_br: border_radius.bottom_right,
-            radius_bl: border_radius.bottom_left,
+            radius_tl: border_radius.top_left.h,
+            radius_tr: border_radius.top_right.h,
+            radius_br: border_radius.bottom_right.h,
+            radius_bl: border_radius.bottom_left.h,
             debug_mode: std::env::var("RUSTKIT_GPU_DEBUG")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
@@ -3621,10 +3816,10 @@ impl Renderer {
             repeating: if repeating { 1 } else { 0 },
             repeat_length,
             num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
-            radius_tl: border_radius.top_left,
-            radius_tr: border_radius.top_right,
-            radius_br: border_radius.bottom_right,
-            radius_bl: border_radius.bottom_left,
+            radius_tl: border_radius.top_left.h,
+            radius_tr: border_radius.top_right.h,
+            radius_br: border_radius.bottom_right.h,
+            radius_bl: border_radius.bottom_left.h,
             debug_mode: std::env::var("RUSTKIT_GPU_DEBUG")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
@@ -4470,7 +4665,10 @@ impl Renderer {
         font_family: &str,
         font_weight: u16,
         padding: [f32; 4],
+        kind: rustkit_layout::TextControlKind,
     ) {
+        let menu_list = kind == rustkit_layout::TextControlKind::MenuList;
+
         // Draw background
         self.draw_solid_rect(rect, background_color);
 
@@ -4497,12 +4695,24 @@ impl Renderer {
         // form_text_seat for what the old formula got wrong).
         let (text_x, text_top, ascent, descent) =
             Self::form_text_seat(rect, border_width, padding, font_family, font_size);
+        // A drop-down's label sits 4px inside its padding edge (Chrome
+        // CfT-148: "Option 1" at border + 4 on a bare select, at border +
+        // padding + 4 on a padded one).
+        let text_x = if menu_list {
+            text_x + MENU_LIST_LABEL_INSET
+        } else {
+            text_x
+        };
 
         let (display_text, display_color) = if value.is_empty() {
             (placeholder, placeholder_color)
         } else {
             (value, text_color)
         };
+
+        if menu_list {
+            self.draw_menu_list_arrow(rect, text_color);
+        }
 
         if !display_text.is_empty() {
             self.draw_text_with_metrics(
@@ -4535,6 +4745,87 @@ impl Renderer {
         }
     }
     
+    /// The drop-down arrow of a `<select>`: a chevron in the control's text
+    /// colour, centred vertically, at a fixed distance from the right edge.
+    /// Chrome CfT-148 measures the same at 13.333px and at 18px with
+    /// `padding: 8px 12px`: about 7.5 wide and 4 tall, its centre 8.75px
+    /// inside the border box, whatever the author padding or font size.
+    fn draw_menu_list_arrow(&mut self, rect: Rect, color: Color) {
+        let (cx, cy) = menu_list_arrow_centre(rect);
+        self.process_command(&DisplayCommand::Polyline {
+            points: vec![(cx - 3.75, cy - 2.0), (cx, cy + 2.0), (cx + 3.75, cy - 2.0)],
+            color,
+            width: 1.75,
+        });
+    }
+
+    /// Draw a list box: the frame, then one row per option, clipped to the
+    /// inside of the frame (a list box with more options than rows scrolls;
+    /// the rows past its height are not painted).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_list_box(
+        &mut self,
+        rect: Rect,
+        options: &[String],
+        selected: &[usize],
+        row_height: f32,
+        font_size: f32,
+        font_family: &str,
+        font_weight: u16,
+        text_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
+    ) {
+        self.draw_solid_rect(rect, background_color);
+        self.draw_border(
+            rect,
+            border_color,
+            border_width,
+            border_width,
+            border_width,
+            border_width,
+        );
+
+        let inner = Rect::new(
+            rect.x + border_width,
+            rect.y + border_width,
+            (rect.width - 2.0 * border_width).max(0.0),
+            (rect.height - 2.0 * border_width).max(0.0),
+        );
+        let (ascent, _descent) = Self::fallback_run_metrics(font_family, font_size);
+        self.push_clip(inner);
+        for (index, label) in options.iter().enumerate() {
+            let row = list_box_row_rect(inner, row_height, index);
+            if row.y >= inner.y + inner.height {
+                break;
+            }
+            // Chrome CfT-148, list box without focus: a selected row is
+            // rgb(206,206,206) with rgb(16,16,16) text.
+            let is_selected = selected.contains(&index);
+            if is_selected {
+                self.draw_solid_rect(row, LIST_BOX_SELECTED_ROW);
+            }
+            self.draw_text_with_metrics(
+                label,
+                row.x + LIST_BOX_OPTION_INSET,
+                row.y,
+                if is_selected {
+                    LIST_BOX_SELECTED_TEXT
+                } else {
+                    text_color
+                },
+                font_size,
+                font_family,
+                font_weight,
+                0,
+                None,
+                Some(ascent),
+            );
+        }
+        self.pop_clip();
+    }
+
     /// Draw a button.
     #[allow(clippy::too_many_arguments)]
     fn draw_button(
@@ -4746,6 +5037,7 @@ impl Renderer {
 
         let mut cursor_x = x;
         let atlas_size = self.glyph_cache.atlas_size() as f32;
+        let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
         // Glyph entries are baseline-relative (ADVANCE CONTRACT): layout's
         // ascent when shipped, one per-run fallback otherwise.
         let baseline = y
@@ -4762,6 +5054,7 @@ impl Renderer {
                 font_size: (font_size * 10.0) as u32,
                 font_weight,
                 font_style,
+                web_face,
             };
 
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
@@ -4884,6 +5177,106 @@ impl Renderer {
         (text_x, text_top, ascent, descent)
     }
 
+    /// Paint a shaped run (SHAPED-RUN CONTRACT, slice S0): the run's glyph
+    /// ids, from the run's face, at the run's advances and offsets. Nothing
+    /// here reads a character or a `font-family` list.
+    ///
+    /// Seating is the family-list path's: the baseline is `y` plus layout's
+    /// ascent, snapped to a whole device row (INTEGER-BASELINE CONTRACT),
+    /// and glyphs are rasterized at phase 0.
+    ///
+    /// Returns `false`, having drawn nothing, when the rasterizer does not
+    /// hold the run's face; the caller then paints the command the old way.
+    fn draw_glyph_run(
+        &mut self,
+        run: &rustkit_layout::GlyphRun,
+        x: f32,
+        y: f32,
+        color: Color,
+        layout_ascent: Option<f32>,
+    ) -> bool {
+        // FROZEN AT 0, as on the character path (GlyphKey::subpixel_phase).
+        let key_for = |glyph_id: u16| RunGlyphKey {
+            face: run.face.id,
+            glyph_id,
+            font_size: (run.font_size * 10.0) as u32,
+            subpixel_phase: 0,
+        };
+
+        // Every glyph's bitmap first, so a missing face is known before a
+        // single quad is emitted.
+        let mut entries = Vec::with_capacity(run.glyphs.len());
+        for glyph in &run.glyphs {
+            match self.glyph_cache.get_or_rasterize_run_glyph(
+                &self.queue,
+                &key_for(glyph.glyph_id),
+                run.font_size,
+            ) {
+                Some(entry) => entries.push(entry),
+                None => return false,
+            }
+        }
+
+        let c = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a,
+        ];
+        let baseline = (y + layout_ascent.unwrap_or(run.ascent)).round();
+        let atlas_size = self.glyph_cache.atlas_size() as f32;
+
+        for ((glyph, pen_x), entry) in run
+            .glyphs
+            .iter()
+            .zip(run.pen_positions(x))
+            .zip(entries)
+        {
+            let glyph_x = pen_x + glyph.x_offset + entry.offset[0];
+            let glyph_y = baseline + glyph.y_offset + entry.offset[1];
+            let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
+            let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
+
+            // `overflow: hidden` clips glyphs like everything else.
+            for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                .textured_pieces(
+                    Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                    entry.tex_coords,
+                )
+            {
+                let c = [c[0], c[1], c[2], c[3] * coverage];
+                let base = self.texture_vertices.len() as u32;
+                self.texture_vertices.extend_from_slice(&[
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [tex[0], tex[1]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [tex[2], tex[1]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [tex[2], tex[3]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [tex[0], tex[3]],
+                        color: c,
+                    },
+                ]);
+                self.texture_indices.extend_from_slice(&[
+                    base, base + 1, base + 2,
+                    base, base + 2, base + 3,
+                ]);
+            }
+        }
+        true
+    }
+
     /// Draw text honoring the ADVANCE CONTRACT: when layout ships per-char
     /// advances and an ascent, glyphs are placed at layout's advances and
     /// the baseline sits at y + layout_ascent — the renderer's own advance
@@ -4943,6 +5336,7 @@ impl Renderer {
 
         // Get atlas size before the loop to avoid borrow issues
         let atlas_size = self.glyph_cache.atlas_size() as f32;
+        let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
 
         for (char_idx, ch) in text.chars().enumerate() {
             let key = GlyphKey {
@@ -4955,6 +5349,7 @@ impl Renderer {
                 font_size: (font_size * 10.0) as u32,
                 font_weight,
                 font_style,
+                web_face,
             };
 
             // Color-glyph (emoji) path: paint the real color-bitmap artwork via
@@ -4962,9 +5357,9 @@ impl Renderer {
             // the normal path would tint into a flat blob. Falls through to the
             // grayscale path if the char isn't a color glyph or has no color
             // artwork (e.g. non-macOS).
-            #[cfg(target_os = "macos")]
-            let is_color = rustkit_text::macos::is_emoji(ch);
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(any(target_os = "macos", windows))]
+            let is_color = rustkit_text::is_emoji(ch);
+            #[cfg(not(any(target_os = "macos", windows)))]
             let is_color = false;
             if is_color {
                 if let Some(entry) =
@@ -4981,30 +5376,30 @@ impl Renderer {
                         .and_then(|a| a.get(char_idx).copied())
                         .unwrap_or(entry.advance);
 
-                    let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) = self
-                        .textured_corners(
+                    for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                        .textured_pieces(
                             Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
                             entry.tex_coords,
                         )
-                    else {
-                        continue;
-                    };
-
-                    // White vertex color: the blit pipeline multiplies, so this
-                    // passes the emoji's own colors through untinted. Preserve
-                    // the run's alpha for opacity/fade.
-                    let cw = [1.0, 1.0, 1.0, color.a];
-                    let base = self.color_glyph_vertices.len() as u32;
-                    self.color_glyph_vertices.extend_from_slice(&[
-                        TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
-                        TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
-                        TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
-                        TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
-                    ]);
-                    self.color_glyph_indices.extend_from_slice(&[
-                        base, base + 1, base + 2,
-                        base, base + 2, base + 3,
-                    ]);
+                    {
+                        // White vertex color: the blit pipeline multiplies, so this
+                        // passes the emoji's own colors through untinted. Preserve
+                        // the run's alpha for opacity/fade. The emoji is
+                        // premultiplied, so a rounded clip's partial coverage
+                        // scales every channel.
+                        let cw = [coverage, coverage, coverage, color.a * coverage];
+                        let base = self.color_glyph_vertices.len() as u32;
+                        self.color_glyph_vertices.extend_from_slice(&[
+                            TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
+                            TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
+                            TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
+                            TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
+                        ]);
+                        self.color_glyph_indices.extend_from_slice(&[
+                            base, base + 1, base + 2,
+                            base, base + 2, base + 3,
+                        ]);
+                    }
                     continue;
                 }
             }
@@ -5038,44 +5433,43 @@ impl Renderer {
                     .unwrap_or(entry.advance);
 
                 // `overflow: hidden` clips glyphs like everything else.
-                let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) = self
-                    .textured_corners(
+                for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                    .textured_pieces(
                         Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
                         entry.tex_coords,
                     )
-                else {
-                    continue;
-                };
+                {
+                    let c = [c[0], c[1], c[2], c[3] * coverage];
+                    let base = self.texture_vertices.len() as u32;
 
-                let base = self.texture_vertices.len() as u32;
+                    self.texture_vertices.extend_from_slice(&[
+                        TextureVertex {
+                            position: [x0, y0],
+                            tex_coords: [tex[0], tex[1]],
+                            color: c,
+                        },
+                        TextureVertex {
+                            position: [x1, y1],
+                            tex_coords: [tex[2], tex[1]],
+                            color: c,
+                        },
+                        TextureVertex {
+                            position: [x2, y2],
+                            tex_coords: [tex[2], tex[3]],
+                            color: c,
+                        },
+                        TextureVertex {
+                            position: [x3, y3],
+                            tex_coords: [tex[0], tex[3]],
+                            color: c,
+                        },
+                    ]);
 
-                self.texture_vertices.extend_from_slice(&[
-                    TextureVertex {
-                        position: [x0, y0],
-                        tex_coords: [tex[0], tex[1]],
-                        color: c,
-                    },
-                    TextureVertex {
-                        position: [x1, y1],
-                        tex_coords: [tex[2], tex[1]],
-                        color: c,
-                    },
-                    TextureVertex {
-                        position: [x2, y2],
-                        tex_coords: [tex[2], tex[3]],
-                        color: c,
-                    },
-                    TextureVertex {
-                        position: [x3, y3],
-                        tex_coords: [tex[0], tex[3]],
-                        color: c,
-                    },
-                ]);
-
-                self.texture_indices.extend_from_slice(&[
-                    base, base + 1, base + 2,
-                    base, base + 2, base + 3,
-                ]);
+                    self.texture_indices.extend_from_slice(&[
+                        base, base + 1, base + 2,
+                        base, base + 2, base + 3,
+                    ]);
+                }
             } else {
                 // Fallback: advance by estimated width (or layout's, if given)
                 cursor_x += layout_advances
@@ -5089,37 +5483,36 @@ impl Renderer {
     fn draw_image(&mut self, url: &str, rect: Rect) {
         if self.texture_cache.contains(url) {
             // `overflow: hidden` clips replaced content like everything else.
-            let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) =
-                self.textured_corners(rect, [0.0, 0.0, 1.0, 1.0])
-            else {
-                return;
-            };
-
-            self.push_image_quad(
-                url,
-                [
-                    TextureVertex {
-                        position: [x0, y0],
-                        tex_coords: [tex[0], tex[1]],
-                        color: [1.0, 1.0, 1.0, 1.0],
-                    },
-                    TextureVertex {
-                        position: [x1, y1],
-                        tex_coords: [tex[2], tex[1]],
-                        color: [1.0, 1.0, 1.0, 1.0],
-                    },
-                    TextureVertex {
-                        position: [x2, y2],
-                        tex_coords: [tex[2], tex[3]],
-                        color: [1.0, 1.0, 1.0, 1.0],
-                    },
-                    TextureVertex {
-                        position: [x3, y3],
-                        tex_coords: [tex[0], tex[3]],
-                        color: [1.0, 1.0, 1.0, 1.0],
-                    },
-                ],
-            );
+            for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in
+                self.textured_pieces(rect, [0.0, 0.0, 1.0, 1.0])
+            {
+                let color = [1.0, 1.0, 1.0, coverage];
+                self.push_image_quad(
+                    url,
+                    [
+                        TextureVertex {
+                            position: [x0, y0],
+                            tex_coords: [tex[0], tex[1]],
+                            color,
+                        },
+                        TextureVertex {
+                            position: [x1, y1],
+                            tex_coords: [tex[2], tex[1]],
+                            color,
+                        },
+                        TextureVertex {
+                            position: [x2, y2],
+                            tex_coords: [tex[2], tex[3]],
+                            color,
+                        },
+                        TextureVertex {
+                            position: [x3, y3],
+                            tex_coords: [tex[0], tex[3]],
+                            color,
+                        },
+                    ],
+                );
+            }
         }
         // If image not loaded, skip (async loading handled elsewhere)
     }
@@ -5319,37 +5712,36 @@ impl Renderer {
         let tex_bottom = 1.0 - clip_bottom / tile_rect.height;
 
         // Then the overflow clip on top of the container clip.
-        let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], [tex_left, tex_top, tex_right, tex_bottom])) =
-            self.textured_corners(draw_rect, [tex_left, tex_top, tex_right, tex_bottom])
-        else {
-            return;
-        };
-
-        self.push_image_quad(
-            url,
-            [
-                TextureVertex {
-                    position: [x0, y0],
-                    tex_coords: [tex_left, tex_top],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x1, y1],
-                    tex_coords: [tex_right, tex_top],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x2, y2],
-                    tex_coords: [tex_right, tex_bottom],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x3, y3],
-                    tex_coords: [tex_left, tex_bottom],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-            ],
-        );
+        for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], [tex_left, tex_top, tex_right, tex_bottom], coverage) in
+            self.textured_pieces(draw_rect, [tex_left, tex_top, tex_right, tex_bottom])
+        {
+            let color = [1.0, 1.0, 1.0, coverage];
+            self.push_image_quad(
+                url,
+                [
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [tex_left, tex_top],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [tex_right, tex_top],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [tex_right, tex_bottom],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [tex_left, tex_bottom],
+                        color,
+                    },
+                ],
+            );
+        }
     }
 
     /// Upload an image to the texture cache.
@@ -5431,24 +5823,41 @@ impl Renderer {
     /// the surviving part. `None` when nothing survives. One rule for every
     /// textured site so text, images and tiles are clipped under a transform
     /// exactly as color quads are.
-    fn textured_corners(&self, rect: Rect, tex: [f32; 4]) -> Option<([[f32; 2]; 4], [f32; 4])> {
-        let (g, tex, space) = clip_textured_under(self.current_transform(), self.current_clip(), rect, tex)?;
-        let corners = match space {
-            QuadSpace::Screen => [
-                [g.x, g.y],
-                [g.x + g.width, g.y],
-                [g.x + g.width, g.y + g.height],
-                [g.x, g.y + g.height],
-            ],
-            QuadSpace::Document => {
-                let (x0, y0) = self.transform_point(g.x, g.y);
-                let (x1, y1) = self.transform_point(g.x + g.width, g.y);
-                let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
-                let (x3, y3) = self.transform_point(g.x, g.y + g.height);
-                [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
-            }
-        };
-        Some((corners, tex))
+    ///
+    /// A quad that a rounded clip's corner cuts comes back as several
+    /// pieces, each with the coverage its vertices' alpha is to be scaled
+    /// by; any other quad is one piece with coverage 1. Empty when nothing
+    /// survives.
+    fn textured_pieces(&self, rect: Rect, tex: [f32; 4]) -> Vec<([[f32; 2]; 4], [f32; 4], f32)> {
+        let mut pieces = Vec::with_capacity(1);
+        let space = clip_textured_pieces_under(
+            self.current_transform(),
+            self.clip_stack.last(),
+            rect,
+            tex,
+            &mut pieces,
+        );
+        pieces
+            .into_iter()
+            .map(|(g, tex, coverage)| {
+                let corners = match space {
+                    QuadSpace::Screen => [
+                        [g.x, g.y],
+                        [g.x + g.width, g.y],
+                        [g.x + g.width, g.y + g.height],
+                        [g.x, g.y + g.height],
+                    ],
+                    QuadSpace::Document => {
+                        let (x0, y0) = self.transform_point(g.x, g.y);
+                        let (x1, y1) = self.transform_point(g.x + g.width, g.y);
+                        let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
+                        let (x3, y3) = self.transform_point(g.x, g.y + g.height);
+                        [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
+                    }
+                };
+                (corners, tex, coverage)
+            })
+            .collect()
     }
 
 
@@ -5577,9 +5986,11 @@ impl Renderer {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // blit_pipeline, not texture_pipeline: the texture shader treats the
-        // sampled R channel as glyph-atlas alpha; blit samples real RGBA.
-        render_pass.set_pipeline(&self.blit_pipeline);
+        // image_pipeline, not texture_pipeline: the texture shader treats the
+        // sampled R channel as glyph-atlas alpha; the blit shader samples real
+        // RGBA. Not blit_pipeline either: its blend is REPLACE, which paints an
+        // image's transparent texels as their own colour (black, for most PNGs).
+        render_pass.set_pipeline(&self.image_pipeline);
         render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -5933,14 +6344,9 @@ fn clip_entry_under(
     }
     match map_rect_axis_aligned(m, rect) {
         Some(screen) => {
-            let scale = (m[0] * m[3]).abs().sqrt();
-            let radius = rustkit_layout::BorderRadius {
-                top_left: radius.top_left * scale,
-                top_right: radius.top_right * scale,
-                bottom_right: radius.bottom_right * scale,
-                bottom_left: radius.bottom_left * scale,
-            };
-            clip_entry_for(current, screen, radius)
+            // Axis-aligned, so each axis scales its own radii: a circular
+            // corner under a non-uniform scale is an ellipse on screen.
+            clip_entry_for(current, screen, radius.scaled(m[0].abs(), m[3].abs()))
         }
         None => clip_entry_for(current, map_rect_bounds(m, rect), radius),
     }
@@ -6026,8 +6432,7 @@ fn clip_textured_under(
 /// Textured quads used to bypass the clip stack entirely — only color quads
 /// went through `collect_clipped_pieces` — so `overflow: hidden` clipped a
 /// box's background but never its text (n35). The rounded part of the clip
-/// is NOT applied to textured quads: a glyph straddling a rounded corner's
-/// arc keeps its square corner. That is a ledgered residual, not a rule.
+/// is applied on top of this by `clip_textured_pieces_under`.
 fn clip_textured_rect(
     clip: Option<Rect>,
     rect: Rect,
@@ -6078,23 +6483,148 @@ fn collect_clipped_pieces(clip: Option<&ClipEntry>, rect: Rect, out: &mut Vec<(R
     out.extend(clip_quad_to_rounded(rect, rounded));
 }
 
-/// Radii clamped so opposite corners cannot overlap, matching
-/// `point_in_rounded_rect` and `draw_rounded_rect`.
-fn clamped_radii(rect: Rect, radius: rustkit_layout::BorderRadius) -> (f32, f32, f32, f32) {
-    let max_r = (rect.width / 2.0).min(rect.height / 2.0).max(0.0);
-    (
-        radius.top_left.min(max_r).max(0.0),
-        radius.top_right.min(max_r).max(0.0),
-        radius.bottom_right.min(max_r).max(0.0),
-        radius.bottom_left.min(max_r).max(0.0),
-    )
+/// How far inside the ellipse with semi-axes `(h, v)` the point `(dx, dy)`
+/// from its centre lies, in px: positive inside, negative outside.
+///
+/// A circle is exact. An ellipse has no closed-form distance, so it uses the
+/// first-order estimate `(1 - k) / |grad k|` for `k = sqrt((dx/h)^2 +
+/// (dy/v)^2)`, which is exact on the curve and good to a fraction of a pixel
+/// in the one-pixel band the antialiasing reads.
+///
+/// Every rounded rasteriser (fill, border, gradient cells) measures its
+/// corners with this, so they agree on where a corner's edge is.
+fn ellipse_edge_distance(dx: f32, dy: f32, h: f32, v: f32) -> f32 {
+    if h == v {
+        return h - (dx * dx + dy * dy).sqrt();
+    }
+    let (nx, ny) = (dx / h, dy / v);
+    let k = (nx * nx + ny * ny).sqrt();
+    if k <= f32::EPSILON {
+        return h.min(v);
+    }
+    let grad = ((nx / h).powi(2) + (ny / v).powi(2)).sqrt() / k;
+    (1.0 - k) / grad
+}
+
+/// Pixel coverage for a signed distance to a corner's edge: half covered on
+/// the edge, a two-pixel ramp across it.
+fn corner_coverage(signed_dist: f32) -> f32 {
+    if signed_dist >= 1.0 {
+        1.0
+    } else if signed_dist > -1.0 {
+        (signed_dist * 0.5 + 0.5).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// The one-pixel cells a corner box is painted in along one axis, as
+/// `(grid start, drawn start, drawn length)`.
+///
+/// The box runs `len` from `box_start`. Its grid is laid from the rect's
+/// OUTER edge inward (`outer_at_start` says which end that is), so the cell
+/// centres `grid start + 0.5` sit where the straight edge beside the corner
+/// puts its pixels, whatever the radius. Laying it from the box's inner
+/// corner put a right or bottom corner with a fractional radius (`25%` of
+/// 150px) half a pixel off the grid: the pixels along the box's outer edge
+/// were measured on the curve instead of inside it and came out half
+/// transparent, a notch in the side.
+///
+/// The cell that crosses the box's inner end is drawn only up to it; what
+/// is past it belongs to the strip beside the corner. A whole-pixel box
+/// gets whole cells, the same ones from either end.
+fn corner_cells(box_start: f32, len: f32, outer_at_start: bool) -> Vec<(f32, f32, f32)> {
+    let box_end = box_start + len;
+    let mut cells = Vec::new();
+    let mut grid = if outer_at_start {
+        box_start
+    } else {
+        box_start - (len.ceil() - len)
+    };
+    while grid < box_end - 0.001 {
+        let start = grid.max(box_start);
+        let length = (grid + 1.0).min(box_end) - start;
+        if length > 0.0 {
+            cells.push((grid, start, length));
+        }
+        grid += 1.0;
+    }
+    cells
+}
+
+/// Top-left of the `h` x `v` box a corner occupies in `rect`.
+/// quadrant: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
+fn corner_box_origin(rect: Rect, corner: rustkit_layout::CornerRadius, quadrant: u8) -> (f32, f32) {
+    let x = if quadrant == 0 || quadrant == 3 {
+        rect.x
+    } else {
+        rect.x + rect.width - corner.h
+    };
+    let y = if quadrant == 0 || quadrant == 1 {
+        rect.y
+    } else {
+        rect.y + rect.height - corner.v
+    };
+    (x, y)
+}
+
+/// Whether the boxes of two diagonally opposite corners of `rect` overlap.
+/// Fitting keeps adjacent corners apart, not opposite ones: `80px 0` on a
+/// 100px square is a leaf whose two corner boxes share the middle.
+fn corner_boxes_overlap(
+    rect: Rect,
+    a: rustkit_layout::CornerRadius,
+    b: rustkit_layout::CornerRadius,
+) -> bool {
+    !a.is_zero() && !b.is_zero() && a.h + b.h > rect.width && a.v + b.v > rect.height
+}
+
+/// Signed distance of the point `(px, py)` to the edge of `corner`
+/// (`quadrant` of `rect`), or `None` when the point is outside that
+/// corner's box and the corner says nothing about it.
+fn corner_distance_at(
+    rect: Rect,
+    corner: rustkit_layout::CornerRadius,
+    quadrant: u8,
+    px: f32,
+    py: f32,
+) -> Option<f32> {
+    if corner.is_zero() {
+        return None;
+    }
+    let ex = if quadrant == 0 || quadrant == 3 {
+        px - rect.x
+    } else {
+        rect.x + rect.width - px
+    };
+    let ey = if quadrant == 0 || quadrant == 1 {
+        py - rect.y
+    } else {
+        rect.y + rect.height - py
+    };
+    if ex >= corner.h || ey >= corner.v {
+        return None;
+    }
+    Some(ellipse_edge_distance(
+        corner.h - ex,
+        corner.v - ey,
+        corner.h,
+        corner.v,
+    ))
+}
+
+/// How far a corner's arc reaches from its centre line on the row `dy` away
+/// from it: the ellipse's `(h / v) * sqrt(v^2 - dy^2)`.
+fn corner_row_reach(corner: rustkit_layout::CornerRadius, dy: f32) -> f32 {
+    (corner.h / corner.v) * (corner.v * corner.v - dy * dy).max(0.0).sqrt()
 }
 
 /// The horizontal span of a rounded rect at height `y`, or `None` when the row
 /// is outside it entirely.
 ///
-/// Analytic rather than sampled: for a row crossing a corner, the arc gives
-/// `dx = sqrt(r^2 - dy^2)` and the span shrinks by exactly that much. The left
+/// Analytic rather than sampled: for a row crossing a corner, the ellipse
+/// gives `dx = (h / v) * sqrt(v^2 - dy^2)` and the span shrinks by exactly
+/// that much. The left
 /// bound takes the tighter of the two left corners and the right bound the
 /// tighter of the two right ones, so a row crossing both a top-left and a
 /// bottom-left arc is handled without special-casing.
@@ -6102,29 +6632,31 @@ fn rounded_row_span(rect: Rect, radius: rustkit_layout::BorderRadius, y: f32) ->
     if y < rect.y || y > rect.bottom() {
         return None;
     }
-    let (tl, tr, br, bl) = clamped_radii(rect, radius);
+    let radius = radius.fitted(rect.width, rect.height);
+    let (tl, tr, br, bl) = (
+        radius.top_left,
+        radius.top_right,
+        radius.bottom_right,
+        radius.bottom_left,
+    );
     let mut left = rect.x;
     let mut right = rect.right();
 
-    if tl > 0.0 && y < rect.y + tl {
-        let dy = (rect.y + tl) - y;
-        let dx = (tl * tl - dy * dy).max(0.0).sqrt();
-        left = left.max(rect.x + tl - dx);
+    if !tl.is_zero() && y < rect.y + tl.v {
+        let dx = corner_row_reach(tl, (rect.y + tl.v) - y);
+        left = left.max(rect.x + tl.h - dx);
     }
-    if bl > 0.0 && y > rect.bottom() - bl {
-        let dy = y - (rect.bottom() - bl);
-        let dx = (bl * bl - dy * dy).max(0.0).sqrt();
-        left = left.max(rect.x + bl - dx);
+    if !bl.is_zero() && y > rect.bottom() - bl.v {
+        let dx = corner_row_reach(bl, y - (rect.bottom() - bl.v));
+        left = left.max(rect.x + bl.h - dx);
     }
-    if tr > 0.0 && y < rect.y + tr {
-        let dy = (rect.y + tr) - y;
-        let dx = (tr * tr - dy * dy).max(0.0).sqrt();
-        right = right.min(rect.right() - tr + dx);
+    if !tr.is_zero() && y < rect.y + tr.v {
+        let dx = corner_row_reach(tr, (rect.y + tr.v) - y);
+        right = right.min(rect.right() - tr.h + dx);
     }
-    if br > 0.0 && y > rect.bottom() - br {
-        let dy = y - (rect.bottom() - br);
-        let dx = (br * br - dy * dy).max(0.0).sqrt();
-        right = right.min(rect.right() - br + dx);
+    if !br.is_zero() && y > rect.bottom() - br.v {
+        let dx = corner_row_reach(br, y - (rect.bottom() - br.v));
+        right = right.min(rect.right() - br.h + dx);
     }
 
     if right > left {
@@ -6238,9 +6770,10 @@ fn clip_quad_to_rounded(
     let mut top_limit = f32::NEG_INFINITY;
     let mut bottom_limit = f32::INFINITY;
     for (rect, radius) in rounded {
-        let (tl, tr, br, bl) = clamped_radii(*rect, *radius);
-        top_limit = top_limit.max(rect.y + tl.max(tr));
-        bottom_limit = bottom_limit.min(rect.bottom() - bl.max(br));
+        let fitted = radius.fitted(rect.width, rect.height);
+        top_limit = top_limit.max(rect.y + fitted.top_left.v.max(fitted.top_right.v));
+        bottom_limit =
+            bottom_limit.min(rect.bottom() - fitted.bottom_left.v.max(fitted.bottom_right.v));
     }
     if quad.y >= top_limit && quad.bottom() <= bottom_limit {
         return vec![(quad, 1.0)];
@@ -6297,6 +6830,226 @@ fn clip_quad_to_rounded(
     out
 }
 
+/// Whether `quad` lies wholly inside every rounded constraint. A rounded rect
+/// is convex, so a quad whose top and bottom edges are both inside it is
+/// inside it everywhere.
+fn quad_inside_rounded(quad: Rect, rounded: &[(Rect, rustkit_layout::BorderRadius)]) -> bool {
+    rounded.iter().all(|(rect, radius)| {
+        [quad.y, quad.bottom()].into_iter().all(|y| {
+            matches!(
+                rounded_row_span(*rect, *radius, y),
+                Some((left, right)) if left <= quad.x && right >= quad.right()
+            )
+        })
+    })
+}
+
+/// A textured quad (glyph, image, background tile) drawn under transform `m`
+/// and cut to `clip`, rounded corners included: each surviving piece with its
+/// texture coordinates and coverage, appended to `out`. The return value says
+/// which space the pieces are in.
+///
+/// The rectangular half is `clip_textured_under`. The rounded half is the
+/// decomposition colour quads get (`clip_quad_to_rounded`), with each piece
+/// taking the texels that were under it, so an `<img>` in a rounded
+/// `overflow: hidden` box (an avatar, a card's cover photo) loses its corners
+/// the way the box's background does. A quad clear of every corner comes back
+/// as the one piece it always was.
+///
+/// Under a rotation or skew only the rectangular part applies, as for colour
+/// quads.
+fn clip_textured_pieces_under(
+    m: [f32; 6],
+    clip: Option<&ClipEntry>,
+    rect: Rect,
+    tex: [f32; 4],
+    out: &mut Vec<(Rect, [f32; 4], f32)>,
+) -> QuadSpace {
+    let Some((quad, tex, space)) = clip_textured_under(m, clip.map(|entry| entry.rect), rect, tex)
+    else {
+        return QuadSpace::Screen;
+    };
+    let rounded = match (space, clip) {
+        (QuadSpace::Screen, Some(entry)) => entry.rounded.as_slice(),
+        _ => &[],
+    };
+    if rounded.is_empty() || quad_inside_rounded(quad, rounded) {
+        out.push((quad, tex, 1.0));
+        return space;
+    }
+
+    let u_per_px = (tex[2] - tex[0]) / quad.width;
+    let v_per_px = (tex[3] - tex[1]) / quad.height;
+    for (piece, coverage) in clip_quad_to_rounded(quad, rounded) {
+        // An antialiased end cell is a whole pixel and can start before the
+        // quad does; a piece only has texels where the quad is.
+        let Some(piece) = piece.intersect(&quad) else {
+            continue;
+        };
+        if piece.width <= 0.0 || piece.height <= 0.0 {
+            continue;
+        }
+        let u0 = tex[0] + (piece.x - quad.x) * u_per_px;
+        let v0 = tex[1] + (piece.y - quad.y) * v_per_px;
+        out.push((
+            piece,
+            [u0, v0, u0 + piece.width * u_per_px, v0 + piece.height * v_per_px],
+            coverage,
+        ));
+    }
+    space
+}
+
+/// How much of the pixel centred on `(px, py)` the rounded rect covers: 1
+/// inside, 0 outside, and the fill's own ramp across a corner's curve
+/// (`corner_coverage`), so a shape cut out with this and the same shape
+/// filled by `draw_rounded_rect` meet on the curve. `radius` must be fitted.
+fn rounded_rect_coverage(rect: Rect, radius: rustkit_layout::BorderRadius, px: f32, py: f32) -> f32 {
+    if px < rect.x || px >= rect.right() || py < rect.y || py >= rect.bottom() {
+        return 0.0;
+    }
+    let mut coverage = 1.0_f32;
+    for (quadrant, corner) in [
+        radius.top_left,
+        radius.top_right,
+        radius.bottom_right,
+        radius.bottom_left,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(distance) = corner_distance_at(rect, corner, quadrant as u8, px, py) {
+            coverage = coverage.min(corner_coverage(distance));
+        }
+    }
+    coverage
+}
+
+/// The part of the rounded rect `shape` that is outside the rounded rect
+/// `hole`, as `(piece, coverage)`: an outer box shadow's layer with the box
+/// cut out of it (CSS Backgrounds 3 §6.1).
+///
+/// Two square shapes give `rect_minus` exactly. Otherwise the plane is cut
+/// along every edge of both rects and of their corner boxes: a cell outside
+/// every corner box is wholly painted or wholly not, and a cell in one is
+/// painted a pixel at a time, runs of fully covered pixels joined.
+///
+/// Pure for the same reason as `clip_quad_to_rounded`.
+fn rounded_difference_pieces(
+    shape: Rect,
+    shape_radius: rustkit_layout::BorderRadius,
+    hole: Rect,
+    hole_radius: rustkit_layout::BorderRadius,
+) -> Vec<(Rect, f32)> {
+    if shape.width <= 0.0 || shape.height <= 0.0 {
+        return Vec::new();
+    }
+    if shape_radius.is_zero() && hole_radius.is_zero() {
+        return Renderer::rect_minus(shape, hole)
+            .into_iter()
+            .map(|r| (r, 1.0))
+            .collect();
+    }
+    let shape_radius = shape_radius.fitted(shape.width, shape.height);
+    let hole_radius = hole_radius.fitted(hole.width, hole.height);
+    let coverage = |x: f32, y: f32| {
+        rounded_rect_coverage(shape, shape_radius, x, y)
+            * (1.0 - rounded_rect_coverage(hole, hole_radius, x, y))
+    };
+
+    // The corner boxes of both shapes, and the cuts along both axes.
+    let mut corner_boxes = Vec::new();
+    let mut xs = vec![shape.x, shape.right()];
+    let mut ys = vec![shape.y, shape.bottom()];
+    for (rect, radius) in [(shape, shape_radius), (hole, hole_radius)] {
+        xs.extend([rect.x, rect.right()]);
+        ys.extend([rect.y, rect.bottom()]);
+        for (quadrant, corner) in [
+            radius.top_left,
+            radius.top_right,
+            radius.bottom_right,
+            radius.bottom_left,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if corner.is_zero() {
+                continue;
+            }
+            let (x, y) = corner_box_origin(rect, corner, quadrant as u8);
+            corner_boxes.push(Rect::new(x, y, corner.h, corner.v));
+            xs.extend([x, x + corner.h]);
+            ys.extend([y, y + corner.v]);
+        }
+    }
+    let cuts = |mut values: Vec<f32>, from: f32, to: f32| {
+        for v in values.iter_mut() {
+            *v = v.clamp(from, to);
+        }
+        values.sort_by(|a, b| a.total_cmp(b));
+        values.dedup();
+        values
+    };
+    let xs = cuts(xs, shape.x, shape.right());
+    let ys = cuts(ys, shape.y, shape.bottom());
+
+    let mut out: Vec<(Rect, f32)> = Vec::new();
+    for band in ys.windows(2) {
+        let (y0, y1) = (band[0], band[1]);
+        // The whole cell of this band still open on its right, if any: cells
+        // side by side in a band join into one rect.
+        let mut open: Option<usize> = None;
+        for span in xs.windows(2) {
+            let (x0, x1) = (span[0], span[1]);
+            let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+            if !corner_boxes.iter().any(|b| b.contains(cx, cy)) {
+                if coverage(cx, cy) <= 0.0 {
+                    open = None;
+                } else if let Some(index) = open {
+                    out[index].0.width = x1 - out[index].0.x;
+                } else {
+                    open = Some(out.len());
+                    out.push((Rect::new(x0, y0, x1 - x0, y1 - y0), 1.0));
+                }
+                continue;
+            }
+            open = None;
+
+            // A cell in a corner box: one pixel at a time on the pixel grid,
+            // each drawn only as far as the cell reaches.
+            let mut row = y0.floor();
+            while row < y1 {
+                let top = row.max(y0);
+                let height = (row + 1.0).min(y1) - top;
+                let mut run: Option<usize> = None;
+                let mut column = x0.floor();
+                while column < x1 {
+                    let left = column.max(x0);
+                    let width = (column + 1.0).min(x1) - left;
+                    let c = coverage(column + 0.5, row + 0.5);
+                    if c >= 1.0 {
+                        match run {
+                            Some(index) => out[index].0.width = left + width - out[index].0.x,
+                            None => {
+                                run = Some(out.len());
+                                out.push((Rect::new(left, top, width, height), 1.0));
+                            }
+                        }
+                    } else {
+                        run = None;
+                        if c > 0.01 {
+                            out.push((Rect::new(left, top, width, height), c));
+                        }
+                    }
+                    column += 1.0;
+                }
+                row += 1.0;
+            }
+        }
+    }
+    out
+}
+
 // ==================== Transform Helpers ====================
 
 /// The page-space affine a `PushTransform { matrix, origin }` command means:
@@ -6340,6 +7093,32 @@ fn multiply_matrices_2d(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_oversized_image_is_downscaled_to_the_limit_keeping_its_aspect() {
+        // 20x10 solid red, limit 8: longest side becomes 8, the other 4.
+        let data = vec![255u8, 0, 0, 255].repeat(20 * 10);
+        let (w, h, px) = super::downscale_rgba_to_fit(20, 10, &data, 8);
+        assert_eq!((w, h), (8, 4));
+        assert_eq!(px.len(), 8 * 4 * 4);
+        assert!(px.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn downscaling_averages_the_source_pixels_it_covers() {
+        // 2x1: black and white, to 1x1: mid grey.
+        let data = vec![0, 0, 0, 255, 255, 255, 255, 255];
+        let (w, h, px) = super::downscale_rgba_to_fit(2, 1, &data, 1);
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(px, vec![128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn an_image_within_the_limit_is_left_alone() {
+        let data = vec![7u8; 3 * 2 * 4];
+        let (w, h, px) = super::downscale_rgba_to_fit(3, 2, &data, 8);
+        assert_eq!((w, h, px), (3, 2, data));
+    }
+
     use super::*;
 
     // ==================== Transform origin (n48) ====================
@@ -6660,7 +7439,24 @@ mod tests {
         let entry = clip_entry_under(None, [2.0, 0.0, 0.0, 2.0, 0.0, 0.0], Rect::new(0.0, 0.0, 50.0, 50.0), radius(10.0));
         assert_eq!(entry.rect.width, 100.0);
         assert_eq!(entry.rounded.len(), 1);
-        assert_eq!(entry.rounded[0].1.top_left, 20.0);
+        assert_eq!(entry.rounded[0].1.top_left, rustkit_layout::CornerRadius::circular(20.0));
+    }
+
+    #[test]
+    fn a_clip_scaled_unevenly_scales_each_axis_of_its_radius() {
+        // A circular corner under scale(2, 3) is an ellipse on screen. One
+        // scalar per corner could only take the geometric mean for both.
+        let entry = clip_entry_under(
+            None,
+            [2.0, 0.0, 0.0, 3.0, 0.0, 0.0],
+            Rect::new(0.0, 0.0, 50.0, 50.0),
+            radius(10.0),
+        );
+        assert_eq!((entry.rect.width, entry.rect.height), (100.0, 150.0));
+        assert_eq!(
+            entry.rounded[0].1.top_left,
+            rustkit_layout::CornerRadius { h: 20.0, v: 30.0 }
+        );
     }
 
     #[test]
@@ -6722,6 +7518,111 @@ mod tests {
         assert_eq!(space, QuadSpace::Screen);
         assert_eq!((r.x, r.width), (70.0, 20.0));
         assert_eq!(t, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    // ==================== Rounded clip on textured quads ====================
+
+    fn textured_pieces_under(
+        clip: Option<&ClipEntry>,
+        rect: Rect,
+        tex: [f32; 4],
+    ) -> Vec<(Rect, [f32; 4], f32)> {
+        let mut out = Vec::new();
+        clip_textured_pieces_under(IDENTITY_2D, clip, rect, tex, &mut out);
+        out
+    }
+
+    /// An avatar: an image filling a circular `overflow: hidden` box. Its
+    /// corners used to survive, because only the clip's rect reached a
+    /// textured quad.
+    #[test]
+    fn an_image_under_a_round_clip_loses_its_corners_and_keeps_its_texels() {
+        let box_rect = Rect::new(20.0, 10.0, 100.0, 100.0);
+        let entry = clip_entry_for(None, box_rect, radius(50.0));
+        let pieces = textured_pieces_under(Some(&entry), box_rect, [0.0, 0.0, 1.0, 1.0]);
+        assert!(pieces.len() > 1, "the image was not decomposed");
+
+        let holds = |x: f32, y: f32| {
+            pieces
+                .iter()
+                .any(|(r, _, coverage)| *coverage > 0.0 && r.contains(x, y))
+        };
+        assert!(!holds(22.0, 12.0), "the top-left corner is still painted");
+        assert!(!holds(118.0, 108.0), "the bottom-right corner is still painted");
+        assert!(holds(70.0, 60.0), "the centre is gone");
+
+        // Every piece samples the texels that were under it in the whole quad.
+        for (r, tex, coverage) in &pieces {
+            assert!(*coverage > 0.0 && *coverage <= 1.0);
+            let expected = [
+                (r.x - 20.0) / 100.0,
+                (r.y - 10.0) / 100.0,
+                (r.right() - 20.0) / 100.0,
+                (r.bottom() - 10.0) / 100.0,
+            ];
+            for (got, want) in tex.iter().zip(expected) {
+                assert!((got - want).abs() < 1e-4, "{r:?}: tex {tex:?}, expected {expected:?}");
+                assert!((-1e-4..=1.0 + 1e-4).contains(got), "texel {got} outside the image");
+            }
+        }
+
+        // What survives is the disc.
+        let area: f32 = pieces.iter().map(|(r, _, c)| r.width * r.height * c).sum();
+        let disc = std::f32::consts::PI * 50.0 * 50.0;
+        assert!((area - disc).abs() < disc * 0.02, "area {area}, disc {disc}");
+    }
+
+    /// A sub-rect of an atlas keeps its own texel range through the split.
+    #[test]
+    fn a_split_glyph_stays_inside_its_atlas_cell() {
+        let box_rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+        let entry = clip_entry_for(None, box_rect, radius(20.0));
+        let glyph = Rect::new(0.5, 4.0, 20.0, 30.0);
+        let cell = [0.25, 0.5, 0.35, 0.65];
+        let pieces = textured_pieces_under(Some(&entry), glyph, cell);
+        assert!(pieces.len() > 1);
+        for (r, tex, _) in &pieces {
+            assert!(r.x >= glyph.x - 1e-4 && r.right() <= glyph.right() + 1e-4, "{r:?}");
+            assert!(tex[0] >= cell[0] - 1e-5 && tex[2] <= cell[2] + 1e-5, "{tex:?}");
+            assert!(tex[1] >= cell[1] - 1e-5 && tex[3] <= cell[3] + 1e-5, "{tex:?}");
+        }
+    }
+
+    /// Text in a pill sits in the band the corners occupy but clear of both
+    /// arcs: it is one quad, as it was, not one per scanline.
+    #[test]
+    fn a_glyph_between_the_arcs_of_a_pill_is_not_split() {
+        let box_rect = Rect::new(0.0, 0.0, 150.0, 40.0);
+        let entry = clip_entry_for(None, box_rect, radius(20.0));
+        let glyph = Rect::new(60.0, 5.0, 20.0, 30.0);
+        let tex = [0.1, 0.2, 0.3, 0.4];
+        let pieces = textured_pieces_under(Some(&entry), glyph, tex);
+        assert_eq!(pieces.len(), 1);
+        let (r, t, coverage) = pieces[0];
+        assert_eq!((r.x, r.y, r.width, r.height), (60.0, 5.0, 20.0, 30.0));
+        assert_eq!(t, tex);
+        assert_eq!(coverage, 1.0);
+    }
+
+    /// No rounded clip, no change: the single piece `clip_textured_under`
+    /// always gave.
+    #[test]
+    fn a_textured_quad_under_a_square_clip_is_the_one_piece_it_was() {
+        let entry = clip_entry_for(None, Rect::new(0.0, 0.0, 50.0, 50.0), radius(0.0));
+        let glyph = Rect::new(40.0, 10.0, 20.0, 20.0);
+        let pieces = textured_pieces_under(Some(&entry), glyph, [0.0, 0.0, 1.0, 1.0]);
+        let (r, t, _) = clip_textured_under(IDENTITY_2D, Some(entry.rect), glyph, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].0.x, pieces[0].0.width, pieces[0].1, pieces[0].2), (r.x, r.width, t, 1.0));
+        assert!(textured_pieces_under(Some(&entry), Rect::new(60.0, 0.0, 10.0, 10.0), [0.0, 0.0, 1.0, 1.0]).is_empty());
+    }
+
+    /// Images are composited source-over. With the blit pipeline's REPLACE a
+    /// transparent PNG painted black where it should show the page.
+    #[test]
+    fn images_are_blended_not_copied() {
+        assert_eq!(pipeline::IMAGE_BLEND, wgpu::BlendState::ALPHA_BLENDING);
+        assert_ne!(pipeline::IMAGE_BLEND, wgpu::BlendState::REPLACE);
     }
 
     #[test]
@@ -6968,6 +7869,270 @@ mod tests {
             (covered_area(&pieces) - expected).abs() < 2.0,
             "clamped radius should give a 20px pill, covered {}",
             covered_area(&pieces)
+        );
+    }
+
+    fn ellipse(h: f32, v: f32) -> rustkit_layout::BorderRadius {
+        let corner = rustkit_layout::CornerRadius { h, v };
+        rustkit_layout::BorderRadius {
+            top_left: corner,
+            top_right: corner,
+            bottom_right: corner,
+            bottom_left: corner,
+        }
+    }
+
+    #[test]
+    fn top_only_radii_as_tall_as_the_box_are_not_cut_to_half_of_it() {
+        // `40px 40px 0 0` on a 200x40 tab: nothing on the left or right side
+        // overlaps, so the corners stay 40px (CSS Backgrounds 3 §5.5). Each
+        // radius used to be cut to half the shorter side, 20px.
+        let clip = Rect::new(0.0, 0.0, 200.0, 40.0);
+        let tab = rustkit_layout::BorderRadius {
+            top_left: rustkit_layout::CornerRadius::circular(40.0),
+            top_right: rustkit_layout::CornerRadius::circular(40.0),
+            ..Default::default()
+        };
+        let pieces = clip_quad_to_rounded(clip, &[(clip, tab)]);
+        let expected = 200.0 * 40.0 - (2.0 - std::f32::consts::FRAC_PI_2) * 40.0 * 40.0;
+        assert!(
+            (covered_area(&pieces) - expected).abs() < 2.0,
+            "two 40px quarter circles, covered {} expected {expected}",
+            covered_area(&pieces)
+        );
+        // 29.5px above its centre line a 40px corner has come in
+        // 40 - sqrt(40^2 - 29.5^2) = 12.99px; a 20px one is not on this row
+        // the same way (it would be 2.6px in).
+        let (left, _) = rounded_row_span(clip, tab, 10.5).expect("row crosses the tab");
+        assert!(
+            (left - 12.986).abs() < 0.01,
+            "left edge at y=10.5 was {left}"
+        );
+    }
+
+    #[test]
+    fn an_elliptical_clip_follows_the_ellipse() {
+        // 200x100 with 100x50 corners is one whole ellipse.
+        let clip = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let (left, right) =
+            rounded_row_span(clip, ellipse(100.0, 50.0), 25.0).expect("row crosses");
+        // dy = 25 of 50: dx = 100 * sqrt(1 - 0.25) = 86.60
+        assert!((left - 13.397).abs() < 0.01, "left {left}");
+        assert!((right - 186.603).abs() < 0.01, "right {right}");
+
+        let pieces = clip_quad_to_rounded(clip, &[(clip, ellipse(100.0, 50.0))]);
+        // One sample per row: the rows nearest the flat top and bottom are
+        // where the span changes fastest, so allow them a few px^2.
+        let expected = std::f32::consts::PI * 100.0 * 50.0;
+        assert!(
+            (covered_area(&pieces) - expected).abs() < 8.0,
+            "ellipse area {expected}, covered {}",
+            covered_area(&pieces)
+        );
+        // Inside the old circular corner (a 50px circle at (50, 50)), outside
+        // the ellipse.
+        assert!(
+            !painted_at(&pieces, 30.0, 10.5, 0.01),
+            "(30, 10.5) is outside the ellipse"
+        );
+        assert!(
+            painted_at(&pieces, 100.0, 2.5, 0.999),
+            "the top of the ellipse is painted"
+        );
+    }
+
+    #[test]
+    fn an_elliptical_corner_loses_its_own_area_to_the_clip() {
+        // Each corner loses (1 - pi/4) * h * v.
+        let clip = Rect::new(0.0, 0.0, 200.0, 120.0);
+        let pieces = clip_quad_to_rounded(clip, &[(clip, ellipse(60.0, 30.0))]);
+        let expected = 200.0 * 120.0 - (4.0 - std::f32::consts::PI) * 60.0 * 30.0;
+        assert!(
+            (covered_area(&pieces) - expected).abs() < 6.0,
+            "covered {} expected {expected}",
+            covered_area(&pieces)
+        );
+    }
+
+    #[test]
+    fn the_edge_distance_is_exact_for_a_circle_and_close_for_an_ellipse() {
+        // Circle: the plain radius-minus-distance.
+        assert_eq!(ellipse_edge_distance(3.0, 4.0, 10.0, 10.0), 5.0);
+        assert_eq!(ellipse_edge_distance(6.0, 8.0, 10.0, 10.0), 0.0);
+
+        // Ellipse (60, 30): walk the curve; half a pixel along the normal on
+        // either side must read as half a pixel, to well under the width of
+        // the antialiasing ramp.
+        let (h, v) = (60.0_f32, 30.0_f32);
+        for step in 0..=20 {
+            let t = step as f32 / 20.0 * std::f32::consts::FRAC_PI_2;
+            let (x, y) = (h * t.cos(), v * t.sin());
+            assert!(
+                ellipse_edge_distance(x, y, h, v).abs() < 1e-3,
+                "on the curve at t={t}"
+            );
+            let (nx, ny) = (x / (h * h), y / (v * v));
+            let len = (nx * nx + ny * ny).sqrt();
+            let (nx, ny) = (nx / len, ny / len);
+            let outside = ellipse_edge_distance(x + 0.5 * nx, y + 0.5 * ny, h, v);
+            let inside = ellipse_edge_distance(x - 0.5 * nx, y - 0.5 * ny, h, v);
+            assert!(
+                (outside + 0.5).abs() < 0.05,
+                "t={t}: half a pixel outside read {outside}"
+            );
+            assert!(
+                (inside - 0.5).abs() < 0.05,
+                "t={t}: half a pixel inside read {inside}"
+            );
+        }
+        // The centre is as far inside as the shorter axis.
+        assert_eq!(ellipse_edge_distance(0.0, 0.0, h, v), 30.0);
+    }
+
+    #[test]
+    fn the_fill_and_the_clip_agree_on_an_elliptical_corner() {
+        // The fill paints corner pixels from `ellipse_edge_distance`; the clip
+        // cuts rows with `rounded_row_span`. If they drew different curves the
+        // clip would eat the fill's edge or leave a rim outside it.
+        let rect = Rect::new(0.0, 0.0, 200.0, 120.0);
+        let radius = ellipse(60.0, 30.0);
+        let corner = radius.top_left;
+        // Whether the clip keeps the point, read from its row.
+        let kept = |px: f32, py: f32| {
+            py >= 0.0
+                && rounded_row_span(rect, radius, py)
+                    .map(|(left, _)| px >= left)
+                    .unwrap_or(false)
+        };
+        let mut edge_pixels = 0;
+        for row in 0..30 {
+            let py = row as f32 + 0.5;
+            for col in 0..60 {
+                let px = col as f32 + 0.5;
+                let fill = corner_distance_at(rect, corner, 0, px, py)
+                    .map(corner_coverage)
+                    .unwrap_or(1.0);
+                // A pixel and a half clear of the curve along both axes
+                // (the curve is nearly flat along the top, so one axis alone
+                // says little there).
+                if !kept(px + 1.5, py) && !kept(px, py + 1.5) {
+                    assert!(
+                        fill < 0.01,
+                        "({px}, {py}) is well outside the clip but filled {fill}"
+                    );
+                }
+                if kept(px - 1.5, py) && kept(px, py - 1.5) {
+                    assert!(
+                        fill > 0.99,
+                        "({px}, {py}) is well inside the clip but filled {fill}"
+                    );
+                }
+                if fill > 0.01 && fill < 0.99 {
+                    edge_pixels += 1;
+                }
+            }
+        }
+        assert!(
+            edge_pixels > 60,
+            "the corner has an antialiased edge, saw {edge_pixels} partial pixels"
+        );
+    }
+
+    #[test]
+    fn a_fractional_corner_is_sampled_on_the_grid_of_its_outer_edge() {
+        // `25%` of a 150px box is 37.5px. The right-hand corner's box starts
+        // at 112.5; its cells must still be centred where the box's right
+        // edge (150) puts pixels: 112.5, 113.5 ... 149.5.
+        let from_right = corner_cells(112.5, 37.5, false);
+        assert_eq!(from_right.len(), 38);
+        assert_eq!(from_right[0], (112.0, 112.5, 0.5), "the inner cell is cut at the box");
+        assert_eq!(from_right[37], (149.0, 149.0, 1.0), "the outer cell is whole");
+        // The left-hand corner: laid from 0, cut at 37.5.
+        let from_left = corner_cells(0.0, 37.5, true);
+        assert_eq!(from_left.len(), 38);
+        assert_eq!(from_left[0], (0.0, 0.0, 1.0));
+        assert_eq!(from_left[37], (37.0, 37.0, 0.5));
+
+        // Mirror images: the outermost column of a right corner reads the
+        // same coverage as the outermost column of a left one. Laid from the
+        // box's inner corner the right one sat half a pixel out and read
+        // one-half or less down the whole side.
+        let rect = Rect::new(0.0, 0.0, 150.0, 100.0);
+        let corner = rustkit_layout::CornerRadius { h: 37.5, v: 25.0 };
+        for row in 0..25 {
+            let py = row as f32 + 0.5;
+            let left = corner_distance_at(rect, corner, 0, from_left[0].0 + 0.5, py).map(corner_coverage);
+            let right = corner_distance_at(rect, corner, 1, from_right[37].0 + 0.5, py).map(corner_coverage);
+            let (left, right) = (left.expect("in the box"), right.expect("in the box"));
+            assert!((left - right).abs() < 1e-4, "row {row}: left {left} right {right}");
+        }
+        let side = corner_distance_at(rect, corner, 1, from_right[37].0 + 0.5, 24.5).map(corner_coverage);
+        assert!(side.unwrap() > 0.7, "the side just above the corner's end is covered, read {side:?}");
+
+        // A whole-pixel box has the same whole cells from either end.
+        assert_eq!(corner_cells(20.0, 12.0, true), corner_cells(20.0, 12.0, false));
+        assert_eq!(corner_cells(20.0, 12.0, true).len(), 12);
+        assert!(corner_cells(20.0, 12.0, true).iter().all(|c| c.0 == c.1 && c.2 == 1.0));
+    }
+
+    #[test]
+    fn opposite_corners_that_share_the_middle_both_cut_it() {
+        // `80px 0` on a 100px square: a leaf. The top-left and bottom-right
+        // boxes overlap in the middle and a point there must be inside both
+        // curves. Adjacent corners never overlap once fitted.
+        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let big = rustkit_layout::CornerRadius::circular(80.0);
+        let leaf = rustkit_layout::BorderRadius {
+            top_left: big,
+            bottom_right: big,
+            ..Default::default()
+        };
+        assert_eq!(leaf.fitted(100.0, 100.0), leaf, "nothing adjacent overlaps");
+        assert!(corner_boxes_overlap(rect, big, big));
+        assert!(!corner_boxes_overlap(
+            rect,
+            rustkit_layout::CornerRadius::circular(50.0),
+            rustkit_layout::CornerRadius::circular(50.0)
+        ));
+
+        // (25, 75): inside the top-left box and curve region's box overlap?
+        // It is in both boxes; the bottom-right curve (centre (20, 20),
+        // r 80) is 55 from its centre on one axis and 5 on the other: inside.
+        // (22, 22) is in both boxes too and outside the top-left curve
+        // (centre (80, 80), distance 82).
+        assert_eq!(Renderer::point_in_rounded_rect(50.0, 50.0, rect, leaf), 1.0);
+        assert_eq!(Renderer::point_in_rounded_rect(22.0, 22.0, rect, leaf), 0.0);
+        assert_eq!(Renderer::point_in_rounded_rect(78.0, 78.0, rect, leaf), 0.0);
+        // The square corners are whole.
+        assert_eq!(Renderer::point_in_rounded_rect(99.0, 1.0, rect, leaf), 1.0);
+
+        // Row 10 is cut on the left by the top-left curve only.
+        let (left, right) = rounded_row_span(rect, leaf, 10.0).expect("row crosses");
+        assert!(left > 40.0 && left < 42.0, "left {left}");
+        assert_eq!(right, 100.0);
+    }
+
+    #[test]
+    fn a_gradient_cell_is_tested_against_the_ellipse() {
+        let rect = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let whole = ellipse(100.0, 50.0);
+        assert_eq!(
+            Renderer::point_in_rounded_rect(30.0, 10.0, rect, whole),
+            0.0
+        );
+        assert_eq!(
+            Renderer::point_in_rounded_rect(100.0, 3.0, rect, whole),
+            1.0
+        );
+        assert_eq!(
+            Renderer::point_in_rounded_rect(15.0, 50.0, rect, whole),
+            1.0
+        );
+        // On the curve: half covered.
+        let on_curve = Renderer::point_in_rounded_rect(100.0 - 86.603, 25.0, rect, whole);
+        assert!(
+            (on_curve - 0.5).abs() < 0.02,
+            "on the curve read {on_curve}"
         );
     }
 
@@ -7467,6 +8632,269 @@ pub(crate) fn paint0_probe() -> bool {
 
 
 #[cfg(test)]
+mod outer_shadow_tests {
+    use super::*;
+
+    fn area(rects: &[(Rect, f32)]) -> f32 {
+        rects.iter().map(|(r, _)| r.width * r.height).sum()
+    }
+
+    const SQUARE: rustkit_layout::BorderRadius = rustkit_layout::BorderRadius {
+        top_left: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+        top_right: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+        bottom_right: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+        bottom_left: rustkit_layout::CornerRadius { h: 0.0, v: 0.0 },
+    };
+
+    /// Paint at `(x, y)`: the summed alpha of the pieces holding the point.
+    fn alpha_at(rects: &[(Rect, f32)], x: f32, y: f32) -> f32 {
+        rects
+            .iter()
+            .filter(|(r, _)| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())
+            .map(|(_, a)| *a)
+            .sum()
+    }
+
+    /// The area painted, weighted by alpha.
+    fn weighted_area(rects: &[(Rect, f32)]) -> f32 {
+        rects.iter().map(|(r, a)| r.width * r.height * a).sum()
+    }
+
+    /// `box-shadow: 0 0 0 6px` on a 100px box with 20px corners is a ring
+    /// between two rounded rects (radii 26 and 20), not a square frame.
+    #[test]
+    fn a_rounded_box_gets_a_rounded_ring() {
+        let border_box = Rect::new(50.0, 50.0, 100.0, 100.0);
+        let radius = rustkit_layout::BorderRadius::uniform(20.0);
+        let shadow = Rect::new(44.0, 44.0, 112.0, 112.0);
+        let rects = Renderer::outer_shadow_paint_rects(
+            border_box,
+            radius,
+            shadow,
+            radius.spread(6.0),
+            0.0,
+            1.0,
+        );
+
+        // On the ring's straight side, and in the gap between the two curves.
+        assert_eq!(alpha_at(&rects, 100.5, 46.5), 1.0);
+        assert_eq!(alpha_at(&rects, 53.5, 53.5), 1.0);
+        // Outside the shadow's own curve: the corner of its bounding square.
+        assert_eq!(alpha_at(&rects, 44.5, 44.5), 0.0);
+        // Inside the box: its middle, and just inside its curve.
+        assert_eq!(alpha_at(&rects, 100.5, 100.5), 0.0);
+        assert_eq!(alpha_at(&rects, 58.5, 58.5), 0.0);
+
+        // No pixel is painted twice, and none outside the shadow's rect.
+        for (r, a) in &rects {
+            assert!(*a > 0.0 && *a <= 1.0, "alpha {a}");
+            assert!(r.x >= 44.0 && r.right() <= 156.0 && r.y >= 44.0 && r.bottom() <= 156.0, "{r:?}");
+        }
+        for y in 44..156 {
+            for x in 44..156 {
+                let a = alpha_at(&rects, x as f32 + 0.5, y as f32 + 0.5);
+                assert!(a <= 1.0 + 1e-6, "({x}, {y}) painted {a}");
+            }
+        }
+
+        // The ring's area: the difference of the two rounded rects.
+        let rounded_area = |side: f32, r: f32| side * side - (4.0 - std::f32::consts::PI) * r * r;
+        let ring = rounded_area(112.0, 26.0) - rounded_area(100.0, 20.0);
+        let painted = weighted_area(&rects);
+        assert!((painted - ring).abs() < ring * 0.02, "painted {painted}, ring {ring}");
+    }
+
+    /// The hole is the box's curve even when the shadow is only moved: the
+    /// notch between the box's square corner and its curve shows the shadow.
+    #[test]
+    fn an_offset_shadow_shows_through_the_corner_notch_of_its_box() {
+        let border_box = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let radius = rustkit_layout::BorderRadius::uniform(30.0);
+        let shadow = Rect::new(10.0, 10.0, 100.0, 100.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, radius, shadow, radius, 0.0, 1.0);
+        // Bottom-right notch of the box: outside its curve, inside the shadow.
+        assert_eq!(alpha_at(&rects, 97.5, 97.5), 1.0);
+        // The shadow's own bottom-right corner is cut.
+        assert_eq!(alpha_at(&rects, 108.5, 108.5), 0.0);
+        // Under the box.
+        assert_eq!(alpha_at(&rects, 50.5, 50.5), 0.0);
+    }
+
+    /// Each blur layer is the shadow's shape grown, corners included.
+    #[test]
+    fn blurred_layers_of_a_rounded_shadow_are_rounded() {
+        let border_box = Rect::new(20.0, 20.0, 60.0, 60.0);
+        let radius = rustkit_layout::BorderRadius::uniform(30.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, radius, border_box, radius, 8.0, 0.9);
+        assert!(!rects.is_empty());
+        // The outermost layer reaches 8px out on the axis, and its bounding
+        // square's corner stays clear.
+        assert!(alpha_at(&rects, 50.5, 13.5) > 0.0);
+        assert_eq!(alpha_at(&rects, 13.5, 13.5), 0.0);
+        assert_eq!(alpha_at(&rects, 50.5, 50.5), 0.0);
+    }
+
+    /// A square box takes the path it always did, rect for rect.
+    #[test]
+    fn a_square_box_gets_exactly_the_old_rects() {
+        let border_box = Rect::new(40.0, 40.0, 89.0, 38.0);
+        let shadow = Rect::new(39.0, 39.0, 91.0, 40.0);
+        let rects = rounded_difference_pieces(shadow, SQUARE, border_box, SQUARE);
+        let old: Vec<(Rect, f32)> = Renderer::rect_minus(shadow, border_box)
+            .into_iter()
+            .map(|r| (r, 1.0))
+            .collect();
+        assert_eq!(rects.len(), old.len());
+        for ((a, ca), (b, cb)) in rects.iter().zip(&old) {
+            assert_eq!((a.x, a.y, a.width, a.height, *ca), (b.x, b.y, b.width, b.height, *cb));
+        }
+    }
+
+    /// The hole's edge takes the fill's coverage ramp, so the two sum to one
+    /// across the box's curve.
+    #[test]
+    fn the_hole_and_the_fill_share_the_corner_ramp() {
+        let rect = Rect::new(0.0, 0.0, 80.0, 80.0);
+        let radius = rustkit_layout::BorderRadius::uniform(24.0);
+        // A shape that covers everything, minus the box.
+        let outside = rounded_difference_pieces(Rect::new(-10.0, -10.0, 100.0, 100.0), SQUARE, rect, radius);
+        let mut partial = 0;
+        for y in 0..24 {
+            for x in 0..24 {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let fill = rounded_rect_coverage(rect, radius, px, py);
+                let hole = alpha_at(&outside, px, py);
+                // A coverage under 0.01 is not emitted, as in the fill.
+                assert!((fill + hole - 1.0).abs() <= 0.011, "({x}, {y}): fill {fill} + hole {hole}");
+                if fill > 0.0 && fill < 1.0 {
+                    partial += 1;
+                }
+            }
+        }
+        assert!(partial > 10, "only {partial} antialiased pixels along a 24px arc");
+    }
+
+    fn assert_outside(rects: &[(Rect, f32)], border_box: Rect) {
+        for (r, _) in rects {
+            assert!(
+                r.intersect(&border_box).is_none(),
+                "shadow rect {r:?} paints inside the border box {border_box:?}"
+            );
+        }
+    }
+
+    /// CSS Backgrounds 3 §7.1: an outer shadow is clipped to outside the
+    /// border box. linkedin's "Sign in" is `box-shadow: 0 0 0 1px blue` on a
+    /// transparent background with blue text: a 1px ring, not a filled box.
+    #[test]
+    fn spread_only_ring_does_not_fill_the_box() {
+        let border_box = Rect::new(40.0, 40.0, 89.0, 38.0);
+        let shadow = Rect::new(39.0, 39.0, 91.0, 40.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, SQUARE, shadow, SQUARE, 0.0, 1.0);
+        assert_outside(&rects, border_box);
+        let ring = 91.0 * 40.0 - 89.0 * 38.0;
+        assert!((area(&rects) - ring).abs() < 1e-3, "area {} != ring {ring}", area(&rects));
+    }
+
+    /// An offset shadow shows only where it sticks out past the box.
+    #[test]
+    fn offset_shadow_shows_only_outside_the_box() {
+        let border_box = Rect::new(40.0, 40.0, 200.0, 60.0);
+        let shadow = Rect::new(48.0, 48.0, 200.0, 60.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, SQUARE, shadow, SQUARE, 0.0, 1.0);
+        assert_outside(&rects, border_box);
+        let visible = 200.0 * 60.0 - 192.0 * 52.0;
+        assert!((area(&rects) - visible).abs() < 1e-3);
+    }
+
+    /// Blurred layers are clipped the same way, and keep their alpha.
+    #[test]
+    fn blurred_layers_are_clipped_too() {
+        let border_box = Rect::new(10.0, 10.0, 50.0, 50.0);
+        let rects = Renderer::outer_shadow_paint_rects(border_box, SQUARE, border_box, SQUARE, 4.0, 0.9);
+        assert!(!rects.is_empty());
+        assert_outside(&rects, border_box);
+        assert!(rects.iter().all(|(_, a)| (*a - 0.9 / 3.0).abs() < 1e-6));
+    }
+
+    /// A shadow entirely hidden behind its box paints nothing.
+    #[test]
+    fn shadow_under_the_box_paints_nothing() {
+        let border_box = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shadow = Rect::new(10.0, 10.0, 80.0, 80.0);
+        assert!(Renderer::outer_shadow_paint_rects(border_box, SQUARE, shadow, SQUARE, 0.0, 1.0).is_empty());
+    }
+}
+
+/// How far inside its padding edge a drop-down `<select>` seats its label.
+const MENU_LIST_LABEL_INSET: f32 = 4.0;
+/// Horizontal padding of a list-box option row (Chrome's `option` padding).
+const LIST_BOX_OPTION_INSET: f32 = 2.0;
+/// A selected list-box row, and its text, in a list box without focus.
+const LIST_BOX_SELECTED_ROW: Color = Color {
+    r: 206,
+    g: 206,
+    b: 206,
+    a: 1.0,
+};
+const LIST_BOX_SELECTED_TEXT: Color = Color {
+    r: 16,
+    g: 16,
+    b: 16,
+    a: 1.0,
+};
+
+/// Centre of a drop-down's arrow in its border box `rect`.
+fn menu_list_arrow_centre(rect: Rect) -> (f32, f32) {
+    (rect.x + rect.width - 8.75, rect.y + rect.height / 2.0)
+}
+
+/// Row `index` of a list box whose frame encloses `inner`.
+fn list_box_row_rect(inner: Rect, row_height: f32, index: usize) -> Rect {
+    Rect::new(
+        inner.x,
+        inner.y + row_height * index as f32,
+        inner.width,
+        row_height,
+    )
+}
+
+#[cfg(test)]
+mod select_paint_tests {
+    use super::*;
+
+    /// Chrome CfT-148, bare `<select>` at (156.19, 875) 137x19: the chevron
+    /// spans x 280.5..288.5 and y 882..886 — centred on the control's
+    /// height, clear of the right border.
+    #[test]
+    fn the_drop_down_arrow_sits_inside_the_right_edge_at_mid_height() {
+        let rect = Rect::new(156.1875, 875.0, 137.0, 19.0);
+        let (cx, cy) = menu_list_arrow_centre(rect);
+        assert!((cx - 284.5).abs() <= 0.5, "arrow centre x {cx}");
+        assert_eq!(cy, 884.5);
+        // The same distance from the right edge on a padded 155x40 select.
+        let big = Rect::new(239.45, 167.0, 155.0, 40.0);
+        let (bx, by) = menu_list_arrow_centre(big);
+        assert_eq!(big.x + big.width - bx, rect.x + rect.width - cx);
+        assert_eq!(by, 187.0);
+    }
+
+    /// Chrome's option rows stack from the inside of the frame: 16px rows
+    /// at y = 906, 922, 938 in a list box whose border box starts at 905.
+    #[test]
+    fn list_box_rows_stack_from_the_inside_of_the_frame() {
+        let inner = Rect::new(157.1875, 906.0, 37.05, 48.0);
+        let ys: Vec<f32> = (0..4)
+            .map(|i| list_box_row_rect(inner, 16.0, i).y)
+            .collect();
+        assert_eq!(ys, vec![906.0, 922.0, 938.0, 954.0]);
+        // The fourth option starts at the frame's inner bottom: not painted.
+        assert!(ys[3] >= inner.y + inner.height);
+        assert_eq!(list_box_row_rect(inner, 16.0, 1).width, inner.width);
+    }
+}
+
+#[cfg(test)]
 mod form_text_seat_tests {
     use super::*;
 
@@ -7532,8 +8960,7 @@ pub struct RenderStats {
     pub stacking_context_depth: usize,
 }
 
-/// ISO8601-ish timestamp without a chrono dependency (approximate calendar;
-/// good enough for a capture sidecar).
+/// ISO8601 timestamp for the capture sidecar, without a chrono dependency.
 #[cfg(windows)]
 fn chrono_lite_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -7541,16 +8968,265 @@ fn chrono_lite_timestamp() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let days = secs / 86400;
-    let years = 1970 + days / 365;
-    let remaining = (days % 365) as u32;
-    let month = remaining / 30 + 1;
-    let day = remaining % 30 + 1;
-    let hours = (secs % 86400) / 3600;
-    let minutes = (secs % 3600) / 60;
+    utc_timestamp_from_secs(secs)
+}
+
+/// Render seconds since the Unix epoch as `YYYY-MM-DDTHH:MM:SSZ`.
+///
+/// The previous version counted 365-day years and 30-day months, so every
+/// sidecar written in 2026 was stamped 17 days into the future (a
+/// 2026-09-25 capture read 2026-10-12), and the drift grows by about five
+/// days a year. This is the proleptic-Gregorian days-to-civil conversion
+/// (Howard Hinnant's algorithm): exact for every date a `u64` can express,
+/// no dependency, no leap seconds (neither has `SystemTime`).
+#[allow(dead_code)] // only the Windows capture path calls it; the test runs everywhere
+fn utc_timestamp_from_secs(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let z = days + 719_468; // shift the epoch from 1970-01-01 to 0000-03-01
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // day of era [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // year of era [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year, March-based [0, 365]
+    let mp = (5 * doy + 2) / 153; // March = 0 ... February = 11
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
     let seconds = secs % 60;
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        years, month, day, hours, minutes, seconds
+        year, month, day, hours, minutes, seconds
     )
+}
+
+#[cfg(test)]
+mod sidecar_timestamp_tests {
+    use super::utc_timestamp_from_secs;
+
+    /// Values cross-checked against Python's `datetime.fromtimestamp(..., UTC)`.
+    #[test]
+    fn the_sidecar_timestamp_is_a_real_civil_date() {
+        assert_eq!(utc_timestamp_from_secs(0), "1970-01-01T00:00:00Z");
+        // The capture that exposed the bug: the old formula turns this
+        // second into 2026-10-12T18:35:17Z.
+        assert_eq!(utc_timestamp_from_secs(1_790_361_317), "2026-09-25T18:35:17Z");
+        // Leap days: an ordinary leap year and a century year that is one.
+        assert_eq!(utc_timestamp_from_secs(1_709_208_000), "2024-02-29T12:00:00Z");
+        assert_eq!(utc_timestamp_from_secs(951_782_400), "2000-02-29T00:00:00Z");
+        // Last second of 2099.
+        assert_eq!(utc_timestamp_from_secs(4_102_444_799), "2099-12-31T23:59:59Z");
+    }
+}
+
+/// SHAPED-RUN CONTRACT, slice S0 (docs/SHAPED_RUN_CONTRACT_2026-09-30.md
+/// §7), paint side. Device-free: these read the bitmaps the atlas is filled
+/// from. The character path is the oracle.
+#[cfg(all(test, target_os = "macos"))]
+mod shaped_run_paint_tests {
+    use super::*;
+    use rustkit_css::{ComputedStyle, Length};
+
+    const GEORGIA_LIST: &str = "Georgia, 'Times New Roman', serif";
+
+    fn run_in(family: &str, weight: u16, text: &str, size: f32) -> rustkit_layout::GlyphRun {
+        let mut style = ComputedStyle::new();
+        style.font_family = family.to_string();
+        style.font_size = Length::Px(size);
+        style.font_weight = rustkit_css::FontWeight(weight);
+        rustkit_layout::shape_line_run(text, &style, size, 0.0).expect("a Latin line has a run")
+    }
+
+    fn key(run: &rustkit_layout::GlyphRun, glyph_id: u16) -> RunGlyphKey {
+        RunGlyphKey {
+            face: run.face.id,
+            glyph_id,
+            font_size: (run.font_size * 10.0) as u32,
+            subpixel_phase: 0,
+        }
+    }
+
+    /// "Face identity, macOS": painting the run resolves no family list,
+    /// and what it draws is, byte for byte, what the character path draws
+    /// when that path resolves the same list to the same face.
+    #[test]
+    fn run_glyphs_are_drawn_from_the_run_face_with_no_family_lookup() {
+        for (weight, text, size) in [(400u16, "Wave To", 24.0f32), (700, "Type", 17.6)] {
+            let run = run_in(GEORGIA_LIST, weight, text, size);
+
+            let before = rustkit_text::macos::css_list_resolutions();
+            let from_run: Vec<_> = run
+                .glyphs
+                .iter()
+                .map(|g| rasterize_run_glyph(&key(&run, g.glyph_id), run.font_size))
+                .collect();
+            assert_eq!(
+                rustkit_text::macos::css_list_resolutions(),
+                before,
+                "painting a run must not resolve a font-family list"
+            );
+
+            // The character path, at the size its key quantizes to.
+            let old = rustkit_text::macos::GlyphRasterizer::with_style(
+                GEORGIA_LIST,
+                (size * 10.0) as u32 as f32 / 10.0,
+                weight,
+                false,
+            );
+            assert!(rustkit_text::macos::css_list_resolutions() > before);
+            for (ch, drawn) in text.chars().zip(from_run) {
+                let drawn = drawn.expect("the run's face is held");
+                assert_eq!(Some(drawn), old.rasterize_char(ch, 0.0), "{ch:?} at {size}px");
+            }
+        }
+    }
+
+    /// Two faces, one glyph id each for the same letter: the key tells them
+    /// apart, so regular and bold do not share a bitmap.
+    #[test]
+    fn the_key_is_the_face_and_the_glyph_not_the_family() {
+        let regular = run_in(GEORGIA_LIST, 400, "W", 24.0);
+        let bold = run_in(GEORGIA_LIST, 700, "W", 24.0);
+        let k_regular = key(&regular, regular.glyphs[0].glyph_id);
+        let k_bold = key(&bold, bold.glyphs[0].glyph_id);
+        assert_ne!(k_regular, k_bold);
+        assert_ne!(
+            rasterize_run_glyph(&k_regular, 24.0).expect("regular"),
+            rasterize_run_glyph(&k_bold, 24.0).expect("bold"),
+        );
+
+        // The same face reached through another list is the same key.
+        let walked = run_in("No Such Family 9f2c, Georgia", 400, "W", 24.0);
+        assert_eq!(key(&walked, walked.glyphs[0].glyph_id), k_regular);
+    }
+
+    /// A face the rasterizer does not hold draws nothing: the caller paints
+    /// the command through the family-list path instead.
+    #[test]
+    fn a_face_that_is_not_held_is_not_drawn() {
+        let run = run_in(GEORGIA_LIST, 400, "W", 24.0);
+        let mut unknown = key(&run, run.glyphs[0].glyph_id);
+        unknown.face ^= 0x5a5a;
+        assert!(rasterize_run_glyph(&unknown, 24.0).is_none());
+        // Held per size: a size layout never shaped at is not held either.
+        assert!(rasterize_run_glyph(&key(&run, run.glyphs[0].glyph_id), 23.0).is_none());
+    }
+}
+
+/// Where S0 changes a frame (campaign case `css-selectors`, "Lang prefix |=
+/// (should be italic)"): layout measures italic system-font text in the
+/// system italic, and the character path, resolving the same family list
+/// again, drew another face at those advances. A run is drawn in the face
+/// that was measured.
+#[cfg(all(test, target_os = "macos"))]
+mod shaped_run_measured_face_tests {
+    use super::*;
+    use rustkit_css::{ComputedStyle, Length};
+
+    #[test]
+    fn italic_system_text_is_drawn_in_the_face_layout_measured() {
+        let mut style = ComputedStyle::new();
+        style.font_family = "-apple-system, BlinkMacSystemFont, sans-serif".to_string();
+        style.font_size = Length::Px(14.0);
+        style.font_style = rustkit_css::FontStyle::Italic;
+        let run = rustkit_layout::shape_line_run("Lang", &style, 14.0, 0.0).expect("run");
+        let name = &run.face.postscript_name;
+        assert!(
+            name.starts_with(".SFNS") && name.contains("Italic"),
+            "layout measures the system italic, got {name}"
+        );
+
+        // The rasterizer is handed that face, and draws the run's glyph.
+        let held = rustkit_text::macos::face_font(run.face.id, 14.0).expect("the face is held");
+        assert_eq!(&held.postscript_name(), name);
+        let key = RunGlyphKey {
+            face: run.face.id,
+            glyph_id: run.glyphs[0].glyph_id,
+            font_size: 140,
+            subpixel_phase: 0,
+        };
+        let (bitmap, ..) = rasterize_run_glyph(&key, 14.0).expect("drawn");
+        assert!(bitmap.iter().any(|&v| v > 128), "the glyph has ink");
+    }
+}
+
+/// SHAPED-RUN CONTRACT, slice S0, paint side on Windows. Device-free: these
+/// read the bitmaps the atlas is filled from. The character path is the
+/// oracle.
+#[cfg(all(test, windows))]
+mod shaped_run_windows_paint_tests {
+    use super::*;
+    use rustkit_css::{ComputedStyle, Length};
+
+    const GEORGIA_LIST: &str = "Georgia, 'Times New Roman', serif";
+
+    fn run_in(family: &str, weight: u16, text: &str, size: f32) -> rustkit_layout::GlyphRun {
+        let mut style = ComputedStyle::new();
+        style.font_family = family.to_string();
+        style.font_size = Length::Px(size);
+        style.font_weight = rustkit_css::FontWeight(weight);
+        rustkit_layout::shape_line_run(text, &style, size, 0.0).expect("a Latin line has a run")
+    }
+
+    fn key(run: &rustkit_layout::GlyphRun, glyph_id: u16) -> RunGlyphKey {
+        RunGlyphKey {
+            face: run.face.id,
+            glyph_id,
+            font_size: (run.font_size * 10.0) as u32,
+            subpixel_phase: 0,
+        }
+    }
+
+    /// What the run draws is, byte for byte, what the character path draws
+    /// when it resolves the same list to the same face.
+    #[test]
+    fn run_glyphs_match_the_character_path() {
+        for (weight, text, size) in [(400u16, "Wave", 24.0f32), (700, "Type", 17.6)] {
+            let run = run_in(GEORGIA_LIST, weight, text, size);
+            for (glyph, c) in run.glyphs.iter().zip(text.chars()) {
+                let from_run = rasterize_run_glyph(&key(&run, glyph.glyph_id), run.font_size)
+                    .expect("the run's face is held");
+                let from_char = glyph::rasterize_char_for_test(c, "Georgia", size, weight)
+                    .expect("the character path draws it");
+                assert_eq!(from_run, from_char, "{c:?} at weight {weight}");
+            }
+        }
+    }
+
+    /// A space is a glyph with an advance and no ink: it must not fail the
+    /// run, or every line with a space would fall back to the family path.
+    #[test]
+    fn a_space_in_a_run_is_blank_not_a_failure() {
+        let run = run_in(GEORGIA_LIST, 400, "a b", 24.0);
+        let space = run.glyphs[1].glyph_id;
+        let (bitmap, w, h, advance, _, _) =
+            rasterize_run_glyph(&key(&run, space), 24.0).expect("a space rasterizes");
+        assert_eq!((bitmap.as_slice(), w, h), (&[0u8][..], 1, 1));
+        assert!(advance > 0.0);
+    }
+
+    #[test]
+    fn the_key_is_the_face_and_the_glyph_not_the_family() {
+        let regular = run_in(GEORGIA_LIST, 400, "W", 24.0);
+        let bold = run_in(GEORGIA_LIST, 700, "W", 24.0);
+        let k_regular = key(&regular, regular.glyphs[0].glyph_id);
+        let k_bold = key(&bold, bold.glyphs[0].glyph_id);
+        assert_ne!(k_regular, k_bold);
+        assert_ne!(
+            rasterize_run_glyph(&k_regular, 24.0).expect("regular"),
+            rasterize_run_glyph(&k_bold, 24.0).expect("bold"),
+        );
+        let walked = run_in("No Such Family 9f2c, Georgia", 400, "W", 24.0);
+        assert_eq!(key(&walked, walked.glyphs[0].glyph_id), k_regular);
+    }
+
+    /// A face the rasterizer does not hold draws nothing: the caller paints
+    /// the command through the family-list path instead.
+    #[test]
+    fn a_face_that_is_not_held_is_not_drawn() {
+        let run = run_in(GEORGIA_LIST, 400, "W", 24.0);
+        let mut unknown = key(&run, run.glyphs[0].glyph_id);
+        unknown.face ^= 0x5a5a;
+        assert!(rasterize_run_glyph(&unknown, 24.0).is_none());
+    }
 }

@@ -220,11 +220,12 @@ def score_site(site, capture_bin, outdir, width, height, env):
     rec["oracle_capture"] = oracle if chrome_ok else None
 
     rk_frame, rk_dl = d / "rustkit.ppm", d / "rustkit-display-list.json"
+    rk_scripts = d / "rustkit-scripts.json"
     started = time.time()
     rk, rk_err, rk_code = run_json(
         [str(capture_bin), "--url", url, "--width", str(width), "--height", str(height),
          "--timeout-ms", str(LOAD_TIMEOUT_MS), "--dump-frame", str(rk_frame),
-         "--dump-display-list", str(rk_dl)],
+         "--dump-display-list", str(rk_dl), "--dump-scripts", str(rk_scripts)],
         timeout=LOAD_TIMEOUT_MS // 1000 + 15,
     )
     rec["rustkit"] = rk if rk is not None else {"status": "crash", "error": rk_err,

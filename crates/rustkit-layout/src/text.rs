@@ -86,12 +86,13 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for sans-serif.
+    /// Helvetica first: it is Chrome's `sans-serif` on macOS. The chain led
+    /// with the system font, which is `system-ui` and a different face: a
+    /// 28-character line at 16px measured 220.78 where Chrome 148 has 217.02.
     #[cfg(target_os = "macos")]
     pub fn sans_serif() -> Self {
-        Self::new("SF Pro")
-            .with_fallback(".AppleSystemUIFont")
+        Self::new("Helvetica")
             .with_fallback("Helvetica Neue")
-            .with_fallback("Helvetica")
             .with_fallback("Arial")
             .with_fallback("PingFang SC")
             .with_fallback("Hiragino Sans")
@@ -111,9 +112,10 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for serif.
+    /// Times first: it is Chrome's `serif` (and its default font) on macOS.
     #[cfg(target_os = "macos")]
     pub fn serif() -> Self {
-        Self::new("New York")
+        Self::new("Times")
             .with_fallback("Times New Roman")
             .with_fallback("Georgia")
             .with_fallback("Songti SC")
@@ -132,19 +134,26 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for monospace.
-    /// Menlo first: it is Chrome's default `monospace` on macOS and ships
-    /// with the OS. SF Mono is an Xcode/Terminal bundle font — leading with
-    /// it measured a Core Text substitute on stock machines (see
-    /// rustkit-text `named_font`) and would measure a different face from
-    /// Chrome's on machines that have it.
+    /// Courier first: it is Chrome's `monospace` on macOS. Chrome 148
+    /// measures 9.6016px per character at 16px, which is Courier's advance;
+    /// Menlo, which led this chain, is 9.6328. SF Mono is an Xcode/Terminal
+    /// bundle font, so it stays out of the chain: stock machines do not have
+    /// it, and machines that do would measure a face Chrome does not use.
     #[cfg(target_os = "macos")]
     pub fn monospace() -> Self {
-        Self::new("Menlo")
-            .with_fallback("SF Mono")
-            .with_fallback("Monaco")
+        Self::new("Courier")
             .with_fallback("Courier New")
+            .with_fallback("Menlo")
+            .with_fallback("Monaco")
             .with_fallback("monospace")
     }
+
+    /// The family a list falls back to when nothing in it is installed: the
+    /// UA's default font, which in Chrome on macOS is Times. The system font
+    /// stood here, so `font-family: "Not Installed"` measured 220.78 for a
+    /// line Chrome sets at 199.52.
+    #[cfg(target_os = "macos")]
+    pub const UA_DEFAULT_FAMILY: &'static str = "Times";
 
     /// Create default font chain for monospace.
     #[cfg(not(target_os = "macos"))]
@@ -194,11 +203,13 @@ impl FontFamilyChain {
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
             "system-ui" | "-apple-system" | "blinkmacsystemfont" => Self::system_ui(),
-            "cursive" => Self::new("Comic Sans MS")
+            // Chrome's faces on macOS lead: Apple Chancery and Papyrus.
+            "cursive" => Self::new("Apple Chancery")
+                .with_fallback("Comic Sans MS")
                 .with_fallback("Brush Script MT")
                 .with_fallback("cursive"),
-            "fantasy" => Self::new("Impact")
-                .with_fallback("Papyrus")
+            "fantasy" => Self::new("Papyrus")
+                .with_fallback("Impact")
                 .with_fallback("fantasy"),
             _ => {
                 let mut chain = Self::new(primary);
@@ -216,6 +227,20 @@ impl FontFamilyChain {
                         let sans_chain = Self::sans_serif();
                         chain.fallbacks.push(sans_chain.primary);
                         chain.fallbacks.extend(sans_chain.fallbacks);
+                    } else if lower == "serif" || lower == "monospace" {
+                        // A generic keyword is not a font name. Left in the
+                        // chain as written it matched nothing, and the walk
+                        // went on to the system font appended below:
+                        // `Consolas, monospace` was measured in a
+                        // proportional face (and painted in Menlo, which is
+                        // what paint maps the keyword to).
+                        let generic = if lower == "serif" {
+                            Self::serif()
+                        } else {
+                            Self::monospace()
+                        };
+                        chain.fallbacks.push(generic.primary);
+                        chain.fallbacks.extend(generic.fallbacks);
                     } else {
                         chain.fallbacks.push(fallback.to_string());
                     }
@@ -223,7 +248,7 @@ impl FontFamilyChain {
                 // Add platform-specific system fallbacks
                 #[cfg(target_os = "macos")]
                 {
-                    chain.fallbacks.push(".AppleSystemUIFont".to_string());
+                    chain.fallbacks.push(Self::UA_DEFAULT_FAMILY.to_string());
                     chain.fallbacks.push("Helvetica".to_string());
                 }
                 #[cfg(not(target_os = "macos"))]
@@ -291,7 +316,7 @@ impl TextMetrics {
     /// This provides accurate metrics directly from the font.
     #[cfg(target_os = "macos")]
     pub fn from_core_text_font(ct_font: &core_text::font::CTFont, width: f32) -> Self {
-        let ascent = ct_font.ascent() as f32;
+        let ascent = rustkit_text::macos::blink_ascent(ct_font);
         let descent = ct_font.descent() as f32;
         let leading = ct_font.leading() as f32;
         let underline_position = ct_font.underline_position() as f32;
@@ -352,6 +377,10 @@ pub struct ShapedRun {
     pub metrics: TextMetrics,
     /// Text direction (LTR or RTL).
     pub direction: TextDirection,
+    /// The face the glyph ids belong to, when the shaper can name it (see
+    /// [`FaceIdentity`]). `None` where a platform shaper does not record it
+    /// yet; such a run cannot be frozen into a [`GlyphRun`].
+    pub face: Option<FaceIdentity>,
 }
 
 /// Text direction for a shaped run.
@@ -398,6 +427,287 @@ impl TextDirection {
     pub fn is_rtl(self) -> bool {
         self == TextDirection::Rtl
     }
+}
+
+/// Which face a run's glyph ids belong to.
+///
+/// A CSS `font-family` list does not say this: the list is an order of
+/// preference, and the face that answers depends on what is installed, what
+/// the document registered, and the weight and style asked for. Layout
+/// resolves the list once, when it shapes. Paint is handed the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaceIdentity {
+    /// Handle the platform rasterizer accepts for this face
+    /// (`rustkit_text::macos::face_font`). Two runs with the same id draw
+    /// from the same face; the id is what a glyph cache keys on.
+    pub id: u64,
+    /// PostScript name of the selected face (Core Text).
+    pub postscript_name: String,
+    /// Index of the face in its file. 0 today: no collection face is
+    /// selected by index yet.
+    pub face_index: u32,
+}
+
+/// What the shaper faked because the face lacks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FaceSynthesis {
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// One glyph of a [`GlyphRun`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunGlyph {
+    /// Glyph id in the run's face.
+    pub glyph_id: u16,
+    /// How far the pen moves after this glyph. Letter-spacing,
+    /// word-spacing and justification are already in it.
+    pub advance: f32,
+    /// Offset of the glyph's origin from the pen.
+    pub x_offset: f32,
+    pub y_offset: f32,
+    /// The UTF-16 code units of the source text this glyph draws. Glyphs of
+    /// one cluster (a ligature, a base with its marks) share one range, and
+    /// a range is the only place a line may break or a caret may stand.
+    pub cluster: std::ops::Range<u32>,
+}
+
+/// A shaped run, frozen: the one result layout, paint and caret read.
+///
+/// Built by one shaper call for one face, with letter-spacing, word-spacing
+/// and justification already applied, then never edited. Paint places
+/// `glyphs` by id from `face`; it has no family list to resolve.
+/// (docs/SHAPED_RUN_CONTRACT_2026-09-30.md §1; this is slice S0, so a run
+/// exists only for a single left-to-right face with no fallback character.)
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlyphRun {
+    pub face: FaceIdentity,
+    /// Size in CSS px.
+    pub font_size: f32,
+    pub font_weight: FontWeight,
+    pub font_style: FontStyle,
+    pub font_stretch: FontStretch,
+    pub synthesis: FaceSynthesis,
+    /// Variation axis values, `(tag, value)`. Empty until a variable-font
+    /// slice sets them.
+    pub variations: Vec<(u32, f32)>,
+    pub glyphs: Vec<RunGlyph>,
+    pub direction: TextDirection,
+    /// ISO 15924 script of the run's letters (`Zyyy` when it has none of
+    /// one script, `Zzzz` when it mixes scripts or uses one not told apart
+    /// here).
+    pub script: [u8; 4],
+    /// BCP 47 language of the content, when layout knows it. It does not
+    /// today: no `lang` reaches computed style.
+    pub language: Option<String>,
+    pub ascent: f32,
+    pub descent: f32,
+    pub leading: f32,
+}
+
+impl GlyphRun {
+    /// Freeze `run`, the shaper's result for one line with spacing applied.
+    /// `justify_space` is the slack layout gave each word separator of a
+    /// justified line; it goes into the advances here, before the freeze.
+    ///
+    /// `None` when the run is outside S0: the shaper did not name its face,
+    /// it is not left-to-right, or a character has no glyph in the face
+    /// (the shaper measured that one from a fallback face, and an emoji is
+    /// painted in colour from one). Such a line keeps the per-character
+    /// path until the fallback-boundary slice.
+    pub fn freeze(run: &ShapedRun, justify_space: f32) -> Option<GlyphRun> {
+        let face = run.face.clone()?;
+        if run.direction != TextDirection::Ltr {
+            return None;
+        }
+        if run
+            .glyphs
+            .iter()
+            .any(|g| g.glyph_id == 0 || is_color_glyph_char(g.character))
+        {
+            return None;
+        }
+
+        // UTF-16 offset of every character, and of the end of the text.
+        let mut unit_offsets: Vec<u32> = Vec::with_capacity(run.text.len() + 1);
+        let mut units = 0u32;
+        for c in run.text.chars() {
+            unit_offsets.push(units);
+            units += c.len_utf16() as u32;
+        }
+        unit_offsets.push(units);
+        let unit_at = |char_index: u32| -> u32 {
+            unit_offsets
+                .get(char_index as usize)
+                .copied()
+                .unwrap_or(units)
+        };
+
+        let mut glyphs = Vec::with_capacity(run.glyphs.len());
+        for (i, g) in run.glyphs.iter().enumerate() {
+            // A cluster runs from its first character to the first
+            // character of the next cluster (left-to-right, so the next
+            // glyph that starts a different one), or to the end of the text.
+            let next_cluster = run.glyphs[i + 1..]
+                .iter()
+                .map(|n| n.cluster)
+                .find(|&c| c != g.cluster);
+            let start = unit_at(g.cluster);
+            let end = next_cluster.map_or(units, unit_at).max(start);
+            let justify = if justify_space > 0.0 && is_justify_separator(g.character) {
+                justify_space
+            } else {
+                0.0
+            };
+            glyphs.push(RunGlyph {
+                glyph_id: g.glyph_id,
+                advance: g.advance + justify,
+                // Today's shapers report the pen position (`x`) and no
+                // offset from it.
+                x_offset: 0.0,
+                y_offset: g.y,
+                cluster: start..end,
+            });
+        }
+
+        Some(GlyphRun {
+            face,
+            font_size: run.font_size,
+            font_weight: run.font_weight,
+            font_style: run.font_style,
+            font_stretch: run.font_stretch,
+            synthesis: FaceSynthesis::default(),
+            variations: Vec::new(),
+            glyphs,
+            direction: run.direction,
+            script: script_of(&run.text),
+            language: None,
+            ascent: run.metrics.ascent,
+            descent: run.metrics.descent,
+            leading: run.metrics.leading,
+        })
+    }
+
+    /// This run cut after its first `kept` glyphs, with `tail` (the
+    /// ellipsis, shaped alone) appended: `text-overflow: ellipsis`. The cut
+    /// is made where layout cut the characters, so it is only asked of a
+    /// run with one glyph per character. `None` when `tail` is in another
+    /// face (one run is one face) or the cut would split a cluster.
+    pub fn cut_with_tail(&self, kept: usize, tail: &GlyphRun) -> Option<GlyphRun> {
+        if tail.face != self.face || kept > self.glyphs.len() {
+            return None;
+        }
+        let cut_unit = match kept {
+            0 => 0,
+            n => self.glyphs[n - 1].cluster.end,
+        };
+        if self
+            .glyphs
+            .get(kept)
+            .is_some_and(|next| next.cluster.start < cut_unit)
+        {
+            return None;
+        }
+        let mut glyphs = self.glyphs[..kept].to_vec();
+        glyphs.extend(tail.glyphs.iter().map(|g| RunGlyph {
+            cluster: g.cluster.start + cut_unit..g.cluster.end + cut_unit,
+            ..g.clone()
+        }));
+        Some(GlyphRun {
+            glyphs,
+            ..self.clone()
+        })
+    }
+
+    /// The advance of each cluster, in order: glyphs that share a cluster
+    /// range are summed.
+    pub fn cluster_advances(&self) -> Vec<(std::ops::Range<u32>, f32)> {
+        let mut out: Vec<(std::ops::Range<u32>, f32)> = Vec::new();
+        for g in &self.glyphs {
+            match out.last_mut() {
+                Some((range, advance)) if *range == g.cluster => *advance += g.advance,
+                _ => out.push((g.cluster.clone(), g.advance)),
+            }
+        }
+        out
+    }
+
+    /// The run projected onto `text`'s characters: one advance per `char`.
+    /// `None` when a cluster is not exactly one character, which is where a
+    /// per-character vector cannot describe the run.
+    pub fn char_advances(&self, text: &str) -> Option<Vec<f32>> {
+        let clusters = self.cluster_advances();
+        let mut out = Vec::with_capacity(clusters.len());
+        let mut clusters = clusters.into_iter();
+        let mut unit = 0u32;
+        for c in text.chars() {
+            let (range, advance) = clusters.next()?;
+            let end = unit + c.len_utf16() as u32;
+            if range != (unit..end) {
+                return None;
+            }
+            out.push(advance);
+            unit = end;
+        }
+        clusters.next().is_none().then_some(out)
+    }
+
+    /// Pen x of every glyph when the run starts at `x`: where paint puts
+    /// each glyph's origin, before the glyph's own offset.
+    pub fn pen_positions(&self, x: f32) -> Vec<f32> {
+        let mut pen = x;
+        self.glyphs
+            .iter()
+            .map(|g| {
+                let here = pen;
+                pen += g.advance;
+                here
+            })
+            .collect()
+    }
+
+    /// Total advance of the run.
+    pub fn width(&self) -> f32 {
+        self.glyphs.iter().map(|g| g.advance).sum()
+    }
+}
+
+/// The word separators a justified line widens (`TextLine::is_word_separator`).
+fn is_justify_separator(c: char) -> bool {
+    matches!(c, ' ' | '\u{a0}')
+}
+
+/// Is `c` painted from the colour-glyph (emoji) path?
+fn is_color_glyph_char(c: char) -> bool {
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        rustkit_text::is_emoji(c)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = c;
+        false
+    }
+}
+
+/// ISO 15924 tag for the letters of `text`. Tells apart the scripts a
+/// single-face left-to-right run can be today; everything else is `Zzzz`.
+fn script_of(text: &str) -> [u8; 4] {
+    let mut found: Option<[u8; 4]> = None;
+    for c in text.chars().filter(|c| c.is_alphabetic()) {
+        let script = match c as u32 {
+            0x0041..=0x024F | 0x1E00..=0x1EFF | 0x2C60..=0x2C7F | 0xA720..=0xA7FF => *b"Latn",
+            0x0370..=0x03FF | 0x1F00..=0x1FFF => *b"Grek",
+            0x0400..=0x052F => *b"Cyrl",
+            _ => return *b"Zzzz",
+        };
+        match found {
+            None => found = Some(script),
+            Some(seen) if seen != script => return *b"Zzzz",
+            Some(_) => {}
+        }
+    }
+    found.unwrap_or(*b"Zyyy")
 }
 
 impl ShapedRun {
@@ -797,6 +1107,37 @@ impl FontCache {
     }
 }
 
+/// Which backend `TextShaper::shape` actually calls on this build, and whether
+/// its advances come from a font at all.
+///
+/// This exists because the answer is not observable from the outside and the
+/// wrong answer is silent. `shape` has three bodies: DirectWrite on Windows,
+/// Core Text on macOS, and — on every other target, the one the Linux parity
+/// seat compiles — a stub that assigns `font_size * 0.5` to each ASCII
+/// character and `font_size` to each wider one, reads no font, and returns
+/// `Ok`. A caller cannot tell that apart from a successful shaping, so a
+/// parity oracle run on such a build reports geometry deltas against a fixed
+/// ruler and presents them as RustKit box-math defects
+/// (trench/digest-parity-finish-line.md, 2026-10-01).
+///
+/// The name is the provenance a capture carries so an oracle can refuse to
+/// attribute, rather than a feature flag: nothing in layout branches on it.
+pub const TEXT_SHAPER_BACKEND: &str = if cfg!(windows) {
+    "directwrite"
+} else if cfg!(target_os = "macos") {
+    "coretext"
+} else {
+    "stub-0.5em"
+};
+
+/// Whether this build's text advances are measured from a real font face.
+///
+/// False means every advance is a constant fraction of the font size, so any
+/// box whose size or inline position depends on a text measurement is reporting
+/// that constant and not a defect. Geometry taken on such a build is MECHANICS
+/// and can never be a parity receipt.
+pub const TEXT_METRICS_ARE_FONT_DERIVED: bool = cfg!(any(windows, target_os = "macos"));
+
 /// Text shaper for complex text layout.
 pub struct TextShaper {
     #[allow(dead_code)]
@@ -833,6 +1174,7 @@ impl TextShaper {
                 font_size: size,
                 metrics: TextMetrics::with_font_size(size),
                 direction: TextDirection::Ltr,
+                face: None,
             });
         }
 
@@ -884,10 +1226,51 @@ impl TextShaper {
                     let mut glyphs = Vec::with_capacity(text_chars.len());
                     let mut x_offset: f32 = 0.0;
 
+                    // Advances for characters the primary face has no glyph
+                    // for. Chrome takes them from the face it falls back to,
+                    // and the renderer paints emoji from Segoe UI Emoji, so
+                    // the emoji's advance must come from that face too or
+                    // the glyph is centred on the wrong width (image-gallery
+                    // placed every emoji 8 px right of Chrome). Looked up
+                    // once per shape, only when an emoji actually appears.
+                    let mut emoji_face: Option<Option<(rustkit_text::FontFace, f32)>> = None;
+                    let mut emoji_advance = |c: char| -> Option<f32> {
+                        let face = emoji_face.get_or_insert_with(|| {
+                            let family = collection.font_family_by_name("Segoe UI Emoji").ok()??;
+                            let font = family
+                                .first_matching_font(
+                                    RkFontWeight::from_u32(400),
+                                    RkFontStretch::from_u32(5),
+                                    RkFontStyle::Normal,
+                                )
+                                .ok()?;
+                            let face = font.create_font_face().ok()?;
+                            let upem = face.metrics().ok()?.design_units_per_em as f32;
+                            Some((face, size / upem))
+                        });
+                        let (face, scale) = face.as_ref()?;
+                        let ids = face.glyph_indices(&[c as u32]).ok()?;
+                        if ids[0] == 0 {
+                            return None;
+                        }
+                        let m = face.design_glyph_metrics(&ids, false).ok()?;
+                        Some(m[0].advance_width as f32 * scale)
+                    };
+
                     for (i, (&glyph_id, &c)) in
                         glyph_indices.iter().zip(text_chars.iter()).enumerate()
                     {
-                        let advance = if i < glyph_metrics.len() {
+                        let advance = if Self::is_default_ignorable(c) {
+                            // Variation selectors, joiners and the like take
+                            // no space; the primary face's .notdef would.
+                            0.0
+                        } else if glyph_id == 0 && rustkit_text::is_emoji(c) {
+                            emoji_advance(c).unwrap_or(if i < glyph_metrics.len() {
+                                glyph_metrics[i].advance_width as f32 * scale
+                            } else {
+                                size * 0.5
+                            })
+                        } else if i < glyph_metrics.len() {
                             glyph_metrics[i].advance_width as f32 * scale
                         } else {
                             size * 0.5
@@ -923,6 +1306,16 @@ impl TextShaper {
                         overline_offset: -ascent,
                     };
 
+                    // Name the face the glyph ids above belong to, and keep
+                    // it, so paint can draw this run with it instead of
+                    // resolving the family list a second time (see
+                    // `FaceIdentity`).
+                    let face_identity = FaceIdentity {
+                        id: rustkit_text::intern_face(&face),
+                        postscript_name: font.postscript_name(),
+                        face_index: face.index(),
+                    };
+
                     return Ok(ShapedRun {
                         text: text.to_string(),
                         glyphs,
@@ -933,6 +1326,7 @@ impl TextShaper {
                         font_size: size,
                         metrics,
                         direction: TextDirection::Ltr,
+                        face: Some(face_identity),
                     });
                 }
             }
@@ -943,6 +1337,14 @@ impl TextShaper {
     }
 
     /// Simple shaping fallback when DirectWrite is unavailable.
+    /// Default-ignorable code points that Chrome lays out with zero
+    /// advance: variation selectors (U+FE0F asks for emoji presentation),
+    /// zero-width space/joiner/non-joiner, word joiner, BOM.
+    #[cfg(windows)]
+    fn is_default_ignorable(c: char) -> bool {
+        matches!(c as u32, 0xFE00..=0xFE0F | 0x200B..=0x200D | 0x2060 | 0xFEFF | 0xE0100..=0xE01EF)
+    }
+
     #[cfg(windows)]
     fn shape_simple(
         &self,
@@ -991,10 +1393,19 @@ impl TextShaper {
             font_size: size,
             metrics,
             direction: TextDirection::Ltr,
+            face: None,
         })
     }
 
     /// Shape text using Core Text on macOS.
+    ///
+    /// Results are memoised per thread. Layout shapes the same strings over
+    /// and over: every flex/grid measuring pass re-wraps its text, and each
+    /// wrap probes a prefix per break opportunity. On cnn, line wrapping was
+    /// 29% of the main thread, spread over thousands of small repeated
+    /// shapes. The answer depends only on the arguments and on the installed
+    /// `@font-face` set, so entries are dropped whenever that set changes
+    /// (the rule `create_ct_font_with_traits` uses).
     #[cfg(target_os = "macos")]
     pub fn shape(
         &self,
@@ -1005,6 +1416,69 @@ impl TextShaper {
         stretch: FontStretch,
         size: f32,
     ) -> Result<ShapedRun, TextError> {
+        use std::cell::RefCell;
+
+        type Key = (String, String, Vec<String>, u16, u8, u8, u32);
+        struct Memo {
+            generation: u64,
+            runs: HashMap<Key, ShapedRun>,
+        }
+        // Bounds memory on a text-heavy page; refilling costs one shape per
+        // entry, which is what every call cost before the memo.
+        const MAX_ENTRIES: usize = 16384;
+        thread_local! {
+            static MEMO: RefCell<Memo> = RefCell::new(Memo {
+                generation: 0,
+                runs: HashMap::new(),
+            });
+        }
+
+        let generation = rustkit_text::webfonts::generation();
+        let key: Key = (
+            text.to_string(),
+            font_chain.primary.clone(),
+            font_chain.fallbacks.clone(),
+            weight.0,
+            style as u8,
+            stretch as u8,
+            size.to_bits(),
+        );
+        let cached = MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.generation != generation {
+                m.runs.clear();
+                m.generation = generation;
+            }
+            m.runs.get(&key).cloned()
+        });
+        if let Some(run) = cached {
+            return Ok(run);
+        }
+        let run = self.shape_uncached(text, font_chain, weight, style, stretch, size)?;
+        MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.runs.len() >= MAX_ENTRIES {
+                m.runs.clear();
+            }
+            m.runs.insert(key, run.clone());
+        });
+        Ok(run)
+    }
+
+    /// Shape text using Core Text on macOS (uncached; see `shape`).
+    #[cfg(target_os = "macos")]
+    fn shape_uncached(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+    ) -> Result<ShapedRun, TextError> {
+        #[cfg(test)]
+        font_resolve_tests::SHAPES.with(|n| n.set(n.get() + 1));
+
         if text.is_empty() {
             return Ok(ShapedRun {
                 text: String::new(),
@@ -1016,6 +1490,7 @@ impl TextShaper {
                 font_size: size,
                 metrics: TextMetrics::with_font_size(size),
                 direction: TextDirection::Ltr,
+                face: None,
             });
         }
 
@@ -1035,11 +1510,29 @@ impl TextShaper {
         }
 
         // Fallback to system font if nothing found
+        let resolved_from_chain = ct_font_opt.is_some();
         let ct_font = ct_font_opt.unwrap_or_else(|| {
             ct_font::new_from_name("Helvetica", size as f64).unwrap_or_else(|_| {
                 ct_font::new_from_name(".AppleSystemUIFont", size as f64).unwrap()
             })
         });
+
+        // Name the face the glyph ids below belong to, and keep the font, so
+        // paint can draw this run with it instead of resolving the family
+        // list a second time (see `FaceIdentity`).
+        let italic = style == FontStyle::Italic;
+        let web_face = if resolved_from_chain {
+            rustkit_text::webfonts::face_id(&used_family, weight.0, italic)
+        } else {
+            0
+        };
+        let (face_id, postscript_name) =
+            rustkit_text::macos::intern_face(&ct_font, size, web_face, weight.0, italic);
+        let face = FaceIdentity {
+            id: face_id,
+            postscript_name,
+            face_index: 0,
+        };
 
         // Convert text to UTF-16 for Core Text
         let utf16_chars: Vec<u16> = text.encode_utf16().collect();
@@ -1095,10 +1588,8 @@ impl TextShaper {
             let mut char_idx = 0;
             let mut utf16_idx = 0;
 
-            // Fallback faces this run actually used, lazily created, and
-            // the union of their extents (ascent, descent, leading).
-            let mut fallback_fonts: Vec<(&'static str, Option<core_text::font::CTFont>)> =
-                Vec::new();
+            // The union of the extents (ascent, descent, leading) of the
+            // fallback faces this run actually used.
             let mut used_fallback_extents: Option<(f32, f32, f32)> = None;
 
             while utf16_idx < char_count && char_idx < text_chars.len() {
@@ -1107,7 +1598,7 @@ impl TextShaper {
 
                 // A character the chosen face has no glyph for is shaped by
                 // the SAME fallback face paint will draw it with (rustkit-text
-                // `GLYPH_FALLBACK_FAMILIES`): its real advance, and its face's
+                // `fallback_face_for`): its real advance, and its face's
                 // extents folded into the run's — Blink unites every used
                 // fallback face into the line box under `line-height: normal`
                 // (NGInlineBoxState::AccumulateUsedFonts). Before: the
@@ -1121,7 +1612,7 @@ impl TextShaper {
                     if c.is_whitespace() || c.is_control() {
                         notdef_advance
                     } else {
-                        match Self::fallback_glyph_advance(c, size, &mut fallback_fonts) {
+                        match Self::fallback_glyph_advance(c, &ct_font) {
                             Some((adv, asc, desc, lead)) => {
                                 used_fallback_extents = Some(match used_fallback_extents {
                                     Some((a, d, l)) => (a.max(asc), d.max(desc), l.max(lead)),
@@ -1157,7 +1648,9 @@ impl TextShaper {
 
             // Get font metrics from Core Text — united with the fallback
             // faces this run used (see `final_advance` above).
-            let mut ascent = ct_font.ascent() as f32;
+            // Blink's ascent: Times, Helvetica and Courier carry its macOS
+            // adjustment (see `blink_ascent`).
+            let mut ascent = rustkit_text::macos::blink_ascent(&ct_font);
             let mut descent = ct_font.descent() as f32;
             let mut leading = ct_font.leading() as f32;
             if let Some((fb_ascent, fb_descent, fb_leading)) = used_fallback_extents {
@@ -1203,6 +1696,7 @@ impl TextShaper {
                 font_size: size,
                 metrics,
                 direction: TextDirection::Ltr,
+                face: Some(face),
             })
         }
     }
@@ -1287,24 +1781,15 @@ impl TextShaper {
         deltas
     }
 
-    /// Advance and face extents for a character the primary face lacks,
-    /// from the first of rustkit-text's `GLYPH_FALLBACK_FAMILIES` that has
-    /// a glyph for it. Faces are created once per run and kept in `fonts`.
-    /// Returns `(advance, ascent, descent, leading)`.
+    /// Advance and face extents for a character `primary` lacks, from the
+    /// face rustkit-text's `fallback_face_for` gives: the one paint draws
+    /// the character from. Returns `(advance, ascent, descent, leading)`.
     #[cfg(target_os = "macos")]
     fn fallback_glyph_advance(
         c: char,
-        size: f32,
-        fonts: &mut Vec<(&'static str, Option<core_text::font::CTFont>)>,
+        primary: &core_text::font::CTFont,
     ) -> Option<(f32, f32, f32, f32)> {
         extern "C" {
-            fn CTFontGetGlyphsForCharacters(
-                font: core_text::font::CTFontRef,
-                characters: *const u16,
-                glyphs: *mut u16,
-                count: isize,
-            ) -> bool;
-
             fn CTFontGetAdvancesForGlyphs(
                 font: core_text::font::CTFontRef,
                 orientation: u32,
@@ -1314,56 +1799,37 @@ impl TextShaper {
             ) -> f64;
         }
 
-        let mut units = [0u16; 2];
-        let unit_count = c.encode_utf16(&mut units).len();
-
-        for family in rustkit_text::macos::GLYPH_FALLBACK_FAMILIES {
-            let slot = match fonts.iter().position(|(name, _)| name == family) {
-                Some(i) => i,
-                None => {
-                    // Same lookup as the painter's `rasterize_fallback`, so
-                    // measure and draw agree on the face.
-                    fonts.push((family, ct_font::new_from_name(family, size as f64).ok()));
-                    fonts.len() - 1
-                }
-            };
-            let Some(font) = fonts[slot].1.as_ref() else {
-                continue;
-            };
-
-            let mut glyph_ids = [0u16; 2];
-            unsafe {
-                // The bool is false when ANY unit lacks a glyph — a surrogate
-                // pair's trailing unit always does — so read the first slot.
-                let _ = CTFontGetGlyphsForCharacters(
-                    font.as_concrete_TypeRef(),
-                    units.as_ptr(),
-                    glyph_ids.as_mut_ptr(),
-                    unit_count as isize,
-                );
-                if glyph_ids[0] == 0 {
-                    continue;
-                }
-                let mut advance = CGSize::new(0.0, 0.0);
-                CTFontGetAdvancesForGlyphs(
-                    font.as_concrete_TypeRef(),
-                    0, // kCTFontOrientationHorizontal
-                    glyph_ids.as_ptr(),
-                    &mut advance,
-                    1,
-                );
-                return Some((
-                    advance.width as f32,
-                    font.ascent() as f32,
-                    font.descent() as f32,
-                    font.leading() as f32,
-                ));
-            }
+        let (font, glyph) = rustkit_text::macos::fallback_face_for(primary, c)?;
+        let mut advance = CGSize::new(0.0, 0.0);
+        // SAFETY: `font` is a live CTFont; one glyph id is read and one
+        // advance written.
+        unsafe {
+            CTFontGetAdvancesForGlyphs(
+                font.as_concrete_TypeRef(),
+                0, // kCTFontOrientationHorizontal
+                &glyph,
+                &mut advance,
+                1,
+            );
         }
-        None
+        Some((
+            advance.width as f32,
+            rustkit_text::macos::blink_ascent(&font),
+            font.descent() as f32,
+            font.leading() as f32,
+        ))
     }
 
-    /// Create a Core Text font with specific traits.
+    /// Create a Core Text font with specific traits, memoized.
+    ///
+    /// Every `shape` and `get_metrics` call resolves its font here, once per
+    /// family in the chain until one hits. Resolution is Core Text
+    /// descriptor matching plus up to eight name guesses for a family that
+    /// doesn't exist, and nothing cached it: a text-heavy page (wikipedia,
+    /// facebook) spent 6-10s per relayout re-resolving the same handful of
+    /// fonts. The answer depends only on the arguments and on which
+    /// `@font-face` set is installed, so results (misses too) are kept per
+    /// thread and dropped whenever the installed set changes.
     #[cfg(target_os = "macos")]
     fn create_ct_font_with_traits(
         family: &str,
@@ -1371,6 +1837,62 @@ impl TextShaper {
         weight: u16,
         italic: bool,
     ) -> Result<core_text::font::CTFont, TextError> {
+        use std::cell::RefCell;
+
+        type Key = (String, u32, u16, bool);
+        struct Resolved {
+            generation: u64,
+            fonts: HashMap<Key, Option<core_text::font::CTFont>>,
+        }
+        // Bounds memory on a page with unusually many sizes; refilling is
+        // cheap next to resolving on every call.
+        const MAX_ENTRIES: usize = 4096;
+        thread_local! {
+            static RESOLVED: RefCell<Resolved> = RefCell::new(Resolved {
+                generation: 0,
+                fonts: HashMap::new(),
+            });
+        }
+
+        let generation = rustkit_text::webfonts::generation();
+        let key: Key = (family.to_string(), size.to_bits(), weight, italic);
+        let cached = RESOLVED.with(|r| {
+            let mut r = r.borrow_mut();
+            if r.generation != generation {
+                r.fonts.clear();
+                r.generation = generation;
+            }
+            r.fonts.get(&key).cloned()
+        });
+        let font = match cached {
+            Some(font) => font,
+            None => {
+                let font = Self::resolve_ct_font_with_traits(family, size, weight, italic).ok();
+                RESOLVED.with(|r| {
+                    let mut r = r.borrow_mut();
+                    if r.fonts.len() >= MAX_ENTRIES {
+                        r.fonts.clear();
+                    }
+                    r.fonts.insert(key, font.clone());
+                });
+                font
+            }
+        };
+        font.ok_or_else(|| TextError::FontNotFound(family.to_string()))
+    }
+
+    /// Resolve a Core Text font with specific traits (uncached; see
+    /// `create_ct_font_with_traits`).
+    #[cfg(target_os = "macos")]
+    fn resolve_ct_font_with_traits(
+        family: &str,
+        size: f32,
+        weight: u16,
+        italic: bool,
+    ) -> Result<core_text::font::CTFont, TextError> {
+        #[cfg(test)]
+        font_resolve_tests::RESOLUTIONS.with(|n| n.set(n.get() + 1));
+
         // A face the document registered via @font-face outranks every
         // platform lookup — the family may exist nowhere else. The engine
         // installs the current view's faces before each layout.
@@ -1496,6 +2018,7 @@ impl TextShaper {
             font_size: size,
             metrics,
             direction: TextDirection::Ltr,
+            face: None,
         })
     }
 
@@ -1608,6 +2131,19 @@ impl TextShaper {
             Some(TextDirection::from_css(css_direction)),
         )
     }
+
+    /// Slack for "does this text fit on the line", in CSS px.
+    ///
+    /// A shrink-to-fit box is sized from the text's max-content width, and
+    /// that width comes back to the line breaker after a trip through
+    /// `(width + padding) - padding` and the flex/grid sizing arithmetic in
+    /// f32, where it can land a bit below the value the shaper measured. An
+    /// exact `<=` then wraps text that was measured to fit its own box:
+    /// gradient-no-radius's "to right Pink-Blue" label broke at the hyphen
+    /// with the box 129.068 wide and the text 129.068 wide. Chrome never
+    /// sees this because LayoutUnit quantises every length to 1/64 px, so
+    /// that is the slack used here.
+    const FIT_EPSILON: f32 = 1.0 / 64.0;
 
     /// Wrap text into lines that fit within the specified width.
     ///
@@ -1966,7 +2502,7 @@ impl TextShaper {
             let remaining = &text[line_start..];
             let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
 
-            if shaped.metrics.width <= cur_max {
+            if shaped.metrics.width <= cur_max + Self::FIT_EPSILON {
                 // Entire remaining text fits on one line
                 let width = shaped.metrics.width;
                 lines.push(WrappedLine {
@@ -2031,7 +2567,7 @@ impl TextShaper {
                             stretch,
                             size,
                         )?;
-                        if shaped_prefix.metrics.width <= cur_max {
+                        if shaped_prefix.metrics.width <= cur_max + Self::FIT_EPSILON {
                             fitted = offset;
                         } else {
                             break;
@@ -2143,7 +2679,7 @@ impl TextShaper {
                 self.shape(prefix, font_chain, weight, style, stretch, size)?
                     .metrics
                     .width
-                    <= max_width
+                    <= max_width + Self::FIT_EPSILON
             };
 
             if fits {
@@ -2518,13 +3054,13 @@ mod tests {
     fn test_generic_font_families() {
         let sans = FontFamilyChain::from_css_value("sans-serif");
         #[cfg(target_os = "macos")]
-        assert_eq!(sans.primary, "SF Pro");
+        assert_eq!(sans.primary, "Helvetica");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(sans.primary, "Segoe UI");
 
         let mono = FontFamilyChain::from_css_value("monospace");
         #[cfg(target_os = "macos")]
-        assert_eq!(mono.primary, "Menlo");
+        assert_eq!(mono.primary, "Courier");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(mono.primary, "Cascadia Code");
 
@@ -2540,6 +3076,130 @@ mod tests {
         assert_eq!(apple.primary, ".AppleSystemUIFont");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(apple.primary, "Segoe UI");
+    }
+
+    /// A generic keyword after families that are not installed resolves
+    /// like the keyword alone. Chrome 148 on a 28-character line at 16px:
+    /// `X, monospace` 268.84 and `X, serif` 199.52, where the system font
+    /// (what the walk used to fall through to) is 220.78.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_generic_after_missing_families_resolves_as_the_generic() {
+        let width = |family: &str| {
+            TextShaper::new()
+                .shape(
+                    "Handgloves quick wizard 0123",
+                    &FontFamilyChain::from_css_value(family),
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    16.0,
+                )
+                .expect("shape")
+                .width()
+        };
+        let system = width("system-ui");
+        for generic in ["monospace", "serif"] {
+            let alone = width(generic);
+            let after_missing = width(&format!("\"No Such Family 9f2c\", {generic}"));
+            assert_eq!(after_missing, alone, "{generic}");
+            assert!((alone - system).abs() > 1.0, "{generic} is not the system font");
+        }
+        // A fixed-pitch face: every advance is the same.
+        let mono = TextShaper::new()
+            .shape(
+                "iW",
+                &FontFamilyChain::from_css_value("Consolas 9f2c, monospace"),
+                FontWeight(400),
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+            )
+            .expect("shape");
+        assert_eq!(mono.glyphs[0].advance, mono.glyphs[1].advance);
+        // An installed family ahead of the generic still wins.
+        assert_eq!(width("Georgia, serif"), width("Georgia"));
+    }
+
+    /// The generic families and the default font are Chrome's on macOS.
+    /// Chrome 148, "Handgloves quick wizard 0123" at 16px: `sans-serif`
+    /// 217.02 (Helvetica), `serif` and no usable family 199.52 (Times),
+    /// `monospace` 268.84 (Courier). `sans-serif` and the default were the
+    /// system font (220.78) and `monospace` was Menlo (269.72).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn generic_families_and_the_default_are_chromes_faces() {
+        let shape = |family: &str| {
+            TextShaper::new()
+                .shape(
+                    "Handgloves quick wizard 0123",
+                    &FontFamilyChain::from_css_value(family),
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    16.0,
+                )
+                .expect("shape")
+        };
+        let face = |family: &str| shape(family).face.expect("face").postscript_name;
+        let near = |family: &str, chrome: f32| {
+            let w = shape(family).width();
+            assert!((w - chrome).abs() < 0.05, "{family}: {w}, Chrome {chrome}");
+        };
+        for (family, chrome_width, postscript) in [
+            ("sans-serif", 217.02, "Helvetica"),
+            ("\"No Such Family 9f2c\", sans-serif", 217.02, "Helvetica"),
+            ("serif", 199.52, "Times-Roman"),
+            ("\"No Such Family 9f2c\"", 199.52, "Times-Roman"),
+            (rustkit_css::INITIAL_FONT_FAMILY, 199.52, "Times-Roman"),
+            ("", 199.52, "Times-Roman"),
+            ("monospace", 268.84, "Courier"),
+            ("\"No Such Family 9f2c\", monospace", 268.84, "Courier"),
+            ("cursive", 200.45, "Apple-Chancery"),
+            ("fantasy", 208.02, "Papyrus"),
+        ] {
+            near(family, chrome_width);
+            assert_eq!(face(family), postscript, "{family}");
+        }
+        // `system-ui` is still the system font, and it is a different face.
+        near("system-ui", 220.78);
+    }
+
+    /// Chrome's line box for a 16px line of Times, Helvetica or Courier on
+    /// macOS is 18px: Blink adds 15% of the rounded ascent + descent to the
+    /// ascent of exactly those three families. The font's own extents give
+    /// 16. Times New Roman is 18 without the adjustment and must stay 18.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn times_helvetica_and_courier_get_blinks_ascent_adjustment() {
+        let line = |family: &str, size: f32| {
+            let m = TextShaper::new()
+                .shape(
+                    "Handgloves",
+                    &FontFamilyChain::from_css_value(family),
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    size,
+                )
+                .expect("shape")
+                .metrics;
+            m.ascent.round() + m.descent.round() + m.leading.round()
+        };
+        for family in [
+            "Times",
+            "Helvetica",
+            "Courier",
+            "serif",
+            "sans-serif",
+            "monospace",
+            "\"No Such Family 9f2c\"",
+            "Times New Roman",
+        ] {
+            assert_eq!(line(family, 16.0), 18.0, "{family}");
+        }
+        // Menlo is 19 in Chrome and is not one of the three.
+        assert_eq!(line("Menlo", 16.0), 19.0);
     }
 
     #[test]
@@ -3192,6 +3852,79 @@ mod tests {
         assert_eq!(lines[0].text(), "Hello");
     }
 
+    /// A line whose measured width comes back a few ulps under its own
+    /// max-content width (f32 round trips through padding and flex sizing)
+    /// must not wrap. Chrome's LayoutUnit hides this; FIT_EPSILON does here.
+    #[test]
+    fn text_that_measures_its_own_width_does_not_wrap_on_an_ulp() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let text = "to right Pink-Blue";
+        let measured = shaper
+            .shape(text, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 16.0)
+            .unwrap()
+            .metrics
+            .width;
+        // Two ulps below: what `(w + 24.0) - 24.0` can hand back for w in
+        // [64, 128) when the sum crosses 128.
+        let a_hair_under = measured - 2.0 * f32::EPSILON * measured;
+        assert!(a_hair_under < measured);
+        let lines = shaper
+            .wrap_text(
+                text,
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+                a_hair_under,
+                CssWordBreak::Normal,
+                CssOverflowWrap::Normal,
+            )
+            .unwrap();
+        assert_eq!(lines.len(), 1, "wrapped on an ulp: {:?}", lines.iter().map(|l| l.width).collect::<Vec<_>>());
+        // And a real shortfall still wraps.
+        let lines = shaper
+            .wrap_text(
+                text,
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+                measured - 1.0,
+                CssWordBreak::Normal,
+                CssOverflowWrap::Normal,
+            )
+            .unwrap();
+        assert_eq!(lines.len(), 2);
+    }
+
+    /// The primary face has no emoji glyph; the advance must be the one
+    /// Chrome uses (Segoe UI Emoji's), and a variation selector takes no
+    /// space. Otherwise the renderer paints the emoji from Segoe UI Emoji
+    /// centred on the wrong width.
+    #[cfg(windows)]
+    #[test]
+    fn emoji_take_the_emoji_faces_advance_and_selectors_take_none() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let w = |t: &str| {
+            shaper
+                .shape(t, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 48.0)
+                .unwrap()
+                .metrics
+                .width
+        };
+        let mountain = w("\u{1F3D4}");
+        // Segoe UI Emoji advances are a little over an em; Arial's .notdef
+        // is well under one.
+        assert!(mountain > 48.0 && mountain < 72.0, "{mountain}");
+        assert_eq!(w("\u{1F3D4}\u{FE0F}"), mountain, "FE0F must add nothing");
+        assert_eq!(w("a\u{FE0F}"), w("a"));
+        assert_eq!(w("\u{1F305}"), w("\u{1F30A}"), "emoji share the face's advance");
+    }
+
     #[test]
     fn test_wrap_text_multiple_lines() {
         let shaper = TextShaper::new();
@@ -3397,5 +4130,171 @@ mod measure_side_font_chain_tests {
         let sum: f32 = run.glyphs.iter().map(|g| g.advance).sum();
         assert!((sum - run.metrics.width).abs() < 0.01);
         assert_eq!(run.glyphs.len(), "CSS Specificity Test".chars().count());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod font_resolve_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Uncached font resolutions on this thread.
+        pub(super) static RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
+        /// Uncached shapes on this thread.
+        pub(super) static SHAPES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn rewrapping_the_same_text_shapes_nothing_new() {
+        // Every flex measuring pass re-wraps its text. The second wrap of
+        // the same paragraph at the same width must come from the memo and
+        // give the same lines.
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("Helvetica");
+        let text = (0..60).map(|i| format!("w{}rd", "o".repeat(i % 7))).collect::<Vec<_>>().join(" ");
+        let wrap = || {
+            shaper
+                .wrap_text(
+                    &text,
+                    &chain,
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    16.0,
+                    300.0,
+                    CssWordBreak::Normal,
+                    CssOverflowWrap::Normal,
+                )
+                .unwrap()
+        };
+        let first = wrap();
+        let before = SHAPES.with(Cell::get);
+        let second = wrap();
+        // 0; a few more if another test's web-font install bumps the
+        // generation mid-wrap.
+        let shaped = SHAPES.with(Cell::get) - before;
+        assert!(shaped <= 8, "{shaped} new shapes re-wrapping the same text");
+        assert!(first.len() > 3);
+        let offsets = |lines: &[WrappedLine]| {
+            lines
+                .iter()
+                .map(|l| (l.start_offset, l.end_offset, l.width.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(offsets(&first), offsets(&second));
+    }
+
+    #[test]
+    fn a_new_web_font_set_invalidates_shaped_runs() {
+        let chain = FontFamilyChain::new("Helvetica");
+        let shape = || {
+            TextShaper::new()
+                .shape("memo", &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
+                .unwrap()
+        };
+        // Other tests install web-font sets on their own threads, and the
+        // generation is process-wide: only judge a hit when it held still.
+        let mut judged = false;
+        for _ in 0..20 {
+            let generation = rustkit_text::webfonts::generation();
+            shape();
+            let before = SHAPES.with(Cell::get);
+            shape();
+            if rustkit_text::webfonts::generation() == generation {
+                assert_eq!(SHAPES.with(Cell::get), before, "second shape is a hit");
+                judged = true;
+                break;
+            }
+        }
+        assert!(judged, "the web-font generation never held still");
+        let before = SHAPES.with(Cell::get);
+        rustkit_text::webfonts::install(
+            "shape-memo-test",
+            &[rustkit_text::webfonts::WebFontFace {
+                family: "ShapeMemoTestFace".into(),
+                weight: 400,
+                italic: false,
+                data: std::sync::Arc::new(vec![0u8; 64]),
+            }],
+        );
+        shape();
+        assert!(SHAPES.with(Cell::get) > before, "re-shaped after the set changed");
+    }
+
+    #[test]
+    fn a_font_is_resolved_once_not_once_per_shape() {
+        // A missing first family (every site's web-font name the platform
+        // lacks) and a real fallback: 200 shapes, 2 resolutions.
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("NoSuchFamilyForTheResolveCache").with_fallback("Helvetica");
+        let before = RESOLUTIONS.with(Cell::get);
+        let generation = rustkit_text::webfonts::generation();
+        let mut widths = Vec::new();
+        for _ in 0..200 {
+            let run = shaper
+                .shape("resolve me once", &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
+                .unwrap();
+            widths.push(run.metrics.width);
+        }
+        // 2 per shape uncached (400). Cached: 2, plus 2 more each time
+        // another test's install bumps the web-font generation mid-loop.
+        // The generation is process-wide and several tests install, so
+        // count the bumps instead of allowing for one.
+        let bumps = (rustkit_text::webfonts::generation() - generation) as usize;
+        let resolved = RESOLUTIONS.with(Cell::get) - before;
+        assert!(
+            resolved <= 2 + 2 * bumps,
+            "{resolved} resolutions for 200 identical shapes across {bumps} generation bumps"
+        );
+        assert!(widths.iter().all(|w| *w == widths[0] && *w > 0.0), "{:?}", &widths[..3]);
+        assert_eq!(
+            shaper
+                .shape("x", &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
+                .unwrap()
+                .font_family,
+            "Helvetica"
+        );
+    }
+
+    #[test]
+    fn a_new_web_font_set_invalidates_the_cache() {
+        let chain = FontFamilyChain::new("Helvetica");
+        let shape = || {
+            TextShaper::new()
+                .shape("x", &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
+                .unwrap()
+        };
+        // Other tests install web-font sets on their own threads, and the
+        // generation is process-wide: only judge a hit when it held still
+        // (as `a_new_web_font_set_invalidates_shaped_runs` does). Judging
+        // it unconditionally failed about one parallel run in two.
+        let mut judged = false;
+        for _ in 0..20 {
+            let generation = rustkit_text::webfonts::generation();
+            shape();
+            let before = RESOLUTIONS.with(Cell::get);
+            shape();
+            if rustkit_text::webfonts::generation() == generation {
+                assert_eq!(RESOLUTIONS.with(Cell::get), before, "second shape is a cache hit");
+                judged = true;
+                break;
+            }
+        }
+        assert!(judged, "the web-font generation never held still");
+        let before = RESOLUTIONS.with(Cell::get);
+        rustkit_text::webfonts::install(
+            "font-resolve-cache-test",
+            &[rustkit_text::webfonts::WebFontFace {
+                family: "FontResolveCacheTestFace".into(),
+                weight: 400,
+                italic: false,
+                // Rejected by Core Graphics (as in rustkit-text's own
+                // garbage-bytes test); the set still changed.
+                data: std::sync::Arc::new(vec![0u8; 64]),
+            }],
+        );
+        shape();
+        assert_eq!(RESOLUTIONS.with(Cell::get), before + 1, "re-resolved after the set changed");
     }
 }

@@ -36,6 +36,83 @@ pub struct GlyphKey {
     /// one pixel different. The call-site flip belongs in the same commit as
     /// the rasterizer that can honor it.
     pub subpixel_phase: u8,
+    /// Which document-registered (`@font-face`) file `font_family` resolves
+    /// to, from [`GlyphKey::web_face_for`]; 0 when it is a platform font.
+    ///
+    /// WHY THIS EXISTS: a family name does not say which face draws it. The
+    /// first paint of a page runs before its web fonts arrive, so the
+    /// fallback's bitmaps were cached under the web font's NAME and every
+    /// later frame reused them: text measured with the web font and drawn
+    /// with Helvetica's glyphs. The same collision let a second document
+    /// that declares the same family name with another file reuse the first
+    /// document's glyphs.
+    pub web_face: u64,
+}
+
+impl GlyphKey {
+    /// The `web_face` of a run: one registry lookup per run, not per glyph.
+    pub fn web_face_for(font_family: &str, font_weight: u16, font_style: u8) -> u64 {
+        rustkit_text::webfonts::face_id(font_family, font_weight, font_style == 1)
+    }
+}
+
+/// Key for a glyph of a SHAPED RUN (`rustkit_layout::GlyphRun`): the face
+/// layout selected and the glyph id it shaped. No character and no family
+/// name: which face draws a character is layout's decision, made once, and
+/// a cache keyed by family name would be keyed by a question, not an answer.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct RunGlyphKey {
+    /// `rustkit_layout::FaceIdentity::id`.
+    pub face: u64,
+    pub glyph_id: u16,
+    pub font_size: u32, // Fixed-point (size * 10), as `GlyphKey`
+    /// As `GlyphKey::subpixel_phase`, and frozen at 0 for the same reason.
+    pub subpixel_phase: u8,
+}
+
+impl RunGlyphKey {
+    /// The size this key's bitmap is rasterized at.
+    pub fn raster_size(&self) -> f32 {
+        self.font_size as f32 / 10.0
+    }
+}
+
+/// Rasterize one glyph of a shaped run: glyph `key.glyph_id` of the face
+/// layout shaped with, at the key's size. `shaped_size` is the size layout
+/// shaped at, which is how the face's font is found. Returns `None` when
+/// the face is not held any more (or on a platform with no face table);
+/// the caller then paints the command through the family-list path.
+///
+/// No CSS family list is resolved here.
+pub fn rasterize_run_glyph(
+    key: &RunGlyphKey,
+    shaped_size: f32,
+) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+    #[cfg(target_os = "macos")]
+    {
+        let font = rustkit_text::macos::face_font(key.face, shaped_size)?;
+        rustkit_text::macos::GlyphRasterizer::for_face(font, key.raster_size())
+            .rasterize_glyph_id(key.glyph_id, 0.0)
+    }
+    #[cfg(windows)]
+    {
+        // DirectWrite faces are size-independent: the face recorded for the
+        // run is drawn at the key's size.
+        let _ = shaped_size;
+        let Some(face) = rustkit_text::face_by_id(key.face) else {
+            // Loud, not silent: layout recorded this id when it shaped the run, so a
+            // miss means the table was bounded out or an id was made up. The caller
+            // still paints the command through the family-list path (no crash).
+            tracing::error!(face = key.face, glyph = key.glyph_id, "shaped run names a face the rasterizer does not hold");
+            return None;
+        };
+        rasterize_face_glyph(face.raw(), key.glyph_id, key.raster_size(), false, true)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (key, shaped_size);
+        None
+    }
 }
 
 /// Number of horizontal subpixel phases a glyph may be rasterized at.
@@ -75,6 +152,8 @@ pub struct GlyphCache {
     bind_group: wgpu::BindGroup,
     atlas_size: u32,
     entries: HashMap<GlyphKey, GlyphEntry>,
+    /// Glyphs of shaped runs, in the same atlas as `entries`.
+    run_entries: HashMap<RunGlyphKey, GlyphEntry>,
     next_x: u32,
     next_y: u32,
     row_height: u32,
@@ -226,6 +305,7 @@ impl GlyphCache {
             bind_group,
             atlas_size,
             entries: HashMap::new(),
+            run_entries: HashMap::new(),
             next_x: 1, // Start at 1 to avoid edge artifacts
             next_y: 1,
             row_height: 0,
@@ -284,7 +364,9 @@ impl GlyphCache {
             );
             rasterizer.rasterize_char_color(key.codepoint)
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        let raster = rasterize_glyph_directwrite_color(key, key.font_size as f32 / 10.0);
+        #[cfg(not(any(target_os = "macos", windows)))]
         let raster: Option<(Vec<u8>, u32, u32, f32, f32, f32)> = None;
 
         let (rgba, gw, gh, advance, bearing_x, bearing_y) = raster?;
@@ -537,6 +619,65 @@ impl GlyphCache {
         Some(entry)
     }
 
+    /// Get or rasterize a glyph of a shaped run (see [`RunGlyphKey`]).
+    /// `shaped_size` is the run's size as layout shaped it. `None` when the
+    /// run's face is not available to the rasterizer; nothing is cached
+    /// then, so the caller can paint the command the old way.
+    pub fn get_or_rasterize_run_glyph(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: &RunGlyphKey,
+        shaped_size: f32,
+    ) -> Option<GlyphEntry> {
+        if let Some(entry) = self.run_entries.get(key) {
+            return Some(entry.clone());
+        }
+
+        let (bitmap, glyph_width, glyph_height, advance, bearing_x, bearing_y) =
+            rasterize_run_glyph(key, shaped_size)?;
+        let glyph_width = glyph_width.max(1).min(256);
+        let glyph_height = glyph_height.max(1).min(256);
+
+        let (atlas_x, atlas_y) = self.allocate_space(glyph_width + 2, glyph_height + 2)?;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: atlas_x + 1,
+                    y: atlas_y + 1,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bitmap,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(glyph_width),
+                rows_per_image: Some(glyph_height),
+            },
+            wgpu::Extent3d {
+                width: glyph_width,
+                height: glyph_height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let u0 = (atlas_x + 1) as f32 / self.atlas_size as f32;
+        let v0 = (atlas_y + 1) as f32 / self.atlas_size as f32;
+        let u1 = (atlas_x + 1 + glyph_width) as f32 / self.atlas_size as f32;
+        let v1 = (atlas_y + 1 + glyph_height) as f32 / self.atlas_size as f32;
+
+        // Baseline-relative, as the character entries are.
+        let entry = GlyphEntry {
+            tex_coords: [u0, v0, u1, v1],
+            offset: [bearing_x, -bearing_y],
+            advance,
+        };
+        self.run_entries.insert(key.clone(), entry.clone());
+        Some(entry)
+    }
+
     /// Allocate space in the atlas.
     fn allocate_space(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
         // Check if we need a new row
@@ -550,6 +691,7 @@ impl GlyphCache {
         if self.next_y + height > self.atlas_size {
             tracing::warn!("Glyph atlas full, clearing cache");
             self.entries.clear();
+            self.run_entries.clear();
             self.next_x = 1;
             self.next_y = 1;
             self.row_height = 0;
@@ -567,6 +709,7 @@ impl GlyphCache {
     /// Clear the cache.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.run_entries.clear();
         self.next_x = 1;
         self.next_y = 1;
         self.row_height = 0;
@@ -696,6 +839,58 @@ fn rasterize_glyph_directwrite(
             return None;
         }
 
+        // Whitespace has an advance but no ink.
+        rasterize_face_glyph(&face, glyph_index, font_size, key.codepoint.is_whitespace(), false)
+    }
+}
+
+/// The character path's bitmap for `c`, for tests that compare it with the
+/// run path's.
+#[cfg(all(test, windows))]
+pub(crate) fn rasterize_char_for_test(
+    c: char,
+    family: &str,
+    size: f32,
+    weight: u16,
+) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+    let key = GlyphKey {
+        codepoint: c,
+        font_family: family.to_string(),
+        font_size: (size * 10.0) as u32,
+        font_weight: weight,
+        font_style: 0,
+        subpixel_phase: 0,
+        web_face: 0,
+    };
+    rasterize_glyph_directwrite(&key, size)
+}
+
+/// Rasterize glyph `glyph_index` of `face` at `font_size`, into the contract
+/// `rasterize_glyph_directwrite` documents.
+///
+/// `blank` says the glyph is known to have no ink (whitespace by character):
+/// it returns a 1x1 empty bitmap with the advance. `blank_if_no_ink` makes a
+/// glyph that turns out to have no ink the same (a shaped run names glyphs,
+/// not characters, so a space reaches here as an id): the character path
+/// leaves that case `None`, so its callers skip the glyph.
+#[cfg(windows)]
+fn rasterize_face_glyph(
+    face: &IDWriteFontFace,
+    glyph_index: u16,
+    font_size: f32,
+    blank: bool,
+    blank_if_no_ink: bool,
+) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+    unsafe {
+        let factory: IDWriteFactory =
+            match DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("Failed to create DWrite factory: {:?}", e);
+                    return None;
+                }
+            };
+
         let mut font_metrics = DWRITE_FONT_METRICS::default();
         face.GetMetrics(&mut font_metrics);
         let design_units_per_em = font_metrics.designUnitsPerEm as f32;
@@ -712,9 +907,9 @@ fn rasterize_glyph_directwrite(
         }
         let advance_width = glyph_metrics[0].advanceWidth as f32 * font_size / design_units_per_em;
 
-        // Whitespace has an advance but no ink: a 1x1 empty bitmap keeps the
-        // shared upload path happy and paints nothing.
-        if key.codepoint.is_whitespace() {
+        // A 1x1 empty bitmap keeps the shared upload path happy and paints
+        // nothing.
+        if blank {
             return Some((vec![0u8; 1], 1, 1, advance_width, 0.0, 0.0));
         }
 
@@ -758,7 +953,11 @@ fn rasterize_glyph_directwrite(
                     Ok(b) if non_empty(&b) => (b, true),
                     _ => {
                         release(glyph_run);
-                        return None;
+                        return if blank_if_no_ink {
+                            Some((vec![0u8; 1], 1, 1, advance_width, 0.0, 0.0))
+                        } else {
+                            None
+                        };
                     }
                 },
             };
@@ -801,6 +1000,155 @@ fn rasterize_glyph_directwrite(
     }
 }
 
+/// Rasterize a colour glyph (emoji) to premultiplied RGBA, the Windows
+/// counterpart of `rasterize_char_color` on macOS.
+///
+/// Chrome on Windows draws emoji from **Segoe UI Emoji**, so that family is
+/// used whatever the run's `font-family` says: the point of the colour path
+/// is to paint the artwork the baseline shows. The drawing goes through
+/// Direct2D's `DrawTextLayout` with `ENABLE_COLOR_FONT`, which renders every
+/// colour glyph format the OS knows (COLRv0 layers, and on Windows 11 the
+/// COLRv1 paint trees Segoe UI Emoji now ships), into a WIC bitmap that is
+/// then cropped to its ink. `IDWriteFactory2::TranslateColorGlyphRun` was
+/// tried first: it only yields the flat COLRv0 layers, which differ from
+/// Chrome's COLRv1 rendering more than the missing glyph did.
+///
+/// Returns `(rgba, width, height, advance, bearing_x, bearing_y)` with the
+/// same bitmap-edge contract as the grayscale rasterizer: `bearing_x` and
+/// `bearing_y` place the bitmap's top-left at `(pen + bearing_x,
+/// baseline - bearing_y)`. `None` means "nothing painted" and the caller
+/// falls back to the grayscale path.
+#[cfg(windows)]
+fn rasterize_glyph_directwrite_color(
+    key: &GlyphKey,
+    font_size: f32,
+) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+    use windows::core::w;
+    use windows::Win32::Graphics::Direct2D::Common::*;
+    use windows::Win32::Graphics::Direct2D::*;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    };
+
+    if font_size <= 0.0 || !font_size.is_finite() {
+        return None;
+    }
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let dwrite: IDWriteFactory =
+            DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+        let format = dwrite
+            .CreateTextFormat(
+                w!("Segoe UI Emoji"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                font_size,
+                w!("en-us"),
+            )
+            .ok()?;
+        // No wrapping: the layout is one glyph, and the box below is sized
+        // to hold any emoji at this size with room for overhang.
+        let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        let mut text: Vec<u16> = [0u16; 2].to_vec();
+        let n = key.codepoint.encode_utf16(&mut text).len();
+        text.truncate(n);
+        let pad = (font_size * 0.5).ceil();
+        let box_w = (font_size * 2.0 + pad * 2.0).ceil();
+        let box_h = (font_size * 2.0 + pad * 2.0).ceil();
+        let layout = dwrite.CreateTextLayout(&text, &format, box_w, box_h).ok()?;
+
+        // Where DirectWrite puts the baseline inside the layout, and the
+        // glyph's advance.
+        let mut line_metrics = [DWRITE_LINE_METRICS::default()];
+        let mut line_count = 0u32;
+        let _ = layout.GetLineMetrics(Some(&mut line_metrics), &mut line_count);
+        if line_count == 0 {
+            return None;
+        }
+        let baseline_in_layout = line_metrics[0].baseline;
+        let mut text_metrics = DWRITE_TEXT_METRICS::default();
+        layout.GetMetrics(&mut text_metrics).ok()?;
+        let advance = text_metrics.widthIncludingTrailingWhitespace;
+
+        // A transparent premultiplied BGRA bitmap for Direct2D to draw into.
+        let wic: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let (bw, bh) = (box_w as u32, box_h as u32);
+        let bitmap = wic
+            .CreateBitmap(bw, bh, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand)
+            .ok()?;
+        let d2d: ID2D1Factory =
+            D2D1CreateFactory::<ID2D1Factory>(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
+        let props = D2D1_RENDER_TARGET_PROPERTIES {
+            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            usage: D2D1_RENDER_TARGET_USAGE_NONE,
+            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+        };
+        let rt = d2d.CreateWicBitmapRenderTarget(&bitmap, &props).ok()?;
+        // Grayscale antialiasing: there is no opaque background to ClearType
+        // against, and the atlas is sampled with plain alpha blending.
+        rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        let black = D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+        let brush = rt.CreateSolidColorBrush(&black, None).ok()?;
+        let origin = windows_numerics::Vector2 { X: pad, Y: pad };
+        rt.BeginDraw();
+        rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+        // The brush only colours layers that ask for the text colour; the
+        // rest is the font's own palette.
+        rt.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        rt.EndDraw(None, None).ok()?;
+
+        let stride = bw * 4;
+        let mut pixels = vec![0u8; (stride * bh) as usize];
+        bitmap.CopyPixels(std::ptr::null(), stride, &mut pixels).ok()?;
+
+        // Crop to the ink. Everything is relative to `origin` (the pen) and
+        // the baseline row inside the box.
+        let (mut x0, mut y0, mut x1, mut y1) = (bw, bh, 0u32, 0u32);
+        for y in 0..bh {
+            for x in 0..bw {
+                if pixels[((y * bw + x) * 4 + 3) as usize] != 0 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
+        }
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let width = x1 - x0;
+        let height = y1 - y0;
+        if width > 256 || height > 256 {
+            return None;
+        }
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let o = ((y * bw + x) * 4) as usize;
+                // PBGRA to premultiplied RGBA.
+                rgba.extend_from_slice(&[pixels[o + 2], pixels[o + 1], pixels[o], pixels[o + 3]]);
+            }
+        }
+        let bearing_x = x0 as f32 - origin.X;
+        let bearing_y = (origin.Y + baseline_in_layout) - y0 as f32;
+        Some((rgba, width, height, advance, bearing_x, bearing_y))
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -812,7 +1160,59 @@ mod tests {
             font_weight: 400,
             font_style: 0,
             subpixel_phase: phase,
+            web_face: 0,
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_web_font_that_arrives_later_does_not_reuse_the_fallbacks_glyphs() {
+        use rustkit_text::webfonts::{self, WebFontFace};
+        use std::sync::Arc;
+        let face = |bytes: &[u8]| WebFontFace {
+            family: "GlyphKeyLateFont".to_string(),
+            weight: 400,
+            italic: false,
+            data: Arc::new(bytes.to_vec()),
+        };
+        let key = || GlyphKey {
+            web_face: GlyphKey::web_face_for("GlyphKeyLateFont, sans-serif", 400, 0),
+            font_family: "GlyphKeyLateFont, sans-serif".to_string(),
+            ..key_at(0)
+        };
+
+        // First paint: the document's font has not arrived, the fallback draws.
+        webfonts::clear();
+        let before = key();
+        assert_eq!(before.web_face, 0);
+
+        // The font arrives. Same family string, another cache entry.
+        let ttf = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+        webfonts::install("glyph-key-a", &[face(ttf)]);
+        let loaded = key();
+        assert_ne!(
+            loaded, before,
+            "the fallback's bitmap was reused for the web font"
+        );
+        assert_eq!(
+            key(),
+            loaded,
+            "one face is one entry however often it is drawn"
+        );
+
+        // Another document, the same family name, another file.
+        let woff2 = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.woff2");
+        webfonts::install("glyph-key-b", &[face(woff2)]);
+        assert_ne!(
+            key(),
+            loaded,
+            "another document's file drew this document's text"
+        );
+
+        // Back on the first document its glyphs are still cached.
+        webfonts::install("glyph-key-c", &[face(ttf)]);
+        assert_eq!(key(), loaded);
+        webfonts::clear();
     }
 
     #[test]
@@ -907,6 +1307,7 @@ mod tests {
             font_size: 160,
             font_weight: 400,
             font_style: 0,
+            web_face: 0,
         };
 
         let key2 = GlyphKey {
@@ -916,6 +1317,7 @@ mod tests {
             font_size: 160,
             font_weight: 400,
             font_style: 0,
+            web_face: 0,
         };
 
         assert_eq!(key1, key2);
@@ -930,6 +1332,7 @@ mod tests {
             font_size: 160,
             font_weight: 400,
             font_style: 0,
+            web_face: 0,
         };
 
         let key2 = GlyphKey {
@@ -939,6 +1342,7 @@ mod tests {
             font_size: 160,
             font_weight: 400,
             font_style: 0,
+            web_face: 0,
         };
 
         assert_ne!(key1, key2);

@@ -5,17 +5,19 @@
 # Usage: ./scripts/visual_live_runner.sh [OPTIONS]
 #
 # Options:
-#   --site <id>           One site from websuite/realsite-top20.json (e.g. wikipedia)
+#   --site <id>           One site from the active board list (e.g. wikipedia)
 #   --url <url>           Any URL (overrides --site / the list)
 #   --list                Print the site ids and exit
 #   --duration <ms>       How long to show each page (default: 10000)
 #   --resolution <preset> fhd | macbook | laptop | ipad (default 1280x800, the board viewport)
 #   --compare             Also open pinned Chrome for Testing 148 beside it, same size
+#   --board <top20|wide>  Site list: top20 (default) or wide (80-site board; use with --compare)
 #   --fullscreen          RustKit window fullscreen (ignored with --compare)
 #
 # Examples:
 #   ./scripts/visual_live_runner.sh                       # all 20 board sites
 #   ./scripts/visual_live_runner.sh --site wikipedia --compare
+#   ./scripts/visual_live_runner.sh --compare --board wide
 #   ./scripts/visual_live_runner.sh --url https://news.ycombinator.com --duration 20000
 #
 # Chrome for --compare: $PARITY_CHROME_PATH, else the pinned CfT under a
@@ -35,6 +37,9 @@ FULLSCREEN=""
 WIDTH=1280
 HEIGHT=800
 LIST="websuite/realsite-top20.json"
+LIST_WIDE="websuite/realsite-top80.json"
+BOARD="top20"
+LIST_ONLY=false
 
 declare -a RESOLUTIONS=(
     "fhd:1920:1080"
@@ -51,6 +56,9 @@ while [[ $# -gt 0 ]]; do
         --url) URL="$2"; shift 2 ;;
         --duration) DURATION_MS="$2"; shift 2 ;;
         --compare) COMPARE=true; shift ;;
+        --board)
+            BOARD="$2"
+            shift 2 ;;
         --fullscreen) FULLSCREEN="--fullscreen"; shift ;;
         --resolution)
             found=""
@@ -60,13 +68,25 @@ while [[ $# -gt 0 ]]; do
             done
             [[ -z "$found" ]] && { echo "Unknown resolution preset: $2"; exit 1; }
             shift 2 ;;
-        --list)
-            python3 -c "import json;[print(f\"{s['id']:<12} {s['url']}\") for s in json.load(open('$LIST'))['sites']]"
-            exit 0 ;;
+        --list) LIST_ONLY=true; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown option: $1"; usage; exit 1 ;;
     esac
 done
+
+case "$BOARD" in
+    top20) ;;
+    wide) LIST="$LIST_WIDE" ;;
+    *) echo "Unknown board: $BOARD (use top20 or wide)"; exit 1 ;;
+esac
+if [[ "$BOARD" == "wide" ]] && ! $COMPARE; then
+    echo "Note: --board wide is intended for --compare runs over the extended site list."
+fi
+
+if $LIST_ONLY; then
+    python3 -c "import json;[print(f\"{s['id']:<12} {s['url']}\") for s in json.load(open('$LIST'))['sites']]"
+    exit 0
+fi
 
 # Build the list of (id url) pairs to show.
 declare -a TARGETS=()
@@ -101,6 +121,10 @@ echo "Building hiwave-smoke (release)..."
 cargo build --release -p hiwave-smoke 2>&1 | tail -2
 
 SHOWN=0; FAILED=0
+LOAD_BUDGET_S=${LOAD_BUDGET_S:-30}
+declare -a HUNG_SITES=()
+declare -a BLOCKED_SITES=()
+declare -a LOADFAIL_SITES=()
 for t in "${TARGETS[@]}"; do
     id=${t%% *}; url=${t#* }
     echo ""
@@ -116,15 +140,49 @@ for t in "${TARGETS[@]}"; do
     fi
     log=$(mktemp /tmp/visual-live-smoke.XXXX)
     ./target/release/hiwave-smoke --url "$url" --width "$WIDTH" --height "$HEIGHT" \
-        --duration-ms "$DURATION_MS" $FULLSCREEN >"$log" 2>&1
-    status=$?
+        --duration-ms "$DURATION_MS" $FULLSCREEN >"$log" 2>&1 &
+    SPID=$!
+    # Watchdog: the page gets LOAD_BUDGET_S to load (the board's 30 s budget)
+    # plus the display duration. A page that hangs RustKit is killed and
+    # reported, and the tour moves on instead of freezing.
+    limit=$(( LOAD_BUDGET_S + DURATION_MS / 1000 ))
+    waited=0; hung=false
+    while kill -0 "$SPID" 2>/dev/null; do
+        if (( waited >= limit )); then
+            hung=true; kill "$SPID" 2>/dev/null; sleep 2; kill -9 "$SPID" 2>/dev/null
+            break
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+    wait "$SPID" 2>/dev/null; status=$?
+    $hung && { echo "  ✗ HUNG: RustKit did not finish within ${limit}s (killed); worth an engine look"; HUNG_SITES+=("$id"); }
     grep -E 'ERROR|Failed' "$log" | head -3
+    # hiwave-smoke exits 0 even when the page itself failed to load (it still
+    # showed a window), so read the outcome from its log.
+    loadfail=""
+    if grep -qE 'Failed to load URL|Navigation failed' "$log"; then
+        code=$(grep -oE 'HTTP [0-9]{3}' "$log" | head -1 | grep -oE '[0-9]{3}')
+        reason=$(grep -oE '\b(error|e)=[A-Za-z]+(\("[^"]*"\))?' "$log" | head -1 | sed -E 's/^(error|e)=//')
+        loadfail="${code:-${reason:-unknown}}"
+    fi
     rm -f "$log"
     if [[ -n "$CPID" ]]; then kill "$CPID" 2>/dev/null; wait "$CPID" 2>/dev/null; rm -rf "$prof"; fi
-    if [[ "$status" -eq 0 ]]; then echo "  ✓ shown"; SHOWN=$((SHOWN+1)); else echo "  ✗ exit $status"; FAILED=$((FAILED+1)); fi
+    if $hung; then
+        :   # reported above
+    elif [[ -n "$loadfail" ]]; then
+        if [[ "$loadfail" =~ ^(401|403|429|503)$ ]]; then
+            echo "  ✗ blocked ($loadfail)"; BLOCKED_SITES+=("$id")
+        else
+            echo "  ✗ load failed ($loadfail)"; LOADFAIL_SITES+=("$id")
+        fi
+    elif [[ "$status" -eq 0 ]]; then echo "  ✓ shown"; SHOWN=$((SHOWN+1))
+    else echo "  ✗ exit $status"; FAILED=$((FAILED+1)); fi
 done
 
 echo ""
 echo "=============================================="
-echo "Shown: $SHOWN, errors: $FAILED"
+echo "Shown: $SHOWN, blocked: ${#BLOCKED_SITES[@]}, load failed: ${#LOADFAIL_SITES[@]}, hung: ${#HUNG_SITES[@]}, errors: $FAILED"
+(( ${#HUNG_SITES[@]} )) && echo "Hung (killed): ${HUNG_SITES[*]}"
+(( ${#BLOCKED_SITES[@]} )) && echo "Blocked: ${BLOCKED_SITES[*]}"
+(( ${#LOADFAIL_SITES[@]} )) && echo "Load failed: ${LOADFAIL_SITES[*]}"
 echo "=============================================="

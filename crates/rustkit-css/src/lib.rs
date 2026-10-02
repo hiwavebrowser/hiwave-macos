@@ -462,6 +462,27 @@ pub enum Length {
     Calc(Box<CalcSum>),
 }
 
+/// One corner of `border-radius`: the two radii of its quarter ellipse
+/// (CSS Backgrounds 3 §5.1). A percentage in `horizontal` refers to the
+/// border box's width and one in `vertical` to its height, so the pair
+/// cannot be folded into one length before layout.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CornerRadius {
+    pub horizontal: Length,
+    pub vertical: Length,
+}
+
+impl CornerRadius {
+    /// Both radii the same length: the one-value form, a quarter circle
+    /// unless the length is a percentage of a non-square box.
+    pub fn circular(radius: Length) -> Self {
+        Self {
+            horizontal: radius.clone(),
+            vertical: radius,
+        }
+    }
+}
+
 impl Length {
     /// Compute the absolute pixel value.
     ///
@@ -1445,27 +1466,51 @@ pub struct GridTemplateAreas {
 }
 
 impl GridTemplateAreas {
-    /// Parse grid-template-areas value.
+    /// Parse a `grid-template-areas` value: one quoted string per row.
+    ///
+    /// Rows are the strings, not source lines. Stylesheets arrive minified
+    /// (`'a a' 'b c'` on one line), and splitting by line read that as a single
+    /// row whose cells kept their quotes. Returns `None` for an invalid value
+    /// (css-grid-1 §7.3): anything outside the strings, rows of unequal
+    /// length, or an area that isn't a filled rectangle. The declaration is
+    /// then ignored, as Chrome ignores it.
     pub fn parse(value: &str) -> Option<Self> {
         let mut rows = Vec::new();
+        let mut chars = value.trim().chars();
 
-        for line in value.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+        while let Some(c) = chars.next() {
+            if c.is_whitespace() {
                 continue;
             }
-            // Remove quotes if present
-            let line = line.trim_matches('"').trim_matches('\'');
-
-            let cells: Vec<Option<String>> = line
+            if c != '"' && c != '\'' {
+                return None;
+            }
+            let mut row = String::new();
+            loop {
+                match chars.next() {
+                    Some(ch) if ch == c => break,
+                    Some(ch) => row.push(ch),
+                    None => return None,
+                }
+            }
+            // A run of one or more `.` is a null cell token.
+            let cells: Vec<Option<String>> = row
                 .split_whitespace()
-                .map(|s| if s == "." { None } else { Some(s.to_string()) })
+                .map(|s| {
+                    if s.chars().all(|ch| ch == '.') {
+                        None
+                    } else {
+                        Some(s.to_string())
+                    }
+                })
                 .collect();
-
+            if cells.is_empty() {
+                return None;
+            }
             rows.push(cells);
         }
 
-        if rows.is_empty() {
+        if rows.is_empty() || rows.iter().any(|r| r.len() != rows[0].len()) {
             return None;
         }
 
@@ -1480,6 +1525,19 @@ impl GridTemplateAreas {
                         // Find extent of this area
                         let (row_end, col_end) =
                             Self::find_area_extent(&rows, row_idx, col_idx, name);
+                        // Rectangular: the name fills its bounding box and
+                        // appears nowhere else.
+                        let in_box = |r: usize, c: usize| {
+                            (row_idx..row_end).contains(&r) && (col_idx..col_end).contains(&c)
+                        };
+                        let rectangular = rows.iter().enumerate().all(|(r, row)| {
+                            row.iter().enumerate().all(|(c, cell)| {
+                                (cell.as_deref() == Some(name.as_str())) == in_box(r, c)
+                            })
+                        });
+                        if !rectangular {
+                            return None;
+                        }
                         areas.push(GridArea {
                             name: name.clone(),
                             row_start: row_idx as i32 + 1,
@@ -1642,6 +1700,25 @@ pub enum Position {
     Sticky,
 }
 
+/// CSS float property values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Float {
+    #[default]
+    None,
+    Left,
+    Right,
+}
+
+/// CSS clear property values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Clear {
+    #[default]
+    None,
+    Left,
+    Right,
+    Both,
+}
+
 /// Font weight values.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FontWeight(pub u16);
@@ -1746,6 +1823,18 @@ pub enum TextAlign {
     Right,
     Center,
     Justify,
+}
+
+/// `visibility` (CSS 2.1 §11.2). Inherited. A hidden box still takes up
+/// space; it just paints nothing of its own, and a descendant can set
+/// `visible` again. `collapse` is treated as `hidden` (no table/flex
+/// collapsing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    #[default]
+    Visible,
+    Hidden,
+    Collapse,
 }
 
 /// Overflow behavior.
@@ -2226,12 +2315,146 @@ impl BorderStyle {
     }
 }
 
+/// The custom properties (`--*`) in effect on one element, as a chain of
+/// layers: the element's own changes over an `Arc` of its parent's set.
+/// Primer declares hundreds of `--*` on `:root`, and an element that
+/// overrode one of them used to copy every one of them (~11% of github's
+/// cascade). A lookup walks the chain, first layer that names the property
+/// wins; past `MAX_DEPTH` layers the small layers on top are collapsed into
+/// one, so lookups stay bounded (`MAX_LAYERS` at most).
+#[derive(Clone, Default)]
+pub struct CustomProperties {
+    /// `None` hides an inherited value (`initial`, or a reference cycle).
+    own: std::collections::HashMap<String, Option<String>>,
+    parent: Option<std::sync::Arc<CustomProperties>>,
+    depth: u32,
+}
+
+impl CustomProperties {
+    const MAX_DEPTH: u32 = 6;
+    /// A layer with at least this many entries is shared by a collapse, not
+    /// copied into it.
+    const LARGE_LAYER: usize = 64;
+    /// The longest chain large layers can build before they are copied too.
+    const MAX_LAYERS: u32 = 32;
+
+    /// One flat layer.
+    pub fn from_map(map: std::collections::HashMap<String, String>) -> Self {
+        Self {
+            own: map.into_iter().map(|(k, v)| (k, Some(v))).collect(),
+            parent: None,
+            depth: 0,
+        }
+    }
+
+    /// `own` over `parent` (`None` removes the property).
+    pub fn over(
+        parent: &std::sync::Arc<Self>,
+        own: std::collections::HashMap<String, Option<String>>,
+    ) -> Self {
+        if parent.depth + 1 < Self::MAX_DEPTH {
+            return Self {
+                own,
+                parent: Some(parent.clone()),
+                depth: parent.depth + 1,
+            };
+        }
+        // Collapse the small layers on top into one and keep sharing from the
+        // nearest large layer down, or from the bottom. The bottom is usually
+        // `:root` with hundreds of entries (Primer); copying it at every
+        // sixth layer was ~15% of github's cascade. A page can declare
+        // another large set above the bottom (a theme scope on `<html>` or a
+        // container), and a collapse below that layer shares it the same
+        // way. A `None` in a collapsed layer still has to mask the layers
+        // under it, so masks are kept.
+        let mut above = vec![parent];
+        loop {
+            let top = *above.last().expect("starts with the parent");
+            let shared =
+                top.own.len() >= Self::LARGE_LAYER && top.depth + 1 < Self::MAX_LAYERS;
+            match top.parent.as_ref() {
+                Some(p) if !shared => above.push(p),
+                _ => break,
+            }
+        }
+        let base = above.pop().expect("starts with the parent").clone();
+        let mut merged: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for layer in above.into_iter().rev() {
+            for (k, v) in &layer.own {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        merged.extend(own);
+        Self {
+            own: merged,
+            depth: base.depth + 1,
+            parent: Some(base),
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.get_key_value(name).map(|(_, v)| v)
+    }
+
+    pub fn get_key_value(&self, name: &str) -> Option<(&str, &str)> {
+        let mut layer = self;
+        loop {
+            if let Some((k, v)) = layer.own.get_key_value(name) {
+                return v.as_deref().map(|v| (k.as_str(), v));
+            }
+            layer = layer.parent.as_deref()?;
+        }
+    }
+
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    /// Every property in effect, flattened.
+    pub fn to_map(&self) -> std::collections::HashMap<String, String> {
+        let mut chain = vec![self];
+        while let Some(p) = chain.last().and_then(|l| l.parent.as_deref()) {
+            chain.push(p);
+        }
+        let mut map = std::collections::HashMap::new();
+        for layer in chain.into_iter().rev() {
+            for (k, v) in &layer.own {
+                match v {
+                    Some(v) => {
+                        map.insert(k.clone(), v.clone());
+                    }
+                    None => {
+                        map.remove(k);
+                    }
+                }
+            }
+        }
+        map
+    }
+}
+
+impl PartialEq for CustomProperties {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other) || self.to_map() == other.to_map()
+    }
+}
+
+impl std::fmt::Debug for CustomProperties {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sorted: std::collections::BTreeMap<_, _> = self.to_map().into_iter().collect();
+        f.debug_map().entries(sorted).finish()
+    }
+}
+
 /// Computed style for an element.
 #[derive(Debug, Clone, Default)]
 pub struct ComputedStyle {
     // Box model
     pub display: Display,
     pub position: Position,
+    pub float: Float,
+    pub clear: Clear,
     pub width: Length,
     pub height: Length,
     pub min_width: Length,
@@ -2266,11 +2489,12 @@ pub struct ComputedStyle {
     pub border_bottom_style: BorderStyle,
     pub border_left_style: BorderStyle,
 
-    // Border radius (for rounded corners)
-    pub border_top_left_radius: Length,
-    pub border_top_right_radius: Length,
-    pub border_bottom_right_radius: Length,
-    pub border_bottom_left_radius: Length,
+    // Border radius (for rounded corners): a horizontal and a vertical
+    // radius per corner (CSS Backgrounds 3 §5.1)
+    pub border_top_left_radius: CornerRadius,
+    pub border_top_right_radius: CornerRadius,
+    pub border_bottom_right_radius: CornerRadius,
+    pub border_bottom_left_radius: CornerRadius,
 
     // Colors
     pub color: Color,
@@ -2318,6 +2542,12 @@ pub struct ComputedStyle {
     // Transforms
     pub transform: TransformList,
     pub transform_origin: TransformOrigin,
+    /// The individual transform properties (css-transforms-2 §5). Each
+    /// cascades on its own; `None` is `none`. Composed ahead of `transform`
+    /// by [`ComputedStyle::effective_transform`].
+    pub translate: Option<TransformOp>,
+    pub rotate: Option<TransformOp>,
+    pub scale: Option<TransformOp>,
 
     // Transitions (parsed but not executed during parity capture)
     pub transition_property: String,
@@ -2340,6 +2570,7 @@ pub struct ComputedStyle {
 
     // Visual
     pub opacity: f32,
+    pub visibility: Visibility,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
@@ -2412,9 +2643,43 @@ pub struct ComputedStyle {
     // Background clip for gradient text
     pub background_clip: BackgroundClip,
     pub webkit_text_fill_color: Option<Color>,
+
+    /// Custom properties (`--*`) in effect on this element, with `var()`
+    /// already substituted (CSS Variables 1 §2: they inherit, and resolve at
+    /// computed-value time on the element that declares them). Shared with
+    /// the parent until this element declares a `--*` whose value differs,
+    /// and then only the differing ones are stored on this element's layer.
+    pub custom_properties: std::sync::Arc<CustomProperties>,
 }
 
+/// The initial value of `font-family`, which CSS leaves to the UA. Chrome's
+/// default font on macOS is Times (`getComputedStyle` of an unstyled element
+/// reports it). `sans-serif` stood here, so every page that sets no font was
+/// laid out in a sans face: a 28-character line at 16px was 220.78px wide
+/// where Chrome 148 has 199.52.
+#[cfg(target_os = "macos")]
+pub const INITIAL_FONT_FAMILY: &str = "Times";
+/// The initial value of `font-family`, which CSS leaves to the UA.
+#[cfg(not(target_os = "macos"))]
+pub const INITIAL_FONT_FAMILY: &str = "sans-serif";
+
 impl ComputedStyle {
+    /// The transform actually applied: `translate`, then `rotate`, then
+    /// `scale`, then `transform` (css-transforms-2 §6, "the transformation
+    /// matrix"). Borrows when no individual property is set.
+    pub fn effective_transform(&self) -> std::borrow::Cow<'_, TransformList> {
+        if self.translate.is_none() && self.rotate.is_none() && self.scale.is_none() {
+            return std::borrow::Cow::Borrowed(&self.transform);
+        }
+        let ops = [&self.translate, &self.rotate, &self.scale]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .chain(self.transform.ops.iter().cloned())
+            .collect();
+        std::borrow::Cow::Owned(TransformList { ops })
+    }
+
     /// Create default style.
     pub fn new() -> Self {
         Self {
@@ -2423,7 +2688,7 @@ impl ComputedStyle {
             opacity: 1.0,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
-            font_family: "sans-serif".to_string(),
+            font_family: INITIAL_FONT_FAMILY.to_string(),
             text_decoration_line: TextDecorationLine::NONE,
             text_decoration_color: None,
             text_decoration_thickness: Length::Auto,
@@ -2480,6 +2745,7 @@ impl ComputedStyle {
             line_break: parent.line_break,
             direction: parent.direction,
             writing_mode: parent.writing_mode,
+            visibility: parent.visibility,
 
             // Text decoration is NOT inherited (each element sets its own)
             text_decoration_line: TextDecorationLine::NONE,
@@ -2517,18 +2783,140 @@ pub struct Declaration {
 pub struct Rule {
     pub selector: String,
     pub declarations: Vec<Declaration>,
+    /// Media query lists of the enclosing `@media` blocks, outermost first;
+    /// the rule applies only where all of them match (`Rule::applies_at`).
+    pub media: Vec<String>,
+    /// Full dotted name of the rule's cascade layer; `None` when unlayered.
+    pub layer: Option<String>,
+    /// The layer's rank in the document's layer order (`assign_layer_order`):
+    /// lower loses to higher among normal declarations. Unlayered rules, and
+    /// every rule until the order is assigned, are `UNLAYERED`.
+    pub layer_order: u32,
+}
+
+/// `Rule::layer_order` of an unlayered rule: above every layer, since
+/// unlayered normal declarations win over layered ones (CSS Cascade 5 §6.4).
+pub const UNLAYERED: u32 = u32::MAX;
+
+/// A cascade layer name declared at a point in a stylesheet (see
+/// `rustkit_cssparser::LayerStatementAst`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerStatement {
+    /// How many rules of the sheet precede the declaration.
+    pub position: usize,
+    pub name: String,
+    pub media: Vec<String>,
+}
+
+impl LayerStatement {
+    /// Whether the statement's `@media` conditions hold (as `Rule::applies_at`).
+    pub fn applies_at(&self, width: f32, height: f32) -> bool {
+        self.media
+            .iter()
+            .all(|m| media::media_query_list_matches(m, width, height))
+    }
+}
+
+/// Rank every rule's cascade layer across `sheets`, taken in document order
+/// (CSS Cascade 5 §6.4.3). Layers are ordered by where their names are first
+/// declared, by a statement or a block, and a nested layer's sublayers come
+/// before the rules placed directly in it; unlayered rules stay `UNLAYERED`.
+/// Returns whether any rule is layered.
+pub fn assign_layer_order(sheets: &mut [Stylesheet]) -> bool {
+    #[derive(Default)]
+    struct Node {
+        children: Vec<(String, Node)>,
+    }
+    fn declare(root: &mut Node, name: &str) {
+        let mut node = root;
+        for segment in name.split('.').map(str::trim) {
+            let i = match node.children.iter().position(|(n, _)| n == segment) {
+                Some(i) => i,
+                None => {
+                    node.children.push((segment.to_string(), Node::default()));
+                    node.children.len() - 1
+                }
+            };
+            node = &mut node.children[i].1;
+        }
+    }
+    // Post-order: a layer ranks after all of its sublayers.
+    fn rank(
+        node: &Node,
+        path: &str,
+        next: &mut u32,
+        out: &mut std::collections::HashMap<String, u32>,
+    ) {
+        for (name, child) in &node.children {
+            let full = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}.{name}")
+            };
+            rank(child, &full, next, out);
+            out.insert(full, *next);
+            *next += 1;
+        }
+    }
+
+    if sheets
+        .iter()
+        .all(|s| s.layer_statements.is_empty() && s.rules.iter().all(|r| r.layer.is_none()))
+    {
+        return false;
+    }
+    let mut root = Node::default();
+    for sheet in sheets.iter() {
+        let mut statements = sheet.layer_statements.iter().peekable();
+        for (i, rule) in sheet.rules.iter().enumerate() {
+            while let Some(s) = statements.next_if(|s| s.position <= i) {
+                declare(&mut root, &s.name);
+            }
+            if let Some(layer) = &rule.layer {
+                declare(&mut root, layer);
+            }
+        }
+        for s in statements {
+            declare(&mut root, &s.name);
+        }
+    }
+    let mut ranks = std::collections::HashMap::new();
+    rank(&root, "", &mut 0, &mut ranks);
+    let mut layered = false;
+    for rule in sheets.iter_mut().flat_map(|s| s.rules.iter_mut()) {
+        rule.layer_order = match &rule.layer {
+            Some(layer) => {
+                layered = true;
+                ranks.get(layer.as_str()).copied().unwrap_or(UNLAYERED)
+            }
+            None => UNLAYERED,
+        };
+    }
+    layered
+}
+
+impl Rule {
+    /// Whether the rule's `@media` conditions hold for a viewport of
+    /// `width` x `height` CSS px.
+    pub fn applies_at(&self, width: f32, height: f32) -> bool {
+        self.media
+            .iter()
+            .all(|m| media::media_query_list_matches(m, width, height))
+    }
 }
 
 /// A complete stylesheet.
 #[derive(Debug, Default, Clone)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// The cascade layer names the sheet declares, in declaration order.
+    pub layer_statements: Vec<LayerStatement>,
 }
 
 impl Stylesheet {
     /// Create an empty stylesheet.
     pub fn new() -> Self {
-        Self { rules: Vec::new() }
+        Self::default()
     }
 
     /// Parse a CSS string into a stylesheet.
@@ -2540,7 +2928,13 @@ impl Stylesheet {
             .rules
             .into_iter()
             .map(|r| Rule {
-                selector: r.selector,
+                media: r.media,
+                layer: r.layer,
+                layer_order: UNLAYERED,
+                selector: match encode_selector_escapes(&r.selector) {
+                    std::borrow::Cow::Borrowed(_) => r.selector,
+                    std::borrow::Cow::Owned(encoded) => encoded,
+                },
                 declarations: r
                     .declarations
                     .into_iter()
@@ -2553,8 +2947,21 @@ impl Stylesheet {
             })
             .collect::<Vec<_>>();
 
+        let layer_statements = ast
+            .layer_statements
+            .into_iter()
+            .map(|s| LayerStatement {
+                position: s.position,
+                name: s.name,
+                media: s.media,
+            })
+            .collect();
+
         debug!(rule_count = rules.len(), "CSS parsed");
-        Ok(Stylesheet { rules })
+        Ok(Stylesheet {
+            rules,
+            layer_statements,
+        })
     }
 
     /// Get the number of rules in this stylesheet.
@@ -2565,6 +2972,12 @@ impl Stylesheet {
 
 pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
+
+pub mod media;
+pub use media::media_query_list_matches;
+
+pub mod selector_escape;
+pub use selector_escape::{css_ident, encode_selector_escapes};
 
 /// Parse a color value.
 pub fn parse_color(value: &str) -> Option<Color> {
@@ -2716,12 +3129,26 @@ pub fn parse_color(value: &str) -> Option<Color> {
 
     // Hex colors
     if let Some(hex) = value.strip_prefix('#') {
+        // Only hex digits: `from_str_radix` also takes a sign, and the slices
+        // below are by byte.
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
         let (r, g, b, a) = match hex.len() {
             3 => {
                 let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
                 let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
                 let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
                 (r, g, b, 1.0)
+            }
+            // #rgba: each digit doubled, like #rgb (minifiers write
+            // `transparent` as `#0000`)
+            4 => {
+                let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+                let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+                let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+                let a = (u8::from_str_radix(&hex[3..4], 16).ok()? * 17) as f32 / 255.0;
+                (r, g, b, a)
             }
             6 => {
                 let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
@@ -2904,6 +3331,21 @@ pub fn parse_length(value: &str) -> Option<Length> {
         return parse_calc_sum(inner).map(CalcSum::into_length);
     }
 
+    // css-values-4 §6.1.2: the small / large / dynamic viewport units. The
+    // suffix arms below would read `100dvh` as `vh` with a number of "100d",
+    // fail, and drop the whole declaration (x.com's `min-height: 100dvh`).
+    if let Some((num, unit)) = split_number_and_unit(value) {
+        let base = viewport_unit_alias(unit);
+        if base != unit {
+            return Some(match base {
+                "vw" => Length::Vw(num),
+                "vh" => Length::Vh(num),
+                "vmin" => Length::Vmin(num),
+                _ => Length::Vmax(num),
+            });
+        }
+    }
+
     if value.ends_with("px") {
         let num = value.trim_end_matches("px").parse::<f32>().ok()?;
         return Some(Length::Px(num));
@@ -3049,7 +3491,7 @@ fn parse_calc_unit(input: &str) -> Option<CalcSum> {
     }
     let mut sum = CalcSum::default();
     let (num, unit) = split_number_and_unit(s)?;
-    match unit {
+    match viewport_unit_alias(unit) {
         "px" | "" => sum.px = num,
         "%" => sum.percent = num,
         "em" => sum.em = num,
@@ -3070,6 +3512,20 @@ fn parse_plain_number(input: &str) -> Option<f32> {
     match split_number_and_unit(s) {
         Some((num, "")) => Some(num),
         _ => None,
+    }
+}
+
+/// The `s`/`l`/`d` viewport units (`svh`, `lvh`, `dvh`, …) as their plain
+/// `v` unit; anything else unchanged. On a desktop window no UI retracts, so
+/// the small, large and dynamic viewports are all the layout viewport — the
+/// same numbers Chrome 148 gives on macOS (css-values-4 §6.1.2).
+fn viewport_unit_alias(unit: &str) -> &str {
+    match unit {
+        "svw" | "lvw" | "dvw" => "vw",
+        "svh" | "lvh" | "dvh" => "vh",
+        "svmin" | "lvmin" | "dvmin" => "vmin",
+        "svmax" | "lvmax" | "dvmax" => "vmax",
+        other => other,
     }
 }
 
@@ -3128,29 +3584,142 @@ fn split_css_function_args(args: &str) -> Vec<&str> {
 }
 
 /// Parse display value.
+///
+/// Besides the legacy single keywords, this takes css-display-3's
+/// `<display-outside> || <display-inside>` plus `list-item` (`flow-root`,
+/// `inline flex`, `block flow list-item`, ...), which were dropped before, so
+/// the element kept its previous display. `flow-root` lays out as a block
+/// (its new formatting context only matters for floats and margin collapse);
+/// `list-item` lays out as its outer display, with no marker. `contents`,
+/// `table*` and `ruby` stay unsupported (`None`).
 pub fn parse_display(value: &str) -> Option<Display> {
-    match value.trim().to_lowercase().as_str() {
-        "block" => Some(Display::Block),
-        "inline" => Some(Display::Inline),
-        "inline-block" => Some(Display::InlineBlock),
-        "flex" => Some(Display::Flex),
-        "inline-flex" => Some(Display::InlineFlex),
-        "grid" => Some(Display::Grid),
-        "inline-grid" => Some(Display::InlineGrid),
-        "none" => Some(Display::None),
-        _ => None,
+    let value = value.trim().to_lowercase();
+    match value.as_str() {
+        "block" => return Some(Display::Block),
+        "inline" => return Some(Display::Inline),
+        "inline-block" => return Some(Display::InlineBlock),
+        "flex" => return Some(Display::Flex),
+        "inline-flex" => return Some(Display::InlineFlex),
+        "grid" => return Some(Display::Grid),
+        "inline-grid" => return Some(Display::InlineGrid),
+        "none" => return Some(Display::None),
+        _ => {}
     }
+    let (mut outer, mut inner, mut list_item) = (None, None, false);
+    for token in value.split_whitespace() {
+        match token {
+            "block" | "inline" if outer.is_none() => outer = Some(token),
+            "flow" | "flow-root" | "flex" | "grid" if inner.is_none() => inner = Some(token),
+            "list-item" if !list_item => list_item = true,
+            _ => return None,
+        }
+    }
+    if outer.is_none() && inner.is_none() && !list_item {
+        return None;
+    }
+    // `list-item` only combines with a flow inner display.
+    if list_item && !matches!(inner, None | Some("flow") | Some("flow-root")) {
+        return None;
+    }
+    let inline = outer == Some("inline");
+    Some(match (inline, inner.unwrap_or("flow")) {
+        (false, "flex") => Display::Flex,
+        (true, "flex") => Display::InlineFlex,
+        (false, "grid") => Display::Grid,
+        (true, "grid") => Display::InlineGrid,
+        (true, "flow-root") => Display::InlineBlock,
+        (true, _) => Display::Inline,
+        (false, _) => Display::Block,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn layer_orders(sheets: &[&str]) -> Vec<(String, u32)> {
+        let mut sheets: Vec<Stylesheet> = sheets
+            .iter()
+            .map(|c| Stylesheet::parse(c).expect("css"))
+            .collect();
+        assign_layer_order(&mut sheets);
+        sheets
+            .iter()
+            .flat_map(|s| s.rules.iter())
+            .map(|r| (r.selector.clone(), r.layer_order))
+            .collect()
+    }
+
+    #[test]
+    fn layers_rank_by_first_declaration_across_sheets() {
+        let got = layer_orders(&[
+            "@layer b; @layer a { .a { color: red } } .u { color: red }",
+            "@layer b { .b { color: red } @layer inner { .bi { color: red } } } @layer c { .c { color: red } }",
+        ]);
+        let rank = |sel: &str| got.iter().find(|(s, _)| s == sel).unwrap().1;
+        // b (with b.inner below b's own rules) < a < c < unlayered.
+        assert!(rank(".bi") < rank(".b"), "{got:?}");
+        assert!(rank(".b") < rank(".a"), "{got:?}");
+        assert!(rank(".a") < rank(".c"), "{got:?}");
+        assert_eq!(rank(".u"), UNLAYERED);
+        let got = layer_orders(&[
+            "@layer b; @layer a { #x.c { background: #0f0 } } @layer b { div#x.c { background: #f00 } }",
+        ]);
+        assert!(got[0].1 > got[1].1, "{got:?}");
+    }
+
+    #[test]
+    fn display_takes_flow_root_list_item_and_two_value_syntax() {
+        let cases: &[(&str, Option<Display>)] = &[
+            ("flow-root", Some(Display::Block)),
+            ("list-item", Some(Display::Block)),
+            ("flow", Some(Display::Block)),
+            ("block flow-root", Some(Display::Block)),
+            ("inline flow-root", Some(Display::InlineBlock)),
+            ("inline flow", Some(Display::Inline)),
+            ("block flex", Some(Display::Flex)),
+            ("inline flex", Some(Display::InlineFlex)),
+            ("grid inline", Some(Display::InlineGrid)),
+            ("block flow list-item", Some(Display::Block)),
+            ("inline list-item", Some(Display::Inline)),
+            ("Flow-Root", Some(Display::Block)),
+            // Legacy keywords are unchanged.
+            ("inline-block", Some(Display::InlineBlock)),
+            ("none", Some(Display::None)),
+            // Unsupported or invalid: still ignored.
+            ("contents", None),
+            ("table", None),
+            ("block block", None),
+            ("flex list-item", None),
+            ("block wobble", None),
+            ("", None),
+        ];
+        for (value, want) in cases {
+            assert_eq!(parse_display(value), *want, "display: {value:?}");
+        }
+    }
+
     #[test]
     fn test_parse_color_hex() {
         assert_eq!(parse_color("#fff"), Some(Color::from_rgb(255, 255, 255)));
         assert_eq!(parse_color("#000000"), Some(Color::BLACK));
         assert_eq!(parse_color("#ff0000"), Some(Color::from_rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn a_four_digit_hex_colour_carries_its_alpha() {
+        // What minifiers write for `transparent`.
+        assert_eq!(parse_color("#0000"), Some(Color::new(0, 0, 0, 0.0)));
+        assert_eq!(parse_color("#f00f"), Some(Color::from_rgb(255, 0, 0)));
+        assert_eq!(parse_color("#0f08"), parse_color("#00ff0088"));
+        assert_eq!(parse_color("#FFFA"), parse_color("#ffffffaa"));
+    }
+
+    #[test]
+    fn a_hex_colour_is_hex_digits_only() {
+        for bad in ["#+f+f+f", "#-ff", "#ggg", "#12345", "#", "#\u{e9}1", "#\u{e9}\u{e9}\u{e9}"] {
+            assert_eq!(parse_color(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
@@ -3363,6 +3932,28 @@ mod tests {
         assert_eq!(parse_length("20vmax"), Some(Length::Vmax(20.0)));
     }
 
+    /// `100dvh` was dropped outright (the `vh` arm parsed "100d"), taking
+    /// x.com's `min-height: 100dvh` page column with it. On a desktop
+    /// window the small, large and dynamic viewports are the layout
+    /// viewport, so each is its `v` unit.
+    #[test]
+    fn test_parse_length_small_large_dynamic_viewport_units() {
+        for p in ["s", "l", "d"] {
+            assert_eq!(parse_length(&format!("100{p}vh")), Some(Length::Vh(100.0)), "{p}vh");
+            assert_eq!(parse_length(&format!("50{p}vw")), Some(Length::Vw(50.0)), "{p}vw");
+            assert_eq!(parse_length(&format!("10{p}vmin")), Some(Length::Vmin(10.0)), "{p}vmin");
+            assert_eq!(parse_length(&format!("20{p}vmax")), Some(Length::Vmax(20.0)), "{p}vmax");
+        }
+        // Inside calc() the same units are terms of the sum.
+        assert_eq!(
+            parse_length("calc(100dvh - 20px)"),
+            parse_length("calc(100vh - 20px)")
+        );
+        assert!(parse_length("calc(100dvh - 20px)").is_some());
+        // An unknown unit is still rejected.
+        assert_eq!(parse_length("100xvh"), None);
+    }
+
     #[test]
     fn test_parse_stylesheet() {
         let css = r#"
@@ -3558,5 +4149,137 @@ mod object_fit_initial_value_tests {
     #[test]
     fn object_fit_initial_value_is_fill() {
         assert_eq!(ComputedStyle::new().object_fit, "fill");
+    }
+}
+
+#[cfg(test)]
+mod custom_properties_collapse_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn layer(pairs: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.map(str::to_string))).collect()
+    }
+
+    /// Past `MAX_DEPTH` the upper layers collapse, but the bottom (`:root`)
+    /// layer is shared, not copied, and masks in the upper layers still hide
+    /// the bottom's values.
+    #[test]
+    fn collapse_keeps_the_bottom_layer_shared_and_masks_it() {
+        let root: HashMap<String, String> = (0..300)
+            .map(|i| (format!("--r{i}"), format!("{i}")))
+            .collect();
+        let bottom = Arc::new(CustomProperties::from_map(root));
+        let mut cur = bottom.clone();
+        cur = Arc::new(CustomProperties::over(&cur, layer(&[("--r1", None)])));
+        cur = Arc::new(CustomProperties::over(&cur, layer(&[("--r2", Some("x"))])));
+        let mut depth = 2;
+        while depth + 1 < CustomProperties::MAX_DEPTH {
+            cur = Arc::new(CustomProperties::over(&cur, layer(&[("--a", Some("a"))])));
+            depth += 1;
+        }
+        let expected = {
+            let mut m = cur.to_map();
+            m.insert("--b".into(), "b".into());
+            m
+        };
+        let collapsed = CustomProperties::over(&cur, layer(&[("--b", Some("b"))]));
+
+        assert!(Arc::ptr_eq(collapsed.parent.as_ref().unwrap(), &bottom));
+        assert_eq!(collapsed.depth, 1);
+        assert_eq!(collapsed.get("--r1"), None, "the mask survives the collapse");
+        assert_eq!(collapsed.get("--r2"), Some("x"));
+        assert_eq!(collapsed.get("--r3"), Some("3"));
+        assert_eq!(collapsed.to_map(), expected);
+        assert!(collapsed.own.len() < 10, "only the upper layers were copied");
+    }
+
+    /// A theme scope puts a large layer above the bottom. Collapses below it
+    /// copy the small layers only: the large one stays shared and still
+    /// answers, masked where a small layer says so.
+    #[test]
+    fn collapse_shares_a_large_layer_above_the_bottom() {
+        let bottom = Arc::new(CustomProperties::from_map(
+            [("--root".to_string(), "r".to_string())].into(),
+        ));
+        let theme: HashMap<String, Option<String>> =
+            (0..500).map(|i| (format!("--t{i}"), Some(format!("{i}")))).collect();
+        let theme = Arc::new(CustomProperties::over(&bottom, theme));
+        let mut cur = theme.clone();
+        let mut flat = cur.to_map();
+        for i in 0..40 {
+            let name = format!("--s{}", i % 7);
+            let value = format!("v{i}");
+            let mut own = layer(&[(name.as_str(), Some(value.as_str()))]);
+            flat.insert(name, value);
+            if i % 5 == 0 {
+                own.insert(format!("--t{i}"), None);
+                flat.remove(&format!("--t{i}"));
+            }
+            cur = Arc::new(CustomProperties::over(&cur, own));
+
+            assert_eq!(cur.to_map(), flat, "layer {i}");
+            assert!(cur.depth < CustomProperties::MAX_DEPTH, "layer {i}");
+            let mut l = &cur;
+            let mut copied = 0;
+            while !Arc::ptr_eq(l, &theme) {
+                copied += l.own.len();
+                l = l.parent.as_ref().expect("the theme layer is still in the chain");
+            }
+            assert!(copied < 64, "layer {i} holds {copied} entries above the theme");
+        }
+    }
+
+    /// Large layers are shared by a collapse, so nesting them deepens the
+    /// chain. Past `MAX_LAYERS` they are copied after all, and the chain
+    /// stays bounded.
+    #[test]
+    fn a_stack_of_large_layers_stays_bounded() {
+        let mut cur = Arc::new(CustomProperties::from_map(HashMap::new()));
+        let mut flat = cur.to_map();
+        for i in 0..100 {
+            let own: HashMap<String, Option<String>> = (0..CustomProperties::LARGE_LAYER)
+                .map(|j| (format!("--v{}", (i * 31 + j) % 400), Some(format!("{i}.{j}"))))
+                .collect();
+            for (k, v) in &own {
+                flat.insert(k.clone(), v.clone().expect("set"));
+            }
+            cur = Arc::new(CustomProperties::over(&cur, own));
+
+            assert!(cur.depth < CustomProperties::MAX_LAYERS, "layer {i}: depth {}", cur.depth);
+            assert_eq!(cur.to_map(), flat, "layer {i}");
+        }
+    }
+}
+
+// ── ported from hiwave-windows (#37, #49): a shadow with no visible colour or
+//    no geometry is not visible, so paint never spends a command on it. ──
+#[cfg(test)]
+mod windows_shadow_pins {
+    use super::*;
+
+
+    #[test]
+    fn a_fully_transparent_shadow_is_not_visible() {
+        // Guards the alpha half of is_visible: geometry alone must not make
+        // a shadow visible, or the renderer draws invisible work.
+        let s = BoxShadow {
+            offset_x: 10.0,
+            offset_y: 10.0,
+            blur_radius: 5.0,
+            spread_radius: 2.0,
+            color: Color::TRANSPARENT,
+            inset: false,
+        };
+        assert!(!s.is_visible());
+    }
+
+    #[test]
+    fn a_zero_geometry_shadow_is_not_visible_even_when_opaque() {
+        // Guards the other half: an opaque colour with no offset, blur or
+        // spread paints nothing.
+        let s = BoxShadow { color: Color::BLACK, ..Default::default() };
+        assert!(!s.is_visible());
     }
 }
