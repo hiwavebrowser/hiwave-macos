@@ -12,6 +12,8 @@
 mod dom;
 mod inner_text;
 #[cfg(test)]
+mod web_interfaces_tests;
+#[cfg(test)]
 mod web_blob_tests;
 mod web_url;
 
@@ -472,6 +474,9 @@ impl DomBindings {
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(Cell::new(DomDirty::Clean));
         dom::install(&mut runtime, &dom_host, &dirty)?;
+        // Event subclasses, geometry types and interface objects pages test with
+        // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
+        runtime.evaluate_script(include_str!("web_interfaces.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
