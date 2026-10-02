@@ -5994,6 +5994,19 @@ impl Engine {
                 // In the shorthand, the first layer is topmost, last is bottommost
                 let layer_strs: Vec<&str> = split_by_comma(value);
 
+                // Another engine's prefixed image (`-moz-linear-gradient(`,
+                // `-o-`, `-ms-`) does not parse in Chrome, which drops the
+                // whole declaration: the earlier background stays.
+                let foreign = layer_strs.iter().any(|layer| {
+                    split_top_level_whitespace(layer).into_iter().any(|token| {
+                        let token = token.to_ascii_lowercase();
+                        ["-moz-", "-ms-", "-o-"].iter().any(|p| token.starts_with(p))
+                    })
+                });
+                if foreign {
+                    return;
+                }
+
                 // Clear existing layers when setting new background
                 style.background_layers.clear();
                 // The legacy gradient goes with them: paint falls back to
@@ -16393,6 +16406,15 @@ mod element_identity_tests {
                 .background_color,
             red
         );
+
+        // A value Chrome cannot parse is dropped whole: the earlier colour
+        // and image both stay.
+        let s = style_under(
+            ".a { background: linear-gradient(red, blue); background-color: red } \
+             .a { background: -moz-linear-gradient(top, red, blue) }",
+        );
+        assert_eq!(s.background_color, red, "a foreign prefix does not reset the colour");
+        assert_eq!(s.background_layers.len(), 1, "nor the image");
 
         // `none` over a gradient removes the gradient.
         let s = style_under(
