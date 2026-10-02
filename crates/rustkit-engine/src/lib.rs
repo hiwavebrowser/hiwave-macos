@@ -5918,6 +5918,19 @@ impl Engine {
 
                 // Clear existing layers when setting new background
                 style.background_layers.clear();
+                // The legacy gradient goes with them: paint falls back to
+                // it, so `background: none` over a gradient kept the
+                // gradient.
+                style.background_gradient = None;
+                // The shorthand resets every longhand it does not name
+                // (css-backgrounds-3 §3.10), the colour included. It only
+                // ever SET a colour, so `background: none`, `0 0`, `unset`,
+                // `initial` or an image alone over an earlier colour left
+                // that colour painted.
+                let shorthand = property == "background";
+                if shorthand && !value.trim().eq_ignore_ascii_case("inherit") {
+                    style.background_color = rustkit_css::Color::TRANSPARENT;
+                }
 
                 // Process layers in reverse order so index 0 is bottommost
                 for layer_str in layer_strs.iter().rev() {
@@ -5930,6 +5943,16 @@ impl Engine {
                     if let Some(color) = parse_color(layer_str) {
                         style.background_color = color;
                         continue;
+                    }
+                    // A colour beside an image (`#fff url(a.png) no-repeat`):
+                    // the colour is one top-level token of the layer.
+                    if shorthand {
+                        if let Some(color) = split_top_level_whitespace(layer_str)
+                            .into_iter()
+                            .find_map(parse_color)
+                        {
+                            style.background_color = color;
+                        }
                     }
 
                     // Parse as a background layer (gradient or url)
@@ -7197,6 +7220,12 @@ impl Engine {
         match property {
             "color" => style.color = rustkit_css::Color::BLACK,
             "background-color" => style.background_color = rustkit_css::Color::TRANSPARENT,
+            // `background: initial` / `unset`: no colour, no image.
+            "background" => {
+                style.background_color = rustkit_css::Color::TRANSPARENT;
+                style.background_layers.clear();
+                style.background_gradient = None;
+            }
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
@@ -16230,6 +16259,65 @@ mod element_identity_tests {
         // the grouped-arm-only version had no backgrounds anywhere, and the
         // dead-arm version can never fire. Buttons are ButtonFace-themed.
         assert_ne!(style_of("button").background_color, rustkit_css::Color::WHITE);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_background_shorthand_resets_the_colour_it_does_not_name() {
+        // css-backgrounds-3 §3.10: the shorthand first sets every longhand
+        // to its initial value. Chrome 148 computes `background-color:
+        // rgba(0, 0, 0, 0)` after each of these over an earlier colour.
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let attrs: std::collections::HashMap<String, String> =
+            [("class".to_string(), "a".to_string())].into_iter().collect();
+        let vars = HashMap::new();
+        let style_under = |css: &str| {
+            let sheet = Stylesheet::parse(css).expect("css");
+            engine.compute_style_for_element(
+                "div",
+                &attrs,
+                &[sheet],
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        let clear = rustkit_css::Color::TRANSPARENT;
+
+        for reset in ["none", "0 0", "unset", "initial", "url(a.png) no-repeat"] {
+            let s = style_under(&format!(
+                ".a {{ background-color: red }} .a {{ background: {reset} }}"
+            ));
+            assert_eq!(s.background_color, clear, "`background: {reset}` clears the colour");
+        }
+
+        // A colour the shorthand does name is kept, alone or beside an image.
+        assert_eq!(style_under(".a { background: red }").background_color, red);
+        assert_eq!(
+            style_under(".a { background: red url(a.png) no-repeat }").background_color,
+            red
+        );
+        assert_eq!(
+            style_under(".a { background: url(a.png) no-repeat red }").background_color,
+            red
+        );
+
+        // `background-image` is a longhand: it leaves the colour alone.
+        assert_eq!(
+            style_under(".a { background-color: red } .a { background-image: none }")
+                .background_color,
+            red
+        );
+
+        // `none` over a gradient removes the gradient.
+        let s = style_under(
+            ".a { background: linear-gradient(red, blue) } .a { background: none }",
+        );
+        assert!(s.background_layers.is_empty());
+        assert!(s.background_gradient.is_none(), "the gradient goes with its layer");
     }
 
     #[test]
