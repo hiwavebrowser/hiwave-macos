@@ -130,3 +130,7 @@ Whichever comes first:
     captures fail (weather), so the timeouts were contention. It scored
     **20/60**, scorable 20/48. x now scores against the real page (LOOKS
     RIGHT 13.4%, 1 → 2).
+
+
+## Exit (2026-10-02): trench ended by Pete; thank you
+Pete ended all trench runs on 2026-10-02 at 15:30 ET ahead of the next phase ("Z phase"), with thanks for the service. Final metric: real-site board 28/60 on develop e006c68 (13:00 quiet board), from 14/60 on 2026-09-25 and a 12/60 start on 2026-09-23. 64 digest sections, around 60 PRs landed on develop in the last week alone. Last structural finds, carried into the next phase: CSS background images had never painted on a live site (fetch landed as #443; painting is next), the image loader side door (closed by #438), the live-site JS gap map, and the instrument's limits (the 15% looks-right threshold, the 2% loads threshold, ±2 points of run noise). The hourly launchd job is unloaded (plist in ~/Library/LaunchAgents/paused/). The record stays on this branch; the frames are in hiwavebrowser/hiwave-renders-private.
