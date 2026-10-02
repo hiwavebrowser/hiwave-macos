@@ -1703,3 +1703,40 @@ The two middle columns are a branch binary (develop b0162e4 plus this branch's c
 1. **3× by 2026-10-11 will not be met; what should the lane do on the 11th?** The worst ratio is 13.6×, and the best measured combination of everything built is 9.8× on wikipedia (tree reuse and sharing both on). cnn is already under 3×. Default: keep grinding to the end date and write the result up then. The alternative is to reset the exit number now to what the two default flips can reach (about 10×) and plan the next cuts from a fresh profile.
 2. **#408 still needs you or Prometheus to mark it ready** (eleventh session). It is the largest single step available: 0.787 on wikipedia.
 3. **Give this lane a quiet window?** (Carried from 07:50.) Today's whole result came from 25 quiet minutes; the board run that followed was slowed about threefold when another lane began building. Default: nothing changes. The alternative is one fixed slot per night where the other lanes do not build.
+
+## 2026-10-02 12:08
+
+**#441 opened: style and match sharing on by default (`atlas/cs-style-share-default` @ b9f2e24, +13 −12). Default against `=0` on that head, 10 quiet counterbalanced pairs: wikipedia 0.887, github 0.884, cnn 0.910. The ratio of record on develop is unchanged within noise, 13.6× → 13.8× (wikipedia); with #441 it would read 12.3×. #436 merged at 09:11. The sharing board is whole: 26 points in both arms, the same verdicts on 20 of 20 sites.**
+
+| site | Chrome ms | before (develop 97393a7, 20 quiet loads, 08:44–08:59) | after (develop 11edb19's path, 10 quiet loads, 11:46–11:53) | with #441's default (same 10 pairs) |
+|---|---|---|---|---|
+| cnn | 210 | 548.5 → 2.6× | 519.5 → 2.5× | 478.0 → 2.3× |
+| github | 110 | 875.0 → 8.0× | 880.5 → 8.0× | 779.0 → 7.1× |
+| wikipedia | 20 | 271.5 → 13.6× | 275.5 → **13.8×** | 245.5 → 12.3× |
+
+- The "after" column is the `=0` arm of #441's A/B: the branch binary (develop 11edb19 plus the flip) with sharing turned off, which runs develop's code path. It is not a binary built from develop itself.
+- **The brief's first task is still listed and is still done** (second session saying so): the lock inversion is #415, merged 2026-10-01 21:49Z. The brief also has a block of test output pasted into the middle of that sentence. Both can come out.
+- **#436 merged** 2026-10-02 13:11Z at 213a5de (R1 CLEAR, R2 PASS). Nothing to answer.
+- **#441 opened**, not a draft. One commit on develop 11edb19.
+  - **Timing** (`ab_flag.py pc-ssd-flip x 10 RUSTKIT_STYLE_SHARE=0`, 5 AB + 5 BA, load 1.7–3.1, none dropped), per-pair default/`=0` median: wikipedia **0.887** (10 of 10 below 1; 275.5 → 245.5 ms; range 0.60–0.95), github 0.884 (8 of 10; 880.5 → 779.0; 0.83–1.39), cnn 0.910 (9 of 10; 519.5 → 478.0; 0.86–1.74). cnn's 1.74 and github's 1.39 are each one fast `=0` load (272 ms and 561 ms).
+  - **Tests:** `cargo test -p rustkit-engine --lib --features headless`, default threads: 375 passed, 0 failed, 129.8 s.
+  - **Receipt:** nothing set and `=0`, 26/26 both, average 1.1%, diffPixels identical on 26 of 26.
+  - **Not run on this head:** verify mode (the PR cites #436's run), clippy.
+- **Board, sharing off against on, now 20 of 20 sites** (binary `pc-mkt-213a5de`, the 8 remaining sites 10:37–11:25 at load 12–16, then second loads of four sites 11:35–12:02 at load 2–5).
+  - At load 12–16 the first loads lost cnn (off arm), github and squarespace (both arms) to the 30 s cap, and Chrome's capture failed on microsoft and netflix in both arms. A chunk of 2 sites took 310–450 s.
+  - With the second loads: points **26 and 26**, verdicts identical on **20 of 20**, RustKit frame byte-identical on 16 of 20, display list on 12 of 20.
+  - **instagram's timeout was the load, not the flag:** at load 3–5 it took 15.6 s with sharing on and 18.4 s off, frame and display list identical.
+  - Frames differ on linkedin, walmart, netflix and cnn (cnn 112 words off, 107 on, no off-against-off control; netflix differs load to load per #408).
+  - Identical frames with differing display lists: facebook, yahoo, shopify, squarespace. The head of facebook's diff is a `face` handle differing in its last byte; I did not read past the first three hunks or open the other three.
+- **#408:** still a draft at 63d24d1, MERGEABLE, R2 PASS, no R1. Nothing to answer.
+- **Aleph:** one `aleph_search` for the flag returned nothing relevant (the hub's index predates #432), so I read the engine file in the new worktree directly.
+- **Slips:** four commands refused (compound commands with `;`, a bare `cargo build`, `git -C`) before I went back to single commands and `cs_cargo.py` / `wt_git.py`. The release build ran past the 10-minute tool limit and finished in the background about a minute later; I waited for it in the turn. I ran the first 8-site board chunks at load 12–16 knowing the oracle was failing, which cost about 45 minutes for results that mostly had to be re-taken.
+- **Saved**, under `cascade-target/tmp/mkt3/`: `pr-body-flip.md`, `receipt-flip-default.json`, `board_cmp20.py`, `board_cmp3.py`, `board-{off3,on3}/` (instagram, github, squarespace), cnn in `board-{off2,on2}/`. Binary `cascade-target/pc-ssd-flip` (b9f2e24). The A/B output is in this section and the PR body only; it was not written to a file.
+- **State left behind:** new worktree `.worktrees/cs-style-share-default` on `atlas/cs-style-share-default` @ b9f2e24, clean, pushed, with the flip binary in its `target/release/`. The shared target dir's release artifact is that build. `.worktrees/cs-engine-init-lock` untouched (still on the merged `atlas/cs-match-key-tests`).
+- **Open cs PRs:** 2 (#408 draft, #441), cap 3.
+- **Next session:** (1) #441 and #408: answer reviews. (2) Verify mode on `pc-ssd-flip`: pinned pages and `verify_sweep.py`, and put the counts in #441. (3) Off-against-off control loads of cnn and walmart on the board; read the four display-list diffs. (4) If quiet: both defaults together, `pc-ssd-flip` with `RUSTKIT_TREE_REUSE=1` against `=0`, for the number the two flips reach. (5) A fresh flag-on profile of wikipedia's first build to pick the next cut.
+
+**Decisions for Pete**
+1. **3× by 2026-10-11 will not be met; what should the lane do on the 11th?** (Carried.) Worst ratio 13.8× on develop; #441 alone would make it 12.3×, and the best measured combination with #408 is 9.8×. Default: keep grinding to the end date and write the result up then.
+2. **#408 still needs you or Prometheus to mark it ready** (twelfth session). #441 was opened ready for review so it does not wait the same way.
+3. **Take the stale first task and the pasted test output out of the brief?** #415 merged yesterday. Default: I keep reporting it as done each session.
