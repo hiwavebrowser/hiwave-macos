@@ -7805,6 +7805,41 @@ impl Engine {
         Ok(fetched.into_iter().flatten().collect())
     }
 
+    /// The http(s) `url()` background images the view's display list paints.
+    ///
+    /// Only `<img>` was ever fetched: a CSS background image reached the
+    /// display list and waited for a cache entry that nothing made (a
+    /// `data:` url is decoded at upload, so those did paint). The display
+    /// list is the right place to look: its urls are already absolute, and
+    /// a box that is not rendered (`display: none`) has no command, as
+    /// Chrome fetches no background for it.
+    ///
+    /// SVG backgrounds are left out: only `<img>` commands are spliced from
+    /// the SVG cache, so one would be fetched and never painted.
+    fn discover_background_images(display_list: Option<&DisplayList>) -> Vec<(String, Url)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut images = Vec::new();
+        for cmd in display_list.map(|dl| dl.commands.as_slice()).unwrap_or(&[]) {
+            let rustkit_layout::DisplayCommand::BackgroundImage { url, .. } = cmd else {
+                continue;
+            };
+            if !seen.insert(url.as_str()) {
+                continue;
+            }
+            let Ok(parsed) = Url::parse(url) else {
+                continue;
+            };
+            if !matches!(parsed.scheme(), "http" | "https")
+                || parsed.path().to_ascii_lowercase().ends_with(".svg")
+            {
+                continue;
+            }
+            debug!(url = %parsed, "Discovered background image");
+            images.push((url.clone(), parsed));
+        }
+        images
+    }
+
     /// Load images asynchronously and store in cache.
     pub async fn load_images(&mut self, id: EngineViewId) -> Result<usize, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -7814,7 +7849,8 @@ impl Engine {
         };
 
         let base_url = view.url.as_ref();
-        let images = self.discover_images(document.as_ref(), base_url);
+        let mut images = self.discover_images(document.as_ref(), base_url);
+        images.extend(Self::discover_background_images(view.display_list.as_ref()));
 
         let image_manager = self.image_manager.clone();
 
@@ -17307,6 +17343,84 @@ mod button_children_tests {
             }
             ref other => panic!("empty button should stay a FormControl leaf, got {other:?}"),
         }
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+mod background_image_fetch_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    /// A 2x2 red PNG.
+    const DOT_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xfd,
+        0xd4, 0x9a, 0x73, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x3c,
+        0xc1, 0x00, 0x02, 0x4c, 0x60, 0x92, 0x01, 0x00, 0x0a, 0x52, 0x00, 0xcc, 0x82, 0xce, 0x0a,
+        0x79, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    const PAGE: &str = r#"<html><head><style>
+.shown { width: 50px; height: 20px; background: url(/shown.png) no-repeat; }
+.hidden { display: none; background-image: url(/hidden.png); }
+</style></head><body><div class="shown"></div><div class="hidden"></div></body></html>"#;
+
+    /// Serve the page and any `.png`; record every path asked for.
+    fn serve(asked: Arc<Mutex<Vec<String>>>) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let (ctype, body): (&str, &[u8]) = if path == "/" {
+                    ("text/html", PAGE.as_bytes())
+                } else if path.ends_with(".png") {
+                    ("image/png", DOT_PNG)
+                } else {
+                    ("text/plain", b"")
+                };
+                asked.lock().unwrap().push(path);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_css_background_image_is_fetched() {
+        // Only `<img>` was fetched: a `background: url(...)` over http never
+        // left the display list, so no page's CSS image painted.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let port = serve(asked.clone());
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let base = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(engine.load_url(view, base.clone())).expect("load_url");
+
+        let shown = base.join("/shown.png").unwrap();
+        let asked = asked.lock().unwrap().clone();
+        assert!(asked.iter().any(|p| p == "/shown.png"), "asked for {asked:?}");
+        assert!(
+            engine.image_manager.is_cached(&shown),
+            "the background image is in the cache paint reads"
+        );
+        // A box that is not rendered asks for nothing, as in Chrome.
+        assert!(!asked.iter().any(|p| p == "/hidden.png"), "asked for {asked:?}");
     }
 }
 
