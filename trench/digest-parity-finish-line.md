@@ -14394,3 +14394,54 @@ consequential thing I measured.
 3. The queue order is still formally unratified against the measured board
    (10-01's note: `settings` is 201/243 text-exposed, i.e. the largest row is
    mostly P4). Unchanged from last night, asked once and not re-argued.
+
+### Addendum — the lane confirmed it, and the prediction was exact
+
+PR [#430](https://github.com/hiwavebrowser/hiwave-macos/pull/430) **MERGED**
+2026-10-02 06:23 UTC, `develop 9c9295d`. Verified from the repository rather
+than from the webhook: `d1d6c32`, `9579d18` and the merge `d222893` are all
+ancestors of `origin/develop`, and `9c9295d`'s diff against its first parent is
+**+539 across exactly 3 files** — bit-for-bit the PR's diffstat, so nothing was
+lost or re-resolved on the way in.
+
+**So the night's metric line is a measurement and not a prediction, and the
+headline at the top of this entry can be read as `3/26 → 3/26` confirmed.**
+Parity Gate run
+[36972454569](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36972454569)
+on `macos-14`, `parity-oracle` sha256-verified (`0674d940…`) against the
+pre-change board of run 36962076388 (`1e79aa05…`).
+
+| | predicted, before the lane ran | measured |
+|---|---|---|
+| `N/26 finish-line-green` | 3/26 → 3/26 | **3/26 → 3/26** |
+| geometry failures | 468 → 467 | **468 → 467** |
+| font-independent roots | 1 → 0 | **1 → 0** |
+
+| column | before | after |
+|---|---|---|
+| geometry | 15/26 | 15/26 |
+| paint | 3/26 | 3/26 |
+| stability | 26/26 | 26/26 |
+| discrete | 26/26 | 26/26 |
+| not fully measured | 0 | 0 |
+
+Per case the only row that moved is **`sticky-scroll` 16 → 15**, and
+`.overflow-content` is gone from the failure list. **No case got worse** on
+geometry or on the join, none lost a green, and **Gate B is bit-identical on
+all 26 cases** — every `within_fraction`, discrete 0 both sides. The stop rule
+did not fire on macOS either.
+
+Two things worth keeping from this:
+
+- **The Linux A/B predicted the macOS delta exactly.** A seat whose text shaper
+  is a stub, forbidden by decision 1 from proposing a unit, still called the
+  macOS failure count to the integer — because the box it moved is
+  font-independent and the prediction was about *that box* and not about a
+  magnitude. That is the shape of claim this seat can still make, and it is
+  worth distinguishing from the claims decision 1 retired.
+- **Gate B moving by zero was predicted for the right reason.** The
+  below-the-fold measurement in this entry said it would, before the lane ran.
+  If it had moved, the below-the-fold reading would have been wrong.
+
+Twelve minutes from R2-STAMP to merged, by a person. The watch is released and
+the safety-net check-in cancelled.
