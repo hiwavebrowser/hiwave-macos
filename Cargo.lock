@@ -5393,7 +5393,6 @@ dependencies = [
  "futures",
  "lru",
  "rustkit-codecs",
- "rustkit-http",
  "rustkit-image",
  "serde",
  "serde_json",

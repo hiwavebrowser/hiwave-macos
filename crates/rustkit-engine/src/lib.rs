@@ -296,6 +296,40 @@ impl SubresourceReferrer {
     }
 }
 
+/// A raster image for `url`, fetched like every other subresource: through
+/// the resource loader, so the shield sees the request, it carries the
+/// Referer the document's policy allows, and the caller's deadline bounds
+/// it. The image manager only decodes and caches what arrives. A cached
+/// image or a `data:` URL needs no request.
+async fn fetch_raster_image(
+    loader: &ResourceLoader,
+    image_manager: &ImageManager,
+    referrer: &SubresourceReferrer,
+    url: Url,
+) -> Result<Arc<rustkit_image::LoadedImage>, rustkit_image::ImageError> {
+    use rustkit_image::ImageError;
+
+    if url.scheme() == "data" || image_manager.is_cached(&url) {
+        return image_manager.load(url).await;
+    }
+    let response = loader
+        .fetch(referrer.get_for(url.clone(), RequestDestination::Image))
+        .await
+        .map_err(|e| ImageError::FetchError(format!("{e} for {url}")))?;
+    if !response.ok() {
+        return Err(ImageError::FetchError(format!(
+            "HTTP {} for {}",
+            response.status, url
+        )));
+    }
+    let content_type = response.content_type.as_ref().map(|mime| mime.to_string());
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| ImageError::FetchError(format!("{e} for {url}")))?;
+    image_manager.insert_fetched(&url, content_type.as_deref(), &body)
+}
+
 struct ViewState {
     id: EngineViewId,
     viewhost_id: ViewId,
@@ -7865,10 +7899,15 @@ impl Engine {
         let mut pending = Vec::new();
         let mut svg_urls = Vec::new();
         let mut loaded = 0;
+        let mut requested = std::collections::HashSet::new();
         for (_src, url) in images {
             if image_manager.is_cached(&url) || self.svg_cache.contains_key(url.as_str()) {
                 debug!(%url, "Image already cached");
                 loaded += 1;
+                continue;
+            }
+            // One request per URL, however many elements show it.
+            if !requested.insert(url.clone()) {
                 continue;
             }
             // SVG is vector content: ImageManager's raster decode rejects it
@@ -7940,11 +7979,15 @@ impl Engine {
         // Each raster load is loaded (true), failed (false), or turned out to
         // be SVG by its type and parsed here for the SVG cache.
         type RasterOutcome = (bool, Option<(String, rustkit_svg::SvgDocument)>);
+        let loader = self.loader.clone();
+        let referrer = &referrer;
         let results: Vec<RasterOutcome> = futures::stream::iter(pending.into_iter().map(|url| {
             let image_manager = image_manager.clone();
+            let loader = loader.clone();
             async move {
-                info!(%url, "Loading image via ImageManager");
-                let Ok(loaded) = tokio::time::timeout_at(deadline, image_manager.load(url.clone())).await else {
+                info!(%url, "Loading image");
+                let load = fetch_raster_image(&loader, &image_manager, referrer, url.clone());
+                let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
                     warn!(%url, "Image over the subresource budget; rendering without it");
                     return (false, None);
                 };
@@ -9281,42 +9324,50 @@ impl SelectorMatcher {
         attributes: &HashMap<String, String>,
     ) -> bool {
         let attr_name = SelectorMatcher::attr_selector_name(attr_selector);
-        for op in &Self::ATTR_OPERATORS {
-            if let Some(pos) = attr_selector.find(op) {
-                let mut attr_value = attr_selector[pos + op.len()..].trim();
-
-                // Remove quotes if present
-                if (attr_value.starts_with('"') && attr_value.ends_with('"'))
-                    || (attr_value.starts_with('\'') && attr_value.ends_with('\''))
-                {
-                    attr_value = &attr_value[1..attr_value.len() - 1];
-                }
-
-                if let Some(el_attr) = attributes.get(attr_name) {
-                    return match *op {
-                        "=" => el_attr == attr_value,
-                        "~=" => el_attr.split_whitespace().any(|w| w == attr_value),
-                        "|=" => {
-                            el_attr == attr_value
-                                || el_attr.starts_with(&format!("{}-", attr_value))
-                        }
-                        "^=" => el_attr.starts_with(attr_value),
-                        "$=" => el_attr.ends_with(attr_value),
-                        "*=" => el_attr.contains(attr_value),
-                        _ => false,
-                    };
-                } else {
-                    return false;
-                }
-            }
+        match Self::attr_selector_test(attr_selector) {
+            Some((op, attr_value)) => attributes
+                .get(attr_name)
+                .is_some_and(|el_attr| Self::attr_test_passes(op, attr_value, el_attr)),
+            // Just [attr] - check presence
+            None => attributes.contains_key(attr_name),
         }
-
-        // Just [attr] - check presence
-        attributes.contains_key(attr_name)
     }
 
     /// Checked in this order; the first one found splits name from value.
     const ATTR_OPERATORS: [&'static str; 6] = ["~=", "|=", "^=", "$=", "*=", "="];
+
+    /// The operator of an `[...]` selector and the value it compares with
+    /// (trimmed, quotes removed). None for a bare `[name]`.
+    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, &str)> {
+        Self::ATTR_OPERATORS.iter().find_map(|op| {
+            let pos = attr_selector.find(op)?;
+            let mut attr_value = attr_selector[pos + op.len()..].trim();
+            if (attr_value.starts_with('"') && attr_value.ends_with('"'))
+                || (attr_value.starts_with('\'') && attr_value.ends_with('\''))
+            {
+                attr_value = &attr_value[1..attr_value.len() - 1];
+            }
+            Some((*op, attr_value))
+        })
+    }
+
+    /// Whether the element's value `el_attr` passes `op` against `attr_value`.
+    fn attr_test_passes(op: &str, attr_value: &str, el_attr: &str) -> bool {
+        match op {
+            "=" => el_attr == attr_value,
+            "~=" => el_attr.split_whitespace().any(|w| w == attr_value),
+            "|=" => {
+                el_attr == attr_value
+                    || el_attr
+                        .strip_prefix(attr_value)
+                        .is_some_and(|rest| rest.starts_with('-'))
+            }
+            "^=" => el_attr.starts_with(attr_value),
+            "$=" => el_attr.ends_with(attr_value),
+            "*=" => el_attr.contains(attr_value),
+            _ => false,
+        }
+    }
 
     /// The attribute an `[...]` selector looks up. Every form, with or
     /// without an operator, fails on an element that lacks it, which is
@@ -11430,8 +11481,17 @@ impl Engine {
     pub async fn load_image(&self, view_id: EngineViewId, url: Url) -> Result<(), EngineError> {
         let image_manager = self.image_manager.clone();
         let event_tx = self.event_tx.clone();
+        let referrer = self.subresource_referrer(view_id);
 
-        match image_manager.load(url.clone()).await {
+        let load = fetch_raster_image(&self.loader, &image_manager, &referrer, url.clone());
+        let loaded = tokio::time::timeout_at(self.subresource_deadline(), load)
+            .await
+            .unwrap_or_else(|_| {
+                Err(rustkit_image::ImageError::FetchError(
+                    "over the subresource budget".into(),
+                ))
+            });
+        match loaded {
             Ok(image) => {
                 let _ = event_tx.send(EngineEvent::ImageLoaded {
                     view_id,
@@ -16604,6 +16664,39 @@ mod element_identity_tests {
         );
         assert!(s.background_layers.is_empty());
         assert!(s.background_gradient.is_none(), "the gradient goes with its layer");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_four_digit_hex_colour_replaces_an_earlier_one() {
+        // `#rgba` (css-color-4 §5.2). Minifiers write `transparent` as
+        // `#0000`; the declaration was dropped, so the colour under it
+        // stayed (weather.com's and squarespace's button resets).
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let attrs: std::collections::HashMap<String, String> =
+            [("class".to_string(), "a".to_string())].into_iter().collect();
+        let vars = HashMap::new();
+        let style_under = |css: &str| {
+            let sheet = Stylesheet::parse(css).expect("css");
+            engine.compute_style_for_element(
+                "div",
+                &attrs,
+                &[sheet],
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let clear = rustkit_css::Color::new(0, 0, 0, 0.0);
+
+        let s = style_under(".a { background-color: red } .a { background-color: #0000 }");
+        assert_eq!(s.background_color, clear, "`background-color: #0000`");
+        let s = style_under(".a { background-color: red } .a { background: #0000 }");
+        assert_eq!(s.background_color, clear, "`background: #0000`");
+        let s = style_under(".a { color: red } .a { color: #00F8 }");
+        assert_eq!(s.color, rustkit_css::Color::new(0, 0, 255, 136.0 / 255.0));
     }
 
     #[test]
@@ -22269,9 +22362,12 @@ struct SelectorReads {
     positional: Vec<bool>,
     /// Ids some compound names.
     ids: std::collections::HashSet<String>,
-    /// Attribute name -> the distinct attribute selectors (the text between
-    /// the brackets) some subject compound tests its value with.
-    attribute_tests: HashMap<String, Vec<String>>,
+    /// Attribute name -> the distinct tests (operator and value, as
+    /// `SelectorMatcher::attr_selector_test` splits them) some subject
+    /// compound puts its value to. Split here, once per index: the key of
+    /// every element ran `match_attribute_selector` over the selector text
+    /// for each of them, 14% of wikipedia's build with sharing on.
+    attribute_tests: HashMap<String, Vec<(&'static str, String)>>,
 }
 
 impl SelectorReads {
@@ -22325,13 +22421,13 @@ impl SelectorReads {
                 // A bare `[name]` reads the name's presence, which the key
                 // always holds.
                 SubjectPart::Attr(attr) => {
-                    if SelectorMatcher::ATTR_OPERATORS.iter().any(|op| attr.contains(op)) {
+                    if let Some((op, value)) = SelectorMatcher::attr_selector_test(attr) {
                         let tests = self
                             .attribute_tests
                             .entry(SelectorMatcher::attr_selector_name(attr).to_string())
                             .or_default();
-                        if !tests.contains(attr) {
-                            tests.push(attr.clone());
+                        if !tests.iter().any(|(o, v)| *o == op && v == value) {
+                            tests.push((op, value.to_string()));
                         }
                     }
                 }
@@ -22397,7 +22493,7 @@ impl SelectorReads {
     /// What a selector can read of one attribute's value: all of it for
     /// `class`, the state attributes and an id some compound names; else
     /// only whether each attribute selector on that name passes.
-    fn keyed_value(&self, name: &str, value: &str, attributes: &HashMap<String, String>) -> MatchKeyValue {
+    fn keyed_value(&self, name: &str, value: &str) -> MatchKeyValue {
         if name == "class"
             || MATCH_STATE_ATTRIBUTES.contains(&name)
             || (name == "id" && self.ids.contains(value))
@@ -22408,7 +22504,7 @@ impl SelectorReads {
             Some(tests) => MatchKeyValue::Tests(
                 tests
                     .iter()
-                    .map(|test| SelectorMatcher.match_attribute_selector(test, attributes))
+                    .map(|(op, test)| SelectorMatcher::attr_test_passes(op, test, value))
                     .collect(),
             ),
             None => MatchKeyValue::Present,
@@ -22418,7 +22514,7 @@ impl SelectorReads {
     fn key(&self, chain: u64, tag_name: &str, attributes: &HashMap<String, String>) -> MatchShareKey {
         let mut attributes: Vec<(String, MatchKeyValue)> = attributes
             .iter()
-            .map(|(name, value)| (name.clone(), self.keyed_value(name, value, attributes)))
+            .map(|(name, value)| (name.clone(), self.keyed_value(name, value)))
             .collect();
         attributes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         MatchShareKey {
@@ -23438,6 +23534,71 @@ mod style_share_tests {
         assert_ne!(key(&[("type", "radio")]), key(&[("type", "text")]));
         assert_ne!(reads.key(1, "a", &attributes(&[])), reads.key(2, "a", &attributes(&[])));
         assert_ne!(reads.key(1, "a", &attributes(&[])), reads.key(1, "b", &attributes(&[])));
+    }
+
+    /// The key splits each attribute test once, when the index is built. It
+    /// must hold what the matcher answers from the selector's text.
+    #[test]
+    fn the_keyed_attribute_tests_answer_as_the_matcher_does() {
+        let tests = [
+            "data-x=a",
+            "data-x=\"a\"",
+            "data-x~=a",
+            "data-x|=a",
+            "data-x^=\"a\"",
+            "data-x$='a'",
+            "data-x*=a",
+            "data-x*=\"\"",
+            "data-x=\"a=b\"",
+        ];
+        let selectors: Vec<String> = tests.iter().map(|t| format!("i[{t}]")).collect();
+        let (reads, _) = reads_of(&selectors.iter().map(String::as_str).collect::<Vec<_>>());
+        let kept = &reads.attribute_tests["data-x"];
+        assert_eq!(kept.len(), tests.len() - 1, "`=a` twice is one test");
+        for value in ["a", "a b", "b a", "a-b", "ab", "ba", "b", "", "a=b", "x~=a", "A"] {
+            let attributes: HashMap<String, String> =
+                [("data-x".to_string(), value.to_string())].into();
+            let MatchKeyValue::Tests(keyed) = reads.keyed_value("data-x", value) else {
+                panic!("data-x is tested");
+            };
+            assert_eq!(keyed.len(), kept.len());
+            for test in tests {
+                let (op, operand) = SelectorMatcher::attr_selector_test(test).expect("operator");
+                let at = kept.iter().position(|(o, v)| *o == op && v == operand).expect("kept");
+                assert_eq!(
+                    keyed[at],
+                    SelectorMatcher.match_attribute_selector(test, &attributes),
+                    "[{test}] on data-x={value:?}"
+                );
+            }
+        }
+        // A bare `[name]` is no test: the key holds the name's presence.
+        assert!(SelectorMatcher::attr_selector_test("data-x").is_none());
+        // The matcher itself, operator by operator.
+        for (test, value, passes) in [
+            ("data-x=a", "a", true),
+            ("data-x=a", "ab", false),
+            ("data-x~=a", "b a", true),
+            ("data-x~=a", "ba", false),
+            ("data-x|=a", "a", true),
+            ("data-x|=a", "a-b", true),
+            ("data-x|=a", "ab", false),
+            ("data-x^=a", "ab", true),
+            ("data-x^=a", "ba", false),
+            ("data-x$=a", "ba", true),
+            ("data-x$=a", "ab", false),
+            ("data-x*=a", "bab", true),
+            ("data-x*=a", "b", false),
+        ] {
+            let attributes: HashMap<String, String> =
+                [("data-x".to_string(), value.to_string())].into();
+            assert_eq!(
+                SelectorMatcher.match_attribute_selector(test, &attributes),
+                passes,
+                "[{test}] on data-x={value:?}"
+            );
+            assert!(!SelectorMatcher.match_attribute_selector(test, &HashMap::new()));
+        }
     }
 
     #[test]
@@ -25941,6 +26102,124 @@ mod referrer_tests {
                 ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
             ]
         );
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod image_loader_routing_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    // 4x4 RGBA, every texel opaque red.
+    const RED_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0xa9, 0xf1, 0x9e, 0x7e, 0x00, 0x00, 0x00,
+        0x15, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0xf0,
+        0x9f, 0x01, 0x09, 0x30, 0x31, 0xa0, 0x01, 0xc2, 0x02, 0x00, 0x83, 0xd1,
+        0x02, 0x06, 0xb3, 0x4b, 0xd2, 0x9b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+        0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    const PAGE: &str = r#"<html><body>
+        <img src="/same.png"><img src="/same.png">
+        <img src="http://localhost:PORT/cross.png">
+        <img src="/tracker.png">
+        </body></html>"#;
+
+    type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    /// Serve `/page` as [`PAGE`], anything else as a PNG, and record each
+    /// image request's path and Referer.
+    fn recording_server() -> (u16, Seen) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        let html = PAGE.replace("PORT", &port.to_string());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let referer = head
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .find(|(k, _)| k.eq_ignore_ascii_case("referer"))
+                    .map(|(_, v)| v.trim().to_string());
+                let (ctype, body): (&str, &[u8]) = if path.starts_with("/page") {
+                    ("text/html", html.as_bytes())
+                } else {
+                    log.lock().unwrap().push((path, referer));
+                    ("image/png", RED_PNG)
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        (port, seen)
+    }
+
+    /// An `<img>` went out through the image manager's own HTTP client: no
+    /// Referer (hotlink-protected CDNs refuse that), and past the request
+    /// interceptor, so a blocked tracker pixel was fetched anyway.
+    #[test]
+    fn an_img_is_fetched_through_the_loader_with_its_referer_and_the_shield() {
+        let (port, seen) = recording_server();
+        let mut shield = rustkit_net::RequestInterceptor::new();
+        shield.block(rustkit_net::intercept::UrlPattern::contains("tracker"));
+        let mut engine =
+            Engine::with_interceptor(EngineConfig::default(), Some(shield)).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page?q=1#frag")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            engine.load_url(view, url).await.expect("load_url");
+            engine.load_subresources(view).await.expect("subresources");
+        });
+
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                ("/cross.png".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
+                ("/same.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
+            ],
+            "one request per image the shield allows, each with the policy's Referer; none for the blocked one"
+        );
+
+        let at = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+        assert_eq!(engine.get_image_dimensions(&at("/same.png")), Some((4, 4)));
+        assert!(!engine.is_image_cached(&at("/tracker.png")));
+    }
+
+    /// The image manager makes no request of its own: there is no second
+    /// way out for an image URL.
+    #[test]
+    fn the_image_manager_does_not_fetch() {
+        let (port, seen) = recording_server();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/direct.png")).unwrap();
+        let manager = ImageManager::new();
+        assert!(manager.load_blocking(url.clone()).is_err());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(rt.block_on(manager.load(url)).is_err());
+        assert!(seen.lock().unwrap().is_empty(), "{:?}", seen.lock().unwrap());
     }
 }
 
