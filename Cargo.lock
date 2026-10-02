@@ -5318,7 +5318,9 @@ name = "rustkit-engine"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytes",
  "futures",
+ "http",
  "rustkit-bindings",
  "rustkit-compositor",
  "rustkit-core",

@@ -11,6 +11,10 @@
 
 mod dom;
 mod inner_text;
+mod net_bridge;
+pub use net_bridge::{NetDelivery, NetRequest};
+#[cfg(test)]
+mod net_bridge_tests;
 #[cfg(test)]
 mod web_streams_tests;
 #[cfg(test)]
