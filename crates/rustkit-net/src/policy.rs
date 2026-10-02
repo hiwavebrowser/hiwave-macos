@@ -165,7 +165,6 @@ impl Default for FetchLimits {
 pub struct FetchPolicy {
     page_url: Url,
     page_origin: Origin,
-    page_private: bool,
     csp: Option<ContentSecurityPolicy>,
     limits: FetchLimits,
     total: AtomicUsize,
@@ -278,6 +277,49 @@ fn map_net_error(e: NetError) -> Denial {
     }
 }
 
+/// Which addresses a request made on behalf of `page` for `target` may reach.
+///
+/// Public pages reach public addresses only. A page served from a private
+/// origin (loopback / private literal / `localhost`) may additionally reach
+/// its OWN origin: same port, and the page's own host (the literal itself, or
+/// loopback for a `localhost` name). Anything else private stays denied, on
+/// every redirect hop. A named intranet host counts as public (deny by
+/// default); a page with no http(s) origin (`file:`, `data:`) gets
+/// public-only.
+pub(crate) fn page_address_policy(page: &Url, target: &Url) -> AddressPolicy {
+    let same_origin = Origin::from_url(page).same_origin(&Origin::from_url(target));
+    let page_ip: Option<std::net::IpAddr> = match page.host() {
+        Some(url::Host::Ipv4(ip)) if !rustkit_http::is_public_ip(ip.into()) => Some(ip.into()),
+        Some(url::Host::Ipv6(ip)) if !rustkit_http::is_public_ip(ip.into()) => Some(ip.into()),
+        _ => None,
+    };
+    let page_local_name = matches!(page.host(), Some(url::Host::Domain(d)) if rustkit_http::is_local_name(d));
+    if !same_origin || !matches!(page.scheme(), "http" | "https") || (page_ip.is_none() && !page_local_name) {
+        return AddressPolicy::PublicOnly;
+    }
+    let port = target.port_or_known_default().unwrap_or(0);
+    AddressPolicy::Custom(Arc::new(move |a| {
+        rustkit_http::is_public_ip(a.ip())
+            || (a.port() == port
+                && match page_ip {
+                    Some(ip) => a.ip() == ip,
+                    None => a.ip().is_loopback(),
+                })
+    }))
+}
+
+/// True when `url`'s host is an IP literal outside the public range or a
+/// local name — something a restricted client will refuse to connect to, and
+/// therefore must not be answered from the shared cache either.
+pub(crate) fn url_host_is_private(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => !rustkit_http::is_public_ip(ip.into()),
+        Some(url::Host::Ipv6(ip)) => !rustkit_http::is_public_ip(ip.into()),
+        Some(url::Host::Domain(d)) => rustkit_http::is_local_name(d),
+        None => false,
+    }
+}
+
 /// The per-hop state of one script request.
 struct Hop {
     url: Url,
@@ -297,18 +339,8 @@ impl FetchPolicy {
         csp: Option<ContentSecurityPolicy>,
         limits: FetchLimits,
     ) -> Self {
-        // A page served from loopback / a private literal / `localhost` is a
-        // private-origin page: it may reach its own origin and nothing else
-        // private. A named intranet host counts as public (deny by default).
-        let page_private = match page_url.host() {
-            Some(url::Host::Ipv4(ip)) => !rustkit_http::is_public_ip(ip.into()),
-            Some(url::Host::Ipv6(ip)) => !rustkit_http::is_public_ip(ip.into()),
-            Some(url::Host::Domain(d)) => rustkit_http::is_local_name(d),
-            None => false,
-        };
         Self {
             page_origin: Origin::from_url(&page_url),
-            page_private,
             csp,
             total: AtomicUsize::new(0),
             page_slots: Arc::new(Semaphore::new(limits.max_in_flight_per_page)),
@@ -420,11 +452,7 @@ impl FetchPolicy {
         if let Some(p) = &self.address_override {
             return p.clone();
         }
-        if self.page_private && !self.is_cross_origin(url) {
-            AddressPolicy::Any
-        } else {
-            AddressPolicy::PublicOnly
-        }
+        page_address_policy(&self.page_url, url)
     }
 
     async fn run(&self, loader: &ResourceLoader, req: ScriptRequest) -> Result<ScriptResponse, Denial> {
@@ -1286,5 +1314,131 @@ mod tests {
         let p = allow_ports(page("http://page.test/"), &[s.port, r2.port]);
         assert_eq!(p.execute(&l, ScriptRequest::get(r2.url("/"))).await.unwrap_err(), Denial::Shield);
         assert_eq!(s.hits(), 0);
+    }
+
+    // ---- subresources: the same rule, driven by the document referrer --------
+
+    fn sub(url: &Url, page: &str, dest: RequestDestination) -> Request {
+        Request::get(url.clone())
+            .destination(dest)
+            .referrer(Url::parse(page).unwrap())
+    }
+
+    fn denied(r: Result<crate::Response, NetError>) -> bool {
+        matches!(r, Err(NetError::HttpError(rustkit_http::HttpError::AddressDenied(_))))
+    }
+
+    #[tokio::test]
+    async fn a_public_page_cannot_load_private_subresources() {
+        let private = serve(|_| resp(200, &[], b"secret")).await;
+        let l = loader();
+        let port = private.port;
+        for dest in [
+            RequestDestination::Image,
+            RequestDestination::Style,
+            RequestDestination::Script,
+            RequestDestination::Font,
+            RequestDestination::Other,
+        ] {
+            for target in [
+                format!("http://127.0.0.1:{port}/a"),
+                format!("http://localhost:{port}/a"),
+                format!("http://[::1]:{port}/a"),
+                "http://169.254.169.254/latest/".to_string(),
+                "http://10.0.0.1/a".to_string(),
+                "http://192.168.1.1/a".to_string(),
+            ] {
+                let r = l.fetch(sub(&Url::parse(&target).unwrap(), "http://example.com/", dest)).await;
+                assert!(denied(r), "{dest:?} {target}");
+            }
+        }
+        assert_eq!(private.hits(), 0, "the private server saw a connection");
+    }
+
+    #[tokio::test]
+    async fn a_name_resolving_private_is_denied_for_subresources_too() {
+        let private = serve(|_| resp(200, &[], b"secret")).await;
+        let l = loader().with_resolver(Arc::new(Rebind));
+        let target = Url::parse(&format!("http://rebind.test:{}/x.png", private.port)).unwrap();
+        assert!(denied(l.fetch(sub(&target, "http://example.com/", RequestDestination::Image)).await));
+        assert_eq!(private.hits(), 0);
+    }
+
+    #[tokio::test]
+    async fn navigations_and_referrerless_loads_are_unchanged() {
+        let s = serve(|_| resp(200, &[], b"page")).await;
+        let l = loader();
+        let nav = Request::get(s.url("/")).destination(RequestDestination::Document);
+        assert_eq!(l.fetch(nav).await.expect("navigation to loopback").bytes().await.unwrap(), "page");
+        l.fetch(Request::get(s.url("/b"))).await.expect("referrer-less load");
+    }
+
+    #[tokio::test]
+    async fn a_private_page_loads_its_own_origin_and_nothing_else_private() {
+        let own = serve(|r| match r.path.as_str() {
+            "/hop" => resp(302, &[("Location", "/ok.css")], b""),
+            _ => resp(200, &[], b"own"),
+        })
+        .await;
+        let other = serve(|_| resp(200, &[], b"other")).await;
+        let to_other = format!("http://127.0.0.1:{}/x", other.port);
+        let bounce = serve(move |_| resp(302, &[("Location", &to_other)], b"")).await;
+        let l = loader();
+        let page = own.url("/index.html").to_string();
+        for p in ["/ok.css", "/hop"] {
+            let r = l.fetch(sub(&own.url(p), &page, RequestDestination::Style)).await.expect(p);
+            assert_eq!(r.bytes().await.unwrap(), "own");
+        }
+        assert!(denied(l.fetch(sub(&other.url("/x"), &page, RequestDestination::Image)).await));
+        // A same-origin URL that redirects to ANOTHER private server is denied at the hop.
+        let page2 = bounce.url("/p").to_string();
+        assert!(denied(l.fetch(sub(&bounce.url("/img"), &page2, RequestDestination::Image)).await));
+        assert_eq!(other.hits(), 0, "the redirect target saw a connection");
+    }
+
+    #[tokio::test]
+    async fn a_localhost_page_reaches_its_own_loopback_origin() {
+        let own = serve(|_| resp(200, &[], b"own")).await;
+        let l = loader();
+        let page = format!("http://localhost:{}/", own.port);
+        let url = Url::parse(&format!("http://localhost:{}/a.css", own.port)).unwrap();
+        l.fetch(sub(&url, &page, RequestDestination::Style)).await.expect("own origin by name");
+        let other = serve(|_| resp(200, &[], b"o")).await;
+        let url = Url::parse(&format!("http://localhost:{}/a.css", other.port)).unwrap();
+        assert!(denied(l.fetch(sub(&url, &page, RequestDestination::Style)).await));
+        assert_eq!(other.hits(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_cache_cannot_answer_a_private_url_for_a_public_page() {
+        let s = serve(|_| resp(200, &[("Cache-Control", "max-age=600")], b"private body")).await;
+        let l = loader();
+        let url = s.url("/cached.css");
+        let nav = Request::get(url.clone()).destination(RequestDestination::Document);
+        l.fetch(nav).await.expect("navigation caches it");
+        assert!(denied(l.fetch(sub(&url, "http://example.com/", RequestDestination::Style)).await));
+        assert_eq!(s.hits(), 1, "second request must not connect, and must not be served from cache");
+    }
+
+    #[test]
+    fn page_policy_matrix() {
+        let allows = |page: &str, target: &str, addr: &str| {
+            page_address_policy(&Url::parse(page).unwrap(), &Url::parse(target).unwrap())
+                .permits(&addr.parse().unwrap())
+        };
+        // Public page: public only.
+        assert!(allows("https://a.com/", "https://b.com/", "93.184.216.34:443"));
+        assert!(!allows("https://a.com/", "https://a.com/", "127.0.0.1:443"));
+        // file: and data: documents get no private reach.
+        assert!(!allows("file:///tmp/x.html", "http://127.0.0.1:80/", "127.0.0.1:80"));
+        assert!(!allows("data:text/html,x", "http://127.0.0.1:80/", "127.0.0.1:80"));
+        // Private page: its own host and port only.
+        assert!(allows("http://127.0.0.1:8000/", "http://127.0.0.1:8000/x", "127.0.0.1:8000"));
+        assert!(!allows("http://127.0.0.1:8000/", "http://127.0.0.1:8000/x", "127.0.0.1:8001"));
+        assert!(!allows("http://127.0.0.1:8000/", "http://127.0.0.1:8000/x", "127.0.0.2:8000"));
+        assert!(!allows("http://127.0.0.1:8000/", "http://10.0.0.5:8000/x", "10.0.0.5:8000"));
+        assert!(allows("http://127.0.0.1:8000/", "http://127.0.0.1:8000/x", "93.184.216.34:8000"));
+        // A named intranet page is a public page.
+        assert!(!allows("http://intranet.corp/", "http://intranet.corp/", "10.1.2.3:80"));
     }
 }
