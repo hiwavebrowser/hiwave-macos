@@ -1,0 +1,7 @@
+all attempt 1 rc 0 unmeasured []
+ratchet rc 0   specificity: geo_fails=0 paint=0.98075 discrete=0
+  sticky-scroll: geo_fails=16 paint=0.98265 discrete=0
+ 
+ratchet exit 2
+519s load=13.8
+CAMPALLDONE

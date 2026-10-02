@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 10px; font: 16px/20px Helvetica, sans-serif; }
+  div { margin-bottom: 10px; }
+  .flex { display: flex; gap: 8px; align-items: center; }
+  .helv { font-family: Helvetica, sans-serif; }
+  .f13 { font: 13px/16px Helvetica, sans-serif; }
+  .f13n { font: 13px Helvetica, sans-serif; }
+  .f20 { font: 20px Helvetica, sans-serif; }
+  .lh30 { line-height: 30px; }
+</style>
+</head>
+<body>
+<div><button id="bare">Go</button> <button id="helv" class="helv">Go</button> <button id="f13" class="f13">Go</button> <button id="f13n" class="f13n">Go</button> <button id="f20" class="f20">Go</button> <button id="lh30" class="lh30">Go</button></div>
+<div class="flex"><button id="x-bare">Go</button><button id="x-helv" class="helv">Go</button><button id="x-f13" class="f13">Go</button><button id="x-f13n" class="f13n">Go</button><button id="x-f20" class="f20">Go</button><button id="x-lh30" class="lh30">Go</button></div>
+<div><button id="long" class="f13">A longer label</button> <input id="in" type="button" value="Go" class="f13"> <input id="sub" type="submit" class="f13"></div>
+</body>
+</html>

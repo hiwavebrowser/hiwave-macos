@@ -1,0 +1,14 @@
+```
+test grid::tests::a_start_aligned_flex_grid_item_keeps_its_content_height ... ok
+test grid::tests::a_column_flex_grid_item_justifies_in_its_row ... FAILED
+test grid::tests::a_flex_grid_item_realigns_after_its_row_grows ... FAILED
+test grid::tests::a_flex_grid_item_fills_its_row_and_aligns_in_it ... FAILED
+thread 'grid::tests::a_column_flex_grid_item_justifies_in_its_row' panicked at crates/rustkit-layout/src/grid.rs:7201:9:
+the flex item fills the 100px row, got 20
+thread 'grid::tests::a_flex_grid_item_realigns_after_its_row_grows' panicked at crates/rustkit-layout/src/grid.rs:7263:9:
+the short item fills the 60px row, got 20
+thread 'grid::tests::a_flex_grid_item_fills_its_row_and_aligns_in_it' panicked at crates/rustkit-layout/src/grid.rs:7173:9:
+the flex item fills the 100px row, got 20
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 594 filtered out; finished in 0.31s
+restored: True
+```

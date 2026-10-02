@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>L0: nested flex items of an auto-row grid</title>
+<style>
+  body { margin: 0; font: 16px/20px Helvetica, sans-serif; }
+  .grid {
+    display: grid;
+    grid-template-columns: 200px 200px 200px;
+    gap: 10px;
+    width: 620px;
+    margin: 10px;
+  }
+  /* In the slice: a flex row, auto height, one row, wrapped text and a button. */
+  .item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid #888;
+    background: #eef;
+  }
+  .item span { min-width: 0; }
+  button { font: 13px/16px Helvetica, sans-serif; }
+  /* Out of the slice, on the fixture's edges. */
+  .span { grid-row: span 2; background: #fee; }
+  .pct { height: 50%; background: #efe; }
+  .ratio { aspect-ratio: 4 / 1; background: #ffe; }
+  .block { background: #eee; padding: 8px; }
+</style>
+</head>
+<body>
+<div class="grid" id="grid">
+  <!-- wrapped text: the estimate counts one line for one text node -->
+  <div class="item" id="wrap"><span id="wrap-s1">Wrapped text that needs several lines in a narrow column</span><button id="wrap-b">Go</button></div>
+  <!-- many text nodes on one line: the estimate counts one line per node -->
+  <div class="item" id="many"><span id="many-s1">a</span><span id="many-s2">b</span><span id="many-s3">c</span><span id="many-s4">d</span><span id="many-s5">e</span><button id="many-b">Open</button></div>
+  <!-- a control and one short word -->
+  <div class="item" id="short"><span id="short-s1">Short</span><button id="short-b">A longer label</button></div>
+  <div class="item" id="wrap2"><span id="wrap2-s1">Second row, again more words than one line of this column holds</span><button id="wrap2-b">Go</button></div>
+  <div class="item span" id="span"><span id="span-s1">Spans two rows</span><button id="span-b">Go</button></div>
+  <div class="block" id="block">A block item with text that wraps onto more than one line here</div>
+  <div class="item ratio" id="ratio"><span id="ratio-s1">4 / 1</span></div>
+  <div class="item pct" id="pct"><span id="pct-s1">50%</span></div>
+</div>
+</body>
+</html>

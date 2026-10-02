@@ -1,0 +1,5 @@
+warning: `rustkit-engine` (lib) generated 4 warnings
+   Compiling parity-capture v0.1.0 (/Users/petecopeland/Repos/.worktrees/rs-l0/crates/parity-capture)
+    Finished `release` profile [optimized] target(s) in 40m 05s
+touched 138 files; rc=0 2406s load=13.8
+-> /Users/petecopeland/Repos/.worktrees/trench-realsite/scratch/bin/pc-gf-026fcc5

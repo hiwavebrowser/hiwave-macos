@@ -1,0 +1,21 @@
+google       within develop   8.36%  within fix   4.09%  across   8.82%   8.36%   4.09%   0.00%  failed: none  secs A,B,A,B 6,7,7,5
+facebook     within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 15,15,17,19
+wikipedia    within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 7,8,8,6
+lyft         within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 13,11,10,14
+x            within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 4,4,4,5
+linkedin     within develop   2.64%  within fix   0.00%  across   1.55%   1.55%   2.96%   2.96%  failed: none  secs A,B,A,B 4,5,4,4
+yahoo        within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 11,11,12,12
+bing         within develop   0.24%  within fix   0.00%  across   0.00%   0.00%   0.24%   0.24%  failed: none  secs A,B,A,B 5,2,4,2
+walmart      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 11,7,8,9
+microsoft    within develop   0.00%  within fix   0.00%  across   0.74%   0.74%   0.74%   0.74%  failed: none  secs A,B,A,B 7,8,8,8
+apple        within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 11,14,14,14
+netflix      within develop   4.61%  within fix   5.01%  across   4.75%   4.81%   4.71%   2.08%  failed: none  secs A,B,A,B 15,23,25,25
+shopify      within develop   0.00%  within fix   0.00%  across   1.04%   1.04%   1.04%   1.04%  failed: none  secs A,B,A,B 24,23,24,28
+weather      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 21,20,16,21
+instagram    within develop    nan%  within fix    nan%  across    nan%   0.00%    nan%    nan%  failed: B1,A2  secs A,B,A,B 25,30,30,27
+youtube      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 23,24,21,17
+reddit       within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 8,7,7,6
+github       within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,A2,B2  secs A,B,A,B 30,30,30,30
+squarespace  within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,A2,B2  secs A,B,A,B 30,30,30,30
+cnn          within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,A2,B2  secs A,B,A,B 30,30,30,30
+ABDONE

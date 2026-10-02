@@ -1,0 +1,18 @@
+RustKit frames, develop / fix / develop / fix on each live URL at 1280x800 (`scratch/s1001g/ab.py` on the hub branch). "Across arms" is the share of pixels where any channel differs by more than 8. The two sites that differ were then scored with the board's own diff against the Chrome frames stored by today's 14:54 quiet board.
+
+```
+site        within develop  within fix  across arms             against Chrome: develop -> fix
+microsoft        0.00%        0.00%     0.74% (all four pairs)   54.38% -> 54.37%
+shopify          0.00%        0.00%     1.04% (all four pairs)   19.91% -> 19.91% (203923 -> 203839 pixels)
+facebook, wikipedia, lyft, x, yahoo, walmart, apple, weather, youtube, reddit: 0.00% across arms (pixel-identical)
+google           8.36%        4.09%     0.00% to 8.82%  (its own variance; one develop/fix pair is identical)
+linkedin         2.64%        0.00%     1.55% to 2.96%  (its own variance)
+bing             0.24%        0.00%     0.00% or 0.24%  (its own variance)
+netflix          4.61%        5.01%     2.08% to 4.81%  (its own variance: the hero rotates between loads)
+instagram: one develop/fix pair captured, identical; the other two captures timed out
+```
+
+- **microsoft:** the left column of centred links (rows 259 to 798) sits about 6px further left. Those links carry `letter-spacing`, and their shrink-to-fit boxes are now as wide as the text in them.
+- **shopify:** the hero's "all-star" headline (negative `letter-spacing`) is a few pixels narrower, the same reason with the opposite sign.
+- Both fail LOOKS RIGHT on both arms, and no board check changes on any site.
+- github, squarespace and cnn did not finish within the binary's 30 s on either arm (machine load was 22 during that part of the run), so they are unverified on both arms alike.

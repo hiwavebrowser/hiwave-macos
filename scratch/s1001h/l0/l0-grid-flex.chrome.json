@@ -1,0 +1,227 @@
+{
+ "grid": {
+  "rect": [
+   10,
+   10,
+   620,
+   259.5
+  ],
+  "display": "grid"
+ },
+ "wrap": {
+  "rect": [
+   10,
+   10,
+   200,
+   78
+  ],
+  "display": "flex"
+ },
+ "wrap-s1": {
+  "rect": [
+   19,
+   19,
+   140.65625,
+   60
+  ],
+  "display": "block"
+ },
+ "wrap-b": {
+  "rect": [
+   167.65625,
+   38,
+   33.34375,
+   22
+  ],
+  "display": "block"
+ },
+ "many": {
+  "rect": [
+   220,
+   10,
+   200,
+   78
+  ],
+  "display": "flex"
+ },
+ "many-s1": {
+  "rect": [
+   229,
+   39,
+   8.90625,
+   20
+  ],
+  "display": "block"
+ },
+ "many-s2": {
+  "rect": [
+   245.90625,
+   39,
+   8.90625,
+   20
+  ],
+  "display": "block"
+ },
+ "many-s3": {
+  "rect": [
+   262.8125,
+   39,
+   8,
+   20
+  ],
+  "display": "block"
+ },
+ "many-s4": {
+  "rect": [
+   278.8125,
+   39,
+   8.90625,
+   20
+  ],
+  "display": "block"
+ },
+ "many-s5": {
+  "rect": [
+   295.71875,
+   39,
+   8.90625,
+   20
+  ],
+  "display": "block"
+ },
+ "many-b": {
+  "rect": [
+   312.625,
+   38,
+   47.8125,
+   22
+  ],
+  "display": "block"
+ },
+ "short": {
+  "rect": [
+   430,
+   10,
+   200,
+   78
+  ],
+  "display": "flex"
+ },
+ "short-s1": {
+  "rect": [
+   439,
+   39,
+   38.25,
+   20
+  ],
+  "display": "block"
+ },
+ "short-b": {
+  "rect": [
+   485.25,
+   38,
+   94.796875,
+   22
+  ],
+  "display": "block"
+ },
+ "wrap2": {
+  "rect": [
+   10,
+   98,
+   200,
+   98
+  ],
+  "display": "flex"
+ },
+ "wrap2-s1": {
+  "rect": [
+   19,
+   107,
+   140.65625,
+   80
+  ],
+  "display": "block"
+ },
+ "wrap2-b": {
+  "rect": [
+   167.65625,
+   136,
+   33.34375,
+   22
+  ],
+  "display": "block"
+ },
+ "span": {
+  "rect": [
+   220,
+   98,
+   200,
+   171.5
+  ],
+  "display": "flex"
+ },
+ "span-s1": {
+  "rect": [
+   229,
+   173.75,
+   112.9375,
+   20
+  ],
+  "display": "block"
+ },
+ "span-b": {
+  "rect": [
+   349.9375,
+   172.75,
+   33.34375,
+   22
+  ],
+  "display": "block"
+ },
+ "block": {
+  "rect": [
+   430,
+   98,
+   200,
+   98
+  ],
+  "display": "block"
+ },
+ "ratio": {
+  "rect": [
+   10,
+   206,
+   200,
+   63.5
+  ],
+  "display": "flex"
+ },
+ "ratio-s1": {
+  "rect": [
+   19,
+   227.75,
+   31.140625,
+   20
+  ],
+  "display": "block"
+ },
+ "pct": {
+  "rect": [
+   430,
+   206,
+   200,
+   49.75
+  ],
+  "display": "flex"
+ },
+ "pct-s1": {
+  "rect": [
+   439,
+   220.875,
+   32.03125,
+   20
+  ],
+  "display": "block"
+ }
+}

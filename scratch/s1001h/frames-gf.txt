@@ -1,0 +1,18 @@
+RustKit frames, develop / fix / develop / fix on each live URL at 1280x800 (`scratch/s1001g/ab.py` on the hub branch). "Across arms" is the share of pixels where any channel differs by more than 8. apple was then scored with the board's own diff against the Chrome frames stored by today's 14:54 quiet board.
+
+```
+site        within develop  within fix  across arms             against Chrome: develop -> fix
+apple            0.00%        0.00%    36.09% (all four pairs)   54.81% -> 41.65%
+wikipedia, walmart, x, shopify, microsoft, yahoo, bing, weather, youtube, reddit, github, squarespace, lyft: 0.00% across arms (pixel-identical)
+facebook         0.00%          -       0.00% (three captures identical; the fourth timed out)
+cnn                -            -       0.00% (one develop/fix pair; the other two captures timed out)
+google           0.00%        0.00%     4.09%, then 0.00% on a second run of four, then 0.00% to 4.09% on a third
+linkedin        40.81%        2.64%     0.00% to 40.97% (its own variance: it serves two layouts)
+netflix          2.30%       12.63%     5.00% to 12.79% (its own variance: the hero rotates between loads)
+instagram: not captured on either arm within the binary's 30 s
+```
+
+- **apple: 13 points closer to Chrome, still a fail.** Its hero is a grid whose item is a flex container. On develop the hero panel stopped at its text (290px, the product image cut off at the top edge) and three stray navigation labels showed on white below it. With the fix the panel is 580px with the image in it and the labels are gone. Chrome's panel is 692px with the image centred; the remaining difference is the collapsed navigation bar and the image's position.
+- **google is the request, not the binary.** The first four captures differed by arm (4.09%). The two frames are two different pages Google serves (two buttons under the search box, or four chips: "Create images", "Ask about files", "Brainstorm", "I'm feeling lucky"). Eight more captures gave both pages on the fix binary and identical frames across arms.
+- No board check changes on any site.
+- Capture time, seconds per load, develop then fix: no site is consistently slower on the fix arm (apple 22, 25 against 26, 25; yahoo 24, 25 against 21, 21; github 24, 19 against 22, 22). facebook finished in 23 to 27 s on develop and 26 s then a 30 s timeout on the fix arm, in that order, while the machine was at load 12 to 20: it is near the limit on both arms, and I could not separate the arms from the load.

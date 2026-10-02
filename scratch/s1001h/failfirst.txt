@@ -1,0 +1,9 @@
+```
+test tests::a_shrink_to_fit_box_is_as_wide_as_its_spaced_text ... FAILED
+thread 'tests::a_shrink_to_fit_box_is_as_wide_as_its_spaced_text' panicked at crates/rustkit-layout/src/lib.rs:12137:17:
+flex_item=false collapse_path=false: px: 184.05469 vs 184.05469 + 48
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 594 filtered out; finished in 0.25s
+restored: True
+```
+
+The assertion stops at the first of its four cases, so this shows the inline-block through `layout()` failing on develop's code. The other three cases (flex item; both through `layout_with_collapse`) pass on the branch; whether each fails separately on develop was not run.

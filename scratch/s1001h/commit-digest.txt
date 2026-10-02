@@ -1,0 +1,3 @@
+trench(realsite): digest 2026-10-01 23:10 — #425 (intrinsic text widths include letter-spacing) opened and MERGED; #426 (a flex container that is a grid item fills its row and aligns in it) opened: new_tab Gate A 17 -> 6, about 66 -> 60, apple 54.81 -> 41.65% against Chrome; unstyled buttons are 8px too wide and 2px short (found, not fixed); L0 fixture written, L0 not built; board 26/60 unchanged (no scoring run)
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

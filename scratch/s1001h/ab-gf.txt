@@ -1,0 +1,21 @@
+wikipedia    within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 18,20,22,19
+walmart      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 12,12,10,11
+facebook     within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,A2,B2  secs A,B,A,B 30,30,30,30
+x            within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 10,10,9,10
+lyft         within develop    nan%  within fix   0.00%  across   0.00%   0.00%    nan%    nan%  failed: A2  secs A,B,A,B 13,21,18,22
+shopify      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 21,16,23,20
+apple        within develop   0.00%  within fix   0.00%  across  36.09%  36.09%  36.09%  36.09%  failed: none  secs A,B,A,B 22,26,25,25
+microsoft    within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 12,12,11,14
+linkedin     within develop  40.81%  within fix   2.64%  across   2.64%   0.00%  40.97%  40.81%  failed: none  secs A,B,A,B 11,10,11,11
+yahoo        within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 24,21,25,21
+bing         within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 6,6,6,6
+google       within develop   0.00%  within fix   0.00%  across   4.09%   4.09%   4.09%   4.09%  failed: none  secs A,B,A,B 13,12,12,13
+netflix      within develop   2.30%  within fix  12.63%  across   5.01%  12.71%   5.00%  12.79%  failed: none  secs A,B,A,B 21,19,15,19
+weather      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 11,10,10,14
+youtube      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 12,11,12,10
+reddit       within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 3,3,3,3
+github       within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 24,22,19,22
+squarespace  within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 26,22,25,25
+cnn          within develop    nan%  within fix    nan%  across   0.00%    nan%    nan%    nan%  failed: A2,B2  secs A,B,A,B 27,28,30,30
+instagram    within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,B2  secs A,B,A,B 30,30,16,30
+ABDONE

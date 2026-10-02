@@ -1,0 +1,24 @@
+== gf-026fcc5
+micro rc 0 Worst 3 Cases:
+  form-controls: 3.24%
+  backgrounds: 1.22%
+  combinators: 0.65%
+builtins rc 0 Worst 3 Cases:
+  about: 3.67%
+  settings: 2.09%
+  new_tab: 1.33%
+all rc 0 Worst 3 Cases:
+  article-typography: 4.79%
+  about: 3.67%
+  form-controls: 3.24%
+ratchet rc 0   pseudo-classes: geo_fails=0 paint=0.98303 discrete=0
+  rounded-corners: geo_fails=0 paint=0.98413 discrete=0
+  settings: geo_fails=243 paint=0.95061 discrete=0
+  shelf: geo_fails=0 paint=0.98398 discrete=0
+  specificity: geo_fails=0 paint=0.98075 discrete=0
+  sticky-scroll: geo_fails=16 paint=0.98265 discrete=0
+ 
+ratchet exit 2
+579s load=12.3
+ 
+CAMPSDONE

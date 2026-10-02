@@ -1,0 +1,212 @@
+{
+ "bare": {
+  "rect": [
+   10,
+   17,
+   33.796875,
+   21
+  ],
+  "font-family": "Arial",
+  "font-size": "13.3333px",
+  "line-height": "normal",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "helv": {
+  "rect": [
+   48.25,
+   17,
+   33.796875,
+   21
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "13.3333px",
+  "line-height": "normal",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "f13": {
+  "rect": [
+   86.5,
+   17,
+   33.34375,
+   22
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "13px",
+  "line-height": "16px",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "f13n": {
+  "rect": [
+   124.296875,
+   17,
+   33.34375,
+   21
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "13px",
+  "line-height": "normal",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "f20": {
+  "rect": [
+   162.09375,
+   11,
+   42.6875,
+   29
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "20px",
+  "line-height": "normal",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "lh30": {
+  "rect": [
+   209.234375,
+   10,
+   33.796875,
+   36
+  ],
+  "font-family": "Arial",
+  "font-size": "13.3333px",
+  "line-height": "30px",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "x-bare": {
+  "rect": [
+   10,
+   63.5,
+   33.796875,
+   21
+  ],
+  "font-family": "Arial",
+  "font-size": "13.3333px",
+  "line-height": "normal",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "x-helv": {
+  "rect": [
+   51.796875,
+   63.5,
+   33.796875,
+   21
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "13.3333px",
+  "line-height": "normal",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "x-f13": {
+  "rect": [
+   93.59375,
+   63,
+   33.34375,
+   22
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "13px",
+  "line-height": "16px",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "x-f13n": {
+  "rect": [
+   134.9375,
+   63.5,
+   33.34375,
+   21
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "13px",
+  "line-height": "normal",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "x-f20": {
+  "rect": [
+   176.28125,
+   59.5,
+   42.6875,
+   29
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "20px",
+  "line-height": "normal",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "x-lh30": {
+  "rect": [
+   226.96875,
+   56,
+   33.796875,
+   36
+  ],
+  "font-family": "Arial",
+  "font-size": "13.3333px",
+  "line-height": "30px",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "long": {
+  "rect": [
+   10,
+   102,
+   94.796875,
+   22
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "13px",
+  "line-height": "16px",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "in": {
+  "rect": [
+   109.25,
+   102,
+   33.34375,
+   21
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "13px",
+  "line-height": "normal",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ },
+ "sub": {
+  "rect": [
+   147.046875,
+   102,
+   56.46875,
+   21
+  ],
+  "font-family": "Helvetica, sans-serif",
+  "font-size": "13px",
+  "line-height": "normal",
+  "padding": "1px 6px",
+  "border-width": "2px",
+  "box-sizing": "border-box"
+ }
+}
