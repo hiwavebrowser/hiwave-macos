@@ -1,0 +1,1 @@
+On the branch: `cargo test -p rustkit-layout --lib` 602/602; `cargo test -p rustkit-engine --lib button_children_tests` 4/4. The whole engine suite was not run locally (other lanes were building; its GPU guard times out under load), so CI's `unit-suites` is its first full run.

@@ -1,0 +1,19 @@
+fix(engine): the background shorthand resets the colour it does not name
+
+`background` only ever set `background-color`, when the whole value
+parsed as a colour. It never cleared one, so `background: none`,
+`background: 0 0` (what minifiers write for `none`), an image alone, and
+`background: initial` / `unset` over an earlier colour all left that
+colour painted. Chrome 148 computes `rgba(0, 0, 0, 0)` after each.
+
+- The shorthand starts from a transparent colour (css-backgrounds-3
+  §3.10), then takes a colour from the value: the whole value, or one
+  top-level token beside an image (`#fff url(a.png) no-repeat`, which
+  was dropped before).
+- `background: initial` / `unset` clear the colour and the layers.
+- The legacy gradient field is cleared with the layers; paint falls back
+  to it, so `background: none` over a gradient kept the gradient.
+
+`background-image` is a longhand and still leaves the colour alone.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

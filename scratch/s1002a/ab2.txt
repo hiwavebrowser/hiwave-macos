@@ -1,0 +1,4 @@
+facebook     within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,B2  secs A,B,A,B 30,30,29,30
+netflix      within develop   4.82%  within fix   2.03%  across   4.69%   2.68%   5.00%   4.89%  failed: none  secs A,B,A,B 23,28,25,25
+github       within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,A2,B2  secs A,B,A,B 30,30,30,30
+cnn          within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,A2,B2  secs A,B,A,B 30,30,30,30

@@ -1,0 +1,19 @@
+fix(layout): button face and frame follow the style; an empty or input button's line
+
+Found on the fixture with the first commit's binary:
+
+- A `padding: 0; border: 0` button had the 1px stand-in frame painted
+  over its label. The border is in the style now, so a zero width means
+  the author removed it: no frame.
+- A button with no label has no line, so only its bottom padding and
+  border hang under the baseline (Chrome 148: a 16 x 6 box, its bottom 3
+  under the baseline). It hung a descent as well and pushed its line 3px.
+- Chrome computes `line-height: normal` for an `<input>` button even
+  under `font: 13px/16px`; a `<button>` with the same style computes
+  16px. The input was 1px taller than Chrome's.
+- ButtonFace and the frame's grey are in the UA arm, so an `<input>`
+  button is no longer the text field's white, and a button with element
+  children (a normal box, not the control leaf) has a face and a grey
+  frame instead of a bare 2px border in the text colour.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

@@ -1,0 +1,21 @@
+RustKit frames, develop / fix / develop / fix on each live URL at 1280x800 (`scratch/s1001g/ab.py` on the hub branch), with the campaign arms running on the same machine (load 12 to 14). "Across arms" is the share of pixels where any channel differs by more than 8. The movers were then scored with the board's own diff against the Chrome frames stored by the 2026-10-01 14:54 quiet board.
+
+```
+site         within develop  within fix  across arms              against Chrome: develop -> fix
+weather          0.00%         0.00%      0.83% (all four pairs)   30.53% -> 30.53%
+walmart          0.00%         0.00%      0.26% (all four pairs)   90.74% -> 90.73%
+squarespace        -           0.00%      1.94% (two pairs)        77.29% -> 77.29%
+google, youtube, wikipedia, lyft, reddit, x, microsoft, apple: 0.00% across arms (pixel-identical)
+shopify            -           0.00%      0.00% (one develop capture; the other timed out)
+facebook         0.00%           -        0.00% (three captures identical; the fourth timed out)
+linkedin         1.55%         1.55%      0.00% to 1.55% (its own variance)
+bing             0.24%         0.00%      0.00% to 0.24% (its own variance)
+yahoo            0.00%        19.15%      0.00% to 19.15% (its own variance: one fix capture is a different page)
+netflix          4.82%         2.03%      2.68% to 5.00% (its own variance: the hero rotates)
+github, cnn, instagram: not captured on either arm within the binary's 30 s, in two attempts
+```
+
+- **weather is a regression in paint, and it is why this PR is a draft.** Its "More" navigation button (a button with element children) now has the grey button face; Chrome's has none. The site removes the face with a `background` shorthand, and the engine's `background` arm only ever sets a colour, it never clears one. The board's diff does not move (30.53% on both arms, the page differs there anyway) and no check changes.
+- walmart: a band under its header moves by a few pixels. Both arms are 90% off Chrome.
+- squarespace: 1.94% across arms on the two pairs captured. I did not look at where.
+- No board check changes on any site.

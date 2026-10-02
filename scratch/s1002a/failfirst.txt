@@ -1,0 +1,32 @@
+== layout tests on develop
+test flex::tests::test_explicitly_sized_button_in_a_flex_row_keeps_its_size ... ok
+test tests::a_bare_buttons_min_content_keeps_the_ua_well ... ok
+test tests::a_flex_items_automatic_minimum_floors_a_button_at_its_widest_word ... ok
+test tests::a_buttons_min_content_is_its_widest_word_not_its_whole_label ... ok
+test tests::a_fixed_height_button_centres_its_line_about_the_baseline ... ok
+test tests::a_buttons_min_content_is_strictly_narrower_than_its_max_content ... ok
+test tests::an_explicit_pixel_width_wins_over_a_buttons_min_content ... ok
+test tests::a_nowrap_button_carries_its_whole_label_into_min_content ... ok
+test tests::a_flex_container_of_buttons_measures_the_buttons_and_the_gap ... ok
+test tests::a_button_is_its_label_and_line_inside_its_padding_and_border ... FAILED
+test tests::a_button_without_a_border_paints_no_frame ... FAILED
+test tests::a_reset_buttons_min_content_is_its_widest_word ... FAILED
+test tests::a_single_word_button_has_the_same_min_and_max_content ... ok
+test tests::test_styled_button_composes_its_font_line_with_author_padding ... ok
+test tests::buttons_on_one_line_share_the_baseline_of_their_labels ... FAILED
+thread 'tests::a_button_is_its_label_and_line_inside_its_padding_and_border' (16592033) panicked at crates/rustkit-layout/src/lib.rs:13215:9:
+reset width is the label (17.786015), got 41.786015
+thread 'tests::a_button_without_a_border_paints_no_frame' (16592034) panicked at crates/rustkit-layout/src/lib.rs:13319:9:
+thread 'tests::a_reset_buttons_min_content_is_its_widest_word' (16592041) panicked at crates/rustkit-layout/src/lib.rs:13147:9:
+a reset button's min-content is its widest word (46.836327), got 70.83633
+thread 'tests::buttons_on_one_line_share_the_baseline_of_their_labels' (16592216) panicked at crates/rustkit-layout/src/lib.rs:13274:13:
+collapse_path=false: the bare button sits 7 under the padded one's top, got 14
+test result: FAILED. 12 passed; 4 failed; 0 ignored; 0 measured; 587 filtered out; finished in 11.83s
+error: test failed, to rerun pass `-p rustkit-layout --lib`
+restored: True
+== engine test on develop
+test button_children_tests::a_push_button_has_chromes_default_box ... FAILED
+thread 'button_children_tests::a_push_button_has_chromes_default_box' (16595509) panicked at crates/rustkit-engine/src/lib.rs:16881:13:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 286 filtered out; finished in 14.97s
+error: test failed, to rerun pass `-p rustkit-engine --lib`
+restored: True

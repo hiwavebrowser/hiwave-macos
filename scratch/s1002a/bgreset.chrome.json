@@ -1,0 +1,145 @@
+{
+ "b0": {
+  "rect": [
+   10,
+   10,
+   44.171875,
+   21
+  ],
+  "background-color": "rgb(239, 239, 239)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b1": {
+  "rect": [
+   62.171875,
+   10,
+   45.65625,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b2": {
+  "rect": [
+   115.828125,
+   10,
+   34.53125,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b3": {
+  "rect": [
+   158.359375,
+   10,
+   64.15625,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b4": {
+  "rect": [
+   230.515625,
+   10,
+   53.0625,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b5": {
+  "rect": [
+   291.578125,
+   10,
+   57.484375,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b6": {
+  "rect": [
+   357.0625,
+   10,
+   48.609375,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b7": {
+  "rect": [
+   413.671875,
+   10,
+   16.015625,
+   20
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "0px",
+  "border-width": "0px"
+ },
+ "b8": {
+  "rect": [
+   429.6875,
+   10,
+   59.71875,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b9": {
+  "rect": [
+   497.40625,
+   10,
+   46.390625,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b10": {
+  "rect": [
+   551.796875,
+   10,
+   44.90625,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b11": {
+  "rect": [
+   604.703125,
+   10,
+   50.09375,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ },
+ "b12": {
+  "rect": [
+   662.796875,
+   10,
+   52.3125,
+   21
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "padding": "1px 6px",
+  "border-width": "2px"
+ }
+}

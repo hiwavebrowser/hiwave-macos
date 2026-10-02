@@ -1,0 +1,28 @@
+RATCHET tighten-eligible (21): about, article-typography, backgrounds, card-grid, chrome_rustkit, css-selectors, flex-positioning, form-controls, form-elements, gpu-gradient-regression, gradient-backgrounds, gradient-no-radius, gradient-radius-only, gradients, image-gallery, images-intrinsic, new_tab, rounded-corners, settings, shelf, sticky-scroll
+  (manual baseline-only PR — this script never writes during a run)
+RATCHET holds: 23 case(s) absolutely red, none worse than the committed floor:
+  about: geo_fails=60 paint=0.93940 discrete=0
+  article-typography: geo_fails=46 paint=0.93116 discrete=0
+  backgrounds: geo_fails=0 paint=0.97872 discrete=0
+  card-grid: geo_fails=0 paint=0.82911 discrete=0
+  chrome_rustkit: geo_fails=3 paint=0.96893 discrete=0
+  combinators: geo_fails=0 paint=0.97987 discrete=0
+  css-selectors: geo_fails=3 paint=0.94307 discrete=0
+  flex-positioning: geo_fails=0 paint=0.95756 discrete=0
+  form-controls: geo_fails=32 paint=0.95949 discrete=0
+  form-elements: geo_fails=47 paint=0.96461 discrete=0
+  gpu-gradient-regression: geo_fails=0 paint=0.98718 discrete=0
+  gradient-backgrounds: geo_fails=0 paint=0.98348 discrete=0
+  gradient-no-radius: geo_fails=0 paint=0.98537 discrete=0
+  gradient-radius-only: geo_fails=0 paint=0.98787 discrete=0
+  image-gallery: geo_fails=1 paint=0.98941 discrete=0
+  images-intrinsic: geo_fails=0 paint=0.98935 discrete=0
+  new_tab: geo_fails=6 paint=0.95134 discrete=0
+  pseudo-classes: geo_fails=0 paint=0.98303 discrete=0
+  rounded-corners: geo_fails=0 paint=0.98413 discrete=0
+  settings: geo_fails=243 paint=0.95061 discrete=0
+  shelf: geo_fails=0 paint=0.98398 discrete=0
+  specificity: geo_fails=0 paint=0.98075 discrete=0
+  sticky-scroll: geo_fails=16 paint=0.98265 discrete=0
+ 
+ratchet exit 2

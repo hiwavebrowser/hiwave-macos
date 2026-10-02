@@ -1,0 +1,23 @@
+fix(layout): a push button has Chrome's default box and its own line
+
+Chrome's UA sheet gives a button `padding: 1px 6px`, a 2px border,
+`box-sizing: border-box` and `line-height: normal`. The engine's default
+style gave it none of these, and layout stood in a fixed figure for a
+style with no padding or border: label + 24 wide, 19 tall. So a bare
+"Go" was 41.79 x 19 where Chrome 148 builds 33.80 x 21, a `padding: 0;
+border: 0` reset was still label + 24 (Chrome: the label alone, 17.80 x
+15), and `line-height` never reached the height (`line-height: 30px`:
+19 here, 36 in Chrome).
+
+- engine: `<button>` and `<input type=button|submit|reset>` get the
+  default padding, border and box-sizing in the UA arm, and do not take
+  the page's line-height unless the author says `inherit`.
+- layout: a button's intrinsic size is always its label and line inside
+  its padding and border; a button with no label has no line (16 x 6).
+- layout: the part of a button under its label's baseline counts its
+  bottom padding and border, so buttons of different padding on one
+  line share a baseline. They shared a bottom edge.
+
+Text fields and selects keep their calibrated sizes; they are next.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
