@@ -296,6 +296,40 @@ impl SubresourceReferrer {
     }
 }
 
+/// A raster image for `url`, fetched like every other subresource: through
+/// the resource loader, so the shield sees the request, it carries the
+/// Referer the document's policy allows, and the caller's deadline bounds
+/// it. The image manager only decodes and caches what arrives. A cached
+/// image or a `data:` URL needs no request.
+async fn fetch_raster_image(
+    loader: &ResourceLoader,
+    image_manager: &ImageManager,
+    referrer: &SubresourceReferrer,
+    url: Url,
+) -> Result<Arc<rustkit_image::LoadedImage>, rustkit_image::ImageError> {
+    use rustkit_image::ImageError;
+
+    if url.scheme() == "data" || image_manager.is_cached(&url) {
+        return image_manager.load(url).await;
+    }
+    let response = loader
+        .fetch(referrer.get_for(url.clone(), RequestDestination::Image))
+        .await
+        .map_err(|e| ImageError::FetchError(format!("{e} for {url}")))?;
+    if !response.ok() {
+        return Err(ImageError::FetchError(format!(
+            "HTTP {} for {}",
+            response.status, url
+        )));
+    }
+    let content_type = response.content_type.as_ref().map(|mime| mime.to_string());
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| ImageError::FetchError(format!("{e} for {url}")))?;
+    image_manager.insert_fetched(&url, content_type.as_deref(), &body)
+}
+
 struct ViewState {
     id: EngineViewId,
     viewhost_id: ViewId,
@@ -7829,10 +7863,15 @@ impl Engine {
         let mut pending = Vec::new();
         let mut svg_urls = Vec::new();
         let mut loaded = 0;
+        let mut requested = std::collections::HashSet::new();
         for (_src, url) in images {
             if image_manager.is_cached(&url) || self.svg_cache.contains_key(url.as_str()) {
                 debug!(%url, "Image already cached");
                 loaded += 1;
+                continue;
+            }
+            // One request per URL, however many elements show it.
+            if !requested.insert(url.clone()) {
                 continue;
             }
             // SVG is vector content: ImageManager's raster decode rejects it
@@ -7904,11 +7943,15 @@ impl Engine {
         // Each raster load is loaded (true), failed (false), or turned out to
         // be SVG by its type and parsed here for the SVG cache.
         type RasterOutcome = (bool, Option<(String, rustkit_svg::SvgDocument)>);
+        let loader = self.loader.clone();
+        let referrer = &referrer;
         let results: Vec<RasterOutcome> = futures::stream::iter(pending.into_iter().map(|url| {
             let image_manager = image_manager.clone();
+            let loader = loader.clone();
             async move {
-                info!(%url, "Loading image via ImageManager");
-                let Ok(loaded) = tokio::time::timeout_at(deadline, image_manager.load(url.clone())).await else {
+                info!(%url, "Loading image");
+                let load = fetch_raster_image(&loader, &image_manager, referrer, url.clone());
+                let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
                     warn!(%url, "Image over the subresource budget; rendering without it");
                     return (false, None);
                 };
@@ -11402,8 +11445,17 @@ impl Engine {
     pub async fn load_image(&self, view_id: EngineViewId, url: Url) -> Result<(), EngineError> {
         let image_manager = self.image_manager.clone();
         let event_tx = self.event_tx.clone();
+        let referrer = self.subresource_referrer(view_id);
 
-        match image_manager.load(url.clone()).await {
+        let load = fetch_raster_image(&self.loader, &image_manager, &referrer, url.clone());
+        let loaded = tokio::time::timeout_at(self.subresource_deadline(), load)
+            .await
+            .unwrap_or_else(|_| {
+                Err(rustkit_image::ImageError::FetchError(
+                    "over the subresource budget".into(),
+                ))
+            });
+        match loaded {
             Ok(image) => {
                 let _ = event_tx.send(EngineEvent::ImageLoaded {
                     view_id,
@@ -25936,6 +25988,124 @@ mod referrer_tests {
                 ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
             ]
         );
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod image_loader_routing_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    // 4x4 RGBA, every texel opaque red.
+    const RED_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0xa9, 0xf1, 0x9e, 0x7e, 0x00, 0x00, 0x00,
+        0x15, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0xf0,
+        0x9f, 0x01, 0x09, 0x30, 0x31, 0xa0, 0x01, 0xc2, 0x02, 0x00, 0x83, 0xd1,
+        0x02, 0x06, 0xb3, 0x4b, 0xd2, 0x9b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+        0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    const PAGE: &str = r#"<html><body>
+        <img src="/same.png"><img src="/same.png">
+        <img src="http://localhost:PORT/cross.png">
+        <img src="/tracker.png">
+        </body></html>"#;
+
+    type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    /// Serve `/page` as [`PAGE`], anything else as a PNG, and record each
+    /// image request's path and Referer.
+    fn recording_server() -> (u16, Seen) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        let html = PAGE.replace("PORT", &port.to_string());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let referer = head
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .find(|(k, _)| k.eq_ignore_ascii_case("referer"))
+                    .map(|(_, v)| v.trim().to_string());
+                let (ctype, body): (&str, &[u8]) = if path.starts_with("/page") {
+                    ("text/html", html.as_bytes())
+                } else {
+                    log.lock().unwrap().push((path, referer));
+                    ("image/png", RED_PNG)
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        (port, seen)
+    }
+
+    /// An `<img>` went out through the image manager's own HTTP client: no
+    /// Referer (hotlink-protected CDNs refuse that), and past the request
+    /// interceptor, so a blocked tracker pixel was fetched anyway.
+    #[test]
+    fn an_img_is_fetched_through_the_loader_with_its_referer_and_the_shield() {
+        let (port, seen) = recording_server();
+        let mut shield = rustkit_net::RequestInterceptor::new();
+        shield.block(rustkit_net::intercept::UrlPattern::contains("tracker"));
+        let mut engine =
+            Engine::with_interceptor(EngineConfig::default(), Some(shield)).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page?q=1#frag")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            engine.load_url(view, url).await.expect("load_url");
+            engine.load_subresources(view).await.expect("subresources");
+        });
+
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                ("/cross.png".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
+                ("/same.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
+            ],
+            "one request per image the shield allows, each with the policy's Referer; none for the blocked one"
+        );
+
+        let at = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+        assert_eq!(engine.get_image_dimensions(&at("/same.png")), Some((4, 4)));
+        assert!(!engine.is_image_cached(&at("/tracker.png")));
+    }
+
+    /// The image manager makes no request of its own: there is no second
+    /// way out for an image URL.
+    #[test]
+    fn the_image_manager_does_not_fetch() {
+        let (port, seen) = recording_server();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/direct.png")).unwrap();
+        let manager = ImageManager::new();
+        assert!(manager.load_blocking(url.clone()).is_err());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(rt.block_on(manager.load(url)).is_err());
+        assert!(seen.lock().unwrap().is_empty(), "{:?}", seen.lock().unwrap());
     }
 }
 
