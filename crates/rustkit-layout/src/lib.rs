@@ -2927,10 +2927,10 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        let is_button = matches!(
-            self.box_type,
-            BoxType::FormControl(FormControlType::Button { .. })
-        );
+        let (is_button, has_label) = match &self.box_type {
+            BoxType::FormControl(FormControlType::Button { label, .. }) => (true, !label.is_empty()),
+            _ => (false, true),
+        };
         // A button's line is the one its box was sized from.
         let line_height = if is_button {
             resolve_line_height(&self.style, font_size)
@@ -2984,6 +2984,13 @@ impl LayoutBox {
         } else {
             button_pb_bottom
         };
+        // A button with no label has no line: its baseline is the bottom of
+        // its (empty) content box, so only the padding and border hang
+        // (Chrome 148: a 16 x 6 empty button's bottom is 3 under the line's
+        // baseline).
+        if !has_label {
+            return spare_below;
+        }
         descent
             + half_leading
             + spare_below
@@ -8444,7 +8451,17 @@ impl DisplayList {
                     } else {
                         Color::new(180, 180, 180, 1.0)
                     },
-                    border_width,
+                    // A button's border is in its style (the UA default
+                    // is 2px), so a zero width is an author's `border: 0`:
+                    // no frame. The 1px stand-in was painted over the label
+                    // of a `padding: 0; border: 0` button.
+                    border_width: if layout_box.style.border_top_width.to_px(font_size, root_font_size, 0.0)
+                        > 0.0
+                    {
+                        border_width
+                    } else {
+                        0.0
+                    },
                     border_radius: 4.0,
                     pressed: false,
                     focused: false,
@@ -13275,7 +13292,7 @@ mod tests {
             padded.style.padding_right = Length::Px(16.0);
             let mut reset = ua_button("Go");
             reset_box(&mut reset);
-            row.children.extend([bare, padded, reset]);
+            row.children.extend([bare, padded, reset, ua_button("")]);
 
             if collapse_path {
                 let mut mc = MarginCollapseContext::new();
@@ -13296,7 +13313,42 @@ mod tests {
                 "{case}: the reset button sits 10 under the padded one's top, got {}",
                 top(2) - top(1)
             );
+            // No label, no line: the 16 x 6 box hangs its bottom padding
+            // and border under the baseline and nothing else. (0.12 of
+            // slack: the labelled buttons hang Arial's unrounded descent,
+            // 2.88, where Chrome's line uses the rounded 3.)
+            assert!(
+                (top(3) - top(1) - 19.0).abs() <= 0.15,
+                "{case}: the empty button sits 19 under the padded one's top, got {}",
+                top(3) - top(1)
+            );
         }
+    }
+
+    #[test]
+    fn a_button_without_a_border_paints_no_frame() {
+        // The frame is the stand-in for the UA border. `border: 0` takes the
+        // border away, and the frame was still painted, over the label of a
+        // `padding: 0; border: 0` button.
+        let frame = |b: &LayoutBox| {
+            DisplayList::build(b)
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    DisplayCommand::Button { border_width, .. } => Some(*border_width),
+                    _ => None,
+                })
+                .expect("a button command")
+        };
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 1280.0, 0.0);
+        let mut bare = ua_button("Go");
+        bare.layout(&cb);
+        assert_eq!(frame(&bare), 1.0, "a bare button keeps its frame");
+        let mut reset = ua_button("Go");
+        reset_box(&mut reset);
+        reset.layout(&cb);
+        assert_eq!(frame(&reset), 0.0, "a button with no border has no frame");
     }
 
     #[test]

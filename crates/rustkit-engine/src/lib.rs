@@ -3806,6 +3806,14 @@ impl Engine {
                         style.line_height = parent.line_height.clone();
                     }
                 }
+                // An `<input>` button's line is always `normal`: Chrome 148
+                // computes `line-height: normal` for `<input type=button
+                // style="font: 13px/16px Helvetica">` and builds it 21 tall,
+                // where the same style on a `<button>` computes 16px and
+                // builds 22.
+                if tag_lower == "input" && is_push_button(&tag_lower, attributes) {
+                    style.line_height = rustkit_css::LineHeight::Normal;
+                }
 
                 // Check for display: none
                 if style.display == rustkit_css::Display::None {
@@ -5138,6 +5146,16 @@ impl Engine {
                     style.border_bottom_width = rustkit_css::Length::Px(2.0);
                     style.border_left_width = rustkit_css::Length::Px(2.0);
                     style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+                    // ButtonFace, and the grey of Chrome's themed frame.
+                    // An `<input>` button got the text field's white, and a
+                    // button with element children (a normal box, not the
+                    // control leaf) got no fill at all.
+                    style.background_color = rustkit_css::Color::new(239, 239, 239, 1.0);
+                    let frame = rustkit_css::Color::new(118, 118, 118, 1.0);
+                    style.border_top_color = frame;
+                    style.border_right_color = frame;
+                    style.border_bottom_color = frame;
+                    style.border_left_color = frame;
                 }
             }
             "small" => {
@@ -16938,6 +16956,11 @@ mod button_children_tests {
                 "{case}: border"
             );
             assert_eq!(s.box_sizing, rustkit_css::BoxSizing::BorderBox, "{case}");
+            assert_eq!(
+                s.background_color,
+                rustkit_css::Color::new(239, 239, 239, 1.0),
+                "{case}: ButtonFace"
+            );
             assert!(
                 matches!(s.line_height, rustkit_css::LineHeight::Normal),
                 "{case}: the page's line-height does not reach a button, got {:?}",
@@ -16957,6 +16980,17 @@ mod button_children_tests {
         assert!(
             matches!(s.line_height, rustkit_css::LineHeight::Px(v) if v == 20.0),
             "line-height: inherit, got {:?}",
+            s.line_height
+        );
+
+        // An author's line-height reaches a `<button>` and never an
+        // `<input>` button (Chrome computes `normal` for it).
+        let s = control_style("button", &[], "button { line-height: 16px }");
+        assert!(matches!(s.line_height, rustkit_css::LineHeight::Px(v) if v == 16.0));
+        let s = control_style("input", &[("type", "button")], "input { line-height: 16px }");
+        assert!(
+            matches!(s.line_height, rustkit_css::LineHeight::Normal),
+            "an input button's line is normal, got {:?}",
             s.line_height
         );
 
