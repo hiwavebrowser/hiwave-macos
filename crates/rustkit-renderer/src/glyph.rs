@@ -99,7 +99,13 @@ pub fn rasterize_run_glyph(
         // DirectWrite faces are size-independent: the face recorded for the
         // run is drawn at the key's size.
         let _ = shaped_size;
-        let face = rustkit_text::face_by_id(key.face)?;
+        let Some(face) = rustkit_text::face_by_id(key.face) else {
+            // Loud, not silent: layout recorded this id when it shaped the run, so a
+            // miss means the table was bounded out or an id was made up. The caller
+            // still paints the command through the family-list path (no crash).
+            tracing::error!(face = key.face, glyph = key.glyph_id, "shaped run names a face the rasterizer does not hold");
+            return None;
+        };
         rasterize_face_glyph(face.raw(), key.glyph_id, key.raster_size(), false, true)
     }
     #[cfg(not(any(target_os = "macos", windows)))]
