@@ -160,6 +160,12 @@ use rustkit_layout::{
 };
 use std::borrow::Cow;
 use std::cell::Cell;
+mod script_net;
+#[cfg(test)]
+mod script_net_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_net_engine_tests;
+use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
 pub use rustkit_renderer::RenderStats;
@@ -437,6 +443,16 @@ pub struct EngineConfig {
     /// network client's own timeout (30s) equals the real-site board's
     /// whole capture budget, so one stalled stylesheet used to blank the page.
     pub subresource_budget_ms: u64,
+    /// Register the script-network bridge on pages loaded from a URL, so
+    /// the page's `XMLHttpRequest`/`fetch` (built on the bridge) can reach
+    /// the network, always under the page's `FetchPolicy`. Off: those
+    /// names do not exist on the page at all.
+    pub script_network_enabled: bool,
+    /// Rounds of take-requests / fetch / deliver the engine runs after the
+    /// page's scripts and after each lifecycle step. A response handler can
+    /// start more requests; whatever is still pending after the last round
+    /// completes with a network error.
+    pub script_network_rounds: u32,
 }
 
 impl Default for EngineConfig {
@@ -451,6 +467,8 @@ impl Default for EngineConfig {
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 10_000_000,
             subresource_budget_ms: 8_000,
+            script_network_enabled: true,
+            script_network_rounds: 8,
         }
     }
 }
@@ -1947,15 +1965,18 @@ impl Engine {
     ///
     /// The document is fully parsed before any script runs, so a script
     /// sees the whole tree rather than the part above it.
-    fn run_page_scripts(
+    async fn run_page_scripts(
         &mut self,
         id: EngineViewId,
         fetched: Vec<FetchedScript>,
         budget: std::time::Duration,
+        policy: Option<Arc<FetchPolicy>>,
     ) {
         let started = std::time::Instant::now();
         let horizon_ms = self.config.timer_horizon_ms;
         let loop_limit = self.config.script_loop_iteration_limit;
+        let net_rounds = self.config.script_network_rounds;
+        let loader = self.loader.clone();
         let Some(view) = self.views.get_mut(&id) else { return };
         let Some(bindings) = view.bindings.as_ref() else { return };
         let log = &mut view.script_log;
@@ -2050,6 +2071,53 @@ impl Engine {
             return;
         }
 
+        // What the scripts asked of the network, answered before the
+        // lifecycle events fire (a handler can start more; see the rounds).
+        // Delivery only: the timers run in their own step below.
+        let pump = |timers: Option<(u64, u32)>| {
+            let policy = policy.clone();
+            let loader = loader.clone();
+            async move {
+                match policy {
+                    Some(policy) => {
+                        let remaining = budget.saturating_sub(started.elapsed());
+                        Some(
+                            script_net::pump(
+                                bindings,
+                                &policy,
+                                &loader,
+                                tokio::time::Instant::now() + remaining,
+                                net_rounds,
+                                timers,
+                            )
+                            .await,
+                        )
+                    }
+                    None => None,
+                }
+            }
+        };
+        let after_scripts = pump(None).await;
+        if let Some(found) = after_scripts {
+            if found.poisoned {
+                log.push(ScriptRecord {
+                    source: "network".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw("JS engine panic".into()),
+                });
+                return;
+            }
+            for message in found.threw {
+                log.push(ScriptRecord {
+                    source: "network".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                });
+            }
+        }
+
         // Lifecycle events and timers. Listener/callback exceptions are
         // caught in JS and drained after each step.
         let steps: [(&str, &dyn Fn() -> Result<(), String>); 3] = [
@@ -2085,6 +2153,28 @@ impl Engine {
             }
             if poisoned.get() {
                 return;
+            }
+            // The step's requests are answered now; after the timers step,
+            // each round also runs the timers the responses scheduled.
+            let timers = (source == "timers").then_some((horizon_ms, MAX_TIMER_CALLBACKS));
+            if let Some(found) = pump(timers).await {
+                for message in found.threw {
+                    log.push(ScriptRecord {
+                        source: "network".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(message),
+                    });
+                }
+                if found.poisoned {
+                    log.push(ScriptRecord {
+                        source: "network".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw("JS engine panic".into()),
+                    });
+                    return;
+                }
             }
             for message in bindings.take_reported_errors() {
                 log.push(ScriptRecord {
@@ -2238,6 +2328,7 @@ impl Engine {
         view.script_log.clear();
 
         // Initialize JavaScript if enabled
+        let mut script_policy: Option<Arc<FetchPolicy>> = None;
         if self.config.javascript_enabled {
             let js_runtime = JsRuntime::new().map_err(|e| EngineError::JsError(e.to_string()))?;
 
@@ -2261,6 +2352,16 @@ impl Engine {
                 bindings
                     .set_dimensions(width as f64, height as f64)
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
+            }
+
+            // The script-network bridge exists only with a policy to
+            // answer it: one per document, owning its request counters and
+            // preflight cache. A page with no URL (load_html) has neither.
+            if self.config.script_network_enabled {
+                bindings
+                    .enable_net_bridge()
+                    .map_err(|e| EngineError::JsError(e.to_string()))?;
+                script_policy = Some(Arc::new(FetchPolicy::for_page(url.clone(), None)));
             }
 
             let view = self
@@ -2377,7 +2478,7 @@ impl Engine {
                 std::time::Duration::from_millis(self.config.script_budget_ms)
                     .saturating_sub(fetch_done.saturating_duration_since(subresources_done))
             };
-            self.run_page_scripts(id, fetched, budget);
+            self.run_page_scripts(id, fetched, budget, script_policy).await;
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
