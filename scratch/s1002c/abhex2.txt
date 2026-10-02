@@ -1,0 +1,7 @@
+x            within develop    nan%  within fix   0.00%  across   0.00%   0.00%    nan%    nan%  failed: A2  secs A,B,A,B 10,10,7,13
+linkedin     within develop   2.96%  within fix   2.64%  across   2.64%   0.00%   1.55%   2.96%  failed: none  secs A,B,A,B 10,14,12,14
+yahoo        within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 26,22,22,22
+bing         within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 8,5,7,7
+apple        within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 23,23,23,21
+netflix      within develop   4.86%  within fix  12.51%  across  12.53%   2.66%  12.70%   4.81%  failed: none  secs A,B,A,B 23,23,26,24
+shopify      within develop   0.00%  within fix   0.00%  across   0.05%   0.05%   0.05%   0.05%  failed: none  secs A,B,A,B 23,27,23,24

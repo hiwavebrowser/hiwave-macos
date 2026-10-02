@@ -1,0 +1,3305 @@
+{
+  "timestamp": "2026-10-02T07:41:35.516641",
+  "scope": "builtins",
+  "iterations": 1,
+  "max_variance": 0.1,
+  "passed": 5,
+  "failed": 0,
+  "results": [
+    {
+      "case_id": "new_tab",
+      "type": "builtins",
+      "threshold": 15,
+      "pixel": {
+        "diffPixels": 11283,
+        "totalPixels": 1024000,
+        "diffPercent": 1.10185546875,
+        "width": 1280,
+        "height": 800,
+        "diffPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/new_tab/run-1/diff.png",
+        "heatmapPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/new_tab/run-1/heatmap.png",
+        "overlayPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/new_tab/run-1/overlay.png",
+        "attribution": {
+          "total_diff_pixels": 1024000,
+          "unattributed_diff_pixels": 0,
+          "top_contributors": [
+            {
+              "selector": "html > body",
+              "tag": "body",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1280,
+                "height": 800
+              },
+              "diff_pixels": 482330,
+              "contribution_percent": 47.1025390625,
+              "element_diff_percent": 47.1025390625,
+              "corner_ratio": 0.0011942031389297783,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 340,
+                "y": 33.5,
+                "width": 600,
+                "height": 733
+              },
+              "diff_pixels": 155864,
+              "contribution_percent": 15.22109375,
+              "element_diff_percent": 35.43974533879036,
+              "corner_ratio": 0.0038495098290817634,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.ambient-glow:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 240,
+                "y": -400,
+                "width": 800,
+                "height": 800
+              },
+              "diff_pixels": 99800,
+              "contribution_percent": 9.74609375,
+              "element_diff_percent": 15.59375,
+              "corner_ratio": 0.0028857715430861725,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 334.5,
+                "width": 536,
+                "height": 400
+              },
+              "diff_pixels": 36240,
+              "contribution_percent": 3.5390625,
+              "element_diff_percent": 16.902985074626866,
+              "corner_ratio": 0,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.search-container:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 390,
+                "y": 195.5,
+                "width": 500,
+                "height": 52
+              },
+              "diff_pixels": 26000,
+              "contribution_percent": 2.5390625,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.023076923076923078,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 295.5,
+                "width": 536,
+                "height": 439
+              },
+              "diff_pixels": 12864,
+              "contribution_percent": 1.25625,
+              "element_diff_percent": 5.466970387243736,
+              "corner_ratio": 0,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.logo-wrapper:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 532.59375,
+                "y": 65.5,
+                "width": 214.796875,
+                "height": 56
+              },
+              "diff_pixels": 11984,
+              "contribution_percent": 1.1703125,
+              "element_diff_percent": 99.62900996581072,
+              "corner_ratio": 0.050066755674232306,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 646,
+                "y": 334.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 11944,
+              "contribution_percent": 1.16640625,
+              "element_diff_percent": 75.9796437659033,
+              "corner_ratio": 0.05023442732752847,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 406.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 11944,
+              "contribution_percent": 1.16640625,
+              "element_diff_percent": 75.9796437659033,
+              "corner_ratio": 0.05023442732752847,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8)",
+              "tag": "div",
+              "rect": {
+                "x": 646,
+                "y": 550.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 11779,
+              "contribution_percent": 1.15029296875,
+              "element_diff_percent": 74.93002544529263,
+              "corner_ratio": 0.050938110196111726,
+              "likely_cause": "text_metrics"
+            }
+          ],
+          "all_elements": [
+            {
+              "selector": "html > body",
+              "tag": "body",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1280,
+                "height": 800
+              },
+              "diff_pixels": 482330,
+              "contribution_percent": 47.1025390625,
+              "element_diff_percent": 47.1025390625,
+              "corner_ratio": 0.0011942031389297783,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 340,
+                "y": 33.5,
+                "width": 600,
+                "height": 733
+              },
+              "diff_pixels": 155864,
+              "contribution_percent": 15.22109375,
+              "element_diff_percent": 35.43974533879036,
+              "corner_ratio": 0.0038495098290817634,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.ambient-glow:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 240,
+                "y": -400,
+                "width": 800,
+                "height": 800
+              },
+              "diff_pixels": 99800,
+              "contribution_percent": 9.74609375,
+              "element_diff_percent": 15.59375,
+              "corner_ratio": 0.0028857715430861725,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 334.5,
+                "width": 536,
+                "height": 400
+              },
+              "diff_pixels": 36240,
+              "contribution_percent": 3.5390625,
+              "element_diff_percent": 16.902985074626866,
+              "corner_ratio": 0,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.search-container:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 390,
+                "y": 195.5,
+                "width": 500,
+                "height": 52
+              },
+              "diff_pixels": 26000,
+              "contribution_percent": 2.5390625,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.023076923076923078,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 295.5,
+                "width": 536,
+                "height": 439
+              },
+              "diff_pixels": 12864,
+              "contribution_percent": 1.25625,
+              "element_diff_percent": 5.466970387243736,
+              "corner_ratio": 0,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.logo-wrapper:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 532.59375,
+                "y": 65.5,
+                "width": 214.796875,
+                "height": 56
+              },
+              "diff_pixels": 11984,
+              "contribution_percent": 1.1703125,
+              "element_diff_percent": 99.62900996581072,
+              "corner_ratio": 0.050066755674232306,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 646,
+                "y": 334.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 11944,
+              "contribution_percent": 1.16640625,
+              "element_diff_percent": 75.9796437659033,
+              "corner_ratio": 0.05023442732752847,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 406.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 11944,
+              "contribution_percent": 1.16640625,
+              "element_diff_percent": 75.9796437659033,
+              "corner_ratio": 0.05023442732752847,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8)",
+              "tag": "div",
+              "rect": {
+                "x": 646,
+                "y": 550.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 11779,
+              "contribution_percent": 1.15029296875,
+              "element_diff_percent": 74.93002544529263,
+              "corner_ratio": 0.050938110196111726,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4)",
+              "tag": "div",
+              "rect": {
+                "x": 646,
+                "y": 406.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 11166,
+              "contribution_percent": 1.0904296875000001,
+              "element_diff_percent": 71.03053435114504,
+              "corner_ratio": 0.05373455131649651
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 478.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 10856,
+              "contribution_percent": 1.06015625,
+              "element_diff_percent": 69.05852417302799,
+              "corner_ratio": 0.0552689756816507
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6)",
+              "tag": "div",
+              "rect": {
+                "x": 646,
+                "y": 478.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 10856,
+              "contribution_percent": 1.06015625,
+              "element_diff_percent": 69.05852417302799,
+              "corner_ratio": 0.0552689756816507
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 550.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 10856,
+              "contribution_percent": 1.06015625,
+              "element_diff_percent": 69.05852417302799,
+              "corner_ratio": 0.0552689756816507
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 334.5,
+                "width": 262,
+                "height": 60
+              },
+              "diff_pixels": 10754,
+              "contribution_percent": 1.0501953124999999,
+              "element_diff_percent": 68.40966921119593,
+              "corner_ratio": 0.055793193230425885
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > p.tagline",
+              "tag": "p",
+              "rect": {
+                "x": 372,
+                "y": 129.5,
+                "width": 536,
+                "height": 18
+              },
+              "diff_pixels": 9648,
+              "contribution_percent": 0.9421875,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.04477611940298507
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10)",
+              "tag": "div",
+              "rect": {
+                "x": 646,
+                "y": 622.5,
+                "width": 262,
+                "height": 50
+              },
+              "diff_pixels": 9159,
+              "contribution_percent": 0.8944335937500001,
+              "element_diff_percent": 69.91603053435115,
+              "corner_ratio": 0.06550933508024893
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 684.5,
+                "width": 262,
+                "height": 50
+              },
+              "diff_pixels": 9159,
+              "contribution_percent": 0.8944335937500001,
+              "element_diff_percent": 69.91603053435115,
+              "corner_ratio": 0.06550933508024893
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 622.5,
+                "width": 262,
+                "height": 50
+              },
+              "diff_pixels": 9110,
+              "contribution_percent": 0.8896484375,
+              "element_diff_percent": 69.54198473282443,
+              "corner_ratio": 0.06586169045005488
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(12)",
+              "tag": "div",
+              "rect": {
+                "x": 646,
+                "y": 684.5,
+                "width": 262,
+                "height": 50
+              },
+              "diff_pixels": 9080,
+              "contribution_percent": 0.88671875,
+              "element_diff_percent": 69.31297709923663,
+              "corner_ratio": 0.06607929515418502
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts-title:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 372,
+                "y": 295.5,
+                "width": 536,
+                "height": 15
+              },
+              "diff_pixels": 8040,
+              "contribution_percent": 0.7851562499999999,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.04477611940298507
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(12) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 710.609375,
+                "y": 701,
+                "width": 180.390625,
+                "height": 17
+              },
+              "diff_pixels": 3060,
+              "contribution_percent": 0.298828125,
+              "element_diff_percent": 99.78345604157643,
+              "corner_ratio": 0.13333333333333333
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 553.421875,
+                "y": 347.5,
+                "width": 66.109375,
+                "height": 34
+              },
+              "diff_pixels": 2278,
+              "contribution_percent": 0.2224609375,
+              "element_diff_percent": 101.34719924367761,
+              "corner_ratio": 0.2633889376646181
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 553.421875,
+                "y": 491.5,
+                "width": 63.578125,
+                "height": 34
+              },
+              "diff_pixels": 2176,
+              "contribution_percent": 0.21250000000000002,
+              "element_diff_percent": 100.66355369869746,
+              "corner_ratio": 0.2757352941176471
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 827.421875,
+                "y": 491.5,
+                "width": 63.578125,
+                "height": 34
+              },
+              "diff_pixels": 2176,
+              "contribution_percent": 0.21250000000000002,
+              "element_diff_percent": 100.66355369869746,
+              "corner_ratio": 0.2757352941176471
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 553.421875,
+                "y": 563.5,
+                "width": 63.578125,
+                "height": 34
+              },
+              "diff_pixels": 2176,
+              "contribution_percent": 0.21250000000000002,
+              "element_diff_percent": 100.66355369869746,
+              "corner_ratio": 0.2757352941176471
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 782.09375,
+                "y": 572,
+                "width": 108.90625,
+                "height": 17
+              },
+              "diff_pixels": 1853,
+              "contribution_percent": 0.18095703125,
+              "element_diff_percent": 100.08608321377332,
+              "corner_ratio": 0.22018348623853212
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 782.09375,
+                "y": 639,
+                "width": 108.90625,
+                "height": 17
+              },
+              "diff_pixels": 1853,
+              "contribution_percent": 0.18095703125,
+              "element_diff_percent": 100.08608321377332,
+              "corner_ratio": 0.22018348623853212
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 508.09375,
+                "y": 701,
+                "width": 108.90625,
+                "height": 17
+              },
+              "diff_pixels": 1853,
+              "contribution_percent": 0.18095703125,
+              "element_diff_percent": 100.08608321377332,
+              "corner_ratio": 0.22018348623853212
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 515.296875,
+                "y": 639,
+                "width": 101.703125,
+                "height": 17
+              },
+              "diff_pixels": 1734,
+              "contribution_percent": 0.1693359375,
+              "element_diff_percent": 100.29190351820556,
+              "corner_ratio": 0.23529411764705882
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 846.375,
+                "y": 419.5,
+                "width": 44.625,
+                "height": 34
+              },
+              "diff_pixels": 1530,
+              "contribution_percent": 0.1494140625,
+              "element_diff_percent": 100.84033613445378,
+              "corner_ratio": 0.39215686274509803
+            },
+            {
+              "selector": "body > div.footer:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 571.203125,
+                "y": 769,
+                "width": 137.59375,
+                "height": 15
+              },
+              "diff_pixels": 1365,
+              "contribution_percent": 0.13330078125,
+              "element_diff_percent": 66.13672496025437,
+              "corner_ratio": 0.13186813186813187
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 734.484375,
+                "y": 424.5,
+                "width": 54.015625,
+                "height": 24
+              },
+              "diff_pixels": 1296,
+              "contribution_percent": 0.1265625,
+              "element_diff_percent": 99.97107318484235,
+              "corner_ratio": 0.4444444444444444
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 453.28125,
+                "y": 635.5,
+                "width": 54.015625,
+                "height": 24
+              },
+              "diff_pixels": 1296,
+              "contribution_percent": 0.1265625,
+              "element_diff_percent": 99.97107318484235,
+              "corner_ratio": 0.4444444444444444
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 389,
+                "y": 352.5,
+                "width": 46.8125,
+                "height": 24
+              },
+              "diff_pixels": 1128,
+              "contribution_percent": 0.11015624999999998,
+              "element_diff_percent": 100.40053404539387,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 663,
+                "y": 352.5,
+                "width": 46.8125,
+                "height": 24
+              },
+              "diff_pixels": 1128,
+              "contribution_percent": 0.11015624999999998,
+              "element_diff_percent": 100.40053404539387,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 389,
+                "y": 424.5,
+                "width": 46.8125,
+                "height": 24
+              },
+              "diff_pixels": 1128,
+              "contribution_percent": 0.11015624999999998,
+              "element_diff_percent": 100.40053404539387,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 663,
+                "y": 424.5,
+                "width": 46.8125,
+                "height": 24
+              },
+              "diff_pixels": 1128,
+              "contribution_percent": 0.11015624999999998,
+              "element_diff_percent": 100.40053404539387,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 389,
+                "y": 496.5,
+                "width": 46.8125,
+                "height": 24
+              },
+              "diff_pixels": 1128,
+              "contribution_percent": 0.11015624999999998,
+              "element_diff_percent": 100.40053404539387,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 663,
+                "y": 496.5,
+                "width": 46.8125,
+                "height": 24
+              },
+              "diff_pixels": 1128,
+              "contribution_percent": 0.11015624999999998,
+              "element_diff_percent": 100.40053404539387,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 389,
+                "y": 568.5,
+                "width": 46.8125,
+                "height": 24
+              },
+              "diff_pixels": 1128,
+              "contribution_percent": 0.11015624999999998,
+              "element_diff_percent": 100.40053404539387,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 727.28125,
+                "y": 568.5,
+                "width": 46.8125,
+                "height": 24
+              },
+              "diff_pixels": 1128,
+              "contribution_percent": 0.11015624999999998,
+              "element_diff_percent": 100.40053404539387,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 727.28125,
+                "y": 635.5,
+                "width": 46.8125,
+                "height": 24
+              },
+              "diff_pixels": 1128,
+              "contribution_percent": 0.11015624999999998,
+              "element_diff_percent": 100.40053404539387,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 389,
+                "y": 697.5,
+                "width": 46.8125,
+                "height": 24
+              },
+              "diff_pixels": 1128,
+              "contribution_percent": 0.11015624999999998,
+              "element_diff_percent": 100.40053404539387,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 827.421875,
+                "y": 356,
+                "width": 63.578125,
+                "height": 17
+              },
+              "diff_pixels": 1088,
+              "contribution_percent": 0.10625000000000001,
+              "element_diff_percent": 100.66355369869746,
+              "corner_ratio": 0.375
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > span.shortcut-label",
+              "tag": "span",
+              "rect": {
+                "x": 553.421875,
+                "y": 428,
+                "width": 63.578125,
+                "height": 17
+              },
+              "diff_pixels": 1088,
+              "contribution_percent": 0.10625000000000001,
+              "element_diff_percent": 100.66355369869746,
+              "corner_ratio": 0.375
+            },
+            {
+              "selector": "#searchInput",
+              "tag": "input",
+              "rect": {
+                "x": 390,
+                "y": 193.5,
+                "width": 500,
+                "height": 52
+              },
+              "diff_pixels": 1000,
+              "contribution_percent": 0.09765625,
+              "element_diff_percent": 3.8461538461538463,
+              "corner_ratio": 0.048
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 455.9375,
+                "y": 352.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 729.9375,
+                "y": 352.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 455.9375,
+                "y": 424.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 455.9375,
+                "y": 496.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 729.9375,
+                "y": 496.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 455.9375,
+                "y": 568.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 663,
+                "y": 568.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 389,
+                "y": 635.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10) > kbd:nth-of-type(1)",
+              "tag": "kbd",
+              "rect": {
+                "x": 663,
+                "y": 635.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11) > kbd:nth-of-type(2)",
+              "tag": "kbd",
+              "rect": {
+                "x": 460.484375,
+                "y": 697.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(12) > kbd",
+              "tag": "kbd",
+              "rect": {
+                "x": 663,
+                "y": 697.5,
+                "width": 39.609375,
+                "height": 24
+              },
+              "diff_pixels": 960,
+              "contribution_percent": 0.09375,
+              "element_diff_percent": 100.9861932938856,
+              "corner_ratio": 0.6
+            },
+            {
+              "selector": "body > div.footer:nth-of-type(3) > a",
+              "tag": "a",
+              "rect": {
+                "x": 662.015625,
+                "y": 769,
+                "width": 46.78125,
+                "height": 15
+              },
+              "diff_pixels": 705,
+              "contribution_percent": 0.06884765625,
+              "element_diff_percent": 100.46760187040749,
+              "corner_ratio": 0.5106382978723404
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > kbd:nth-of-type(3)",
+              "tag": "kbd",
+              "rect": {
+                "x": 520.21875,
+                "y": 352.5,
+                "width": 25.203125,
+                "height": 24
+              },
+              "diff_pixels": 600,
+              "contribution_percent": 0.05859375,
+              "element_diff_percent": 99.19404835709858,
+              "corner_ratio": 0.96
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > kbd:nth-of-type(3)",
+              "tag": "kbd",
+              "rect": {
+                "x": 794.21875,
+                "y": 352.5,
+                "width": 25.203125,
+                "height": 24
+              },
+              "diff_pixels": 600,
+              "contribution_percent": 0.05859375,
+              "element_diff_percent": 99.19404835709858,
+              "corner_ratio": 0.96
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > kbd:nth-of-type(3)",
+              "tag": "kbd",
+              "rect": {
+                "x": 520.21875,
+                "y": 424.5,
+                "width": 25.203125,
+                "height": 24
+              },
+              "diff_pixels": 600,
+              "contribution_percent": 0.05859375,
+              "element_diff_percent": 99.19404835709858,
+              "corner_ratio": 0.96
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > kbd:nth-of-type(3)",
+              "tag": "kbd",
+              "rect": {
+                "x": 813.171875,
+                "y": 424.5,
+                "width": 25.203125,
+                "height": 24
+              },
+              "diff_pixels": 600,
+              "contribution_percent": 0.05859375,
+              "element_diff_percent": 99.19404835709858,
+              "corner_ratio": 0.96
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > kbd:nth-of-type(3)",
+              "tag": "kbd",
+              "rect": {
+                "x": 520.21875,
+                "y": 496.5,
+                "width": 25.203125,
+                "height": 24
+              },
+              "diff_pixels": 600,
+              "contribution_percent": 0.05859375,
+              "element_diff_percent": 99.19404835709858,
+              "corner_ratio": 0.96
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > kbd:nth-of-type(3)",
+              "tag": "kbd",
+              "rect": {
+                "x": 794.21875,
+                "y": 496.5,
+                "width": 25.203125,
+                "height": 24
+              },
+              "diff_pixels": 600,
+              "contribution_percent": 0.05859375,
+              "element_diff_percent": 99.19404835709858,
+              "corner_ratio": 0.96
+            },
+            {
+              "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > kbd:nth-of-type(3)",
+              "tag": "kbd",
+              "rect": {
+                "x": 520.21875,
+                "y": 568.5,
+                "width": 25.203125,
+                "height": 24
+              },
+              "diff_pixels": 600,
+              "contribution_percent": 0.05859375,
+              "element_diff_percent": 99.19404835709858,
+              "corner_ratio": 0.96
+            }
+          ]
+        },
+        "taxonomy": {
+          "text_metrics": 74.31142578124997,
+          "gradient_interpolation": 9.74609375
+        }
+      },
+      "styles": {
+        "error": "RustKit styles not found",
+        "matched": 0,
+        "mismatched": 0
+      },
+      "rects": {
+        "matched": 0,
+        "mismatched": 67,
+        "differences": []
+      },
+      "passed": true,
+      "pixel_runs": [
+        1.10185546875
+      ],
+      "diff_pct_median": 1.10185546875,
+      "diff_pct_min": 1.10185546875,
+      "diff_pct_max": 1.10185546875,
+      "diff_pct_variance": 0.0,
+      "measured_runs": 1,
+      "stable": false,
+      "diff_pct": 1.10185546875
+    },
+    {
+      "case_id": "about",
+      "type": "builtins",
+      "threshold": 15,
+      "pixel": {
+        "diffPixels": 17636,
+        "totalPixels": 480000,
+        "diffPercent": 3.6741666666666664,
+        "width": 800,
+        "height": 600,
+        "diffPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/about/run-1/diff.png",
+        "heatmapPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/about/run-1/heatmap.png",
+        "overlayPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/about/run-1/overlay.png",
+        "attribution": {
+          "total_diff_pixels": 480000,
+          "unattributed_diff_pixels": 0,
+          "top_contributors": [
+            {
+              "selector": "html > body",
+              "tag": "body",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 800,
+                "height": 600
+              },
+              "diff_pixels": 173568,
+              "contribution_percent": 36.16,
+              "element_diff_percent": 36.16,
+              "corner_ratio": 0.00331858407079646,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 64,
+                "y": 360,
+                "width": 672,
+                "height": 321.3125
+              },
+              "diff_pixels": 58650,
+              "contribution_percent": 12.21875,
+              "element_diff_percent": 27.162586489565676,
+              "corner_ratio": 0.004910485933503836,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.hero:nth-of-type(1) > h1.logo",
+              "tag": "h1",
+              "rect": {
+                "x": 64,
+                "y": 48,
+                "width": 672,
+                "height": 76
+              },
+              "diff_pixels": 51072,
+              "contribution_percent": 10.639999999999999,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.011278195488721804,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3) > p:nth-of-type(2)",
+              "tag": "p",
+              "rect": {
+                "x": 89,
+                "y": 469.1875,
+                "width": 622,
+                "height": 54.375
+              },
+              "diff_pixels": 34210,
+              "contribution_percent": 7.127083333333334,
+              "element_diff_percent": 101.14942528735634,
+              "corner_ratio": 0.01683718211049401,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3) > p:nth-of-type(3)",
+              "tag": "p",
+              "rect": {
+                "x": 89,
+                "y": 535.5625,
+                "width": 622,
+                "height": 54.375
+              },
+              "diff_pixels": 33588,
+              "contribution_percent": 6.9975,
+              "element_diff_percent": 99.3103448275862,
+              "corner_ratio": 0.01714898177920686,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.hero:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 64,
+                "y": 48,
+                "width": 672,
+                "height": 150
+              },
+              "diff_pixels": 31464,
+              "contribution_percent": 6.555,
+              "element_diff_percent": 31.214285714285715,
+              "corner_ratio": 0.009153318077803204,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 64,
+                "y": 246,
+                "width": 672,
+                "height": 66
+              },
+              "diff_pixels": 27752,
+              "contribution_percent": 5.781666666666667,
+              "element_diff_percent": 62.572150072150066,
+              "corner_ratio": 0.020755260882098586,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3) > h2.card-title",
+              "tag": "h2",
+              "rect": {
+                "x": 89,
+                "y": 385,
+                "width": 622,
+                "height": 29
+              },
+              "diff_pixels": 17400,
+              "contribution_percent": 3.6249999999999996,
+              "element_diff_percent": 96.46302250803859,
+              "corner_ratio": 0.016551724137931035,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3) > p:nth-of-type(1)",
+              "tag": "p",
+              "rect": {
+                "x": 89,
+                "y": 430,
+                "width": 622,
+                "height": 27.1875
+              },
+              "diff_pixels": 16794,
+              "contribution_percent": 3.49875,
+              "element_diff_percent": 99.3103448275862,
+              "corner_ratio": 0.03429796355841372,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div:nth-of-type(2) > a.sponsor-btn",
+              "tag": "a",
+              "rect": {
+                "x": 233.875,
+                "y": 262,
+                "width": 332.25,
+                "height": 50
+              },
+              "diff_pixels": 16600,
+              "contribution_percent": 3.4583333333333335,
+              "element_diff_percent": 99.9247554552295,
+              "corner_ratio": 0.03469879518072289,
+              "likely_cause": "gradient_interpolation"
+            }
+          ],
+          "all_elements": [
+            {
+              "selector": "html > body",
+              "tag": "body",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 800,
+                "height": 600
+              },
+              "diff_pixels": 173568,
+              "contribution_percent": 36.16,
+              "element_diff_percent": 36.16,
+              "corner_ratio": 0.00331858407079646,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 64,
+                "y": 360,
+                "width": 672,
+                "height": 321.3125
+              },
+              "diff_pixels": 58650,
+              "contribution_percent": 12.21875,
+              "element_diff_percent": 27.162586489565676,
+              "corner_ratio": 0.004910485933503836,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.hero:nth-of-type(1) > h1.logo",
+              "tag": "h1",
+              "rect": {
+                "x": 64,
+                "y": 48,
+                "width": 672,
+                "height": 76
+              },
+              "diff_pixels": 51072,
+              "contribution_percent": 10.639999999999999,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.011278195488721804,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3) > p:nth-of-type(2)",
+              "tag": "p",
+              "rect": {
+                "x": 89,
+                "y": 469.1875,
+                "width": 622,
+                "height": 54.375
+              },
+              "diff_pixels": 34210,
+              "contribution_percent": 7.127083333333334,
+              "element_diff_percent": 101.14942528735634,
+              "corner_ratio": 0.01683718211049401,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3) > p:nth-of-type(3)",
+              "tag": "p",
+              "rect": {
+                "x": 89,
+                "y": 535.5625,
+                "width": 622,
+                "height": 54.375
+              },
+              "diff_pixels": 33588,
+              "contribution_percent": 6.9975,
+              "element_diff_percent": 99.3103448275862,
+              "corner_ratio": 0.01714898177920686,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.hero:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 64,
+                "y": 48,
+                "width": 672,
+                "height": 150
+              },
+              "diff_pixels": 31464,
+              "contribution_percent": 6.555,
+              "element_diff_percent": 31.214285714285715,
+              "corner_ratio": 0.009153318077803204,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 64,
+                "y": 246,
+                "width": 672,
+                "height": 66
+              },
+              "diff_pixels": 27752,
+              "contribution_percent": 5.781666666666667,
+              "element_diff_percent": 62.572150072150066,
+              "corner_ratio": 0.020755260882098586,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3) > h2.card-title",
+              "tag": "h2",
+              "rect": {
+                "x": 89,
+                "y": 385,
+                "width": 622,
+                "height": 29
+              },
+              "diff_pixels": 17400,
+              "contribution_percent": 3.6249999999999996,
+              "element_diff_percent": 96.46302250803859,
+              "corner_ratio": 0.016551724137931035,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3) > p:nth-of-type(1)",
+              "tag": "p",
+              "rect": {
+                "x": 89,
+                "y": 430,
+                "width": 622,
+                "height": 27.1875
+              },
+              "diff_pixels": 16794,
+              "contribution_percent": 3.49875,
+              "element_diff_percent": 99.3103448275862,
+              "corner_ratio": 0.03429796355841372,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div:nth-of-type(2) > a.sponsor-btn",
+              "tag": "a",
+              "rect": {
+                "x": 233.875,
+                "y": 262,
+                "width": 332.25,
+                "height": 50
+              },
+              "diff_pixels": 16600,
+              "contribution_percent": 3.4583333333333335,
+              "element_diff_percent": 99.9247554552295,
+              "corner_ratio": 0.03469879518072289,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container > div.hero:nth-of-type(1) > p.tagline",
+              "tag": "p",
+              "rect": {
+                "x": 64,
+                "y": 132,
+                "width": 672,
+                "height": 23
+              },
+              "diff_pixels": 15456,
+              "contribution_percent": 3.2199999999999998,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.03571428571428571
+            },
+            {
+              "selector": "#versionBadge",
+              "tag": "span",
+              "rect": {
+                "x": 347.6875,
+                "y": 171,
+                "width": 104.625,
+                "height": 27
+              },
+              "diff_pixels": 2808,
+              "contribution_percent": 0.585,
+              "element_diff_percent": 99.4026284348865,
+              "corner_ratio": 0.20512820512820512
+            },
+            {
+              "selector": "body > div.container > div.card:nth-of-type(3) > h2.card-title > span.icon",
+              "tag": "span",
+              "rect": {
+                "x": 89,
+                "y": 385,
+                "width": 22,
+                "height": 29
+              },
+              "diff_pixels": 638,
+              "contribution_percent": 0.13291666666666666,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.8275862068965517
+            }
+          ]
+        },
+        "taxonomy": {
+          "gradient_interpolation": 50.25833333333333,
+          "text_metrics": 45.80375
+        }
+      },
+      "styles": {
+        "error": "RustKit styles not found",
+        "matched": 0,
+        "mismatched": 0
+      },
+      "rects": {
+        "matched": 0,
+        "mismatched": 150,
+        "differences": []
+      },
+      "passed": true,
+      "pixel_runs": [
+        3.6741666666666664
+      ],
+      "diff_pct_median": 3.6741666666666664,
+      "diff_pct_min": 3.6741666666666664,
+      "diff_pct_max": 3.6741666666666664,
+      "diff_pct_variance": 0.0,
+      "measured_runs": 1,
+      "stable": false,
+      "diff_pct": 3.6741666666666664
+    },
+    {
+      "case_id": "settings",
+      "type": "builtins",
+      "threshold": 15,
+      "pixel": {
+        "diffPixels": 16451,
+        "totalPixels": 786432,
+        "diffPercent": 2.0918528238932295,
+        "width": 1024,
+        "height": 768,
+        "diffPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/settings/run-1/diff.png",
+        "heatmapPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/settings/run-1/heatmap.png",
+        "overlayPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/settings/run-1/overlay.png",
+        "attribution": {
+          "total_diff_pixels": 786432,
+          "unattributed_diff_pixels": 0,
+          "top_contributors": [
+            {
+              "selector": "html > body",
+              "tag": "body",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1024,
+                "height": 3087.578125
+              },
+              "diff_pixels": 271232,
+              "contribution_percent": 34.48893229166667,
+              "element_diff_percent": 8.57873029528605,
+              "corner_ratio": 0.0010618216139688533,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container",
+              "tag": "div",
+              "rect": {
+                "x": 162,
+                "y": 32,
+                "width": 700,
+                "height": 3023.578125
+              },
+              "diff_pixels": 49000,
+              "contribution_percent": 6.230672200520834,
+              "element_diff_percent": 2.315137797208399,
+              "corner_ratio": 0,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 162,
+                "y": 120.390625,
+                "width": 700,
+                "height": 259.5625
+              },
+              "diff_pixels": 47360,
+              "contribution_percent": 6.022135416666666,
+              "element_diff_percent": 26.06583880843452,
+              "corner_ratio": 0.012162162162162163,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 162,
+                "y": 395.953125,
+                "width": 700,
+                "height": 259.5625
+              },
+              "diff_pixels": 47360,
+              "contribution_percent": 6.022135416666666,
+              "element_diff_percent": 26.06583880843452,
+              "corner_ratio": 0.012162162162162163,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 162,
+                "y": 671.515625,
+                "width": 700,
+                "height": 133.1875
+              },
+              "diff_pixels": 27600,
+              "contribution_percent": 3.509521484375,
+              "element_diff_percent": 29.603807736139977,
+              "corner_ratio": 0.010434782608695653,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > h1",
+              "tag": "h1",
+              "rect": {
+                "x": 162,
+                "y": 32,
+                "width": 700,
+                "height": 33
+              },
+              "diff_pixels": 23100,
+              "contribution_percent": 2.93731689453125,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.024935064935064935,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(4)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 297.765625,
+                "width": 660,
+                "height": 62.1875
+              },
+              "diff_pixels": 17520,
+              "contribution_percent": 2.227783203125,
+              "element_diff_percent": 42.686158063042484,
+              "corner_ratio": 0.03287671232876712,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 510.140625,
+                "width": 660,
+                "height": 63.1875
+              },
+              "diff_pixels": 17200,
+              "contribution_percent": 2.187093098958333,
+              "element_diff_percent": 41.24329346881276,
+              "corner_ratio": 0.03348837209302326,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 171.390625,
+                "width": 660,
+                "height": 63.1875
+              },
+              "diff_pixels": 17060,
+              "contribution_percent": 2.169291178385417,
+              "element_diff_percent": 40.90759224290382,
+              "corner_ratio": 0.03376318874560375,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(4)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 573.328125,
+                "width": 660,
+                "height": 62.1875
+              },
+              "diff_pixels": 17040,
+              "contribution_percent": 2.166748046875,
+              "element_diff_percent": 41.516674280493376,
+              "corner_ratio": 0.03380281690140845,
+              "likely_cause": "text_metrics"
+            }
+          ],
+          "all_elements": [
+            {
+              "selector": "html > body",
+              "tag": "body",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1024,
+                "height": 3087.578125
+              },
+              "diff_pixels": 271232,
+              "contribution_percent": 34.48893229166667,
+              "element_diff_percent": 8.57873029528605,
+              "corner_ratio": 0.0010618216139688533,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container",
+              "tag": "div",
+              "rect": {
+                "x": 162,
+                "y": 32,
+                "width": 700,
+                "height": 3023.578125
+              },
+              "diff_pixels": 49000,
+              "contribution_percent": 6.230672200520834,
+              "element_diff_percent": 2.315137797208399,
+              "corner_ratio": 0,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 162,
+                "y": 120.390625,
+                "width": 700,
+                "height": 259.5625
+              },
+              "diff_pixels": 47360,
+              "contribution_percent": 6.022135416666666,
+              "element_diff_percent": 26.06583880843452,
+              "corner_ratio": 0.012162162162162163,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 162,
+                "y": 395.953125,
+                "width": 700,
+                "height": 259.5625
+              },
+              "diff_pixels": 47360,
+              "contribution_percent": 6.022135416666666,
+              "element_diff_percent": 26.06583880843452,
+              "corner_ratio": 0.012162162162162163,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 162,
+                "y": 671.515625,
+                "width": 700,
+                "height": 133.1875
+              },
+              "diff_pixels": 27600,
+              "contribution_percent": 3.509521484375,
+              "element_diff_percent": 29.603807736139977,
+              "corner_ratio": 0.010434782608695653,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > h1",
+              "tag": "h1",
+              "rect": {
+                "x": 162,
+                "y": 32,
+                "width": 700,
+                "height": 33
+              },
+              "diff_pixels": 23100,
+              "contribution_percent": 2.93731689453125,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.024935064935064935,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(4)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 297.765625,
+                "width": 660,
+                "height": 62.1875
+              },
+              "diff_pixels": 17520,
+              "contribution_percent": 2.227783203125,
+              "element_diff_percent": 42.686158063042484,
+              "corner_ratio": 0.03287671232876712,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 510.140625,
+                "width": 660,
+                "height": 63.1875
+              },
+              "diff_pixels": 17200,
+              "contribution_percent": 2.187093098958333,
+              "element_diff_percent": 41.24329346881276,
+              "corner_ratio": 0.03348837209302326,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 171.390625,
+                "width": 660,
+                "height": 63.1875
+              },
+              "diff_pixels": 17060,
+              "contribution_percent": 2.169291178385417,
+              "element_diff_percent": 40.90759224290382,
+              "corner_ratio": 0.03376318874560375,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(4)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 573.328125,
+                "width": 660,
+                "height": 62.1875
+              },
+              "diff_pixels": 17040,
+              "contribution_percent": 2.166748046875,
+              "element_diff_percent": 41.516674280493376,
+              "corner_ratio": 0.03380281690140845,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 446.953125,
+                "width": 660,
+                "height": 63.1875
+              },
+              "diff_pixels": 16941,
+              "contribution_percent": 2.1541595458984375,
+              "element_diff_percent": 40.62224620088122,
+              "corner_ratio": 0.03400035417035594
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 234.578125,
+                "width": 660,
+                "height": 63.1875
+              },
+              "diff_pixels": 16920,
+              "contribution_percent": 2.1514892578125,
+              "element_diff_percent": 40.571891016994876,
+              "corner_ratio": 0.03404255319148936
+            },
+            {
+              "selector": "body > div.container > p.subtitle",
+              "tag": "p",
+              "rect": {
+                "x": 162,
+                "y": 79.390625,
+                "width": 700,
+                "height": 17
+              },
+              "diff_pixels": 11900,
+              "contribution_percent": 1.5131632486979165,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.03428571428571429
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.section-title:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 140.390625,
+                "width": 660,
+                "height": 15
+              },
+              "diff_pixels": 9900,
+              "contribution_percent": 1.25885009765625,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.03636363636363636
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.section-title:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 415.953125,
+                "width": 660,
+                "height": 15
+              },
+              "diff_pixels": 9900,
+              "contribution_percent": 1.25885009765625,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.03636363636363636
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(3) > div.section-title:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 691.515625,
+                "width": 660,
+                "height": 15
+              },
+              "diff_pixels": 9900,
+              "contribution_percent": 1.25885009765625,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.03636363636363636
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(3) > div.setting-row:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 722.515625,
+                "width": 660,
+                "height": 62.1875
+              },
+              "diff_pixels": 8900,
+              "contribution_percent": 1.1316935221354165,
+              "element_diff_percent": 21.684178468098068,
+              "corner_ratio": 0.032359550561797755
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(2) > div.setting-label:nth-of-type(1) > strong",
+              "tag": "strong",
+              "rect": {
+                "x": 182,
+                "y": 183.390625,
+                "width": 520,
+                "height": 17
+              },
+              "diff_pixels": 8840,
+              "contribution_percent": 1.1240641276041665,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.046153846153846156
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(3) > div.setting-label:nth-of-type(1) > strong",
+              "tag": "strong",
+              "rect": {
+                "x": 182,
+                "y": 246.578125,
+                "width": 520,
+                "height": 17
+              },
+              "diff_pixels": 8840,
+              "contribution_percent": 1.1240641276041665,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.046153846153846156
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(4) > div.setting-label:nth-of-type(1) > strong",
+              "tag": "strong",
+              "rect": {
+                "x": 182,
+                "y": 309.765625,
+                "width": 520,
+                "height": 17
+              },
+              "diff_pixels": 8840,
+              "contribution_percent": 1.1240641276041665,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.046153846153846156
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(3) > div.setting-label:nth-of-type(1) > strong",
+              "tag": "strong",
+              "rect": {
+                "x": 182,
+                "y": 522.140625,
+                "width": 520,
+                "height": 17
+              },
+              "diff_pixels": 8840,
+              "contribution_percent": 1.1240641276041665,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.046153846153846156
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(3) > div.setting-row:nth-of-type(2) > div.setting-label:nth-of-type(1) > strong",
+              "tag": "strong",
+              "rect": {
+                "x": 182,
+                "y": 734.515625,
+                "width": 520,
+                "height": 17
+              },
+              "diff_pixels": 8840,
+              "contribution_percent": 1.1240641276041665,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.046153846153846156
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(2) > div.setting-label:nth-of-type(1) > strong",
+              "tag": "strong",
+              "rect": {
+                "x": 182,
+                "y": 458.953125,
+                "width": 513,
+                "height": 17
+              },
+              "diff_pixels": 8721,
+              "contribution_percent": 1.1089324951171875,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.04678362573099415
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(3) > div.setting-label:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 246.578125,
+                "width": 520,
+                "height": 38.1875
+              },
+              "diff_pixels": 8460,
+              "contribution_percent": 1.07574462890625,
+              "element_diff_percent": 42.60355029585799,
+              "corner_ratio": 0.01702127659574468
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(2) > div.setting-label:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 183.390625,
+                "width": 520,
+                "height": 38.1875
+              },
+              "diff_pixels": 8305,
+              "contribution_percent": 1.056035359700521,
+              "element_diff_percent": 41.82298879516556,
+              "corner_ratio": 0.017338952438290187
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(2) > div.setting-label:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 458.953125,
+                "width": 513,
+                "height": 38.1875
+              },
+              "diff_pixels": 8178,
+              "contribution_percent": 1.039886474609375,
+              "element_diff_percent": 41.74538911381017,
+              "corner_ratio": 0.01760821716801174
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(4) > div.setting-label:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 309.765625,
+                "width": 520,
+                "height": 38.1875
+              },
+              "diff_pixels": 7890,
+              "contribution_percent": 1.003265380859375,
+              "element_diff_percent": 39.733098325569685,
+              "corner_ratio": 0.018250950570342206
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(4) > div.setting-label:nth-of-type(1) > strong",
+              "tag": "strong",
+              "rect": {
+                "x": 182,
+                "y": 585.328125,
+                "width": 460,
+                "height": 17
+              },
+              "diff_pixels": 7820,
+              "contribution_percent": 0.9943644205729166,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.05217391304347826
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(4) > div.setting-label:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 585.328125,
+                "width": 460,
+                "height": 38.1875
+              },
+              "diff_pixels": 6745,
+              "contribution_percent": 0.8576711018880209,
+              "element_diff_percent": 38.397495196755145,
+              "corner_ratio": 0.02134914751667902
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(4) > div.setting-control:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 642,
+                "y": 587.921875,
+                "width": 200,
+                "height": 33
+              },
+              "diff_pixels": 6600,
+              "contribution_percent": 0.8392333984375,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.08727272727272728
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(3) > div.setting-label:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 522.140625,
+                "width": 520,
+                "height": 38.1875
+              },
+              "diff_pixels": 6360,
+              "contribution_percent": 0.8087158203125,
+              "element_diff_percent": 32.02820093163792,
+              "corner_ratio": 0.022641509433962263
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(3) > div.setting-row:nth-of-type(2) > div.setting-label:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 182,
+                "y": 734.515625,
+                "width": 520,
+                "height": 38.1875
+              },
+              "diff_pixels": 6130,
+              "contribution_percent": 0.7794698079427083,
+              "element_diff_percent": 30.86994838222334,
+              "corner_ratio": 0.013703099510603589
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(3) > div.setting-label:nth-of-type(1) > span",
+              "tag": "span",
+              "rect": {
+                "x": 182,
+                "y": 545.328125,
+                "width": 304.375,
+                "height": 15
+              },
+              "diff_pixels": 4560,
+              "contribution_percent": 0.579833984375,
+              "element_diff_percent": 99.87679671457906,
+              "corner_ratio": 0.07894736842105263
+            },
+            {
+              "selector": "#defaultMode",
+              "tag": "select",
+              "rect": {
+                "x": 734,
+                "y": 248.171875,
+                "width": 108,
+                "height": 35
+              },
+              "diff_pixels": 3780,
+              "contribution_percent": 0.48065185546875,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.1523809523809524
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(4) > div.setting-label:nth-of-type(1) > span",
+              "tag": "span",
+              "rect": {
+                "x": 182,
+                "y": 608.515625,
+                "width": 225.46875,
+                "height": 15
+              },
+              "diff_pixels": 3375,
+              "contribution_percent": 0.4291534423828125,
+              "element_diff_percent": 99.7920997920998,
+              "corner_ratio": 0.10666666666666667
+            },
+            {
+              "selector": "#theme",
+              "tag": "select",
+              "rect": {
+                "x": 750,
+                "y": 184.984375,
+                "width": 92,
+                "height": 35
+              },
+              "diff_pixels": 3220,
+              "contribution_percent": 0.4094441731770833,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.17888198757763976
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(2) > div.setting-label:nth-of-type(1) > span",
+              "tag": "span",
+              "rect": {
+                "x": 182,
+                "y": 206.578125,
+                "width": 208.609375,
+                "height": 15
+              },
+              "diff_pixels": 3135,
+              "contribution_percent": 0.3986358642578125,
+              "element_diff_percent": 100.18725189124412,
+              "corner_ratio": 0.11483253588516747
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(4) > div.setting-label:nth-of-type(1) > span",
+              "tag": "span",
+              "rect": {
+                "x": 182,
+                "y": 332.953125,
+                "width": 202.328125,
+                "height": 15
+              },
+              "diff_pixels": 3030,
+              "contribution_percent": 0.385284423828125,
+              "element_diff_percent": 99.83782531469612,
+              "corner_ratio": 0.1188118811881188
+            },
+            {
+              "selector": "#tabDecayUnit",
+              "tag": "select",
+              "rect": {
+                "x": 761,
+                "y": 460.546875,
+                "width": 81,
+                "height": 35
+              },
+              "diff_pixels": 2835,
+              "contribution_percent": 0.3604888916015625,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.20317460317460317
+            },
+            {
+              "selector": "#autoShelfDays",
+              "tag": "input",
+              "rect": {
+                "x": 762,
+                "y": 524.734375,
+                "width": 80,
+                "height": 33
+              },
+              "diff_pixels": 2640,
+              "contribution_percent": 0.335693359375,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.21818181818181817
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(2) > div.setting-label:nth-of-type(1) > span",
+              "tag": "span",
+              "rect": {
+                "x": 182,
+                "y": 482.140625,
+                "width": 173.4375,
+                "height": 15
+              },
+              "diff_pixels": 2595,
+              "contribution_percent": 0.3299713134765625,
+              "element_diff_percent": 99.74774774774775,
+              "corner_ratio": 0.13872832369942195
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(3) > div.setting-label:nth-of-type(1) > span",
+              "tag": "span",
+              "rect": {
+                "x": 182,
+                "y": 269.765625,
+                "width": 164.109375,
+                "height": 15
+              },
+              "diff_pixels": 2460,
+              "contribution_percent": 0.31280517578125,
+              "element_diff_percent": 99.93335237551176,
+              "corner_ratio": 0.14634146341463414
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(4) > div.setting-control:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 702,
+                "y": 315.859375,
+                "width": 140,
+                "height": 26
+              },
+              "diff_pixels": 2392,
+              "contribution_percent": 0.30415852864583337,
+              "element_diff_percent": 65.71428571428571,
+              "corner_ratio": 0.12040133779264214
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(3) > div.setting-row:nth-of-type(2) > div.setting-control:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 702,
+                "y": 740.609375,
+                "width": 140,
+                "height": 26
+              },
+              "diff_pixels": 2392,
+              "contribution_percent": 0.30415852864583337,
+              "element_diff_percent": 65.71428571428571,
+              "corner_ratio": 0.12040133779264214
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(3) > div.setting-row:nth-of-type(2) > div.setting-label:nth-of-type(1) > span",
+              "tag": "span",
+              "rect": {
+                "x": 182,
+                "y": 757.703125,
+                "width": 219.046875,
+                "height": 15
+              },
+              "diff_pixels": 2190,
+              "contribution_percent": 0.278472900390625,
+              "element_diff_percent": 66.65240031385976,
+              "corner_ratio": 0.1095890410958904
+            },
+            {
+              "selector": "#tabDecayValue",
+              "tag": "input",
+              "rect": {
+                "x": 695,
+                "y": 461.546875,
+                "width": 60,
+                "height": 33
+              },
+              "diff_pixels": 1980,
+              "contribution_percent": 0.25177001953125,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.2909090909090909
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(3) > div.setting-control:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 702,
+                "y": 524.734375,
+                "width": 140,
+                "height": 33
+              },
+              "diff_pixels": 1980,
+              "contribution_percent": 0.25177001953125,
+              "element_diff_percent": 42.857142857142854,
+              "corner_ratio": 0.14545454545454545
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(2) > div.setting-control:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 702,
+                "y": 184.984375,
+                "width": 140,
+                "height": 35
+              },
+              "diff_pixels": 1680,
+              "contribution_percent": 0.213623046875,
+              "element_diff_percent": 34.285714285714285,
+              "corner_ratio": 0.17142857142857143
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(4) > div.setting-control:nth-of-type(2) > label.toggle",
+              "tag": "label",
+              "rect": {
+                "x": 794,
+                "y": 315.859375,
+                "width": 48,
+                "height": 26
+              },
+              "diff_pixels": 1248,
+              "contribution_percent": 0.15869140625,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.46153846153846156
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(3) > div.setting-row:nth-of-type(2) > div.setting-control:nth-of-type(2) > label.toggle",
+              "tag": "label",
+              "rect": {
+                "x": 794,
+                "y": 740.609375,
+                "width": 48,
+                "height": 26
+              },
+              "diff_pixels": 1248,
+              "contribution_percent": 0.15869140625,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.46153846153846156
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(1) > div.setting-row:nth-of-type(3) > div.setting-control:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 702,
+                "y": 248.171875,
+                "width": 140,
+                "height": 35
+              },
+              "diff_pixels": 1120,
+              "contribution_percent": 0.14241536458333331,
+              "element_diff_percent": 22.857142857142858,
+              "corner_ratio": 0.2571428571428571
+            },
+            {
+              "selector": "body > div.container > div.section:nth-of-type(2) > div.setting-row:nth-of-type(2) > div.setting-control decay-control:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 695,
+                "y": 460.546875,
+                "width": 147,
+                "height": 35
+              },
+              "diff_pixels": 330,
+              "contribution_percent": 0.041961669921875,
+              "element_diff_percent": 6.41399416909621,
+              "corner_ratio": 0.07272727272727272
+            }
+          ]
+        },
+        "taxonomy": {
+          "gradient_interpolation": 37.42624918619792,
+          "text_metrics": 30.535380045572914
+        }
+      },
+      "styles": {
+        "error": "RustKit styles not found",
+        "matched": 0,
+        "mismatched": 0
+      },
+      "rects": {
+        "matched": 0,
+        "mismatched": 189,
+        "differences": []
+      },
+      "passed": true,
+      "pixel_runs": [
+        2.0918528238932295
+      ],
+      "diff_pct_median": 2.0918528238932295,
+      "diff_pct_min": 2.0918528238932295,
+      "diff_pct_max": 2.0918528238932295,
+      "diff_pct_variance": 0.0,
+      "measured_runs": 1,
+      "stable": false,
+      "diff_pct": 2.0918528238932295
+    },
+    {
+      "case_id": "chrome_rustkit",
+      "type": "builtins",
+      "threshold": 15,
+      "pixel": {
+        "diffPixels": 1438,
+        "totalPixels": 128000,
+        "diffPercent": 1.1234374999999999,
+        "width": 1280,
+        "height": 100,
+        "diffPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/chrome_rustkit/run-1/diff.png",
+        "heatmapPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/chrome_rustkit/run-1/heatmap.png",
+        "overlayPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/chrome_rustkit/run-1/overlay.png",
+        "attribution": {
+          "total_diff_pixels": 128000,
+          "unattributed_diff_pixels": 0,
+          "top_contributors": [
+            {
+              "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1280,
+                "height": 40
+              },
+              "diff_pixels": 46096,
+              "contribution_percent": 36.012499999999996,
+              "element_diff_percent": 90.03125,
+              "corner_ratio": 0.010760152724748352,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "html > body",
+              "tag": "body",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1280,
+                "height": 100
+              },
+              "diff_pixels": 16960,
+              "contribution_percent": 13.25,
+              "element_diff_percent": 13.25,
+              "corner_ratio": 0.008490566037735849,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 0,
+                "y": 40,
+                "width": 1280,
+                "height": 44
+              },
+              "diff_pixels": 14632,
+              "contribution_percent": 11.43125,
+              "element_diff_percent": 25.98011363636364,
+              "corner_ratio": 0.029797703663203938,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5)",
+              "tag": "div",
+              "rect": {
+                "x": 328,
+                "y": 45.5,
+                "width": 906,
+                "height": 32
+              },
+              "diff_pixels": 14334,
+              "contribution_percent": 11.198437499999999,
+              "element_diff_percent": 49.44122516556291,
+              "corner_ratio": 0.041858518208455424,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5) > span.url-text:nth-of-type(2)",
+              "tag": "span",
+              "rect": {
+                "x": 367,
+                "y": 53,
+                "width": 809,
+                "height": 17
+              },
+              "diff_pixels": 13753,
+              "contribution_percent": 10.74453125,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.029666254635352288,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.sidebar-toggle:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 8,
+                "y": 40,
+                "width": 200,
+                "height": 43
+              },
+              "diff_pixels": 7864,
+              "contribution_percent": 6.14375,
+              "element_diff_percent": 91.44186046511628,
+              "corner_ratio": 0.07324516785350967,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1) > div.tab active:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 8,
+                "y": 3,
+                "width": 120,
+                "height": 36
+              },
+              "diff_pixels": 3004,
+              "contribution_percent": 2.346875,
+              "element_diff_percent": 69.53703703703704,
+              "corner_ratio": 0.19174434087882822,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 0,
+                "y": 84,
+                "width": 220,
+                "height": 16
+              },
+              "diff_pixels": 2708,
+              "contribution_percent": 2.115625,
+              "element_diff_percent": 76.93181818181817,
+              "corner_ratio": 0.13146233382570163,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.nav-btn disabled:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 214,
+                "y": 45.5,
+                "width": 32,
+                "height": 32
+              },
+              "diff_pixels": 1024,
+              "contribution_percent": 0.8,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.5859375,
+              "likely_cause": "clip_radius"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.nav-btn disabled:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 252,
+                "y": 45.5,
+                "width": 32,
+                "height": 32
+              },
+              "diff_pixels": 1024,
+              "contribution_percent": 0.8,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.5859375,
+              "likely_cause": "clip_radius"
+            }
+          ],
+          "all_elements": [
+            {
+              "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1280,
+                "height": 40
+              },
+              "diff_pixels": 46096,
+              "contribution_percent": 36.012499999999996,
+              "element_diff_percent": 90.03125,
+              "corner_ratio": 0.010760152724748352,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "html > body",
+              "tag": "body",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1280,
+                "height": 100
+              },
+              "diff_pixels": 16960,
+              "contribution_percent": 13.25,
+              "element_diff_percent": 13.25,
+              "corner_ratio": 0.008490566037735849,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 0,
+                "y": 40,
+                "width": 1280,
+                "height": 44
+              },
+              "diff_pixels": 14632,
+              "contribution_percent": 11.43125,
+              "element_diff_percent": 25.98011363636364,
+              "corner_ratio": 0.029797703663203938,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5)",
+              "tag": "div",
+              "rect": {
+                "x": 328,
+                "y": 45.5,
+                "width": 906,
+                "height": 32
+              },
+              "diff_pixels": 14334,
+              "contribution_percent": 11.198437499999999,
+              "element_diff_percent": 49.44122516556291,
+              "corner_ratio": 0.041858518208455424,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5) > span.url-text:nth-of-type(2)",
+              "tag": "span",
+              "rect": {
+                "x": 367,
+                "y": 53,
+                "width": 809,
+                "height": 17
+              },
+              "diff_pixels": 13753,
+              "contribution_percent": 10.74453125,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.029666254635352288,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.sidebar-toggle:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 8,
+                "y": 40,
+                "width": 200,
+                "height": 43
+              },
+              "diff_pixels": 7864,
+              "contribution_percent": 6.14375,
+              "element_diff_percent": 91.44186046511628,
+              "corner_ratio": 0.07324516785350967,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1) > div.tab active:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 8,
+                "y": 3,
+                "width": 120,
+                "height": 36
+              },
+              "diff_pixels": 3004,
+              "contribution_percent": 2.346875,
+              "element_diff_percent": 69.53703703703704,
+              "corner_ratio": 0.19174434087882822,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 0,
+                "y": 84,
+                "width": 220,
+                "height": 16
+              },
+              "diff_pixels": 2708,
+              "contribution_percent": 2.115625,
+              "element_diff_percent": 76.93181818181817,
+              "corner_ratio": 0.13146233382570163,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.nav-btn disabled:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 214,
+                "y": 45.5,
+                "width": 32,
+                "height": 32
+              },
+              "diff_pixels": 1024,
+              "contribution_percent": 0.8,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.5859375,
+              "likely_cause": "clip_radius"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.nav-btn disabled:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 252,
+                "y": 45.5,
+                "width": 32,
+                "height": 32
+              },
+              "diff_pixels": 1024,
+              "contribution_percent": 0.8,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.5859375,
+              "likely_cause": "clip_radius"
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.nav-btn:nth-of-type(4)",
+              "tag": "div",
+              "rect": {
+                "x": 290,
+                "y": 45.5,
+                "width": 32,
+                "height": 32
+              },
+              "diff_pixels": 1024,
+              "contribution_percent": 0.8,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.5859375
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.menu-btn:nth-of-type(6)",
+              "tag": "div",
+              "rect": {
+                "x": 1240,
+                "y": 45.5,
+                "width": 32,
+                "height": 32
+              },
+              "diff_pixels": 1024,
+              "contribution_percent": 0.8,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.5859375
+            },
+            {
+              "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1) > div.tab active:nth-of-type(1) > span.tab-title:nth-of-type(1)",
+              "tag": "span",
+              "rect": {
+                "x": 24,
+                "y": 13,
+                "width": 62,
+                "height": 16
+              },
+              "diff_pixels": 992,
+              "contribution_percent": 0.775,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.3870967741935484
+            },
+            {
+              "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-title:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 8,
+                "y": 96,
+                "width": 203,
+                "height": 13
+              },
+              "diff_pixels": 812,
+              "contribution_percent": 0.634375,
+              "element_diff_percent": 30.76923076923077,
+              "corner_ratio": 0.11822660098522167
+            },
+            {
+              "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1) > div.new-tab-btn:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 134,
+                "y": 11,
+                "width": 28,
+                "height": 28
+              },
+              "diff_pixels": 784,
+              "contribution_percent": 0.6125,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.7346938775510204
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.sidebar-toggle:nth-of-type(1) > span.workspace-name",
+              "tag": "span",
+              "rect": {
+                "x": 16,
+                "y": 53.5,
+                "width": 45.9375,
+                "height": 16
+              },
+              "diff_pixels": 736,
+              "contribution_percent": 0.575,
+              "element_diff_percent": 100.13605442176872,
+              "corner_ratio": 0.5217391304347826
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5) > span.url-icon:nth-of-type(1)",
+              "tag": "span",
+              "rect": {
+                "x": 341,
+                "y": 50,
+                "width": 18,
+                "height": 23
+              },
+              "diff_pixels": 414,
+              "contribution_percent": 0.3234375,
+              "element_diff_percent": 100,
+              "corner_ratio": 1
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5) > span.shield-icon:nth-of-type(3)",
+              "tag": "span",
+              "rect": {
+                "x": 1184,
+                "y": 51.5,
+                "width": 20,
+                "height": 20
+              },
+              "diff_pixels": 400,
+              "contribution_percent": 0.3125,
+              "element_diff_percent": 100,
+              "corner_ratio": 1
+            },
+            {
+              "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1) > div.tab active:nth-of-type(1) > span.tab-close:nth-of-type(2)",
+              "tag": "span",
+              "rect": {
+                "x": 94,
+                "y": 12,
+                "width": 18,
+                "height": 18
+              },
+              "diff_pixels": 324,
+              "contribution_percent": 0.253125,
+              "element_diff_percent": 100,
+              "corner_ratio": 1
+            },
+            {
+              "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5) > span.shield-count:nth-of-type(4)",
+              "tag": "span",
+              "rect": {
+                "x": 1214,
+                "y": 55,
+                "width": 7,
+                "height": 13
+              },
+              "diff_pixels": 91,
+              "contribution_percent": 0.07109375,
+              "element_diff_percent": 100,
+              "corner_ratio": 1
+            }
+          ]
+        },
+        "taxonomy": {
+          "text_metrics": 93.24296874999997,
+          "clip_radius": 1.6
+        }
+      },
+      "styles": {
+        "error": "RustKit styles not found",
+        "matched": 0,
+        "mismatched": 0
+      },
+      "rects": {
+        "matched": 0,
+        "mismatched": 37,
+        "differences": []
+      },
+      "passed": true,
+      "pixel_runs": [
+        1.1234374999999999
+      ],
+      "diff_pct_median": 1.1234374999999999,
+      "diff_pct_min": 1.1234374999999999,
+      "diff_pct_max": 1.1234374999999999,
+      "diff_pct_variance": 0.0,
+      "measured_runs": 1,
+      "stable": false,
+      "diff_pct": 1.1234374999999999
+    },
+    {
+      "case_id": "shelf",
+      "type": "builtins",
+      "threshold": 15,
+      "pixel": {
+        "diffPixels": 1656,
+        "totalPixels": 153600,
+        "diffPercent": 1.078125,
+        "width": 1280,
+        "height": 120,
+        "diffPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/shelf/run-1/diff.png",
+        "heatmapPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/shelf/run-1/heatmap.png",
+        "overlayPath": "/Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/parity-baseline/diffs/shelf/run-1/overlay.png",
+        "attribution": {
+          "total_diff_pixels": 153600,
+          "unattributed_diff_pixels": 0,
+          "top_contributors": [
+            {
+              "selector": "body > div.shelf-header:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1280,
+                "height": 41
+              },
+              "diff_pixels": 50329,
+              "contribution_percent": 32.766276041666664,
+              "element_diff_percent": 95.90129573170731,
+              "corner_ratio": 0.01144469391404558,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "#commandInput",
+              "tag": "input",
+              "rect": {
+                "x": 53,
+                "y": 54,
+                "width": 1198,
+                "height": 41
+              },
+              "diff_pixels": 49118,
+              "contribution_percent": 31.977864583333332,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.011726861842908913,
+              "likely_cause": "form_control"
+            },
+            {
+              "selector": "html > body",
+              "tag": "body",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1280,
+                "height": 120
+              },
+              "diff_pixels": 32480,
+              "contribution_percent": 21.145833333333332,
+              "element_diff_percent": 21.145833333333332,
+              "corner_ratio": 0.008866995073891626,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "#commandResults",
+              "tag": "div",
+              "rect": {
+                "x": 16,
+                "y": 108,
+                "width": 1248,
+                "height": 56
+              },
+              "diff_pixels": 14976,
+              "contribution_percent": 9.75,
+              "element_diff_percent": 21.428571428571427,
+              "corner_ratio": 0.019230769230769232,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 16,
+                "y": 53,
+                "width": 1248,
+                "height": 43
+              },
+              "diff_pixels": 4350,
+              "contribution_percent": 2.83203125,
+              "element_diff_percent": 8.105992844364938,
+              "corner_ratio": 0.13241379310344828,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.shelf-header:nth-of-type(1) > span.shelf-title",
+              "tag": "span",
+              "rect": {
+                "x": 16,
+                "y": 12.5,
+                "width": 104.78125,
+                "height": 15
+              },
+              "diff_pixels": 1575,
+              "contribution_percent": 1.025390625,
+              "element_diff_percent": 100.20876826722338,
+              "corner_ratio": 0.22857142857142856,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "#closeBtn",
+              "tag": "button",
+              "rect": {
+                "x": 1240,
+                "y": 8,
+                "width": 24,
+                "height": 24
+              },
+              "diff_pixels": 576,
+              "contribution_percent": 0.375,
+              "element_diff_percent": 100,
+              "corner_ratio": 1,
+              "likely_cause": "form_control"
+            },
+            {
+              "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg",
+              "tag": "svg",
+              "rect": {
+                "x": 29,
+                "y": 67.5,
+                "width": 14,
+                "height": 14
+              },
+              "diff_pixels": 102,
+              "contribution_percent": 0.06640625,
+              "element_diff_percent": 52.04081632653062,
+              "corner_ratio": 1,
+              "likely_cause": "replaced_content"
+            },
+            {
+              "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg > circle",
+              "tag": "circle",
+              "rect": {
+                "x": 30.75,
+                "y": 69.25,
+                "width": 9.333332061767578,
+                "height": 9.333335876464844
+              },
+              "diff_pixels": 88,
+              "contribution_percent": 0.057291666666666664,
+              "element_diff_percent": 101.02039440033255,
+              "corner_ratio": 1,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg > path",
+              "tag": "path",
+              "rect": {
+                "x": 38.712501525878906,
+                "y": 77.2125015258789,
+                "width": 2.5374984741210938,
+                "height": 2.5374984741210938
+              },
+              "diff_pixels": 6,
+              "contribution_percent": 0.00390625,
+              "element_diff_percent": 93.18363993862425,
+              "corner_ratio": 1,
+              "likely_cause": "text_metrics"
+            }
+          ],
+          "all_elements": [
+            {
+              "selector": "body > div.shelf-header:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1280,
+                "height": 41
+              },
+              "diff_pixels": 50329,
+              "contribution_percent": 32.766276041666664,
+              "element_diff_percent": 95.90129573170731,
+              "corner_ratio": 0.01144469391404558,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "#commandInput",
+              "tag": "input",
+              "rect": {
+                "x": 53,
+                "y": 54,
+                "width": 1198,
+                "height": 41
+              },
+              "diff_pixels": 49118,
+              "contribution_percent": 31.977864583333332,
+              "element_diff_percent": 100,
+              "corner_ratio": 0.011726861842908913,
+              "likely_cause": "form_control"
+            },
+            {
+              "selector": "html > body",
+              "tag": "body",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "width": 1280,
+                "height": 120
+              },
+              "diff_pixels": 32480,
+              "contribution_percent": 21.145833333333332,
+              "element_diff_percent": 21.145833333333332,
+              "corner_ratio": 0.008866995073891626,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "#commandResults",
+              "tag": "div",
+              "rect": {
+                "x": 16,
+                "y": 108,
+                "width": 1248,
+                "height": 56
+              },
+              "diff_pixels": 14976,
+              "contribution_percent": 9.75,
+              "element_diff_percent": 21.428571428571427,
+              "corner_ratio": 0.019230769230769232,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 16,
+                "y": 53,
+                "width": 1248,
+                "height": 43
+              },
+              "diff_pixels": 4350,
+              "contribution_percent": 2.83203125,
+              "element_diff_percent": 8.105992844364938,
+              "corner_ratio": 0.13241379310344828,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.shelf-header:nth-of-type(1) > span.shelf-title",
+              "tag": "span",
+              "rect": {
+                "x": 16,
+                "y": 12.5,
+                "width": 104.78125,
+                "height": 15
+              },
+              "diff_pixels": 1575,
+              "contribution_percent": 1.025390625,
+              "element_diff_percent": 100.20876826722338,
+              "corner_ratio": 0.22857142857142856,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "#closeBtn",
+              "tag": "button",
+              "rect": {
+                "x": 1240,
+                "y": 8,
+                "width": 24,
+                "height": 24
+              },
+              "diff_pixels": 576,
+              "contribution_percent": 0.375,
+              "element_diff_percent": 100,
+              "corner_ratio": 1,
+              "likely_cause": "form_control"
+            },
+            {
+              "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg",
+              "tag": "svg",
+              "rect": {
+                "x": 29,
+                "y": 67.5,
+                "width": 14,
+                "height": 14
+              },
+              "diff_pixels": 102,
+              "contribution_percent": 0.06640625,
+              "element_diff_percent": 52.04081632653062,
+              "corner_ratio": 1,
+              "likely_cause": "replaced_content"
+            },
+            {
+              "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg > circle",
+              "tag": "circle",
+              "rect": {
+                "x": 30.75,
+                "y": 69.25,
+                "width": 9.333332061767578,
+                "height": 9.333335876464844
+              },
+              "diff_pixels": 88,
+              "contribution_percent": 0.057291666666666664,
+              "element_diff_percent": 101.02039440033255,
+              "corner_ratio": 1,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg > path",
+              "tag": "path",
+              "rect": {
+                "x": 38.712501525878906,
+                "y": 77.2125015258789,
+                "width": 2.5374984741210938,
+                "height": 2.5374984741210938
+              },
+              "diff_pixels": 6,
+              "contribution_percent": 0.00390625,
+              "element_diff_percent": 93.18363993862425,
+              "corner_ratio": 1,
+              "likely_cause": "text_metrics"
+            }
+          ]
+        },
+        "taxonomy": {
+          "text_metrics": 67.58072916666667,
+          "form_control": 32.35286458333333,
+          "replaced_content": 0.06640625
+        }
+      },
+      "styles": {
+        "error": "RustKit styles not found",
+        "matched": 0,
+        "mismatched": 0
+      },
+      "rects": {
+        "matched": 0,
+        "mismatched": 12,
+        "differences": []
+      },
+      "passed": true,
+      "pixel_runs": [
+        1.078125
+      ],
+      "diff_pct_median": 1.078125,
+      "diff_pct_min": 1.078125,
+      "diff_pct_max": 1.078125,
+      "diff_pct_variance": 0.0,
+      "measured_runs": 1,
+      "stable": false,
+      "diff_pct": 1.078125
+    }
+  ]
+}

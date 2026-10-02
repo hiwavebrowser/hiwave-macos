@@ -1,0 +1,6 @@
+---- element_identity_tests::a_four_digit_hex_colour_replaces_an_earlier_one stdout ----
+
+thread 'element_identity_tests::a_four_digit_hex_colour_replaces_an_earlier_one' (17025300) panicked at crates/rustkit-engine/src/lib.rs:16599:9:
+assertion `left == right` failed: `background-color: #0000`
+  left: Color { r: 255, g: 0, b: 0, a: 1.0 }
+ right: Color { r: 0, g: 0, b: 0, a: 0.0 }

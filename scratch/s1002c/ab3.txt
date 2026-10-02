@@ -1,0 +1,6 @@
+github       within develop   0.00%  within fix   0.00%  across   0.16%   0.16%   0.16%   0.16%  failed: none  secs A,B,A,B 14,12,13,14
+cnn          within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 18,19,18,17
+youtube      within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 8,8,7,8
+instagram    within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 17,16,18,16
+reddit       within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 1,1,1,1
+microsoft    within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 7,7,7,7

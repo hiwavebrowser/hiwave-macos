@@ -1,0 +1,7 @@
+weather      within develop   0.00%  within fix   0.00%  across   0.83%   0.83%   0.83%   0.83%  failed: none  secs A,B,A,B 8,8,8,7
+walmart      within develop  38.42%  within fix   0.00%  across  38.59%  38.59%   0.90%   0.90%  failed: none  secs A,B,A,B 11,11,7,7
+squarespace  within develop   0.00%  within fix   0.00%  across   1.94%   1.94%   1.94%   1.94%  failed: none  secs A,B,A,B 14,18,16,23
+google       within develop   4.09%  within fix   4.09%  across   0.00%   4.09%   4.09%   0.00%  failed: none  secs A,B,A,B 5,5,12,5
+facebook     within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 24,14,14,13
+wikipedia    within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 5,6,5,6
+lyft         within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 9,10,10,10

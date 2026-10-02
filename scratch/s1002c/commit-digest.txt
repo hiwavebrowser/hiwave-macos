@@ -1,0 +1,3 @@
+trench(realsite): digest 2026-10-02 08:20 — #435 (a four-digit hex colour is parsed) opened: 7 of 13 fixture boxes wrong -> 0, campaign identical, CI green, R1 CLEAR; github 75.06 -> 16.24% against stored Chrome frames; #434 MERGED; #429 still DRAFT (develop merged in and pushed; weather and squarespace keep the button face until #435 lands: both reset it with `background-color:#0000`); board 26/60 unchanged (no scoring run)
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

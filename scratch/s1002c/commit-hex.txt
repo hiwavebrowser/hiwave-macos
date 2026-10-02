@@ -1,0 +1,15 @@
+fix(css): a four-digit hex colour is parsed (#rgba)
+
+`#rgba` is the short form of `#rrggbbaa` (css-color-4): each digit is
+doubled. The parser knew three, six and eight digits, so a declaration
+with four was dropped and the colour under it stayed. Minifiers write
+`transparent` as `#0000`: Tailwind's preflight resets every button and
+field with `background-color:#0000`, and squarespace's buttons do the
+same.
+
+A hex colour is also checked to be hex digits only before it is read.
+
+Tests: two in rustkit-css; one in the engine, which fails on develop
+(`background-color: #0000` over red stays red).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

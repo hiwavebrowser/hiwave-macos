@@ -1,0 +1,5 @@
+squarespace  within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,A2,B2  secs A,B,A,B 30,30,30,30
+facebook     within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: B1,A2,B2  secs A,B,A,B 29,30,30,30
+github       within develop    nan%  within fix   0.00%  across    nan%    nan%  97.72%  97.72%  failed: A1  secs A,B,A,B 30,24,23,24
+cnn          within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,A2,B2  secs A,B,A,B 31,31,30,30
+instagram    within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 27,29,29,27

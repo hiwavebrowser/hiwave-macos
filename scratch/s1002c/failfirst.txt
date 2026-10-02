@@ -1,0 +1,22 @@
+
+failures:
+
+---- element_identity_tests::a_four_digit_hex_colour_replaces_an_earlier_one stdout ----
+
+thread 'element_identity_tests::a_four_digit_hex_colour_replaces_an_earlier_one' (17025300) panicked at crates/rustkit-engine/src/lib.rs:16599:9:
+assertion `left == right` failed: `background-color: #0000`
+  left: Color { r: 255, g: 0, b: 0, a: 1.0 }
+ right: Color { r: 0, g: 0, b: 0, a: 0.0 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    element_identity_tests::a_four_digit_hex_colour_replaces_an_earlier_one
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 303 filtered out; finished in 7.17s
+
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 303 filtered out; finished in 7.17s
+error: test failed, to rerun pass `-p rustkit-engine --lib`
+rc 101
+restored: clean

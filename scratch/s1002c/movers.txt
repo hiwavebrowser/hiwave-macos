@@ -1,0 +1,9 @@
+What moved, and what I looked at:
+
+- **github: the whole frame.** On develop the header is a black band, the hero sits on a flat panel and the e-mail field is filled white; on the fix the header is clear over the hero's gradient and the field is clear. Scored with the oracle's own diff against the Chrome frames stored by the 2026-10-01 14:54 quiet board (`scratch/s1001g/vs_chrome.py`; not a same-run Chrome capture, so read it as a size, not a board score): **develop 75.06%, fix 16.24%**. Three of four captures finished (one develop capture hit the 30 s limit); the two fix captures are identical to each other.
+- **weather 0.01%** (125 pixels in the location pill's label) and **shopify 0.05%** (536 pixels at a button's edge): against the same stored Chrome frames weather is 30.53 -> 30.54% and shopify 19.906 -> 19.905%.
+- **netflix, google, walmart, linkedin:** each serves more than one page (netflix alternates two headlines and button styles), and the difference within one arm is as large as across arms. I looked at netflix's two fix captures: two different pages.
+- **Not verified: squarespace, facebook, cnn.** None finished inside the 30 s limit on either arm in two attempts (machine load 11 to 14). squarespace is one of the two sites this was found on (`.cta--inline { background-color:#0000 }`), so it should move.
+- The other ten sites are pixel-identical across every capture that finished (x lost one develop capture to the 30 s limit; the other nine have all four).
+
+No board check is claimed: no scoring run was taken.

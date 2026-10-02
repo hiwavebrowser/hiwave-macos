@@ -1,0 +1,14 @@
+d0   chrome (255, 0, 0)      computed rgb(255, 0, 0)      develop (255, 0, 0)       fix (255, 0, 0)       |  
+d1   chrome (255, 255, 255)  computed rgba(0, 0, 0, 0)    develop (255, 0, 0)      WRONG  fix (255, 255, 255)   |  #d1 { background-color: #0000; }
+d2   chrome (255, 255, 255)  computed rgba(0, 0, 0, 0)    develop (255, 255, 255)   fix (255, 255, 255)   |  #d2 { background: #0000; }
+d3   chrome (119, 119, 255)  computed rgba(0, 0, 255, 0.533)  develop (255, 0, 0)      WRONG  fix (119, 119, 255)   |  #d3 { background-color: #00f8; }
+d4   chrome (0, 255, 0)      computed rgb(0, 255, 0)      develop (255, 0, 0)      WRONG  fix (0, 255, 0)       |  #d4 { background-color: #0F0F; }
+d5   chrome (127, 255, 127)  computed rgba(0, 255, 0, 0.5)  develop (127, 255, 127)   fix (127, 255, 127)   |  #d5 { background-color: #00ff0080; }
+d6   chrome (255, 0, 0)      computed rgb(255, 0, 0)      develop (255, 0, 0)       fix (255, 0, 0)       |  #d6 { background-color: #12345; }
+d7   chrome (255, 0, 0)      computed rgb(255, 0, 0)      develop (255, 0, 0)       fix (255, 0, 0)       |  #d7 { background-color: #ggg; }
+d8   chrome (119, 119, 255)  computed rgba(0, 0, 0, 0)    develop (255, 255, 255)  WRONG  fix (119, 119, 255)   |  #d8 { background: #0000 linear-gradient(#00f8, #00f8); }
+d9   chrome (255, 255, 255)  computed rgba(255, 255, 255, 0)  develop (255, 0, 0)      WRONG  fix (255, 255, 255)   |  #d9 { border: 10px solid #0808; background-color: #fff0; }
+d10  chrome (185, 119, 188)  computed rgba(0, 0, 0, 0)    develop (255, 255, 255)  WRONG  fix (185, 119, 189)   |  #d10 { background: linear-gradient(#f008, #00f8); }
+d11  chrome (170, 187, 204)  computed rgb(170, 187, 204)  develop (170, 187, 204)   fix (170, 187, 204)   |  #d11 { background-color: #abc; }
+d12  chrome (255, 0, 0)      computed rgb(255, 0, 0)      develop (15, 15, 15)     WRONG  fix (255, 0, 0)       |  #d12 { background-color: #+f+f+f; }
+boxes whose painted colour differs from Chrome: develop 7 of 13, fix 0 of 13
