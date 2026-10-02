@@ -1,0 +1,1 @@
+On the branch: `cargo test -p rustkit-engine --lib background` 8/8 (these three, #433's test and four older background tests). The whole engine suite was not run locally (the other lanes were building, load 13 to 23, and its GPU guard times out under load), so CI's `unit-suites` is its first full run.

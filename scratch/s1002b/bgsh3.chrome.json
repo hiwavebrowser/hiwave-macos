@@ -1,0 +1,242 @@
+{
+ "f0": {
+  "rect": [
+   10,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "auto"
+ },
+ "f1": {
+  "rect": [
+   138,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "0% 0%",
+  "background-size": "auto"
+ },
+ "f2": {
+  "rect": [
+   266,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "auto"
+ },
+ "f3": {
+  "rect": [
+   394,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "100% 100%",
+  "background-size": "auto"
+ },
+ "f4": {
+  "rect": [
+   522,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "repeat-x",
+  "background-position": "0% 0%",
+  "background-size": "auto"
+ },
+ "f5": {
+  "rect": [
+   650,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "10px 20px",
+  "background-size": "40px 30px"
+ },
+ "f6": {
+  "rect": [
+   778,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgb(255, 255, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "auto"
+ },
+ "f7": {
+  "rect": [
+   906,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "20px 10px",
+  "background-size": "30px 15px"
+ },
+ "f8": {
+  "rect": [
+   1034,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "cover"
+ },
+ "f9": {
+  "rect": [
+   10,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgb(238, 238, 238)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "contain"
+ },
+ "f10": {
+  "rect": [
+   138,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "repeat",
+  "background-position": "0% 0%",
+  "background-size": "auto"
+ },
+ "f11": {
+  "rect": [
+   266,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "auto"
+ },
+ "f12": {
+  "rect": [
+   394,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat, repeat",
+  "background-position": "50% 50%, 0% 0%",
+  "background-size": "auto, auto"
+ },
+ "f13": {
+  "rect": [
+   522,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 100%",
+  "background-size": "100% 4px"
+ },
+ "f14": {
+  "rect": [
+   650,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "repeat-y",
+  "background-position": "100% 50%",
+  "background-size": "6px 12px"
+ },
+ "f15": {
+  "rect": [
+   778,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "100% 0%",
+  "background-size": "30px 15px"
+ },
+ "f16": {
+  "rect": [
+   906,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "10px 20px",
+  "background-size": "30px 15px"
+ },
+ "f17": {
+  "rect": [
+   1034,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 100%",
+  "background-size": "50% 50%"
+ },
+ "f18": {
+  "rect": [
+   10,
+   146,
+   120,
+   60
+  ],
+  "background-color": "rgb(204, 255, 204)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "50% 50%"
+ },
+ "f19": {
+  "rect": [
+   138,
+   146,
+   120,
+   60
+  ],
+  "background-color": "rgb(238, 238, 238)",
+  "background-repeat": "no-repeat, no-repeat, repeat",
+  "background-position": "0px 0px, 100% 0px, 0% 0%",
+  "background-size": "20px 100%, 20px 100%, auto"
+ }
+}

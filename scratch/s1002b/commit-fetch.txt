@@ -1,0 +1,16 @@
+fix(engine): a CSS background image is fetched
+
+Only `<img>` elements were looked for. A `background-image: url(...)`
+reached the display list and was painted only when it was a `data:` URL
+or already in the cache, so no page's CSS image over http ever painted.
+
+`discover_background_images` takes the http(s) urls of the display list's
+background image commands (absolute already; a box that is not rendered
+has none) and `load_images` fetches them with the `<img>` list. SVG
+backgrounds are left out: only `<img>` commands are spliced from the SVG
+cache.
+
+No receipts yet: this goes down the image manager's own HTTP client, as
+`<img>` does, and is not to become a PR on that path.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

@@ -1,0 +1,19 @@
+fix(engine): the background shorthand sets each layer's position, size, repeat and boxes
+
+A layer of `background` kept only its image, and only when the layer
+began with it. `url(a.png) no-repeat center / cover` tiled from the top
+left at its own size, `no-repeat url(a.png)` had no image, and
+`linear-gradient(...) no-repeat 0 0 / 100% 2px` painted nothing (the
+gradient parser was handed the whole layer).
+
+`parse_background_shorthand_layer` reads a layer token by token
+(css-backgrounds-3 §3.10): the image wherever it stands, the position
+with an optional `/ size`, one or two repeat keywords, the attachment
+(read, not used), one or two boxes, and the colour. A url is taken to its
+closing parenthesis, not to the first `)` inside it.
+
+`background-position` reads its keywords by axis: one value centres the
+other axis and `top` / `bottom` are vertical; `top right` is `right top`;
+the edge-offset form keeps an offset from `left` / `top`.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

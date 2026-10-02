@@ -1,0 +1,17 @@
+test element_identity_tests::the_background_shorthand_sets_each_layers_position_size_and_repeat ... FAILED
+thread 'element_identity_tests::the_background_shorthand_sets_each_layers_position_size_and_repeat' (16851005) panicked at crates/rustkit-engine/src/lib.rs:16461:9:
+assertion `left == right` failed
+  left: Repeat
+ right: NoRepeat
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 301 filtered out; finished in 30.25s
+error: test failed, to rerun pass `-p rustkit-engine --lib`
+rc 101
+test element_identity_tests::a_background_position_reads_its_keywords_by_axis ... FAILED
+thread 'element_identity_tests::a_background_position_reads_its_keywords_by_axis' (16851508) panicked at crates/rustkit-engine/src/lib.rs:16525:9:
+assertion `left == right` failed
+  left: (Percent(1.0), Percent(0.5))
+ right: (Percent(0.5), Percent(1.0))
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 301 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p rustkit-engine --lib`
+rc 101
+restored: True

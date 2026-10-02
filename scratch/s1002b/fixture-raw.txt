@@ -1,0 +1,21 @@
+f0    develop   0.00%  base433   0.00%  fix   0.00%  |  #f0 { background-image: url(data:image/png;b
+f1    develop  94.44%  base433  94.44%  fix   0.00%  |  #f1 { background: url(data:image/png;base64,
+f2    develop 100.00%  base433 100.00%  fix   0.00%  |  #f2 { background: url(data:image/png;base64,
+f3    develop  94.44%  base433  94.44%  fix   0.00%  |  #f3 { background: url(data:image/png;base64,
+f4    develop  66.67%  base433  66.67%  fix   0.00%  |  #f4 { background: url(data:image/png;base64,
+f5    develop  96.50%  base433  96.50%  fix  29.17%  |  #f5 { background: url(data:image/png;base64,
+f6    develop 100.00%  base433   5.56%  fix   0.00%  |  #f6 { background: #ff0 url(data:image/png;ba
+f7    develop   6.25%  base433   6.25%  fix   0.00%  |  #f7 { background: linear-gradient(blue, blue
+f8    develop  71.67%  base433  71.67%  fix   0.00%  |  #f8 { background: url(data:image/png;base64,
+f9    develop  89.44%  base433  89.44%  fix   0.00%  |  #f9 { background: url(data:image/png;base64,
+f10   develop   0.00%  base433   0.00%  fix   0.00%  |  #f10 { background: url(data:image/png;base64
+f11   develop   5.56%  base433   5.56%  fix   0.00%  |  #f11 { background: no-repeat center url(data
+f12   develop 100.00%  base433 100.00%  fix   0.00%  |  #f12 { background: url(data:image/png;base64
+f13   develop   6.67%  base433   6.67%  fix   0.00%  |  #f13 { background: linear-gradient(blue, blu
+f14   develop   5.00%  base433   5.00%  fix   0.00%  |  #f14 { background: linear-gradient(blue, blu
+f15   develop   6.25%  base433   6.25%  fix   0.00%  |  #f15 { background: linear-gradient(blue, blu
+f16   develop   6.25%  base433   6.25%  fix   0.00%  |  #f16 { background: linear-gradient(blue, blu
+f17   develop  25.00%  base433  25.00%  fix   0.00%  |  #f17 { background: linear-gradient(blue, blu
+f18   develop 100.00%  base433  25.00%  fix   0.00%  |  #f18 { background: #cfc linear-gradient(blue
+f19   develop  33.33%  base433  33.33%  fix   0.00%  |  #f19 { background: linear-gradient(blue, blu
+boxes more than 1% off Chrome: develop 18 of 20, base433 18 of 20, fix 1 of 20

@@ -1,0 +1,23 @@
+declaration (IMG = the data: PNG, GRAD = linear-gradient(blue, blue))                                 before #433  develop 33d7368  fix
+background-image: IMG; background-repeat: no-repeat; background-position: center                            0.00%            0.00%    0.00%
+background: IMG no-repeat                                                                                  94.44%           94.44%    0.00%
+background: IMG no-repeat center                                                                          100.00%          100.00%    0.00%
+background: IMG no-repeat right bottom                                                                     94.44%           94.44%    0.00%
+background: IMG repeat-x                                                                                   66.67%           66.67%    0.00%
+background: IMG no-repeat 10px 20px / 40px 30px                                                            96.50%           96.50%   29.17%
+background: #ff0 IMG no-repeat center                                                                     100.00%            5.56%    0.00%
+background: GRAD no-repeat 20px 10px / 30px 15px                                                            6.25%            6.25%    0.00%
+background: IMG center / cover no-repeat                                                                   71.67%           71.67%    0.00%
+background: IMG center / contain no-repeat #eee                                                            89.44%           89.44%    0.00%
+background: IMG                                                                                             0.00%            0.00%    0.00%
+background: no-repeat center IMG                                                                            5.56%            5.56%    0.00%
+background: IMG 50% 50% no-repeat, linear-gradient(#cfc, #cfc)                                            100.00%          100.00%    0.00%
+background: GRAD no-repeat bottom / 100% 4px                                                                6.67%            6.67%    0.00%
+background: GRAD repeat-y right / 6px 12px                                                                  5.00%            5.00%    0.00%
+background: GRAD no-repeat top right / 30px 15px                                                            6.25%            6.25%    0.00%
+background: GRAD no-repeat left 10px top 20px / 30px 15px                                                   6.25%            6.25%    0.00%
+background: GRAD no-repeat; background-size: 50% 50%; background-position: bottom                          25.00%           25.00%    0.00%
+background: #cfc GRAD no-repeat center/50% 50%                                                            100.00%           25.00%    0.00%
+background: GRAD 0 0/20px 100% no-repeat, linear-gradient(red, red) 100% 0/20px 100% no-repeat, #eee       33.33%           33.33%    0.00%
+
+boxes more than 1% off Chrome                                                                            18 of 20         18 of 20  1 of 20

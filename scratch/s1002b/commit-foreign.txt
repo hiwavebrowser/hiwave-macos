@@ -1,0 +1,8 @@
+fix(engine): a background value in another engine's prefix is dropped whole
+
+`background: -moz-linear-gradient(...)` (also `-o-`, `-ms-`) does not parse
+in Chrome, so the declaration is ignored and the earlier background stays.
+The engine cleared the earlier image layers on it, and with the shorthand
+reset it would have cleared the colour too.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+body { margin: 10px; background: #fff; }
+div { float: left; width: 120px; height: 60px; margin: 0 8px 8px 0; }
+#f0 { background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=); background-repeat: no-repeat; background-position: center; }
+#f1 { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=) no-repeat; }
+#f2 { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=) no-repeat center; }
+#f3 { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=) no-repeat right bottom; }
+#f4 { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=) repeat-x; }
+#f5 { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=) no-repeat 10px 20px / 40px 30px; }
+#f6 { background: #ff0 url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=) no-repeat center; }
+#f7 { background: linear-gradient(blue, blue) no-repeat 20px 10px / 30px 15px; }
+#f8 { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=) center / cover no-repeat; }
+#f9 { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=) center / contain no-repeat #eee; }
+#f10 { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=); }
+#f11 { background: no-repeat center url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=); }
+#f12 { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAL0lEQVR4nGM8wYAPWEzDJ8vEQAFgGtU8IgKMxYIBXxp7xmVBK5uZRjWTBoZogAEA2oID6HRyeCoAAAAASUVORK5CYII=) 50% 50% no-repeat, linear-gradient(#cfc, #cfc); }
+#f13 { background: linear-gradient(blue, blue) no-repeat bottom / 100% 4px; }
+#f14 { background: linear-gradient(blue, blue) repeat-y right / 6px 12px; }
+#f15 { background: linear-gradient(blue, blue) no-repeat top right / 30px 15px; }
+#f16 { background: linear-gradient(blue, blue) no-repeat left 10px top 20px / 30px 15px; }
+#f17 { background: linear-gradient(blue, blue) no-repeat; background-size: 50% 50%; background-position: bottom; }
+#f18 { background: #cfc linear-gradient(blue, blue) no-repeat center/50% 50%; }
+#f19 { background: linear-gradient(blue, blue) 0 0/20px 100% no-repeat, linear-gradient(red, red) 100% 0/20px 100% no-repeat, #eee; }
+</style></head><body>
+<div id="f0"></div><div id="f1"></div><div id="f2"></div><div id="f3"></div><div id="f4"></div><div id="f5"></div><div id="f6"></div><div id="f7"></div><div id="f8"></div><div id="f9"></div><div id="f10"></div><div id="f11"></div><div id="f12"></div><div id="f13"></div><div id="f14"></div><div id="f15"></div><div id="f16"></div><div id="f17"></div><div id="f18"></div><div id="f19"></div>
+</body></html>

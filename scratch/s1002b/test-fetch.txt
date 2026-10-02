@@ -1,0 +1,27 @@
+error[E0599]: no method named `create_headless_view` found for struct `Engine` in the current scope
+     --> crates/rustkit-engine/src/lib.rs:17406:14
+      |
+  816 |   pub struct Engine {
+      |   ----------------- method `create_headless_view` not found for this struct
+...
+17405 |           let view = engine
+      |  ____________________-
+17406 | |             .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+      | |_____________-^^^^^^^^^^^^^^^^^^^^
+      |
+help: there is a method `create_view` with a similar name, but with different arguments
+     --> crates/rustkit-engine/src/lib.rs:1156:5
+      |
+ 1156 | /     pub fn create_view(
+ 1157 | |         &mut self,
+ 1158 | |         parent: WindowHandle,
+ 1159 | |         bounds: Bounds,
+ 1160 | |     ) -> Result<EngineViewId, EngineError> {
+      | |__________________________________________^
+
+For more information about this error, try `rustc --explain E0599`.
+warning: `rustkit-engine` (lib test) generated 5 warnings
+error: could not compile `rustkit-engine` (lib test) due to 1 previous error; 5 warnings emitted
+
+error: could not compile `rustkit-engine` (lib test) due to 1 previous error; 5 warnings emitted
+rc=101 347s load=14.1

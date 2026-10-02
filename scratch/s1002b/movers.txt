@@ -1,0 +1,5 @@
+No site moves between the arms. Seventeen were captured; fourteen are pixel-identical across all four pairs or differ only by what two captures of one binary differ by (google 0.30%, bing 0.24%, netflix 1.9 to 4.8%). linkedin and walmart each served a second variant of the page to one capture (linkedin's first develop capture, walmart's second); the other three captures of each agree to 0.00% and 1.55%. github, squarespace and cnn did not finish within the binary's 30 s on either arm (load 13 to 21 from the other lanes), so they are unverified on both arms alike. No check changes.
+
+I expected this change to move live pages in both directions and it moves none of the first viewports. Where it shows is #429's button face, which is not on develop yet.
+
+The one campaign mover is `card-grid`, 1.3074 -> 1.3034% (99 pixels, paint score 0.82911 -> 0.82914). Its featured card is `.card { background: white }` under a later `.card.featured { background: linear-gradient(...) }`. On develop the white stayed under the gradient and showed as light slivers at the card's four rounded corners; Chrome has no white there, and neither does the fix.

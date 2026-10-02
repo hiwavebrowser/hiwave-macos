@@ -1,0 +1,9 @@
+test element_identity_tests::the_background_shorthand_resets_the_colour_it_does_not_name ... FAILED
+thread 'element_identity_tests::the_background_shorthand_resets_the_colour_it_does_not_name' (16783466) panicked at crates/rustkit-engine/src/lib.rs:16347:13:
+assertion `left == right` failed: `background: none` clears the colour
+  left: Color { r: 255, g: 0, b: 0, a: 1.0 }
+ right: Color { r: 0, g: 0, b: 0, a: 0.0 }
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 299 filtered out; finished in 6.70s
+error: test failed, to rerun pass `-p rustkit-engine --lib`
+rc 101
+restored: True

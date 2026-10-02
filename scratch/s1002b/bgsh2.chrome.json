@@ -1,0 +1,182 @@
+{
+ "e0": {
+  "rect": [
+   10,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "auto"
+ },
+ "e1": {
+  "rect": [
+   138,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "0% 0%",
+  "background-size": "auto"
+ },
+ "e2": {
+  "rect": [
+   266,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "auto"
+ },
+ "e3": {
+  "rect": [
+   394,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "100% 100%",
+  "background-size": "auto"
+ },
+ "e4": {
+  "rect": [
+   522,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "repeat-x",
+  "background-position": "0% 0%",
+  "background-size": "auto"
+ },
+ "e5": {
+  "rect": [
+   650,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "10px 20px",
+  "background-size": "40px 30px"
+ },
+ "e6": {
+  "rect": [
+   778,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgb(255, 255, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "auto"
+ },
+ "e7": {
+  "rect": [
+   906,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "20px 10px",
+  "background-size": "30px 15px"
+ },
+ "e8": {
+  "rect": [
+   1034,
+   10,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "cover"
+ },
+ "e9": {
+  "rect": [
+   10,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgb(238, 238, 238)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "contain"
+ },
+ "e10": {
+  "rect": [
+   138,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "repeat",
+  "background-position": "0% 0%",
+  "background-size": "auto"
+ },
+ "e11": {
+  "rect": [
+   266,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "50% 50%",
+  "background-size": "auto"
+ },
+ "e12": {
+  "rect": [
+   394,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat, repeat",
+  "background-position": "50% 50%, 0% 0%",
+  "background-size": "auto, auto"
+ },
+ "e13": {
+  "rect": [
+   522,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "no-repeat",
+  "background-position": "calc(100% - 5px) calc(100% - 5px)",
+  "background-size": "auto"
+ },
+ "e14": {
+  "rect": [
+   650,
+   78,
+   120,
+   60
+  ],
+  "background-color": "rgba(0, 0, 0, 0)",
+  "background-repeat": "repeat",
+  "background-position": "0% 0%",
+  "background-size": "auto"
+ }
+}

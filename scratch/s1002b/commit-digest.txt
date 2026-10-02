@@ -1,0 +1,3 @@
+trench(realsite): digest 2026-10-02 05:25 — #433 (the background shorthand resets the colour it does not name) opened and MERGED: 11 of 18 fixture boxes wrong -> 1; #434 (the shorthand sets each layer's position, size, repeat and boxes) opened: 18 of 20 boxes off Chrome -> 1, campaign identical, CI green, R1 CLEAR; found: a CSS background image is never fetched (only <img> is); atlas/rs-background-image-fetch @ 96fb04d pushed without a PR (it would fetch outside the shield); #429 still DRAFT (develop merged locally, not pushed); board 26/60 unchanged (no scoring run)
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
