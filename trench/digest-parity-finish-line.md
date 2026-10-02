@@ -14188,3 +14188,209 @@ text-exposure on real Core Text says the largest geometry row is mostly P4,
 which §4 places fourth. That was context for decision 1, not a question he
 answered. The 08-12 geometry-first amendment stands. Moving the queue is its own
 decision.
+
+## 2026-10-02
+
+**Metric: `3/26` on macOS before, and the prediction for this change is
+`3/26` after.** It is recorded as a prediction, before the lane runs, so a
+later night can check the lane against it rather than against this file.
+Tonight closes the **only font-independent geometry root on the whole board**
+and that is still not enough to flip a case: `sticky-scroll` carries 16
+geometry failures and 15 of them are text metrics of 0.5px–1.5px, so it stays
+geometry-RED. Expect geometry failures 468 → 467 and font-independent roots
+1 → 0.
+
+**P-item: a grid-path geometry defect, picked from the macOS board under the
+ratified geometry-first amendment. COMPLETE.** One root, one call, four
+guards, six mutation probes, and a whole-corpus A/B that moves exactly one box.
+
+### The unit was picked from macOS, which is the thing that changed tonight
+
+Night 71's decision 1 (ratified) forbids this seat from proposing a unit from
+its own Gate A magnitudes; decision 3 (ratified, applied) allows the macOS
+artifact to be read directly. This is the first night to use that route end to
+end, and the recipe in the baseline file worked as written:
+
+1. `parity.yml` run **36962076388** (10-02 04:01 UTC, `macos-14`) — the newest
+   completed lane. Its merge ref is `develop` + #427, and #427 is now
+   `develop b0162e4`, so **the board and tonight's branch base are the same
+   engine.** That is the base match five nights of digests have asked for. It
+   came from timing, not from a mechanism: **G5 is still unbuilt**, and the
+   next night may not assume this.
+2. `parity-oracle` downloaded, sha256 checked against GitHub's recorded digest
+   (`1e79aa05…`), plus all four `parity-shard-N` artifacts (`1fa7f10a…`,
+   `ac52669b…`, `bc4d1fdd…`, `e25e2015…`) for the macOS `layout.json` captures.
+3. `scripts/geometry_attribution.py` over those captures — the tool that
+   already existed and that night 71 rebuilt by accident (G6):
+
+```
+  failing: 468 axes = 223 root + 245 carried
+  font-independent roots: 1
+    sticky-scroll  …> main > div.overflow-demo:nth-of-type(4) > div.overflow-content
+                   y   expected 1051.25   actual 976.30   -74.95
+```
+
+**One root on the entire board that this seat can measure end to end.** No
+guessing from a count, no Linux magnitude. The board's per-case shape, for the
+record (`own`/`flow` = text-exposed, `clean` = neither):
+
+| case | fail | own | flow | clean | join |
+|---|---:|---:|---:|---:|---:|
+| settings | 243 | 169 | 32 | 42 | 0 |
+| about | 60 | 50 | 10 | 0 | 0 |
+| form-elements | 47 | 32 | 8 | 8 | 1 |
+| article-typography | 46 | 46 | 0 | 0 | 0 |
+| form-controls | 43 | 17 | 21 | 9 | 4 |
+| sticky-scroll | 16 | 15 | 0 | 1 | 0 |
+| new_tab | 6 | 5 | 0 | 1 | 0 |
+| chrome_rustkit / css-selectors | 3 / 3 | 3 / 3 | 0 | 0 | 0 |
+| shelf | 0 | 0 | 0 | 3 | 3 |
+| image-gallery | 1 | 1 | 0 | 0 | 0 |
+
+### What the defect was
+
+`.overflow-content` is `position: absolute; top: 50%; left: 50%;
+transform: translate(-50%, -50%)` in a `position: relative; height: 150px`
+`.overflow-demo`, and the demo is a child of `main`, which is a grid item.
+Chrome: `top` = 75 of 150, layout box at 1201.25, visual box at 1051.25 after
+the translate. RustKit had the layout box at **1126.30 — the demo's own y**,
+i.e. `top` resolved to **0**.
+
+Grid Phase 9 re-lays out a grid item's children itself: width, final position,
+a re-flow of the subtree, and only then the height. The abspos
+great-grandchild was positioned inside that re-flow, against the grandchild's
+**stale** height. The generic block path has anchored abspos children to the
+parent's final padding box since n46 (`reanchor_absolute_children` at the tail
+of `layout_block` and `layout_with_collapse_in`); this loop reaches neither.
+One call, at the point the grandchild's box is final.
+
+`left: 50%` was right the whole time, and that asymmetry is the diagnosis in
+one line: **a grid item's width is known before its children flow and its
+height is not.**
+
+### Commits
+
+On `atlas/n72-unit` (off `develop b0162e4`):
+
+- `d1d6c32` — a grid item's child anchors its abspos children to its final box.
+
+On this branch: this digest entry.
+
+### Measured — Linux/SwiftShader, 26 captures, box by box. MECHANICS, NOT A RECEIPT
+
+This seat's `TextShaper::shape` is a stub, so no magnitude from here is a
+defect and no number here is the campaign's. What an A/B at the same base
+*can* say is what a change moves, and it says this:
+
+| | |
+|---|---|
+| moved axes, whole corpus | **2** — both on `.overflow-content`, both **+75.0px** |
+| | `layout.y` 1126.304 → 1201.304 · `visual.y` 976.304 → **1051.304** (Chrome 1051.25) |
+| every other box, all 26 captures | **bit-identical** on all four axes, both rects |
+| `diff_pct_median`, all 26 cases | **bit-identical** |
+| all 26 `frame.ppm` | **bit-identical by sha256** |
+
+**Stop rule: did not fire.** One box moved, onto Chrome's number; nothing
+worsened on any axis of any box of any case; no box appeared or vanished.
+
+One corroboration that was not planned: this seat's pre-fix `.overflow-demo`
+y is `1126.3040771484375` and **macOS's is the same to the last bit.** The
+attribution board called this root font-independent from a heuristic; two
+independent text stacks agreeing exactly is a measurement of the same claim.
+
+### Mutation-check results
+
+**6 probes, 6 RED, control green before and after, every guard kills at least
+one probe.**
+
+| probe | A | B | C | D |
+|---|---|---|---|---|
+| M1 delete the call | RED | RED | RED | RED |
+| M2 call it BEFORE the height resolution | RED | RED | RED | — |
+| M3 reanchor the grandchild itself, not its children | RED | RED | RED | — |
+| M4 anchor to the content box, not the padding box | green | **RED** | green | — |
+| M5 gate the call on `width_changed` | green | green | **RED** | — |
+
+A `an_abspos_child_of_a_grid_items_child_anchors_to_its_final_height` ·
+B `an_inset_stretched_abspos_in_a_grid_items_child_uses_the_final_height` ·
+C `the_grid_child_reanchor_does_not_wait_for_the_width_to_move` ·
+D (rustkit-engine) `a_percentage_inset_in_a_grid_items_child_resolves_against_its_final_height`
+
+**Two survivors, both closed, and both the shape this digest has now named six
+sweeps running — the guard written against the example rather than the rule.**
+
+- **M5 survived the first sweep.** A, B and C build the grandchild from
+  nothing, so its stale width is 0 and the width always moves: no guard could
+  tell an unconditional re-anchor from one gated on `width_changed`. The gated
+  form is wrong in exactly the shape the real page has — the block pre-pass
+  has already given a full-width block its final width, and only the *height*
+  is resolved in Phase 9. C exists for that and nothing else.
+- **D exists because a layout-level test of this shape came out CORRECT.**
+  Before writing any guard I built a 16-way matrix at the layout level
+  (relative/static × overflow × in-grid × margin-collapse) and **all 16 were
+  right**, which read as the layout crate being innocent. It is not: the
+  matrix drove `LayoutBox::layout`, whose grid arm runs a block pre-pass over
+  the whole subtree *first*, and a pre-pass that happens to leave the correct
+  height behind makes the same tree right for the wrong reason. The defect
+  only appears through `layout_grid_container` with no pre-pass (guards A–C)
+  or through the engine's real cascade (D). **A matrix that looks exhaustive
+  and never enters the suspect path is worse than no matrix, because it reads
+  as an exoneration.** The engine-level repro is what actually located this.
+
+### A measurement that disagreed with an assumption
+
+**73% of the board's geometry failures are on boxes no paint oracle can see.**
+Both sides' paint capture is a viewport screenshot (Chrome's `baseline.png` is
+1280×800, RustKit's `frame.ppm` is the same), while geometry is scored over
+the whole document. Counted against the committed Chrome rects:
+
+```
+  476 failures scored (468 geometry + 8 join)
+  349 on boxes Chrome places entirely BELOW the captured viewport
+    settings 172/243 · about 55/60 · form-elements 42/48 · form-controls 37/47
+    article-typography 41/46 · sticky-scroll 1/16 · image-gallery 1/1
+```
+
+That is why all 26 frames came back bit-identical tonight: `.overflow-demo`
+sits at y=1126 in an 800px capture, so a 300×300 circle moved 75px and the
+painted frame could not change. **The zero in the paint column is not a pass
+and not a regression — it is out of frame.** The two conditions of the
+conjunction are measured over different extents, which means a below-the-fold
+geometry fix can never move paint, and the eleven paint-only cases cannot be
+helped by most of the geometry grind. I did not expect this and it is the most
+consequential thing I measured.
+
+### Latent, found while working, nobody's unit
+
+- **Phase 9 never resolves a grid grandchild's block-direction padding or
+  border from style.** It recomputes the inline edges (`calculate_block_width`)
+  and reads `padding.top`/`border.top` from whatever the block pre-pass left.
+  In the engine a pre-pass always runs, so this is invisible there; through
+  `layout_grid_container` alone those edges are 0. Guard B seeds them the way
+  the pre-pass would, and says so in a comment. Recorded, not fixed — one
+  thing per night.
+- **`resolved_offsets` cannot resolve an absolute `top`/`left` from style at
+  all.** It handles `Percent`, `Vw/Vh/Vmin/Vmax`, `Calc`, `Min/Max/Clamp`, and
+  falls through to `None` for `Px` and `Zero`, relying on the engine's
+  `positioning_of` to have pre-resolved those into `offsets`. That is a
+  coherent split, but it is undocumented at the call site and it cost me a
+  false red while writing guard B.
+- **`shelf`'s only geometry failures are 3 `missing_box` on an inline
+  `<svg>` and its `circle`/`path`.** It is the one case on the board that a
+  single non-text fix could take geometry-green — and `circle`/`path` need
+  real SVG bbox geometry, not just a box for the `<svg>`. Named as the
+  cheapest geometry-green flip available, not started.
+
+### Decisions needed from Pete
+
+1. **Paint is scored over the viewport and geometry over the whole document —
+   349 of 476 geometry failures are below the fold.** Should the paint capture
+   go full-page (which re-baselines all 26 cases and so touches the corpus,
+   currently banned), or is the viewport-only paint column intended and the
+   geometry grind simply not expected to move it?
+2. **G5 (record the base SHA in the gate JSON) is still unbuilt and tonight
+   got its base match by luck.** Build it next time a night has no clean unit,
+   or leave it?
+3. The queue order is still formally unratified against the measured board
+   (10-01's note: `settings` is 201/243 text-exposed, i.e. the largest row is
+   mostly P4). Unchanged from last night, asked once and not re-argued.
