@@ -1,0 +1,25 @@
+error: test failed, to rerun pass `-p rustkit-engine --lib`
+
+
+failures:
+
+---- rounded_paint_frame_tests::a_url_background_sits_at_its_length_position stdout ----
+
+thread 'rounded_paint_frame_tests::a_url_background_sits_at_its_length_position' (17586426) panicked at crates/rustkit-engine/src/lib.rs:25931:9:
+assertion `left == right` failed: near: inside the image
+  left: [0, 0, 255]
+ right: [255, 0, 0]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    rounded_paint_frame_tests::a_url_background_sits_at_its_length_position
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 377 filtered out; finished in 8.00s
+
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 377 filtered out; finished in 8.00s
+error: test failed, to rerun pass `-p rustkit-engine --lib`
+rc=101 91s load=12.8
+ 
+restored /Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/crates/rustkit-engine/src/lib.rs

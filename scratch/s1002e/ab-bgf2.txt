@@ -1,0 +1,4 @@
+netflix      within develop    nan%  within fix   2.27%  across    nan%    nan%   2.29%   2.17%  failed: A1  secs A,B,A,B 30,27,25,24
+apple        within develop   0.00%  within fix   0.00%  across   0.00%   0.00%   0.00%   0.00%  failed: none  secs A,B,A,B 27,25,28,26
+shopify      within develop    nan%  within fix    nan%  across   0.00%    nan%    nan%    nan%  failed: A2,B2  secs A,B,A,B 27,22,30,31
+github       within develop    nan%  within fix    nan%  across    nan%    nan%    nan%    nan%  failed: A1,B1,A2,B2  secs A,B,A,B 31,30,30,30

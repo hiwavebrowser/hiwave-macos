@@ -1,0 +1,14 @@
+:root { --img: url(../img/dot.png?c); }
+div { width: 120px; height: 40px; margin: 4px; }
+#a { background: url(../img/dot.png?a); }
+#b { background-image: url("../img/dot.png?b"); }
+#c { background: var(--img) no-repeat; }
+#d { background-image: image-set(url(../img/dot.png?d) 1x, url(../img/dot.png?d2) 2x); }
+#e { background-image: url(../img/dot.png?e), linear-gradient(red, blue); }
+#f { background: url(/img/dot.png?f) center / cover no-repeat; }
+#g::before { content: ""; display: block; width: 50px; height: 40px; background: url(../img/dot.png?g); }
+#h { background-image: -webkit-image-set(url(../img/dot.png?h) 1x); }
+#i { background-size: cover; }
+#i { background-image: url(../img/dot.png?i); }
+@media (min-width: 600px) { #j { background-image: url(../img/dot.png?j); } }
+#k { background: #eee url(../img/dot.png?k) no-repeat 50% / 20px; }

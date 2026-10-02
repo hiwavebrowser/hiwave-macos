@@ -1,0 +1,13 @@
+fix(layout): a url() background image sits at its length position
+
+DisplayCommand::BackgroundImage carried the position as two shares of
+the free space, and layout turned a length into share 0: `10px 20px`,
+every sprite offset and `right 10px` drew the image at the box's corner
+(or flush on the far edge). Gradients were right, since their rect is
+computed in layout.
+
+The command now carries a pixel offset beside the share, the renderer
+adds it, and `right <offset>` / `bottom <offset>` are kept by the
+parser (BackgroundPositionValue::FromEnd).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

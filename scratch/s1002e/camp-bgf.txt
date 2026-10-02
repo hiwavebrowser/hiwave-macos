@@ -1,0 +1,21 @@
+micro rc 0 Worst 3 Cases:
+  form-controls: 3.24%
+  backgrounds: 1.22%
+  combinators: 0.65%
+builtins rc 0 Worst 3 Cases:
+  about: 3.67%
+  settings: 2.09%
+  chrome_rustkit: 1.12%
+all rc 1 Worst 3 Cases:
+  chrome_rustkit: NOT-MEASURED
+  article-typography: 4.79%
+  about: 3.67%
+ratchet rc 0   pseudo-classes: geo_fails=0 paint=0.98303 discrete=0
+  rounded-corners: geo_fails=0 paint=0.98413 discrete=0
+  settings: geo_fails=243 paint=0.95061 discrete=0
+  shelf: geo_fails=0 paint=0.98398 discrete=0
+  specificity: geo_fails=0 paint=0.98075 discrete=0
+  sticky-scroll: geo_fails=15 paint=0.98265 discrete=0
+ 
+ratchet exit 2
+567s load=14.0

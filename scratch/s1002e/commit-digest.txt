@@ -1,0 +1,3 @@
+trench(realsite): digest 2026-10-02 14:15 — #443 (a CSS background image is fetched, through the loader) opened: fixture 14 of 15 boxes off Chrome -> 2, campaign identical, fails first on develop; no board site moves, because on 13 sites censused no display list has an http raster background; atlas/rs-background-length-position @ b5a08a5 pushed without a PR (tests pass, no receipts); #438 MERGED; #429 still flagged DRAFT; board 26/60 unchanged (no scoring run)
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

@@ -1,0 +1,25 @@
+error: test failed, to rerun pass `-p rustkit-engine --lib`
+
+
+failures:
+
+---- background_image_fetch_tests::a_css_background_image_is_fetched stdout ----
+
+thread 'background_image_fetch_tests::a_css_background_image_is_fetched' (17582585) panicked at crates/rustkit-engine/src/lib.rs:28424:9:
+assertion `left == right` failed: one request per background the shield allows, each with the policy's Referer; none for the blocked one, none for a box that is not rendered
+  left: []
+ right: [("/cross.png", Some("http://127.0.0.1:63390/")), ("/shown.png", Some("http://127.0.0.1:63390/page?q=1"))]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    background_image_fetch_tests::a_css_background_image_is_fetched
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 377 filtered out; finished in 9.86s
+
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 377 filtered out; finished in 9.86s
+error: test failed, to rerun pass `-p rustkit-engine --lib`
+rc=101 790s load=14.6
+ 
+restored /Users/petecopeland/Repos/.worktrees/rs-dev-9f49a40/crates/rustkit-engine/src/lib.rs

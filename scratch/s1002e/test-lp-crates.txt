@@ -1,0 +1,6 @@
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.13s
+test result: ok. 602 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s
+test result: ok. 114 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+warning: unused variable: `auto_repeat`
+warning: unused variable: `auto_repeat`
+rc=0 378s load=14.7

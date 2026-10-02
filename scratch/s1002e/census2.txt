@@ -1,0 +1,9 @@
+netflix     commands  1771  <img>/svg image ops   1  background_image ops: none
+             log: image failures 0
+apple rc 3 et; rendering without it [3murl[0m[2m=[0mhttps://is1-ssl.mzstatic.com/image/thumb/Features221/v4/b1/bd/81/b1bd81c6-f678-a6d1-25d2-9d3bd20e1299/f1d34c41-e9e3-428d-80b7-fff65822f3f6.png/470x264.jpg 
+shopify     commands 22419  <img>/svg image ops  38  background_image ops: none
+             log: image failures 12
+github rc 3 {"status":"timeout","html_file":null,"url":"https://github.com/","width":1280,"height":800,"frame_path":null,"layout_path":null,"layout_stats":null,"error":"capture exceeded 30000 ms"} 
+facebook rc 3 {"status":"timeout","html_file":null,"url":"https://www.facebook.com/","width":1280,"height":800,"frame_path":null,"layout_path":null,"layout_stats":null,"error":"capture exceeded 30000 ms"} 
+squarespace rc 3 4 Not Found for https://media-www.sqspcdn.com/images/components/card-carousel/payment-2-500w.jpg") [3murl[0m[2m=[0mhttps://media-www.sqspcdn.com/images/components/card-carousel/payment-2-500w.jpg 
+cnn rc 3 {"status":"timeout","html_file":null,"url":"https://www.cnn.com/","width":1280,"height":800,"frame_path":null,"layout_path":null,"layout_stats":null,"error":"capture exceeded 30000 ms"} 

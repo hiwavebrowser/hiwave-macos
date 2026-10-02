@@ -1,0 +1,2 @@
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 375 filtered out; finished in 9.90s
+rc=0 221s load=13.4
