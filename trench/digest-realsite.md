@@ -1967,3 +1967,36 @@ trench/realsite/runs/20261002T0926Z-quiet-dev97393a7
 1. **The census before any more background work?** Found 1 says the fetch was not what kept backgrounds off the board, and I only found that by building it. Recommendation: yes. Length positions go up as a PR because they are written and tested, and then the census (both sides) decides between SVG backgrounds, `image-set()` and whatever else it shows, instead of my order from 05:25.
 2. **Still open from 11:20: #429 is ready and I cannot take its draft flag off** (`gh pr ready` is refused in the headless session). One click, or allow that command for this lane.
 3. **Which weather regression did the 06:30 note mean?** The fetch does not touch weather (identical frames, no background commands). If it is the "More" pill from #429, that was fixed by #435 and re-receipted at 11:20. If it is something else, name the frame or the digest line and I will bisect it first thing.
+
+## 2026-10-02 14:40 — daily QUIET board (quiet), develop e006c68
+
+**28/60 (loads 16, readable 8, looks-right 4; scorable 27/57)** (load at start: { 8.72 7.94 8.66 })
+
+```
+google     PASS PASS 100.0% PASS   8.1% (cc   0.3%)  3/3  
+youtube    fail fail   0.0% fail    -   (cc   0.1%)  0/3  blank frame (0.25% non-background)
+facebook   PASS fail  58.7% PASS  13.5% (cc   8.2%)  2/3  
+instagram  fail fail   0.0% fail    -   (cc   8.1%)  0/3  blank frame (0.59% non-background)
+wikipedia  PASS PASS  81.5% fail  16.9% (cc  14.9%)  2/3  
+lyft       PASS PASS 100.0% fail  17.9% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% fail    -   (cc   0.1%)  0/3  blank frame (1.51% non-background)
+x          PASS PASS  95.3% PASS  10.1% (cc   0.0%)  3/3  
+linkedin   PASS fail    -   fail    -   (cc    -  )  1/3  
+yahoo      PASS fail    -   fail    -   (cc    -  )  1/3  
+bing       PASS fail  12.2% fail  66.2% (cc   0.4%)  1/3  
+walmart    PASS fail  58.8% unst  91.2% (cc  96.7%)  1/3  
+microsoft  fail fail   0.0% fail    -   (cc   1.2%)  0/3  blank frame (0.96% non-background)
+apple      PASS PASS 100.0% fail  41.6% (cc   0.0%)  2/3  
+netflix    PASS PASS  85.3% fail  66.1% (cc   1.9%)  2/3  
+github     PASS fail  71.7% PASS   9.6% (cc  10.1%)  2/3  
+shopify    PASS PASS  96.4% unst  20.0% (cc  26.5%)  2/3  
+squarespace PASS PASS  85.7% fail  80.6% (cc   9.9%)  2/3  
+cnn        PASS fail  46.2% fail  52.5% (cc   0.2%)  1/3  
+weather    PASS fail   9.6% fail  34.3% (cc    -  )  1/3  
+------------------------------------------------------------------------------
+POINTS 28/60   loads 16  readable 8  looks-right 4   unstable: walmart, shopify   oracle failed: linkedin, yahoo
+BLOCKED none
+ORACLE BLOCKED linkedin (top-level document HTTP 403)
+SCORABLE 27/57 on 19 sites
+trench/realsite/runs/20261002T1814Z-quiet-deve006c68
+```
