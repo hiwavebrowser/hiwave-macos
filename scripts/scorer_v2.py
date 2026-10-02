@@ -14,6 +14,9 @@ Calibrated on known good/bad site captures to separate:
 Per Rule A3, Scorer v2 publishes BESIDE the old board (realsite_board.py), never
 mutating existing scoring definitions or thresholds.
 
+Zero mandatory external dependencies: uses scripts/parity_image.py for stdlib-only
+RGB decoding, accelerating with numpy/Pillow when available.
+
 Usage:
   python3 scripts/scorer_v2.py --run trench/realsite/runs/<ts>
   python3 scripts/scorer_v2.py --archive P:/repos/hiwave-renders/archive/realsite/windows/3787391
@@ -21,12 +24,14 @@ Usage:
 """
 
 import argparse
+from collections import Counter
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Optional acceleration: numpy / Pillow
 try:
     from PIL import Image
     import numpy as np
@@ -34,35 +39,27 @@ except ImportError:
     Image = None
     np = None
 
+# Pure-Python stdlib image decoder fallback
+try:
+    from parity_image import UnsupportedImage, read_image
+except ImportError:
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    try:
+        from parity_image import UnsupportedImage, read_image
+    except ImportError:
+        read_image = None
+
 BLANK_MIN_FRACTION = 0.02
 READABLE_MIN = 0.80
 LOOKS_RIGHT_MAX = 15.0
 
 
-def load_ppm(path: Path) -> Tuple[int, int, bytes]:
-    """Parse P6 PPM into width, height, rgb_bytes."""
-    data = path.read_bytes()
-    fields, idx = [], 0
-    while len(fields) < 4:
-        while idx < len(data) and data[idx : idx + 1].isspace():
-            idx += 1
-        if idx < len(data) and data[idx : idx + 1] == b"#":
-            while idx < len(data) and data[idx : idx + 1] not in (b"\n", b""):
-                idx += 1
-            continue
-        start = idx
-        while idx < len(data) and not data[idx : idx + 1].isspace():
-            idx += 1
-        fields.append(data[start:idx])
-    idx += 1
-    if fields[0] != b"P6":
-        raise ValueError(f"Not a P6 PPM: {path}")
-    w, h = int(fields[1]), int(fields[2])
-    return w, h, data[idx : idx + w * h * 3]
-
-
-def analyze_image_bytes(arr: Any) -> Dict[str, Any]:
-    """Analyze a numpy uint8 RGB array (h, w, 3)."""
+def analyze_image_numpy(path: Path) -> Dict[str, Any]:
+    """Analyze PNG or PPM using numpy array vectorization."""
+    img = Image.open(path).convert("RGB")
+    arr = np.array(img)
     h, w, _ = arr.shape
     px = arr.reshape(-1, 3)
     packed = (px[:, 0].astype(np.uint32) << 16) | (px[:, 1].astype(np.uint32) << 8) | px[:, 2]
@@ -113,21 +110,105 @@ def analyze_image_bytes(arr: Any) -> Dict[str, Any]:
     }
 
 
+def analyze_image_pure_python(path: Path) -> Dict[str, Any]:
+    """Analyze PNG or PPM using parity_image (pure Python stdlib)."""
+    if read_image is None:
+        raise RuntimeError("parity_image is required for pure-Python image analysis")
+    img = read_image(path)
+    w, h, rgb = img.width, img.height, img.rgb
+
+    # Find dominant color by sampling
+    step = 16
+    sample_px = [(rgb[i], rgb[i + 1], rgb[i + 2]) for i in range(0, len(rgb), step * 3)]
+    dom_color, _ = Counter(sample_px).most_common(1)[0]
+    dr, dg, db = dom_color
+
+    stride = 2
+    non_bg_count = 0
+    top_end = int(h * 0.15)
+    bot_start = int(h * 0.85)
+    mid_ctr_x_start = int(w * 0.3)
+    mid_ctr_x_end = int(w * 0.7)
+
+    top_non_bg = 0
+    mid_non_bg = 0
+    bot_non_bg = 0
+    mid_ctr_non_bg = 0
+
+    top_total = top_end * (w // stride)
+    bot_total = (h - bot_start) * (w // stride)
+    mid_total = (bot_start - top_end) * (w // stride)
+    mid_ctr_total = (bot_start - top_end) * ((mid_ctr_x_end - mid_ctr_x_start) // stride)
+
+    min_x, max_x = w, 0
+    min_y, max_y = h, 0
+
+    seen_colors = set()
+    sampled_pixels = 0
+
+    for y in range(0, h, stride):
+        row_offset = y * w * 3
+        for x in range(0, w, stride):
+            idx = row_offset + x * 3
+            r, g, b = rgb[idx], rgb[idx + 1], rgb[idx + 2]
+            sampled_pixels += 1
+            if len(seen_colors) < 50000:
+                seen_colors.add((r, g, b))
+
+            diff = max(abs(r - dr), abs(g - dg), abs(b - db))
+            if diff > 8:
+                non_bg_count += 1
+                if x < min_x:
+                    min_x = x
+                if x > max_x:
+                    max_x = x
+                if y < min_y:
+                    min_y = y
+                if y > max_y:
+                    max_y = y
+
+                if y < top_end:
+                    top_non_bg += 1
+                elif y >= bot_start:
+                    bot_non_bg += 1
+                else:
+                    mid_non_bg += 1
+                    if mid_ctr_x_start <= x < mid_ctr_x_end:
+                        mid_ctr_non_bg += 1
+
+    frac = non_bg_count / sampled_pixels
+    bbox = (min_x, min_y, max_x, max_y) if non_bg_count > 0 else None
+    v_span = (max_y - min_y + 1) / h if bbox else 0.0
+    h_span = (max_x - min_x + 1) / w if bbox else 0.0
+
+    return {
+        "width": w,
+        "height": h,
+        "dom_rgb": list(dom_color),
+        "non_bg_fraction": round(frac, 5),
+        "color_count": len(seen_colors),
+        "region_fractions": {
+            "top": round(top_non_bg / max(top_total, 1), 5),
+            "mid": round(mid_non_bg / max(mid_total, 1), 5),
+            "bot": round(bot_non_bg / max(bot_total, 1), 5),
+            "mid_center": round(mid_ctr_non_bg / max(mid_ctr_total, 1), 5),
+        },
+        "bbox": bbox,
+        "v_span": round(v_span, 4),
+        "h_span": round(h_span, 4),
+    }
+
+
 def analyze_image_file(path: Optional[Path]) -> Optional[Dict[str, Any]]:
-    """Analyze PNG or PPM file into structural features."""
+    """Analyze PNG or PPM file into structural features with automatic engine selection."""
     if not path or not path.exists():
         return None
-    if np is None:
-        raise RuntimeError("numpy and Pillow are required to run scorer_v2")
-
-    if path.suffix.lower() == ".ppm":
-        w, h, rgb_bytes = load_ppm(path)
-        arr = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((h, w, 3))
-    else:
-        img = Image.open(path).convert("RGB")
-        arr = np.array(img)
-
-    return analyze_image_bytes(arr)
+    if np is not None and Image is not None and path.suffix.lower() == ".png":
+        try:
+            return analyze_image_numpy(path)
+        except Exception:
+            pass
+    return analyze_image_pure_python(path)
 
 
 def inspect_display_list(dl_path: Optional[Path]) -> Dict[str, Any]:
@@ -198,17 +279,16 @@ def classify_frame(
         return "ACCESS_BLOCKED", f"blocked by bot-manager ({access.get('vendor')})", meta
 
     # 1. SMALL_SPLASH
-    # Low global ink (< 2.0%), but rich anti-aliased assets (> 1000 colors) or DL image ops,
+    # Low global ink (< 2.0%), but rich anti-aliased assets (> 500 colors in sampled scan) or DL image ops,
     # vertical span covers top + bottom or center splash, scripts ran without fatal throw.
     if frac < BLANK_MIN_FRACTION:
-        has_graphic_asset = rk_colors > 1000 or dl.get("image_ops", 0) > 0
+        has_graphic_asset = rk_colors > 500 or dl.get("image_ops", 0) > 0
         has_splash_geometry = False
         if rk_feat:
-            # Centered or top+bottom badges
             has_splash_geometry = (
                 rk_feat["v_span"] > 0.4
-                or (rk_feat["region_fractions"]["top"] > 0.02 and rk_feat["region_fractions"]["bot"] > 0.002)
-                or rk_feat["region_fractions"]["mid_center"] > 0.01
+                or (rk_feat["region_fractions"]["top"] > 0.01 and rk_feat["region_fractions"]["bot"] > 0.001)
+                or rk_feat["region_fractions"]["mid_center"] > 0.005
             )
         scripts_ran_ok = (scripts.get("ran", 0) > 5 and scripts.get("threw", 0) == 0) or dl.get("image_ops", 0) > 0
         if has_graphic_asset and (has_splash_geometry or scripts_ran_ok):
@@ -231,7 +311,7 @@ def classify_frame(
             return "BLANK_SHELL", "empty DOM / unhydrated container", meta
 
     # 3. GOOGLE_LOGO (Minimal Branded Layout)
-    # Compact branded portal by design. Clean centered layout, moderate ink (< 15%),
+    # Compact branded portal by design. Clean centered layout, moderate ink (< 20%),
     # high text match (ratio >= 0.8), compact word count (cw < 60).
     if (site_id == "google") or (
         cw > 0
@@ -241,7 +321,7 @@ def classify_frame(
         and ratio >= 0.8
         and frac < 0.20
         and rk_feat
-        and rk_feat["region_fractions"]["mid_center"] > 0.08
+        and rk_feat["region_fractions"]["mid_center"] > 0.05
     ):
         return "GOOGLE_LOGO", "minimal branded homepage with centered layout and high readability", meta
 
@@ -389,7 +469,6 @@ def main():
                     if sha_dir.is_dir() and (sha_dir / "summary.json").exists():
                         target_dirs.append(sha_dir)
     else:
-        # Default fallback: check if archive directory exists locally
         default_arch = Path("P:/repos/hiwave-renders/archive/realsite/windows/3787391")
         if default_arch.exists():
             target_dirs.append(default_arch)

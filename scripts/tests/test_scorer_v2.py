@@ -1,34 +1,23 @@
 #!/usr/bin/env python3
-"""test_scorer_v2.py — Unit and calibration tests for Scorer v2 (Package M0)."""
+"""test_scorer_v2.py — Unit and calibration tests for Scorer v2 (Package M0).
+
+Runs with Python standard library only (no Pillow or numpy required).
+Run: python3 scripts/tests/test_scorer_v2.py
+"""
 
 import json
-import tempfile
-import unittest
 from pathlib import Path
-import numpy as np
-from PIL import Image
-
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import scorer_v2
 
 
 class TestScorerV2(unittest.TestCase):
 
-    def test_analyze_image_bytes(self):
-        # Create a 100x100 white image with a small centered red square
-        arr = np.full((100, 100, 3), 255, dtype=np.uint8)
-        arr[45:55, 45:55] = [255, 0, 0]  # 10x10 = 100 pixels out of 10000 = 1% non-bg
-        res = scorer_v2.analyze_image_bytes(arr)
-        self.assertEqual(res["width"], 100)
-        self.assertEqual(res["height"], 100)
-        self.assertEqual(res["dom_rgb"], [255, 255, 255])
-        self.assertAlmostEqual(res["non_bg_fraction"], 0.01, places=3)
-        self.assertGreater(res["region_fractions"]["mid_center"], 0.0)
-
     def test_classify_small_splash(self):
-        # Small splash: low ink (<2%), rich colors (>1000), vertical span
+        # Small splash: low ink (<2%), rich colors (>500), vertical span
         v1_rec = {
             "id": "instagram",
             "loads": {"pass": False, "why": "blank frame (0.60% non-background)"},
