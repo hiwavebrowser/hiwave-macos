@@ -9245,42 +9245,50 @@ impl SelectorMatcher {
         attributes: &HashMap<String, String>,
     ) -> bool {
         let attr_name = SelectorMatcher::attr_selector_name(attr_selector);
-        for op in &Self::ATTR_OPERATORS {
-            if let Some(pos) = attr_selector.find(op) {
-                let mut attr_value = attr_selector[pos + op.len()..].trim();
-
-                // Remove quotes if present
-                if (attr_value.starts_with('"') && attr_value.ends_with('"'))
-                    || (attr_value.starts_with('\'') && attr_value.ends_with('\''))
-                {
-                    attr_value = &attr_value[1..attr_value.len() - 1];
-                }
-
-                if let Some(el_attr) = attributes.get(attr_name) {
-                    return match *op {
-                        "=" => el_attr == attr_value,
-                        "~=" => el_attr.split_whitespace().any(|w| w == attr_value),
-                        "|=" => {
-                            el_attr == attr_value
-                                || el_attr.starts_with(&format!("{}-", attr_value))
-                        }
-                        "^=" => el_attr.starts_with(attr_value),
-                        "$=" => el_attr.ends_with(attr_value),
-                        "*=" => el_attr.contains(attr_value),
-                        _ => false,
-                    };
-                } else {
-                    return false;
-                }
-            }
+        match Self::attr_selector_test(attr_selector) {
+            Some((op, attr_value)) => attributes
+                .get(attr_name)
+                .is_some_and(|el_attr| Self::attr_test_passes(op, attr_value, el_attr)),
+            // Just [attr] - check presence
+            None => attributes.contains_key(attr_name),
         }
-
-        // Just [attr] - check presence
-        attributes.contains_key(attr_name)
     }
 
     /// Checked in this order; the first one found splits name from value.
     const ATTR_OPERATORS: [&'static str; 6] = ["~=", "|=", "^=", "$=", "*=", "="];
+
+    /// The operator of an `[...]` selector and the value it compares with
+    /// (trimmed, quotes removed). None for a bare `[name]`.
+    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, &str)> {
+        Self::ATTR_OPERATORS.iter().find_map(|op| {
+            let pos = attr_selector.find(op)?;
+            let mut attr_value = attr_selector[pos + op.len()..].trim();
+            if (attr_value.starts_with('"') && attr_value.ends_with('"'))
+                || (attr_value.starts_with('\'') && attr_value.ends_with('\''))
+            {
+                attr_value = &attr_value[1..attr_value.len() - 1];
+            }
+            Some((*op, attr_value))
+        })
+    }
+
+    /// Whether the element's value `el_attr` passes `op` against `attr_value`.
+    fn attr_test_passes(op: &str, attr_value: &str, el_attr: &str) -> bool {
+        match op {
+            "=" => el_attr == attr_value,
+            "~=" => el_attr.split_whitespace().any(|w| w == attr_value),
+            "|=" => {
+                el_attr == attr_value
+                    || el_attr
+                        .strip_prefix(attr_value)
+                        .is_some_and(|rest| rest.starts_with('-'))
+            }
+            "^=" => el_attr.starts_with(attr_value),
+            "$=" => el_attr.ends_with(attr_value),
+            "*=" => el_attr.contains(attr_value),
+            _ => false,
+        }
+    }
 
     /// The attribute an `[...]` selector looks up. Every form, with or
     /// without an operator, fails on an element that lacks it, which is
@@ -22188,9 +22196,12 @@ struct SelectorReads {
     positional: Vec<bool>,
     /// Ids some compound names.
     ids: std::collections::HashSet<String>,
-    /// Attribute name -> the distinct attribute selectors (the text between
-    /// the brackets) some subject compound tests its value with.
-    attribute_tests: HashMap<String, Vec<String>>,
+    /// Attribute name -> the distinct tests (operator and value, as
+    /// `SelectorMatcher::attr_selector_test` splits them) some subject
+    /// compound puts its value to. Split here, once per index: the key of
+    /// every element ran `match_attribute_selector` over the selector text
+    /// for each of them, 14% of wikipedia's build with sharing on.
+    attribute_tests: HashMap<String, Vec<(&'static str, String)>>,
 }
 
 impl SelectorReads {
@@ -22244,13 +22255,13 @@ impl SelectorReads {
                 // A bare `[name]` reads the name's presence, which the key
                 // always holds.
                 SubjectPart::Attr(attr) => {
-                    if SelectorMatcher::ATTR_OPERATORS.iter().any(|op| attr.contains(op)) {
+                    if let Some((op, value)) = SelectorMatcher::attr_selector_test(attr) {
                         let tests = self
                             .attribute_tests
                             .entry(SelectorMatcher::attr_selector_name(attr).to_string())
                             .or_default();
-                        if !tests.contains(attr) {
-                            tests.push(attr.clone());
+                        if !tests.iter().any(|(o, v)| *o == op && v == value) {
+                            tests.push((op, value.to_string()));
                         }
                     }
                 }
@@ -22316,7 +22327,7 @@ impl SelectorReads {
     /// What a selector can read of one attribute's value: all of it for
     /// `class`, the state attributes and an id some compound names; else
     /// only whether each attribute selector on that name passes.
-    fn keyed_value(&self, name: &str, value: &str, attributes: &HashMap<String, String>) -> MatchKeyValue {
+    fn keyed_value(&self, name: &str, value: &str) -> MatchKeyValue {
         if name == "class"
             || MATCH_STATE_ATTRIBUTES.contains(&name)
             || (name == "id" && self.ids.contains(value))
@@ -22327,7 +22338,7 @@ impl SelectorReads {
             Some(tests) => MatchKeyValue::Tests(
                 tests
                     .iter()
-                    .map(|test| SelectorMatcher.match_attribute_selector(test, attributes))
+                    .map(|(op, test)| SelectorMatcher::attr_test_passes(op, test, value))
                     .collect(),
             ),
             None => MatchKeyValue::Present,
@@ -22337,7 +22348,7 @@ impl SelectorReads {
     fn key(&self, chain: u64, tag_name: &str, attributes: &HashMap<String, String>) -> MatchShareKey {
         let mut attributes: Vec<(String, MatchKeyValue)> = attributes
             .iter()
-            .map(|(name, value)| (name.clone(), self.keyed_value(name, value, attributes)))
+            .map(|(name, value)| (name.clone(), self.keyed_value(name, value)))
             .collect();
         attributes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         MatchShareKey {
@@ -23357,6 +23368,71 @@ mod style_share_tests {
         assert_ne!(key(&[("type", "radio")]), key(&[("type", "text")]));
         assert_ne!(reads.key(1, "a", &attributes(&[])), reads.key(2, "a", &attributes(&[])));
         assert_ne!(reads.key(1, "a", &attributes(&[])), reads.key(1, "b", &attributes(&[])));
+    }
+
+    /// The key splits each attribute test once, when the index is built. It
+    /// must hold what the matcher answers from the selector's text.
+    #[test]
+    fn the_keyed_attribute_tests_answer_as_the_matcher_does() {
+        let tests = [
+            "data-x=a",
+            "data-x=\"a\"",
+            "data-x~=a",
+            "data-x|=a",
+            "data-x^=\"a\"",
+            "data-x$='a'",
+            "data-x*=a",
+            "data-x*=\"\"",
+            "data-x=\"a=b\"",
+        ];
+        let selectors: Vec<String> = tests.iter().map(|t| format!("i[{t}]")).collect();
+        let (reads, _) = reads_of(&selectors.iter().map(String::as_str).collect::<Vec<_>>());
+        let kept = &reads.attribute_tests["data-x"];
+        assert_eq!(kept.len(), tests.len() - 1, "`=a` twice is one test");
+        for value in ["a", "a b", "b a", "a-b", "ab", "ba", "b", "", "a=b", "x~=a", "A"] {
+            let attributes: HashMap<String, String> =
+                [("data-x".to_string(), value.to_string())].into();
+            let MatchKeyValue::Tests(keyed) = reads.keyed_value("data-x", value) else {
+                panic!("data-x is tested");
+            };
+            assert_eq!(keyed.len(), kept.len());
+            for test in tests {
+                let (op, operand) = SelectorMatcher::attr_selector_test(test).expect("operator");
+                let at = kept.iter().position(|(o, v)| *o == op && v == operand).expect("kept");
+                assert_eq!(
+                    keyed[at],
+                    SelectorMatcher.match_attribute_selector(test, &attributes),
+                    "[{test}] on data-x={value:?}"
+                );
+            }
+        }
+        // A bare `[name]` is no test: the key holds the name's presence.
+        assert!(SelectorMatcher::attr_selector_test("data-x").is_none());
+        // The matcher itself, operator by operator.
+        for (test, value, passes) in [
+            ("data-x=a", "a", true),
+            ("data-x=a", "ab", false),
+            ("data-x~=a", "b a", true),
+            ("data-x~=a", "ba", false),
+            ("data-x|=a", "a", true),
+            ("data-x|=a", "a-b", true),
+            ("data-x|=a", "ab", false),
+            ("data-x^=a", "ab", true),
+            ("data-x^=a", "ba", false),
+            ("data-x$=a", "ba", true),
+            ("data-x$=a", "ab", false),
+            ("data-x*=a", "bab", true),
+            ("data-x*=a", "b", false),
+        ] {
+            let attributes: HashMap<String, String> =
+                [("data-x".to_string(), value.to_string())].into();
+            assert_eq!(
+                SelectorMatcher.match_attribute_selector(test, &attributes),
+                passes,
+                "[{test}] on data-x={value:?}"
+            );
+            assert!(!SelectorMatcher.match_attribute_selector(test, &HashMap::new()));
+        }
     }
 
     #[test]
