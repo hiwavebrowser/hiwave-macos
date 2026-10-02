@@ -1545,3 +1545,52 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Merge #427 before it has a timing with tree reuse on?** Today it is 0.919 on wikipedia; after #408 its measured part mostly disappears and the rest is unmeasured. It is 86 lines, changes no output, and both reviewers cleared it. Default: yes, you or Prometheus merge it on the reviews, and the next quiet session reports the reuse-on number here. Say "hold it" and it waits for that number.
 2. **Which number is the ratio of record when the machine itself drifts 6% between hours?** Default: the latest quiet read of develop (14.6× now), with every claim of a change resting on a paired A/B and never on two records from different hours. Say so if you want the record frozen at the lower read instead.
 3. **The 21:32 decisions are still open** (style-share stays unopened; stage two is next; #408 needs you or Prometheus to mark it ready, seventh session). Defaults stand. With #408 and #427 both in, wikipedia is still about 11×: 3× by 2026-10-11 is not in reach.
+
+## 2026-10-02 02:50
+
+**One PR opened: #432 (`atlas/cs-style-share` @ e3d95d1), the matched-properties cache with its second stage, behind `RUSTKIT_STYLE_SHARE`, off by default. Stage two skips the matcher for an element that repeats an earlier one's tag, attributes and ancestor chain. With the flag on, wikipedia reads 0.920 of flag-unset in 16 counterbalanced pairs on a quiet machine (13 of 16 below 1), cnn 0.896 and github 0.928 (14 of 16 each). With tree reuse on in both arms it reads 0.897 on wikipedia (10 pairs), 9.8× with both on. Verify reads 0 differing matches and 0 differing styles on the pinned pages and on the board's 20 live sites. Nothing changes the ratio of record until the default flips: it stays 14.6× (wikipedia, develop b35c82e); develop's tip was not measured.**
+
+| site | Chrome ms | before: of record (develop b35c82e, 32 quiet loads, 00:13) | #432 binary, flag unset, median of 16 quiet loads (02:19–02:30) | same pairs, `RUSTKIT_STYLE_SHARE=1` | on / unset, per-pair median |
+|---|---|---|---|---|---|
+| cnn | 210 | 543.0 → 2.6× | 538.0 → 2.6× | 481.0 → 2.3× | 0.896 (14 of 16 below 1) |
+| github | 110 | 860.5 → 7.8× | 846.0 → 7.7× | 782.0 → 7.1× | 0.928 (14 of 16) |
+| wikipedia | 20 | 292.0 → **14.6×** | 270.0 → 13.5× | 247.0 → 12.3× | **0.920** (13 of 16) |
+
+The two middle columns are a branch binary (develop b0162e4 plus this branch's code), so they are not a ratio of record.
+
+- **The brief's first task was already done**: the test lock inversion is #415, merged 2026-10-01 17:49; `ENGINE_INIT` has 0 occurrences in develop's engine. #427 merged since the last digest (develop b0162e4). This session went to the 21:32 decision 2 default, stage two.
+- **What stage two is.** A selector with no `+`/`~` and no positional pseudo-class reads only the element's tag and attributes and its ancestors' tags, classes and ids. The rule index now marks each rule that reads more (`SelectorReads::positional`); those are matched for every element as before. For the rest, an element takes the matched rules of an earlier element with the same key and skips both the matcher and the candidate lookup. Stage one then shares the style as it did.
+  - **The key** is the ancestor chain's id, the tag and every attribute name. Of a value it holds all of `class` and five form-state attributes, an `id` only when a rule names it, and otherwise the pass or fail of each attribute selector the sheets test that name with. That last part is what keeps wikipedia's links together: `a[href^="http"]` splits them in two groups, not one per URL.
+  - **The chain id** is interned on (rest of chain, tag, classes, named id) and is valid only inside the walk scope that owns the ancestor slice, the same pattern as stage one's parent id.
+  - `=verify` runs the matcher anyway and counts entries that differ. `=style` is stage one alone.
+  - Engine +678 −5 in this commit; the branch is +1,186 −15 against develop.
+- **Shared per first build:** wikipedia 2,872 of 3,839 keyed elements (75%), cnn 1,404 of 2,159 (65%), github 692 of 1,153 (60%). The 18:14 probe's bound for wikipedia was 66%.
+- **The timing** (`ab_flag.py pc-ms-e3d95d1 RUSTKIT_STYLE_SHARE=1 8`, twice, 8 AB + 8 BA, load 1.6–3.6, none dropped; logs `cascade-target/tmp/stage2/abflag-0219-a.txt`, `abflag-0225-b.txt`).
+  - Ranges: cnn 0.58–1.02, github 0.58–1.25, wikipedia 0.81–1.03. wikipedia by run: 0.923 (6 of 8), 0.914 (7 of 8).
+  - **All of it is the first build**: wikipedia 206.9 → 181.3 ms (per-pair 0.886, 15 of 16 below 1), cnn 478.6 → 424.8 (0.877), github 718.5 → 657.5 (0.913). The second build does not move.
+  - **With tree reuse on in both arms** (what #408 makes the default; `env RUSTKIT_TREE_REUSE=1 ab_flag.py … 10`, 5 AB + 5 BA, 02:40–02:47, load 1.1–2.5, none dropped; log `abflag-0240-reuse.txt`): wikipedia **0.897** (9 of 10 below 1; 215.0 → 195.5 ms, **10.8× → 9.8×**), cnn 0.898 (9 of 10; 481.5 → 426.5, 2.3× → 2.0×), github 0.884 (10 of 10; 728.0 → 646.0, 6.6× → 5.9×). The second build is 1–3 ms in both arms, so the first-build gain is the whole gain. One cnn pair read 2.07.
+  - Stage one alone read 0.988 on wikipedia at 21:32, on another binary and another hour. How much of 0.920 is stage two is **not measured** (`=style` against `=1` was not run).
+  - The 21:32 digest bounded stage two at about 40 ms of wikipedia's first build. It took 25.6 ms.
+- **Verify, on the binary built from e3d95d1:**
+  - Pinned pages, 2 loads each: 0 differing matches in 9,936 shared, 0 differing styles in 10,556 shared, 0 parent styles differ.
+  - Board's 20 sites live, one load each: 20 of 20 exit 0; 0 differing matches in 19,519 shared; 0 differing styles in 19,440; 0 parent styles differ. Log `tmp/stage2/verify-sweep.log`.
+  - Layout JSON and display list, unset / `=1` / verify, 2 loads each: wikipedia byte-identical in all 6. github: both unset loads, one `=1` and one verify are identical; the other two differ from everything. cnn gave 4 layouts in 6 loads; one unset, one `=1` and one verify are identical, and the other unset load differs from them. I did not diff the odd dumps.
+- **Tests.** Engine lib, parallel: 298 passed, 0 failed in 243 s (5 new). **The run before it had one failure**, `windows_a_leg_pins::css_variable_fan_out_is_bounded`, which builds no engine and no layout. It passed alone and in the full rerun. I did not capture its message, so I do not know why it failed.
+  - Seven mutations of the key, one at a time (no chain, sibling combinators not positional, positional pseudo-classes not positional, attribute tests not keyed, own named id not keyed, ancestor named id not keyed, state attributes not keyed by value): the page test fails under every one. Script `tmp/stage2/mutate.py`.
+- **Receipt on e3d95d1:** flag unset 26/26, avg 1.1%; `=1` 26/26, avg 1.1%, diffPixels identical on 26 of 26. Against #427's receipt one case moved in both arms (`new_tab` 15,363 → 11,283); develop moved b35c82e → b0162e4 in between and I took no control on b0162e4.
+- **#432 state:** just opened, no review yet. It is in the body that clippy with `-D warnings` stops in five other crates before it reaches the engine.
+- **#408:** still a draft at 63d24d1, MERGEABLE, one Cursor R2-STAMP PASS, no R1 review, nothing to answer.
+- **Not done:** the stage split above, a read of develop's tip, `--features headless` tests, the real-site board's pixel scores, a profile with the flag on.
+- **Aleph:** one call (`aleph_search ENGINE_INIT`), answered at once, no hang or error. It returned 296 lexical matches on "engine" and "init" and no such symbol, which is right: the mutex is gone. Navigation after that was Read plus `find.py` on the cs worktree.
+- **Slips:** the lost failure message above. The merge commit 7c15584 was not compiled on its own, only with stage two on top. I timed before the 20-site verify sweep, because the machine went quiet; the plan's order is verify first (the sweep then read 0). The PR body draft had the wrong cnn load and a wrong test count; both were corrected before opening. Six commands were refused (a heredoc, chained operations, `$?`, a `#` and an `=` inside quoted commit messages) before I used script and message files.
+- **Build cost:** debug engine tests 2 min 15 s to compile, then about 1 min per mutation. Release parity-capture 6 min 15 s at load 7–12.
+- **Hub tool change:** `share_check.py` and `verify_sweep.py` also print and total the engine's "Match share" lines.
+- **Saved:** binary `cascade-target/pc-ms-e3d95d1`; receipts `receipt-ss-ms-{off,on}-e3d95d1.json`; PR body `pr-ms-body.md`. Under `cascade-target/tmp/stage2/`: the three A/B logs, `check1/` and `check1.txt`, `verify-live/` and `verify-sweep.log`, `mutate.py`, `test-full2.log`, `build-release.log`, `clippy.log`, `resolve.py`.
+- **State left behind:** `.worktrees/cs-engine-init-lock` is on `atlas/cs-style-share` @ e3d95d1, clean, pushed. The shared target dir's release artifact is that build. `.worktrees/cs-tree-reuse-default` untouched.
+- **Open cs PRs:** 2 (#408 draft, #432), cap 3.
+- **Next session:** (1) #432 and #408: answer reviews. (2) If load is under 6: `=1` against `=style` (`ab_flag.py` needs a way to give both arms a value; today its fourth argument only sets A against nothing). (3) A symbolized profile with the flag on. Two candidates from reading the code, neither measured: `::before`/`::after` matching can use the same key, and the ancestor Bloom filter is still built for every element, hit or not. (4) If still quiet: build b0162e4 and take the ratio of record.
+
+**Decisions for Pete**
+1. **Merge #432 with the flag off by default?** It is 1,186 lines in the engine, verified at 0 differing on 23 sites, and does nothing until the flag is set. Default: yes, you or Prometheus merge it on the reviews; the default flips only in a separate PR after one real-site board run with the flag on. Say "hold it" and it waits for that first.
+2. **Extend the same key to `::before`/`::after` next, or flip the default first?** Default: a profile with the flag on first, then the pseudo-element matching if the profile still shows it near the 12% it had at 21:32. The flip PR comes after the board run either way.
+3. **#408 still needs you or Prometheus to mark it ready** (eighth session). With tree reuse and this flag both on, wikipedia measures 195.5 ms, 9.8×, against a 60 ms budget: 3× by 2026-10-11 is still not in reach.

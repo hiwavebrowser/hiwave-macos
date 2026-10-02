@@ -25,7 +25,8 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 cfg = json.load(open(sites_file))
 width, height = cfg["viewport"]["width"], cfg["viewport"]["height"]
 verified = boxes = mismatches = 0
-share = {"hits": 0, "mismatches": 0, "parent_mismatches": 0}
+share = {"hits": 0, "mismatches": 0, "parent_mismatches": 0,
+         "match_hits": 0, "match_misses": 0, "match_untracked": 0, "match_mismatches": 0}
 share_sites = 0
 for site in cfg["sites"]:
     env = dict(os.environ, RUSTKIT_CASCADE_TIMING="1",
@@ -43,7 +44,8 @@ for site in cfg["sites"]:
     builds = [round(float(m.group(1))) for m in
               (re.search(r"cascade_ms=([\d.]+)", l) for l in lines if "Cascade timing" in l) if m]
     said = [l.split("rustkit_engine: ")[-1][:130] for l in lines
-            if "Tree reuse" in l or "Incremental restyle" in l or "Style share" in l]
+            if "Tree reuse" in l or "Incremental restyle" in l or "Style share" in l
+            or "Match share" in l]
     share_sites += any(s.startswith("Style share") for s in said)
     for s in said:
         m = re.match(r"Tree reuse verify boxes=(\d+) mismatches=(\d+)", s)
@@ -51,7 +53,7 @@ for site in cfg["sites"]:
             verified += 1
             boxes += int(m.group(1))
             mismatches += int(m.group(2))
-        if s.startswith("Style share"):
+        if s.startswith("Style share") or s.startswith("Match share"):
             for name in share:
                 m = re.search(r"\b%s=(\d+)" % name, s)
                 share[name] += int(m.group(1)) if m else 0

@@ -44,7 +44,8 @@ def sha(path):
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-totals = {"hits": 0, "mismatches": 0, "parent_mismatches": 0}
+totals = {"hits": 0, "mismatches": 0, "parent_mismatches": 0,
+          "match_hits": 0, "match_misses": 0, "match_untracked": 0, "match_mismatches": 0}
 for site in ("cnn", "github", "wikipedia"):
     url = "http://127.0.0.1:%d/%s/index.html" % (port, site)
     got = {}
@@ -67,7 +68,8 @@ for site in ("cnn", "github", "wikipedia"):
             lines = log.splitlines()
             builds = [re.search(r"cascade_ms=([\d.]+)", l).group(1)
                       for l in lines if "Cascade timing" in l]
-            share = [l.split("rustkit_engine: ")[-1][:130] for l in lines if "Style share" in l]
+            share = [l.split("rustkit_engine: ")[-1][:130] for l in lines
+                     if "Style share" in l or "Match share" in l]
             if mode == "verify":
                 for s in share:
                     for name in totals:
