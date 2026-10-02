@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sample one pinned-snapshot load with macOS `sample` (where does cascade time go?).
 
-    python3 trench/tools/cascade_profile.py --capture <parity-capture> --site wikipedia --out prof.txt [--secs 8]
+    python3 trench/tools/cascade_profile.py --capture <parity-capture> --site wikipedia --out prof.txt [--secs 8] [--env NAME=VALUE]
 
 Prints the heaviest frames under build_layout_from_document from the call
 tree (self-time is in the `sample` report's "Sort by top of stack" section).
@@ -22,6 +22,7 @@ def main():
     ap.add_argument("--site", default="wikipedia")
     ap.add_argument("--secs", type=int, default=8)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--env", action="append", default=[], metavar="NAME=VALUE")
     args = ap.parse_args()
     srv = serve()
     url = "http://127.0.0.1:%d/%s/index.html" % (srv.server_address[1], args.site)
@@ -32,6 +33,7 @@ def main():
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1.0)
     p = subprocess.Popen([args.capture, "--url", url, "--timeout-ms", "120000"],
+                         env=dict(os.environ, **dict(kv.split("=", 1) for kv in args.env)),
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     p.wait()
     s.wait()

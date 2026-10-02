@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Take N `sample` profiles of one pinned-site load and pool their inclusive counts.
 
-    cascade_prof_pool.py --capture <symbolized parity-capture> --site github --runs 6 --out-prefix ../prof-x [--top 60] [--root build_layout_from_document]
+    cascade_prof_pool.py --capture <symbolized parity-capture> --site github --runs 6 --out-prefix ../prof-x [--top 60] [--root build_layout_from_document] [--env NAME=VALUE]
 
 One `sample -wait` attach often catches only a slice of a ~2 s load, so a
 single report can hold as few as 15 samples under the root. Pooling several
@@ -37,12 +37,14 @@ def main():
     ap.add_argument("--out-prefix", required=True)
     ap.add_argument("--root", default="build_layout_from_document")
     ap.add_argument("--top", type=int, default=60)
+    ap.add_argument("--env", action="append", default=[], metavar="NAME=VALUE")
     args = ap.parse_args()
     pooled = defaultdict(int)
     for i in range(1, args.runs + 1):
         out = "%s-%d.txt" % (args.out_prefix, i)
         subprocess.run([sys.executable, os.path.join(HERE, "cascade_profile.py"), "--capture", args.capture,
-                        "--site", args.site, "--secs", str(args.secs), "--out", out],
+                        "--site", args.site, "--secs", str(args.secs), "--out", out]
+                       + [x for e in args.env for x in ("--env", e)],
                        stdout=subprocess.DEVNULL)
         c = inclusive(out, args.root)
         root_n = max(c.values()) if c else 0

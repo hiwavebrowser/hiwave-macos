@@ -1422,3 +1422,53 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Open the style-share PR before it has a timing?** It is off by default and verified on 23 sites, but unmeasured. Default: no, it waits for a quiet 10-pair A/B and is opened only if it wins. Say "open it" and the next session opens it with the timing marked as owed.
 2. **This lane has had one quiet window in its last five sessions, and every speed claim needs one.** Default: unchanged, the session that finds load under 6 does the timing first. Say so if you want the cascade session moved to an hour when the other lanes are idle.
 3. **#408 is still a draft that a headless session cannot mark ready** (fifth session). Default: you or Prometheus mark it ready; with it merged the worst ratio of record becomes about 11.0×.
+
+## 2026-10-01 21:32
+
+**No PR opened. The style-share branch got its owed timing on a quiet machine, and it does not win where the metric is: flag on / unset is 0.988 on wikipedia in 16 counterbalanced pairs (9 of 16 below 1), 0.961 on cnn (14 of 16) and 0.964 on github (9 of 16). By the rule set at 19:39 the branch stays unopened. A symbolized profile says why: with sharing on, applying declarations is about 1% of the walk; what is left of element style is matching. The worst ratio of record stays 13.5× (wikipedia); a read of develop's tip was spoiled by load.**
+
+| site | Chrome ms | before: of record (develop a0583fa, 16 quiet runs, 17:50) | after: `pc-ss-feb236d`, flag unset, 16 pairs (develop ac1b067) | same pairs, `RUSTKIT_STYLE_SHARE=1` | on / unset, per-pair median |
+|---|---|---|---|---|---|
+| cnn | 210 | 497 → 2.4× | 561.5 → 2.7× | 529.0 → 2.5× | 0.961 (14 of 16 below 1) |
+| github | 110 | 824 → 7.5× | 864.5 → 7.9× | 846.0 → 7.7× | 0.964 (9 of 16) |
+| wikipedia | 20 | 270 → **13.5×** | 283.0 → 14.2× | 280.0 → 14.0× | **0.988** (9 of 16) |
+
+- **The brief's first task was already done**: the test lock inversion is #415, merged 17:49. This session went to the 19:39 digest's first item.
+- **The timing** (`ab_flag.py pc-ss-feb236d RUSTKIT_STYLE_SHARE=1`, runs of 6 and 10 pairs back to back, 8 AB + 8 BA, 20:37–20:49, load 2.1–5.8, none dropped). Logs `cascade-target/tmp/style-share/abflag-2037-a.txt` and `abflag-2042-b.txt`, pooled with `ab_combine.py`.
+  - Ranges: cnn 0.46–1.30, github 0.36–1.14, wikipedia 0.74–1.43. One pair had an unset load at twice its normal time (cnn 1,210 ms, github 1,828 ms).
+  - First build, per-pair on / unset: cnn 0.947 (13 of 16 below 1), github 0.957 (11), wikipedia 0.992 (9). The second build does not move (cnn 65.8 → 65.0 ms, github 132.1 → 132.4, wikipedia 73.3 → 73.1).
+  - github is not solid either: the 6-pair run read 0.914 (6 of 6 below 1) and the 10-pair run 1.030 (3 of 10).
+  - The "after" columns are a branch binary, not develop, so they are not a ratio of record.
+- **Why sharing 89% of wikipedia's element styles saves nothing.** Symbolized build of feb236d (`cascade-target-prof/pc-prof-ss-feb236d`), macOS `sample`, split by the new hub tool `prof_walk_split.py` (charges each stack's self samples to what the innermost walk frame called).
+  - **Flag on, one wikipedia load, 868 samples in the walk:**
+
+    | share of the walk | what |
+    |---|---|
+    | 34.7% | element style (`compute_style_for_element`) |
+    | 12.2% | `::before`/`::after` (`through_memo`; 6.8% is `pseudo_element_style`) |
+    | 8.4% | the walk's own code |
+    | 6.5% | the share path's own clone and allocation |
+    | 3.0% | a `format!` per element |
+    | 1.7% | `to_lowercase` per element |
+    | 1.4% | `positioning_of`, nearly all of it an environment-variable read per element |
+
+    The rest is box construction and allocation in pieces of about 2% or less.
+  - **Inside element style with the flag on** (304 samples): matching is 52% (`matched_specificity` 40.5%, `RuleBuckets::candidates` 11.5%), its own code 14%, `ComputedStyle` clone and `new` 11.5%, `apply_style_property` 1.6%, `resolve_css_variables` 0.7%. Matching is 18% of the walk.
+  - **Flag unset** (26 loads pooled, only 149 walk samples, so read it loosely): `apply_style_property` plus `resolve_css_variables` are 11 of 149 (7%). That 7% is all sharing can remove, and its key, hash and extra clone give most of it back.
+  - The flag-on profile is one load that ran about 3× slow under the sampler (967 samples under the root at 1 ms). The other 35 loads caught 0–11 samples each; I did not find out why.
+- **What this does to the plan.** The 18:14 digest put the bound for a cache that skips matching at about 60 ms of wikipedia's 205 ms first build. From this profile it is nearer 40 ms: element style is about 31% of the build (63 ms) and the probe's exact-enough key repeats on 66% of elements. That is still the largest single cut on the list. The per-element `format!`, `to_lowercase` and environment read are 6% of the walk together and carry no correctness risk.
+- **Develop's tip (f657cf2) has no read.** Built `pc-dev-f657cf2`, 16 loads per site, one site after another: cnn 495 → 2.4×, github 862 → 7.8×, then another lane's work started and wikipedia's first four loads read 757–1,317 ms (median 327, load 6.1 at the end). Alternating blocks of 8 wikipedia loads after that, at load 5.3–13.8: tip 330 and 308, the a0583fa binary 1,311 (discarded) and 302. Nothing in that says the tip moved; none of it counts. Files `cascade-target/tmp/bench-record-dev-f657cf2-2116.txt` and `bench-wiki-tip-vs-a0583fa-2125.txt`.
+- **#408:** still a draft at 63d24d1, CLEAN, MERGEABLE, one Cursor comment review, no R1 review. I did not try `gh pr ready` (refused in the last four sessions that tried).
+- **Not done:** any engine change, tests, clippy, a receipt (nothing was opened), a counted read of develop's tip.
+- **Aleph:** not called. No engine source was read this session; the work was timing and profiling.
+- **Slips:** the first profile pass ran on the stripped binary and returned no engine frames (the 2026-09-28 note says the default release binary is stripped; I had not reread it). The symbolized build ran past the 600 s tool limit into the background and I waited for it in the foreground. I ran the tip bench one site after another instead of interleaved, so wikipedia alone took the noise. Six commands were refused (chained operations, `ps`, `git -C`, a `grep` on the indexed tree) before I found the permitted shapes.
+- **Build cost:** symbolized release 11 min 34 s (`cascade-target-prof`, last used at fb1a2ea), release at develop's tip 5 min 35 s (8 crates), both at load 3–6.
+- **Saved:** binaries `cascade-target/pc-dev-f657cf2` and `cascade-target-prof/pc-prof-ss-feb236d`. Under `cascade-target/tmp/style-share/`: the two A/B logs, `prof-on-{1..10}.txt` (run 10 is the full one), `prof-off-*.txt`, `prof-off2-*.txt`, `pool-off.txt`, `pool-on.txt`. Hub tools: `prof_walk_split.py` (new); `cascade_profile.py` and `cascade_prof_pool.py` now take `--env NAME=VALUE`.
+- **State left behind:** `.worktrees/cs-engine-init-lock` is on `atlas/cs-style-share` @ feb236d, clean, pushed. It was detached at f657cf2 for the tip build and put back, so the next build there recompiles the engine. The shared target dir's release artifact is develop f657cf2. `.worktrees/cs-tree-reuse-default` untouched.
+- **Open cs PRs:** 1 (#408, draft), cap 3.
+- **Next session:** (1) #408: mark ready if permitted; answer reviews. (2) Per decision 2 below: stage two on `atlas/cs-style-share`, a second cache in front of matching, keyed on what the sheets' selectors can read (the 18:14 key work), in the same `verify` mode; 0 differing on the pinned pages and the 20-site board before any timing. (3) A small separate branch for the per-element `format!`, `to_lowercase` and environment read. (4) If load is under 6: interleaved `ab.py pc-eil-204ba3e pc-dev-f657cf2` for the tip.
+
+**Decisions for Pete**
+1. **Leave the style-share PR unopened?** It is verified on 23 sites and off by default, but it is 500 lines for 0.988 on wikipedia and about 0.96 on cnn and github, with github inside the noise. Default: yes, unopened; the branch stays as the base for stage two and is opened only together with a stage that wins on wikipedia. Say "open it" and the next session opens it as it is with these numbers.
+2. **Build stage two (skip matching for a repeated element) next?** Bound: about 40 ms of wikipedia's 283 ms, the largest cut left, and the riskiest for correctness (a key that misses one thing a selector reads gives a wrong style). Default: yes, behind the same flag with the same verify mode. The alternative is the three small per-element cuts alone (about 6% of the walk, no risk).
+3. **#408 is still a draft that a headless session cannot mark ready** (sixth session). Default: you or Prometheus mark it ready. With it merged and all of stage two's bound, wikipedia is about 180 ms, or 9×, against a 60 ms budget: 3× by 2026-10-11 is still not in reach.
