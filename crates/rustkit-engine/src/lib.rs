@@ -10357,6 +10357,7 @@ impl Engine {
                     rect: r,
                     size,
                     position,
+                    offset,
                     repeat,
                 } => serde_json::json!({
                     "op": "background_image",
@@ -10364,6 +10365,7 @@ impl Engine {
                     "rect": rect(r),
                     "size": format!("{:?}", size),
                     "position": { "x": position.0, "y": position.1 },
+                    "offset": { "x": offset.0, "y": offset.1 },
                     "repeat": format!("{:?}", repeat)
                 }),
                 Cmd::BoxShadow {
@@ -12114,11 +12116,9 @@ fn parse_background_repeat(value: &str) -> rustkit_css::BackgroundRepeat {
 /// One value: the other axis is `center`, and `top` / `bottom` name the
 /// vertical axis. Two values: horizontal then vertical, unless the keywords
 /// say otherwise (`top right`). Three or four: `<edge> <offset>?` pairs; an
-/// offset from `left` / `top` is kept, one from `right` / `bottom` is not
-/// (the value has no way to say "from the far edge" yet) and the image sits
-/// on that edge.
+/// offset from `right` / `bottom` is measured inward from that edge.
 fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
-    use rustkit_css::BackgroundPositionValue::Percent;
+    use rustkit_css::BackgroundPositionValue::{FromEnd, Percent, Px};
     let value = value.trim().to_lowercase();
     let parts: Vec<&str> = value.split_whitespace().collect();
     let vertical = |s: &str| matches!(s, "top" | "bottom");
@@ -12147,6 +12147,13 @@ fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
                     .filter(|next| !vertical(next) && !horizontal(next) && *next != "center");
                 let at = match (edge, offset) {
                     ("left" | "top", Some(offset)) => parse_background_position_value(offset),
+                    ("right" | "bottom", Some(offset)) => {
+                        match parse_background_position_value(offset) {
+                            Percent(share) => Percent(1.0 - share),
+                            Px(px) => FromEnd(px),
+                            FromEnd(px) => Px(px),
+                        }
+                    }
                     _ => parse_background_position_value(edge),
                 };
                 if vertical(edge) {
@@ -16754,7 +16761,7 @@ mod element_identity_tests {
 
     #[test]
     fn a_background_position_reads_its_keywords_by_axis() {
-        use rustkit_css::BackgroundPositionValue::{Percent, Px};
+        use rustkit_css::BackgroundPositionValue::{FromEnd, Percent, Px};
         let at = |v: &str| {
             let p = parse_background_position(v);
             (p.x, p.y)
@@ -16770,9 +16777,10 @@ mod element_identity_tests {
         assert_eq!(at("center bottom"), (Percent(0.5), Percent(1.0)));
         assert_eq!(at("bottom center"), (Percent(0.5), Percent(1.0)));
         assert_eq!(at("10px 20px"), (Px(10.0), Px(20.0)));
-        // Edge and offset: kept from the near edge; the far edge alone.
+        // Edge and offset: from the near edge, or inward from the far one.
         assert_eq!(at("left 10px top 20px"), (Px(10.0), Px(20.0)));
-        assert_eq!(at("right 5px bottom 5px"), (Percent(1.0), Percent(1.0)));
+        assert_eq!(at("right 5px bottom 10px"), (FromEnd(5.0), FromEnd(10.0)));
+        assert_eq!(at("right 25% bottom"), (Percent(0.75), Percent(1.0)));
         assert_eq!(at("top 20px left"), (Percent(0.0), Px(20.0)));
     }
 
@@ -25878,6 +25886,67 @@ img { display: block; width: 60px; height: 60px; }
         assert_eq!(pixel(&ppm, 70, 215), GREEN, "top of the ring");
         assert_eq!(pixel(&ppm, 32, 212), WHITE, "corner of the ring's bounding square");
         assert_eq!(pixel(&ppm, 70, 250), WHITE, "inside the shadowed box");
+    }
+
+    // Three 60x60 blue boxes down the left edge, 20px apart from y=0, each
+    // with a 4x4 red image drawn 20x20 once: at a length from the near
+    // edges, at a length in from the far edges, and at a negative length.
+    const POSITIONS: &str = r#"<!DOCTYPE html><html><head><style>
+body { margin: 0; background: white; }
+div { width: 60px; height: 60px; margin: 0 0 20px 20px; background-color: #0000ff;
+  background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAFUlEQVR42mP8z8DwnwEJMDGgAcICAIPRAgazS9KbAAAAAElFTkSuQmCC);
+  background-repeat: no-repeat; background-size: 20px 20px; }
+#near { background-position: 10px 30px; }
+#far { background-position: right 10px bottom 5px; }
+#sprite { background-position: -10px -10px; }
+</style></head><body>
+<div id="near"></div>
+<div id="far"></div>
+<div id="sprite"></div>
+</body></html>"#;
+
+    /// The command carried the position as two shares of the free space, so
+    /// a length was dropped: `10px 30px`, `right 10px` and every sprite
+    /// offset put the image at the box's corner.
+    #[test]
+    fn a_url_background_sits_at_its_length_position() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 240,
+            })
+            .expect("view");
+        engine.load_html(view, POSITIONS).expect("load_html");
+        engine.render_view(view).expect("render");
+        let path = std::env::temp_dir().join(format!(
+            "rustkit-background-length-position-{}.ppm",
+            std::process::id()
+        ));
+        engine
+            .capture_frame(view, path.to_str().unwrap())
+            .expect("capture");
+        let ppm = std::fs::read(&path).expect("frame");
+        let _ = std::fs::remove_file(&path);
+
+        const WHITE: [u8; 3] = [255, 255, 255];
+        const RED: [u8; 3] = [255, 0, 0];
+        const BLUE: [u8; 3] = [0, 0, 255];
+
+        // 10px 30px: the image covers (30..50, 30..50).
+        assert_eq!(pixel(&ppm, 40, 40), RED, "near: inside the image");
+        assert_eq!(pixel(&ppm, 25, 5), BLUE, "near: the box's corner is bare");
+
+        // right 10px bottom 5px: (50..70, 115..135) of the box at y=80.
+        assert_eq!(pixel(&ppm, 55, 120), RED, "far: inside the image");
+        assert_eq!(pixel(&ppm, 75, 137), BLUE, "far: the gap to the far edges");
+
+        // -10px -10px: (10..30, 150..170), cut to the box at (20, 160).
+        assert_eq!(pixel(&ppm, 25, 165), RED, "sprite: the part inside the box");
+        assert_eq!(pixel(&ppm, 35, 175), BLUE, "sprite: past the image");
+        assert_eq!(pixel(&ppm, 15, 155), WHITE, "sprite: nothing outside the box");
     }
 }
 

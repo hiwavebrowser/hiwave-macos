@@ -1008,6 +1008,8 @@ pub enum BackgroundPositionValue {
     Percent(f32),
     /// Pixel offset from the start.
     Px(f32),
+    /// Pixel offset inward from the end (`right 10px`, `bottom 5px`).
+    FromEnd(f32),
 }
 
 impl Default for BackgroundPositionValue {
@@ -1026,6 +1028,18 @@ impl BackgroundPositionValue {
                 (container_size - image_size) * pct
             }
             BackgroundPositionValue::Px(px) => *px,
+            BackgroundPositionValue::FromEnd(px) => container_size - image_size - px,
+        }
+    }
+
+    /// The position as the share of the free space the image starts at, plus
+    /// a pixel offset: what a painter that learns the image's size late (a
+    /// `url()` image) needs. `to_px` is `free space * share + offset`.
+    pub fn share_and_offset(&self) -> (f32, f32) {
+        match self {
+            BackgroundPositionValue::Percent(pct) => (*pct, 0.0),
+            BackgroundPositionValue::Px(px) => (0.0, *px),
+            BackgroundPositionValue::FromEnd(px) => (1.0, -px),
         }
     }
 }

@@ -6225,6 +6225,9 @@ pub enum DisplayCommand {
         size: BackgroundSize,
         /// Background position (0-1 range)
         position: (f32, f32),
+        /// Pixel offset added to the position (a length position, such as
+        /// a sprite's `-20px -40px` or `right 10px`)
+        offset: (f32, f32),
         /// Background repeat
         repeat: BackgroundRepeat,
     },
@@ -7609,7 +7612,7 @@ impl DisplayList {
                 // The actual image dimensions would come from the image cache
                 // For now, use container size as fallback
                 let size = self.convert_background_size(&layer.size);
-                let position = self.convert_background_position(&layer.position);
+                let (position, offset) = self.convert_background_position(&layer.position);
                 let repeat = self.convert_background_repeat(layer.repeat);
 
                 self.commands.push(DisplayCommand::BackgroundImage {
@@ -7617,6 +7620,7 @@ impl DisplayList {
                     rect: container,
                     size,
                     position,
+                    offset,
                     repeat,
                 });
             }
@@ -7731,17 +7735,17 @@ impl DisplayList {
         }
     }
 
-    /// Convert rustkit_css::BackgroundPosition to (f32, f32) tuple.
-    fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> (f32, f32) {
-        let x = match &pos.x {
-            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
-            rustkit_css::BackgroundPositionValue::Px(_) => 0.0, // Will be handled in rendering
-        };
-        let y = match &pos.y {
-            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
-            rustkit_css::BackgroundPositionValue::Px(_) => 0.0,
-        };
-        (x, y)
+    /// Convert rustkit_css::BackgroundPosition to the command's position
+    /// (share of the free space, per axis) and pixel offset. The image's
+    /// size is not known here, so a length cannot be folded into the share:
+    /// it was dropped, and every sprite sat at its box's corner.
+    fn convert_background_position(
+        &self,
+        pos: &rustkit_css::BackgroundPosition,
+    ) -> ((f32, f32), (f32, f32)) {
+        let (x, dx) = pos.x.share_and_offset();
+        let (y, dy) = pos.y.share_and_offset();
+        ((x, y), (dx, dy))
     }
 
     /// Convert rustkit_css::BackgroundRepeat to layout BackgroundRepeat.

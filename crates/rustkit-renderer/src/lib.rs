@@ -2123,9 +2123,10 @@ impl Renderer {
                 rect,
                 size,
                 position,
+                offset,
                 repeat,
             } => {
-                self.draw_background_image(url, *rect, size, *position, repeat);
+                self.draw_background_image(url, *rect, size, *position, *offset, repeat);
             }
 
             DisplayCommand::BoxShadow {
@@ -5540,6 +5541,7 @@ impl Renderer {
         container: Rect,
         size: &BackgroundSize,
         position: (f32, f32),
+        offset: (f32, f32),
         repeat: &BackgroundRepeat,
     ) {
         // Get the texture to retrieve image dimensions
@@ -5562,8 +5564,8 @@ impl Renderer {
         }
 
         // Calculate the starting position based on position property
-        let mut start_x = container.x + (container.width - bg_width) * position.0;
-        let mut start_y = container.y + (container.height - bg_height) * position.1;
+        let mut start_x = container.x + (container.width - bg_width) * position.0 + offset.0;
+        let mut start_y = container.y + (container.height - bg_height) * position.1 + offset.1;
 
         // Adjust size and spacing for space/round modes
         let mut adjusted_bg_width = bg_width;
