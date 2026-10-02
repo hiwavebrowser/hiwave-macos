@@ -1666,3 +1666,40 @@ The two middle columns are a branch binary (develop b0162e4 plus this branch's c
 1. **Open the match-key PR without a counted timing?** Third session in a row with no quiet window (load 9–27 at 03:00–05:00, 6–20 at 06:35–07:50); the other lanes build through the whole hour. The cut changes no output on 23 sites and 26 receipt cases and its tests catch 5 of 5 mutations. Default: keep waiting for a quiet A/B. Say "open it" and the next session opens it with the profile and the correctness evidence, marked "timing pending".
 2. **Give this lane a quiet window?** The A/B standard needs load under 6 for about 10 minutes per claim, and the hourly sessions overlap the real-site and JS lanes' builds. Default: nothing changes and timing lands when it lands. The alternative is one fixed slot per night (say 02:00–02:30) where the other lanes do not build.
 3. **#408 still needs you or Prometheus to mark it ready** (tenth session). 3× by 2026-10-11 is not in reach: the best measured combination is 9.8× on wikipedia (tree reuse and sharing both on, 02:47).
+
+## 2026-10-02 09:50
+
+**The machine was quiet for 25 minutes (load 1.5–3.6, 08:35–09:00) and the match-key cut got its counted timing: #436 opened at 213a5de. With sharing on it reads 0.966 on wikipedia, 0.978 on github, 0.987 on cnn (10 pairs); with the flag unset it reads as no change (20 pairs). The ratio of record moves 14.6× → 13.6× (wikipedia, develop 97393a7, 20 quiet loads). The real-site board with sharing on is 12 of 20 sites done: 16 points in both arms, the same verdicts on all 12.**
+
+| site | Chrome ms | before (develop b35c82e, 32 quiet loads, 00:13) | after (develop 97393a7, 20 quiet loads, 08:44–08:59) |
+|---|---|---|---|
+| cnn | 210 | 543.0 → 2.6× | 548.5 → 2.6× |
+| github | 110 | 860.5 → 7.8× | 875.0 → 8.0× |
+| wikipedia | 20 | 292.0 → 14.6× | 271.5 → **13.6×** |
+
+- The "after" column is the develop arm of the flag-unset A/B below (`pc-dev-97393a7`, half the loads run first in their pair and half second). Develop's tip is now d29a018 (#435, a four-digit hex colour, +33 in the engine file); it was not built or measured. I did not look for which merge between b35c82e and 97393a7 moved wikipedia.
+- **The brief's first task is still listed and is still done**: the lock inversion is #415, merged 2026-10-01. `git grep -c ENGINE_INIT origin/develop -- crates/rustkit-engine` prints nothing at d29a018. It can come out of the brief.
+- **#436 opened** (`atlas/cs-match-key-tests` @ 213a5de, +116 −40, one commit plus one merge of develop). The head is the commit every number was taken on; it merges cleanly with d29a018 (`git merge-tree`), so I did not merge develop in again.
+  - **Flag on in both arms** (`ab2.py pc-dev-97393a7 pc-mkt-213a5de 10 RUSTKIT_STYLE_SHARE=1`, 5 AB + 5 BA, 08:37–08:43, load 2.0–3.6, none dropped): wikipedia **0.966** (7 of 10 below 1; 259.0 → 246.0 ms; range 0.90–1.38), github 0.978 (8 of 10; 803.0 → 787.0), cnn 0.987 (5 of 10; 494.5 → 489.5). First build: wikipedia 0.959 (7 of 10), github 0.967 (8 of 10), cnn 0.993 (5 of 10).
+  - **Flag unset in both arms** (two runs of 10, 08:44–08:59, load 1.5–3.3, none dropped), pooled over 20 pairs: wikipedia 1.004 (9 of 20 below 1), cnn 0.991 (12 of 20), github 0.976 (12 of 20). By run wikipedia read 1.016 and 0.964, github 1.002 and 0.961. I read the default path as unchanged.
+  - **The profile overstated the cut.** It put the key at 14.8% of wikipedia's build; the quiet A/B gives 4% of the first build. That profile was one slow load at load 15.
+  - The PR body carries last session's verify, tests, mutations and receipt (26/26, diffPixels identical to a develop control on 26 of 26, both arms). Nothing in it was re-run today.
+- **Real-site board with sharing on, 12 of 20 sites** (`scripts/realsite_board.py --capture-bin pc-mkt-213a5de`, `RUSTKIT_STYLE_SHARE` unset against `=1`, chunks interleaved, 09:00–09:39; load 1.9–3.0 for the first chunk and 8–17 after another lane began building at about 09:10).
+  - Points **16 and 16**. Loads / readable / looks-right verdicts identical on **12 of 12**. RustKit frame byte-identical on 9 of 12, display list on 7 of 12.
+  - The three sites whose frames differ: **linkedin** (50 words unset, 48 with the flag; #408's board saw both renderings in both arms), **walmart** (92 and 90 words, no control), **instagram** (below).
+  - **instagram timed out twice with the flag on** (30 s cap, load 12–16) and did not with it unset: 15.2 s at load 2–3, then 28.5 s in a control at load 11.5. One control is not enough to say whether that is the flag or the load. It scores 0 in both arms either way ("rustkit did not load").
+  - facebook and yahoo have identical frames and differing display lists. I did not diff them.
+  - Chrome's capture failed on yahoo and bing in both arms and once each on x (on) and linkedin (unset); that is the oracle under load, not the flag.
+  - **Not run:** microsoft, apple, netflix, github, shopify, squarespace, cnn, weather. A chunk of 4 sites took 654 s at load 13 and ran past the tool limit; I waited for it in the foreground.
+- **#408:** still a draft at 63d24d1, MERGEABLE, one R2-STAMP PASS, no R1 review, nothing to answer.
+- **Aleph:** not called. Nothing this session needed code navigation.
+- **Slips:** three commands were refused (a chain ending in `git ls-remote`, a `grep` on the indexed tree, an inline script with a brace and a quote) before I used single commands and script files. I asked for 8 sites in one board chunk and it finished 46 s under the limit.
+- **Saved**, under `cascade-target/tmp/mkt3/`: `ab2-on-0837.txt`, `ab2-unset-0844.txt`, `ab2-unset-0853.txt`, `pr-body.md`, `chunk.py` and `board_cmp12.py` (the board runner and comparer for this flag), `board-{off,on}/` (12 sites each), `board-{on2,off2}/` (instagram).
+- **State left behind:** `.worktrees/cs-engine-init-lock` on `atlas/cs-match-key-tests` @ 213a5de, clean, pushed. No build ran this session; the shared target dir is as the 07:50 session left it.
+- **Open cs PRs:** 2 (#408 draft, #436), cap 3.
+- **Next session:** (1) #436 and #408: answer reviews. (2) Finish the board: `chunk.py off` and `chunk.py on` for the 8 sites left, 2–3 sites per chunk; then instagram three times per arm at load under 6, and a second unset load of walmart. (3) Diff facebook's and yahoo's two display lists. (4) With the board whole and #436 merged: the PR that turns `RUSTKIT_STYLE_SHARE` on by default.
+
+**Decisions for Pete**
+1. **3× by 2026-10-11 will not be met; what should the lane do on the 11th?** The worst ratio is 13.6×, and the best measured combination of everything built is 9.8× on wikipedia (tree reuse and sharing both on). cnn is already under 3×. Default: keep grinding to the end date and write the result up then. The alternative is to reset the exit number now to what the two default flips can reach (about 10×) and plan the next cuts from a fresh profile.
+2. **#408 still needs you or Prometheus to mark it ready** (eleventh session). It is the largest single step available: 0.787 on wikipedia.
+3. **Give this lane a quiet window?** (Carried from 07:50.) Today's whole result came from 25 quiet minutes; the board run that followed was slowed about threefold when another lane began building. Default: nothing changes. The alternative is one fixed slot per night where the other lanes do not build.
