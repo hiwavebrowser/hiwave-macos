@@ -540,7 +540,24 @@ impl ResourceLoader {
 
     /// Fetch a URL.
     pub async fn fetch(&self, request: Request) -> Result<Response, NetError> {
-        self.fetch_with(request, &self.client, true).await
+        // A subresource (anything with a document referrer that is not itself
+        // the navigation) may not reach private addresses on behalf of a
+        // public page, on any redirect hop. Navigations and referrer-less
+        // loads are unchanged.
+        let policy = match (&request.referrer, request.destination) {
+            (Some(page), dest) if dest != RequestDestination::Document => {
+                policy::page_address_policy(page, &request.url)
+            }
+            _ => rustkit_http::AddressPolicy::Any,
+        };
+        if matches!(policy, rustkit_http::AddressPolicy::Any) {
+            return self.fetch_with(request, &self.client, true).await;
+        }
+        // The shared cache is keyed by URL alone and would answer a private
+        // URL without connecting.
+        let use_cache = !policy::url_host_is_private(&request.url);
+        let client = self.client.clone().with_address_policy(policy);
+        self.fetch_with(request, &client, use_cache).await
     }
 
     /// One hop of a governed (script-initiated) request: the same pipeline as
