@@ -3177,6 +3177,13 @@ impl Engine {
             )),
         };
 
+        // Off unless RUSTKIT_STYLE_SHARE asks for it. A shared style records
+        // no trace entries, so a traced build never shares.
+        let _style_share = StyleShareScope::install(match traced {
+            true => StyleShareMode::Off,
+            false => style_share_mode(),
+        });
+
         let walk_started = mark();
 
         // A trace describes ONE build. Keeping entries from the previous
@@ -3722,17 +3729,19 @@ impl Engine {
                 }
 
                 // Create computed style based on element, attributes, and stylesheets
-                let mut style = memoized_style(node.id, || {
-                    self.compute_style_for_element(
-                        tag_name,
-                        attributes,
-                        stylesheets,
-                        css_vars,
-                        ancestors,
-                        siblings_before,
-                        sib,
-                        parent_style,
-                    )
+                let (mut style, share_id) = style_share_tracked(|| {
+                    memoized_style(node.id, || {
+                        self.compute_style_for_element(
+                            tag_name,
+                            attributes,
+                            stylesheets,
+                            css_vars,
+                            ancestors,
+                            siblings_before,
+                            sib,
+                            parent_style,
+                        )
+                    })
                 });
 
                 // CSS computed-value resolution: font-size absolutizes at
@@ -4353,6 +4362,13 @@ impl Engine {
                     Some(s) => s,
                     None => &layout_box.style,
                 };
+                // Style sharing keys a child's cascade on its parent's style.
+                // Everything done to this style since the cascade (font-size,
+                // line-height, blockification) was a function of the style
+                // and the parent's, so `share_id` still names it.
+                let share_parent = StyleShareParent::enter(children_parent_style, share_id);
+                // Match sharing keys a child's matches on its ancestor chain.
+                let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 for (child_index, child) in child_nodes.iter().enumerate() {
                     let child_path = Self::child_selector_path(
                         selector_path,
@@ -4430,6 +4446,8 @@ impl Engine {
                         Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     }
                 }
+                drop(share_chain);
+                drop(share_parent);
 
                 // Check for ::after pseudo-element
                 if let Some(after_box) = memoized_pseudo_style(node.id, Pseudo::After, || {
@@ -5354,13 +5372,43 @@ impl Engine {
         // element's id, classes, tag or the universal bucket can pass
         // `rule_may_match`; the rest are never visited.
         let index = active_rule_index(stylesheets);
-        let rules: Box<dyn Iterator<Item = (usize, &Rule)>> = match index.as_ref() {
-            Some(ix) => Box::new(
+        // Match sharing: a selector with no sibling combinator and no
+        // positional pseudo-class reads only the element's tag and
+        // attributes and its ancestors' tags, classes and ids. An earlier
+        // element equal in all of those already has the answer for every
+        // such rule; the rest are matched afresh.
+        let match_share = match index.as_ref() {
+            Some(ix) => match_share_lookup(ix, tag_name, attributes, ancestors),
+            None => MatchShared::Untracked,
+        };
+        let shared_matches = match (&match_share, index.as_ref()) {
+            (MatchShared::Hit(entry), Some(ix)) => Some((entry.clone(), ix)),
+            _ => None,
+        };
+        let records_matches = matches!(match_share, MatchShared::Miss(_) | MatchShared::Check(..));
+        let mut fresh_matches = MatchShareEntry::default();
+        let rules: Box<dyn Iterator<Item = (usize, &Rule)>> = match (index.as_ref(), &shared_matches) {
+            (_, Some((entry, ix))) => {
+                matching_rules.extend(
+                    entry
+                        .matched
+                        .iter()
+                        .map(|&(g, specificity)| (ix.rule(stylesheets, g), specificity, g as usize)),
+                );
+                Box::new(
+                    entry
+                        .positional
+                        .clone()
+                        .into_iter()
+                        .map(|g| (g as usize, ix.rule(stylesheets, g))),
+                )
+            }
+            (Some(ix), None) => Box::new(
                 ix.candidates(tag_name, attributes)
                     .into_iter()
                     .map(|g| (g as usize, ix.rule(stylesheets, g))),
             ),
-            None => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).enumerate()),
+            (None, None) => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).enumerate()),
         };
 
         for (rule_index, rule) in rules {
@@ -5391,6 +5439,13 @@ impl Engine {
                         "the subject prefilter rejects {:?}, which matches <{tag_name}>",
                         rule.selector
                     );
+                    if records_matches {
+                        if ix.reads.positional[rule_index] {
+                            fresh_matches.positional.push(rule_index as u32);
+                        } else if let Some(specificity) = matched {
+                            fresh_matches.matched.push((rule_index as u32, specificity));
+                        }
+                    }
                     matched
                 }
                 None => {
@@ -5414,6 +5469,7 @@ impl Engine {
                 matching_rules.push((rule, specificity, rule_index));
             }
         }
+        match_share_store(match_share, fresh_matches);
 
         // Sort by cascade layer, then specificity, then source order (lower
         // first, so they get overwritten by higher). CSS Cascade 5 §6.4:
@@ -5430,6 +5486,26 @@ impl Engine {
         let rules_for = |important_pass: bool| match (&important_rules, important_pass) {
             (Some(rules), true) => rules.as_slice(),
             _ => matching_rules.as_slice(),
+        };
+
+        // Style sharing: everything below reads only the parent's style, the
+        // tag, the matched rules in this order, the inline style and whether
+        // a UA rule hid the element. An earlier element with the same five
+        // already has this style. Only under the build's own rule index,
+        // whose rule numbers the key holds.
+        let share = match (index.is_some(), parent_style) {
+            (true, Some(parent)) => style_share_lookup(parent, || StyleShareKey {
+                parent: 0,
+                tag: tag_name.to_string(),
+                rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
+                inline: attributes.get("style").cloned(),
+                ua_hidden: style.display == rustkit_css::Display::None,
+            }),
+            _ => StyleShared::Untracked,
+        };
+        let share = match share {
+            StyleShared::Hit(shared) => return *shared,
+            other => other,
         };
 
         // Custom properties first: every `var()` below resolves against THIS
@@ -5583,6 +5659,8 @@ impl Engine {
         zero_width_of_borderless_sides(&mut style);
 
         style.custom_properties = vars;
+
+        style_share_store(share, &style);
 
         if recording {
             let id = attributes.get("id").cloned();
@@ -8321,6 +8399,7 @@ impl Engine {
             specificity: Vec::new(),
             member_specificity: Vec::new(),
             prepared: Vec::new(),
+            reads: SelectorReads::default(),
             main: RuleBuckets::default(),
             before: RuleBuckets::default(),
             after: RuleBuckets::default(),
@@ -8345,7 +8424,10 @@ impl Engine {
                 };
                 ix.specificity.push(whole);
                 ix.member_specificity.push(members);
-                ix.prepared.push(SelectorMatcher.prepared_selector(rule.selector.trim()));
+                let prepared = SelectorMatcher.prepared_selector(rule.selector.trim());
+                let positional = ix.reads.note(&prepared);
+                ix.reads.positional.push(positional);
+                ix.prepared.push(prepared);
                 let mut pseudo_keys = None;
                 let mut pseudo_prepared = None;
                 // Same test as create_pseudo_element's (the single-colon
@@ -21221,6 +21303,8 @@ struct RuleIndex {
     /// SipHash the selector string into the prepared cache on every
     /// candidate of every element.
     prepared: Vec<Rc<PreparedSelector>>,
+    /// What the prepared selectors read, for match sharing.
+    reads: SelectorReads,
     /// Every rule, by its subject keys.
     main: RuleBuckets,
     /// Rules whose selector ends in `:before`/`::before` (resp. after), the
@@ -21506,6 +21590,717 @@ fn tree_reuse_from(value: Option<&str>) -> TreeReuse {
 fn tree_reuse_mode() -> TreeReuse {
     static MODE: std::sync::OnceLock<TreeReuse> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| tree_reuse_from(std::env::var("RUSTKIT_TREE_REUSE").ok().as_deref()))
+}
+
+/// `RUSTKIT_STYLE_SHARE`: off by default. `1` or `on` hands an element the
+/// style an earlier element of the same build computed from the same parent
+/// style, tag, matched rules, inline style and UA hiding, instead of applying
+/// the declarations again. `verify` applies them anyway and counts the styles
+/// that differ from the shared one.
+///
+/// `1`, `on` and `verify` also share matches (see [`MatchShareKey`]): an
+/// element takes the matched rules of an earlier element with the same tag,
+/// attributes and ancestor chain, for every rule that reads nothing else.
+/// `style` shares styles only.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StyleShareMode {
+    Off,
+    StyleOnly,
+    Share,
+    Verify,
+}
+
+fn style_share_from(value: Option<&str>) -> StyleShareMode {
+    match value {
+        Some("1") | Some("on") => StyleShareMode::Share,
+        Some("style") => StyleShareMode::StyleOnly,
+        Some("verify") => StyleShareMode::Verify,
+        _ => StyleShareMode::Off,
+    }
+}
+
+fn style_share_mode() -> StyleShareMode {
+    #[cfg(test)]
+    if let Some(mode) = STYLE_SHARE_TEST_MODE.with(|m| m.get()) {
+        return mode;
+    }
+    static MODE: std::sync::OnceLock<StyleShareMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| style_share_from(std::env::var("RUSTKIT_STYLE_SHARE").ok().as_deref()))
+}
+
+/// Everything the cascade reads once the matching rules are known. `parent`
+/// is the share id of the parent's style: equal ids mean equal styles.
+/// `rules` holds each matched rule's number and the specificity it matched
+/// with, in cascade order.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct StyleShareKey {
+    parent: u64,
+    tag: String,
+    rules: Vec<(usize, (usize, usize, usize))>,
+    inline: Option<String>,
+    ua_hidden: bool,
+}
+
+/// What `style_share_lookup` found for one element.
+enum StyleShared {
+    /// No sharing in this build, or the parent's style has no share id.
+    Untracked,
+    /// An earlier element's style, to use as is.
+    Hit(Box<ComputedStyle>),
+    /// Nothing stored under this key yet: compute, then store.
+    Miss(StyleShareKey),
+    /// Verify mode: compute anyway and compare with the style under this key.
+    Check(StyleShareKey),
+}
+
+/// One build's shared styles.
+struct StyleShare {
+    verify: bool,
+    /// The styles computed so far, each with its share id.
+    styles: HashMap<StyleShareKey, (u64, ComputedStyle)>,
+    /// The enclosing elements whose children are being built, innermost
+    /// last: the address of the style their children inherit from, and its
+    /// share id when it has one.
+    parents: Vec<(*const ComputedStyle, Option<u64>)>,
+    /// Verify mode: the first parent style seen under each share id.
+    parent_styles: HashMap<u64, ComputedStyle>,
+    /// The share id of the style the cascade last produced, for the walk.
+    last_id: Option<u64>,
+    next_id: u64,
+    hits: usize,
+    misses: usize,
+    untracked: usize,
+    mismatches: usize,
+    parent_mismatches: usize,
+    /// Match sharing; `None` under `RUSTKIT_STYLE_SHARE=style`.
+    matches: Option<MatchShare>,
+}
+
+/// Rule numbers of [`MatchShareEntry`] are the rule index's.
+type MatchedRule = (u32, (usize, usize, usize));
+
+/// What one element's matching came to, split by what the rules read.
+#[derive(Default, PartialEq, Debug)]
+struct MatchShareEntry {
+    /// The matched rules among the candidates that read only what
+    /// [`MatchShareKey`] holds, ascending, each with the specificity it
+    /// matched with.
+    matched: Vec<MatchedRule>,
+    /// The candidates that also read siblings, position or children
+    /// (`SelectorReads::positional`), ascending. An element sharing this
+    /// entry matches them itself.
+    positional: Vec<u32>,
+}
+
+/// Everything a selector with no sibling combinator and no positional
+/// pseudo-class can read: the element's tag and attributes, and its
+/// ancestors' tags, classes and ids (`chain`: equal ids mean chains equal
+/// in all three, see [`MatchShareChain`]). An attribute's name is always
+/// held; of its value, what a selector can read
+/// ([`SelectorReads::keyed_value`]). The candidate list is a function of the
+/// same key.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct MatchShareKey {
+    chain: u64,
+    tag: String,
+    /// Sorted by name.
+    attributes: Vec<(String, MatchKeyValue)>,
+}
+
+/// What [`MatchShareKey`] holds of one attribute's value.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum MatchKeyValue {
+    /// No selector reads the value.
+    Present,
+    Value(String),
+    /// The outcome of each attribute selector the sheets test this name
+    /// with, in `SelectorReads::attribute_tests` order.
+    Tests(Vec<bool>),
+}
+
+/// What `match_share_lookup` found for one element.
+enum MatchShared {
+    /// No match sharing in this build, or the element's ancestor slice is
+    /// not the one the innermost [`MatchShareChain`] named.
+    Untracked,
+    /// An earlier element's matches.
+    Hit(Rc<MatchShareEntry>),
+    /// Nothing stored under this key yet: match, then store.
+    Miss(MatchShareKey),
+    /// Verify mode: match anyway and compare with the entry under this key.
+    Check(MatchShareKey, Rc<MatchShareEntry>),
+}
+
+/// One build's shared matches.
+struct MatchShare {
+    verify: bool,
+    /// `RuleIndex::source` of the index the entries' rule numbers belong to.
+    source: Option<(usize, usize, usize)>,
+    entries: HashMap<MatchShareKey, Rc<MatchShareEntry>>,
+    /// Chain ids by content: the rest of the chain's id, then the nearest
+    /// ancestor's tag, classes and id (the id only when a selector names
+    /// it). The empty chain is 0.
+    chain_ids: HashMap<(u64, String, Vec<String>, Option<String>), u64>,
+    /// The enclosing elements whose children are being built, innermost
+    /// last: the address and length of the ancestor slice their children
+    /// are matched against, and its chain id.
+    chains: Vec<(usize, usize, u64)>,
+    next_chain: u64,
+    hits: usize,
+    misses: usize,
+    untracked: usize,
+    mismatches: usize,
+}
+
+/// Attributes a state pseudo-class decides by value (`:checked`, `:valid`,
+/// `:read-write`, `:lang()`, `:dir()`): always held by value in the key.
+const MATCH_STATE_ATTRIBUTES: [&str; 5] = ["type", "value", "contenteditable", "lang", "dir"];
+
+/// What the sheets' selectors read beyond tags, classes and attribute
+/// names, collected once per rule index.
+#[derive(Default)]
+struct SelectorReads {
+    /// Global rule index -> the rule's match also depends on the element's
+    /// siblings, its position among them or whether it has children: it has
+    /// a `+` or `~` combinator, or a subject pseudo-class outside
+    /// [`SelectorReads::pseudo_reads_only_the_element`].
+    positional: Vec<bool>,
+    /// Ids some compound names.
+    ids: std::collections::HashSet<String>,
+    /// Attribute name -> the distinct attribute selectors (the text between
+    /// the brackets) some subject compound tests its value with.
+    attribute_tests: HashMap<String, Vec<String>>,
+}
+
+impl SelectorReads {
+    /// Record what `prepared` reads. True when it is positional.
+    fn note(&mut self, prepared: &PreparedSelector) -> bool {
+        match prepared {
+            PreparedSelector::Never => false,
+            PreparedSelector::List(members) => {
+                members.iter().fold(false, |positional, m| self.note(m) | positional)
+            }
+            PreparedSelector::Complex { tokens, compounds, subject, .. } => {
+                let mut positional = false;
+                for ((_, combinator), compound) in tokens.iter().zip(compounds) {
+                    match combinator.as_str() {
+                        // The subject's own token: `subject` below.
+                        "" => {}
+                        " " | ">" => self.note_ancestor(compound),
+                        _ => positional = true,
+                    }
+                }
+                self.note_subject(subject) | positional
+            }
+        }
+    }
+
+    fn note_ancestor(&mut self, compound: &AncestorCompound) {
+        self.ids.extend(compound.id.iter().cloned());
+        for alternative in compound.any_of.iter().flatten() {
+            self.note_ancestor(alternative);
+        }
+    }
+
+    fn note_subject(&mut self, subject: &SubjectCompound) -> bool {
+        let parts = match subject {
+            SubjectCompound::Universal | SubjectCompound::Root | SubjectCompound::ClassesOnly(_) => {
+                return false;
+            }
+            SubjectCompound::IdOnly(id) => {
+                self.ids.insert(id.clone());
+                return false;
+            }
+            SubjectCompound::General { parts, .. } => parts,
+        };
+        let mut positional = false;
+        for part in parts {
+            match part {
+                SubjectPart::Class(_) => {}
+                SubjectPart::Id(id) => {
+                    self.ids.insert(id.clone());
+                }
+                // A bare `[name]` reads the name's presence, which the key
+                // always holds.
+                SubjectPart::Attr(attr) => {
+                    if SelectorMatcher::ATTR_OPERATORS.iter().any(|op| attr.contains(op)) {
+                        let tests = self
+                            .attribute_tests
+                            .entry(SelectorMatcher::attr_selector_name(attr).to_string())
+                            .or_default();
+                        if !tests.contains(attr) {
+                            tests.push(attr.clone());
+                        }
+                    }
+                }
+                SubjectPart::Pseudo(name, _) => {
+                    positional |= !Self::pseudo_reads_only_the_element(name);
+                }
+                SubjectPart::List { members, .. } => {
+                    for member in members.iter().flatten() {
+                        positional |= self.note_subject(member);
+                    }
+                }
+            }
+        }
+        positional
+    }
+
+    /// Pseudo-classes `match_pseudo_class` decides from the tag and the
+    /// attributes alone (names, and the values of
+    /// [`MATCH_STATE_ATTRIBUTES`]), or the same way for every element. A
+    /// name not listed here makes its rule positional, which is always safe.
+    fn pseudo_reads_only_the_element(name: &str) -> bool {
+        SelectorMatcher::pseudo_class_is_static_false(name)
+            || matches!(
+                name,
+                "link"
+                    | "any-link"
+                    | "disabled"
+                    | "enabled"
+                    | "checked"
+                    | "indeterminate"
+                    | "default"
+                    | "autofill"
+                    | "user-valid"
+                    | "user-invalid"
+                    | "required"
+                    | "optional"
+                    | "read-write"
+                    | "read-only"
+                    | "invalid"
+                    | "valid"
+                    | "in-range"
+                    | "out-of-range"
+                    | "defined"
+                    | "lang"
+                    | "dir"
+                    | "fullscreen"
+                    | "modal"
+                    | "popover-open"
+                    | "picture-in-picture"
+                    | "playing"
+                    | "muted"
+                    | "host"
+                    | "host-context"
+                    | "paused"
+                    | "first-line"
+                    | "first-letter"
+                    | "root"
+                    | "scope"
+                    | "has"
+            )
+    }
+
+    /// What a selector can read of one attribute's value: all of it for
+    /// `class`, the state attributes and an id some compound names; else
+    /// only whether each attribute selector on that name passes.
+    fn keyed_value(&self, name: &str, value: &str, attributes: &HashMap<String, String>) -> MatchKeyValue {
+        if name == "class"
+            || MATCH_STATE_ATTRIBUTES.contains(&name)
+            || (name == "id" && self.ids.contains(value))
+        {
+            return MatchKeyValue::Value(value.to_string());
+        }
+        match self.attribute_tests.get(name) {
+            Some(tests) => MatchKeyValue::Tests(
+                tests
+                    .iter()
+                    .map(|test| SelectorMatcher.match_attribute_selector(test, attributes))
+                    .collect(),
+            ),
+            None => MatchKeyValue::Present,
+        }
+    }
+
+    fn key(&self, chain: u64, tag_name: &str, attributes: &HashMap<String, String>) -> MatchShareKey {
+        let mut attributes: Vec<(String, MatchKeyValue)> = attributes
+            .iter()
+            .map(|(name, value)| (name.clone(), self.keyed_value(name, value, attributes)))
+            .collect();
+        attributes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        MatchShareKey {
+            chain,
+            tag: tag_name.to_string(),
+            attributes,
+        }
+    }
+}
+
+/// Names `child_chain` as the ancestor slice the elements built inside this
+/// scope are matched against, and gives it a chain id. `child_chain` is
+/// `parent_chain` with the element entering the scope in front. An element's
+/// matches are keyed on the id only while the scope is alive and only when
+/// it is handed this very slice, which the scope's owner keeps borrowed.
+struct MatchShareChain {
+    entered: bool,
+}
+
+impl MatchShareChain {
+    fn enter(stylesheets: &[Stylesheet], parent_chain: &[Ancestor], child_chain: &[Ancestor]) -> Self {
+        let entered = STYLE_SHARE.with(|s| {
+            let mut slot = s.borrow_mut();
+            let Some(share) = slot.as_mut().and_then(|s| s.matches.as_mut()) else {
+                return false;
+            };
+            let (Some(ix), Some(nearest)) = (active_rule_index(stylesheets), child_chain.first())
+            else {
+                return false;
+            };
+            // Which ids are named is the index's; so are the chain ids.
+            if *share.source.get_or_insert(ix.source) != ix.source {
+                return false;
+            }
+            let rest = match share.chains.last() {
+                _ if parent_chain.is_empty() => Some(0),
+                Some(&(at, len, id))
+                    if at == parent_chain.as_ptr() as usize && len == parent_chain.len() =>
+                {
+                    Some(id)
+                }
+                _ => None,
+            };
+            // A chain not seen before, or one nothing else can be told equal
+            // to (its rest is unknown): its own id.
+            share.next_chain += 1;
+            let fresh = share.next_chain;
+            let id = match rest.filter(|_| child_chain.len() == parent_chain.len() + 1) {
+                Some(rest) => {
+                    let (tag, classes, id) = &**nearest;
+                    let named = id.clone().filter(|id| ix.reads.ids.contains(id));
+                    *share
+                        .chain_ids
+                        .entry((rest, tag.clone(), classes.clone(), named))
+                        .or_insert(fresh)
+                }
+                None => fresh,
+            };
+            share.chains.push((child_chain.as_ptr() as usize, child_chain.len(), id));
+            true
+        });
+        MatchShareChain { entered }
+    }
+}
+
+impl Drop for MatchShareChain {
+    fn drop(&mut self) {
+        if self.entered {
+            STYLE_SHARE.with(|s| {
+                if let Some(share) = s.borrow_mut().as_mut().and_then(|s| s.matches.as_mut()) {
+                    share.chains.pop();
+                }
+            });
+        }
+    }
+}
+
+/// Look one element's matches up. Only under the rule index the build's
+/// entries were stored under, and only for the ancestor slice the innermost
+/// [`MatchShareChain`] scope named.
+fn match_share_lookup(
+    ix: &RuleIndex,
+    tag_name: &str,
+    attributes: &HashMap<String, String>,
+    ancestors: &[Ancestor],
+) -> MatchShared {
+    STYLE_SHARE.with(|s| {
+        let mut slot = s.borrow_mut();
+        let Some(share) = slot.as_mut().and_then(|s| s.matches.as_mut()) else {
+            return MatchShared::Untracked;
+        };
+        let same_index = *share.source.get_or_insert(ix.source) == ix.source;
+        let chain = match share.chains.last() {
+            Some(&(at, len, id))
+                if same_index && at == ancestors.as_ptr() as usize && len == ancestors.len() =>
+            {
+                id
+            }
+            _ => {
+                share.untracked += 1;
+                return MatchShared::Untracked;
+            }
+        };
+        let key = ix.reads.key(chain, tag_name, attributes);
+        match share.entries.get(&key) {
+            Some(entry) => {
+                share.hits += 1;
+                match share.verify {
+                    true => MatchShared::Check(key, entry.clone()),
+                    false => MatchShared::Hit(entry.clone()),
+                }
+            }
+            None => {
+                share.misses += 1;
+                MatchShared::Miss(key)
+            }
+        }
+    })
+}
+
+/// The matcher ran over every candidate of an element `match_share_lookup`
+/// did not answer; `fresh` is what it found.
+fn match_share_store(found: MatchShared, fresh: MatchShareEntry) {
+    let (key, shared) = match found {
+        MatchShared::Untracked | MatchShared::Hit(_) => return,
+        MatchShared::Miss(key) => (key, None),
+        MatchShared::Check(key, shared) => (key, Some(shared)),
+    };
+    STYLE_SHARE.with(|s| {
+        let mut slot = s.borrow_mut();
+        let Some(share) = slot.as_mut().and_then(|s| s.matches.as_mut()) else {
+            return;
+        };
+        match shared {
+            None => {
+                share.entries.insert(key, Rc::new(fresh));
+            }
+            Some(shared) if *shared != fresh => {
+                share.mismatches += 1;
+                warn!(?key, ?shared, ?fresh, "Match share: shared matches differ from a fresh match");
+            }
+            Some(_) => {}
+        }
+    });
+}
+
+impl StyleShare {
+    fn fresh_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+}
+
+thread_local! {
+    /// Set by `StyleShareScope` for the span of one layout build.
+    static STYLE_SHARE: std::cell::RefCell<Option<StyleShare>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Overrides `RUSTKIT_STYLE_SHARE` for the builds of one test.
+    static STYLE_SHARE_TEST_MODE: Cell<Option<StyleShareMode>> = const { Cell::new(None) };
+    /// The last build's (hits, misses, mismatches, parent mismatches).
+    static STYLE_SHARE_LAST: Cell<(usize, usize, usize, usize)> = const { Cell::new((0, 0, 0, 0)) };
+    /// The last match-sharing build's (hits, misses, mismatches).
+    static MATCH_SHARE_LAST: Cell<(usize, usize, usize)> = const { Cell::new((0, 0, 0)) };
+}
+
+/// Arms style sharing for one layout build. Dropping it (also on unwind)
+/// restores what was there before, so no shared style or share id outlives
+/// the sheets, viewport and fonts it was computed under.
+struct StyleShareScope {
+    armed: bool,
+    previous: Option<StyleShare>,
+}
+
+impl StyleShareScope {
+    fn install(mode: StyleShareMode) -> Self {
+        if mode == StyleShareMode::Off {
+            return StyleShareScope {
+                armed: false,
+                previous: None,
+            };
+        }
+        let share = StyleShare {
+            verify: mode == StyleShareMode::Verify,
+            styles: HashMap::new(),
+            parents: Vec::new(),
+            parent_styles: HashMap::new(),
+            last_id: None,
+            next_id: 0,
+            hits: 0,
+            misses: 0,
+            untracked: 0,
+            mismatches: 0,
+            parent_mismatches: 0,
+            matches: (mode != StyleShareMode::StyleOnly).then(|| MatchShare {
+                verify: mode == StyleShareMode::Verify,
+                source: None,
+                entries: HashMap::new(),
+                chain_ids: HashMap::new(),
+                chains: Vec::new(),
+                next_chain: 0,
+                hits: 0,
+                misses: 0,
+                untracked: 0,
+                mismatches: 0,
+            }),
+        };
+        StyleShareScope {
+            armed: true,
+            previous: STYLE_SHARE.with(|s| s.replace(Some(share))),
+        }
+    }
+}
+
+impl Drop for StyleShareScope {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let ended = STYLE_SHARE.with(|s| s.replace(self.previous.take()));
+        if let Some(share) = ended {
+            info!(
+                verify = share.verify,
+                hits = share.hits,
+                misses = share.misses,
+                untracked = share.untracked,
+                mismatches = share.mismatches,
+                parent_mismatches = share.parent_mismatches,
+                "Style share"
+            );
+            if let Some(matches) = &share.matches {
+                info!(
+                    verify = matches.verify,
+                    match_hits = matches.hits,
+                    match_misses = matches.misses,
+                    match_untracked = matches.untracked,
+                    match_mismatches = matches.mismatches,
+                    "Match share"
+                );
+                #[cfg(test)]
+                MATCH_SHARE_LAST.with(|l| l.set((matches.hits, matches.misses, matches.mismatches)));
+            }
+            #[cfg(test)]
+            STYLE_SHARE_LAST.with(|l| {
+                l.set((
+                    share.hits,
+                    share.misses,
+                    share.mismatches,
+                    share.parent_mismatches,
+                ))
+            });
+        }
+    }
+}
+
+/// Run one element's cascade and report the share id of the style it
+/// produced. `None` when the cascade did not run (a replayed style) or the
+/// build does not share: that element's children then share nothing.
+fn style_share_tracked<T>(cascade: impl FnOnce() -> T) -> (T, Option<u64>) {
+    let take = || STYLE_SHARE.with(|s| s.borrow_mut().as_mut().and_then(|s| s.last_id.take()));
+    take();
+    let style = cascade();
+    (style, take())
+}
+
+/// Marks `style` as the one the elements built inside this scope inherit
+/// from. A child's cascade is keyed on `id` only while the scope is alive
+/// and only when it is handed this very style.
+struct StyleShareParent {
+    entered: bool,
+}
+
+impl StyleShareParent {
+    fn enter(style: &ComputedStyle, id: Option<u64>) -> Self {
+        let entered = STYLE_SHARE.with(|s| {
+            let mut slot = s.borrow_mut();
+            let Some(share) = slot.as_mut() else {
+                return false;
+            };
+            if let (true, Some(id)) = (share.verify, id) {
+                let differs = share
+                    .parent_styles
+                    .get(&id)
+                    .map(|first| !same_computed_style(first, style));
+                match differs {
+                    None => {
+                        share.parent_styles.insert(id, style.clone());
+                    }
+                    Some(true) => {
+                        share.parent_mismatches += 1;
+                        warn!(id, "Style share: two parent styles differ under one share id");
+                    }
+                    Some(false) => {}
+                }
+            }
+            share.parents.push((style as *const ComputedStyle, id));
+            true
+        });
+        StyleShareParent { entered }
+    }
+}
+
+impl Drop for StyleShareParent {
+    fn drop(&mut self) {
+        if self.entered {
+            STYLE_SHARE.with(|s| {
+                if let Some(share) = s.borrow_mut().as_mut() {
+                    share.parents.pop();
+                }
+            });
+        }
+    }
+}
+
+/// Look one element up. `key` is built only when the build shares and
+/// `parent` is the style the innermost `StyleShareParent` scope named; its
+/// `parent` field is filled in here.
+fn style_share_lookup(parent: &ComputedStyle, key: impl FnOnce() -> StyleShareKey) -> StyleShared {
+    STYLE_SHARE.with(|s| {
+        let mut slot = s.borrow_mut();
+        let Some(share) = slot.as_mut() else {
+            return StyleShared::Untracked;
+        };
+        let parent_id = match share.parents.last() {
+            Some((style, Some(id))) if std::ptr::eq(*style, parent) => *id,
+            _ => {
+                // A style nothing else can be told equal to: its own id.
+                share.untracked += 1;
+                share.last_id = Some(share.fresh_id());
+                return StyleShared::Untracked;
+            }
+        };
+        let mut key = key();
+        key.parent = parent_id;
+        let found = share
+            .styles
+            .get(&key)
+            .map(|(id, style)| (*id, (!share.verify).then(|| Box::new(style.clone()))));
+        match found {
+            Some((id, style)) => {
+                share.hits += 1;
+                share.last_id = Some(id);
+                match style {
+                    Some(style) => StyleShared::Hit(style),
+                    None => StyleShared::Check(key),
+                }
+            }
+            None => {
+                share.misses += 1;
+                StyleShared::Miss(key)
+            }
+        }
+    })
+}
+
+/// The cascade finished for an element `style_share_lookup` did not answer.
+fn style_share_store(found: StyleShared, style: &ComputedStyle) {
+    STYLE_SHARE.with(|s| {
+        let mut slot = s.borrow_mut();
+        let Some(share) = slot.as_mut() else {
+            return;
+        };
+        match found {
+            StyleShared::Miss(key) => {
+                let id = share.fresh_id();
+                share.last_id = Some(id);
+                share.styles.insert(key, (id, style.clone()));
+            }
+            StyleShared::Check(key) => {
+                let differs = share
+                    .styles
+                    .get(&key)
+                    .is_some_and(|(_, shared)| !same_computed_style(shared, style));
+                if differs {
+                    share.mismatches += 1;
+                    warn!(?key, "Style share: shared style differs from a fresh cascade");
+                }
+            }
+            StyleShared::Untracked | StyleShared::Hit(_) => {}
+        }
+    });
 }
 
 /// `tag.to_lowercase()`, borrowed when the tag is already lowercase ASCII.
@@ -21900,6 +22695,382 @@ fn same_computed_style(a: &ComputedStyle, b: &ComputedStyle) -> bool {
         format!("{s:?}")
     };
     strip(a) == strip(b)
+}
+
+#[cfg(test)]
+mod style_share_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, DisplayList, Rect};
+
+    fn engine() -> Engine {
+        Engine::new(EngineConfig::default()).expect("engine")
+    }
+
+    /// Repeats (list items, their links, the notes) next to everything that
+    /// must keep two look-alikes apart: a parent with another font size, an
+    /// inline style, a positional rule, a `hidden` attribute, a custom
+    /// property set on one parent only.
+    const PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+        :root { --accent: #c00; }
+        html { font-size: 15px; line-height: 1.4; }
+        body { margin: 0; font-family: sans-serif; }
+        ul li { padding: 2px 4px; color: var(--accent); }
+        ul li a { font-size: 1.2em; text-decoration: none; border-left: 0.5em solid; }
+        li:nth-child(2n) { background: #eee; }
+        #big { font-size: 30px; }
+        #green { --accent: #080; }
+        .note { margin: 1em; padding: 3px; }
+        div.gone { display: block; }
+        </style></head><body>
+        <ul><li><a href="/1">one</a></li><li><a href="/2">two</a></li><li><a href="/3">three</a></li><li><a href="/4">four</a></li></ul>
+        <ul id="big"><li><a href="/5">five</a></li><li><a href="/6">six</a></li><li><a href="/7">seven</a></li></ul>
+        <ul id="green"><li><a href="/8">eight</a></li><li><a href="/9">nine</a></li><li><a href="/10">ten</a></li></ul>
+        <p class="note">a</p><p class="note" style="color: green">b</p><p class="note">c</p>
+        <div hidden>unseen</div><div>seen</div><div class="gone" hidden>shown anyway</div>
+        </body></html>"#;
+
+    struct Mode;
+
+    impl Mode {
+        fn set(mode: StyleShareMode) -> Self {
+            STYLE_SHARE_TEST_MODE.with(|m| m.set(Some(mode)));
+            Mode
+        }
+    }
+
+    impl Drop for Mode {
+        fn drop(&mut self) {
+            STYLE_SHARE_TEST_MODE.with(|m| m.set(None));
+        }
+    }
+
+    /// The page's display list under `mode`, and the build's
+    /// (hits, misses, mismatches, parent mismatches).
+    fn paint(e: &Engine, mode: StyleShareMode) -> (String, (usize, usize, usize, usize)) {
+        paint_page(e, PAGE, mode)
+    }
+
+    fn paint_page(e: &Engine, page: &str, mode: StyleShareMode) -> (String, (usize, usize, usize, usize)) {
+        let _mode = Mode::set(mode);
+        STYLE_SHARE_LAST.with(|l| l.set((0, 0, 0, 0)));
+        MATCH_SHARE_LAST.with(|l| l.set((0, 0, 0)));
+        let d = Document::parse_html(page).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        root.layout(&cb);
+        let painted = DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (painted, STYLE_SHARE_LAST.with(|l| l.get()))
+    }
+
+    #[test]
+    fn sharing_is_off_unless_asked_for() {
+        assert_eq!(style_share_from(None), StyleShareMode::Off);
+        assert_eq!(style_share_from(Some("0")), StyleShareMode::Off);
+        assert_eq!(style_share_from(Some("")), StyleShareMode::Off);
+        assert_eq!(style_share_from(Some("1")), StyleShareMode::Share);
+        assert_eq!(style_share_from(Some("on")), StyleShareMode::Share);
+        assert_eq!(style_share_from(Some("style")), StyleShareMode::StyleOnly);
+        assert_eq!(style_share_from(Some("verify")), StyleShareMode::Verify);
+    }
+
+    /// Look-alikes that match different rules: an ancestor's class, an
+    /// ancestor's id a rule names (next to one no rule names), an own id a
+    /// rule names, attribute values on either side of an operator test,
+    /// position, an earlier sibling, emptiness and form state.
+    const MATCH_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+        body { margin: 0; font-family: sans-serif; }
+        li { padding: 1px; }
+        .dark li { background: #222; color: #fff; }
+        #second li { border-left: 3px solid #00f; }
+        li:first-child { font-weight: bold; }
+        li + li { margin-top: 2px; }
+        a[href^="http"] { color: #080; }
+        a[href$=".pdf"] { background: #fc0; }
+        #named { background: #ff0; }
+        p:empty { height: 7px; background: #f0f; }
+        input:checked { margin-left: 11px; }
+        [data-kind] { padding-left: 9px; }
+        [data-kind="b"] { padding-left: 19px; }
+        </style></head><body>
+        <ul><li><a href="/a">a</a></li><li><a href="/b">b</a></li><li><a href="http://x/c">c</a></li><li><a href="/d.pdf">d</a></li><li><a href="/e">e</a></li></ul>
+        <ul class="dark"><li>f</li><li>g</li><li>h</li></ul>
+        <ul id="second"><li>i</li><li>j</li><li>k</li></ul>
+        <ul id="third"><li>l</li><li>m</li><li>n</li></ul>
+        <div id="named">o</div><div id="other">p</div><div id="another">q</div>
+        <p></p><p>r</p><p>s</p>
+        <span data-kind="a">t</span><span data-kind="b">u</span><span data-kind="a">v</span><span data-other="a">w</span>
+        <input type="checkbox" checked><input type="checkbox"><input type="text" checked><input type="checkbox">
+        </body></html>"#;
+
+    fn match_share_last() -> (usize, usize, usize) {
+        MATCH_SHARE_LAST.with(|l| l.get())
+    }
+
+    #[test]
+    fn shared_matches_paint_what_a_full_cascade_paints() {
+        let e = engine();
+        for page in [MATCH_PAGE, PAGE] {
+            let (full, _) = paint_page(&e, page, StyleShareMode::Off);
+            assert_eq!(match_share_last(), (0, 0, 0), "an unshared build shares no matches");
+            let (styles_only, _) = paint_page(&e, page, StyleShareMode::StyleOnly);
+            assert_eq!(match_share_last(), (0, 0, 0), "`style` shares no matches");
+            let (shared, _) = paint_page(&e, page, StyleShareMode::Share);
+            let (hits, misses, _) = match_share_last();
+            let (verified, _) = paint_page(&e, page, StyleShareMode::Verify);
+            let (verify_hits, verify_misses, mismatches) = match_share_last();
+
+            assert!(hits > 0 && misses > 0, "{hits} shared, {misses} matched");
+            assert_eq!((verify_hits, verify_misses), (hits, misses));
+            assert_eq!(mismatches, 0);
+            assert_eq!(styles_only, full);
+            assert_eq!(shared, full);
+            assert_eq!(verified, full);
+        }
+    }
+
+    #[test]
+    fn the_match_key_tells_look_alikes_apart() {
+        let e = engine();
+        paint_page(&e, MATCH_PAGE, StyleShareMode::Share);
+        // Matched afresh (19): each of the four lists (no id, a class, a
+        // named id, an unnamed id); the first item under the plain, the
+        // dark and the `#second` list; the `/a`, `http:` and `.pdf` links;
+        // `#named` and `#other`; the first paragraph; the first `a` and the
+        // `b` kind and `data-other`; the checked checkbox, the unchecked
+        // one and the checked text input.
+        // Shared (18): the other items of those three lists (4, 2, 2) and
+        // all three under `#third`, whose chain is the plain list's; the
+        // `/b` and `/e` links; `#another`; two paragraphs (`:empty` is
+        // matched for each); the second `a` kind; the last checkbox.
+        // `html` and `body` are styled outside any chain scope.
+        let (hits, misses, _) = match_share_last();
+        assert_eq!((hits, misses), (18, 19));
+    }
+
+    fn reads_of(selectors: &[&str]) -> (SelectorReads, Vec<bool>) {
+        let mut reads = SelectorReads::default();
+        let positional = selectors
+            .iter()
+            .map(|s| reads.note(&SelectorMatcher.prepared_selector(s)))
+            .collect();
+        (reads, positional)
+    }
+
+    #[test]
+    fn a_rule_that_reads_siblings_position_or_children_is_never_shared() {
+        let positional = [
+            "li:first-child",
+            "li:nth-of-type(2n)",
+            "p:empty",
+            "a + b",
+            "a ~ b",
+            "a + b c",
+            "div :not(:last-child)",
+            "ul :is(.a, .b:only-child)",
+            ".x, li:last-child",
+            "textarea:placeholder-shown",
+        ];
+        let (_, flags) = reads_of(&positional);
+        for (selector, flag) in positional.iter().zip(flags) {
+            assert!(flag, "{selector} reads more than the key holds");
+        }
+
+        let plain = [
+            "*",
+            ":root",
+            "#a",
+            ".a.b",
+            "div p",
+            "ul > li.x",
+            "a:link",
+            "a:hover",
+            "input:checked",
+            "a[href^=\"http\"]",
+            "div:not(.a, #b)",
+            ":is(h1, h2) span",
+            ".x, .y z",
+        ];
+        let (_, flags) = reads_of(&plain);
+        for (selector, flag) in plain.iter().zip(flags) {
+            assert!(!flag, "{selector} reads only the element and its ancestors");
+        }
+    }
+
+    #[test]
+    fn the_key_holds_what_the_selectors_read_of_an_attribute() {
+        let (reads, _) = reads_of(&[
+            "#top li",
+            "div#own",
+            ":is(#listed, .x) a",
+            "span:not(#denied)",
+            "a[href^=\"http\"]",
+            "a[href$=\".pdf\"]",
+            "[title]",
+        ]);
+        for id in ["top", "own", "listed", "denied"] {
+            assert!(reads.ids.contains(id), "{id} is named");
+        }
+        let attributes = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect()
+        };
+        let key = |pairs: &[(&str, &str)]| reads.key(1, "a", &attributes(pairs));
+
+        // Values no selector reads do not split the key; their names do.
+        assert_eq!(key(&[("href", "/a"), ("title", "x")]), key(&[("href", "/b"), ("title", "y")]));
+        assert_ne!(key(&[("href", "/a"), ("title", "x")]), key(&[("href", "/a")]));
+        // Either side of an operator test.
+        assert_ne!(key(&[("href", "/a")]), key(&[("href", "http://a")]));
+        assert_ne!(key(&[("href", "/a")]), key(&[("href", "/a.pdf")]));
+        // A named id, an unnamed one, and none.
+        assert_eq!(key(&[("id", "one")]), key(&[("id", "two")]));
+        assert_ne!(key(&[("id", "one")]), key(&[("id", "own")]));
+        assert_ne!(key(&[("id", "one")]), key(&[]));
+        // Classes and state attributes by value; the chain and the tag.
+        assert_ne!(key(&[("class", "a")]), key(&[("class", "b")]));
+        assert_ne!(key(&[("type", "radio")]), key(&[("type", "text")]));
+        assert_ne!(reads.key(1, "a", &attributes(&[])), reads.key(2, "a", &attributes(&[])));
+        assert_ne!(reads.key(1, "a", &attributes(&[])), reads.key(1, "b", &attributes(&[])));
+    }
+
+    #[test]
+    fn matches_are_shared_only_for_the_slice_the_enclosing_scope_named() {
+        let e = engine();
+        let sheets = vec![rustkit_css::Stylesheet::parse("#top li { color: red } li { margin: 0 }").expect("css")];
+        let _index = RuleIndexScope::install(e.build_rule_index(&sheets));
+        let ix = active_rule_index(&sheets).expect("index");
+        let _scope = StyleShareScope::install(StyleShareMode::Share);
+        let none = HashMap::new();
+        let chain = |tag: &str, id: Option<&str>| -> Vec<Ancestor> {
+            vec![Rc::new((tag.to_string(), Vec::new(), id.map(str::to_string)))]
+        };
+        let (top, plain, other) = (chain("ul", Some("top")), chain("ul", None), chain("ul", Some("x")));
+
+        // No scope: nothing is keyed.
+        assert!(matches!(match_share_lookup(&ix, "li", &none, &top), MatchShared::Untracked));
+
+        let stored = |ancestors: &[Ancestor]| {
+            let _chain = MatchShareChain::enter(&sheets, &[], ancestors);
+            // Another slice than the scope's, equal or not, is not keyed.
+            assert!(matches!(
+                match_share_lookup(&ix, "li", &none, &ancestors.to_vec()),
+                MatchShared::Untracked
+            ));
+            match match_share_lookup(&ix, "li", &none, ancestors) {
+                MatchShared::Miss(key) => {
+                    match_share_store(MatchShared::Miss(key), MatchShareEntry::default());
+                    false
+                }
+                MatchShared::Hit(_) => true,
+                _ => panic!("a scoped slice is keyed"),
+            }
+        };
+        assert!(!stored(&top), "first under #top");
+        assert!(stored(&top), "the same chain again");
+        assert!(!stored(&plain), "an id a rule names tells the chains apart");
+        assert!(stored(&other), "an id no rule names does not");
+        assert!(matches!(match_share_lookup(&ix, "li", &none, &top), MatchShared::Untracked));
+    }
+
+    #[test]
+    fn a_sharing_build_paints_what_a_full_cascade_paints() {
+        let e = engine();
+        let (full, off) = paint(&e, StyleShareMode::Off);
+        let (shared, (hits, misses, _, _)) = paint(&e, StyleShareMode::Share);
+
+        assert!(!full.contains("unseen") && full.contains("anyway"), "the page's own traps");
+        assert_eq!(off, (0, 0, 0, 0), "an unshared build keeps no share state");
+        // Odd and even items differ (`:nth-child(2n)`), and so do the links
+        // inside them. The first list's third and fourth items repeat its
+        // first and second, links included (4); the other two lists' third
+        // items repeat their first (2 each); the third note repeats the
+        // first (1). Nothing is shared across the lists or with the inline-
+        // styled note.
+        assert_eq!((hits, misses), (9, 20), "shared and computed styles");
+        assert_eq!(shared, full);
+    }
+
+    #[test]
+    fn verify_mode_finds_no_difference_between_a_shared_and_a_fresh_style() {
+        let e = engine();
+        let (full, _) = paint(&e, StyleShareMode::Off);
+        let (_, (shared_hits, _, _, _)) = paint(&e, StyleShareMode::Share);
+        let (verified, (hits, _, mismatches, parent_mismatches)) =
+            paint(&e, StyleShareMode::Verify);
+
+        assert_eq!(hits, shared_hits, "verify checks every style a sharing build shares");
+        assert_eq!(mismatches, 0);
+        assert_eq!(parent_mismatches, 0);
+        assert_eq!(verified, full);
+    }
+
+    #[test]
+    fn an_element_whose_parent_is_not_the_enclosing_scope_shares_nothing() {
+        let _scope = StyleShareScope::install(StyleShareMode::Share);
+        let named = ComputedStyle::new();
+        let other = ComputedStyle::new();
+        let key = || StyleShareKey {
+            parent: 0,
+            tag: "p".to_string(),
+            rules: Vec::new(),
+            inline: None,
+            ua_hidden: false,
+        };
+
+        // No scope at all, then a scope naming another style, then a scope
+        // whose own style has no share id.
+        assert!(matches!(style_share_lookup(&other, key), StyleShared::Untracked));
+        let parent = StyleShareParent::enter(&named, Some(7));
+        assert!(matches!(style_share_lookup(&other, key), StyleShared::Untracked));
+        let unnamed = StyleShareParent::enter(&other, None);
+        assert!(matches!(style_share_lookup(&other, key), StyleShared::Untracked));
+        drop(unnamed);
+
+        // Under the named parent: a miss, then a hit once stored.
+        let miss = style_share_lookup(&named, key);
+        assert!(matches!(miss, StyleShared::Miss(_)));
+        style_share_store(miss, &ComputedStyle::new());
+        assert!(matches!(style_share_lookup(&named, key), StyleShared::Hit(_)));
+
+        // The scope ends: the same style is no longer a known parent.
+        drop(parent);
+        assert!(matches!(style_share_lookup(&named, key), StyleShared::Untracked));
+    }
+
+    #[test]
+    fn every_untracked_or_computed_style_gets_an_id_of_its_own() {
+        let _scope = StyleShareScope::install(StyleShareMode::Share);
+        let named = ComputedStyle::new();
+        let key = |tag: &'static str| {
+            move || StyleShareKey {
+                parent: 0,
+                tag: tag.to_string(),
+                rules: Vec::new(),
+                inline: None,
+                ua_hidden: false,
+            }
+        };
+        let (_, untracked) = style_share_tracked(|| style_share_lookup(&named, key("p")));
+        let _parent = StyleShareParent::enter(&named, untracked);
+        let id_of = |tag: &'static str| {
+            style_share_tracked(|| {
+                let found = style_share_lookup(&named, key(tag));
+                style_share_store(found, &ComputedStyle::new());
+            })
+            .1
+        };
+        let (p, div, p_again) = (id_of("p"), id_of("div"), id_of("p"));
+
+        assert!(untracked.is_some());
+        assert!(p.is_some() && p != untracked && p != div);
+        assert_eq!(p_again, p, "a shared style keeps the id it was stored under");
+        assert_eq!(style_share_tracked(|| ()).1, None, "no cascade, no id");
+    }
 }
 
 #[cfg(test)]
