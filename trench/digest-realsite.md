@@ -1814,3 +1814,36 @@ trench/realsite/runs/20261001T1832Z-quiet-dev2b764be
 1. **Background images before `unicode-range` and L0?** No CSS background image on any live site has ever painted (Found 1). The fix is small and it is the first change in several sessions that I expect to move LOOKS RIGHT on real sites, for better and, where a sprite lands at the wrong offset, for worse (Found 3 goes with it). Recommendation: yes, next, as two or three small PRs (fetch; length positions; SVG backgrounds), each with an all-site A/B against Chrome. The 02:10 question (`unicode-range` or L0 after that) stays open.
 2. **Route image fetches through the resource loader BEFORE the fetch PR opens?** The branch as written sends background images down the path `<img>` uses, and I checked that path today: the image manager still has its own HTTP client, so raster images get no Referer, no shield and no subresource budget (the 2026-09-28 note decided to route `<img>` through the loader; it has not been done; SVG images already go through it). Fetching backgrounds that way would add requests the shield never sees. Recommendation: yes, the routing first, for `<img>` and backgrounds together, and I will not open the fetch PR on the unshielded path. Say so if you would rather it land and be routed after.
 3. **The image census from the 2026-09-28 note (requested, fetched, decoded, painted, by cause) was never run and would have found this in an hour.** Recommendation: run it on the board's sites once the fetch lands, so the next gap in this path (formats, `image-set()`, lazy loading, `<picture>`) is found by counting, not by accident.
+
+## 2026-10-02 05:51 — daily QUIET board (quiet), develop 97393a7
+
+**26/60 (loads 16, readable 7, looks-right 3; scorable 25/57)** (load at start: { 8.01 7.23 7.82 })
+
+```
+google     PASS PASS 100.0% PASS   8.9% (cc   0.5%)  3/3  
+youtube    fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.25% non-background)
+facebook   PASS fail  58.7% PASS  13.5% (cc   0.0%)  2/3  
+instagram  fail fail   0.0% fail    -   (cc   8.1%)  0/3  blank frame (0.59% non-background)
+wikipedia  PASS fail  74.3% fail  15.3% (cc  14.9%)  1/3  
+lyft       PASS PASS 100.0% fail  17.9% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% fail    -   (cc   0.1%)  0/3  blank frame (1.51% non-background)
+x          PASS PASS  95.3% PASS  10.1% (cc   0.2%)  3/3  
+linkedin   PASS fail    -   fail    -   (cc    -  )  1/3  
+yahoo      PASS fail    -   fail    -   (cc    -  )  1/3  
+bing       PASS fail  12.5% fail  69.6% (cc   2.2%)  1/3  
+walmart    PASS fail  71.6% unst  91.4% (cc  96.6%)  1/3  
+microsoft  fail fail   0.0% fail    -   (cc   0.1%)  0/3  blank frame (0.96% non-background)
+apple      PASS PASS 100.0% fail  41.6% (cc   0.0%)  2/3  
+netflix    PASS PASS  85.3% fail  66.1% (cc   2.7%)  2/3  
+github     PASS fail  71.7% fail  75.1% (cc   0.3%)  1/3  
+shopify    PASS PASS  96.4% fail  19.9% (cc   0.0%)  2/3  
+squarespace PASS PASS  85.7% fail  77.3% (cc   7.2%)  2/3  
+cnn        PASS fail  51.9% fail  60.2% (cc   0.1%)  1/3  
+weather    PASS fail  10.1% unst  30.0% (cc  23.7%)  1/3  
+------------------------------------------------------------------------------
+POINTS 26/60   loads 16  readable 7  looks-right 3   unstable: walmart, weather   oracle failed: linkedin, yahoo
+BLOCKED none
+ORACLE BLOCKED linkedin (top-level document HTTP 403)
+SCORABLE 25/57 on 19 sites
+trench/realsite/runs/20261002T0926Z-quiet-dev97393a7
+```
