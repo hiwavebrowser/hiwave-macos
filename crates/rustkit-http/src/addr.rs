@@ -100,7 +100,7 @@ fn is_public_v4(o: [u8; 4]) -> bool {
         || o[0] >= 224) // multicast, reserved, broadcast
 }
 
-fn is_local_name(host: &str) -> bool {
+pub fn is_local_name(host: &str) -> bool {
     let h = host.trim_end_matches('.').to_ascii_lowercase();
     h == "localhost" || h.ends_with(".localhost")
 }

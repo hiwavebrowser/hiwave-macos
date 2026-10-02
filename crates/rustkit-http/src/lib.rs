@@ -25,7 +25,7 @@ use tracing::{debug, trace, warn};
 use url::Url;
 
 mod addr;
-pub use addr::{is_public_ip, AddressPolicy, Resolve, ResolveFuture, SystemResolver};
+pub use addr::{is_local_name, is_public_ip, AddressPolicy, Resolve, ResolveFuture, SystemResolver};
 
 /// HTTP client errors.
 #[derive(Error, Debug)]

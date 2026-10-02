@@ -359,6 +359,9 @@ fn dest_to_shield(dest: RequestDestination) -> hiwave_shield::ResourceType {
         RequestDestination::Image => R::Image,
         RequestDestination::Font => R::Font,
         RequestDestination::Other => R::Other,
+        // Filter lists key script requests on `$xmlhttprequest`; fetch() is
+        // the same class of request.
+        RequestDestination::Fetch | RequestDestination::Xhr => R::Xhr,
     }
 }
 
@@ -367,8 +370,8 @@ fn dest_to_shield(dest: RequestDestination) -> hiwave_shield::ResourceType {
 /// intended) from "site failed".
 #[derive(Default)]
 pub struct ShieldCensus {
-    attempted: [AtomicU64; 6],
-    blocked: [AtomicU64; 6],
+    attempted: [AtomicU64; 8],
+    blocked: [AtomicU64; 8],
     /// Requests that passed unchecked while the filter engine was still
     /// building at startup (the allow-until-ready window).
     pub engine_pending: AtomicU64,
@@ -383,6 +386,8 @@ impl ShieldCensus {
             RequestDestination::Image => 3,
             RequestDestination::Font => 4,
             RequestDestination::Other => 5,
+            RequestDestination::Fetch => 6,
+            RequestDestination::Xhr => 7,
         }
     }
     fn attempted(&self, d: RequestDestination) {
@@ -392,7 +397,7 @@ impl ShieldCensus {
         self.blocked[Self::idx(d)].fetch_add(1, Ordering::Relaxed);
     }
     /// (attempted, blocked) per destination, in enum order.
-    pub fn snapshot(&self) -> [(u64, u64); 6] {
+    pub fn snapshot(&self) -> [(u64, u64); 8] {
         std::array::from_fn(|i| {
             (
                 self.attempted[i].load(Ordering::Relaxed),
