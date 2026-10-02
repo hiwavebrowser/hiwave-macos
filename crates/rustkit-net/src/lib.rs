@@ -27,6 +27,7 @@ use url::Url;
 pub mod cache;
 pub mod download;
 pub mod intercept;
+pub mod policy;
 pub mod security;
 
 pub use cache::{cache_eligibility, CacheConfig, CacheKey, CacheStats, CachedResponse, Ineligible, MemoryCache, parse_cache_control};
@@ -102,8 +103,12 @@ pub enum RequestDestination {
     Image,
     /// Web font.
     Font,
-    /// Anything else (API fetches, unknown).
+    /// Anything else (unknown).
     Other,
+    /// A script's `fetch()` call (governed by [`policy::FetchPolicy`]).
+    Fetch,
+    /// A script's `XMLHttpRequest` (governed by [`policy::FetchPolicy`]).
+    Xhr,
 }
 
 #[derive(Debug, Clone)]
@@ -516,6 +521,13 @@ impl ResourceLoader {
         self.interceptor = Some(Arc::new(RwLock::new(interceptor)));
     }
 
+    /// Test seam: resolve names through `resolver` instead of the system.
+    #[cfg(test)]
+    pub(crate) fn with_resolver(mut self, resolver: Arc<dyn rustkit_http::Resolve>) -> Self {
+        self.client = self.client.with_resolver(resolver);
+        self
+    }
+
     /// Get the download manager.
     pub fn download_manager(&self) -> Arc<DownloadManager> {
         Arc::clone(&self.download_manager)
@@ -528,6 +540,37 @@ impl ResourceLoader {
 
     /// Fetch a URL.
     pub async fn fetch(&self, request: Request) -> Result<Response, NetError> {
+        self.fetch_with(request, &self.client, true).await
+    }
+
+    /// One hop of a governed (script-initiated) request: the same pipeline as
+    /// [`fetch`](Self::fetch) (interceptor/shield, `data:`, cache, headers),
+    /// over a client that refuses addresses outside `address_policy`, does
+    /// not follow redirects (the policy vets and follows each hop itself) and
+    /// refuses bodies over `max_body`. `use_cache` is false for requests whose
+    /// response depends on the `Origin` header.
+    pub(crate) async fn fetch_governed_hop(
+        &self,
+        request: Request,
+        address_policy: rustkit_http::AddressPolicy,
+        max_body: usize,
+        use_cache: bool,
+    ) -> Result<Response, NetError> {
+        let client = self
+            .client
+            .clone()
+            .with_address_policy(address_policy)
+            .with_follow_redirects(false)
+            .with_max_body(max_body);
+        self.fetch_with(request, &client, use_cache).await
+    }
+
+    async fn fetch_with(
+        &self,
+        request: Request,
+        client: &HttpClient,
+        use_cache: bool,
+    ) -> Result<Response, NetError> {
         debug!(url = %request.url, method = %request.method, "Fetching resource");
 
         // Apply interception
@@ -543,10 +586,10 @@ impl ResourceLoader {
                     debug!(url = %request.url, new_url = %new_url, "Request redirected");
                     let mut new_request = request.clone();
                     new_request.url = new_url;
-                    return Box::pin(self.fetch(new_request)).await;
+                    return Box::pin(self.fetch_with(new_request, client, use_cache)).await;
                 }
                 InterceptAction::Modify(modified) => {
-                    return Box::pin(self.fetch(*modified)).await;
+                    return Box::pin(self.fetch_with(*modified, client, use_cache)).await;
                 }
             }
         }
@@ -573,7 +616,7 @@ impl ResourceLoader {
         }
 
         // Check cache for GET requests
-        let cache_key = if request.method == Method::GET && self.cache.enabled() {
+        let cache_key = if use_cache && request.method == Method::GET && self.cache.enabled() {
             let key = CacheKey::new(&request.url);
             if let Some(cached) = self.cache.get(&key) {
                 debug!(url = %request.url, "Serving from cache");
@@ -623,8 +666,7 @@ impl ResourceLoader {
         }
 
         // Execute request using rustkit-http
-        let http_response = self
-            .client
+        let http_response = client
             .request(
                 request.method.clone(),
                 request.url.as_str(),
