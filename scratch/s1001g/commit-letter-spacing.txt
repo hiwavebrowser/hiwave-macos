@@ -1,0 +1,18 @@
+fix(layout): intrinsic text widths include letter-spacing and word-spacing
+
+The min-content and max-content width of a text run were measured
+without `letter-spacing` or `word-spacing`, so a shrink-to-fit box around
+spaced text was narrower than the line laid out in it. new_tab's "HIWAVE"
+logo (48px, `letter-spacing: 0.5rem`, in an inline-block) was 165.66px
+wide where Chrome's is 214.80, and sat 24.6px right of centre.
+
+`text_min_content_width`, `text_max_content_width` and
+`collapsed_space_width` now measure through `spaced_text_width`, which
+resolves the two spacings as line layout's `shape_line` does and calls
+`measure_text_with_spacing`.
+
+Test: `a_shrink_to_fit_box_is_as_wide_as_its_spaced_text` (px and rem
+letter-spacing, word-spacing). With develop's grid.rs it fails: 184.05
+against 184.05 + 48.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
