@@ -1,0 +1,22 @@
+fix(engine): raster images are fetched through the resource loader
+
+An <img> went out through the image manager's own HTTP client, so the
+request carried no Referer, never passed the request interceptor (the
+shield), and used that client's defaults rather than the engine's user
+agent and cookie setting. SVG images, stylesheets, fonts and scripts
+already go through the loader.
+
+- rustkit-image no longer depends on rustkit-http and has no client.
+  ImageManager::insert_fetched decodes and caches a body the caller
+  fetched; load and load_blocking answer from the cache or a data: URL
+  and are an error for anything else.
+- Engine::load_images and Engine::load_image fetch raster images with
+  the loader, as RequestDestination::Image, with the document's
+  referrer policy and under the subresource deadline. One request per
+  URL however many elements show it.
+
+Tests (engine, headless): an <img> request carries the policy's Referer
+and a blocked one is never sent; the image manager makes no request.
+Both fail on develop's code.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

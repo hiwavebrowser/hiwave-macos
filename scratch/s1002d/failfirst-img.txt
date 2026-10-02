@@ -1,0 +1,29 @@
+
+failures:
+
+---- image_loader_routing_tests::the_image_manager_does_not_fetch stdout ----
+
+thread 'image_loader_routing_tests::the_image_manager_does_not_fetch' (17249468) panicked at crates/rustkit-engine/src/lib.rs:28196:9:
+assertion failed: manager.load_blocking(url.clone()).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- image_loader_routing_tests::an_img_is_fetched_through_the_loader_with_its_referer_and_the_shield stdout ----
+
+thread 'image_loader_routing_tests::an_img_is_fetched_through_the_loader_with_its_referer_and_the_shield' (17249467) panicked at crates/rustkit-engine/src/lib.rs:28175:9:
+assertion `left == right` failed: one request per image the shield allows, each with the policy's Referer; none for the blocked one
+  left: [("/cross.png", None), ("/same.png", None), ("/tracker.png", None)]
+ right: [("/cross.png", Some("http://127.0.0.1:63216/")), ("/same.png", Some("http://127.0.0.1:63216/page?q=1"))]
+
+
+failures:
+    image_loader_routing_tests::an_img_is_fetched_through_the_loader_with_its_referer_and_the_shield
+    image_loader_routing_tests::the_image_manager_does_not_fetch
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 374 filtered out; finished in 9.02s
+
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 374 filtered out; finished in 9.02s
+error: test failed, to rerun pass `-p rustkit-engine --lib`
+rc=101 219s load=12.0
+ 
+develop worktree clean

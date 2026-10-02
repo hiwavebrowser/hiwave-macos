@@ -1,0 +1,4 @@
+weather      within develop   0.00%  within fix   0.00%  across   0.02%   0.02%   0.02%   0.02%  failed: none  secs A,B,A,B 11,11,10,10
+squarespace  within develop   0.00%  within fix    nan%  across   0.00%    nan%   0.00%    nan%  failed: B2  secs A,B,A,B 30,31,29,30
+walmart      within develop   0.00%  within fix   0.00%  across   0.90%   0.90%   0.90%   0.90%  failed: none  secs A,B,A,B 10,10,10,10
+github       within develop    nan%  within fix    nan%  across   0.15%    nan%    nan%    nan%  failed: A2,B2  secs A,B,A,B 30,30,30,30
