@@ -3792,9 +3792,16 @@ impl Engine {
                 // parent's computed value. `Number` inherits as a factor (re-resolved against this
                 // element's own font-size); `Px` inherits as the absolute length — both match CSS
                 // 2.1 §10.8 computed-value inheritance.
+                //
+                // A push button is the exception: Chrome's UA sheet gives it
+                // `line-height: normal`, so the page's line-height does not
+                // reach it unless the author says `inherit` (which the cascade
+                // has already applied). A bare button under `body { line-height:
+                // 20px }` is 21 tall in Chrome, not 26.
                 if let Some(parent) = parent_style {
                     if matches!(style.line_height, rustkit_css::LineHeight::Normal)
                         && !matches!(parent.line_height, rustkit_css::LineHeight::Normal)
+                        && !is_push_button(&tag_lower, attributes)
                     {
                         style.line_height = parent.line_height.clone();
                     }
@@ -5114,6 +5121,23 @@ impl Engine {
                 }
                 if tag_name == "textarea" {
                     style.font_family = "monospace".to_string();
+                }
+                // A push button's box in Chrome's UA sheet: `padding: 1px
+                // 6px; border: 2px outset; box-sizing: border-box`. Chrome
+                // 148 builds a bare "Go" as 33.80 x 21 (label 17.80 + 16,
+                // line 15 + 6). With no padding or border in the cascade,
+                // layout stood in a fixed label + 24 by 19, which a
+                // `padding: 0` reset could not take away.
+                if is_push_button(tag_name, attributes) {
+                    style.padding_top = rustkit_css::Length::Px(1.0);
+                    style.padding_bottom = rustkit_css::Length::Px(1.0);
+                    style.padding_left = rustkit_css::Length::Px(6.0);
+                    style.padding_right = rustkit_css::Length::Px(6.0);
+                    style.border_top_width = rustkit_css::Length::Px(2.0);
+                    style.border_right_width = rustkit_css::Length::Px(2.0);
+                    style.border_bottom_width = rustkit_css::Length::Px(2.0);
+                    style.border_left_width = rustkit_css::Length::Px(2.0);
+                    style.box_sizing = rustkit_css::BoxSizing::BorderBox;
                 }
             }
             "small" => {
@@ -12198,6 +12222,20 @@ fn ch_advance_px(style: &ComputedStyle) -> f32 {
 }
 
 
+/// A push button: `<button>`, or an `<input>` of type `button`, `submit` or
+/// `reset`. These share one box in Chrome's UA sheet.
+fn is_push_button(tag_name: &str, attributes: &HashMap<String, String>) -> bool {
+    if tag_name.eq_ignore_ascii_case("button") {
+        return true;
+    }
+    tag_name.eq_ignore_ascii_case("input")
+        && attributes.get("type").is_some_and(|t| {
+            ["button", "submit", "reset"]
+                .iter()
+                .any(|k| t.eq_ignore_ascii_case(k))
+        })
+}
+
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
 /// Zero the width of every `none`/`hidden` border side. Runs after the whole
@@ -16823,6 +16861,108 @@ mod button_children_tests {
             }
             ref other => panic!("empty button should stay a FormControl leaf, got {other:?}"),
         }
+    }
+
+    /// The computed style of one childless element under a parent whose
+    /// `line-height` is 20px.
+    #[cfg(target_os = "macos")]
+    fn control_style(tag: &str, attrs: &[(&str, &str)], css: &str) -> ComputedStyle {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let node = Node::new(
+            rustkit_dom::NodeId::new(1),
+            NodeType::Element {
+                tag_name: tag.into(),
+                namespace: String::new(),
+                attributes: attrs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            },
+        );
+        let sheets: Vec<Stylesheet> = if css.is_empty() {
+            Vec::new()
+        } else {
+            vec![Stylesheet::parse(css).expect("css")]
+        };
+        let mut parent = ComputedStyle::new();
+        parent.line_height = rustkit_css::LineHeight::Px(20.0);
+        let layout = engine.build_layout_from_parent_style_and_path(
+            &node,
+            &sheets,
+            &HashMap::new(),
+            &[],
+            Some(&parent),
+            &[],
+            SiblingContext::SOLE.with_children(false),
+            tag,
+            &Cell::new(0),
+            false,
+        );
+        (*layout.style).clone()
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_push_button_has_chromes_default_box() {
+        // Chrome 148's computed style for a bare button: `padding: 1px 6px`,
+        // `border-width: 2px`, `box-sizing: border-box`, `line-height:
+        // normal` whatever the page's line-height is.
+        use rustkit_css::Length;
+        let px = |l: &Length| l.to_px(13.333, 16.0, 0.0);
+        for (tag, attrs) in [
+            ("button", vec![]),
+            ("input", vec![("type", "submit")]),
+            ("input", vec![("type", "reset")]),
+            ("input", vec![("type", "button")]),
+        ] {
+            let s = control_style(tag, &attrs, "");
+            let case = format!("{tag} {attrs:?}");
+            assert_eq!(
+                [
+                    px(&s.padding_top),
+                    px(&s.padding_right),
+                    px(&s.padding_bottom),
+                    px(&s.padding_left)
+                ],
+                [1.0, 6.0, 1.0, 6.0],
+                "{case}: padding"
+            );
+            assert_eq!(
+                [
+                    px(&s.border_top_width),
+                    px(&s.border_right_width),
+                    px(&s.border_bottom_width),
+                    px(&s.border_left_width)
+                ],
+                [2.0; 4],
+                "{case}: border"
+            );
+            assert_eq!(s.box_sizing, rustkit_css::BoxSizing::BorderBox, "{case}");
+            assert!(
+                matches!(s.line_height, rustkit_css::LineHeight::Normal),
+                "{case}: the page's line-height does not reach a button, got {:?}",
+                s.line_height
+            );
+        }
+
+        // An author's reset takes the box away, and `inherit` brings the
+        // page's line-height back.
+        let s = control_style(
+            "button",
+            &[],
+            "button { padding: 0; border: none; line-height: inherit }",
+        );
+        assert_eq!(px(&s.padding_left) + px(&s.padding_top), 0.0);
+        assert_eq!(px(&s.border_left_width) + px(&s.border_top_width), 0.0);
+        assert!(
+            matches!(s.line_height, rustkit_css::LineHeight::Px(v) if v == 20.0),
+            "line-height: inherit, got {:?}",
+            s.line_height
+        );
+
+        // A text field is not a push button.
+        let s = control_style("input", &[("type", "text")], "");
+        assert_eq!(px(&s.padding_left) + px(&s.border_left_width), 0.0);
     }
 }
 

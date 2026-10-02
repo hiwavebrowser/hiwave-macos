@@ -195,8 +195,12 @@ pub(crate) fn aspect_ratio_content_height(
 }
 
 /// Compose a button's BORDER-box width from an advance measured out of its
-/// label: the author's horizontal padding+border when there is any, else the
-/// UA well (24px) the bare-control calibration uses.
+/// label: the advance plus the horizontal padding and border of its style.
+/// The UA default (`padding: 1px 6px`, 2px border) arrives through the
+/// cascade, so a bare "Go" is label + 16 (Chrome 148: 33.80) and a
+/// `padding: 0; border: 0` reset is the label alone (17.80). There used to be
+/// a label + 24 stand-in here for a style with neither, which is what a
+/// reset produces.
 ///
 /// This exists as one function because a button has TWO intrinsic widths and
 /// they differ only in which advance goes in — the whole label for
@@ -214,15 +218,11 @@ pub(crate) fn button_border_box_width(
         Length::Percent(_) | Length::Auto => 0.0,
         other => other.to_px(font_size, 16.0, 0.0),
     };
-    let author_pb_h = px(&style.padding_left)
+    label_advance
+        + px(&style.padding_left)
         + px(&style.padding_right)
         + px(&style.border_left_width)
-        + px(&style.border_right_width);
-    if author_pb_h > 0.0 {
-        label_advance + author_pb_h
-    } else {
-        label_advance + 24.0
-    }
+        + px(&style.border_right_width)
 }
 
 /// Intrinsic BORDER-box size of a form control: the bare-control calibration,
@@ -325,9 +325,17 @@ pub(crate) fn form_control_intrinsic_size(
                 style.font_style,
             )
             .width;
+            // The line is the button's own `line-height` (Chrome 148:
+            // `line-height: 30px` builds 36, `font: 13px/16px` 22, normal
+            // 21), and a button with no label has no line (16 x 6).
+            let line = if label.is_empty() {
+                0.0
+            } else {
+                resolve_line_height(style, font_size)
+            };
             (
                 button_border_box_width(style, font_size, label_width),
-                single_line_box(19.0 * ua_scale),
+                line + author_pb_v,
             )
         }
         FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
@@ -2919,7 +2927,16 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        let line_height = self.style.line_height.to_px(font_size);
+        let is_button = matches!(
+            self.box_type,
+            BoxType::FormControl(FormControlType::Button { .. })
+        );
+        // A button's line is the one its box was sized from.
+        let line_height = if is_button {
+            resolve_line_height(&self.style, font_size)
+        } else {
+            self.style.line_height.to_px(font_size)
+        };
         let metrics = measure_text_advanced(
             "x",
             &self.style.font_family,
@@ -2933,6 +2950,22 @@ impl LayoutBox {
             (font_size * 0.8, font_size * 0.2)
         };
         let half_leading = half_leading(line_height, ascent, descent);
+        // `layout_form_control` folds padding and border into the content
+        // box, so `dimensions.padding` / `.border` are zero for a control and
+        // the bottom padding and border under a button's line have to be read
+        // from its style. Chrome 148 on one line: a bare button's bottom is 6
+        // under the baseline (3 of descent, 1 of padding, 2 of border), a
+        // `padding: 8px 16px` one 13, a `padding: 0; border: 0` one 3. All
+        // three sat at one bottom here.
+        let button_pb_bottom = if is_button {
+            let px = |l: &Length| match l {
+                Length::Percent(_) | Length::Auto => 0.0,
+                other => other.to_px(font_size, 16.0, 0.0),
+            };
+            px(&self.style.padding_bottom) + px(&self.style.border_bottom_width)
+        } else {
+            0.0
+        };
         // A single-line control taller than its text line (author `height`)
         // centres the line in its content box, so half the spare height
         // hangs below the baseline too. n54 form-controls §4: a `height:
@@ -2945,9 +2978,11 @@ impl LayoutBox {
             _ => false,
         };
         let spare_below = if centres_its_line && !matches!(self.style.height, Length::Auto) {
+            // Half the spare height of the border box: with the padding and
+            // border equal above and below, that already counts them.
             ((self.dimensions.content.height - line_height) / 2.0).max(0.0)
         } else {
-            0.0
+            button_pb_bottom
         };
         descent
             + half_leading
@@ -13112,10 +13147,11 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_buttons_min_content_keeps_the_ua_well() {
-        // With no author padding the composition falls back to the 24px UA
-        // well, and it must still be there under min-content — otherwise a
-        // bare button floors at its bare text and paints over its own border.
+    fn a_reset_buttons_min_content_is_its_widest_word() {
+        // `padding: 0; border: 0` (every CSS reset) leaves the label alone.
+        // The UA padding and border reach a button through the cascade, so
+        // a style with neither is an author's reset and not a bare button;
+        // this used to add a 24px stand-in for the UA box.
         let mut b = n68_button("Save Changes");
         b.style.padding_left = Length::Px(0.0);
         b.style.padding_right = Length::Px(0.0);
@@ -13124,11 +13160,143 @@ mod tests {
         let widest_word = n68_advance(&b, "Changes");
         let got = crate::grid::own_min_content_width(&b);
         assert!(
-            (got - (widest_word + 24.0)).abs() < 0.01,
-            "a bare button's min-content is its widest word plus the 24px UA \
-             well ({}), got {got}",
-            widest_word + 24.0
+            (got - widest_word).abs() < 0.01,
+            "a reset button's min-content is its widest word ({widest_word}), got {got}"
         );
+    }
+
+    /// A push button as the engine's UA defaults build it: Arial 13.333px,
+    /// `padding: 1px 6px`, a 2px border, `line-height: normal`.
+    fn ua_button(label: &str) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.display = rustkit_css::Display::InlineBlock;
+        s.box_sizing = BoxSizing::BorderBox;
+        s.font_family = "Arial".to_string();
+        s.font_size = Length::Px(13.333);
+        s.padding_top = Length::Px(1.0);
+        s.padding_bottom = Length::Px(1.0);
+        s.padding_left = Length::Px(6.0);
+        s.padding_right = Length::Px(6.0);
+        s.border_top_width = Length::Px(2.0);
+        s.border_right_width = Length::Px(2.0);
+        s.border_bottom_width = Length::Px(2.0);
+        s.border_left_width = Length::Px(2.0);
+        LayoutBox::new(
+            BoxType::FormControl(FormControlType::Button {
+                label: label.to_string(),
+                button_type: "button".to_string(),
+            }),
+            s,
+        )
+    }
+
+    fn reset_box(b: &mut LayoutBox) {
+        for l in [
+            &mut b.style.padding_top,
+            &mut b.style.padding_right,
+            &mut b.style.padding_bottom,
+            &mut b.style.padding_left,
+            &mut b.style.border_top_width,
+            &mut b.style.border_right_width,
+            &mut b.style.border_bottom_width,
+            &mut b.style.border_left_width,
+        ] {
+            *l = Length::Px(0.0);
+        }
+    }
+
+    #[test]
+    fn a_button_is_its_label_and_line_inside_its_padding_and_border() {
+        // Chrome 148, Arial 13.333px "Go" (label 17.80, normal line 15):
+        // bare 33.80 x 21; `padding: 0; border: 0` 17.80 x 15;
+        // `line-height: 30px` 33.80 x 36; `padding: 8px 16px` 53.80 x 35;
+        // no label 16 x 6.
+        let size = |b: &LayoutBox| match &b.box_type {
+            BoxType::FormControl(c) => form_control_intrinsic_size(&b.style, c),
+            _ => unreachable!(),
+        };
+        let bare = ua_button("Go");
+        let label = n68_advance(&bare, "Go");
+        let line = normal_line_height(&bare.style, 13.333);
+        assert!((line - 15.0).abs() < 0.01, "Arial 13.333px normal line: {line}");
+
+        let (w, h) = size(&bare);
+        assert!((w - (label + 16.0)).abs() < 0.01, "bare width {w}, label {label}");
+        assert!((h - 21.0).abs() < 0.01, "bare height: Chrome 21, got {h}");
+
+        let mut reset = ua_button("Go");
+        reset_box(&mut reset);
+        let (w, h) = size(&reset);
+        assert!((w - label).abs() < 0.01, "reset width is the label ({label}), got {w}");
+        assert!((h - 15.0).abs() < 0.01, "reset height: Chrome 15, got {h}");
+
+        let mut tall = ua_button("Go");
+        tall.style.line_height = rustkit_css::LineHeight::Px(30.0);
+        let (_, h) = size(&tall);
+        assert!((h - 36.0).abs() < 0.01, "line-height 30px: Chrome 36, got {h}");
+
+        let mut padded = ua_button("Go");
+        padded.style.padding_top = Length::Px(8.0);
+        padded.style.padding_bottom = Length::Px(8.0);
+        padded.style.padding_left = Length::Px(16.0);
+        padded.style.padding_right = Length::Px(16.0);
+        let (w, h) = size(&padded);
+        assert!((w - (label + 36.0)).abs() < 0.01, "padded width {w}");
+        assert!((h - 35.0).abs() < 0.01, "padded height: Chrome 35, got {h}");
+
+        let (w, h) = size(&ua_button(""));
+        assert!(
+            (w - 16.0).abs() < 0.01 && (h - 6.0).abs() < 0.01,
+            "a button with no label has no line: Chrome 16 x 6, got {w} x {h}"
+        );
+    }
+
+    #[test]
+    fn buttons_on_one_line_share_the_baseline_of_their_labels() {
+        // Chrome 148, one line holding a bare button, a `padding: 8px 16px`
+        // one and a `padding: 0; border: 0` one: tops at 7, 0 and 10 from
+        // the tallest's top (heights 21, 35, 15), so each label's baseline
+        // is on one row. The padding and border under the label were not
+        // counted, and all three sat on one bottom edge.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 1280.0, 0.0);
+        for collapse_path in [false, true] {
+            let mut row_style = ComputedStyle::new();
+            row_style.font_family = "Helvetica".to_string();
+            row_style.font_size = Length::Px(16.0);
+            row_style.line_height = rustkit_css::LineHeight::Px(20.0);
+            let mut row = LayoutBox::new(BoxType::Block, row_style);
+
+            let bare = ua_button("Go");
+            let mut padded = ua_button("Go");
+            padded.style.padding_top = Length::Px(8.0);
+            padded.style.padding_bottom = Length::Px(8.0);
+            padded.style.padding_left = Length::Px(16.0);
+            padded.style.padding_right = Length::Px(16.0);
+            let mut reset = ua_button("Go");
+            reset_box(&mut reset);
+            row.children.extend([bare, padded, reset]);
+
+            if collapse_path {
+                let mut mc = MarginCollapseContext::new();
+                let mut fc = FloatContext::new();
+                row.layout_with_collapse(&cb, &mut mc, &mut fc);
+            } else {
+                row.layout(&cb);
+            }
+            let top = |i: usize| row.children[i].dimensions.content.y;
+            let case = format!("collapse_path={collapse_path}");
+            assert!(
+                (top(0) - top(1) - 7.0).abs() <= 0.05,
+                "{case}: the bare button sits 7 under the padded one's top, got {}",
+                top(0) - top(1)
+            );
+            assert!(
+                (top(2) - top(1) - 10.0).abs() <= 0.05,
+                "{case}: the reset button sits 10 under the padded one's top, got {}",
+                top(2) - top(1)
+            );
+        }
     }
 
     #[test]
