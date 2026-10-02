@@ -3211,7 +3211,7 @@ impl Engine {
             )),
         };
 
-        // Off unless RUSTKIT_STYLE_SHARE asks for it. A shared style records
+        // On unless RUSTKIT_STYLE_SHARE turns it off. A shared style records
         // no trace entries, so a traced build never shares.
         let _style_share = StyleShareScope::install(match traced {
             true => StyleShareMode::Off,
@@ -22073,13 +22073,13 @@ fn tree_reuse_mode() -> TreeReuse {
     *MODE.get_or_init(|| tree_reuse_from(std::env::var("RUSTKIT_TREE_REUSE").ok().as_deref()))
 }
 
-/// `RUSTKIT_STYLE_SHARE`: off by default. `1` or `on` hands an element the
-/// style an earlier element of the same build computed from the same parent
-/// style, tag, matched rules, inline style and UA hiding, instead of applying
-/// the declarations again. `verify` applies them anyway and counts the styles
-/// that differ from the shared one.
+/// `RUSTKIT_STYLE_SHARE`: on by default. An element is handed the style an
+/// earlier element of the same build computed from the same parent style,
+/// tag, matched rules, inline style and UA hiding, instead of applying the
+/// declarations again. `0` or `off` applies them for every element. `verify`
+/// applies them anyway and counts the styles that differ from the shared one.
 ///
-/// `1`, `on` and `verify` also share matches (see [`MatchShareKey`]): an
+/// The default and `verify` also share matches (see [`MatchShareKey`]): an
 /// element takes the matched rules of an earlier element with the same tag,
 /// attributes and ancestor chain, for every rule that reads nothing else.
 /// `style` shares styles only.
@@ -22093,10 +22093,10 @@ enum StyleShareMode {
 
 fn style_share_from(value: Option<&str>) -> StyleShareMode {
     match value {
-        Some("1") | Some("on") => StyleShareMode::Share,
+        Some("0") | Some("off") => StyleShareMode::Off,
         Some("style") => StyleShareMode::StyleOnly,
         Some("verify") => StyleShareMode::Verify,
-        _ => StyleShareMode::Off,
+        _ => StyleShareMode::Share,
     }
 }
 
@@ -23253,10 +23253,11 @@ mod style_share_tests {
     }
 
     #[test]
-    fn sharing_is_off_unless_asked_for() {
-        assert_eq!(style_share_from(None), StyleShareMode::Off);
+    fn sharing_is_on_unless_turned_off() {
+        assert_eq!(style_share_from(None), StyleShareMode::Share);
+        assert_eq!(style_share_from(Some("")), StyleShareMode::Share);
         assert_eq!(style_share_from(Some("0")), StyleShareMode::Off);
-        assert_eq!(style_share_from(Some("")), StyleShareMode::Off);
+        assert_eq!(style_share_from(Some("off")), StyleShareMode::Off);
         assert_eq!(style_share_from(Some("1")), StyleShareMode::Share);
         assert_eq!(style_share_from(Some("on")), StyleShareMode::Share);
         assert_eq!(style_share_from(Some("style")), StyleShareMode::StyleOnly);
