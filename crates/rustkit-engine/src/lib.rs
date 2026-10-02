@@ -296,6 +296,53 @@ impl SubresourceReferrer {
     }
 }
 
+/// Tiles one SVG background may paint before the rest are dropped: each
+/// tile is the document's whole command list again, so a 1px pattern
+/// repeated across a page would otherwise multiply into millions. The
+/// gradient lane caps at 50 per axis; this is the same total.
+const MAX_SVG_BACKGROUND_TILES: usize = 2500;
+
+/// The vector commands that paint `svg` as a CSS background of the box
+/// `rect`: the document rendered once per tile the raster lane would draw
+/// ([`rustkit_layout::background_tiles`]), clipped to the box. The
+/// renderer only knows textures, so a `BackgroundImage` naming an SVG is
+/// replaced by these, as an `<img>` of one is.
+///
+/// An SVG with no `width`/`height` has no size of its own: with a
+/// `viewBox` it has a ratio and `auto` sizes it like `contain`; with
+/// neither it fills the box (CSS Images 3, default sizing).
+fn svg_background_commands(
+    svg: &rustkit_svg::SvgDocument,
+    rect: rustkit_layout::Rect,
+    size: &rustkit_layout::BackgroundSize,
+    position: (f32, f32),
+    repeat: rustkit_layout::BackgroundRepeat,
+) -> Vec<rustkit_layout::DisplayCommand> {
+    let (width, height) = match (&svg.width, &svg.height, &svg.view_box) {
+        (Some(_), Some(_), _) => svg.get_size(rect.width, rect.height),
+        (_, _, Some(vb)) if vb.width > 0.0 && vb.height > 0.0 => {
+            let scale = (rect.width / vb.width).min(rect.height / vb.height);
+            (vb.width * scale, vb.height * scale)
+        }
+        _ => (rect.width, rect.height),
+    };
+    let mut tiles = rustkit_layout::background_tiles(rect, size, position, repeat, width, height);
+    if tiles.is_empty() {
+        return Vec::new();
+    }
+    if tiles.len() > MAX_SVG_BACKGROUND_TILES {
+        warn!(tiles = tiles.len(), "SVG background tile count over the cap; painting the first {MAX_SVG_BACKGROUND_TILES}");
+        tiles.truncate(MAX_SVG_BACKGROUND_TILES);
+    }
+    let mut commands = vec![rustkit_layout::DisplayCommand::PushClip(rect)];
+    for tile in tiles {
+        // A standalone SVG document: `currentColor` is the initial black.
+        commands.extend(svg.render(tile.x, tile.y, tile.width, tile.height));
+    }
+    commands.push(rustkit_layout::DisplayCommand::PopClip);
+    commands
+}
+
 /// A raster image for `url`, fetched like every other subresource: through
 /// the resource loader, so the shield sees the request, it carries the
 /// Referer the document's policy allows, and the caller's deadline bounds
@@ -2763,6 +2810,18 @@ impl Engine {
                                 dest_rect.height,
                                 *current_color,
                             ));
+                            continue;
+                        }
+                    }
+                    rustkit_layout::DisplayCommand::BackgroundImage {
+                        url,
+                        rect,
+                        size,
+                        position,
+                        repeat,
+                    } => {
+                        if let Some(svg) = self.svg_cache.get(url) {
+                            expanded.extend(svg_background_commands(svg, *rect, size, *position, *repeat));
                             continue;
                         }
                     }
@@ -7846,10 +7905,8 @@ impl Engine {
     /// `data:` url is decoded at upload, so those did paint). The display
     /// list is the right place to look: its urls are already absolute, and
     /// a box that is not rendered (`display: none`) has no command, as
-    /// Chrome fetches no background for it.
-    ///
-    /// SVG backgrounds are left out: only `<img>` commands are spliced from
-    /// the SVG cache, so one would be fetched and never painted.
+    /// Chrome fetches no background for it. An SVG one is fetched into the
+    /// SVG cache like an `<img>` and painted by [`svg_background_commands`].
     fn discover_background_images(display_list: Option<&DisplayList>) -> Vec<(String, Url)> {
         let mut seen = std::collections::HashSet::new();
         let mut images = Vec::new();
@@ -7863,9 +7920,7 @@ impl Engine {
             let Ok(parsed) = Url::parse(url) else {
                 continue;
             };
-            if !matches!(parsed.scheme(), "http" | "https")
-                || parsed.path().to_ascii_lowercase().ends_with(".svg")
-            {
+            if !matches!(parsed.scheme(), "http" | "https") {
                 continue;
             }
             debug!(url = %parsed, "Discovered background image");
