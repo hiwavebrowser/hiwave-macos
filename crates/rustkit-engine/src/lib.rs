@@ -16628,6 +16628,39 @@ mod element_identity_tests {
 
     #[test]
     #[cfg(target_os = "macos")]
+    fn a_four_digit_hex_colour_replaces_an_earlier_one() {
+        // `#rgba` (css-color-4 §5.2). Minifiers write `transparent` as
+        // `#0000`; the declaration was dropped, so the colour under it
+        // stayed (weather.com's and squarespace's button resets).
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let attrs: std::collections::HashMap<String, String> =
+            [("class".to_string(), "a".to_string())].into_iter().collect();
+        let vars = HashMap::new();
+        let style_under = |css: &str| {
+            let sheet = Stylesheet::parse(css).expect("css");
+            engine.compute_style_for_element(
+                "div",
+                &attrs,
+                &[sheet],
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let clear = rustkit_css::Color::new(0, 0, 0, 0.0);
+
+        let s = style_under(".a { background-color: red } .a { background-color: #0000 }");
+        assert_eq!(s.background_color, clear, "`background-color: #0000`");
+        let s = style_under(".a { background-color: red } .a { background: #0000 }");
+        assert_eq!(s.background_color, clear, "`background: #0000`");
+        let s = style_under(".a { color: red } .a { color: #00F8 }");
+        assert_eq!(s.color, rustkit_css::Color::new(0, 0, 255, 136.0 / 255.0));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
     fn the_background_shorthand_sets_each_layers_position_size_and_repeat() {
         // css-backgrounds-3 §3.10. Only the image was taken, and only when
         // the layer began with it: `url(a.png) no-repeat` tiled, and
