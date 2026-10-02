@@ -1472,3 +1472,40 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Leave the style-share PR unopened?** It is verified on 23 sites and off by default, but it is 500 lines for 0.988 on wikipedia and about 0.96 on cnn and github, with github inside the noise. Default: yes, unopened; the branch stays as the base for stage two and is opened only together with a stage that wins on wikipedia. Say "open it" and the next session opens it as it is with these numbers.
 2. **Build stage two (skip matching for a repeated element) next?** Bound: about 40 ms of wikipedia's 283 ms, the largest cut left, and the riskiest for correctness (a key that misses one thing a selector reads gives a wrong style). Default: yes, behind the same flag with the same verify mode. The alternative is the three small per-element cuts alone (about 6% of the walk, no risk).
 3. **#408 is still a draft that a headless session cannot mark ready** (sixth session). Default: you or Prometheus mark it ready. With it merged and all of stage two's bound, wikipedia is about 180 ms, or 9×, against a 60 ms budget: 3× by 2026-10-11 is still not in reach.
+
+## 2026-10-01 22:40
+
+**No PR opened. The three small per-element cuts from the 21:32 profile are built, verified and pushed as `atlas/cs-walk-smalls` @ 378ea6f (develop b35c82e, engine only, +86 −21). They have no timing: load was 13–22 all session (another lane building), so no A/B was run and no ratio was measured. The worst ratio of record stays 13.5× (wikipedia).**
+
+| site | Chrome ms | before: of record (develop a0583fa, 16 quiet runs, 17:50) | after: this session |
+|---|---|---|---|
+| cnn | 210 | 497 → 2.4× | not measured |
+| github | 110 | 824 → 7.5× | not measured |
+| wikipedia | 20 | 270 → **13.5×** | not measured |
+
+- **The brief's first task was already done**: the test lock inversion is #415, merged 17:49. This session started 3 minutes after the last one ended, so none of the 21:32 decisions has an answer yet. I took item 3 of its list (no correctness risk, no decision needed) and left stage two (decision 2) alone.
+- **What was built.** The profile charged about 6% of wikipedia's walk to three things that are not style work:
+  - `positioning_of` read `RK_NO_POS` from the environment for every box, and `pseudo_element_box` read `RK_NO_PSEUDO_POS` for every pseudo box. Both are read once now.
+  - The walk lowercased each element's tag about six times into new Strings. `lower_tag` hands back the tag borrowed when it is already lowercase ASCII, and `to_lowercase()` otherwise.
+  - The child selector path and the `:nth-of-type(N)` suffix went through `format!`. They are built with `push_str`.
+  - One behaviour changes: the two `RK_NO_*` flags are read once per process. Nothing in `crates/`, `scripts/`, `tools/` or `.github/` sets them.
+- **Bound, not a result:** 6% of the walk is the most this can save, and the walk is part of the first build only. Expect a few percent of wikipedia's load at best; it may not clear the noise.
+- **Verification, branch 378ea6f against control b35c82e (both built this session):**
+  - Engine lib tests, parallel: 288 passed, 0 failed in 79 s (286 + 2 new).
+  - Receipt (scope all, 26 cases): control 26/26, avg 1.1%; branch 26/26, avg 1.1%; diffPixels identical on 26 of 26.
+  - Pinned pages, layout JSON, 3 control and 3 branch loads per site: wikipedia identical in 6 of 6. github identical in 5 of 6; the sixth (a branch load at load 22) differs in three images that had not arrived (natural size 150×150 against 834×924) and the heights that follow. cnn gave four layouts in six loads, the control's three all different from each other; two branch loads equal a control load.
+- **Why no PR.** Same rule as 19:39: a perf change with no speed number is not opened. The body is written except for the timing (`cascade-target/pr-ws-body.md`), and both binaries are saved.
+- **#408:** still a draft at 63d24d1, CLEAN, MERGEABLE, R2-STAMP PASS, no R1 review, no new comments. I did not try `gh pr ready`.
+- **Not done:** any timing or ratio, clippy, `--features headless` tests, the real-site board, stage two, the tip's ratio of record.
+- **Aleph:** one call (`aleph_search positioning_of`), answered at once, no hang or error. It returned 83 lexical matches on "positioning" (`Engine::transfer_positioning` first) and not the function. Navigation after that was Read plus `find.py` on the cs worktree.
+- **Slips:** both release builds ran past the 600 s tool limit into the background; I waited for each in the foreground. A heredoc that appended the test module was refused by the command parser, so the first test run matched 0 tests; the module went in through a script file. I drafted the PR body's cnn line before diffing the cnn dumps and had to correct it.
+- **Build cost:** debug engine tests 58 s. Release parity-capture **22 min 17 s** (branch) and **17 min 57 s** (control), both at load 13–17, most of it the thin-LTO link. Two release builds for an 86-line change is 40 of this session's 65 minutes.
+- **Saved:** binaries `cascade-target/pc-ws-378ea6f` and `pc-dev-b35c82e`; receipts `receipt-ws-A-b35c82e.json` and `receipt-ws-B-378ea6f.json`; PR body draft `pr-ws-body.md`. Under `cascade-target/tmp/walk-smalls/`: `apply.py`, `tests.rs`, `append.py`, `receipt.py`, `test-full1.log`, `buildA.log`, `buildB.log`, `site-equal/`, `site-equal-swapped/`. Hub tool: `layout_jdiff.py` (new; lists the paths at which two layout dumps differ, and counts them by field).
+- **State left behind:** `.worktrees/cs-engine-init-lock` is on `atlas/cs-walk-smalls` @ 378ea6f, clean, pushed. `atlas/cs-style-share` @ feb236d is untouched on the remote. The shared target dir's release artifact is develop b35c82e, with the worktree's source switched back to the branch afterwards, so the next release build there recompiles the engine. `.worktrees/cs-tree-reuse-default` untouched.
+- **Open cs PRs:** 1 (#408, draft), cap 3.
+- **Next session:** (1) If load is under 6: `ab2.py pc-dev-b35c82e pc-ws-378ea6f 16`. If wikipedia's per-pair median is clearly below 1, put it in `pr-ws-body.md` and open the PR; if not, say so here and leave the branch unopened. (2) #408: answer reviews. (3) Stage two per the 21:32 decision 2, if Pete has not said otherwise. (4) If quiet: interleaved `ab2.py pc-eil-204ba3e pc-dev-b35c82e` for the tip.
+
+**Decisions for Pete**
+1. **Open `atlas/cs-walk-smalls` without a timing?** It is 86 lines, changes no style or box, and its receipt is identical on 26 of 26, but its gain is unmeasured and bounded at a few percent. Default: no, it waits for a quiet 16-pair A/B and is opened only if wikipedia wins. Say "open it" and the next session opens it with the timing marked as owed.
+2. **Two of today's sessions could not time anything because another lane was building (load 12–25).** Default: unchanged, the first session that finds load under 6 does the owed timings (this branch, and the tip). Say so if you want the cascade session moved to an hour when the other lanes are idle; that is the only thing that makes every session able to produce a ratio.
+3. **The 21:32 decisions are still open** (style-share stays unopened; stage two is next; #408 needs you or Prometheus to mark it ready). Defaults stand.
