@@ -6077,19 +6077,21 @@ impl Engine {
                         style.background_color = color;
                         continue;
                     }
-                    // A colour beside an image (`#fff url(a.png) no-repeat`):
-                    // the colour is one top-level token of the layer.
-                    if shorthand {
-                        if let Some(color) = split_top_level_whitespace(layer_str)
-                            .into_iter()
-                            .find_map(parse_color)
-                        {
+                    // The shorthand's layer names its image, position, size,
+                    // repeat and boxes in any order, and a colour beside
+                    // them (`#fff url(a.png) no-repeat center / cover`).
+                    // `background-image` is the image alone.
+                    let layer = if shorthand {
+                        let (color, layer) = parse_background_shorthand_layer(layer_str);
+                        if let Some(color) = color {
                             style.background_color = color;
                         }
-                    }
+                        layer
+                    } else {
+                        parse_background_layer(layer_str)
+                    };
 
-                    // Parse as a background layer (gradient or url)
-                    if let Some(layer) = parse_background_layer(layer_str) {
+                    if let Some(layer) = layer {
                         style.background_layers.push(layer.clone());
                         // Also set legacy field for backwards compatibility
                         if let rustkit_css::BackgroundImage::Gradient(ref gradient) = layer.image {
@@ -12089,29 +12091,56 @@ fn parse_background_repeat(value: &str) -> rustkit_css::BackgroundRepeat {
     }
 }
 
-/// Parse a background-position value.
+/// Parse a background-position value (css-backgrounds-3 §3.6).
+///
+/// One value: the other axis is `center`, and `top` / `bottom` name the
+/// vertical axis. Two values: horizontal then vertical, unless the keywords
+/// say otherwise (`top right`). Three or four: `<edge> <offset>?` pairs; an
+/// offset from `left` / `top` is kept, one from `right` / `bottom` is not
+/// (the value has no way to say "from the far edge" yet) and the image sits
+/// on that edge.
 fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
+    use rustkit_css::BackgroundPositionValue::Percent;
     let value = value.trim().to_lowercase();
     let parts: Vec<&str> = value.split_whitespace().collect();
+    let vertical = |s: &str| matches!(s, "top" | "bottom");
+    let horizontal = |s: &str| matches!(s, "left" | "right");
 
-    let x = parts
-        .first()
-        .map(|s| parse_background_position_value(s))
-        .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0));
-    let y = parts
-        .get(1)
-        .map(|s| parse_background_position_value(s))
-        .unwrap_or_else(|| {
-            // If only one value, center the other axis for keywords, or use same for lengths
-            match &x {
-                rustkit_css::BackgroundPositionValue::Percent(_) => {
-                    rustkit_css::BackgroundPositionValue::Percent(0.5)
+    let (x, y) = match parts.as_slice() {
+        [] => (Percent(0.0), Percent(0.0)),
+        [one] if vertical(one) => (Percent(0.5), parse_background_position_value(one)),
+        [one] => (parse_background_position_value(one), Percent(0.5)),
+        [a, b] if vertical(a) || horizontal(b) => (
+            parse_background_position_value(b),
+            parse_background_position_value(a),
+        ),
+        [a, b] => (
+            parse_background_position_value(a),
+            parse_background_position_value(b),
+        ),
+        many => {
+            let (mut x, mut y) = (Percent(0.5), Percent(0.5));
+            let mut i = 0;
+            while i < many.len() {
+                let edge = many[i];
+                let offset = many
+                    .get(i + 1)
+                    .copied()
+                    .filter(|next| !vertical(next) && !horizontal(next) && *next != "center");
+                let at = match (edge, offset) {
+                    ("left" | "top", Some(offset)) => parse_background_position_value(offset),
+                    _ => parse_background_position_value(edge),
+                };
+                if vertical(edge) {
+                    y = at;
+                } else if horizontal(edge) {
+                    x = at;
                 }
-                rustkit_css::BackgroundPositionValue::Px(_) => {
-                    rustkit_css::BackgroundPositionValue::Percent(0.5)
-                }
+                i += if offset.is_some() { 2 } else { 1 };
             }
-        });
+            (x, y)
+        }
+    };
 
     rustkit_css::BackgroundPosition { x, y }
 }
@@ -12189,6 +12218,123 @@ fn parse_background_layer(value: &str) -> Option<rustkit_css::BackgroundLayer> {
     }
 
     None
+}
+
+/// One comma-separated layer of the `background` shorthand
+/// (css-backgrounds-3 §3.10): an image, a position with an optional
+/// `/ size`, a repeat style, an attachment and up to two boxes, in any
+/// order, and a colour beside them. Returns the colour the layer names and
+/// the layer itself when it has an image.
+///
+/// A token that is none of these (`image-set()`, a `calc()` length) is
+/// skipped rather than failing the declaration.
+fn parse_background_shorthand_layer(
+    value: &str,
+) -> (Option<rustkit_css::Color>, Option<rustkit_css::BackgroundLayer>) {
+    // `center/cover` is one whitespace token: give the slash its own.
+    let mut spaced = String::with_capacity(value.len() + 2);
+    let mut depth = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if ch == '/' && depth == 0 {
+            spaced.push_str(" / ");
+        } else {
+            spaced.push(ch);
+        }
+    }
+
+    let numeric = |lower: &str| {
+        let digits = lower.strip_prefix(['-', '+']).unwrap_or(lower);
+        digits.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+    };
+
+    let mut layer = rustkit_css::BackgroundLayer::default();
+    let mut color = None;
+    let mut position: Vec<&str> = Vec::new();
+    let mut size: Vec<&str> = Vec::new();
+    let mut repeats: Vec<rustkit_css::BackgroundRepeat> = Vec::new();
+    let mut boxes = 0;
+    let mut in_size = false;
+
+    for token in split_top_level_whitespace(&spaced) {
+        let lower = token.to_ascii_lowercase();
+        if token == "/" {
+            in_size = true;
+            continue;
+        }
+        if in_size {
+            let takes = match size.len() {
+                0 => matches!(lower.as_str(), "auto" | "cover" | "contain") || numeric(&lower),
+                1 => {
+                    !matches!(size[0], "cover" | "contain")
+                        && (lower == "auto" || numeric(&lower))
+                }
+                _ => false,
+            };
+            if takes {
+                size.push(token);
+                continue;
+            }
+            in_size = false;
+        }
+        match lower.as_str() {
+            "none" | "scroll" | "fixed" | "local" => {}
+            "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round" => {
+                repeats.push(parse_background_repeat(&lower));
+            }
+            "border-box" | "padding-box" | "content-box" => {
+                // One box sets both origin and clip; a second is the clip.
+                if boxes == 0 {
+                    layer.origin = parse_background_origin(&lower);
+                }
+                layer.clip = match lower.as_str() {
+                    "padding-box" => rustkit_css::BackgroundClip::PaddingBox,
+                    "content-box" => rustkit_css::BackgroundClip::ContentBox,
+                    _ => rustkit_css::BackgroundClip::BorderBox,
+                };
+                boxes += 1;
+            }
+            "left" | "right" | "top" | "bottom" | "center" => position.push(token),
+            _ if lower.starts_with("url(") && token.ends_with(')') => {
+                let url = token[4..token.len() - 1]
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'');
+                layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
+            }
+            _ if numeric(&lower) => position.push(token),
+            _ => {
+                if let Some(gradient) = parse_gradient(token) {
+                    layer.image = rustkit_css::BackgroundImage::Gradient(gradient);
+                } else if let Some(c) = parse_color(token) {
+                    color = Some(c);
+                }
+            }
+        }
+    }
+
+    if !position.is_empty() {
+        layer.position = parse_background_position(&position.join(" "));
+    }
+    if !size.is_empty() {
+        layer.size = parse_background_size(&size.join(" "));
+    }
+    {
+        use rustkit_css::BackgroundRepeat::{NoRepeat, Repeat, RepeatX, RepeatY};
+        layer.repeat = match repeats.as_slice() {
+            [] => layer.repeat,
+            // Two values are the horizontal then the vertical style.
+            [Repeat, NoRepeat] => RepeatX,
+            [NoRepeat, Repeat] => RepeatY,
+            [first, ..] => *first,
+        };
+    }
+
+    let has_image = !matches!(layer.image, rustkit_css::BackgroundImage::None);
+    (color, has_image.then_some(layer))
 }
 
 /// Parse a position value (percentage, keyword, or length).
@@ -16478,6 +16624,138 @@ mod element_identity_tests {
         );
         assert!(s.background_layers.is_empty());
         assert!(s.background_gradient.is_none(), "the gradient goes with its layer");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_background_shorthand_sets_each_layers_position_size_and_repeat() {
+        // css-backgrounds-3 §3.10. Only the image was taken, and only when
+        // the layer began with it: `url(a.png) no-repeat` tiled, and
+        // `no-repeat url(a.png)` had no image at all.
+        use rustkit_css::BackgroundPositionValue::{Percent, Px};
+        use rustkit_css::{BackgroundImage, BackgroundRepeat, BackgroundSize};
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let attrs: std::collections::HashMap<String, String> =
+            [("class".to_string(), "a".to_string())].into_iter().collect();
+        let vars = HashMap::new();
+        let style_under = |css: &str| {
+            let sheet = Stylesheet::parse(css).expect("css");
+            engine.compute_style_for_element(
+                "div",
+                &attrs,
+                &[sheet],
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let url = |s: &ComputedStyle, i: usize| match &s.background_layers[i].image {
+            BackgroundImage::Url(u) => u.clone(),
+            other => panic!("layer {i} is not a url: {other:?}"),
+        };
+
+        let s = style_under(".a { background: url(a.png) no-repeat center / cover }");
+        assert_eq!(s.background_layers.len(), 1);
+        let l = &s.background_layers[0];
+        assert_eq!(url(&s, 0), "a.png");
+        assert_eq!(l.repeat, BackgroundRepeat::NoRepeat);
+        assert_eq!((&l.position.x, &l.position.y), (&Percent(0.5), &Percent(0.5)));
+        assert_eq!(l.size, BackgroundSize::Cover);
+
+        // No whitespace around the slash, and the image last.
+        let s = style_under(".a { background: no-repeat right bottom/contain url(a.png) }");
+        let l = &s.background_layers[0];
+        assert_eq!(url(&s, 0), "a.png");
+        assert_eq!(l.repeat, BackgroundRepeat::NoRepeat);
+        assert_eq!((&l.position.x, &l.position.y), (&Percent(1.0), &Percent(1.0)));
+        assert_eq!(l.size, BackgroundSize::Contain);
+
+        // A colour beside the image, lengths for position and size.
+        let s = style_under(
+            ".a { background: #ff0 linear-gradient(blue, blue) no-repeat 20px 10px / 30px 15px }",
+        );
+        let l = &s.background_layers[0];
+        assert!(matches!(l.image, BackgroundImage::Gradient(_)));
+        assert_eq!(s.background_color, rustkit_css::Color::new(255, 255, 0, 1.0));
+        assert_eq!(l.repeat, BackgroundRepeat::NoRepeat);
+        assert_eq!((&l.position.x, &l.position.y), (&Px(20.0), &Px(10.0)));
+        assert_eq!(
+            l.size,
+            BackgroundSize::Explicit { width: Some(30.0), height: Some(15.0) }
+        );
+
+        // Each layer keeps its own; the first named is the topmost (last).
+        let s = style_under(
+            ".a { background: url(a.png) 50% 0 repeat-x, url(b.png) no-repeat }",
+        );
+        assert_eq!(s.background_layers.len(), 2);
+        assert_eq!(url(&s, 1), "a.png");
+        assert_eq!(s.background_layers[1].repeat, BackgroundRepeat::RepeatX);
+        assert_eq!(s.background_layers[1].position.x, Percent(0.5));
+        assert_eq!(url(&s, 0), "b.png");
+        assert_eq!(s.background_layers[0].repeat, BackgroundRepeat::NoRepeat);
+
+        // What a layer does not name is the initial value, not the last
+        // declaration's.
+        let s = style_under(
+            ".a { background: url(a.png) no-repeat center } .a { background: url(b.png) }",
+        );
+        let l = &s.background_layers[0];
+        assert_eq!(l.repeat, BackgroundRepeat::Repeat);
+        assert_eq!((&l.position.x, &l.position.y), (&Percent(0.0), &Percent(0.0)));
+
+        // A longhand after the shorthand still applies to its layer.
+        let s = style_under(
+            ".a { background: url(a.png) no-repeat; background-position: 10px 100% }",
+        );
+        let l = &s.background_layers[0];
+        assert_eq!((&l.position.x, &l.position.y), (&Px(10.0), &Percent(1.0)));
+        assert_eq!(l.repeat, BackgroundRepeat::NoRepeat);
+    }
+
+    #[test]
+    fn a_background_position_reads_its_keywords_by_axis() {
+        use rustkit_css::BackgroundPositionValue::{Percent, Px};
+        let at = |v: &str| {
+            let p = parse_background_position(v);
+            (p.x, p.y)
+        };
+        // One value: the other axis is centred.
+        assert_eq!(at("left"), (Percent(0.0), Percent(0.5)));
+        assert_eq!(at("bottom"), (Percent(0.5), Percent(1.0)));
+        assert_eq!(at("top"), (Percent(0.5), Percent(0.0)));
+        assert_eq!(at("25%"), (Percent(0.25), Percent(0.5)));
+        // Two keywords in either order.
+        assert_eq!(at("top right"), (Percent(1.0), Percent(0.0)));
+        assert_eq!(at("right top"), (Percent(1.0), Percent(0.0)));
+        assert_eq!(at("center bottom"), (Percent(0.5), Percent(1.0)));
+        assert_eq!(at("bottom center"), (Percent(0.5), Percent(1.0)));
+        assert_eq!(at("10px 20px"), (Px(10.0), Px(20.0)));
+        // Edge and offset: kept from the near edge; the far edge alone.
+        assert_eq!(at("left 10px top 20px"), (Px(10.0), Px(20.0)));
+        assert_eq!(at("right 5px bottom 5px"), (Percent(1.0), Percent(1.0)));
+        assert_eq!(at("top 20px left"), (Percent(0.0), Px(20.0)));
+    }
+
+    #[test]
+    fn a_shorthand_layers_url_is_taken_whole() {
+        // The url ended at the first `)`, which a data: url may contain.
+        let (color, layer) = parse_background_shorthand_layer(
+            "url(\"data:image/svg+xml,<svg fill='rgb(0,0,0)'/>\") no-repeat #eee",
+        );
+        assert_eq!(color, Some(rustkit_css::Color::new(238, 238, 238, 1.0)));
+        match layer.expect("layer").image {
+            rustkit_css::BackgroundImage::Url(u) => {
+                assert_eq!(u, "data:image/svg+xml,<svg fill='rgb(0,0,0)'/>")
+            }
+            other => panic!("{other:?}"),
+        }
+        // No image, no layer; the colour is still named.
+        let (color, layer) = parse_background_shorthand_layer("none repeat-x red");
+        assert_eq!(color, Some(rustkit_css::Color::new(255, 0, 0, 1.0)));
+        assert!(layer.is_none());
     }
 
     #[test]
