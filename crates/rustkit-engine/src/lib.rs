@@ -26412,3 +26412,83 @@ mod walk_smalls_tests {
         assert_eq!(Engine::selector_segment("li", &attributes, 1, 1, false), "li");
     }
 }
+
+// ── sticky-scroll `.overflow-content`: a percentage inset inside a grid
+//    item's child, measured through the real cascade. ──
+#[cfg(test)]
+mod grid_item_child_abspos_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// The layout-crate guards for this defect
+    /// (`rustkit-layout::grid::an_abspos_child_of_a_grid_items_child_…`) drive
+    /// `layout_grid_container` directly. The engine reaches grid layout
+    /// through `layout_with_collapse`, which runs a block pre-pass over the
+    /// whole subtree FIRST — and a pre-pass that happens to leave the right
+    /// height behind makes the same tree come out correct for the wrong
+    /// reason. An arrangement of this shape built at the layout level did
+    /// exactly that and read as an exoneration while the real page was 75px
+    /// out. So the engine path gets its own guard.
+    ///
+    /// T-RED without `reanchor_absolute_children` in grid Phase 9: the circle
+    /// lands at the demo's own top (`top: 50%` resolved against the stale
+    /// height) instead of 75px down.
+    fn laid_out(html: &str) -> LayoutBox {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        // Height 0, as the engine lays out the root: a block's containing
+        // block height is the flow cursor.
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut margins = rustkit_layout::MarginCollapseContext::new();
+        let mut floats = rustkit_layout::FloatContext::new();
+        root.layout_with_collapse(&cb, &mut margins, &mut floats);
+        root
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    #[test]
+    fn a_percentage_inset_in_a_grid_items_child_resolves_against_its_final_height() {
+        let root = laid_out(concat!(
+            r#"<body style="margin:0">"#,
+            r#"<div style="display:grid;grid-template-columns:250px 1fr 250px;gap:30px">"#,
+            r#"<aside style="height:20px"></aside>"#,
+            r#"<main style="min-height:1500px">"#,
+            r#"<div id="demo" style="position:relative;height:150px;overflow:hidden;margin-top:20px">"#,
+            r#"<div id="circle" style="position:absolute;width:300px;height:300px;"#,
+            r#"top:50%;left:50%;transform:translate(-50%,-50%)"></div>"#,
+            r#"</div></main>"#,
+            r#"<aside style="height:20px"></aside>"#,
+            r#"</div></body>"#,
+        ));
+        let demo = by_id(&root, "demo").expect("the demo box");
+        let circle = by_id(&root, "circle").expect("the circle");
+        assert_eq!(
+            demo.dimensions.content.height, 150.0,
+            "the precondition: the demo keeps its own definite height"
+        );
+        let lead = circle.dimensions.content.y - demo.dimensions.content.y;
+        assert!(
+            (lead - 75.0).abs() < 0.01,
+            "`top: 50%` of the demo's 150px is 75px, not {lead}"
+        );
+        // The transform is a paint-time translate, so the LAYOUT box must not
+        // carry it — the oracle reads `visual_border_box` for Chrome's
+        // post-transform rect and `border_box` for the layout one.
+        let inset = circle.dimensions.content.x - demo.dimensions.content.x;
+        assert!(
+            (inset - demo.dimensions.content.width / 2.0).abs() < 0.01,
+            "`left: 50%` must stay correct: expected {}, got {inset}",
+            demo.dimensions.content.width / 2.0
+        );
+    }
+}
