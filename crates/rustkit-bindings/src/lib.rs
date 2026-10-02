@@ -12,6 +12,8 @@
 mod dom;
 mod inner_text;
 #[cfg(test)]
+mod web_streams_tests;
+#[cfg(test)]
 mod web_interfaces_tests;
 #[cfg(test)]
 mod web_blob_tests;
@@ -609,6 +611,9 @@ impl DomBindings {
 
         // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
         runtime.evaluate_script(include_str!("web_encoding.js"))?;
+
+        // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
+        runtime.evaluate_script(include_str!("web_streams.js"))?;
 
         // IPC bridge for communication with Rust
         let ipc_js = r#"
