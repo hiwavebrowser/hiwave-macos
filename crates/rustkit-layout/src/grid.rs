@@ -2242,6 +2242,22 @@ pub fn layout_grid_container(
                         // resolution that depends on their reflowed extent.
                     }
 
+                    // This grandchild's box is final: anchor its abspos
+                    // children to its padding box, the same statement the
+                    // generic block path makes at the tail of `layout_block`
+                    // and `layout_with_collapse_in` (n46). This loop reaches
+                    // neither, so until now an abspos great-grandchild kept
+                    // the position the re-flow above gave it — resolved
+                    // against the grandchild's height BEFORE the lines just
+                    // above set it. sticky-scroll's `.overflow-content`
+                    // (`top: 50%` in a 150px `.overflow-demo`) read 0 and sat
+                    // at the demo's own top, 75px high.
+                    //
+                    // Width was never affected, which is why the corpus
+                    // failure is a pure `y`: a grid item's width is known
+                    // before its children flow and its height is not.
+                    grandchild.reanchor_absolute_children();
+
                     // Update y for next sibling: advance to the BORDER-BOX
                     // bottom and bank margin_bottom in the collapse context,
                     // where the next sibling's margin_top will max against it
@@ -7906,6 +7922,243 @@ mod tests {
             (item.width - 100.0).abs() < 0.01 && (offset - 250.0).abs() < 0.01,
             "expected a 100px item centred at +250, got {}px at +{offset}",
             item.width
+        );
+    }
+
+    /// sticky-scroll `.overflow-content`, the one font-independent root on the
+    /// 2026-10-02 macOS board (`y` 1051.25 expected, 976.30 measured, −74.95).
+    ///
+    /// Phase 9 re-lays out a grid item's children itself: it sets the
+    /// grandchild's width, its final position, re-flows its subtree, and only
+    /// THEN resolves its height. A `position: absolute` great-grandchild was
+    /// positioned inside that re-flow, while the grandchild's height was still
+    /// the stale pre-pass figure — so `top: 50%` resolved against it and came
+    /// out 0. The generic block path has anchored abspos children to the
+    /// parent's FINAL padding box since n46 (`reanchor_absolute_children` at
+    /// the tail of `layout_block` / `layout_with_collapse_in`); this loop
+    /// bypasses both, so nothing re-asked the question.
+    ///
+    /// `left: 50%` was unaffected throughout, which is why the corpus failure
+    /// is a pure `y` delta: a grid item's WIDTH is known before its children
+    /// are flowed and its HEIGHT is not.
+    ///
+    /// T-RED without the re-anchor: the circle sits at the demo's own top
+    /// (`top: 50%` → 0) instead of 75px down.
+    #[test]
+    fn an_abspos_child_of_a_grid_items_child_anchors_to_its_final_height() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns = GridTemplate::from_sizes(vec![
+            TrackSize::Px(250.0),
+            TrackSize::Fr(1.0),
+            TrackSize::Px(250.0),
+        ]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        // `main`, the middle grid item.
+        let mut main_style = ComputedStyle::new();
+        main_style.grid_column_start = GridLine::Number(2);
+        main_style.grid_column_end = GridLine::Number(3);
+        let mut main_box = LayoutBox::new(BoxType::Block, main_style);
+
+        // `.overflow-demo { position: relative; height: 150px; overflow: hidden }`
+        let mut demo_style = ComputedStyle::new();
+        demo_style.height = Length::Px(150.0);
+        demo_style.position = rustkit_css::Position::Relative;
+        demo_style.overflow_x = rustkit_css::Overflow::Hidden;
+        demo_style.overflow_y = rustkit_css::Overflow::Hidden;
+        let mut demo = LayoutBox::new(BoxType::Block, demo_style);
+
+        // `.overflow-content { position: absolute; width/height: 300px;
+        //  top: 50%; left: 50% }`
+        let mut circle_style = ComputedStyle::new();
+        circle_style.width = Length::Px(300.0);
+        circle_style.height = Length::Px(300.0);
+        circle_style.top = Some(Length::Percent(50.0));
+        circle_style.left = Some(Length::Percent(50.0));
+        let circle = LayoutBox::with_position(
+            BoxType::Block,
+            circle_style,
+            crate::Position::Absolute,
+        );
+        demo.children.push(circle);
+        main_box.children.push(demo);
+        container.children.push(main_box);
+
+        layout_grid_container(&mut container, 1160.0, 800.0);
+
+        let demo = &container.children[0].children[0];
+        assert_eq!(
+            demo.dimensions.content.height, 150.0,
+            "the precondition: the demo keeps its own definite height"
+        );
+        let circle = &demo.children[0];
+        let lead = circle.dimensions.content.y - demo.dimensions.content.y;
+        assert!(
+            (lead - 75.0).abs() < 0.01,
+            "`top: 50%` of a 150px containing block is 75px, not {lead} — \
+             the abspos child was anchored to the grandchild's stale height"
+        );
+        let inset = circle.dimensions.content.x - demo.dimensions.content.x;
+        assert!(
+            (inset - demo.dimensions.content.width / 2.0).abs() < 0.01,
+            "`left: 50%` must stay correct: expected {}, got {inset}",
+            demo.dimensions.content.width / 2.0
+        );
+    }
+
+    /// The same bypass, stated as the rule rather than as the one corpus
+    /// example: it is the grandchild's FINAL box the abspos children anchor
+    /// to, for every inset and for a percentage size — not just for `top`.
+    ///
+    /// T-RED without the re-anchor on both assertions: an `inset: 0` overlay
+    /// stretches to the stale height (0) and a `bottom`-anchored box lands at
+    /// the stale bottom edge.
+    #[test]
+    fn an_inset_stretched_abspos_in_a_grid_items_child_uses_the_final_height() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Fr(1.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.grid_column_start = GridLine::Number(1);
+        item_style.grid_column_end = GridLine::Number(2);
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+
+        // Padded, because CSS 2.1 §10.1 makes the abspos containing block the
+        // positioned ancestor's PADDING box: a re-anchor written against the
+        // content box lands 10px in on every edge, and a card with no padding
+        // cannot tell the two apart.
+        let mut card_style = ComputedStyle::new();
+        card_style.height = Length::Px(120.0);
+        card_style.padding_top = Length::Px(10.0);
+        card_style.padding_bottom = Length::Px(10.0);
+        card_style.padding_left = Length::Px(10.0);
+        card_style.padding_right = Length::Px(10.0);
+        card_style.position = rustkit_css::Position::Relative;
+        let mut card = LayoutBox::new(BoxType::Block, card_style);
+        // Phase 9 recomputes a grandchild's INLINE padding from its style and
+        // inherits the block-direction edges from the block pre-pass the
+        // engine runs before grid layout. `layout_grid_container` alone has no
+        // pre-pass, so seed them the way that pass would.
+        card.dimensions.padding.top = 10.0;
+        card.dimensions.padding.bottom = 10.0;
+
+        // Absolute lengths arrive pre-resolved in `offsets` (the engine's
+        // `positioning_of` does that and leaves percentages to the layout
+        // pass, which is why the `top: 50%` case above sets the style).
+        let mut cover = LayoutBox::with_position(
+            BoxType::Block,
+            ComputedStyle::new(),
+            crate::Position::Absolute,
+        );
+        cover.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        card.children.push(cover);
+
+        let mut caption_style = ComputedStyle::new();
+        caption_style.height = Length::Px(20.0);
+        let mut caption =
+            LayoutBox::with_position(BoxType::Block, caption_style, crate::Position::Absolute);
+        caption.set_offsets(None, None, Some(0.0), Some(0.0));
+        card.children.push(caption);
+
+        item.children.push(card);
+        container.children.push(item);
+
+        layout_grid_container(&mut container, 600.0, 400.0);
+
+        let card = &container.children[0].children[0];
+        assert_eq!(
+            card.dimensions.content.height, 120.0,
+            "the precondition: the card keeps its own definite height"
+        );
+        let padding_box = card.dimensions.padding_box();
+        assert!(
+            (padding_box.height - 140.0).abs() < 0.01,
+            "the precondition: 120px of content plus 10px of padding each side"
+        );
+        let cover = &card.children[0];
+        assert!(
+            (cover.dimensions.content.height - padding_box.height).abs() < 0.01,
+            "an `inset: 0` overlay fills the card's {}px padding box, not {}",
+            padding_box.height,
+            cover.dimensions.content.height
+        );
+        assert!(
+            (cover.dimensions.content.y - padding_box.y).abs() < 0.01,
+            "…and starts at its padding edge {}, not {}",
+            padding_box.y,
+            cover.dimensions.content.y
+        );
+        let caption = &card.children[1];
+        let from_bottom = (padding_box.y + padding_box.height)
+            - (caption.dimensions.content.y + caption.dimensions.content.height);
+        assert!(
+            from_bottom.abs() < 0.01,
+            "a `bottom: 0` caption sits on the card's padding edge, {from_bottom}px off"
+        );
+    }
+
+    /// The re-anchor is UNCONDITIONAL, and this guard exists because a
+    /// mutation that made it conditional on `width_changed` survived the first
+    /// sweep. Both guards above build the grandchild from nothing, so its
+    /// stale width is 0 and the width always moves — the condition they could
+    /// not distinguish is the one the real page meets, since the block
+    /// pre-pass has usually already given a full-width block its final width
+    /// and only the HEIGHT is resolved here.
+    ///
+    /// T-RED with the call gated on `width_changed`: the width is already
+    /// right, the height still goes 0 -> 120, and `top: 50%` keeps the 0 it
+    /// resolved against the stale height.
+    #[test]
+    fn the_grid_child_reanchor_does_not_wait_for_the_width_to_move() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Fr(1.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.grid_column_start = GridLine::Number(1);
+        item_style.grid_column_end = GridLine::Number(2);
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+
+        let mut card_style = ComputedStyle::new();
+        card_style.height = Length::Px(120.0);
+        card_style.position = rustkit_css::Position::Relative;
+        let mut card = LayoutBox::new(BoxType::Block, card_style);
+        // The block pre-pass already sized this full-width block to the
+        // container, so Phase 9 recomputes the same number: the width does
+        // not move and only the height does.
+        card.dimensions.content.width = 600.0;
+
+        let mut circle_style = ComputedStyle::new();
+        circle_style.width = Length::Px(40.0);
+        circle_style.height = Length::Px(40.0);
+        circle_style.top = Some(Length::Percent(50.0));
+        card.children.push(LayoutBox::with_position(
+            BoxType::Block,
+            circle_style,
+            crate::Position::Absolute,
+        ));
+
+        item.children.push(card);
+        container.children.push(item);
+
+        layout_grid_container(&mut container, 600.0, 400.0);
+
+        let card = &container.children[0].children[0];
+        assert_eq!(
+            card.dimensions.content.width, 600.0,
+            "the precondition: Phase 9 must not have moved the width"
+        );
+        assert_eq!(card.dimensions.content.height, 120.0);
+        let lead = card.children[0].dimensions.content.y - card.dimensions.content.y;
+        assert!(
+            (lead - 60.0).abs() < 0.01,
+            "`top: 50%` of 120px is 60px, not {lead}"
         );
     }
 }
