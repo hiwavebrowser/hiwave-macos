@@ -43,3 +43,7 @@ Noise: a single wikipedia run 10 minutes earlier read 1133 ms (the other lane wa
 ## Changes
 - 2026-09-27: lane created (Pete approved a second trench lane after spending the one-time limits reset).
 - 2026-09-27 22:25: phase 0. The measurement rule said to use "the real-site board's pinned snapshots", but none exist, so this lane pinned its own (see Instrument). Method frozen. Needs Pete's OK retroactively (digest decision).
+
+
+## Exit (2026-10-02): trench ended by Pete; thank you
+Pete ended all trench runs on 2026-10-02 at 15:30 ET ahead of the next phase, with thanks for the service. Final metric: worst RustKit-cascade / Chrome-style ratio about 13× on wikipedia (from 80.6× on 2026-09-27), cnn about 3.2×, github about 9×; the exit target of 3× was not reached. 63 digest sections; about 35 PRs on develop. Lasting contributions beyond the ratio: the counterbalanced A/B standard (≥5 AB + ≥5 BA pairs, median of per-pair ratios), the ENGINE_INIT test lock fix, the rule index, prepared selector lists, and style/match sharing on by default. Open ideas for the next phase: tree reuse by default (archived as archive/atlas-cs-tree-reuse-default), the walk-time cuts named in the last digests. The hourly launchd job is unloaded (plist in ~/Library/LaunchAgents/paused/).
