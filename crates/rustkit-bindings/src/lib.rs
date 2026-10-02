@@ -11,6 +11,12 @@
 
 mod dom;
 mod inner_text;
+#[cfg(test)]
+mod web_streams_tests;
+#[cfg(test)]
+mod web_interfaces_tests;
+#[cfg(test)]
+mod web_blob_tests;
 mod web_url;
 
 pub use dom::SelectorMatchFn;
@@ -470,6 +476,9 @@ impl DomBindings {
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(Cell::new(DomDirty::Clean));
         dom::install(&mut runtime, &dom_host, &dirty)?;
+        // Event subclasses, geometry types and interface objects pages test with
+        // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
+        runtime.evaluate_script(include_str!("web_interfaces.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -591,8 +600,20 @@ impl DomBindings {
         // geometry, that pages read without feature-testing (web_platform.js).
         runtime.evaluate_script(include_str!("web_platform.js"))?;
 
+        // Blob, File, FormData, AbortController/AbortSignal, structuredClone (web_blob.js).
+        runtime.evaluate_script(include_str!("web_blob.js"))?;
+
+        // The observer interfaces and requestIdleCallback (web_observers.js).
+        runtime.evaluate_script(include_str!("web_observers.js"))?;
+
         // `URL` and `URLSearchParams` (parsing is the `url` crate's).
         web_url::install(runtime)?;
+
+        // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
+        runtime.evaluate_script(include_str!("web_encoding.js"))?;
+
+        // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
+        runtime.evaluate_script(include_str!("web_streams.js"))?;
 
         // IPC bridge for communication with Rust
         let ipc_js = r#"
@@ -1544,6 +1565,17 @@ mod tests {
         assert!(matches!(method, JsValue::String(s) if s == "post"));
     }
 
+    /// Like `eval_string`, but renders a boolean or number result too, so
+    /// a test can compare `a === b` directly.
+    fn eval_any(bindings: &DomBindings, script: &str) -> String {
+        match bindings.evaluate(script).unwrap() {
+            JsValue::String(s) => s,
+            JsValue::Boolean(b) => b.to_string(),
+            JsValue::Number(n) => if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() },
+            other => panic!("{script} evaluated to {other:?}"),
+        }
+    }
+
     fn eval_string(bindings: &DomBindings, script: &str) -> String {
         match bindings.evaluate(script).unwrap() {
             JsValue::String(s) => s,
@@ -1661,6 +1693,135 @@ mod tests {
         );
         assert_eq!(ev("var v = new URL('https://a.test/'); v.search = '?k=1&k=2'; v.searchParams.getAll('k').join()"), "1,2");
         assert_eq!(ev("var w = new URL('https://a.test/?only=1'); w.searchParams.delete('only'); w.href"), "https://a.test/");
+    }
+
+    /// The observer interfaces and requestIdleCallback: pages construct them
+    /// during start-up (walmart died on MutationObserver and
+    /// IntersectionObserver, microsoft on MutationObserver). They exist and
+    /// validate like the real ones, and report no records.
+    #[test]
+    fn observers_exist_validate_their_arguments_and_report_nothing() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_string(&bindings, s);
+        assert_eq!(
+            ev("String([typeof MutationObserver, typeof IntersectionObserver, typeof ResizeObserver, typeof PerformanceObserver].join())"),
+            "function,function,function,function"
+        );
+        // A callback is required, and `new` is.
+        assert_eq!(ev("var a; try { new MutationObserver(); a = 'no throw'; } catch (e) { a = e.name; } a"), "TypeError");
+        assert_eq!(ev("var b; try { new IntersectionObserver(1); b = 'no throw'; } catch (e) { b = e.name; } b"), "TypeError");
+        assert_eq!(ev("var c; try { ResizeObserver(function () {}); c = 'no throw'; } catch (e) { c = e.name; } c"), "TypeError");
+        // MutationObserver.observe needs a target and at least one record type.
+        assert_eq!(ev("var el = {}; var m = new MutationObserver(function () {}); var d; try { m.observe(el, {}); d = 'no throw'; } catch (e) { d = e.name; } d"), "TypeError");
+        assert_eq!(ev("var e2; try { m.observe(null, { childList: true }); e2 = 'no throw'; } catch (e) { e2 = e.name; } e2"), "TypeError");
+        assert_eq!(ev("m.observe(el, { childList: true, subtree: true }); String(m.takeRecords().length)"), "0");
+        assert_eq!(ev("m.disconnect(); String(typeof WebKitMutationObserver)"), "function");
+        // IntersectionObserver reports its configuration.
+        assert_eq!(
+            ev("var io = new IntersectionObserver(function () {}); String([io.root, io.rootMargin, io.thresholds.join()].join('|'))"),
+            "|0px 0px 0px 0px|0"
+        );
+        assert_eq!(
+            ev("var io2 = new IntersectionObserver(function () {}, { rootMargin: '10px', threshold: [1, 0.5] }); String([io2.rootMargin, io2.thresholds.join()].join('|'))"),
+            "10px|0.5,1"
+        );
+        assert_eq!(ev("io.observe(el); io.unobserve(el); io.disconnect(); String(io.takeRecords().length)"), "0");
+        assert_eq!(ev("var ro = new ResizeObserver(function () {}); ro.observe(el); ro.unobserve(el); ro.disconnect(); 'ok'"), "ok");
+        assert_eq!(ev("var po = new PerformanceObserver(function () {}); po.observe({ entryTypes: ['mark'] }); po.disconnect(); String(PerformanceObserver.supportedEntryTypes.length)"), "0");
+    }
+
+    #[test]
+    fn request_idle_callback_runs_once_on_the_timer_clock_and_can_be_cancelled() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                r#"
+                var log = [];
+                var id1 = requestIdleCallback(function (d) { log.push('ran:' + d.didTimeout + ':' + (d.timeRemaining() >= 0)); });
+                var id2 = requestIdleCallback(function () { log.push('cancelled-ran'); });
+                cancelIdleCallback(id2);
+                var thrown = 'none';
+                try { requestIdleCallback('nope'); } catch (e) { thrown = e.name; }
+                "#,
+            )
+            .unwrap();
+        assert_eq!(eval_string(&bindings, "String(typeof id1 + ':' + (id1 !== id2) + ':' + thrown)"), "number:true:TypeError");
+        assert_eq!(eval_string(&bindings, "log.join()"), "", "not run before the timers advance");
+        bindings.run_timers(1_000, 100).unwrap();
+        assert_eq!(eval_string(&bindings, "log.join()"), "ran:false:true");
+    }
+
+    /// btoa/atob, escape/unescape, TextEncoder/TextDecoder: netflix died on
+    /// `TextEncoder is not defined`, squarespace on `escape`, and base64 and
+    /// UTF-8 conversion sit in most bundles' first lines.
+    #[test]
+    fn btoa_and_atob_round_trip_latin1_and_reject_bad_input() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_any(&bindings, s);
+        assert_eq!(ev("[btoa(''), btoa('a'), btoa('ab'), btoa('abc'), btoa('hello')].join()"), ",YQ==,YWI=,YWJj,aGVsbG8=");
+        assert_eq!(ev("btoa(String.fromCharCode(0, 255, 128))"), "AP+A");
+        // atob: padding optional, ASCII whitespace ignored.
+        assert_eq!(ev("[atob(''), atob('YQ=='), atob('YQ'), atob('YW Jj\\n'), atob('aGVsbG8=')].join()"), ",a,a,abc,hello");
+        assert_eq!(ev("atob('AP+A').split('').map(function (c) { return c.charCodeAt(0); }).join()"), "0,255,128");
+        // Errors are InvalidCharacterError (DOMException) for both directions.
+        assert_eq!(ev("var n1; try { btoa('\\u20ac'); n1 = 'no throw'; } catch (e) { n1 = e.name; } n1"), "InvalidCharacterError");
+        assert_eq!(ev("var n2; try { atob('!!!!'); n2 = 'no throw'; } catch (e) { n2 = e.name; } n2"), "InvalidCharacterError");
+        assert_eq!(ev("var n3; try { atob('a'); n3 = 'no throw'; } catch (e) { n3 = e.name; } n3"), "InvalidCharacterError");
+    }
+
+    #[test]
+    fn escape_and_unescape_follow_annex_b() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_any(&bindings, s);
+        assert_eq!(ev("escape('\\u00e4 b+c\\u20ac@*_-./')"), "%E4%20b+c%u20AC@*_-./");
+        assert_eq!(ev("unescape('%E4%20b+c%u20AC')"), "\u{e4} b+c\u{20ac}");
+        // A malformed escape passes through.
+        assert_eq!(ev("unescape('%u0041%41%zz%u12')"), "AA%zz%u12");
+    }
+
+    #[test]
+    fn text_encoder_produces_utf8_and_encode_into_respects_the_buffer() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_any(&bindings, s);
+        assert_eq!(ev("String(new TextEncoder().encoding)"), "utf-8");
+        // h é l l o space € 😀 = 1+2+1+1+1+1+3+4 bytes.
+        assert_eq!(ev("var b = new TextEncoder().encode('h\\u00e9llo \\u20ac\\ud83d\\ude00'); b.length + ':' + Array.from(b).slice(0, 4).join()"), "14:104,195,169,108");
+        assert_eq!(ev("Array.from(new TextEncoder().encode('\\ud83d\\ude00')).join()"), "240,159,152,128");
+        // A lone surrogate is U+FFFD (EF BF BD), not an exception.
+        assert_eq!(ev("Array.from(new TextEncoder().encode('a\\ud800b')).join()"), "97,239,191,189,98");
+        assert_eq!(ev("String(new TextEncoder().encode().length) + ',' + new TextEncoder().encode('').length"), "0,0");
+        // encodeInto stops before a character that does not fit.
+        assert_eq!(ev("var d = new Uint8Array(4); var r = new TextEncoder().encodeInto('a\\u20acb', d); r.read + ',' + r.written + ',' + Array.from(d).join()"), "2,4,97,226,130,172");
+        assert_eq!(ev("var d2 = new Uint8Array(3); var r2 = new TextEncoder().encodeInto('a\\u20ac', d2); r2.read + ',' + r2.written"), "1,1");
+    }
+
+    #[test]
+    fn text_decoder_decodes_utf8_with_replacement_bom_fatal_and_streaming() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let ev = |s: &str| eval_any(&bindings, s);
+        // Round trip, from a Uint8Array, an ArrayBuffer and a sub-view.
+        assert_eq!(ev("var s = 'h\\u00e9llo \\u20ac\\ud83d\\ude00'; String(new TextDecoder().decode(new TextEncoder().encode(s)) === s)"), "true");
+        assert_eq!(ev("new TextDecoder().decode(new Uint8Array([104, 105]).buffer)"), "hi");
+        assert_eq!(ev("var big = new Uint8Array([0, 104, 105, 0]); new TextDecoder().decode(big.subarray(1, 3))"), "hi");
+        // Invalid bytes become U+FFFD; a truncated sequence at the end is one.
+        assert_eq!(ev("new TextDecoder().decode(new Uint8Array([0x61, 0xFF, 0x62])) === 'a\\ufffdb'"), "true");
+        assert_eq!(ev("new TextDecoder().decode(new Uint8Array([0x61, 0xE2, 0x82])) === 'a\\ufffd'"), "true");
+        // fatal throws TypeError.
+        assert_eq!(ev("var f; try { new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array([0xFF])); f = 'no throw'; } catch (e) { f = e.name; } f"), "TypeError");
+        // A leading BOM is dropped unless ignoreBOM.
+        assert_eq!(ev("String(new TextDecoder().decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x61])).length)"), "1");
+        assert_eq!(ev("String(new TextDecoder('utf-8', { ignoreBOM: true }).decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x61])).length)"), "2");
+        // stream: a character split across chunks decodes once whole.
+        assert_eq!(
+            ev("var sd = new TextDecoder(); var p1 = sd.decode(new Uint8Array([0xE2, 0x82]), { stream: true }); \
+                var p2 = sd.decode(new Uint8Array([0xAC, 0x21])); (p1 + '|' + p2) === '|\\u20ac!'"),
+            "true"
+        );
+        // Labels and the other supported encodings.
+        assert_eq!(ev("[new TextDecoder().encoding, new TextDecoder('UTF8').encoding, new TextDecoder('latin1').encoding, new TextDecoder('utf-16le').encoding].join()"), "utf-8,utf-8,windows-1252,utf-16le");
+        assert_eq!(ev("new TextDecoder('latin1').decode(new Uint8Array([0xE9]))"), "\u{e9}");
+        assert_eq!(ev("new TextDecoder('utf-16le').decode(new Uint8Array([0x61, 0x00, 0xAC, 0x20]))"), "a\u{20ac}");
+        assert_eq!(ev("var l; try { new TextDecoder('no-such-label'); l = 'no throw'; } catch (e) { l = e.name; } l"), "RangeError");
     }
 
     #[test]

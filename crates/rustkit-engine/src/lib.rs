@@ -158,6 +158,7 @@ use rustkit_layout::{
     FontLoader,
     BoxType, Dimensions, DisplayList, ElementIdentity, LayoutBox, Position, Rect,
 };
+use std::borrow::Cow;
 use std::cell::Cell;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -2963,7 +2964,7 @@ impl Engine {
     /// What `transfer_positioning` reads from a style: position, the px
     /// offsets and z-index of a positioned box, float and clear.
     fn positioning_of(style: &ComputedStyle) -> BoxPositioning {
-        let position = if std::env::var("RK_NO_POS").is_ok() {
+        let position = if positioning_disabled() {
             Position::Static
         } else {
             match style.position {
@@ -3525,7 +3526,9 @@ impl Engine {
         }
 
         if same_tag_total > 1 {
-            segment.push_str(&format!(":nth-of-type({})", same_tag_index));
+            segment.push_str(":nth-of-type(");
+            segment.push_str(&same_tag_index.to_string());
+            segment.push(')');
         }
 
         segment
@@ -3592,7 +3595,13 @@ impl Engine {
     /// boxes must never inherit a path.
     fn child_selector_path(selector_path: &str, segment: Option<&str>) -> String {
         match (selector_path.is_empty(), segment) {
-            (false, Some(segment)) => format!("{} > {}", selector_path, segment),
+            (false, Some(segment)) => {
+                let mut path = String::with_capacity(selector_path.len() + 3 + segment.len());
+                path.push_str(selector_path);
+                path.push_str(" > ");
+                path.push_str(segment);
+                path
+            }
             _ => String::new(),
         }
     }
@@ -3606,14 +3615,14 @@ impl Engine {
         children: &[Rc<Node>],
         parent_is_foreign: bool,
     ) -> Vec<Option<String>> {
-        let mut totals: HashMap<String, usize> = HashMap::new();
+        let mut totals: HashMap<Cow<'_, str>, usize> = HashMap::new();
         for child in children {
             if let NodeType::Element { tag_name, .. } = &child.node_type {
-                *totals.entry(tag_name.to_lowercase()).or_insert(0) += 1;
+                *totals.entry(lower_tag(tag_name)).or_insert(0) += 1;
             }
         }
 
-        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut seen: HashMap<Cow<'_, str>, usize> = HashMap::new();
         children
             .iter()
             .map(|child| match &child.node_type {
@@ -3622,13 +3631,13 @@ impl Engine {
                     attributes,
                     ..
                 } => {
-                    let tag_lower = tag_name.to_lowercase();
+                    let tag_lower = lower_tag(tag_name);
                     let index = {
                         let counter = seen.entry(tag_lower.clone()).or_insert(0);
                         *counter += 1;
                         *counter
                     };
-                    let total = totals.get(&tag_lower).copied().unwrap_or(1);
+                    let total = totals.get(&*tag_lower).copied().unwrap_or(1);
                     let is_foreign = parent_is_foreign || Self::enters_foreign_content(&tag_lower);
                     Some(Self::selector_segment(
                         &tag_lower,
@@ -3706,11 +3715,11 @@ impl Engine {
                 attributes,
                 ..
             } => {
-                let tag_lower = tag_name.to_lowercase();
+                let tag_lower = lower_tag(tag_name);
 
                 // Skip rendering for certain elements
                 let is_hidden = matches!(
-                    tag_lower.as_str(),
+                    &*tag_lower,
                     "head" | "title" | "meta" | "link" | "script" | "style" | "noscript"
                 );
 
@@ -4303,7 +4312,7 @@ impl Engine {
                     .unwrap_or_default();
                 let id = attributes.get("id").cloned();
                 let mut child_ancestors: Vec<Ancestor> = Vec::with_capacity(ancestors.len() + 1);
-                child_ancestors.push(Rc::new((tag_lower.clone(), classes, id)));
+                child_ancestors.push(Rc::new((tag_lower.to_string(), classes, id)));
                 child_ancestors.extend(ancestors.iter().cloned());
 
                 // Check for ::before pseudo-element
@@ -4342,13 +4351,13 @@ impl Engine {
                 let child_segments =
                     Self::child_selector_segments(&child_nodes, children_are_foreign);
                 // Same-tag totals feed the `-of-type` pseudo-classes.
-                let mut type_totals: HashMap<String, usize> = HashMap::new();
+                let mut type_totals: HashMap<Cow<'_, str>, usize> = HashMap::new();
                 for c in child_nodes.iter() {
                     if let NodeType::Element { tag_name, .. } = &c.node_type {
-                        *type_totals.entry(tag_name.to_lowercase()).or_insert(0) += 1;
+                        *type_totals.entry(lower_tag(tag_name)).or_insert(0) += 1;
                     }
                 }
-                let mut type_seen: HashMap<String, usize> = HashMap::new();
+                let mut type_seen: HashMap<Cow<'_, str>, usize> = HashMap::new();
                 let children_parent_style: &ComputedStyle = match &unblockified {
                     Some(s) => s,
                     None => &layout_box.style,
@@ -4365,13 +4374,13 @@ impl Engine {
                     );
                     let child_sib = match &child.node_type {
                         NodeType::Element { tag_name, .. } => {
-                            let t = tag_name.to_lowercase();
-                            let type_index = *type_seen.get(&t).unwrap_or(&0);
+                            let t = lower_tag(tag_name);
+                            let type_index = *type_seen.get(&*t).unwrap_or(&0);
                             SiblingContext {
                                 index: preceding_siblings.len(),
                                 count: child_element_count,
                                 type_index,
-                                type_count: type_totals.get(&t).copied().unwrap_or(1),
+                                type_count: type_totals.get(&*t).copied().unwrap_or(1),
                                 has_children: Self::node_has_children(child),
                             }
                         }
@@ -4399,10 +4408,15 @@ impl Engine {
                             .get("class")
                             .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
                             .unwrap_or_default();
-                        let t = tag_name.to_lowercase();
+                        let t = lower_tag(tag_name);
                         *type_seen.entry(t.clone()).or_insert(0) += 1;
                         let state = ElementState::of(&t, attributes);
-                        preceding_siblings.push((t, child_classes, attributes.get("id").cloned(), state));
+                        preceding_siblings.push((
+                            t.into_owned(),
+                            child_classes,
+                            attributes.get("id").cloned(),
+                            state,
+                        ));
                     }
 
                     // Determine if box should be included in layout tree
@@ -4907,7 +4921,7 @@ impl Engine {
             _ => BoxType::Block,
         };
         let mut pseudo_box = LayoutBox::new(box_type, pseudo_style.clone());
-        if std::env::var("RK_NO_PSEUDO_POS").is_err() {
+        if !pseudo_positioning_disabled() {
             Self::transfer_positioning(&mut pseudo_box, &pseudo_style);
         }
 
@@ -4991,7 +5005,7 @@ impl Engine {
         // Apply tag-specific default styles (user-agent stylesheet)
         // Apply tag-specific default styles (Chrome UA stylesheet alignment)
         // Reference: https://chromium.googlesource.com/chromium/blink/+/master/Source/core/css/html.css
-        match tag_name.to_lowercase().as_str() {
+        match &*lower_tag(tag_name) {
             "html" => {
                 style.display = rustkit_css::Display::Block;
             }
@@ -21820,6 +21834,28 @@ fn style_share_store(found: StyleShared, style: &ComputedStyle) {
     });
 }
 
+/// `tag.to_lowercase()`, borrowed when the tag is already lowercase ASCII.
+/// The walk lowercases each element's tag several times over.
+fn lower_tag(tag: &str) -> Cow<'_, str> {
+    if tag.bytes().all(|b| b.is_ascii() && !b.is_ascii_uppercase()) {
+        Cow::Borrowed(tag)
+    } else {
+        Cow::Owned(tag.to_lowercase())
+    }
+}
+
+/// `RK_NO_POS` is set. Read once: the walk asks for every box.
+fn positioning_disabled() -> bool {
+    static SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SET.get_or_init(|| std::env::var("RK_NO_POS").is_ok())
+}
+
+/// `RK_NO_PSEUDO_POS` is set. Read once, like `positioning_disabled`.
+fn pseudo_positioning_disabled() -> bool {
+    static SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SET.get_or_init(|| std::env::var("RK_NO_PSEUDO_POS").is_ok())
+}
+
 /// A recording build with tree reuse on notes each `<img>` box's size
 /// hints under its identity, for `refresh_image_sizes`.
 fn note_snapshot_image(image_box: &LayoutBox, width: Option<f32>, height: Option<f32>) {
@@ -26843,5 +26879,34 @@ mod control_semantics_tests {
         assert_eq!(kind_of("days"), "MenuList");
         assert_eq!(kind_of("typed"), "Text");
         assert_eq!(kind_of("notes"), "TextArea");
+    }
+}
+
+#[cfg(test)]
+mod walk_smalls_tests {
+    use super::*;
+
+    #[test]
+    fn lower_tag_is_to_lowercase_and_borrows_when_it_can() {
+        for tag in ["div", "h1", "my-element", "DIV", "Svg", "foreignObject", "É", "é", "İ", ""] {
+            assert_eq!(&*lower_tag(tag), tag.to_lowercase().as_str(), "{tag:?}");
+        }
+        assert!(matches!(lower_tag("my-element"), Cow::Borrowed(_)));
+        assert!(matches!(lower_tag("DIV"), Cow::Owned(_)));
+        // Lowercase already, but not ASCII: left to `to_lowercase`.
+        assert!(matches!(lower_tag("é"), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn selector_paths_and_segments_are_spelled_as_before() {
+        assert_eq!(
+            Engine::child_selector_path("body > div.a b", Some("p:nth-of-type(12)")),
+            format!("{} > {}", "body > div.a b", "p:nth-of-type(12)"),
+        );
+        assert_eq!(Engine::child_selector_path("", Some("p")), "");
+        assert_eq!(Engine::child_selector_path("body", None), "");
+        let attributes = HashMap::new();
+        assert_eq!(Engine::selector_segment("li", &attributes, 12, 30, false), "li:nth-of-type(12)");
+        assert_eq!(Engine::selector_segment("li", &attributes, 1, 1, false), "li");
     }
 }

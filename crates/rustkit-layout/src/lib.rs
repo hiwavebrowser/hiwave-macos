@@ -12085,6 +12085,76 @@ mod tests {
     }
 
     #[test]
+    fn a_shrink_to_fit_box_is_as_wide_as_its_spaced_text() {
+        // new_tab's logo: "HIWAVE" at 48px with `letter-spacing: 0.5rem`
+        // inside an inline-block. The intrinsic width left the spacing out,
+        // so the box was 48px narrower than the line laid out in it
+        // (165.66 against Chrome's 214.80).
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 1280.0, 0.0);
+
+        // The box is an inline-block in a block, or an item of a flex row,
+        // through `layout()` or the collapse path the engine's page layout
+        // runs.
+        for flex_item in [false, true] {
+            for collapse_path in [false, true] {
+                let width_with = |letter_spacing: Length, word_spacing: Length, text: &str| {
+                    let mut text_style = ComputedStyle::new();
+                    text_style.font_family = "Helvetica".to_string();
+                    text_style.font_size = Length::Px(48.0);
+                    text_style.letter_spacing = letter_spacing;
+                    text_style.word_spacing = word_spacing;
+
+                    let mut wrapper_style = text_style.clone();
+                    let mut parent_style = ComputedStyle::new();
+                    if flex_item {
+                        parent_style.display = rustkit_css::Display::Flex;
+                    } else {
+                        wrapper_style.display = rustkit_css::Display::InlineBlock;
+                    }
+                    let mut wrapper = LayoutBox::new(BoxType::Block, wrapper_style);
+                    wrapper
+                        .children
+                        .push(LayoutBox::new(BoxType::Text(text.to_string()), text_style));
+
+                    let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+                    parent.children.push(wrapper);
+                    if collapse_path {
+                        let mut mc = MarginCollapseContext::new();
+                        let mut fc = FloatContext::new();
+                        parent.layout_with_collapse(&cb, &mut mc, &mut fc);
+                    } else {
+                        parent.layout(&cb);
+                    }
+                    parent.children[0].dimensions.content.width
+                };
+                let case = format!("flex_item={flex_item} collapse_path={collapse_path}");
+
+                let plain = width_with(Length::Zero, Length::Zero, "HIWAVE");
+                assert!(plain > 100.0, "{case}: sanity: {plain}");
+                // Six letters, 8px after each.
+                let px = width_with(Length::Px(8.0), Length::Zero, "HIWAVE");
+                assert!(
+                    (px - (plain + 48.0)).abs() < 0.01,
+                    "{case}: px: {px} vs {plain} + 48"
+                );
+                let rem = width_with(Length::Rem(0.5), Length::Zero, "HIWAVE");
+                assert!(
+                    (rem - (plain + 48.0)).abs() < 0.01,
+                    "{case}: rem: {rem} vs {plain} + 48"
+                );
+                // `word-spacing` widens each space.
+                let words = width_with(Length::Zero, Length::Zero, "HI WAVE");
+                let spaced = width_with(Length::Zero, Length::Px(10.0), "HI WAVE");
+                assert!(
+                    (spaced - (words + 10.0)).abs() < 0.01,
+                    "{case}: word: {spaced} vs {words} + 10"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_inline_block_auto_width_shrinks_to_fit() {
         // CSS2 §10.3.9: an atomic inline with width:auto shrinks to its
         // content, it does not fill the containing block. Found on the

@@ -1904,6 +1904,7 @@ pub fn layout_grid_container(
     // the track-sizing pass only had estimate_content_height (blind to
     // wrapped text), so auto rows can be far too short.
     let mut real_heights: Vec<Option<f32>> = vec![None; positions.len()];
+    let container_align_items = container.style.align_items;
     let mut phase9_idx: usize = 0;
     for child in container.children.iter_mut() {
         if child.style.display == Display::None {
@@ -1914,11 +1915,24 @@ pub fn layout_grid_container(
 
         if !child.children.is_empty() {
             if child.style.display.is_flex() {
-                // Nested flex container
+                // Nested flex container. Phase 8 handed it its grid area; the
+                // flex pass sizes an auto-height container by its content and
+                // writes that over the area. The content height is what
+                // Phase 9.5 sizes the row from, and a stretched item gets its
+                // area back: it used to keep the content height unless a row
+                // repair happened to fire, so a flex card beside a taller
+                // sibling was 38px in a 100px row.
+                let area_height = child.dimensions.content.height;
                 let child_containing = child.dimensions.clone();
                 crate::flex::layout_flex_container(child, &child_containing);
+                let content_height = child.dimensions.content.height;
                 if let Some(slot) = real_heights.get_mut(item_idx) {
-                    *slot = Some(child.dimensions.content.height);
+                    *slot = Some(content_height);
+                }
+                if area_height > content_height
+                    && stretches_to_its_row(child, &container_align_items)
+                {
+                    child.dimensions.content.height = area_height;
                 }
             } else if child.style.display.is_grid() {
                 // Nested grid container
@@ -2616,6 +2630,42 @@ pub fn layout_grid_container(
         }
     }
 
+    // Phase 9.8: a flex container that is a grid item lays its items out at
+    // the item's USED height.
+    //
+    // Phase 9 ran the item's flex layout to learn its content height, and an
+    // auto-height flex container aligns its items inside that content height.
+    // The passes above then fix the item's height (its row for the default
+    // `stretch`, the ratio in 9.6), and that height is definite when the
+    // item's contents are laid out, as a stretched flex item's is
+    // (css-flexbox-1 §9.4.11). Chrome 148 centres an `align-items: center`
+    // child in the stretched item; here it stayed at the top, where the
+    // content-height pass had put it. new_tab's `.shortcut` rows beside a
+    // taller one had every child 5px above Chrome's.
+    {
+        let mut idx = 0usize;
+        for child in container.children.iter_mut() {
+            if child.style.display == Display::None {
+                continue;
+            }
+            let item_idx = idx;
+            idx += 1;
+            if !child.style.display.is_flex()
+                || child.children.is_empty()
+                || !matches!(child.style.height, Length::Auto)
+            {
+                continue;
+            }
+            let Some(Some(content_height)) = real_heights.get(item_idx).copied() else {
+                continue;
+            };
+            let used = child.dimensions.content.height;
+            if used - content_height > 0.01 {
+                crate::flex::layout_flex_container_at_used_height(child, used);
+            }
+        }
+    }
+
     debug!(
         "Grid layout complete: {} columns, {} rows, {} items",
         grid.column_count(),
@@ -2904,16 +2954,35 @@ fn is_collapsible_whitespace_only(child: &LayoutBox) -> bool {
 /// measured with the shaper line layout uses so the intrinsic size and the
 /// laid-out line agree about the same character.
 fn collapsed_space_width(style: &ComputedStyle) -> f32 {
+    spaced_text_width(" ", style)
+}
+
+/// Width of `text` on one line in `style`, `letter-spacing` and
+/// `word-spacing` included, as line layout measures it (`shape_line`).
+///
+/// The intrinsic widths left the spacing out, so a shrink-to-fit box around
+/// spaced text was narrower than its text: new_tab's "HIWAVE" logo (48px,
+/// `letter-spacing: 0.5rem`, in an inline-block) was 165.66px wide where
+/// Chrome's is 214.80, and sat 24.6px right of centre.
+fn spaced_text_width(text: &str, style: &ComputedStyle) -> f32 {
     let font_size = match style.font_size {
         Length::Px(px) => px,
         _ => 16.0,
     };
-    crate::measure_text_advanced(
-        " ",
+    let spacing = |length: &Length| match *length {
+        Length::Px(px) => px,
+        Length::Em(em) => em * font_size,
+        Length::Rem(rem) => rem * 16.0,
+        _ => 0.0,
+    };
+    crate::measure_text_with_spacing(
+        text,
         &style.font_family,
         font_size,
         style.font_weight,
         style.font_style,
+        spacing(&style.letter_spacing),
+        spacing(&style.word_spacing),
     )
     .width
 }
@@ -2924,13 +2993,7 @@ fn text_min_content_width(text: &str, style: &ComputedStyle) -> f32 {
     if text.trim().is_empty() {
         return 0.0;
     }
-    let font_size = match style.font_size {
-        Length::Px(px) => px,
-        _ => 16.0,
-    };
-    let measure = |s: &str| {
-        crate::measure_text_advanced(s, &style.font_family, font_size, style.font_weight, style.font_style).width
-    };
+    let measure = |s: &str| spaced_text_width(s, style);
     if matches!(style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre) {
         return measure(text);
     }
@@ -2942,11 +3005,7 @@ fn text_max_content_width(text: &str, style: &ComputedStyle) -> f32 {
     if text.trim().is_empty() {
         return 0.0;
     }
-    let font_size = match style.font_size {
-        Length::Px(px) => px,
-        _ => 16.0,
-    };
-    crate::measure_text_advanced(text, &style.font_family, font_size, style.font_weight, style.font_style).width
+    spaced_text_width(text, style)
 }
 
 /// Estimate of a box's max-content (border-box) width: the width the box
@@ -3733,6 +3792,16 @@ fn apply_justify_self(
             }
         },
     }
+}
+
+/// Whether a grid item fills its area on the block axis: `align-self`
+/// resolves to `stretch` and its height is `auto` (css-align-3 §4.2).
+fn stretches_to_its_row(child: &LayoutBox, items_align: &AlignItems) -> bool {
+    let stretch = match child.style.align_self {
+        AlignSelf::Auto => *items_align == AlignItems::Stretch,
+        other => other == AlignSelf::Stretch,
+    };
+    stretch && matches!(child.style.height, Length::Auto)
 }
 
 /// Apply align-self alignment.
@@ -7065,13 +7134,151 @@ mod tests {
 
         layout_grid_container(&mut container, 262.0, 600.0);
 
-        // The ROW is the subject: a flex-container item re-derives its own
-        // auto height from its content and is not stretched back to a row
-        // that did not move (pre-existing; the grow path has the same gap).
         let h = container.dimensions.content.height;
         assert!(
             h >= 99.5,
             "a minmax(100px, auto) row must keep its 100px floor, got {h}"
+        );
+    }
+
+    /// A grid of one row: a 100px-tall block beside a flex container holding
+    /// one 30x20 box. `item` styles the flex container.
+    fn flex_item_beside_a_tall_sibling(item: impl FnOnce(&mut ComputedStyle)) -> LayoutBox {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(200.0), TrackSize::Px(200.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut tall = ComputedStyle::new();
+        tall.height = Length::Px(100.0);
+        container.children.push(LayoutBox::new(BoxType::Block, tall));
+
+        let mut flex_style = ComputedStyle::new();
+        flex_style.display = Display::Flex;
+        item(&mut flex_style);
+        let mut flex = LayoutBox::new(BoxType::Block, flex_style);
+        let mut mark = ComputedStyle::new();
+        mark.width = Length::Px(30.0);
+        mark.height = Length::Px(20.0);
+        flex.children.push(LayoutBox::new(BoxType::Block, mark));
+        container.children.push(flex);
+
+        layout_grid_container(&mut container, 400.0, 0.0);
+        container
+    }
+
+    /// A flex container that is a grid item fills its row (`align-self`'s
+    /// default is `stretch`) and aligns its items in that height. The flex
+    /// pass sizes an auto-height container by its content, and nothing gave
+    /// the row back unless a row repair fired: beside a 100px sibling the
+    /// item was 20px tall, and its `align-items: center` child sat at the top.
+    /// Chrome 148: the item is 100 tall and the child's top is at 40.
+    #[test]
+    fn a_flex_grid_item_fills_its_row_and_aligns_in_it() {
+        let container = flex_item_beside_a_tall_sibling(|s| s.align_items = AlignItems::Center);
+        let item = &container.children[1];
+        let mark = &item.children[0];
+        assert!(
+            (item.dimensions.content.height - 100.0).abs() < 0.01,
+            "the flex item fills the 100px row, got {}",
+            item.dimensions.content.height
+        );
+        assert!(
+            (mark.dimensions.content.y - item.dimensions.content.y - 40.0).abs() < 0.01,
+            "a 20px box centres at 40 in a 100px item, got {}",
+            mark.dimensions.content.y - item.dimensions.content.y
+        );
+        assert!(
+            (mark.dimensions.content.height - 20.0).abs() < 0.01,
+            "the box keeps its own height, got {}",
+            mark.dimensions.content.height
+        );
+    }
+
+    /// The same on a column container's main axis: `justify-content: center`
+    /// distributes the stretched height.
+    #[test]
+    fn a_column_flex_grid_item_justifies_in_its_row() {
+        let container = flex_item_beside_a_tall_sibling(|s| {
+            s.flex_direction = rustkit_css::FlexDirection::Column;
+            s.justify_content = rustkit_css::JustifyContent::Center;
+            s.align_items = AlignItems::FlexStart;
+        });
+        let item = &container.children[1];
+        let mark = &item.children[0];
+        assert!(
+            (item.dimensions.content.height - 100.0).abs() < 0.01,
+            "the flex item fills the 100px row, got {}",
+            item.dimensions.content.height
+        );
+        assert!(
+            (mark.dimensions.content.y - item.dimensions.content.y - 40.0).abs() < 0.01,
+            "a 20px box centres at 40 in a 100px column, got {}",
+            mark.dimensions.content.y - item.dimensions.content.y
+        );
+    }
+
+    /// `align-self: start` opts the item out: it keeps its content height at
+    /// the top of the row.
+    #[test]
+    fn a_start_aligned_flex_grid_item_keeps_its_content_height() {
+        let container = flex_item_beside_a_tall_sibling(|s| {
+            s.align_self = AlignSelf::FlexStart;
+            s.align_items = AlignItems::Center;
+        });
+        let item = &container.children[1];
+        assert!(
+            (item.dimensions.content.height - 20.0).abs() < 0.01,
+            "an `align-self: start` item is as tall as its content, got {}",
+            item.dimensions.content.height
+        );
+        assert!(
+            (item.children[0].dimensions.content.y - item.dimensions.content.y).abs() < 0.01,
+            "its child sits at its top"
+        );
+    }
+
+    /// The row a repair pass grew: two flex items share an auto row, one
+    /// holds a 60px box and the other a 20px box. The estimate sees neither
+    /// (no text), Phase 9.5 grows the row to 60, and the short item's child
+    /// centres in the grown row.
+    #[test]
+    fn a_flex_grid_item_realigns_after_its_row_grows() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(200.0), TrackSize::Px(200.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        for h in [60.0, 20.0] {
+            let mut flex_style = ComputedStyle::new();
+            flex_style.display = Display::Flex;
+            flex_style.align_items = AlignItems::Center;
+            let mut flex = LayoutBox::new(BoxType::Block, flex_style);
+            // The mark is wrapped so the estimate (which reads a child's own
+            // `height`) does not see it.
+            let mut wrap = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            let mut mark = ComputedStyle::new();
+            mark.width = Length::Px(30.0);
+            mark.height = Length::Px(h);
+            wrap.children.push(LayoutBox::new(BoxType::Block, mark));
+            flex.children.push(wrap);
+            container.children.push(flex);
+        }
+
+        layout_grid_container(&mut container, 400.0, 0.0);
+
+        let short = &container.children[1];
+        assert!(
+            (short.dimensions.content.height - 60.0).abs() < 0.01,
+            "the short item fills the 60px row, got {}",
+            short.dimensions.content.height
+        );
+        let wrap = &short.children[0];
+        assert!(
+            (wrap.dimensions.content.y - short.dimensions.content.y - 20.0).abs() < 0.01,
+            "its 20px child centres at 20 in the 60px row, got {}",
+            wrap.dimensions.content.y - short.dimensions.content.y
         );
     }
 

@@ -889,6 +889,45 @@ const WRAPPERS_JS: &str = r#"
     var elementProtos = { input: HTMLInputElement.prototype,
                           textarea: HTMLTextAreaElement.prototype, form: HTMLFormElement.prototype,
                           script: HTMLScriptElement.prototype };
+    // The rest of the HTML element interfaces (HTML §4), so `el instanceof
+    // HTMLAnchorElement` and `typeof HTMLImageElement` work on real nodes.
+    // Tags without an interface of their own stay plain HTMLElement.
+    (function () {
+        var HTMLMediaElement = iface('HTMLMediaElement', HTMLElement);
+        var byTag = {
+            a: 'HTMLAnchorElement', area: 'HTMLAreaElement', audio: 'HTMLAudioElement', base: 'HTMLBaseElement',
+            body: 'HTMLBodyElement', br: 'HTMLBRElement', button: 'HTMLButtonElement', canvas: 'HTMLCanvasElement',
+            data: 'HTMLDataElement', details: 'HTMLDetailsElement', dialog: 'HTMLDialogElement', div: 'HTMLDivElement',
+            dl: 'HTMLDListElement', embed: 'HTMLEmbedElement', fieldset: 'HTMLFieldSetElement', head: 'HTMLHeadElement',
+            h1: 'HTMLHeadingElement', h2: 'HTMLHeadingElement', h3: 'HTMLHeadingElement', h4: 'HTMLHeadingElement',
+            h5: 'HTMLHeadingElement', h6: 'HTMLHeadingElement', hr: 'HTMLHRElement', html: 'HTMLHtmlElement',
+            iframe: 'HTMLIFrameElement', img: 'HTMLImageElement', label: 'HTMLLabelElement', legend: 'HTMLLegendElement',
+            li: 'HTMLLIElement', link: 'HTMLLinkElement', map: 'HTMLMapElement', meta: 'HTMLMetaElement',
+            meter: 'HTMLMeterElement', object: 'HTMLObjectElement', ol: 'HTMLOListElement', optgroup: 'HTMLOptGroupElement',
+            option: 'HTMLOptionElement', output: 'HTMLOutputElement', p: 'HTMLParagraphElement', picture: 'HTMLPictureElement',
+            pre: 'HTMLPreElement', progress: 'HTMLProgressElement', blockquote: 'HTMLQuoteElement', q: 'HTMLQuoteElement',
+            select: 'HTMLSelectElement', slot: 'HTMLSlotElement', source: 'HTMLSourceElement', span: 'HTMLSpanElement',
+            style: 'HTMLStyleElement', table: 'HTMLTableElement', td: 'HTMLTableCellElement', th: 'HTMLTableCellElement',
+            tr: 'HTMLTableRowElement', thead: 'HTMLTableSectionElement', tbody: 'HTMLTableSectionElement',
+            tfoot: 'HTMLTableSectionElement', template: 'HTMLTemplateElement', time: 'HTMLTimeElement',
+            title: 'HTMLTitleElement', track: 'HTMLTrackElement', ul: 'HTMLUListElement', video: 'HTMLVideoElement'
+        };
+        var made = {};
+        Object.keys(byTag).forEach(function (tag) {
+            var name = byTag[tag];
+            if (!made[name]) {
+                var parent = (name === 'HTMLAudioElement' || name === 'HTMLVideoElement') ? HTMLMediaElement : HTMLElement;
+                made[name] = iface(name, parent);
+            }
+            elementProtos[tag] = made[name].prototype;
+        });
+        // Interface objects with no element of their own here: the checks
+        // `x instanceof HTMLUnknownElement` / `SVGElement` still need a RHS.
+        iface('HTMLUnknownElement', HTMLElement);
+        var SVGElement = iface('SVGElement', Element);
+        var SVGGraphicsElement = iface('SVGGraphicsElement', SVGElement);
+        elementProtos.svg = iface('SVGSVGElement', SVGGraphicsElement).prototype;
+    })();
     var DocumentFragment = iface('DocumentFragment', Node);
     var NodeList = iface('NodeList');
     var HTMLCollection = iface('HTMLCollection');
