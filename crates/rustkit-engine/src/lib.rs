@@ -2087,6 +2087,7 @@ impl Engine {
         let loader = self.loader.clone();
         let Some(view) = self.views.get_mut(&id) else { return };
         let document_url = view.url.clone();
+        let view_document = view.document.clone();
         let Some(bindings) = view.bindings.as_ref() else { return };
         let log = &mut view.script_log;
         bindings.set_loop_iteration_limit(loop_limit);
@@ -2146,8 +2147,35 @@ impl Engine {
                 .unwrap_or(message)
         };
 
+        // Import maps (inline only, as the spec has it) are read before any
+        // module is resolved. A map that is not usable is reported and
+        // changes nothing.
+        if let Some(document) = view_document {
+            let mut maps: Vec<String> = Vec::new();
+            document.traverse(|node| {
+                if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) == Some(true)
+                    && node.get_attribute("src").is_none()
+                    && node
+                        .get_attribute("type")
+                        .map(|t| t.trim().eq_ignore_ascii_case("importmap"))
+                        .unwrap_or(false)
+                {
+                    maps.push(node.text_content());
+                }
+            });
+            for text in maps {
+                if let Err(message) = bindings.add_import_map(&text) {
+                    log.push(ScriptRecord {
+                        source: "importmap".into(),
+                        bytes: text.len(),
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(format!("import map: {message}")),
+                    });
+                }
+            }
+        }
         let _ = bindings.set_ready_state("loading");
-        let mut modules_fetched = 0usize;
+        let modules_fetched = Cell::new(0usize);
         for (label, _, source, node_id, is_module) in runnable {
             let text = match source {
                 Ok(text) => text,
@@ -2212,15 +2240,17 @@ impl Engine {
                     Ok(Ok(handle)) => {
                         if let (Some(policy), Some(document)) = (&policy, &document_url) {
                             let remaining = budget.saturating_sub(started.elapsed());
+                            let mut count = modules_fetched.get();
                             let found = script_net::pump_modules(
                                 bindings,
                                 policy,
                                 &loader,
                                 tokio::time::Instant::now() + remaining,
                                 document,
-                                &mut modules_fetched,
+                                &mut count,
                             )
                             .await;
+                            modules_fetched.set(count);
                             if found.poisoned {
                                 poisoned.set(true);
                             }
@@ -2286,21 +2316,28 @@ impl Engine {
         let pump = |timers: Option<(u64, u32)>| {
             let policy = policy.clone();
             let loader = loader.clone();
+            let document = document_url.clone();
+            let modules_fetched = &modules_fetched;
             async move {
                 match policy {
                     Some(policy) => {
                         let remaining = budget.saturating_sub(started.elapsed());
-                        Some(
-                            script_net::pump(
-                                bindings,
-                                &policy,
-                                &loader,
-                                tokio::time::Instant::now() + remaining,
-                                net_rounds,
-                                timers,
-                            )
-                            .await,
+                        let mut count = modules_fetched.get();
+                        // Network requests and dynamic imports alternate:
+                        // one can start the other.
+                        let found = script_net::pump_all(
+                            bindings,
+                            &policy,
+                            &loader,
+                            tokio::time::Instant::now() + remaining,
+                            net_rounds,
+                            timers,
+                            document.as_ref(),
+                            &mut count,
                         )
+                        .await;
+                        modules_fetched.set(count);
+                        Some(found)
                     }
                     None => None,
                 }

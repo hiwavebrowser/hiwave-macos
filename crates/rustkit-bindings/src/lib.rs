@@ -1114,6 +1114,13 @@ impl DomBindings {
         self.runtime.borrow_mut().set_module_base(url);
     }
 
+    /// Register a `<script type=importmap>` document (see
+    /// `JsRuntime::add_import_map`): per-entry warnings, or an error when the
+    /// document is unusable.
+    pub fn add_import_map(&self, text: &str) -> Result<Vec<String>, String> {
+        self.runtime.borrow_mut().add_import_map(text)
+    }
+
     /// Parse and start a module (see `JsRuntime::begin_module`).
     pub fn begin_module(&self, url: &str, source: &str) -> Result<rustkit_js::ModuleHandle, String> {
         self.runtime.borrow_mut().begin_module(url, source)
