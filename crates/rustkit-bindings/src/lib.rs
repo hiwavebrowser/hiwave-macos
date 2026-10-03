@@ -35,6 +35,8 @@ mod dom_utils_tests;
 #[cfg(test)]
 mod web_cssom_tests;
 #[cfg(test)]
+mod form_controls_tests;
+#[cfg(test)]
 mod web_history_tests;
 mod web_crypto;
 mod web_url;
@@ -525,6 +527,8 @@ impl DomBindings {
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
         // insertRule writes into the <style>'s text, which the engine restyles from.
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
+        // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
+        runtime.evaluate_script(include_str!("web_forms.js"))?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
         runtime.evaluate_script(include_str!("web_history.js"))?;
