@@ -14445,3 +14445,179 @@ Two things worth keeping from this:
 
 Twelve minutes from R2-STAMP to merged, by a person. The watch is released and
 the safety-net check-in cancelled.
+
+## 2026-10-03
+
+**Metric: `3/26` on macOS before, and `3/26` predicted after.** The unit
+completed and it does NOT move the metric, which was knowable before the work
+started and is the honest headline: `shelf` is blocked on geometry AND paint,
+tonight closes its geometry, and its paint stays RED. What should move is the
+geometry column, **15/26 → 16/26**, and the board's join failures, **8 → 5**.
+
+**P-item: `shelf`'s three `missing_box` join failures — the whole case's
+geometry. COMPLETE.** Picked from the macOS board under the ratified
+geometry-first amendment; named in last night's *latent* list as "the cheapest
+geometry-green flip available, not started".
+
+### The unit, and why it was the right one
+
+`shelf` is the only case on the board with **zero delta failures** — its
+geometry is already correct everywhere Gate A can see it — and exactly three
+join failures: the inline `<svg>` and its `circle` and `path`. So it is the one
+case a single non-text fix takes geometry-green, and nothing about it is
+text-exposed.
+
+Provenance: `parity.yml` run **37096150470** (10-03 04:19 UTC, `macos-14`),
+`parity-oracle` sha256-verified against GitHub's recorded digest
+(`dbc5168b…`), plus all four `parity-shard-N` artifacts (`2772fb7c…`,
+`c9fb0840…`, `d019121b…`, `83388c4d…`) for the macOS `layout.json` captures.
+That run's merge ref is `develop` at `382efbe` + #465; `develop` is now
+`092a354`, which adds only #464 (realsite scripts, no engine), so **the board
+and tonight's branch base are the same engine.** Again by timing, not by
+mechanism — **G5 is still unbuilt** and the next night may not assume this.
+
+### Two defects, and the first one is the interesting measurement
+
+**1. The `<svg>` box carried no identity.** The `tag_lower == "svg"` branch is
+its own early return and neither of its two exits called `attach_identity` —
+the same defect class `9fcfbdf` closed for `img`/`input`/`button`/`textarea`/
+`select`; the svg branch was added later and was missed.
+
+The box RustKit already computed for it is **`{x: 29, y: 67.5, w: 14, h: 14}`,
+which is Chrome's rect to the bit.** The geometry was right all along and the
+instrument could not see it. A whole case sat RED on an export omission.
+
+**2. The shape elements had no box to join at all, and never could.** SVG
+shapes generate no CSS box, so they are absent from the layout tree by
+construction — while Chrome's baseline is `getBoundingClientRect()` over
+`querySelectorAll('*')`, which reports a rect for every rendered shape. Those
+two rows were `missing_box` failures **no engine fix could ever clear**: a
+ceiling on the metric that nobody chose. They are now exported as children of
+the svg's box under `"type": "svg_shape"`, named so no reader mistakes them for
+CSS boxes.
+
+Both contracts are reused rather than restated, because a parallel
+implementation is exactly how a confident wrong join gets built:
+
+- the **join key** comes from `child_selector_segments(.., is_foreign=true)` —
+  the machinery `verify_selector_key.mjs` pins to Chrome's `getSelector`
+  (1757/1757), foreign-content class rule included. That rule was already
+  written, and its comment already named shelf: a previous night built it in
+  anticipation and nothing had ever reached it.
+- the **transform** mirrors `SvgDocument::render_with_color` exactly, over the
+  CONTENT box, which is what `render_image` hands the painter. The point is to
+  report the geometry the engine will PAINT, not a second opinion about it.
+
+**Refusal is the load-bearing half.** A shape not modelled exactly emits
+NOTHING, so Gate A files it `missing_box` and scores it UNMEASURED — a rule
+that already holds — whereas a box from arithmetic that is merely close would
+be compared and believed. Refused: any `transform` and its whole subtree; any
+path with a curve or arc (a Bezier's control-point bbox is a SUPERSET of the
+tight bbox Chrome reports); `text`/`tspan`, `use`, `image`/`foreignObject`; a
+letterboxed fit (Chrome's default `xMidYMid` CENTERS, `render_with_color` does
+not); a non-default `object-fit`; a missing or degenerate viewBox.
+
+### Commits
+
+On `atlas/n73-unit` (off `develop 092a354`):
+
+- `15dc1e8` — an inline `<svg>` box carries its element identity.
+- `7fe1044` — export inline SVG shape geometry so the oracle can join it.
+
+### Measured — Linux/SwiftShader. MECHANICS, NOT A RECEIPT
+
+A/B at the same base, 13 cases, **1829 boxes**, box by box on all five rects:
+
+| | |
+|---|---|
+| geometry moved, whole corpus | **0** |
+| boxes removed | **0** |
+| boxes added | **2** — shelf's `circle` and `path`, nothing else |
+| identity-only changes | **1** — the svg box gaining its selector |
+| `frame.ppm` sha256, all 13 | **BIT-IDENTICAL** |
+
+**Stop rule: did not fire.** No axis of any box of any case worsened.
+
+Gate A on this seat, `shelf`: **join 3 → 0, boxes compared 9/12 → 12/12.** The
+three newly joined boxes fail on **y only, by exactly −1.5px each** — one
+inherited offset from the wrapper's height, i.e. this seat's text-shaper stub,
+not three defects. x, width and height are green. On macOS the svg box's
+content box is `{29, 67.5, 14, 14}` (bit-identical to Chrome), so that −1.5 is
+zero there and the mapping lands the shapes within **2.5e-06 px** of Chrome's
+committed values. Gate A's tolerance is 0.5.
+
+Scope was measured, not estimated: the whole 26-case gating corpus contains
+inline SVG in **exactly one case** with **exactly these three elements**, so
+nothing else can move.
+
+### Mutation-check results
+
+**10 probes across both commits, 10 RED, control green before and after.**
+
+| probe | result |
+|---|---|
+| M1 delete `attach_identity` on the svg cache-HIT exit | RED |
+| M2 delete it on the cache-MISS exit | RED |
+| M3 delete both | RED |
+| M4 map from the border box, not the content box | RED |
+| M5 drop the viewBox min-x/min-y origin shift | RED |
+| M6 bound a curved path by its control points | RED |
+| M7 ignore the `transform` attribute | RED |
+| M8 leave the shape's size unscaled | RED |
+| M9 use the circle's stroke bbox instead of fill | RED |
+| M10 do not recurse past the svg's direct children | RED |
+
+**M4 and M5 SURVIVED the first sweep**, both for the same reason, and it is the
+shape this digest has now named seven sweeps running — *the guard written
+against the example rather than the rule*. `shelf`'s svg has no padding or
+border (content box **is** border box) and its viewBox is `0 0 24 24` (the
+origin shift is a no-op), so the one case in the corpus cannot distinguish the
+right implementation from either wrong one. Closed by
+`a_shape_at_the_viewbox_origin_paints_at_the_content_origin`: viewBox
+`10 20 24 24` at scale 1, nonzero padding and border, and a circle whose user
+bbox sits exactly at the viewBox origin, so the only correct answer is the
+content box's origin. It asserts the border box differs from the content box by
+more than Gate A's tolerance *first*, or M4 would still be indistinguishable.
+
+M1/M2 also needed separate cover: the svg branch's two exits build different
+box types (`Image` on a cache hit, `Block` on a miss), and the existing
+`a_replaced_element_is_built_with_its_element_identity` collects
+`Image | FormControl` only, so it cannot see the miss path at all.
+
+### Decisions needed from Pete
+
+1. **Is `"type": "svg_shape"` in `layout.json` the right home for this?** It is
+   real measured geometry under a pinned join key, and refusing to emit it
+   leaves a permanent ceiling on the metric — but it is not a CSS box, and
+   `layout.json` is otherwise the layout tree. Say so now if it should live in
+   a separate dump instead.
+2. **G5 (record the base SHA in the gate JSON) is still unbuilt and tonight got
+   its base match by timing again** — second night running. Build it next time
+   a night has no clean unit?
+3. Unchanged and not re-argued: the queue order is still formally unratified
+   against the measured board (`settings`, the largest row, is ~83%
+   text-exposed, i.e. mostly P4).
+
+### Anything that surprised me
+
+**A whole case was RED on an export omission, not an engine defect.** `shelf`
+had zero delta failures before tonight: every box Gate A could see was already
+within tolerance, and the case was failing because three boxes were invisible
+to the join — one of them computed bit-identically to Chrome. I expected the
+cheapest geometry flip on the board to be a small layout fix and it was not a
+layout fix at all.
+
+**The corollary is worth stating plainly, because it cuts against this
+campaign's own instinct.** The campaign exists because the old board reported
+numbers that were too kind. This is the first unit where the instrument was too
+HARSH — it scored correct geometry as a failure — and the direction of the
+error does not make it less of an instrument defect. It is also bounded: 8 join
+failures remain on the board (`form-controls` 4 `select > option`,
+`form-elements` 1 `phantom_box`, and shelf's 3 which this closes), so there are
+at most 5 more boxes anywhere that could be hiding the same thing.
+
+**And the trap I nearly walked into.** The obvious shortcut — teach Gate A to
+exclude SVG-namespace elements from Chrome's side — would have flipped `shelf`
+green in about ten lines. It is the Goodhart substitution this campaign exists
+to end: weakening the oracle to move a number. Measuring the shapes is more
+work and is the only version that is true.
