@@ -28,6 +28,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+mod node_apis;
+
 /// Does this element match this selector list? `None` means the list is
 /// invalid, and script throws `SyntaxError`.
 pub type SelectorMatchFn = Rc<dyn Fn(&Rc<Node>, &str) -> Option<bool>>;
@@ -962,7 +964,7 @@ pub(crate) fn install(
     )?;
 
     runtime.evaluate_script(WRAPPERS_JS)?;
-    Ok(())
+    node_apis::install(runtime, host)
 }
 
 /// Wrapper prototypes, the identity cache, and the `document` read
@@ -1073,12 +1075,16 @@ const WRAPPERS_JS: &str = r#"
         if (!s) throw new TypeError('Illegal invocation');
         return s;
     }
+    // An element's interface; node_apis.js extends this by namespace.
+    var elementProto = function (id) {
+        return elementProtos[N.info(gen, id, 'local')] || HTMLElement.prototype;
+    };
     function wrap(id) {
         if (typeof id !== 'number') return null;
         var w = cache.get(id);
         if (w) return w;
         var t = N.info(gen, id, 'type');
-        var proto = t === 1 ? elementProtos[N.info(gen, id, 'local')] || HTMLElement.prototype
+        var proto = t === 1 ? elementProto(id)
                   : t === 3 ? Text.prototype : t === 9 ? Document.prototype
                   : t === 8 ? Comment.prototype : t === 11 ? DocumentFragment.prototype
                   : Node.prototype;
@@ -1651,10 +1657,7 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(out, 'length', { value: els.length });
         return out;
     });
-    // Focus is engine-side (pin §4) and not reachable from script yet; these
-    // keep handlers that call them (`input.focus()` after a submit) running.
-    HTMLElement.prototype.focus = function () {};
-    HTMLElement.prototype.blur = function () {};
+    // focus()/blur() and document.activeElement are in node_apis.js.
 
     Element.prototype.getAttribute = function (name) {
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
@@ -2266,6 +2269,34 @@ const WRAPPERS_JS: &str = r#"
             if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
         }
     }
+    // An element's on<type> handler: the property when one was assigned
+    // (`null` included, which turns the handler off), else its `on<type>`
+    // content attribute (HTML §8.1.8.1). The attribute's text is the body of
+    // `function (event)`, with the element and its document in scope,
+    // compiled on first use and again when the text changes. A body that
+    // does not compile is logged once and is no handler.
+    var INLINE = new WeakMap();
+    function handlerOf(t, type) {
+        var h = t['on' + type];
+        if (h !== undefined || !t[SLOT] || t.nodeType !== 1) return h;
+        var src = t.getAttribute('on' + type);
+        if (src === null) return h;
+        var all = INLINE.get(t);
+        if (!all) { all = {}; INLINE.set(t, all); }
+        var c = all[type];
+        if (!c || c.src !== src) {
+            c = all[type] = { src: src, fn: null };
+            try {
+                c.fn = new Function('event',
+                    'with (this.ownerDocument || {}) { with (this) {\n' + src + '\n} }');
+            } catch (e) {
+                var msg;
+                try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
+                if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
+            }
+        }
+        return c.fn;
+    }
     function invoke(t, event, phase, capture) {
         event.currentTarget = t;
         event.eventPhase = phase;
@@ -2280,7 +2311,7 @@ const WRAPPERS_JS: &str = r#"
             }
         }
         // The on<type> handler runs with the non-capture listeners.
-        var h = capture || event[STOP_NOW] ? null : t['on' + event.type];
+        var h = capture || event[STOP_NOW] ? null : handlerOf(t, event.type);
         if (typeof h === 'function' && callListener(t, h, event) === false && event.cancelable) {
             event.defaultPrevented = true;
         }
@@ -2404,6 +2435,15 @@ const WRAPPERS_JS: &str = r#"
         delete doc[k];
         g[k] = EventTarget.prototype[k];
     });
+
+    // For node_apis.js, which runs next and deletes it.
+    g.__rkNodeInternals = {
+        wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
+        extendElementProto: function (f) {
+            var base = elementProto;
+            elementProto = function (id) { return f(id, base); };
+        }
+    };
 
     g.__rustkit_dom_reset = function (newGen) {
         gen = newGen;
