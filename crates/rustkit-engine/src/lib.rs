@@ -17633,11 +17633,12 @@ div { width: 50px; height: 20px; }
         assert_eq!(
             seen,
             vec![
-                ("/cross.png".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
                 ("/shown.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
             ],
-            "one request per background the shield allows, each with the policy's Referer; \
-             none for the blocked one, none for a box that is not rendered"
+            "one request per same-origin background the shield allows, with the policy's Referer; \
+             none for the blocked one, none for a box that is not rendered, and none for the \
+             cross-origin loopback `localhost` image: the subresource vet only lets a local page \
+             reach its own origin (the origin-only Referer is pinned in security.rs)"
         );
 
         let at = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
