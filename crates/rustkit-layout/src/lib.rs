@@ -9137,6 +9137,64 @@ mod tests {
         assert_eq!(blink_baseline_offset(16.0, 15.46875, 3.375), 14.0);
     }
 
+    /// The one tile a no-repeat url background paints in a 300x200 box,
+    /// for a 240x210 image.
+    fn url_background_tile(size: rustkit_css::BackgroundSize) -> Rect {
+        let mut style = ComputedStyle::new();
+        style.background_layers = vec![rustkit_css::BackgroundLayer {
+            image: rustkit_css::BackgroundImage::Url("dinosaur.png".to_string()),
+            size,
+            repeat: rustkit_css::BackgroundRepeat::NoRepeat,
+            ..Default::default()
+        }];
+        let mut card = LayoutBox::new(BoxType::Block, style);
+        card.dimensions.content = Rect::new(10.0, 20.0, 300.0, 200.0);
+
+        let list = DisplayList::build(&card);
+        let (rect, size, position, repeat) = list
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::BackgroundImage { rect, size, position, repeat, .. } => {
+                    Some((*rect, size.clone(), *position, *repeat))
+                }
+                _ => None,
+            })
+            .expect("a url background must emit a BackgroundImage command");
+        let tiles = background_tiles(rect, &size, position, repeat, 240.0, 210.0);
+        assert_eq!(tiles.len(), 1, "{tiles:?}");
+        tiles[0]
+    }
+
+    #[test]
+    fn test_url_background_percentage_size_resolves_against_its_box() {
+        // Percentages ride the Explicit variant as negative values. The
+        // gradient lane resolves them (calculate_background_rect); the url
+        // lane passed them through, so `background-size: 50% auto` reached
+        // the painter as a -50px image and painted nothing (Chrome paints
+        // it 150 wide, 131.25 tall in a 300x200 box).
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: Some(-50.0),
+            height: None,
+        });
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (10.0, 20.0, 150.0, 131.25));
+
+        // `auto 100%`: the height is the box's, the width keeps the ratio.
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: None,
+            height: Some(-100.0),
+        });
+        assert_eq!((tile.y, tile.height), (20.0, 200.0));
+        assert!((tile.width - 200.0 * 240.0 / 210.0).abs() < 0.01, "{tile:?}");
+
+        // Control: a px size is not a percentage.
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        });
+        assert_eq!((tile.width, tile.height), (100.0, 50.0));
+    }
+
     #[test]
     fn test_oversized_gradient_paint_is_clipped_to_its_box() {
         // The gradient-backgrounds "-45deg Rainbow" card: `background-size:
