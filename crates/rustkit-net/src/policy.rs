@@ -192,10 +192,12 @@ impl CancelToken {
         Self { tx: Arc::new(tokio::sync::watch::channel(false).0) }
     }
 
-    pub fn cancel(&self) {}
+    pub fn cancel(&self) {
+        self.tx.send_replace(true);
+    }
 
     pub fn is_cancelled(&self) -> bool {
-        false
+        *self.tx.borrow()
     }
 }
 
@@ -440,12 +442,7 @@ impl FetchPolicy {
         loader: &ResourceLoader,
         req: ScriptRequest,
     ) -> Result<ScriptResponse, Denial> {
-        let mut cancelled = self.cancel.subscribe();
-        tokio::select! {
-            biased;
-            _ = async { let _ = cancelled.wait_for(|c| *c).await; } => Err(Denial::Cancelled),
-            r = self.execute_governed(loader, req) => r,
-        }
+        self.execute_raced(loader, req, None).await
     }
 
     /// [`execute`](Self::execute) that `token` can also end. An aborted
@@ -455,9 +452,30 @@ impl FetchPolicy {
         &self,
         loader: &ResourceLoader,
         req: ScriptRequest,
-        _token: &CancelToken,
+        token: &CancelToken,
     ) -> Result<ScriptResponse, Denial> {
-        self.execute(loader, req).await
+        self.execute_raced(loader, req, Some(token)).await
+    }
+
+    async fn execute_raced(
+        &self,
+        loader: &ResourceLoader,
+        req: ScriptRequest,
+        token: Option<&CancelToken>,
+    ) -> Result<ScriptResponse, Denial> {
+        let mut page = self.cancel.subscribe();
+        let mut own = token.map(|t| t.tx.subscribe());
+        tokio::select! {
+            biased;
+            _ = async { let _ = page.wait_for(|c| *c).await; } => Err(Denial::Cancelled),
+            _ = async {
+                match own.as_mut() {
+                    Some(rx) => { let _ = rx.wait_for(|c| *c).await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => Err(Denial::Cancelled),
+            r = self.execute_governed(loader, req) => r,
+        }
     }
 
     async fn execute_governed(
