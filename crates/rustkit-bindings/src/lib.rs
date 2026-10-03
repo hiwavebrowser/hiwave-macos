@@ -520,6 +520,9 @@ impl DomBindings {
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_script(include_str!("web_components.js"))?;
+        // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
+        // insertRule writes into the <style>'s text, which the engine restyles from.
+        runtime.evaluate_script(include_str!("web_cssom.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
