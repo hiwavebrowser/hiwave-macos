@@ -1837,6 +1837,23 @@ const WRAPPERS_JS: &str = r#"
         },
         configurable: true, enumerable: false, writable: true
     });
+    // The engine delivers the user's mouse input: a trusted MouseEvent
+    // that bubbles and can be cancelled (UI Events §3.4). Returns false
+    // when a listener called preventDefault().
+    Object.defineProperty(Document.prototype, '__rkFireMouse', {
+        value: function (id, type, init) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return true;
+            init.bubbles = true;
+            init.cancelable = true;
+            init.composed = true;
+            init.view = g;
+            var ev = new g.MouseEvent(type, init);
+            ev.isTrusted = true;
+            return target.dispatchEvent(ev);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
 
     // EventTarget (DOM §2.7) for node wrappers, document and window: a
     // JS-side listener registry, and dispatch through capture, target and

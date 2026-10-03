@@ -2267,11 +2267,19 @@ fn main() {
                     // tao window events (measured with a synthetic
                     // sendEvent:, 2026-08-07).
                     for click in rustkit_viewhost::drain_pending_clicks() {
+                        // The page hears the click before the browser
+                        // acts on it: mousedown on press; mouseup and click
+                        // on release, and only then focus and the link,
+                        // which a listener's preventDefault() cancels. Until
+                        // 2026-10-03 no event reached the page at all, so
+                        // every script-driven control was dead (Z lane I0).
                         if click.down {
+                            view.mouse_down_at_point(click.x as f32, click.y as f32);
                             continue;
                         }
                         info!(x = click.x, y = click.y, "content click (view-local)");
-                        if let Some(tag) = view.focus_at_point(click.x as f32, click.y as f32) {
+                        let outcome = view.click_at_point(click.x as f32, click.y as f32);
+                        if let Some(tag) = outcome.focused {
                             info!(%tag, "Focused content element");
                             // ENGINE focus is not APPKIT focus: without
                             // making the content view the window's first
@@ -2283,7 +2291,7 @@ fn main() {
                             view.grab_keyboard();
                             view.relayout();
                         }
-                        if let Some(url) = view.link_at_point(click.x as f32, click.y as f32) {
+                        if let Some(url) = outcome.navigate {
                             info!(%url, "Link clicked");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
