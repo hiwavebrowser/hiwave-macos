@@ -2099,3 +2099,36 @@ ORACLE BLOCKED linkedin (top-level document HTTP 403)
 SCORABLE 24/57 on 19 sites
 trench/realsite/runs/20261003T1716Z-quiet-dev91fa24e8
 ```
+
+## 2026-10-03 14:52 — daily QUIET board (quiet), develop 387ccf88
+
+**25/60 (loads 15, readable 7, looks-right 3; scorable 24/57)** (load at start: { 2.92 3.00 2.66 })
+
+```
+google     PASS PASS 100.0% PASS   8.9% (cc   0.0%)  3/3  
+youtube    fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.25% non-background)
+facebook   PASS fail  58.7% PASS  13.5% (cc   0.0%)  2/3  
+instagram  fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.59% non-background)
+wikipedia  PASS fail  74.3% fail  15.3% (cc  14.9%)  1/3  
+lyft       PASS PASS 100.0% fail  17.9% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% fail    -   (cc   0.3%)  0/3  blank frame (1.51% non-background)
+x          PASS PASS  95.3% PASS  10.1% (cc   0.0%)  3/3  
+linkedin   PASS fail    -   fail    -   (cc    -  )  1/3  
+yahoo      PASS fail  31.6% unst  24.6% (cc  15.4%)  1/3  
+bing       PASS fail  11.9% fail  66.2% (cc   5.1%)  1/3  
+walmart    PASS fail  34.8% unst  93.7% (cc  93.5%)  1/3  
+microsoft  fail fail   0.0% fail    -   (cc   1.2%)  0/3  blank frame (0.96% non-background)
+apple      PASS PASS 100.0% fail  41.6% (cc   0.0%)  2/3  
+netflix    PASS PASS  87.9% fail  65.0% (cc   1.9%)  2/3  
+github     fail fail   0.0% fail    -   (cc   0.1%)  0/3  Failed to load URL: NetworkError(HttpError(Timeout))
+shopify    PASS PASS  93.8% unst  87.2% (cc  75.5%)  2/3  
+squarespace PASS PASS  85.7% fail  78.6% (cc   8.9%)  2/3  
+cnn        PASS fail  52.6% fail  59.2% (cc   0.0%)  1/3  
+weather    PASS fail   9.9% unst  50.1% (cc  28.8%)  1/3  
+------------------------------------------------------------------------------
+POINTS 25/60   loads 15  readable 7  looks-right 3   unstable: yahoo, walmart, shopify, weather   oracle failed: linkedin
+BLOCKED none
+ORACLE BLOCKED linkedin (top-level document HTTP 403)
+SCORABLE 24/57 on 19 sites
+trench/realsite/runs/20261003T1841Z-quiet-dev387ccf88
+```
