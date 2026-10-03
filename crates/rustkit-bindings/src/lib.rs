@@ -33,6 +33,8 @@ mod web_utils_tests;
 #[cfg(test)]
 mod dom_utils_tests;
 #[cfg(test)]
+mod web_cssom_tests;
+#[cfg(test)]
 mod node_apis_tests;
 #[cfg(test)]
 mod form_controls_tests;
@@ -526,6 +528,9 @@ impl DomBindings {
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_script(include_str!("web_components.js"))?;
+        // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
+        // insertRule writes into the <style>'s text, which the engine restyles from.
+        runtime.evaluate_script(include_str!("web_cssom.js"))?;
         // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
         runtime.evaluate_script(include_str!("web_forms.js"))?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
