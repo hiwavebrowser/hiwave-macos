@@ -237,6 +237,42 @@ def diff_frames(frame_a: Path, frame_b: Path, diff_path: Optional[Path] = None) 
         return {"diffPercent": 100.0, "error": str(e)}
 
 
+def classify_interactive_outcome(s_data: Dict[str, Any]) -> str:
+    """Classify interactive outcome according to REAL_SITE_INTERACTIVE_DESIGN_2026-10-03.md: PASS, fail, unstable."""
+    chrome_status = s_data.get("chrome_status")
+    rk_status = s_data.get("rustkit_status")
+
+    if chrome_status != "ok":
+        return "unstable"
+
+    chrome_actions = s_data.get("chrome_action_results", [])
+    chrome_click = next((a for a in chrome_actions if a.get("type") in ("click", "key")), None)
+    if not chrome_click or chrome_click.get("status") != "ok":
+        return "unstable"
+
+    if rk_status != "ok":
+        return "fail"
+
+    rk_actions = s_data.get("rustkit_action_results", [])
+    rk_click = next((a for a in rk_actions if a.get("type") in ("click", "key")), None)
+    if not rk_click or rk_click.get("status") != "ok":
+        return "fail"
+
+    r_delta = s_data.get("rustkit_action_delta")
+    c_delta = s_data.get("chrome_action_delta")
+
+    # If Chrome showed negligible visual movement (< 0.1%), the action was visually inert in the oracle
+    if c_delta is not None and c_delta < 0.1:
+        if r_delta is not None and r_delta < 0.1:
+            return "unstable"
+
+    # Measurable visual delta on RustKit (>= 0.5%) confirms responsiveness
+    if r_delta is not None and r_delta >= 0.5:
+        return "PASS"
+
+    return "fail"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--site", action="append", help="site id to test from catalog")
@@ -306,7 +342,7 @@ def main():
         c_delta = diff_frames(Path(c_before), Path(c_after)).get("diffPercent", 0.0) if c_before and c_after else None
         r_delta = diff_frames(Path(r_before), Path(r_after)).get("diffPercent", 0.0) if r_before and r_after else None
 
-        summary["sites"][site_id] = {
+        site_summary = {
             "url": url,
             "chrome_status": chrome_res.get("status"),
             "rustkit_status": rk_res.get("status"),
@@ -316,6 +352,8 @@ def main():
             "chrome_action_results": chrome_res.get("action_results", []),
             "rustkit_action_results": rk_res.get("action_results", []),
         }
+        site_summary["outcome"] = classify_interactive_outcome(site_summary)
+        summary["sites"][site_id] = site_summary
 
     summary_file = run_dir / "interactive_summary.json"
     summary_file.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -324,8 +362,8 @@ def main():
         print(json.dumps(summary, indent=2))
     else:
         print(f"\nInteractive Board Run Complete. Saved to {run_dir}")
-        print(f"{'Site':<15} {'Chrome':<8} {'RustKit':<8} {'C-Delta':<10} {'R-Delta':<10} {'BeforeDiff':<12} {'AfterDiff':<12}")
-        print("-" * 80)
+        print(f"{'Site':<15} {'Chrome':<8} {'RustKit':<8} {'Outcome':<10} {'C-Delta':<10} {'R-Delta':<10} {'BeforeDiff':<12} {'AfterDiff':<12}")
+        print("-" * 92)
         for s_id, s_data in summary["sites"].items():
             b_diff = next((d["diff_percent"] for d in s_data["step_diffs"] if d.get("label") == "before"), None)
             a_diff = next((d["diff_percent"] for d in s_data["step_diffs"] if d.get("label") == "after"), None)
@@ -333,7 +371,8 @@ def main():
             r_d = f"{s_data['rustkit_action_delta']:.2f}%" if s_data['rustkit_action_delta'] is not None else "N/A"
             b_d = f"{b_diff:.2f}%" if b_diff is not None else "N/A"
             a_d = f"{a_diff:.2f}%" if a_diff is not None else "N/A"
-            print(f"{s_id:<15} {s_data['chrome_status']:<8} {s_data['rustkit_status']:<8} {c_d:<10} {r_d:<10} {b_d:<12} {a_d:<12}")
+            outcome = s_data.get("outcome", "unknown")
+            print(f"{s_id:<15} {s_data['chrome_status']:<8} {s_data['rustkit_status']:<8} {outcome:<10} {c_d:<10} {r_d:<10} {b_d:<12} {a_d:<12}")
 
 
 if __name__ == "__main__":
