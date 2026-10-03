@@ -142,7 +142,7 @@ fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpErro
             // A single unparseable platform cert must not kill the store.
             let _ = roots.add(cert);
         }
-        roots
+        (roots, String::new())
     })
 }
 
@@ -150,7 +150,7 @@ type RootsCache = std::sync::Mutex<Option<Arc<tokio_rustls::rustls::RootCertStor
 
 fn roots_cached(
     cache: &RootsCache,
-    load: impl FnOnce() -> tokio_rustls::rustls::RootCertStore,
+    load: impl FnOnce() -> (tokio_rustls::rustls::RootCertStore, String),
 ) -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
     let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(roots) = slot.as_ref() {
@@ -158,7 +158,8 @@ fn roots_cached(
     }
     // Only a usable store is cached: a transient platform failure (keychain
     // busy under load) must not turn every later handshake into an error.
-    let roots = Arc::new(load());
+    let (roots, _diagnostics) = load();
+    let roots = Arc::new(roots);
     if roots.is_empty() {
         return Err(HttpError::TlsError(
             "no usable platform root certificates".into(),
@@ -1269,25 +1270,38 @@ mod tests {
         assert!(
             roots_cached(&cache, || {
                 loads += 1;
-                RootCertStore::empty()
+                (RootCertStore::empty(), String::new())
             })
             .is_err(),
             "an empty load is an error"
         );
         let got = roots_cached(&cache, || {
             loads += 1;
-            one_anchor()
+            (one_anchor(), String::new())
         });
         assert!(got.is_ok(), "a later successful load must be used, not the earlier empty one");
         assert_eq!(loads, 2);
         assert!(
             roots_cached(&cache, || {
                 loads += 1;
-                RootCertStore::empty()
+                (RootCertStore::empty(), String::new())
             })
             .is_ok()
         );
         assert_eq!(loads, 2, "a good store is cached and not reloaded");
+    }
+
+    #[test]
+    fn an_empty_platform_root_error_says_why() {
+        use tokio_rustls::rustls::RootCertStore;
+        let cache: RootsCache = std::sync::Mutex::new(None);
+        let err = roots_cached(&cache, || {
+            (RootCertStore::empty(), "2 load errors, first: keychain busy".to_string())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("keychain busy"), "the platform's reason must reach the caller: {err}");
+        assert!(err.contains("no usable platform root certificates"), "{err}");
     }
 
     #[test]
