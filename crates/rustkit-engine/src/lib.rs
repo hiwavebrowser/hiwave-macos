@@ -20776,6 +20776,147 @@ mod node_identity_tests {
         );
     }
 
+    // Pete's live testing, continued: a click on a checkbox did not check
+    // it, a radio button did not take over its group, and a click on a
+    // <label> did nothing to its control. The click was dispatched and that
+    // was all: nothing ran the element's activation behaviour (HTML
+    // §4.10.5.1.15, §4.10.5.1.16, §4.10.4), and the box builder painted a
+    // control from its `checked` ATTRIBUTE, which a click never changes.
+
+    /// Checkedness of every checkbox and radio box in the layout, in tree
+    /// order: what paint draws.
+    fn painted_checks(b: &LayoutBox, out: &mut Vec<bool>) {
+        match &b.box_type {
+            BoxType::FormControl(rustkit_layout::FormControlType::Checkbox { checked })
+            | BoxType::FormControl(rustkit_layout::FormControlType::Radio { checked, .. }) => {
+                out.push(*checked)
+            }
+            _ => {}
+        }
+        for c in &b.children {
+            painted_checks(c, out);
+        }
+    }
+
+    const ACTIVATION_PAGE: &str = concat!(
+        r#"<html><head><style>a { display: none } input:checked + a { display: block; height: 40px }</style></head>"#,
+        r#"<body style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="c" type="checkbox" style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="no" type="checkbox" style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="r1" type="radio" name="g" checked style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="r2" type="radio" name="g" style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="l" for="t" style="display:block;height:40px">label</label></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="t" type="checkbox" style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div><input id="s" type="checkbox" style="display:block;width:30px;height:30px;margin:0">"#,
+        r#"<a href="https://example.com/shown">shown</a></div>"#,
+        r#"</body></html>"#,
+    );
+
+    fn activation_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, ACTIVATION_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             $('c').addEventListener('click', function () { log.push('click:' + $('c').checked); }); \
+             $('c').addEventListener('input', function (e) { log.push('input:' + e.bubbles); }); \
+             $('c').addEventListener('change', function (e) { log.push('change:' + $('c').checked + ':' + e.bubbles); }); \
+             $('no').addEventListener('click', function (e) { log.push('no:' + $('no').checked); e.preventDefault(); }); \
+             $('no').addEventListener('change', function () { log.push('no-change'); }); \
+             $('r1').addEventListener('change', function () { log.push('r1-change'); }); \
+             $('r2').addEventListener('change', function () { log.push('r2-change'); }); \
+             $('t').addEventListener('click', function (e) { log.push('t-click:' + e.target.id); });",
+        );
+        (engine, id)
+    }
+
+    fn js_string(s: &str) -> String {
+        format!("{:?}", rustkit_js::JsValue::String(s.into()))
+    }
+
+    fn painted(engine: &Engine, id: EngineViewId) -> Vec<bool> {
+        let mut out = Vec::new();
+        painted_checks(engine.views[&id].layout.as_ref().expect("layout"), &mut out);
+        out
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_checks_a_checkbox_and_a_radio_and_fires_input_and_change() {
+        let (mut engine, id) = activation_page();
+        // c, no, r1, r2, t, s
+        assert_eq!(painted(&engine, id), [false, false, true, false, false, false]);
+
+        // The checkbox is already checked when its click listeners run, and
+        // input then change follow the click.
+        engine.click_at_point(id, 8.0, 10.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('c').checked + ' ' + $('c').hasAttribute('checked')"),
+            js_string("click:true input:true change:true:true | true false")
+        );
+        assert_eq!(painted(&engine, id), [true, false, true, false, false, false]);
+
+        // A cancelled click puts the checkbox back, with no change event.
+        js(&mut engine, id, "log.length = 0");
+        engine.click_at_point(id, 8.0, 50.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('no').checked"),
+            js_string("no:true | false")
+        );
+        assert_eq!(painted(&engine, id), [true, false, true, false, false, false]);
+
+        // A radio button takes over its group; only it gets the change.
+        js(&mut engine, id, "log.length = 0");
+        engine.click_at_point(id, 8.0, 130.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('r1').checked + ' ' + $('r2').checked"),
+            js_string("r2-change | false true")
+        );
+        assert_eq!(painted(&engine, id), [true, false, false, true, false, false]);
+        // Clicking the checked radio again changes nothing.
+        js(&mut engine, id, "log.length = 0");
+        engine.click_at_point(id, 8.0, 130.0);
+        assert_eq!(js(&mut engine, id, "log.join(' ') + ' | ' + $('r2').checked"), js_string(" | true"));
+
+        // A second click unchecks the checkbox.
+        engine.click_at_point(id, 8.0, 10.0);
+        assert_eq!(js(&mut engine, id, "$('c').checked"), "Boolean(false)");
+        assert_eq!(painted(&engine, id), [false, false, false, true, false, false]);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_label_clicks_its_control() {
+        let (mut engine, id) = activation_page();
+        engine.click_at_point(id, 8.0, 180.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('t').checked"),
+            js_string("t-click:t | true")
+        );
+        assert_eq!(painted(&engine, id), [false, false, true, false, true, false]);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn checked_styles_follow_a_click() {
+        let (mut engine, id) = activation_page();
+        assert_eq!(engine.link_at_point(id, 8.0, 285.0), None, "precondition: the link is display:none");
+        engine.click_at_point(id, 8.0, 250.0);
+        assert_eq!(
+            engine.link_at_point(id, 8.0, 285.0).as_deref(),
+            Some("https://example.com/shown"),
+            "`input:checked + a` must match once the click has checked the box"
+        );
+        // Script setting it back is styled and painted too.
+        js(&mut engine, id, "$('s').checked = false");
+        assert_eq!(engine.link_at_point(id, 8.0, 285.0), None);
+        assert_eq!(painted(&engine, id), [false, false, true, false, false, false]);
+    }
+
     // ---- the live loop runs what the page scheduled (Z lane I0, 2026-10-03) ----
     //
     // Pete's live testing: content that arrives after the load never shows.
