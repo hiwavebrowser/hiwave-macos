@@ -9607,13 +9607,33 @@ impl SelectorMatcher {
     /// so a script query and the style that paints agree on what matches.
     pub(crate) fn node_matches(&self, node: &Rc<Node>, selector: &str) -> Option<bool> {
         let selector = selector.trim();
-        if selector.is_empty() || !Self::selector_list_is_valid(selector) {
+        // A query asks this for every node of the tree with one selector, so
+        // the selector is validated and prepared once, not once per node.
+        let (valid, prepared) = Self::query_selector_prepared(selector);
+        if selector.is_empty() || !valid {
             return None;
         }
         let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
             return Some(false);
         };
         let tag = tag_name.to_lowercase();
+        // A selector that reads neither the ancestors nor the siblings (`.a`,
+        // `div`, `#id`, `[data-x]`, `div.a.b`, and lists of those) needs
+        // neither: building them walked every ancestor and every sibling of
+        // every node a query visited, which on a wide page made one
+        // `querySelector('x-tag')` cost milliseconds.
+        if false && prepared.is_context_free() {
+            return Some(SelectorMatcher.selector_matches_prepared(
+                &prepared,
+                &tag,
+                attributes,
+                &[],
+                &[],
+                SiblingContext::SOLE.with_children(Engine::node_has_children(node)),
+            ));
+        }
+        #[cfg(test)]
+        QUERY_CONTEXT_BUILDS.with(|n| n.set(n.get() + 1));
         let classes = |attributes: &HashMap<String, String>| -> Vec<String> {
             attributes
                 .get("class")
@@ -9673,6 +9693,28 @@ impl SelectorMatcher {
             }
         };
         Some(self.selector_matches(selector, &tag, attributes, &ancestors, &siblings_before, sib))
+    }
+
+    /// Whether `selector` is a valid selector list, with its prepared form,
+    /// for the one selector a query keeps asking about. The last answer is
+    /// kept: a query visits every node with the same string.
+    fn query_selector_prepared(selector: &str) -> (bool, Rc<PreparedSelector>) {
+        thread_local! {
+            static LAST: std::cell::RefCell<Option<(String, bool, Rc<PreparedSelector>)>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        if let Some(hit) = LAST.with(|l| {
+            l.borrow()
+                .as_ref()
+                .filter(|(s, _, _)| s == selector)
+                .map(|(_, valid, prepared)| (*valid, prepared.clone()))
+        }) {
+            return hit;
+        }
+        let valid = !selector.is_empty() && Self::selector_list_is_valid(selector);
+        let prepared = SelectorMatcher.prepared_selector(selector);
+        LAST.with(|l| *l.borrow_mut() = Some((selector.to_string(), valid, prepared.clone())));
+        (valid, prepared)
     }
 
     fn selector_matches(
@@ -21647,6 +21689,9 @@ mod visual_rect_tests {
 thread_local! {
     /// How many times the full selector matcher ran on this thread.
     static FULL_SELECTOR_MATCHES: Cell<u64> = const { Cell::new(0) };
+    /// How many times a script query built an element's ancestor and
+    /// sibling context (see `SelectorMatcher::node_matches`).
+    static QUERY_CONTEXT_BUILDS: Cell<u64> = const { Cell::new(0) };
     /// How many rule-index candidates were tried against an element on this
     /// thread (the cascade's and the `::before`/`::after` lists').
     static CANDIDATE_VISITS: Cell<u64> = const { Cell::new(0) };
@@ -23695,6 +23740,21 @@ enum PreparedSelector {
     },
 }
 
+impl PreparedSelector {
+    /// True when matching reads only the element's own tag, attributes and
+    /// child-ness: no combinator and no structural or state pseudo-class,
+    /// so no ancestor or sibling is consulted.
+    fn is_context_free(&self) -> bool {
+        match self {
+            PreparedSelector::Never => true,
+            PreparedSelector::List(members) => members.iter().all(|m| m.is_context_free()),
+            PreparedSelector::Complex { tokens, subject, .. } => {
+                tokens.len() == 1 && subject.is_context_free()
+            }
+        }
+    }
+}
+
 /// A key's hash for [`AncestorFilter`]: FNV-1a over a kind byte (`<` tag,
 /// `.` class, `#` id) and the name, then a murmur3 finalizer so both of the
 /// filter's bit indices come from well-mixed bits. Tags are ASCII-folded,
@@ -23856,6 +23916,22 @@ fn is_bare_id(rest: &str) -> bool {
 }
 
 impl SubjectCompound {
+    /// See [`PreparedSelector::is_context_free`]. Any pseudo-class makes the
+    /// compound context-dependent (`:first-child`, `:nth-*`, `:hover`, ...);
+    /// `:not()` and `:is()` are free only when every member is.
+    fn is_context_free(&self) -> bool {
+        match self {
+            Self::Universal | Self::Root | Self::IdOnly(_) | Self::ClassesOnly(_) => true,
+            Self::General { parts, .. } => parts.iter().all(|part| match part {
+                SubjectPart::Class(_) | SubjectPart::Id(_) | SubjectPart::Attr(_) => true,
+                SubjectPart::Pseudo(..) => false,
+                SubjectPart::List { members, .. } => {
+                    members.iter().all(|m| m.as_ref().map_or(true, |m| m.is_context_free()))
+                }
+            }),
+        }
+    }
+
     fn parse(engine: &SelectorMatcher, selector: &str) -> Self {
         if selector == "*" {
             return Self::Universal;
@@ -29187,6 +29263,51 @@ mod script_selector_tests {
         // #deep under the second card, whose `div` is the scope itself.
         assert_eq!(js("document.querySelectorAll('.card')[1].querySelectorAll('div p').length"), "1");
         assert_eq!(js("document.querySelectorAll('.card')[1].querySelectorAll('.featured p').length"), "0");
+    }
+
+    // A query visits every node with one selector. A selector that reads
+    // neither ancestors nor siblings must not pay to build them for each node
+    // (github's element registry asks `querySelector(tag)` about 400 times,
+    // 3.3 s of one timer callback).
+    #[test]
+    fn context_free_queries_do_not_build_ancestor_and_sibling_context() {
+        let mut html = String::from("<html><body>");
+        for i in 0..60 {
+            html.push_str(&format!("<div class='card c{}' data-n='{}'><p>t</p></div>", i % 3, i));
+        }
+        html.push_str("<x-thing id='only'></x-thing></body></html>");
+        let (mut engine, view) = loaded(&html);
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        for (selector, want) in [
+            ("x-thing", "1"),
+            ("#only", "1"),
+            (".card", "60"),
+            ("div.card.c1", "20"),
+            ("[data-n='7']", "1"),
+            ("[data-n]", "60"),
+            ("x-thing, .c2", "21"),
+            ("p:not(.nope)", "60"),
+            ("no-such-tag", "0"),
+        ] {
+            QUERY_CONTEXT_BUILDS.with(|n| n.set(0));
+            assert_eq!(js(&format!("document.querySelectorAll({selector:?}).length")), want, "{selector}");
+            assert_eq!(
+                QUERY_CONTEXT_BUILDS.with(|n| n.get()),
+                0,
+                "{selector} needs no ancestor or sibling context"
+            );
+        }
+        // Selectors that DO read the tree still build it and still answer right.
+        for (selector, want) in [
+            ("div p", "60"),
+            ("p:first-child", "60"),
+            (".c0 + .c1", "20"),
+            ("body > x-thing", "1"),
+        ] {
+            QUERY_CONTEXT_BUILDS.with(|n| n.set(0));
+            assert_eq!(js(&format!("document.querySelectorAll({selector:?}).length")), want, "{selector}");
+            assert!(QUERY_CONTEXT_BUILDS.with(|n| n.get()) > 0, "{selector} reads the tree");
+        }
     }
 
     #[test]
