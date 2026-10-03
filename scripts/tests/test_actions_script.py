@@ -84,6 +84,16 @@ class TestActionsScript(unittest.TestCase):
         self.assertEqual(report[1]["label"], "after")
         self.assertEqual(report[1]["diff_percent"], 8.5)
 
+    def test_all_catalog_entries_validate(self):
+        """Ensure all 20 catalog entries translate to 100% schema-valid action sequences."""
+        from scripts.interactive_board import catalog_to_actions, validate_action_sequence
+
+        catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8")).get("interactions", {})
+        for site_id, item in catalog.items():
+            actions = catalog_to_actions(site_id, item)
+            errors = validate_action_sequence(actions)
+            self.assertEqual(errors, [], f"Catalog entry for {site_id} produced invalid actions: {errors}")
+
 
 if __name__ == "__main__":
     unittest.main()
