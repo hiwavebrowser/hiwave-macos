@@ -68,6 +68,14 @@ struct Args {
     #[arg(long)]
     dump_layout: Option<String>,
 
+    /// JSON string or path to JSON file defining interaction sequence (wait/click/key/resize/capture)
+    #[arg(long)]
+    actions: Option<String>,
+
+    /// Directory for action capture frames
+    #[arg(long)]
+    actions_out_dir: Option<String>,
+
     /// Enable verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -91,6 +99,70 @@ struct CaptureResult {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     elapsed_ms: Option<u64>,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    captures: Option<Vec<StepCapture>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    action_results: Option<Vec<ActionResult>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ActionItem {
+    #[serde(default)]
+    step: Option<usize>,
+    #[serde(rename = "type")]
+    action_type: String,
+    #[serde(default)]
+    ms: Option<u64>,
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    x: Option<f32>,
+    #[serde(default)]
+    y: Option<f32>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default)]
+    frame: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ActionsPayload {
+    #[serde(default)]
+    actions: Vec<ActionItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct StepCapture {
+    step: usize,
+    label: String,
+    frame: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ActionResult {
+    step: usize,
+    #[serde(rename = "type")]
+    action_type: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selector_used: Option<String>,
+    elapsed_ms: u64,
 }
 
 impl CaptureResult {
@@ -108,6 +180,8 @@ impl CaptureResult {
             script_stats: None,
             elapsed_ms: None,
             error: None,
+            captures: None,
+            action_results: None,
         }
     }
 
@@ -221,7 +295,7 @@ fn run_capture(args: &Args) -> CaptureResult {
     let engine_result = EngineBuilder::new()
         .with_config(EngineConfig::for_parity_testing())
         .user_agent(user_agent)
-        .javascript_enabled(url.is_some())
+        .javascript_enabled(url.is_some() || args.actions.is_some())
         .build();
 
     let mut engine = match engine_result {
@@ -286,7 +360,24 @@ fn run_capture(args: &Args) -> CaptureResult {
         result.height = height;
     }
 
-    // Render
+    if let Some(ref actions_raw) = args.actions {
+        let actions = match parse_actions(actions_raw) {
+            Ok(acts) => acts,
+            Err(e) => {
+                let _ = engine.destroy_view(view_id);
+                return result.failed("error", e);
+            }
+        };
+        execute_actions(
+            &mut engine,
+            view_id,
+            &actions,
+            args.actions_out_dir.as_deref(),
+            &mut result,
+        );
+    }
+
+    // Render final view
     if let Err(e) = engine.render_view(view_id) {
         return result.failed("error", format!("Failed to render: {:?}", e));
     }
@@ -327,6 +418,233 @@ fn run_capture(args: &Args) -> CaptureResult {
     let _ = engine.destroy_view(view_id);
 
     result
+}
+
+fn parse_actions(raw: &str) -> Result<Vec<ActionItem>, String> {
+    let trimmed = raw.trim();
+    let content = if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        trimmed.to_string()
+    } else {
+        fs::read_to_string(trimmed).map_err(|e| format!("failed to read actions file: {e}"))?
+    };
+    let content = content.trim();
+    if content.starts_with('[') {
+        serde_json::from_str::<Vec<ActionItem>>(content)
+            .map_err(|e| format!("failed to parse actions JSON array: {e}"))
+    } else {
+        serde_json::from_str::<ActionsPayload>(content)
+            .map(|p| p.actions)
+            .map_err(|e| format!("failed to parse actions JSON object: {e}"))
+    }
+}
+
+fn execute_actions(
+    engine: &mut rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    actions: &[ActionItem],
+    actions_out_dir: Option<&str>,
+    result: &mut CaptureResult,
+) {
+    let mut captures = Vec::new();
+    let mut action_results = Vec::new();
+
+    for (i, a) in actions.iter().enumerate() {
+        let step = a.step.unwrap_or(i);
+        let start = Instant::now();
+        let mut a_res = ActionResult {
+            step,
+            action_type: a.action_type.clone(),
+            status: "ok".to_string(),
+            error: None,
+            frame: None,
+            label: None,
+            selector_used: None,
+            elapsed_ms: 0,
+        };
+
+        match a.action_type.as_str() {
+            "wait" => {
+                if let Some(ref sel) = a.selector {
+                    let timeout = Duration::from_millis(a.timeout_ms.or(a.ms).unwrap_or(2000));
+                    let wait_start = Instant::now();
+                    let sel_json = serde_json::to_string(sel).unwrap_or_default();
+                    let check_js = format!("Boolean(document.querySelector({})) ? 'found' : 'missing'", sel_json);
+                    let mut found = false;
+                    while wait_start.elapsed() < timeout {
+                        if let Ok(eval_res) = engine.execute_script(view_id, &check_js) {
+                            if eval_res.contains("found") && !eval_res.contains("missing") {
+                                found = true;
+                                break;
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    if !found {
+                        a_res.status = "timeout".to_string();
+                        a_res.error = Some(format!("timed out waiting for selector {}", sel));
+                    }
+                } else {
+                    let ms = a.ms.unwrap_or(500);
+                    std::thread::sleep(Duration::from_millis(ms));
+                }
+            }
+            "click" => {
+                if let Some(ref sel) = a.selector {
+                    let selectors: Vec<&str> = sel.split(',').map(|s| s.trim()).collect();
+                    let mut clicked = false;
+                    for s in selectors {
+                        let s_json = serde_json::to_string(s).unwrap_or_default();
+                        let click_js = format!(
+                            r#"(function() {{
+                                var el = document.querySelector({0});
+                                if (!el) return 'missing';
+                                if (typeof el.focus === 'function') el.focus();
+                                if (typeof el.click === 'function') {{
+                                    el.click();
+                                }} else {{
+                                    el.dispatchEvent(new Event('click', {{ bubbles: true, cancelable: true }}));
+                                }}
+                                return 'clicked';
+                            }})()"#,
+                            s_json
+                        );
+                        if let Ok(eval_res) = engine.execute_script(view_id, &click_js) {
+                            if eval_res.contains("clicked") {
+                                clicked = true;
+                                a_res.selector_used = Some(s.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    if !clicked {
+                        a_res.status = "selector_not_found".to_string();
+                        a_res.error = Some(format!("no matching element found for selector {}", sel));
+                    } else {
+                        let _ = engine.relayout(view_id);
+                    }
+                } else if let (Some(x), Some(y)) = (a.x, a.y) {
+                    let _ = engine.focus_at_point(view_id, x, y);
+                    let click_js = r#"(function() {
+                        if (document.activeElement && typeof document.activeElement.click === 'function') {
+                            document.activeElement.click();
+                        }
+                    })()"#;
+                    let _ = engine.execute_script(view_id, click_js);
+                    let _ = engine.relayout(view_id);
+                } else {
+                    a_res.status = "error".to_string();
+                    a_res.error = Some("click action requires selector or (x, y)".to_string());
+                }
+            }
+            "key" => {
+                if let Some(ref sel) = a.selector {
+                    let sel_json = serde_json::to_string(sel).unwrap_or_default();
+                    let focus_js = format!(
+                        "var el = document.querySelector({}); if (el && typeof el.focus === 'function') el.focus();",
+                        sel_json
+                    );
+                    let _ = engine.execute_script(view_id, &focus_js);
+                }
+                if let Some(ref text) = a.text {
+                    let text_json = serde_json::to_string(text).unwrap_or_default();
+                    let key_js = format!(
+                        r#"(function() {{
+                            var el = document.activeElement;
+                            if (el && 'value' in el) {{
+                                el.value = (el.value || '') + {0};
+                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}
+                        }})()"#,
+                        text_json
+                    );
+                    let _ = engine.execute_script(view_id, &key_js);
+                    let _ = engine.relayout(view_id);
+                } else if let Some(ref key) = a.key {
+                    let key_code = match key.as_str() {
+                        "Enter" => 13,
+                        "Escape" => 27,
+                        "Backspace" => 8,
+                        "Tab" => 9,
+                        _ => 0,
+                    };
+                    let _ = engine.handle_text_key(view_id, key_code, key, false, false, false);
+                    let key_json = serde_json::to_string(key).unwrap_or_default();
+                    let event_js = format!(
+                        r#"(function() {{
+                            var el = document.activeElement || document.body;
+                            if (el) {{
+                                el.dispatchEvent(new KeyboardEvent('keydown', {{ key: {0}, bubbles: true }}));
+                                el.dispatchEvent(new KeyboardEvent('keyup', {{ key: {0}, bubbles: true }}));
+                            }}
+                        }})()"#,
+                        key_json
+                    );
+                    let _ = engine.execute_script(view_id, &event_js);
+                    let _ = engine.relayout(view_id);
+                }
+            }
+            "resize" => {
+                if let (Some(w), Some(h)) = (a.width, a.height) {
+                    let bounds = Bounds {
+                        x: 0,
+                        y: 0,
+                        width: w,
+                        height: h,
+                    };
+                    if let Err(e) = engine.resize_view(view_id, bounds) {
+                        a_res.status = "error".to_string();
+                        a_res.error = Some(format!("resize failed: {:?}", e));
+                    } else {
+                        result.width = w;
+                        result.height = h;
+                        let _ = engine.relayout(view_id);
+                    }
+                } else {
+                    a_res.status = "error".to_string();
+                    a_res.error = Some("resize requires width and height".to_string());
+                }
+            }
+            "capture" => {
+                if let Some(ref frame) = a.frame {
+                    let frame_path = match actions_out_dir {
+                        Some(out_dir) => Path::new(out_dir).join(frame).to_string_lossy().to_string(),
+                        None => frame.clone(),
+                    };
+                    if let Some(parent) = Path::new(&frame_path).parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = engine.render_view(view_id);
+                    if let Err(e) = engine.capture_frame(view_id, &frame_path) {
+                        a_res.status = "error".to_string();
+                        a_res.error = Some(format!("capture_frame failed: {:?}", e));
+                    } else {
+                        let label = a.label.clone().unwrap_or_else(|| format!("step_{}", step));
+                        captures.push(StepCapture {
+                            step,
+                            label: label.clone(),
+                            frame: frame_path.clone(),
+                        });
+                        a_res.frame = Some(frame_path);
+                        a_res.label = Some(label);
+                    }
+                } else {
+                    a_res.status = "error".to_string();
+                    a_res.error = Some("capture requires frame path".to_string());
+                }
+            }
+            other => {
+                a_res.status = "error".to_string();
+                a_res.error = Some(format!("unknown action type: {}", other));
+            }
+        }
+
+        a_res.elapsed_ms = start.elapsed().as_millis() as u64;
+        action_results.push(a_res);
+    }
+
+    result.captures = Some(captures);
+    result.action_results = Some(action_results);
 }
 
 /// `WxH`, e.g. `1024x768`.
