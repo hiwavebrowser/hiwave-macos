@@ -138,11 +138,28 @@ fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpErro
     static ROOTS: RootsCache = std::sync::Mutex::new(None);
     roots_cached(&ROOTS, || {
         let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs().certs {
+        let loaded = rustls_native_certs::load_native_certs();
+        let mut rejected = 0usize;
+        for cert in loaded.certs {
             // A single unparseable platform cert must not kill the store.
-            let _ = roots.add(cert);
+            if roots.add(cert).is_err() {
+                rejected += 1;
+            }
         }
-        (roots, String::new())
+        let mut diagnostics = String::new();
+        if !loaded.errors.is_empty() || rejected > 0 {
+            diagnostics = format!(
+                "{} load errors, {} rejected certs, accepted {}",
+                loaded.errors.len(),
+                rejected,
+                roots.len()
+            );
+            if let Some(first) = loaded.errors.first() {
+                diagnostics.push_str(&format!(", first error: {first}"));
+            }
+            warn!(target: "rustkit_http::roots", "platform root load: {diagnostics}");
+        }
+        (roots, diagnostics)
     })
 }
 
@@ -158,12 +175,14 @@ fn roots_cached(
     }
     // Only a usable store is cached: a transient platform failure (keychain
     // busy under load) must not turn every later handshake into an error.
-    let (roots, _diagnostics) = load();
+    let (roots, diagnostics) = load();
     let roots = Arc::new(roots);
     if roots.is_empty() {
-        return Err(HttpError::TlsError(
-            "no usable platform root certificates".into(),
-        ));
+        return Err(HttpError::TlsError(if diagnostics.is_empty() {
+            "no usable platform root certificates".into()
+        } else {
+            format!("no usable platform root certificates ({diagnostics})")
+        }));
     }
     *slot = Some(roots.clone());
     Ok(roots)
