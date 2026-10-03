@@ -20784,6 +20784,48 @@ mod node_identity_tests {
         );
     }
 
+    // Pete's live testing, continued: a control wired with an `onclick="..."`
+    // attribute did nothing. Dispatch looked up the `onclick` PROPERTY only;
+    // the attribute's text was never compiled into a handler.
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_runs_an_onclick_attribute_and_lays_out_what_it_wrote() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let html = r#"<html><body style="margin:0"><div id="menu" style="height:40px" onclick="var a = document.createElement('a'); a.setAttribute('href', 'https://example.com/' + this.id + '-' + event.type); a.style.display = 'block'; a.style.height = '40px'; a.textContent = 'opened'; document.body.appendChild(a);">menu</div></body></html>"#;
+        engine.load_html(id, html).expect("load_html");
+        assert_eq!(engine.link_at_point(id, 5.0, 60.0), None, "precondition: nothing below the menu");
+
+        engine.click_at_point(id, 5.0, 10.0);
+
+        assert_eq!(
+            engine.link_at_point(id, 5.0, 60.0).as_deref(),
+            Some("https://example.com/menu-click"),
+            "the attribute's handler must run with `this` and `event`, and its writes must be laid out"
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn an_onclick_attribute_that_returns_false_cancels_the_link() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let html = r#"<html><body style="margin:0"><a href="https://example.com/x" style="display:block;height:40px" onclick="return false">stay</a><a href="https://example.com/y" style="display:block;height:40px" onclick="window.seen = 1">go</a></body></html>"#;
+        engine.load_html(id, html).expect("load_html");
+
+        assert_eq!(engine.click_at_point(id, 5.0, 10.0).navigate, None);
+        // A handler that returns nothing leaves the default action alone.
+        assert_eq!(
+            engine.click_at_point(id, 5.0, 50.0).navigate.as_deref(),
+            Some("https://example.com/y")
+        );
+    }
+
     // ---- the live loop runs what the page scheduled (Z lane I0, 2026-10-03) ----
     //
     // Pete's live testing: content that arrives after the load never shows.

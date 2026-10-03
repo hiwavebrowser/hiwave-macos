@@ -46,3 +46,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [[test]]
 name = "macos_set_bounds"
 harness = false
+
+[[test]]
+name = "macos_click_point"
+harness = false
