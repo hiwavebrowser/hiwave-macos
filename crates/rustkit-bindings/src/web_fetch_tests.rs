@@ -270,3 +270,35 @@ fn a_full_queue_rejects_the_overflow() {
     assert_eq!(ev(&b, "rejected"), "6");
     assert_eq!(b.take_net_requests().len(), 64);
 }
+
+/// Prometheus #898 must-fix: a `no-cors` request keeps only the
+/// CORS-safelisted headers for its whole life, not just at construction.
+#[test]
+fn a_no_cors_request_can_never_carry_a_non_safelisted_header() {
+    let b = bindings();
+    // At construction.
+    assert_eq!(
+        ev(&b, "var r = new Request('http://other.test/x', { mode: 'no-cors', headers: { Authorization: 'Bearer t', Accept: 'text/x', 'X-Custom': '1', 'Content-Type': 'application/json' } }); Array.from(r.headers).join('|')"),
+        "accept,text/x"
+    );
+    // After construction: append / set cannot widen it; safelisted values still work.
+    assert_eq!(
+        ev(&b, "r.headers.append('Authorization', 'Bearer t'); r.headers.set('X-Custom', '1'); r.headers.set('Content-Type', 'application/json'); \
+                r.headers.set('Content-Type', 'text/plain;charset=UTF-8'); r.headers.append('Accept-Language', 'en'); \
+                Array.from(r.headers).join('|')"),
+        "accept,text/x|accept-language,en|content-type,text/plain;charset=UTF-8"
+    );
+    // A cors request is not restricted by this guard.
+    assert_eq!(ev(&b, "var c = new Request('/x', { headers: { Authorization: 'a' } }); c.headers.append('X-Custom', '1'); Array.from(c.headers).join('|')"), "authorization,a|x-custom,1");
+    // And the wire only ever sees the safelisted set.
+    b.evaluate("fetch(r); fetch('http://other.test/y', { mode: 'no-cors', headers: { Authorization: 'x', Accept: '*/*' } });").unwrap();
+    let reqs = b.take_net_requests();
+    assert_eq!(reqs.len(), 2);
+    for req in &reqs {
+        assert!(req.headers.iter().all(|(n, _)| ["accept", "accept-language", "content-type", "content-language"].contains(&n.as_str())), "{:?}", req.headers);
+    }
+    // Only GET, HEAD and POST are allowed in no-cors mode, and it fails at construction.
+    assert_eq!(thrown(&b, "new Request('/x', { mode: 'no-cors', method: 'PUT' });"), "TypeError:TypeError");
+    assert_eq!(thrown(&b, "new Request('/x', { mode: 'no-cors', method: 'POST' });"), "no error");
+    assert_eq!(thrown(&b, "fetch('/x', { mode: 'no-cors', method: 'DELETE' }).catch(function () {}); new Request('/x', { mode: 'no-cors', method: 'DELETE' });"), "TypeError:TypeError");
+}
