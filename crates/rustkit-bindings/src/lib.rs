@@ -21,6 +21,8 @@ mod web_xhr_tests;
 #[cfg(test)]
 mod web_fetch_tests;
 #[cfg(test)]
+mod web_components_tests;
+#[cfg(test)]
 mod web_streams_tests;
 #[cfg(test)]
 mod web_interfaces_tests;
@@ -488,6 +490,9 @@ impl DomBindings {
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
+        // customElements and a constructible HTMLElement (web_components.js); wraps the
+        // tree and attribute mutators the DOM install just defined.
+        runtime.evaluate_script(include_str!("web_components.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
