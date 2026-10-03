@@ -2033,3 +2033,36 @@ ORACLE BLOCKED linkedin (top-level document HTTP 403)
 SCORABLE 26/57 on 19 sites
 trench/realsite/runs/20261002T1957Z-quiet-devb91af56
 ```
+
+## 2026-10-03 05:24 — daily QUIET board (quiet), develop a238ae8
+
+**26/60 (loads 15, readable 8, looks-right 3; scorable 25/57)** (load at start: { 15.78 10.54 8.45 })
+
+```
+google     PASS PASS 100.0% PASS   8.9% (cc   0.0%)  3/3  
+youtube    fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.25% non-background)
+facebook   PASS fail  58.7% PASS  13.5% (cc   0.0%)  2/3  
+instagram  fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.59% non-background)
+wikipedia  PASS PASS  81.5% fail  16.9% (cc  14.9%)  2/3  
+lyft       PASS PASS 100.0% fail  17.9% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% fail    -   (cc   9.0%)  0/3  blank frame (1.51% non-background)
+x          PASS PASS  95.3% PASS  10.1% (cc   0.0%)  3/3  
+linkedin   PASS fail    -   fail    -   (cc    -  )  1/3  
+yahoo      PASS fail  31.2% fail  22.7% (cc   4.7%)  1/3  
+bing       PASS fail  14.6% fail  60.1% (cc  10.4%)  1/3  
+walmart    PASS fail  78.1% unst  95.3% (cc  89.9%)  1/3  
+microsoft  fail fail   0.0% unst    -   (cc  18.3%)  0/3  blank frame (0.96% non-background)
+apple      PASS PASS 100.0% fail  41.6% (cc   0.0%)  2/3  
+netflix    PASS PASS  87.9% fail  66.0% (cc   3.1%)  2/3  
+github     fail fail   0.0% fail    -   (cc   0.1%)  0/3  capture exceeded 30000 ms
+shopify    PASS PASS  93.3% fail  20.2% (cc   0.0%)  2/3  
+squarespace PASS PASS  85.7% unst  74.9% (cc  74.6%)  2/3  
+cnn        PASS fail  44.0% fail  56.8% (cc   0.0%)  1/3  
+weather    PASS fail   9.7% fail  30.4% (cc    -  )  1/3  
+------------------------------------------------------------------------------
+POINTS 26/60   loads 15  readable 8  looks-right 3   unstable: walmart, microsoft, squarespace   oracle failed: linkedin
+BLOCKED none
+ORACLE BLOCKED linkedin (top-level document HTTP 403)
+SCORABLE 25/57 on 19 sites
+trench/realsite/runs/20261003T0900Z-quiet-deva238ae8
+```
