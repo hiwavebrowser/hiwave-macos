@@ -32,6 +32,8 @@ mod web_blob_tests;
 mod web_utils_tests;
 #[cfg(test)]
 mod dom_utils_tests;
+#[cfg(test)]
+mod web_history_tests;
 mod web_crypto;
 mod web_url;
 
@@ -518,6 +520,9 @@ impl DomBindings {
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_script(include_str!("web_components.js"))?;
+        // history (pushState/replaceState/popstate) and the anchor URL parts;
+        // needs the interface objects and window's EventTarget (web_history.js).
+        runtime.evaluate_script(include_str!("web_history.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -1066,6 +1071,7 @@ impl DomBindings {
             window.location.hash = {:?};
             window.location.origin = {:?};
             document.URL = {:?};
+            if (window.__rustkit_history_reset) window.__rustkit_history_reset();
             "#,
             location.href,
             location.protocol,
