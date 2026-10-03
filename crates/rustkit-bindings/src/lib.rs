@@ -16,6 +16,8 @@ pub use net_bridge::{NetDelivery, NetRequest};
 #[cfg(test)]
 mod net_bridge_tests;
 #[cfg(test)]
+mod web_xhr_tests;
+#[cfg(test)]
 mod web_streams_tests;
 #[cfg(test)]
 mod web_interfaces_tests;
