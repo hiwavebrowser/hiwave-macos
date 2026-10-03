@@ -276,6 +276,14 @@ pub enum EngineEvent {
     FaviconDetected { view_id: EngineViewId, url: Url },
 }
 
+/// The `Accept` of an image request: Chrome's image header without
+/// `image/avif`, which rustkit-codecs cannot decode. Without a header of
+/// its own an image request carried the transport's navigation default,
+/// which lists AVIF, and the image CDNs answered with it (44 `<img>`s on
+/// microsoft, shopify and walmart failed as "Unknown image format").
+/// Add `image/avif` back when a decoder lands.
+const IMAGE_ACCEPT: &str = "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+
 /// View state.
 #[allow(dead_code)]
 /// The document side of a subresource request (see
@@ -294,9 +302,15 @@ impl SubresourceReferrer {
 
     /// Same, with the fetch destination the shield classifies by.
     fn get_for(&self, url: Url, destination: RequestDestination) -> Request {
-        let request = Request::get(url)
+        let mut request = Request::get(url)
             .referrer_policy(self.policy)
             .destination(destination);
+        if destination == RequestDestination::Image {
+            request = request.header(
+                http::header::ACCEPT,
+                http::HeaderValue::from_static(IMAGE_ACCEPT),
+            );
+        }
         match &self.url {
             Some(referrer) => request.referrer(referrer.clone()),
             None => request,
