@@ -2189,6 +2189,7 @@ impl Engine {
             }
         }
         let _ = bindings.set_ready_state("loading");
+        let scripts_started = std::time::Instant::now();
         let modules_fetched = Cell::new(0usize);
         for (label, _, source, node_id, is_module) in runnable {
             let text = match source {
@@ -2324,6 +2325,10 @@ impl Engine {
             return;
         }
 
+        info!(
+            elapsed_ms = scripts_started.elapsed().as_millis() as u64,
+            "Page scripts ran (fetching the module graphs included)"
+        );
         // What the scripts asked of the network, answered before the
         // lifecycle events fire (a handler can start more; see the rounds).
         // Delivery only: the timers run in their own step below.
@@ -2378,6 +2383,7 @@ impl Engine {
             }
         }
 
+        let timers_ran = Cell::new(0u32);
         // Lifecycle events and timers. Listener/callback exceptions are
         // caught in JS and drained after each step.
         let steps: [(&str, &dyn Fn() -> Result<(), String>); 3] = [
@@ -2399,13 +2405,20 @@ impl Engine {
             ("timers", &|| {
                 bindings
                     .run_timers(horizon_ms, MAX_TIMER_CALLBACKS)
-                    .map(|_| ())
+                    .map(|n| timers_ran.set(n))
                     .map_err(strip)
             }),
         ];
         for (source, step) in steps {
             info!(%source, "Running page lifecycle step");
+            let step_started = std::time::Instant::now();
             let record = run(source.to_string(), 0, step);
+            info!(
+                %source,
+                elapsed_ms = step_started.elapsed().as_millis() as u64,
+                callbacks = timers_ran.get(),
+                "Page lifecycle step done"
+            );
             // Only an escaped error (the loop limit, a panic) is worth a
             // record of its own; a clean step is not a script.
             if record.outcome != ScriptOutcome::Ran {
