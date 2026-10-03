@@ -497,6 +497,11 @@ struct ViewState {
     /// passes after it looked at, loaded or not. The post-script pass
     /// fetches only what is not in here.
     images_attempted: std::collections::HashSet<Url>,
+    /// The current document's fetch policy: a URL-loaded page with
+    /// JavaScript on has one, anything else has none. The load's script
+    /// requests and the live loop's go through the same one, so its request
+    /// counters cover both.
+    script_policy: Option<Arc<FetchPolicy>>,
 }
 
 /// Engine configuration.
@@ -567,6 +572,21 @@ impl Default for EngineConfig {
 /// Timer callbacks one load may run (a 16ms `requestAnimationFrame` loop
 /// across the default 5s horizon is ~300).
 const MAX_TIMER_CALLBACKS: u32 = 10_000;
+
+/// Most timer callbacks one turn of the live loop runs (`Engine::pump_live`).
+/// A page that owes more keeps them for the next turn, so input and paint
+/// get a turn in between.
+const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
+
+/// Longest one turn of the live loop waits on the network. The loop is the
+/// UI thread, so a request slower than this fails as a network error rather
+/// than hold the window.
+const LIVE_NETWORK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Most records the live loop adds to a view's script log. A timer that
+/// throws on every tick would otherwise grow it for as long as the page is
+/// open.
+const MAX_LIVE_SCRIPT_RECORDS: usize = 2_000;
 
 /// How a page `<script>` is scheduled, per its `type`, `src`, `async`
 /// and `defer` attributes.
@@ -1316,6 +1336,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            script_policy: None,
         };
 
         self.views.insert(id, view_state);
@@ -1376,6 +1397,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            script_policy: None,
         };
 
         let id = view_state.id;
@@ -1445,6 +1467,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            script_policy: None,
         };
 
         self.views.insert(id, view_state);
@@ -1812,8 +1835,91 @@ impl Engine {
     /// One turn of the live loop for a loaded page: run the timers that came
     /// due in the `elapsed_ms` since the last turn, answer what the page
     /// asked of the network, and lay out what the callbacks wrote.
-    pub async fn pump_live(&mut self, _id: EngineViewId, _elapsed_ms: u64) -> LivePump {
-        LivePump::default()
+    ///
+    /// The load runs a page's timers once, on a virtual clock up to its
+    /// horizon. This is what runs them afterwards: the caller's loop passes
+    /// the real time since its last turn and comes back when
+    /// [`LivePump::next_timer_ms`] says the next timer is due. Requests go
+    /// through the document's own `FetchPolicy`, as they did during the
+    /// load; a page with none (`load_html`) has no network.
+    pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        let mut out = LivePump::default();
+        let net_rounds = self.config.script_network_rounds;
+        let loader = self.loader.clone();
+        let Some(view) = self.views.get_mut(&id) else {
+            return out;
+        };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return out;
+        };
+        let policy = view.script_policy.clone();
+        let document = view.url.clone();
+        let mut threw: Vec<(&str, String)> = Vec::new();
+
+        // Timers first: what they ask of the network is answered this turn.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
+        })) {
+            Ok(Ok(ran)) => out.timers_ran = ran,
+            Ok(Err(e)) => threw.push(("timers", e.to_string())),
+            Err(_) => threw.push(("timers", "JS engine panic".into())),
+        }
+        if let Some(policy) = policy {
+            // Delivery only: a timer a response handler sets runs on a later
+            // turn, when its time has passed.
+            let mut modules_fetched = 0;
+            let found = script_net::pump_all(
+                bindings,
+                &policy,
+                &loader,
+                tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
+                net_rounds,
+                None,
+                document.as_ref(),
+                &mut modules_fetched,
+            )
+            .await;
+            out.requests = found.requests;
+            threw.extend(found.threw.into_iter().map(|message| ("network", message)));
+            if found.poisoned {
+                threw.push(("network", "JS engine panic".into()));
+            }
+        }
+        threw.extend(bindings.take_reported_errors().into_iter().map(|message| ("timers", message)));
+        out.next_timer_ms = bindings.next_timer_delay();
+        for (source, message) in threw {
+            if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
+                break;
+            }
+            view.script_log.push(ScriptRecord {
+                source: source.to_string(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::Threw(message),
+            });
+        }
+
+        match self.flush_script_dom_writes(id) {
+            Ok(relaid_out) => out.relaid_out = relaid_out,
+            Err(e) => debug!(?id, error = %e, "relayout after a live turn failed"),
+        }
+        // What the callbacks added may show images the load never saw.
+        if out.relaid_out {
+            match self.load_images_added_by_scripts(id).await {
+                Ok(0) => {}
+                Ok(count) => {
+                    info!(count, "Loaded images added by live page scripts");
+                    if let Err(e) = self.relayout(id) {
+                        debug!(?id, error = %e, "relayout after live images failed");
+                    }
+                }
+                Err(e) => debug!(?id, error = %e, "Failed to load images added by live page scripts"),
+            }
+        }
+        if out.timers_ran > 0 || out.requests > 0 {
+            debug!(?id, ?out, "Live turn");
+        }
+        out
     }
 
     /// Deliver a key to the focused form control.
@@ -2737,6 +2843,7 @@ impl Engine {
         view.edit_states.clear();
         view.focused_node = None;
         view.script_log.clear();
+        view.script_policy = None;
 
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
@@ -2784,6 +2891,7 @@ impl Engine {
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
             view.bindings = Some(bindings);
+            view.script_policy = script_policy.clone();
         }
 
         // LAST GATE before we mutate anything visible: a stop that landed
@@ -3034,6 +3142,7 @@ impl Engine {
         view.edit_states.clear();
         view.focused_node = None;
         view.script_log.clear();
+        view.script_policy = None;
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -11761,13 +11870,14 @@ impl Engine {
     /// Apply what script's DOM writes invalidated (the DOM-bindings pin §3
     /// flush): one relayout for however many writes the script made. Runs
     /// once when script settles; `relayout` rebuilds style and layout in
-    /// full, so both `DomDirty` buckets take the same path for now.
-    fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+    /// full, so both `DomDirty` buckets take the same path for now. Returns
+    /// whether it laid out.
+    fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         let Some(view) = self.views.get_mut(&id) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(bindings) = view.bindings.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let dirty = bindings.take_dirty();
         // Script-set control values reach layout through edit state, the
@@ -11783,10 +11893,10 @@ impl Engine {
             }
         }
         if dirty == DomDirty::Clean {
-            return Ok(());
+            return Ok(false);
         }
         debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
-        self.relayout(id)
+        self.relayout(id).map(|_| true)
     }
 
     /// Get the current URL of a view.

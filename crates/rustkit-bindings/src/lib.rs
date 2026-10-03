@@ -431,6 +431,25 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         }
         return ran;
     };
+    // The live loop's clock: `delta` ms of real time have passed. Run what
+    // came due and leave the clock there, so a timer set next (by a click,
+    // say) counts from now and not from the last callback. With callbacks
+    // still owed (the cap), the clock stays behind and the next turn
+    // catches up.
+    window.__rustkit_advance_timers = function (delta, max) {
+        var target = now + delta;
+        var ran = window.__rustkit_run_timers(target, max);
+        if (ran < max && now < target) now = target;
+        return ran;
+    };
+    // Ms until the earliest timer is due (0 when overdue), -1 with none set.
+    window.__rustkit_next_timer = function () {
+        var due = -1;
+        for (var i = 0; i < timers.length; i++) {
+            if (due < 0 || timers[i].due < due) due = timers[i].due;
+        }
+        return due < 0 ? -1 : Math.max(0, due - now);
+    };
 })();
 "#;
 
@@ -1209,6 +1228,33 @@ impl DomBindings {
         })
     }
 
+    /// Move the virtual clock on by `delta_ms` (the live loop's real elapsed
+    /// time) and run the timers that came due, at most `max_callbacks` of
+    /// them. Returns how many ran.
+    pub fn advance_timers(&self, delta_ms: u64, max_callbacks: u32) -> Result<u32, BindingError> {
+        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
+            "window.__rustkit_advance_timers({}, {})",
+            delta_ms, max_callbacks
+        ))?;
+        Ok(match ran {
+            JsValue::Number(n) => n as u32,
+            _ => 0,
+        })
+    }
+
+    /// Milliseconds until the page's next timer is due on the virtual clock
+    /// (0 when one is overdue). `None` when no timer is set.
+    pub fn next_timer_delay(&self) -> Option<u64> {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_script("window.__rustkit_next_timer()")
+        {
+            Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
+            _ => None,
+        }
+    }
+
     /// Exceptions thrown in listeners and timer callbacks since the last
     /// call, as `String(error)` (`TypeError: x is not a function`).
     pub fn take_reported_errors(&self) -> Vec<String> {
@@ -1946,6 +1992,39 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("undefinedFn"), "{errors:?}");
         assert!(bindings.take_reported_errors().is_empty(), "drained");
+    }
+
+    #[test]
+    fn the_live_clock_advances_by_elapsed_time_and_reports_the_next_timer() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        assert_eq!(bindings.next_timer_delay(), None);
+        bindings
+            .evaluate("var log = []; setTimeout(function () { log.push('a'); }, 300);")
+            .unwrap();
+        assert_eq!(bindings.next_timer_delay(), Some(300));
+
+        // Not due: nothing runs, but the time has passed.
+        assert_eq!(bindings.advance_timers(100, 10).unwrap(), 0);
+        assert_eq!(bindings.next_timer_delay(), Some(200));
+
+        // A timer set now counts from now (100), not from 0.
+        bindings.evaluate("setTimeout(function () { log.push('b'); }, 50);").unwrap();
+        assert_eq!(bindings.advance_timers(60, 10).unwrap(), 1);
+        assert_eq!(bindings.advance_timers(140, 10).unwrap(), 1);
+        assert_eq!(bindings.next_timer_delay(), None);
+        assert!(matches!(
+            bindings.evaluate("log.join(',')").unwrap(),
+            JsValue::String(s) if s == "b,a"
+        ));
+
+        // The cap leaves the clock behind; the next turn catches up.
+        bindings
+            .evaluate("var n = 0; var t = setInterval(function () { n++; }, 10);")
+            .unwrap();
+        assert_eq!(bindings.advance_timers(100, 4).unwrap(), 4);
+        assert_eq!(bindings.next_timer_delay(), Some(10));
+        assert_eq!(bindings.advance_timers(0, 100).unwrap(), 0);
+        assert_eq!(bindings.advance_timers(60, 100).unwrap(), 6);
     }
 
     #[test]
