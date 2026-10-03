@@ -2066,3 +2066,36 @@ ORACLE BLOCKED linkedin (top-level document HTTP 403)
 SCORABLE 25/57 on 19 sites
 trench/realsite/runs/20261003T0900Z-quiet-deva238ae8
 ```
+
+## 2026-10-03 13:40 — daily QUIET board (quiet), develop 91fa24e8
+
+**25/60 (loads 15, readable 7, looks-right 3; scorable 24/57)** (load at start: { 7.52 8.02 7.94 })
+
+```
+google     PASS PASS 100.0% PASS   8.8% (cc   0.0%)  3/3  
+youtube    fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.25% non-background)
+facebook   PASS fail  58.7% PASS   3.8% (cc  10.0%)  2/3  
+instagram  fail fail   0.0% fail    -   (cc   8.1%)  0/3  blank frame (0.59% non-background)
+wikipedia  PASS fail  74.3% fail  15.3% (cc  14.9%)  1/3  
+lyft       PASS PASS 100.0% fail  17.9% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% fail    -   (cc   0.2%)  0/3  blank frame (1.51% non-background)
+x          PASS PASS  95.3% PASS  10.1% (cc   0.3%)  3/3  
+linkedin   PASS fail    -   fail    -   (cc    -  )  1/3  
+yahoo      PASS fail  27.5% unst  30.6% (cc  20.5%)  1/3  
+bing       PASS fail  14.3% fail  66.3% (cc   0.4%)  1/3  
+walmart    PASS fail  32.4% unst  95.3% (cc  93.7%)  1/3  
+microsoft  fail fail   0.0% unst    -   (cc  15.2%)  0/3  blank frame (0.96% non-background)
+apple      PASS PASS 100.0% fail  41.6% (cc   0.0%)  2/3  
+netflix    PASS PASS  87.9% fail  66.1% (cc   2.1%)  2/3  
+github     fail fail   0.0% fail    -   (cc   0.3%)  0/3  capture exceeded 30000 ms
+shopify    PASS PASS  93.8% fail  22.8% (cc  12.6%)  2/3  
+squarespace PASS PASS  85.7% fail  64.6% (cc   0.5%)  2/3  
+cnn        PASS fail  48.8% fail  58.1% (cc   0.0%)  1/3  
+weather    PASS fail  10.0% fail  30.3% (cc   0.7%)  1/3  
+------------------------------------------------------------------------------
+POINTS 25/60   loads 15  readable 7  looks-right 3   unstable: yahoo, walmart, microsoft   oracle failed: linkedin
+BLOCKED none
+ORACLE BLOCKED linkedin (top-level document HTTP 403)
+SCORABLE 24/57 on 19 sites
+trench/realsite/runs/20261003T1716Z-quiet-dev91fa24e8
+```
