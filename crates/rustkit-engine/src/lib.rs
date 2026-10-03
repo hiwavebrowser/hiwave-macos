@@ -17924,6 +17924,78 @@ div { height: 10px; }
         assert!(!engine.is_image_cached(&at("/tracker.png")));
     }
 
+    /// Navigate to `page` and return the image paths the navigation
+    /// requested, then the paths requested once `load_subresources` has run
+    /// again on the finished document. The second list is the control: what
+    /// is in it and not in the first was there to discover and was missed.
+    fn requested_by_navigation_then_reload(page: &'static str) -> (Vec<String>, Vec<String>) {
+        let (port, seen) = recording_server_for(page);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let paths = |seen: &Seen| -> Vec<String> {
+            let mut paths: Vec<String> = seen.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+            paths.sort();
+            paths.dedup();
+            paths
+        };
+        rt.block_on(engine.load_url(view, url)).expect("load_url");
+        let by_navigation = paths(&seen);
+        rt.block_on(engine.load_subresources(view)).expect("subresources");
+        (by_navigation, paths(&seen))
+    }
+
+    /// Images were discovered once, before page scripts ran: `navigate`
+    /// loads subresources, runs the scripts, flushes their DOM writes and
+    /// finishes. An `<img>` a script appended was laid out and never
+    /// fetched.
+    #[test]
+    fn an_img_a_script_adds_is_fetched_by_the_navigation() {
+        const SCRIPTED_IMG_PAGE: &str = r#"<html><body><img src="/parsed.png"><script>
+var img = document.createElement('img');
+img.setAttribute('src', '/added.png');
+document.body.appendChild(img);
+</script></body></html>"#;
+        let (by_navigation, after_reload) = requested_by_navigation_then_reload(SCRIPTED_IMG_PAGE);
+        let has = |paths: &[String], path: &str| paths.iter().any(|p| p == path);
+        assert!(has(&by_navigation, "/parsed.png"), "the parsed <img> is fetched: {by_navigation:?}");
+        assert!(
+            has(&after_reload, "/added.png"),
+            "control: the script appended the <img> and a second discovery finds it: {after_reload:?}"
+        );
+        assert!(
+            has(&by_navigation, "/added.png"),
+            "the navigation itself fetches an <img> a script added: {by_navigation:?}"
+        );
+    }
+
+    /// The same for a CSS background a script switches on by class.
+    #[test]
+    fn a_background_a_script_turns_on_is_fetched_by_the_navigation() {
+        const SCRIPTED_BG_PAGE: &str = r#"<html><head><style>
+div { width: 50px; height: 20px; }
+.late { background: url(/late.png) no-repeat; }
+</style></head><body><div id="box"></div><script>
+document.getElementById('box').setAttribute('class', 'late');
+</script></body></html>"#;
+        let (by_navigation, after_reload) = requested_by_navigation_then_reload(SCRIPTED_BG_PAGE);
+        let has = |paths: &[String], path: &str| paths.iter().any(|p| p == path);
+        assert!(
+            has(&after_reload, "/late.png"),
+            "control: the script set the class and a second discovery finds the background: {after_reload:?}"
+        );
+        assert!(
+            has(&by_navigation, "/late.png"),
+            "the navigation itself fetches a background a script turned on: {by_navigation:?}"
+        );
+    }
+
     /// SVG backgrounds were skipped at discovery: only `<img>` commands
     /// were spliced from the SVG cache, so a fetched one would never paint.
     /// Each is fetched now and painted as vector commands, one copy per
