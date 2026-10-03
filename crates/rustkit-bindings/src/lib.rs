@@ -406,6 +406,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
+        if (typeof cb !== 'function') throw new TypeError("Failed to execute 'queueMicrotask' on 'Window': The callback provided as parameter 1 is not a function.");
         Promise.resolve().then(function () { try { cb(); } catch (e) { report(e); } });
     };
 
