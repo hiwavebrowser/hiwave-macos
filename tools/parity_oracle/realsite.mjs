@@ -175,7 +175,12 @@ async function runActionsChrome(url, actionsArg, outDir, width, height, settleMs
           await page.setViewportSize({ width: Number(a.width), height: Number(a.height) });
         } else if (a.type === 'capture') {
           const framePath = outDir ? pathJoin(outDir, a.frame) : a.frame;
-          await page.screenshot({ path: framePath, fullPage: false });
+          try {
+            await page.screenshot({ path: framePath, fullPage: false });
+          } catch (_) {
+            await page.waitForTimeout(500);
+            await page.screenshot({ path: framePath, fullPage: false });
+          }
           aRes.frame = framePath;
           aRes.label = a.label || `step_${i}`;
           result.captures.push({ step: aRes.step, label: aRes.label, frame: framePath });

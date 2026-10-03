@@ -26,7 +26,9 @@ DEFAULT_SITES_FILE = REPO / "websuite" / "realsite-top20.json"
 DEFAULT_CAPTURE_BIN = (
     REPO / "target" / "release" / ("parity-capture.exe" if sys.platform == "win32" else "parity-capture")
 )
-DEFAULT_CHROME = Path.home() / "chrome-for-testing" / "chrome" / "win64-148.0.7778.216" / "chrome-win64" / "chrome.exe"
+DEFAULT_CHROME = Path(os.environ.get("PARITY_CHROME_PATH", "")) if os.environ.get("PARITY_CHROME_PATH") else None
+if not DEFAULT_CHROME or not DEFAULT_CHROME.exists():
+    DEFAULT_CHROME = Path.home() / "chrome-for-testing" / "chrome" / "win64-148.0.7778.216" / "chrome-win64" / "chrome.exe"
 if not DEFAULT_CHROME.exists():
     DEFAULT_CHROME = Path.home() / "Repos" / "hiwave" / "hiwave-macos" / ".browsers" / "chrome" / "mac_arm-148.0.7778.216"
 
@@ -154,6 +156,7 @@ def run_chrome_actions(
     env = os.environ.copy()
     if chrome_bin and Path(chrome_bin).exists():
         env["CHROME_BIN"] = str(chrome_bin)
+        env["PARITY_CHROME_PATH"] = str(chrome_bin)
 
     cmd = [
         "node",
@@ -312,7 +315,7 @@ def main():
 
     for site_id in target_sites:
         cat_entry = catalog.get(site_id, {})
-        url = url_map.get(site_id, f"https://www.{site_id}.com/")
+        url = cat_entry.get("url") or url_map.get(site_id, f"https://www.{site_id}.com/")
         actions = catalog_to_actions(site_id, cat_entry)
 
         site_dir = run_dir / site_id
@@ -346,6 +349,8 @@ def main():
             "url": url,
             "chrome_status": chrome_res.get("status"),
             "rustkit_status": rk_res.get("status"),
+            "chrome_error": chrome_res.get("error"),
+            "rustkit_error": rk_res.get("error"),
             "chrome_action_delta": c_delta,
             "rustkit_action_delta": r_delta,
             "step_diffs": step_diffs,
