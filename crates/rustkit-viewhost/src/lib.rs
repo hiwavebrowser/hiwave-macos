@@ -848,6 +848,34 @@ impl ViewHost {
             }
         }
 
+        // Until 2026-10-03 this function had no macOS arm: the bounds were
+        // recorded, the engine resized its drawable and laid out at the new
+        // size, and the NSView kept its first frame. The new drawable was
+        // stretched into the old rectangle, so a bigger window drew a
+        // smaller page, and clicks landed on the wrong elements. The
+        // `setFrame:` lived only in `MacOSViewHost::set_bounds`, the twin
+        // with no callers.
+        #[cfg(target_os = "macos")]
+        if hwnd_raw != 0 {
+            let view = hwnd_raw as id;
+            unsafe {
+                let superview: id = msg_send![view, superview];
+                if superview != nil {
+                    // Top-left origin (HiWave/Wry) to Cocoa's bottom-left,
+                    // as `create_view` does.
+                    let parent: cocoa::foundation::NSRect = msg_send![superview, frame];
+                    let frame = cocoa::foundation::NSRect::new(
+                        cocoa::foundation::NSPoint::new(
+                            bounds.x as f64,
+                            parent.size.height - bounds.y as f64 - bounds.height as f64,
+                        ),
+                        cocoa::foundation::NSSize::new(bounds.width as f64, bounds.height as f64),
+                    );
+                    let _: () = msg_send![view, setFrame: frame];
+                }
+            }
+        }
+
         trace!(?view_id, ?bounds, "Bounds updated");
         Ok(())
     }
