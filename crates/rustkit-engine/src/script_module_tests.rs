@@ -220,3 +220,46 @@ fn import_meta_url_is_the_served_from_url() {
     ]);
     assert_eq!(log(&mut engine, view), format!("http://127.0.0.1:{}/lib/u.js", server.port));
 }
+
+/// The github pattern: an element in the markup, a module that defines it.
+/// Before custom elements, `customElements is not defined` stopped the module
+/// (and with it every script after it).
+#[test]
+fn a_module_defines_a_custom_element_that_upgrades_the_markup() {
+    let (mut engine, view, _server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(
+                r#"<my-card id="c" title="Hello"></my-card>
+<script type="module" src="/card.js"></script>
+<script>document.body.appendChild(Object.assign(document.createElement('my-card'), { id: 'made' }));</script>"#,
+            ),
+        ),
+        (
+            "/card.js",
+            JS,
+            "class MyCard extends HTMLElement { \
+                 static get observedAttributes() { return ['title']; } \
+                 connectedCallback() { this.textContent = 'card:' + (this.getAttribute('title') || 'none'); log.push('connected:' + this.id); } \
+                 attributeChangedCallback(n, o, v) { log.push('attr:' + n + ':' + v); } \
+             } \
+             customElements.define('my-card', MyCard); \
+             log.push('defined:' + (customElements.get('my-card') === MyCard));"
+                .into(),
+        ),
+    ]);
+    assert_eq!(log(&mut engine, view), "attr:title:Hello,connected:c,connected:made,defined:true");
+    // The upgraded element's own work shows in the document.
+    assert_eq!(
+        engine.execute_script(view, "document.getElementById('c').textContent").unwrap(),
+        r#"String("card:Hello")"#
+    );
+    // `define` upgrades synchronously (so the callbacks come before the line
+    // after it), including the element the classic script made and connected
+    // before the module ran.
+    assert_eq!(
+        engine.execute_script(view, "document.getElementById('made') instanceof customElements.get('my-card')").unwrap(),
+        "Boolean(true)"
+    );
+}
