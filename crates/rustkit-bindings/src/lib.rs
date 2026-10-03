@@ -29,9 +29,12 @@ mod web_interfaces_tests;
 #[cfg(test)]
 mod web_blob_tests;
 #[cfg(test)]
+mod web_utils_tests;
+#[cfg(test)]
 mod dom_utils_tests;
 #[cfg(test)]
 mod web_history_tests;
+mod web_crypto;
 mod web_url;
 
 pub use dom::SelectorMatchFn;
@@ -408,6 +411,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
+        if (typeof cb !== 'function') throw new TypeError("Failed to execute 'queueMicrotask' on 'Window': The callback provided as parameter 1 is not a function.");
         Promise.resolve().then(function () { try { cb(); } catch (e) { report(e); } });
     };
 
@@ -648,6 +652,9 @@ impl DomBindings {
 
         // `URL` and `URLSearchParams` (parsing is the `url` crate's).
         web_url::install(runtime)?;
+
+        // crypto.getRandomValues / randomUUID over the OS random source.
+        web_crypto::install(runtime)?;
 
         // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
         runtime.evaluate_script(include_str!("web_encoding.js"))?;
