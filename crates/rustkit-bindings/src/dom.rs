@@ -28,6 +28,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+mod node_apis;
+
 /// Does this element match this selector list? `None` means the list is
 /// invalid, and script throws `SyntaxError`.
 pub type SelectorMatchFn = Rc<dyn Fn(&Rc<Node>, &str) -> Option<bool>>;
@@ -920,7 +922,7 @@ pub(crate) fn install(
     )?;
 
     runtime.evaluate_script(WRAPPERS_JS)?;
-    Ok(())
+    node_apis::install(runtime, host)
 }
 
 /// Wrapper prototypes, the identity cache, and the `document` read
@@ -1031,12 +1033,16 @@ const WRAPPERS_JS: &str = r#"
         if (!s) throw new TypeError('Illegal invocation');
         return s;
     }
+    // An element's interface; node_apis.js extends this by namespace.
+    var elementProto = function (id) {
+        return elementProtos[N.info(gen, id, 'local')] || HTMLElement.prototype;
+    };
     function wrap(id) {
         if (typeof id !== 'number') return null;
         var w = cache.get(id);
         if (w) return w;
         var t = N.info(gen, id, 'type');
-        var proto = t === 1 ? elementProtos[N.info(gen, id, 'local')] || HTMLElement.prototype
+        var proto = t === 1 ? elementProto(id)
                   : t === 3 ? Text.prototype : t === 9 ? Document.prototype
                   : t === 8 ? Comment.prototype : t === 11 ? DocumentFragment.prototype
                   : Node.prototype;
@@ -1609,10 +1615,7 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(out, 'length', { value: els.length });
         return out;
     });
-    // Focus is engine-side (pin §4) and not reachable from script yet; these
-    // keep handlers that call them (`input.focus()` after a submit) running.
-    HTMLElement.prototype.focus = function () {};
-    HTMLElement.prototype.blur = function () {};
+    // focus()/blur() and document.activeElement are in node_apis.js.
 
     Element.prototype.getAttribute = function (name) {
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
@@ -2193,6 +2196,15 @@ const WRAPPERS_JS: &str = r#"
         delete doc[k];
         g[k] = EventTarget.prototype[k];
     });
+
+    // For node_apis.js, which runs next and deletes it.
+    g.__rkNodeInternals = {
+        wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
+        extendElementProto: function (f) {
+            var base = elementProto;
+            elementProto = function (id) { return f(id, base); };
+        }
+    };
 
     g.__rustkit_dom_reset = function (newGen) {
         gen = newGen;
