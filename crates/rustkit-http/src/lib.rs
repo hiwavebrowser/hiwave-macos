@@ -153,12 +153,18 @@ fn roots_cached(
     load: impl FnOnce() -> tokio_rustls::rustls::RootCertStore,
 ) -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
     let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
-    let roots = slot.get_or_insert_with(|| Arc::new(load())).clone();
+    if let Some(roots) = slot.as_ref() {
+        return Ok(roots.clone());
+    }
+    // Only a usable store is cached: a transient platform failure (keychain
+    // busy under load) must not turn every later handshake into an error.
+    let roots = Arc::new(load());
     if roots.is_empty() {
         return Err(HttpError::TlsError(
             "no usable platform root certificates".into(),
         ));
     }
+    *slot = Some(roots.clone());
     Ok(roots)
 }
 
