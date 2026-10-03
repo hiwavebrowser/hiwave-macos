@@ -135,22 +135,31 @@ pub fn default_user_agent() -> String {
 /// #355 already removed the second (per-connection) load site.
 #[cfg(not(feature = "native-tls"))]
 fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
-    static ROOTS: std::sync::OnceLock<Arc<tokio_rustls::rustls::RootCertStore>> =
-        std::sync::OnceLock::new();
-    let roots = ROOTS.get_or_init(|| {
+    static ROOTS: RootsCache = std::sync::Mutex::new(None);
+    roots_cached(&ROOTS, || {
         let mut roots = tokio_rustls::rustls::RootCertStore::empty();
         for cert in rustls_native_certs::load_native_certs().certs {
             // A single unparseable platform cert must not kill the store.
             let _ = roots.add(cert);
         }
-        Arc::new(roots)
-    });
+        roots
+    })
+}
+
+type RootsCache = std::sync::Mutex<Option<Arc<tokio_rustls::rustls::RootCertStore>>>;
+
+fn roots_cached(
+    cache: &RootsCache,
+    load: impl FnOnce() -> tokio_rustls::rustls::RootCertStore,
+) -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
+    let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let roots = slot.get_or_insert_with(|| Arc::new(load())).clone();
     if roots.is_empty() {
         return Err(HttpError::TlsError(
             "no usable platform root certificates".into(),
         ));
     }
-    Ok(roots.clone())
+    Ok(roots)
 }
 
 /// ALPN outcome of a TLS handshake.
@@ -1236,6 +1245,43 @@ mod tests {
         let (version, status) = parse_status_line("HTTP/1.0 404 Not Found").unwrap();
         assert_eq!(version, Version::HTTP_10);
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn an_empty_platform_root_load_is_not_cached_for_the_life_of_the_process() {
+        use tokio_rustls::rustls::pki_types::{Der, TrustAnchor};
+        use tokio_rustls::rustls::RootCertStore;
+        let one_anchor = || RootCertStore {
+            roots: vec![TrustAnchor {
+                subject: Der::from_slice(b"subject"),
+                subject_public_key_info: Der::from_slice(b"spki"),
+                name_constraints: None,
+            }],
+        };
+        let cache: RootsCache = std::sync::Mutex::new(None);
+        let mut loads = 0;
+        assert!(
+            roots_cached(&cache, || {
+                loads += 1;
+                RootCertStore::empty()
+            })
+            .is_err(),
+            "an empty load is an error"
+        );
+        let got = roots_cached(&cache, || {
+            loads += 1;
+            one_anchor()
+        });
+        assert!(got.is_ok(), "a later successful load must be used, not the earlier empty one");
+        assert_eq!(loads, 2);
+        assert!(
+            roots_cached(&cache, || {
+                loads += 1;
+                RootCertStore::empty()
+            })
+            .is_ok()
+        );
+        assert_eq!(loads, 2, "a good store is cached and not reloaded");
     }
 
     #[test]
