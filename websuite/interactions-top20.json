@@ -1,0 +1,145 @@
+{
+  "description": "Real-site board interaction catalog: pinned minimal scripted interaction per top-20 site (Package Z2-M3). Pinned catalog — change it only with a dated note in trench/BASELINE-realsite.md, never to make the number move.",
+  "interactions": {
+    "google": {
+      "target_selector": "textarea[name='q'], input[name='q'], #APjFqb",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Search input focused with active caret or suggestion container",
+      "timeout_ms": 1000
+    },
+    "youtube": {
+      "target_selector": "button#search-button-narrow, button[aria-label='Search'], #guide-button",
+      "action": "click",
+      "response_type": "dom_mutation",
+      "expected_response": "Search bar or navigation drawer opens with active input",
+      "timeout_ms": 1500
+    },
+    "facebook": {
+      "target_selector": "input#email",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Email input focus ring and cursor active",
+      "timeout_ms": 1000
+    },
+    "instagram": {
+      "target_selector": "input[name='username']",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Username field active and label transitions",
+      "timeout_ms": 1000
+    },
+    "wikipedia": {
+      "target_selector": "input#searchInput",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Search input focused and search suggestion popup ready",
+      "timeout_ms": 1000
+    },
+    "lyft": {
+      "target_selector": "a[href*='rider'], button",
+      "action": "click",
+      "response_type": "visual_delta",
+      "expected_response": "Navigation overlay or destination modal renders",
+      "timeout_ms": 1500
+    },
+    "reddit": {
+      "target_selector": "input[type='search'], [role='search'] input",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Search input expands or search dropdown appears",
+      "timeout_ms": 1000
+    },
+    "x": {
+      "target_selector": "input[data-testid='SearchBox_Search_Input'], a[href='/login']",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Search input focused or login modal triggers",
+      "timeout_ms": 1000
+    },
+    "linkedin": {
+      "target_selector": "input.search-global-typeahead__input, input#username",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Search typeahead focused or login input ring active",
+      "timeout_ms": 1000
+    },
+    "yahoo": {
+      "target_selector": "input#ybar-sbq",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Search input focused with active autocomplete panel",
+      "timeout_ms": 1000
+    },
+    "bing": {
+      "target_selector": "input#sb_form_q",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Search box focused and suggestions flyout appears",
+      "timeout_ms": 1000
+    },
+    "walmart": {
+      "target_selector": "input[type='search']",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Search input focused and recent search layer opens",
+      "timeout_ms": 1000
+    },
+    "microsoft": {
+      "target_selector": "button#search, a#search",
+      "action": "click",
+      "response_type": "dom_mutation",
+      "expected_response": "Search flyout expands with input element",
+      "timeout_ms": 1000
+    },
+    "apple": {
+      "target_selector": "button#globalnav-menubutton-link-search, a#globalnav-menubutton-link-search",
+      "action": "click",
+      "response_type": "dom_mutation",
+      "expected_response": "Global search drawer slides down with search input",
+      "timeout_ms": 1000
+    },
+    "netflix": {
+      "target_selector": "input[name='email']",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Email field focused and floating label moves",
+      "timeout_ms": 1000
+    },
+    "github": {
+      "target_selector": "button.header-search-button, button[aria-label='Search or jump to…']",
+      "action": "click",
+      "response_type": "dom_mutation",
+      "expected_response": "Search modal command palette dialog opens (Day-7 Exit Metric #1)",
+      "timeout_ms": 1500
+    },
+    "shopify": {
+      "target_selector": "input[type='email']",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Free trial email input focused with active ring",
+      "timeout_ms": 1000
+    },
+    "squarespace": {
+      "target_selector": "button[aria-label='Open Menu'], a[href*='get-started']",
+      "action": "click",
+      "response_type": "visual_delta",
+      "expected_response": "Nav overlay opens or button active state renders",
+      "timeout_ms": 1500
+    },
+    "cnn": {
+      "target_selector": "button.search-icon, button[aria-label='Search']",
+      "action": "click",
+      "response_type": "dom_mutation",
+      "expected_response": "Search input bar reveals with active focus",
+      "timeout_ms": 1000
+    },
+    "weather": {
+      "target_selector": "input[id*='LocationSearch'], input[type='search']",
+      "action": "click",
+      "response_type": "focus_state",
+      "expected_response": "Location search input focused with suggestions dropdown",
+      "timeout_ms": 1000
+    }
+  }
+}
