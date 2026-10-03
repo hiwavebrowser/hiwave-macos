@@ -165,6 +165,8 @@ mod script_net;
 mod script_net_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_net_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_module_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
