@@ -214,3 +214,71 @@ fn delivery(response: ScriptResponse) -> NetDelivery {
         redirected: response.redirected,
     }
 }
+
+/// Most modules one page may pull in. The policy has its own request caps;
+/// this bounds the graph walk itself (a page cannot keep the engine here with
+/// a generated module graph).
+pub(crate) const MAX_MODULES_PER_PAGE: usize = 2_000;
+
+/// Deepest import chain followed (each round fetches one level, all its
+/// modules concurrently).
+const MAX_MODULE_ROUNDS: u32 = 64;
+
+/// Fetch what a started module graph has asked for, level by level, until it
+/// asks for nothing more. Every fetch is the policy's module entry point;
+/// this decides nothing. A module that is refused, mistyped, missing or too
+/// many is supplied as an error, so the graph fails as a whole and none of
+/// its code runs.
+///
+/// `fetched` counts the modules already pulled in on this page.
+pub(crate) async fn pump_modules(
+    bindings: &DomBindings,
+    policy: &FetchPolicy,
+    loader: &ResourceLoader,
+    deadline: tokio::time::Instant,
+    document: &Url,
+    fetched: &mut usize,
+) -> Pump {
+    let mut out = Pump::default();
+    for _ in 0..MAX_MODULE_ROUNDS {
+        let Ok(urls) = catch_unwind(AssertUnwindSafe(|| bindings.take_module_requests())) else {
+            out.poisoned = true;
+            return out;
+        };
+        if urls.is_empty() {
+            return out;
+        }
+        out.rounds += 1;
+        out.requests += urls.len();
+
+        // Within the page's module cap, fetch the level concurrently.
+        let room = MAX_MODULES_PER_PAGE.saturating_sub(*fetched);
+        *fetched += urls.len().min(room);
+        let outcomes = futures::future::join_all(urls.iter().enumerate().map(|(i, url)| async move {
+            if i >= room {
+                return Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})"));
+            }
+            let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
+            match tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await {
+                Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
+                    final_url: module.final_url.to_string(),
+                    source: module.source,
+                }),
+                Ok(Err(denial)) => {
+                    debug!(%url, ?denial, "Module fetch denied");
+                    Err(NETWORK_ERROR.to_string())
+                }
+                Err(_) => Err("script budget spent".to_string()),
+            }
+        }))
+        .await;
+
+        for (url, outcome) in urls.iter().zip(outcomes) {
+            if catch_unwind(AssertUnwindSafe(|| bindings.supply_module(url, outcome))).is_err() {
+                out.poisoned = true;
+                return out;
+            }
+        }
+    }
+    out
+}

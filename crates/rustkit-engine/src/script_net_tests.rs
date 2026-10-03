@@ -79,9 +79,11 @@ pub(crate) fn serve_routes(routes: Vec<(&'static str, &'static str, String)>) ->
                     }
                     path.clone().into_bytes()
                 };
+                // `/missing...` is a 404, for the failure cases.
+                let status = if fixed.is_none() && path.starts_with("/missing") { "404 Not Found" } else { "200 OK" };
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(&body);
