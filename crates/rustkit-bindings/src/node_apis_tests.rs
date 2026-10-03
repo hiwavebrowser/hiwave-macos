@@ -135,6 +135,6 @@ fn create_event_makes_uninitialised_events_for_init_and_dispatch() {
              r.join(',')"
         ),
         "\"\",true,false,false,InvalidStateError,true,true,true,true,true,true,true,\
-         NotSupportedError,ping:true:false:undefined:ping:false:true:7"
+         NotSupportedError,ping:true:false::ping:false:true:7"
     );
 }
