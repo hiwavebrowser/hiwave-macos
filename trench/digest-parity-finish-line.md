@@ -14621,3 +14621,68 @@ exclude SVG-namespace elements from Chrome's side — would have flipped `shelf`
 green in about ten lines. It is the Goodhart substitution this campaign exists
 to end: weakening the oracle to move a number. Measuring the shapes is more
 work and is the only version that is true.
+
+### Addendum — the lane confirmed it, and the prediction was exact on Gate A
+
+Parity Gate run
+[37100738647](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/37100738647)
+on `macos-14`, head `a7ba25c2`, `parity-oracle` sha256-verified
+(`3a3eaca7…`) against the pre-change board of run 37096150470
+(`dbc5168b…`). **So the night's metric line is a measurement, not a
+prediction.**
+
+| | predicted, before the lane ran | measured |
+|---|---|---|
+| `N/26 finish-line-green` | 3/26 → 3/26 | **3/26 → 3/26** |
+| geometry column | 15/26 → 16/26 | **15/26 → 16/26** |
+| `shelf` geometry | RED → GREEN | **RED → green** |
+| board join failures | 8 → 5 | **8 → 5** |
+| geometry failures | 467 (unchanged) | **467** |
+| not fully measured | 0 | **0** |
+
+`shelf` after: **12/12 Chrome boxes compared, 0 geometry failures, 0 join
+failures, green.** Exactly **one** of the 26 rows in the receipt table
+changed, and **one** of 26 cases changed in Gate A. No case lost a green on
+any column. The stop rule did not fire on macOS either.
+
+### Where my own prediction was WRONG, and it is the more interesting half
+
+I predicted **"Gate B is bit-identical on all 26 cases."** It is not, and the
+PR body says so too. The file differs — in exactly three fields, all of them
+*attribution* rather than paint:
+
+```
+  discrete_examined         1219 -> 1222   (+3)
+  discrete_unattributable    374 ->  371   (-3)
+  shelf discrete_withheld_selectors: [svg, svg > circle, svg > path] -> []
+```
+
+Every paint quantity is bit-identical, which is the part that mattered:
+`within_fraction` (shelf 0.983984375 both sides), `outside_tolerance_px`
+(2460), `total_px`, per-case `green`, `discrete_failures` 0 → 0, paint green
+3/26 → 3/26. Checked across all 26 cases: the ONLY fields that differ
+anywhere are those three.
+
+**Why it happened, and it is a consequence worth keeping.** Night 8 made Gate
+B's discrete detectors require attributability — an element is admitted only
+where its border box matches Chrome's rect within Gate A's tolerance — because
+reading RustKit's pixels at Chrome's rect on a displaced box reads pixels
+belonging to something else. A box that cannot be **joined** fails that
+precondition too, so the three svg boxes were being **withheld from the
+discrete column as well**, not just scored RED in geometry. Closing a join
+does not only un-RED geometry: it un-withholds the same boxes in Gate B, which
+then examined all three and passed them.
+
+So the one-line correction to this entry's headline: the fix moved **two**
+gates, not one, and "unmeasured" was hiding in a column nobody was looking at.
+373 boxes remain unattributable in Gate B board-wide — a number worth someone's
+night, since on this evidence some of them are withheld for the same reason
+rather than because they are displaced.
+
+### Land state
+
+R1 **DESIGN CLEAR** @ `a7ba25c2` (Prometheus, COMMENT — Pete-authored PR, so
+not APPROVE), R2-STAMP **PASS** @ the same SHA, checks green, merge CLEAN,
+gates 1–7 ok. No blockers, no changes requested; the two items above are
+surfaced to Pete as non-blocking. **PR #467 is land-ready and waiting on a
+human to merge** — nothing further is mine to push.
