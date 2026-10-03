@@ -72,3 +72,37 @@ fn a_page_loaded_from_a_string_has_no_bridge() {
         r#"String("undefined")"#
     );
 }
+
+/// XMLHttpRequest through a real page load: asked while scripts run, from a
+/// load handler and from a timer; a POST body round-trips; a request to
+/// another private address is refused by the policy and the page sees only
+/// `error`.
+#[test]
+fn xmlhttprequest_works_end_to_end_under_the_policy() {
+    let page = r#"<html><head><script>
+var log = [];
+function xhr(path, tag, body) {
+    var x = new XMLHttpRequest();
+    x.open(body ? 'POST' : 'GET', path);
+    x.onload = function () { log.push(tag + ':' + x.status + ':' + x.responseText); };
+    x.onerror = function () { log.push(tag + ':error'); };
+    x.send(body || null);
+}
+xhr('/hello', 'get');
+xhr('/echo', 'post', 'posted body');
+xhr('http://127.0.0.2:' + location.port + '/secret', 'denied');
+window.addEventListener('load', function () { xhr('/after-load', 'load'); });
+setTimeout(function () { xhr('/timer', 'timer'); }, 100);
+</script></head><body>hi</body></html>"#;
+    let (mut engine, view, server) = load(
+        EngineConfig::default(),
+        vec![("/", "text/html", page.to_string())],
+    );
+    let log = engine.execute_script(view, "log.join('|')").unwrap();
+    assert_eq!(
+        log,
+        r#"String("get:200:/hello|post:200:posted body|denied:error|load:200:/after-load|timer:200:/timer")"#
+    );
+    // The page, plus four fetched requests; the refused one never connected.
+    assert_eq!(server.hits.load(std::sync::atomic::Ordering::SeqCst), 5);
+}
