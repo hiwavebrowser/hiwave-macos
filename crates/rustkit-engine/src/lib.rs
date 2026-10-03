@@ -12731,13 +12731,17 @@ fn parse_background_repeat(value: &str) -> rustkit_css::BackgroundRepeat {
 /// One value: the other axis is `center`, and `top` / `bottom` name the
 /// vertical axis. Two values: horizontal then vertical, unless the keywords
 /// say otherwise (`top right`). Three or four: `<edge> <offset>?` pairs; an
-/// offset from `left` / `top` is kept, one from `right` / `bottom` is not
-/// (the value has no way to say "from the far edge" yet) and the image sits
-/// on that edge.
+/// offset from `right` / `bottom` is measured back from that edge.
 fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
-    use rustkit_css::BackgroundPositionValue::Percent;
+    use rustkit_css::BackgroundPositionValue::{Calc, Percent, Px};
     let value = value.trim().to_lowercase();
-    let parts: Vec<&str> = value.split_whitespace().collect();
+    // A `calc()` has spaces of its own.
+    let parts: Vec<&str> = split_top_level_whitespace(&value);
+    let from_far_edge = |offset: rustkit_css::BackgroundPositionValue| match offset {
+        Percent(p) => Percent(1.0 - p),
+        Px(px) => Calc { percent: 1.0, px: -px },
+        Calc { percent, px } => Calc { percent: 1.0 - percent, px: -px },
+    };
     let vertical = |s: &str| matches!(s, "top" | "bottom");
     let horizontal = |s: &str| matches!(s, "left" | "right");
 
@@ -12764,6 +12768,9 @@ fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
                     .filter(|next| !vertical(next) && !horizontal(next) && *next != "center");
                 let at = match (edge, offset) {
                     ("left" | "top", Some(offset)) => parse_background_position_value(offset),
+                    ("right" | "bottom", Some(offset)) => {
+                        from_far_edge(parse_background_position_value(offset))
+                    }
                     _ => parse_background_position_value(edge),
                 };
                 if vertical(edge) {
@@ -12787,6 +12794,26 @@ fn parse_background_position_value(value: &str) -> rustkit_css::BackgroundPositi
         "left" | "top" => rustkit_css::BackgroundPositionValue::Percent(0.0),
         "center" => rustkit_css::BackgroundPositionValue::Percent(0.5),
         "right" | "bottom" => rustkit_css::BackgroundPositionValue::Percent(1.0),
+        // A sum of a percentage and px; one in font or viewport units has
+        // nothing to resolve against here and is the start edge.
+        _ if value.starts_with("calc(") => match rustkit_css::parse_length(&value) {
+            Some(rustkit_css::Length::Px(px)) => rustkit_css::BackgroundPositionValue::Px(px),
+            Some(rustkit_css::Length::Zero) => rustkit_css::BackgroundPositionValue::Px(0.0),
+            Some(rustkit_css::Length::Percent(p)) => {
+                rustkit_css::BackgroundPositionValue::Percent(p / 100.0)
+            }
+            Some(rustkit_css::Length::Calc(sum))
+                if [sum.em, sum.rem, sum.vw, sum.vh, sum.vmin, sum.vmax]
+                    .iter()
+                    .all(|c| *c == 0.0) =>
+            {
+                rustkit_css::BackgroundPositionValue::Calc {
+                    percent: sum.percent / 100.0,
+                    px: sum.px,
+                }
+            }
+            _ => rustkit_css::BackgroundPositionValue::Percent(0.0),
+        },
         _ if value.ends_with('%') => value
             .strip_suffix('%')
             .and_then(|s| s.parse::<f32>().ok())
@@ -12914,6 +12941,12 @@ fn parse_background_shorthand_layer(
                 size.push(token);
                 continue;
             }
+            // A `calc()` size is not resolved yet: it holds its place as
+            // `auto` rather than being read as a position.
+            if lower.starts_with("calc(") && size.len() < 2 {
+                size.push("auto");
+                continue;
+            }
             in_size = false;
         }
         match lower.as_str() {
@@ -12940,7 +12973,7 @@ fn parse_background_shorthand_layer(
                     .trim_matches(|c| c == '"' || c == '\'');
                 layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
             }
-            _ if numeric(&lower) => position.push(token),
+            _ if numeric(&lower) || lower.starts_with("calc(") => position.push(token),
             _ => {
                 if let Some(gradient) = parse_gradient(token) {
                     layer.image = rustkit_css::BackgroundImage::Gradient(gradient);
@@ -18175,7 +18208,7 @@ mod element_identity_tests {
 
     #[test]
     fn a_background_position_reads_its_keywords_by_axis() {
-        use rustkit_css::BackgroundPositionValue::{Percent, Px};
+        use rustkit_css::BackgroundPositionValue::{Calc, Percent, Px};
         let at = |v: &str| {
             let p = parse_background_position(v);
             (p.x, p.y)
@@ -18191,10 +18224,47 @@ mod element_identity_tests {
         assert_eq!(at("center bottom"), (Percent(0.5), Percent(1.0)));
         assert_eq!(at("bottom center"), (Percent(0.5), Percent(1.0)));
         assert_eq!(at("10px 20px"), (Px(10.0), Px(20.0)));
-        // Edge and offset: kept from the near edge; the far edge alone.
+        // Edge and offset: from the near edge, or back from the far one.
         assert_eq!(at("left 10px top 20px"), (Px(10.0), Px(20.0)));
-        assert_eq!(at("right 5px bottom 5px"), (Percent(1.0), Percent(1.0)));
+        assert_eq!(
+            at("right 5px bottom 5px"),
+            (Calc { percent: 1.0, px: -5.0 }, Calc { percent: 1.0, px: -5.0 })
+        );
         assert_eq!(at("top 20px left"), (Percent(0.0), Px(20.0)));
+    }
+
+    #[test]
+    fn a_background_position_keeps_far_edge_offsets_and_calc() {
+        // css-backgrounds-3 §3.6: `right 5px` is 5px in from the right edge,
+        // and a position may be a `calc()` of a percentage and a length.
+        // The far-edge offset was dropped and a `calc()` was split at its
+        // spaces. Read as px for a 100x50 image in a 300x200 area.
+        let at = |v: &str| {
+            let p = parse_background_position(v);
+            (p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0))
+        };
+        assert_eq!(at("right 5px bottom 10px"), (195.0, 140.0));
+        assert_eq!(at("bottom 10px right 5px"), (195.0, 140.0));
+        assert_eq!(at("right 10% top 20px"), (180.0, 20.0));
+        assert_eq!(at("left 5px bottom"), (5.0, 150.0));
+        assert_eq!(at("calc(100% - 20px) 0"), (180.0, 0.0));
+        assert_eq!(at("10px calc(50% + 4px)"), (10.0, 79.0));
+        assert_eq!(at("right calc(10px + 5px) top"), (185.0, 0.0));
+
+        // The shorthand takes them as position tokens too.
+        let (_, layer) =
+            parse_background_shorthand_layer("url(a.png) no-repeat right 5px bottom 10px");
+        let p = layer.expect("layer").position;
+        assert_eq!((p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0)), (195.0, 140.0));
+        let (_, layer) =
+            parse_background_shorthand_layer("url(a.png) calc(100% - 20px) 50% / 100px no-repeat");
+        let layer = layer.expect("layer");
+        let p = &layer.position;
+        assert_eq!((p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0)), (180.0, 75.0));
+        assert_eq!(
+            layer.size,
+            rustkit_css::BackgroundSize::Explicit { width: Some(100.0), height: None }
+        );
     }
 
     #[test]

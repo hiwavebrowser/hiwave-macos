@@ -7892,11 +7892,13 @@ impl DisplayList {
 
     /// Convert rustkit_css::BackgroundPosition to the command's
     /// `(position, offset)`: a percentage is the 0-1 position with no
-    /// offset, a length is position 0 with that many px of offset.
+    /// offset, a length is position 0 with that many px of offset, and a
+    /// far-edge offset or `calc()` is both.
     fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> ((f32, f32), (f32, f32)) {
         let axis = |v: &rustkit_css::BackgroundPositionValue| match v {
             rustkit_css::BackgroundPositionValue::Percent(p) => (*p, 0.0),
             rustkit_css::BackgroundPositionValue::Px(px) => (0.0, *px),
+            rustkit_css::BackgroundPositionValue::Calc { percent, px } => (*percent, *px),
         };
         let (x, offset_x) = axis(&pos.x);
         let (y, offset_y) = axis(&pos.y);
@@ -9248,6 +9250,32 @@ mod tests {
             },
         );
         assert_eq!((tile.x, tile.y), (20.0, 170.0));
+    }
+
+    #[test]
+    fn test_url_background_far_edge_offset_is_a_percentage_plus_px() {
+        // `right 5px bottom 10px`: on the far edges, then back by the
+        // offsets. 100x50 image in the 300x200 box at 10,20.
+        let calc = |percent, px| rustkit_css::BackgroundPositionValue::Calc { percent, px };
+        let size = rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        };
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: calc(1.0, -5.0), y: calc(1.0, -10.0) },
+        );
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (205.0, 160.0, 100.0, 50.0));
+
+        // `calc(50% + 4px)` on one axis.
+        let tile = url_background_tile_at(
+            size,
+            rustkit_css::BackgroundPosition {
+                x: calc(0.5, 4.0),
+                y: rustkit_css::BackgroundPositionValue::Percent(0.0),
+            },
+        );
+        assert_eq!((tile.x, tile.y), (114.0, 20.0));
     }
 
     #[test]
