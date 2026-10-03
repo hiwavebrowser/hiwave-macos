@@ -270,6 +270,37 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
     let op = string_arg(args, 1).ok_or("NotSupportedError")?;
     if let Some(kind) = op.strip_prefix("create:") {
         let data = string_arg(args, 2).unwrap_or("").to_string();
+        // DOMParser (HTML §8.5.1): parse `data` as a whole HTML document,
+        // then copy it under a detached Document node here. Its nodes share
+        // this Document's node table (so wrappers and tree moves work on
+        // them) but are in no rendered tree.
+        if kind == "document" {
+            let parsed = Document::parse_html(&data).map_err(|_| "SyntaxError")?;
+            let doc = document.create_node(NodeType::Document);
+            let templates = &mut host.templates.borrow_mut();
+            for child in parsed.root().children() {
+                // The parsed tree's NodeIds are its own: clone with an
+                // empty template table, then give its templates content.
+                doc.append_child(clone_node(document, &child, true, &mut HashMap::new()));
+            }
+            // An HTML document always has a body, but rustkit-html drops
+            // it (and the text) for text-only input; supply an empty one.
+            if let Some(html) = doc
+                .children()
+                .into_iter()
+                .find(|n| n.tag_name() == Some("html"))
+            {
+                if !html.children().iter().any(|n| n.tag_name() == Some("body")) {
+                    html.append_child(document.create_node(NodeType::Element {
+                        tag_name: String::from("body"),
+                        namespace: String::from("http://www.w3.org/1999/xhtml"),
+                        attributes: Default::default(),
+                    }));
+                }
+            }
+            adopt_template_contents(document, &doc, templates);
+            return Ok((node_id(Some(doc)), DomDirty::Clean));
+        }
         let node_type = match kind {
             "element" if is_valid_name(&data) => NodeType::Element {
                 // An HTML document lowercases the name it is given.
@@ -1006,7 +1037,7 @@ const WRAPPERS_JS: &str = r#"
         if (w) return w;
         var t = N.info(gen, id, 'type');
         var proto = t === 1 ? elementProtos[N.info(gen, id, 'local')] || HTMLElement.prototype
-                  : t === 3 ? Text.prototype
+                  : t === 3 ? Text.prototype : t === 9 ? Document.prototype
                   : t === 8 ? Comment.prototype : t === 11 ? DocumentFragment.prototype
                   : Node.prototype;
         w = Object.create(proto);
@@ -1084,8 +1115,13 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this);
         return list(NodeList.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', false);
     });
+    // A node in a DOMParser document is owned by it; every other node by
+    // the global document.
     getter(Node.prototype, 'ownerDocument', function () {
-        return info(this, 'type') === 9 ? null : g.document;
+        if (info(this, 'type') === 9) return null;
+        var n = this;
+        while (n.parentNode) n = n.parentNode;
+        return n.nodeType === 9 ? n : g.document;
     });
     Node.prototype.hasChildNodes = function () { return this.firstChild !== null; };
 
@@ -1338,12 +1374,13 @@ const WRAPPERS_JS: &str = r#"
             return elementSibling(this, 'previousSibling');
         });
     });
-    // A node is connected when its root is the current document; an old
-    // document's wrappers have no parent and are never connected.
+    // A node is connected when its root is a document (the current one,
+    // or a DOMParser one); an old document's wrappers have no parent and
+    // are never connected.
     getter(Node.prototype, 'isConnected', function () {
         var n = this;
         while (n.parentNode) n = n.parentNode;
-        return n === g.document && slotOf(n).gen === gen;
+        return n.nodeType === 9 && slotOf(n).gen === gen;
     });
 
     // HTML §4.12.3 template.content: the fragment its parsed children
@@ -1843,7 +1880,8 @@ const WRAPPERS_JS: &str = r#"
     DocumentFragment.prototype.querySelectorAll = queries.querySelectorAll;
     // NonElementParentNode on a fragment: the id table only knows the
     // document, so walk the fragment's own subtree.
-    DocumentFragment.prototype.getElementById = function (id) {
+    // A DOMParser document's ids are not in the table either.
+    function findById(root, id) {
         id = String(id);
         function find(n) {
             for (var c = n.firstChild; c; c = c.nextSibling) {
@@ -1854,8 +1892,9 @@ const WRAPPERS_JS: &str = r#"
             }
             return null;
         }
-        return find(this);
-    };
+        return find(root);
+    }
+    DocumentFragment.prototype.getElementById = function (id) { return findById(this, id); };
     function matches(el, sel, method) {
         var s = slotOf(el);
         if (s.gen !== gen) return false;
@@ -1901,12 +1940,31 @@ const WRAPPERS_JS: &str = r#"
     };
     Document.prototype.getElementById = function (id) {
         var s = slotOf(this);
+        if (this !== g.document) return findById(this, id);
         return s.gen === gen ? wrap(N.byId(s.gen, String(id))) : null;
     };
+    // A DOMParser document answers these from its own tree.
+    function childNamed(n, name) {
+        for (var c = n && n.firstChild; c; c = c.nextSibling) {
+            if (c.nodeType === 1 && (!name || c.localName === name)) return c;
+        }
+        return null;
+    }
     ['documentElement', 'head', 'body'].forEach(function (k) {
         getter(Document.prototype, k, function () {
-            var s = slotOf(this); return s.gen === gen ? wrap(N.root(s.gen, k)) : null;
+            var s = slotOf(this);
+            if (this !== g.document) {
+                var root = childNamed(this);
+                return k === 'documentElement' ? root : childNamed(root, k);
+            }
+            return s.gen === gen ? wrap(N.root(s.gen, k)) : null;
         });
+    });
+    // The global document's title is an own property the engine sets; a
+    // DOMParser document reads its first <title> (HTML §3.1.3).
+    getter(Document.prototype, 'title', function () {
+        var t = this.querySelector('title');
+        return t ? t.textContent.replace(/[\t\n\f\r ]+/g, ' ').trim() : '';
     });
 
     // `document.currentScript` (HTML §3.1.1): the classic <script> element
@@ -2078,6 +2136,29 @@ const WRAPPERS_JS: &str = r#"
     };
     g.Event = Event;
     g.CustomEvent = CustomEvent;
+
+    // DOMParser (HTML §8.5.1), for 'text/html' only: the XML types need an
+    // XML parser, which RustKit does not have yet.
+    var DOMParser = function DOMParser() {
+        if (!(this instanceof DOMParser)) {
+            throw new TypeError("Failed to construct 'DOMParser': Please use the 'new' operator.");
+        }
+    };
+    DOMParser.prototype.parseFromString = function (str, type) {
+        type = String(type);
+        if (type === 'text/xml' || type === 'application/xml' ||
+            type === 'application/xhtml+xml' || type === 'image/svg+xml') {
+            throw new DOMException("Failed to execute 'parseFromString' on 'DOMParser': " +
+                "XML documents are not supported yet.", 'NotSupportedError');
+        }
+        if (type !== 'text/html') {
+            throw new TypeError("Failed to execute 'parseFromString' on 'DOMParser': The provided value '" +
+                type + "' is not a valid enum value of type DOMParserSupportedType.");
+        }
+        return create('document', String(str), 'parseFromString');
+    };
+    Object.defineProperty(DOMParser.prototype, Symbol.toStringTag, { value: 'DOMParser' });
+    g.DOMParser = DOMParser;
     HTMLElement.prototype.click = function () {
         this.dispatchEvent(new Event('click', { bubbles: true, cancelable: true }));
     };

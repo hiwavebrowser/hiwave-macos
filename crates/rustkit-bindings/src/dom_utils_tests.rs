@@ -226,13 +226,14 @@ fn dom_parser_parses_html_into_its_own_document() {
                     d.body.firstChild.textContent, d.getElementById('q').className, \
                     d.querySelector('.k').id, String(document.getElementById('q')), \
                     d.documentElement.tagName, d.head.firstChild.tagName, d.body.isConnected); \
-             r.push(new DOMParser().parseFromString('&lt;b&gt; &#39;', 'text/html').body.textContent); \
+             r.push(new DOMParser().parseFromString('<p>&lt;b&gt; &#39;</p>', 'text/html').body.textContent, \
+                    new DOMParser().parseFromString('', 'text/html').body.tagName); \
              var moved = document.importNode(d.getElementById('q'), true); \
              document.body.appendChild(moved); r.push(document.getElementById('q') === moved); \
              try { new DOMParser().parseFromString('x', 'text/plain'); } catch (e) { r.push(e.name); } \
              r.join('|')"
         ),
-        "true|true|9|Hi|a & b|k|q|null|HTML|TITLE|true|<b> '|true|TypeError"
+        "true|true|9|Hi|a & b|k|q|null|HTML|TITLE|true|<b> '|BODY|true|TypeError"
     );
 }
 
