@@ -1008,6 +1008,9 @@ pub enum BackgroundPositionValue {
     Percent(f32),
     /// Pixel offset from the start.
     Px(f32),
+    /// A percentage (0.0 = start, 1.0 = end) plus a pixel offset:
+    /// `right 10px` is 100% - 10px, and `calc(50% + 4px)` is itself.
+    Calc { percent: f32, px: f32 },
 }
 
 impl Default for BackgroundPositionValue {
@@ -1026,6 +1029,9 @@ impl BackgroundPositionValue {
                 (container_size - image_size) * pct
             }
             BackgroundPositionValue::Px(px) => *px,
+            BackgroundPositionValue::Calc { percent, px } => {
+                (container_size - image_size) * percent + px
+            }
         }
     }
 }
