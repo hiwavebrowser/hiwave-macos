@@ -659,6 +659,9 @@ impl DomBindings {
         // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
         runtime.evaluate_script(include_str!("web_streams.js"))?;
 
+        // Intl (en-US only) and the toLocale*String methods over it (web_intl.js).
+        runtime.evaluate_script(include_str!("web_intl.js"))?;
+
         // IPC bridge for communication with Rust
         let ipc_js = r#"
             // IPC queue for postMessage calls
