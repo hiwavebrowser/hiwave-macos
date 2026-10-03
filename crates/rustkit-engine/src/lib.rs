@@ -3772,8 +3772,10 @@ impl Engine {
         layout_box: &mut LayoutBox,
         images: &HashMap<usize, (Option<f32>, Option<f32>)>,
     ) -> usize {
-        // An inline `<svg>` box has no identity and nothing to refresh: its
-        // size comes from the DOM subtree, which has not changed.
+        // An inline `<svg>` box carries an identity but no recorded size
+        // hints — only `<img>` boxes call `note_snapshot_image` — so the
+        // lookup misses and there is nothing to refresh: an svg's size comes
+        // from the DOM subtree, which has not changed.
         let hints = layout_box
             .identity
             .as_ref()
@@ -4337,10 +4339,24 @@ impl Engine {
                             style.clone(),
                         );
                         Self::transfer_positioning(&mut svg_box, &style);
+                        Self::attach_identity(
+                            &mut svg_box,
+                            selector_path,
+                            attributes,
+                            &tag_lower,
+                            element_ids,
+                        );
                         return svg_box;
                     }
                     let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
                     Self::transfer_positioning(&mut svg_box, &style);
+                    Self::attach_identity(
+                        &mut svg_box,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
                     return svg_box;
                 }
 
@@ -8060,6 +8076,92 @@ impl Engine {
         }
     }
 
+    /// Index every inline `<svg>` subtree's shape geometry by the same
+    /// content-hash key the box build and the paint splice use.
+    ///
+    /// Keyed by content hash, so two identical svgs on one page share an
+    /// entry — which is harmless and not an ambiguity: identical subtrees
+    /// yield identical child segments and identical user-space geometry, and
+    /// each svg box resolves its OWN selector prefix from its own identity.
+    fn inline_svg_shape_index(&self, document: &Document) -> HashMap<String, InlineSvgShapes> {
+        let mut index = HashMap::new();
+        for svg_el in document.get_elements_by_tag_name("svg") {
+            let key = Self::inline_svg_key(&Self::serialize_svg_subtree(&svg_el));
+            if index.contains_key(&key) {
+                continue;
+            }
+            let Some(svg) = self.svg_cache.get(&key) else {
+                // No parsed document means the box build took its cache-MISS
+                // exit and painted nothing, so there is no geometry to report.
+                continue;
+            };
+            let mut shapes = Vec::new();
+            Self::collect_svg_shapes(&svg_el, "", &mut shapes);
+            index.insert(
+                key,
+                InlineSvgShapes {
+                    view_box: svg.view_box,
+                    stretch: svg.stretch,
+                    shapes,
+                },
+            );
+        }
+        index
+    }
+
+    /// Walk an inline `<svg>` subtree, collecting each shape's user-space
+    /// bbox under the selector Chrome reports for it.
+    ///
+    /// `parent_path` is relative to the `<svg>` itself and starts empty; the
+    /// svg's own prefix is joined on at export time from its box identity, so
+    /// one walk serves every box sharing this subtree's content hash.
+    ///
+    /// Selector segments come from `child_selector_segments` with
+    /// `parent_is_foreign = true` — the SAME machinery, and the same
+    /// `:nth-of-type` and foreign-content class rules, that the HTML side is
+    /// pinned to by `tools/parity_oracle/verify_selector_key.mjs`. A parallel
+    /// implementation here is exactly how a confident wrong join gets built.
+    ///
+    /// A `transform` attribute REFUSES that element and its whole subtree:
+    /// this walk composes no transforms, and a shape reported at its
+    /// untransformed position would be a wrong box rather than a missing one.
+    fn collect_svg_shapes(node: &Rc<Node>, parent_path: &str, out: &mut Vec<SvgShapeBox>) {
+        let children = node.children();
+        let segments = Self::child_selector_segments(&children, true);
+        for (child, segment) in children.iter().zip(segments) {
+            let NodeType::Element {
+                tag_name,
+                attributes,
+                ..
+            } = &child.node_type
+            else {
+                continue;
+            };
+            if attributes.contains_key("transform") {
+                continue;
+            }
+            let Some(segment) = segment else { continue };
+            let path = match parent_path.is_empty() {
+                true => segment,
+                false => format!("{parent_path} > {segment}"),
+            };
+            let tag_lower = lower_tag(tag_name);
+            if let Some((x, y, width, height)) = svg_shape_user_bbox(&tag_lower, attributes) {
+                out.push(SvgShapeBox {
+                    tag: tag_lower.to_string(),
+                    selector: path.clone(),
+                    x,
+                    y,
+                    width,
+                    height,
+                });
+            }
+            // `<g>` and friends carry no geometry of their own but hold
+            // shapes that do, so the walk continues through them.
+            Self::collect_svg_shapes(child, &path, out);
+        }
+    }
+
     /// Parse a `data:image/svg+xml` image into svg_cache under its own url,
     /// the key the display-list splice looks up, so it paints as vector
     /// commands like a fetched SVG. Left to the raster lane, ImageManager's
@@ -10540,7 +10642,15 @@ impl Engine {
 
         // Convert layout tree to JSON-serializable structure
 
-        let layout_json = layout_box_to_json(layout);
+        // SVG shape geometry is indexed from the DOM, not the layout tree:
+        // shapes generate no CSS box, so the tree has nothing to walk. Empty
+        // when the view has no document, which keeps the export identical to
+        // what it was rather than failing.
+        let svg_shapes = match view.document.as_ref() {
+            Some(document) => self.inline_svg_shape_index(document),
+            None => HashMap::new(),
+        };
+        let layout_json = layout_box_to_json_under(layout, None, &svg_shapes);
 
         // Get viewport size from compositor
         let (width, height) = self
@@ -14266,8 +14376,284 @@ fn layout_export_wrapper(
 /// tests that go through `build_layout_from_document` need a GPU compositor and
 /// SKIP when none is present, which would make an identity test vacuous on any
 /// machine without a GPU adapter.
+/// One SVG shape element's geometry bbox, in the inline `<svg>` subtree's own
+/// USER units, with the join key Chrome reports for it.
+///
+/// SVG shape elements generate NO CSS box, so they are absent from the layout
+/// tree by design — but Chrome's baseline is `getBoundingClientRect()` over
+/// `querySelectorAll('*')`, which reports a rect for every rendered shape. So
+/// `shelf`'s `svg > circle` and `svg > path` reached Gate A as `missing_box`
+/// join failures and could never be compared, which put a ceiling on the
+/// metric that nobody chose: the case cannot reach geometry-green however
+/// correct the engine is.
+///
+/// These are emitted as children of the svg's box under `"type": "svg_shape"`
+/// — named so no reader mistakes them for CSS boxes — carrying the geometry
+/// RustKit will actually paint, through the same viewBox transform
+/// `SvgDocument::render_with_color` uses.
+///
+/// MEASURED against Chrome (run 37096150470, `macos-14`, and
+/// `baselines/chrome-148/builtins/shelf/layout-rects.json`): the rect is the
+/// FILL geometry bbox with STROKE EXCLUDED. `circle r=8` under
+/// `stroke-width="2"` reports 9.333332px at scale 14/24, which is 16.0 user
+/// units — the fill box (18 would be the stroke box).
+#[derive(Debug, Clone)]
+struct SvgShapeBox {
+    tag: String,
+    selector: String,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+/// The shapes of one inline `<svg>` subtree, keyed by its `inline_svg_key`.
+struct InlineSvgShapes {
+    view_box: Option<rustkit_svg::ViewBox>,
+    stretch: bool,
+    shapes: Vec<SvgShapeBox>,
+}
+
+/// Parse a `points` list (`"1,2 3,4"` / `"1 2 3 4"`) into coordinate pairs.
+fn svg_points(raw: &str) -> Vec<(f32, f32)> {
+    let nums: Vec<f32> = raw
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| t.parse::<f32>().ok())
+        .collect();
+    nums.chunks_exact(2).map(|p| (p[0], p[1])).collect()
+}
+
+fn bounds_of_points(points: &[(f32, f32)]) -> Option<(f32, f32, f32, f32)> {
+    let (first, rest) = points.split_first()?;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.0, first.1, first.0, first.1);
+    for &(x, y) in rest {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    Some((min_x, min_y, max_x - min_x, max_y - min_y))
+}
+
+/// The bbox of a path whose every command is a STRAIGHT line, in user units.
+///
+/// `None` for any path carrying a curve or an arc. A Bezier's bbox is NOT the
+/// bbox of its control points — that is a superset, and Chrome reports the
+/// tight bbox — so bounding one from its control points would report a box
+/// larger than the shape and call the difference a geometry defect. Refusing
+/// leaves the element UNMEASURED, which is the honest reading; the tight
+/// extrema of a cubic are a separate unit.
+fn straight_path_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f32, f32)> {
+    use rustkit_svg::PathCommand as C;
+    let mut points: Vec<(f32, f32)> = Vec::new();
+    let (mut cx, mut cy) = (0.0f32, 0.0f32);
+    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    for cmd in commands {
+        match *cmd {
+            C::MoveTo(x, y) => {
+                (cx, cy) = (x, y);
+                (sx, sy) = (x, y);
+                points.push((cx, cy));
+            }
+            C::MoveToRel(dx, dy) => {
+                (cx, cy) = (cx + dx, cy + dy);
+                (sx, sy) = (cx, cy);
+                points.push((cx, cy));
+            }
+            C::LineTo(x, y) => {
+                (cx, cy) = (x, y);
+                points.push((cx, cy));
+            }
+            C::LineToRel(dx, dy) => {
+                (cx, cy) = (cx + dx, cy + dy);
+                points.push((cx, cy));
+            }
+            C::HorizontalTo(x) => {
+                cx = x;
+                points.push((cx, cy));
+            }
+            C::HorizontalToRel(dx) => {
+                cx += dx;
+                points.push((cx, cy));
+            }
+            C::VerticalTo(y) => {
+                cy = y;
+                points.push((cx, cy));
+            }
+            C::VerticalToRel(dy) => {
+                cy += dy;
+                points.push((cx, cy));
+            }
+            C::Close => {
+                (cx, cy) = (sx, sy);
+            }
+            // Any curve or arc: refuse the whole path.
+            _ => return None,
+        }
+    }
+    bounds_of_points(&points)
+}
+
+/// The user-space geometry bbox of one SVG shape element, or `None` where the
+/// shape is one this exporter does not model EXACTLY.
+///
+/// Refusing is the correct failure: the element is then absent from
+/// `layout.json`, Gate A files it as `missing_box` and scores it UNMEASURED,
+/// and "unmeasured is never green". A box emitted from arithmetic that is
+/// merely close would be compared and believed.
+fn svg_shape_user_bbox(
+    tag: &str,
+    attributes: &HashMap<String, String>,
+) -> Option<(f32, f32, f32, f32)> {
+    let num = |name: &str, default: f32| -> f32 {
+        attributes
+            .get(name)
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(default)
+    };
+    match tag {
+        "circle" => {
+            let r = num("r", 0.0);
+            // r <= 0 disables rendering (SVG 1.1 §9.3); Chrome's capture
+            // skips the zero-size rect, so emitting one would be a phantom.
+            (r > 0.0).then(|| {
+                let (cx, cy) = (num("cx", 0.0), num("cy", 0.0));
+                (cx - r, cy - r, 2.0 * r, 2.0 * r)
+            })
+        }
+        "ellipse" => {
+            let (rx, ry) = (num("rx", 0.0), num("ry", 0.0));
+            (rx > 0.0 && ry > 0.0).then(|| {
+                let (cx, cy) = (num("cx", 0.0), num("cy", 0.0));
+                (cx - rx, cy - ry, 2.0 * rx, 2.0 * ry)
+            })
+        }
+        "rect" => {
+            let (w, h) = (num("width", 0.0), num("height", 0.0));
+            (w > 0.0 && h > 0.0).then(|| (num("x", 0.0), num("y", 0.0), w, h))
+        }
+        "line" => {
+            let (x1, y1) = (num("x1", 0.0), num("y1", 0.0));
+            let (x2, y2) = (num("x2", 0.0), num("y2", 0.0));
+            bounds_of_points(&[(x1, y1), (x2, y2)])
+        }
+        "polyline" | "polygon" => {
+            let points = svg_points(attributes.get("points")?);
+            bounds_of_points(&points)
+        }
+        "path" => {
+            let commands = rustkit_svg::SvgPath::parse(attributes.get("d")?);
+            straight_path_bbox(&commands)
+        }
+        // Everything else is UNMODELLED and stays unmeasured, deliberately:
+        // `text`/`tspan` need shaped glyph extents, `use` is unresolved in
+        // rustkit-svg's renderer (`SvgElement::Use(_) => {}`), and
+        // `image`/`foreignObject` are their own replaced lanes. Non-rendered
+        // elements (`defs`, `title`, gradients, `clipPath`) never reach the
+        // baseline at all: the capture skips any rect that is 0x0.
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn find_svg_border_box(b: &LayoutBox) -> Option<rustkit_layout::Rect> {
+    if b.identity().map(|i| i.tag == "svg").unwrap_or(false) {
+        return Some(b.dimensions.border_box());
+    }
+    b.children.iter().find_map(find_svg_border_box)
+}
+
+/// The no-inline-svg convenience: every production export goes through
+/// `layout_box_to_json_under` with a real shape index.
+#[cfg(test)]
 fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
-    layout_box_to_json_under(layout_box, None)
+    layout_box_to_json_under(layout_box, None, &HashMap::new())
+}
+
+/// Map an inline `<svg>`'s shape geometry from user units into page space.
+///
+/// The transform mirrors `SvgDocument::render_with_color` exactly — the same
+/// uniform-`min` scale, the same `stretch` escape, the same `min-x`/`min-y`
+/// origin shift — because the point is to report the geometry the engine will
+/// PAINT, not a second opinion about it. The viewport is the CONTENT box,
+/// which is what `render_image` passes as its container.
+///
+/// `None` wherever the mapping is not the one the painter uses: no viewBox
+/// (an svg sized without one puts its shapes in raw user units, which is a
+/// different lane and unverified here), a degenerate viewBox, or a non-default
+/// `object-fit` (which would make the paint dest differ from the content box). Chrome's
+/// default `preserveAspectRatio="xMidYMid"` also CENTERS letterboxed content
+/// and `render_with_color` does not, so a non-square fit is refused rather
+/// than reported from a transform known to differ.
+fn svg_shape_children_json(
+    layout_box: &LayoutBox,
+    shapes: &HashMap<String, InlineSvgShapes>,
+) -> Option<Vec<serde_json::Value>> {
+    let identity = layout_box.identity()?;
+    if identity.tag != "svg" {
+        return None;
+    }
+    let BoxType::Image { url, .. } = &layout_box.box_type else {
+        return None;
+    };
+    let entry = shapes.get(url)?;
+    let view_box = entry.view_box?;
+    if !(view_box.width > 0.0 && view_box.height > 0.0) {
+        return None;
+    }
+    if !matches!(layout_box.style.object_fit.as_str(), "fill" | "") {
+        return None;
+    }
+
+    let content = &layout_box.dimensions.content;
+    let (scale_x, scale_y) = {
+        let (sx, sy) = (
+            content.width / view_box.width,
+            content.height / view_box.height,
+        );
+        match entry.stretch {
+            true => (sx, sy),
+            false => {
+                let s = sx.min(sy);
+                // A letterboxed fit is where the painter and Chrome's
+                // xMidYMid centering part company; refuse rather than report.
+                if (sx - sy).abs() > 1e-4 {
+                    return None;
+                }
+                (s, s)
+            }
+        }
+    };
+    let origin_x = content.x - view_box.min_x * scale_x;
+    let origin_y = content.y - view_box.min_y * scale_y;
+
+    let prefix = &identity.selector;
+    Some(
+        entry
+            .shapes
+            .iter()
+            .map(|shape| {
+                let rect = serde_json::json!({
+                    "x": origin_x + shape.x * scale_x,
+                    "y": origin_y + shape.y * scale_y,
+                    "width": shape.width * scale_x,
+                    "height": shape.height * scale_y,
+                });
+                serde_json::json!({
+                    // NOT a CSS box, and named so no reader treats it as one.
+                    "type": "svg_shape",
+                    "tag": shape.tag,
+                    "selector": format!("{prefix} > {}", shape.selector),
+                    // An SVG shape has no box model, so there is one rect and
+                    // `border_box` carries it: Gate A reads `border_box` and
+                    // falls back to `rect`, and the two must not disagree.
+                    "rect": rect,
+                    "border_box": rect,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// `ancestor` is the composed transform of everything above this box, in page
@@ -14276,6 +14662,7 @@ fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
 fn layout_box_to_json_under(
     layout_box: &LayoutBox,
     ancestor: Option<[f32; 6]>,
+    svg_shapes: &HashMap<String, InlineSvgShapes>,
 ) -> serde_json::Value {
     let effective = match (ancestor, own_transform_affine(layout_box)) {
         (None, None) => None,
@@ -14288,11 +14675,24 @@ fn layout_box_to_json_under(
     // on anonymous and text boxes — the geometry oracle must SKIP
     // those rather than pair them positionally with Chrome elements.
     // Emitting a placeholder here would manufacture geometry failures.
-    let mut value = layout_box_body_to_json(layout_box, effective);
+    let mut value = layout_box_body_to_json(layout_box, effective, svg_shapes);
     if let (Some(identity), Some(object)) = (layout_box.identity(), value.as_object_mut()) {
         object.insert("element_id".into(), identity.element_id.into());
         object.insert("tag".into(), identity.tag.clone().into());
         object.insert("selector".into(), identity.selector.clone().into());
+    }
+
+    // An inline `<svg>`'s shape elements have no CSS box, so they are not in
+    // the layout tree; they are attached here, where identity already is,
+    // because that is what they are — a join key plus the geometry the paint
+    // lane will use. See `SvgShapeBox`.
+    if let (Some(children), Some(object)) = (
+        svg_shape_children_json(layout_box, svg_shapes),
+        value.as_object_mut(),
+    ) {
+        if !children.is_empty() {
+            object.insert("children".into(), children.into());
+        }
     }
     value
 }
@@ -14309,6 +14709,7 @@ fn rect_to_json(rect: &rustkit_layout::Rect) -> serde_json::Value {
 fn layout_box_body_to_json(
     layout_box: &LayoutBox,
     effective_transform: Option<[f32; 6]>,
+    svg_shapes: &HashMap<String, InlineSvgShapes>,
 ) -> serde_json::Value {
     let dims = &layout_box.dimensions;
     let content = &dims.content;
@@ -14372,7 +14773,7 @@ fn layout_box_body_to_json(
     let children: Vec<serde_json::Value> = layout_box
         .children
         .iter()
-        .map(|child| layout_box_to_json_under(child, effective_transform))
+        .map(|child| layout_box_to_json_under(child, effective_transform, svg_shapes))
         .collect();
 
     let mut json = serde_json::json!({
@@ -14741,6 +15142,519 @@ mod tests {
         assert_eq!(
             img.1, "body > div.container > img.test-img",
             "the image's join key must be the selector Chrome's capture reports"
+        );
+    }
+
+    /// An inline `<svg>` is built by its OWN early-return branch, below the
+    /// `<img>` one and above the general element path, and it carried no
+    /// identity on either of its two exits. So the one case in the gating
+    /// corpus with an inline svg — `shelf` — reached the geometry oracle with
+    /// its `<svg>` filed as a `missing_box` join failure and never compared,
+    /// while the box RustKit actually computed for it was
+    /// `{x: 29, y: 67.5, w: 14, h: 14}` — Chrome's rect to the bit
+    /// (`baselines/chrome-148/builtins/shelf/layout-rects.json`). The
+    /// geometry was already right; the instrument could not see it.
+    ///
+    /// The branch has TWO exits and they need separate cover: a cache HIT
+    /// builds `BoxType::Image` (sized from the parsed document), a MISS
+    /// builds `BoxType::Block`. `a_replaced_element_is_built_with_its_element_identity`
+    /// cannot stand in for either — it collects `Image | FormControl` boxes,
+    /// so the miss path's `Block` is invisible to it, and with an empty
+    /// `svg_cache` the miss path is the only one an engine built by
+    /// `layout_only_engine()` ever takes.
+    ///
+    /// The skip is LOUD for the same reason as the guard above: on macOS a
+    /// missing adapter FAILS, because a guard that skips itself prints the
+    /// same word as one that passed.
+    #[test]
+    fn an_inline_svg_is_built_with_its_element_identity() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!(
+                        "no GPU adapter on a macOS runner — this guard cannot \
+                         report a pass without building a layout tree"
+                    );
+                }
+                eprintln!(
+                    "SKIPPED an_inline_svg_is_built_with_its_element_identity: \
+                     no GPU adapter, so no layout tree was built and NOTHING was \
+                     asserted. Re-run with VK_ICD_FILENAMES set to a software \
+                     Vulkan ICD to make this guard actually execute."
+                );
+                return;
+            }
+        };
+
+        // `shelf`'s markup, which is what the corpus measures.
+        let html = r#"<!DOCTYPE html><html><body>
+            <div class="command-palette">
+              <div class="command-input-wrapper">
+                <svg class="command-input-icon" width="14" height="14" viewBox="0 0 24 24">
+                  <circle cx="11" cy="11" r="8"/>
+                  <path d="M21 21l-4.35-4.35"/>
+                </svg>
+              </div>
+            </div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+
+        const EXPECTED: &str = "body > div.command-palette > div.command-input-wrapper > svg";
+
+        fn svg_identities(b: &LayoutBox, out: &mut Vec<(String, String)>) {
+            if let Some(identity) = b.identity() {
+                if identity.tag == "svg" {
+                    out.push((identity.selector.clone(), format!("{:?}", b.box_type)));
+                }
+            }
+            for c in &b.children {
+                svg_identities(c, out);
+            }
+        }
+
+        // Exit 1: cache MISS — nothing has parsed the subtree, so the branch
+        // builds a plain Block. An empty svg_cache is the default state of
+        // `layout_only_engine()`.
+        assert!(
+            engine.svg_cache.is_empty(),
+            "this half of the guard is only meaningful on a cache miss"
+        );
+        let miss = engine.build_layout_from_document(&document, &[]);
+        let mut found = Vec::new();
+        svg_identities(&miss, &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "a cache-miss inline <svg> must still produce exactly one \
+             identified box; the geometry oracle cannot join it otherwise \
+             (found {found:?})"
+        );
+        assert_eq!(
+            found[0].0, EXPECTED,
+            "the svg's join key must be the selector Chrome's capture reports"
+        );
+
+        // Exit 2: cache HIT — the pre-pass has parsed the subtree, so the
+        // branch builds an Image sized from the viewBox. This is the exit the
+        // real engine takes on every relayout, and the one the `shelf`
+        // capture went through.
+        engine.cache_inline_svgs(&document);
+        assert!(
+            !engine.svg_cache.is_empty(),
+            "the pre-pass did not parse the subtree, so the cache-hit exit \
+             was never entered and this half asserted nothing"
+        );
+        let hit = engine.build_layout_from_document(&document, &[]);
+        let mut found = Vec::new();
+        svg_identities(&hit, &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "a cached inline <svg> must produce exactly one identified box \
+             (found {found:?})"
+        );
+        assert_eq!(
+            found[0].0, EXPECTED,
+            "the svg's join key must be the selector Chrome's capture reports"
+        );
+        assert!(
+            found[0].1.starts_with("Image"),
+            "the cache-hit exit must be the one under test — a Block here \
+             means the subtree did not parse and the miss path ran twice \
+             (box type {:?})",
+            found[0].1
+        );
+
+        // An identity with an EMPTY selector joins nothing and is reported as
+        // a phantom rather than excluded, so it is worse than none.
+        fn assert_no_empty_key(b: &LayoutBox) {
+            if let Some(identity) = b.identity() {
+                assert!(
+                    !identity.selector.is_empty(),
+                    "a box was stamped with an empty join key (tag {:?})",
+                    identity.tag
+                );
+            }
+            for c in &b.children {
+                assert_no_empty_key(c);
+            }
+        }
+        assert_no_empty_key(&hit);
+    }
+
+    /// An inline `<svg>`'s SHAPE elements reach Chrome's baseline — the
+    /// capture is `getBoundingClientRect()` over `querySelectorAll('*')`, and
+    /// a rendered `<circle>` has a rect — but they generate no CSS box, so
+    /// they are absent from the layout tree by construction. `shelf`'s
+    /// `svg > circle` and `svg > path` were therefore `missing_box` join
+    /// failures that no engine fix could ever clear, which capped the metric:
+    /// the case could not reach geometry-green however correct the engine was.
+    ///
+    /// This asserts the exported shapes against Chrome's COMMITTED numbers
+    /// (`baselines/chrome-148/builtins/shelf/layout-rects.json`, run
+    /// 37096150470 `macos-14`), not against a recomputation of the same
+    /// arithmetic this exporter does — the test would be circular otherwise.
+    /// The svg's content box is pinned to the one RustKit actually computed
+    /// for `shelf` (`{29, 67.5, 14, 14}`, itself bit-identical to Chrome's
+    /// rect), so what is under test is the viewBox mapping and the join key.
+    #[test]
+    fn inline_svg_shapes_are_exported_at_chromes_rects() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!(
+                        "no GPU adapter on a macOS runner — this guard cannot \
+                         report a pass without building a layout tree"
+                    );
+                }
+                eprintln!(
+                    "SKIPPED inline_svg_shapes_are_exported_at_chromes_rects: \
+                     no GPU adapter, so no layout tree was built and NOTHING \
+                     was asserted. Re-run with VK_ICD_FILENAMES set to a \
+                     software Vulkan ICD to make this guard actually execute."
+                );
+                return;
+            }
+        };
+
+        let html = r#"<!DOCTYPE html><html><body>
+            <div class="command-palette">
+              <div class="command-input-wrapper">
+                <svg class="command-input-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"/>
+                  <path d="M21 21l-4.35-4.35"/>
+                </svg>
+              </div>
+            </div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        engine.cache_inline_svgs(&document);
+        let index = engine.inline_svg_shape_index(&document);
+        assert_eq!(
+            index.len(),
+            1,
+            "the subtree must be indexed under its content hash"
+        );
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+
+        // Pin the svg's content box to the one the macOS capture recorded, so
+        // this guard measures the mapping and not the page's own layout.
+        fn pin_svg_content(b: &mut LayoutBox) -> bool {
+            if b.identity().map(|i| i.tag == "svg").unwrap_or(false) {
+                b.dimensions.content.x = 29.0;
+                b.dimensions.content.y = 67.5;
+                b.dimensions.content.width = 14.0;
+                b.dimensions.content.height = 14.0;
+                return true;
+            }
+            b.children.iter_mut().any(pin_svg_content)
+        }
+        assert!(pin_svg_content(&mut layout), "no identified svg box");
+
+        let json = layout_box_to_json_under(&layout, None, &index);
+
+        // Collect every exported svg_shape, wherever it sits.
+        fn shapes(v: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("svg_shape") {
+                out.push(v.clone());
+            }
+            if let Some(children) = v.get("children").and_then(|c| c.as_array()) {
+                for c in children {
+                    shapes(c, out);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        shapes(&json, &mut found);
+        assert_eq!(
+            found.len(),
+            2,
+            "expected the circle and the path; got {found:#?}"
+        );
+
+        // Chrome's committed rects, verbatim from the baseline.
+        let expected: [(&str, [f64; 4]); 2] = [
+            (
+                "body > div.command-palette > div.command-input-wrapper > svg > circle",
+                [30.75, 69.25, 9.333332061767578, 9.333335876464844],
+            ),
+            (
+                "body > div.command-palette > div.command-input-wrapper > svg > path",
+                [
+                    38.712501525878906,
+                    77.2125015258789,
+                    2.5374984741210938,
+                    2.5374984741210938,
+                ],
+            ),
+        ];
+
+        for (selector, chrome) in expected {
+            let shape = found
+                .iter()
+                .find(|s| s.get("selector").and_then(|v| v.as_str()) == Some(selector))
+                .unwrap_or_else(|| {
+                    panic!("no exported shape joined on {selector}; got {found:#?}")
+                });
+            // Gate A reads `border_box` and falls back to `rect`; a shape has
+            // one geometry and the two must not disagree.
+            assert_eq!(
+                shape["rect"], shape["border_box"],
+                "a shape's two rects must be the same geometry"
+            );
+            for (axis, want) in ["x", "y", "width", "height"].iter().zip(chrome) {
+                let got = shape["rect"][axis].as_f64().expect("numeric axis");
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "{selector} {axis}: exported {got}, Chrome {want} \
+                     (Gate A's tolerance is 0.5px per box per axis)"
+                );
+            }
+        }
+    }
+
+    /// The refusals, which are the load-bearing half: a shape this exporter
+    /// does not model EXACTLY must produce NO box, leaving Gate A to file it
+    /// as `missing_box` and score it UNMEASURED. "Unmeasured is never green"
+    /// is already enforced; a box emitted from arithmetic that is merely
+    /// close would be compared and believed instead.
+    #[test]
+    fn an_unmodelled_svg_shape_is_refused_rather_than_approximated() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!("no GPU adapter on a macOS runner");
+                }
+                eprintln!(
+                    "SKIPPED an_unmodelled_svg_shape_is_refused_rather_than_approximated: \
+                     no GPU adapter, NOTHING asserted."
+                );
+                return;
+            }
+        };
+
+        // A cubic Bezier (bbox of control points is a SUPERSET of the tight
+        // bbox Chrome reports), an element carrying a transform this walk does
+        // not compose, a <text> needing shaped glyph extents, and a <use>
+        // rustkit-svg's renderer does not resolve. Plus one straight-line
+        // path and one rect, which MUST still come through — a refusal that
+        // refuses everything would pass this test vacuously.
+        let html = r##"<!DOCTYPE html><html><body>
+            <svg width="100" height="100" viewBox="0 0 100 100">
+              <path class="curve" d="M10 10 C 20 20, 40 20, 50 10"/>
+              <rect class="shifted" x="1" y="1" width="5" height="5" transform="translate(3,3)"/>
+              <text x="5" y="5">hi</text>
+              <use href="#nope" x="1" y="1"/>
+              <path class="straight" d="M10 10 L 30 40 Z"/>
+              <rect class="plain" x="2" y="4" width="6" height="8"/>
+            </svg>
+        </body></html>"##;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        engine.cache_inline_svgs(&document);
+        let index = engine.inline_svg_shape_index(&document);
+        let entry = index.values().next().expect("one indexed subtree");
+
+        let tags: Vec<&str> = entry.shapes.iter().map(|s| s.tag.as_str()).collect();
+        let selectors: Vec<&str> = entry.shapes.iter().map(|s| s.selector.as_str()).collect();
+
+        assert!(
+            selectors.contains(&"path:nth-of-type(2)"),
+            "the straight-line path must be exported, else this guard is \
+             vacuous; got {selectors:?}"
+        );
+        assert!(
+            selectors.contains(&"rect:nth-of-type(2)"),
+            "the untransformed rect must be exported; got {selectors:?}"
+        );
+        assert!(
+            !selectors.contains(&"path:nth-of-type(1)"),
+            "a path with a cubic Bezier must be REFUSED, not bounded by its \
+             control points; got {selectors:?}"
+        );
+        assert!(
+            !selectors.contains(&"rect:nth-of-type(1)"),
+            "an element with a transform must be refused — this walk \
+             composes none; got {selectors:?}"
+        );
+        assert!(
+            !tags.contains(&"text"),
+            "<text> needs shaped glyph extents and must be refused; got {tags:?}"
+        );
+        assert!(
+            !tags.contains(&"use"),
+            "<use> is unresolved in the renderer and must be refused; got {tags:?}"
+        );
+        assert_eq!(
+            entry.shapes.len(),
+            2,
+            "exactly the two modelled shapes; got {selectors:?}"
+        );
+
+        // The straight path's bbox is the tight one: M10 10 L30 40 spans
+        // 20x30 from (10,10). The curve's control-point bbox would have been
+        // 40x10 from (10,10) — a box the shape never occupies.
+        let straight = entry
+            .shapes
+            .iter()
+            .find(|s| s.selector == "path:nth-of-type(2)")
+            .expect("straight path");
+        assert_eq!(
+            (straight.x, straight.y, straight.width, straight.height),
+            (10.0, 10.0, 20.0, 30.0)
+        );
+    }
+
+    /// The two quantities `shelf` cannot distinguish, pinned on a case that
+    /// can. Both of these survived the first mutation sweep for the same
+    /// reason: `shelf`'s svg has NO padding or border, so its content box and
+    /// its border box are the same rect, and its `viewBox` is `0 0 24 24`, so
+    /// the origin shift is a no-op. A guard that only knows `shelf` cannot
+    /// tell the right implementation from either wrong one.
+    ///
+    /// - M4: mapping from the BORDER box origin instead of the CONTENT box.
+    ///   The SVG viewport is the content box — it is what `render_image`
+    ///   passes to the painter as its container.
+    /// - M5: dropping the `viewBox` `min-x`/`min-y` origin shift, so a
+    ///   viewBox that does not start at `0 0` paints offset by its own origin.
+    ///
+    /// Construction: `viewBox="10 20 24 24"` over a 24x24 content box, so the
+    /// scale is exactly 1 and the arithmetic is readable. The circle's user
+    /// bbox is `(10, 20, 4, 4)` — precisely the viewBox's own origin — so the
+    /// one correct answer is the CONTENT box's origin and nothing else. With
+    /// M4 it lands at the border origin (left and up by padding+border); with
+    /// M5 it lands 10 right and 20 down.
+    #[test]
+    fn a_shape_at_the_viewbox_origin_paints_at_the_content_origin() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!("no GPU adapter on a macOS runner");
+                }
+                eprintln!(
+                    "SKIPPED a_shape_at_the_viewbox_origin_paints_at_the_content_origin: \
+                     no GPU adapter, NOTHING asserted."
+                );
+                return;
+            }
+        };
+
+        let html = r#"<!DOCTYPE html><html><body>
+            <svg width="24" height="24" viewBox="10 20 24 24">
+              <circle cx="12" cy="22" r="2"/>
+            </svg>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        engine.cache_inline_svgs(&document);
+        let index = engine.inline_svg_shape_index(&document);
+
+        // The user-space bbox must be the viewBox's own origin, or the test
+        // below is measuring something other than what its comment claims.
+        let entry = index.values().next().expect("one indexed subtree");
+        let circle = entry.shapes.first().expect("the circle");
+        assert_eq!(
+            (circle.x, circle.y, circle.width, circle.height),
+            (10.0, 20.0, 4.0, 4.0),
+            "the circle's user bbox must sit exactly at the viewBox origin"
+        );
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        fn pin(b: &mut LayoutBox) -> bool {
+            if b.identity().map(|i| i.tag == "svg").unwrap_or(false) {
+                b.dimensions.content.x = 100.0;
+                b.dimensions.content.y = 200.0;
+                b.dimensions.content.width = 24.0;
+                b.dimensions.content.height = 24.0;
+                // Make the content box and the border box DIFFERENT rects,
+                // which is the whole point of this guard.
+                b.dimensions.padding.left = 5.0;
+                b.dimensions.padding.top = 7.0;
+                b.dimensions.border.left = 2.0;
+                b.dimensions.border.top = 3.0;
+                return true;
+            }
+            b.children.iter_mut().any(pin)
+        }
+        assert!(pin(&mut layout), "no identified svg box");
+        let border = layout_border_box_of_svg(&layout);
+        assert!(
+            (border.x - 100.0).abs() > 0.5 && (border.y - 200.0).abs() > 0.5,
+            "the border box must differ from the content box by more than \
+             Gate A's tolerance, else M4 is still indistinguishable (border \
+             {border:?})"
+        );
+
+        let json = layout_box_to_json_under(&layout, None, &index);
+        fn first_shape(v: &serde_json::Value) -> Option<serde_json::Value> {
+            if v.get("type").and_then(|t| t.as_str()) == Some("svg_shape") {
+                return Some(v.clone());
+            }
+            v.get("children")
+                .and_then(|c| c.as_array())
+                .and_then(|cs| cs.iter().find_map(first_shape))
+        }
+        let shape = first_shape(&json).expect("an exported shape");
+        for (axis, want) in [("x", 100.0), ("y", 200.0), ("width", 4.0), ("height", 4.0)] {
+            let got = shape["rect"][axis].as_f64().expect("numeric axis");
+            assert!(
+                (got - want).abs() < 0.01,
+                "{axis}: exported {got}, expected {want} — a shape at the \
+                 viewBox origin paints at the CONTENT box origin"
+            );
+        }
+    }
+
+    /// The svg box's border box, for the guard above.
+    fn layout_border_box_of_svg(b: &LayoutBox) -> rustkit_layout::Rect {
+        if b.identity().map(|i| i.tag == "svg").unwrap_or(false) {
+            return b.dimensions.border_box();
+        }
+        b.children
+            .iter()
+            .find_map(find_svg_border_box)
+            .expect("no identified svg box in the tree")
+    }
+
+    /// A transform on a `<g>` must refuse the shapes BENEATH it too, not just
+    /// the `<g>` (which has no geometry of its own and so refuses silently
+    /// either way). Separate from the test above because that one puts the
+    /// transform on the shape itself, where a subtree bug cannot show.
+    #[test]
+    fn a_transformed_group_refuses_the_shapes_beneath_it() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!("no GPU adapter on a macOS runner");
+                }
+                eprintln!(
+                    "SKIPPED a_transformed_group_refuses_the_shapes_beneath_it: \
+                     no GPU adapter, NOTHING asserted."
+                );
+                return;
+            }
+        };
+
+        let html = r#"<!DOCTYPE html><html><body>
+            <svg width="100" height="100" viewBox="0 0 100 100">
+              <g transform="translate(10,10)"><circle cx="5" cy="5" r="2"/></g>
+              <g><circle cx="7" cy="7" r="3"/></g>
+            </svg>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        engine.cache_inline_svgs(&document);
+        let index = engine.inline_svg_shape_index(&document);
+        let entry = index.values().next().expect("one indexed subtree");
+
+        let selectors: Vec<&str> = entry.shapes.iter().map(|s| s.selector.as_str()).collect();
+        assert_eq!(
+            selectors,
+            vec!["g:nth-of-type(2) > circle"],
+            "only the circle under the UNtransformed group may be exported"
         );
     }
 
