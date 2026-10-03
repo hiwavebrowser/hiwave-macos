@@ -5412,6 +5412,7 @@ version = "0.1.0"
 dependencies = [
  "boa_engine",
  "boa_gc",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
