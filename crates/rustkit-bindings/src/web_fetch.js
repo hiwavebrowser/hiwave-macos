@@ -71,9 +71,23 @@
             throw typeError("Failed to construct 'Headers': The provided value is not of type '(record<ByteString, ByteString> or sequence<sequence<ByteString>>)'.");
         }
     }
-    function guarded(h, name) {
+    // CORS-safelisted request headers (Fetch §2.2.2), the only ones a
+    // `no-cors` request may carry, however the headers object is mutated
+    // after the request is built.
+    var SAFELISTED = { 'accept': 1, 'accept-language': 1, 'content-language': 1, 'content-type': 1 };
+    function safelisted(name, value) {
+        if (!SAFELISTED[name]) return false;
+        if (value.length > 128) return false;
+        if (name === 'content-type') {
+            var essence = value.split(';')[0].replace(/^[	 ]+|[	 ]+$/g, '').toLowerCase();
+            return essence === 'application/x-www-form-urlencoded' || essence === 'multipart/form-data' || essence === 'text/plain';
+        }
+        return true;
+    }
+    function guarded(h, name, value) {
         var s = h[H];
         if (s.guard === 'immutable') throw typeError('Headers are immutable');
+        if (s.guard === 'request-no-cors') return safelisted(name, value === undefined ? '' : value);
         if (s.guard === 'request' && (FORBIDDEN_REQUEST[name] || name.indexOf('proxy-') === 0 || name.indexOf('sec-') === 0)) return false;
         if (s.guard === 'response' && (name === 'set-cookie' || name === 'set-cookie2')) return false;
         return true;
@@ -81,13 +95,13 @@
     method(Headers.prototype, 'append', function (name, value) {
         if (arguments.length < 2) throw typeError("Failed to execute 'append' on 'Headers': 2 arguments required, but only " + arguments.length + ' present.');
         var n = checkName(name, 'append'), v = checkValue(value, 'append');
-        if (!guarded(this, n)) return;
+        if (!guarded(this, n, v)) return;
         this[H].list.push([n, v]);
     });
     method(Headers.prototype, 'set', function (name, value) {
         if (arguments.length < 2) throw typeError("Failed to execute 'set' on 'Headers': 2 arguments required, but only " + arguments.length + ' present.');
         var n = checkName(name, 'set'), v = checkValue(value, 'set');
-        if (!guarded(this, n)) return;
+        if (!guarded(this, n, v)) return;
         var list = this[H].list, at = -1;
         for (var i = 0; i < list.length; i++) if (list[i][0] === n) { at = i; break; }
         if (at < 0) { list.push([n, v]); return; }
@@ -293,15 +307,13 @@
             s.signal = input[R].signal;
         }
         Object.defineProperty(this, R, { value: s });
-        var headers = guardedHeaders(s.mode === 'no-cors' ? 'request-no-cors' : 'request', init.headers !== undefined ? init.headers : inputHeaders);
-        // no-cors requests keep only the CORS-safelisted headers; the guard
-        // name is handled by the policy too, this is the early filter.
-        if (s.mode === 'no-cors') {
-            headers[H].list = headers[H].list.filter(function (e) {
-                return { 'accept': 1, 'accept-language': 1, 'content-language': 1, 'content-type': 1 }[e[0]];
-            });
+        if (s.mode === 'no-cors' && ['GET', 'HEAD', 'POST'].indexOf(s.method) < 0) {
+            throw typeError("Failed to construct 'Request': '" + s.method + "' is unsupported in no-cors mode.");
         }
-        headers[H].guard = 'request';
+        // The guard stays with the headers object for as long as the request
+        // lives: a no-cors request can never be widened by a later
+        // append()/set().
+        var headers = guardedHeaders(s.mode === 'no-cors' ? 'request-no-cors' : 'request', init.headers !== undefined ? init.headers : inputHeaders);
         Object.defineProperty(this, H, { value: headers });
         var hasInitBody = init.body !== undefined && init.body !== null;
         if ((hasInitBody || (inputBody && (inputBody.bytes !== null || inputBody.ready))) && (s.method === 'GET' || s.method === 'HEAD')) {
