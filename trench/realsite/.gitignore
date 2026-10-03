@@ -2,3 +2,5 @@
 # ~5 MB per site per run; only the per-site JSON and summary.json are kept.
 runs/*/*/
 interactive_runs/*/*/
+timestable/*/*
+!timestable/timestable_summary.json
