@@ -2058,6 +2058,34 @@ const WRAPPERS_JS: &str = r#"
             if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
         }
     }
+    // An element's on<type> handler: the property when one was assigned
+    // (`null` included, which turns the handler off), else its `on<type>`
+    // content attribute (HTML §8.1.8.1). The attribute's text is the body of
+    // `function (event)`, with the element and its document in scope,
+    // compiled on first use and again when the text changes. A body that
+    // does not compile is logged once and is no handler.
+    var INLINE = new WeakMap();
+    function handlerOf(t, type) {
+        var h = t['on' + type];
+        if (h !== undefined || !t[SLOT] || t.nodeType !== 1) return h;
+        var src = t.getAttribute('on' + type);
+        if (src === null) return h;
+        var all = INLINE.get(t);
+        if (!all) { all = {}; INLINE.set(t, all); }
+        var c = all[type];
+        if (!c || c.src !== src) {
+            c = all[type] = { src: src, fn: null };
+            try {
+                c.fn = new Function('event',
+                    'with (this.ownerDocument || {}) { with (this) {\n' + src + '\n} }');
+            } catch (e) {
+                var msg;
+                try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
+                if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
+            }
+        }
+        return c.fn;
+    }
     function invoke(t, event, phase, capture) {
         event.currentTarget = t;
         event.eventPhase = phase;
@@ -2072,7 +2100,7 @@ const WRAPPERS_JS: &str = r#"
             }
         }
         // The on<type> handler runs with the non-capture listeners.
-        var h = capture || event[STOP_NOW] ? null : t['on' + event.type];
+        var h = capture || event[STOP_NOW] ? null : handlerOf(t, event.type);
         if (typeof h === 'function' && callListener(t, h, event) === false && event.cancelable) {
             event.defaultPrevented = true;
         }
