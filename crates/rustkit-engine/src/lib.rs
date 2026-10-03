@@ -304,6 +304,53 @@ impl SubresourceReferrer {
     }
 }
 
+/// Tiles one SVG background may paint before the rest are dropped: each
+/// tile is the document's whole command list again, so a 1px pattern
+/// repeated across a page would otherwise multiply into millions. The
+/// gradient lane caps at 50 per axis; this is the same total.
+const MAX_SVG_BACKGROUND_TILES: usize = 2500;
+
+/// The vector commands that paint `svg` as a CSS background of the box
+/// `rect`: the document rendered once per tile the raster lane would draw
+/// ([`rustkit_layout::background_tiles`]), clipped to the box. The
+/// renderer only knows textures, so a `BackgroundImage` naming an SVG is
+/// replaced by these, as an `<img>` of one is.
+///
+/// An SVG with no `width`/`height` has no size of its own: with a
+/// `viewBox` it has a ratio and `auto` sizes it like `contain`; with
+/// neither it fills the box (CSS Images 3, default sizing).
+fn svg_background_commands(
+    svg: &rustkit_svg::SvgDocument,
+    rect: rustkit_layout::Rect,
+    size: &rustkit_layout::BackgroundSize,
+    position: (f32, f32),
+    repeat: rustkit_layout::BackgroundRepeat,
+) -> Vec<rustkit_layout::DisplayCommand> {
+    let (width, height) = match (&svg.width, &svg.height, &svg.view_box) {
+        (Some(_), Some(_), _) => svg.get_size(rect.width, rect.height),
+        (_, _, Some(vb)) if vb.width > 0.0 && vb.height > 0.0 => {
+            let scale = (rect.width / vb.width).min(rect.height / vb.height);
+            (vb.width * scale, vb.height * scale)
+        }
+        _ => (rect.width, rect.height),
+    };
+    let mut tiles = rustkit_layout::background_tiles(rect, size, position, repeat, width, height);
+    if tiles.is_empty() {
+        return Vec::new();
+    }
+    if tiles.len() > MAX_SVG_BACKGROUND_TILES {
+        warn!(tiles = tiles.len(), "SVG background tile count over the cap; painting the first {MAX_SVG_BACKGROUND_TILES}");
+        tiles.truncate(MAX_SVG_BACKGROUND_TILES);
+    }
+    let mut commands = vec![rustkit_layout::DisplayCommand::PushClip(rect)];
+    for tile in tiles {
+        // A standalone SVG document: `currentColor` is the initial black.
+        commands.extend(svg.render(tile.x, tile.y, tile.width, tile.height));
+    }
+    commands.push(rustkit_layout::DisplayCommand::PopClip);
+    commands
+}
+
 /// A raster image for `url`, fetched like every other subresource: through
 /// the resource loader, so the shield sees the request, it carries the
 /// Referer the document's policy allows, and the caller's deadline bounds
@@ -3010,6 +3057,18 @@ impl Engine {
                                 dest_rect.height,
                                 *current_color,
                             ));
+                            continue;
+                        }
+                    }
+                    rustkit_layout::DisplayCommand::BackgroundImage {
+                        url,
+                        rect,
+                        size,
+                        position,
+                        repeat,
+                    } => {
+                        if let Some(svg) = self.svg_cache.get(url) {
+                            expanded.extend(svg_background_commands(svg, *rect, size, *position, *repeat));
                             continue;
                         }
                     }
@@ -8093,10 +8152,8 @@ impl Engine {
     /// `data:` url is decoded at upload, so those did paint). The display
     /// list is the right place to look: its urls are already absolute, and
     /// a box that is not rendered (`display: none`) has no command, as
-    /// Chrome fetches no background for it.
-    ///
-    /// SVG backgrounds are left out: only `<img>` commands are spliced from
-    /// the SVG cache, so one would be fetched and never painted.
+    /// Chrome fetches no background for it. An SVG one is fetched into the
+    /// SVG cache like an `<img>` and painted by [`svg_background_commands`].
     fn discover_background_images(display_list: Option<&DisplayList>) -> Vec<(String, Url)> {
         let mut seen = std::collections::HashSet::new();
         let mut images = Vec::new();
@@ -8110,9 +8167,7 @@ impl Engine {
             let Ok(parsed) = Url::parse(url) else {
                 continue;
             };
-            if !matches!(parsed.scheme(), "http" | "https")
-                || parsed.path().to_ascii_lowercase().ends_with(".svg")
-            {
+            if !matches!(parsed.scheme(), "http" | "https") {
                 continue;
             }
             debug!(url = %parsed, "Discovered background image");
@@ -17712,16 +17767,38 @@ div { width: 50px; height: 20px; }
 </style></head><body><div class="shown"></div><div class="again"></div><div class="cross"></div>
 <div class="blocked"></div><div class="hidden"></div></body></html>"#;
 
+    const SVG_PAGE: &str = r#"<html><head><style>
+body { margin: 0; }
+div { height: 10px; }
+.one { width: 40px; background: url(/green.svg) no-repeat; }
+.row { width: 30px; background: url(/blue.svg) repeat-x; }
+</style></head><body><div class="one"></div><div class="row"></div></body></html>"#;
+
+    /// A 10x10 square of `fill`, served as `image/svg+xml`.
+    fn square_svg(fill: &str) -> String {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="{fill}"/></svg>"#
+        )
+    }
+
     type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
     /// Serve `/page` as [`PAGE`], anything else as a PNG, and record each
     /// image request's path and Referer.
     fn recording_server() -> (u16, Seen) {
+        recording_server_for(PAGE)
+    }
+
+    /// [`recording_server`] serving `page`; `/green.svg` and `/blue.svg`
+    /// are squares of that color.
+    fn recording_server_for(page: &'static str) -> (u16, Seen) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen: Seen = Arc::default();
         let log = seen.clone();
-        let html = PAGE.replace("PORT", &port.to_string());
+        let html = page.replace("PORT", &port.to_string());
+        let green = square_svg("#00ff00");
+        let blue = square_svg("#0000ff");
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
                 let mut buf = [0u8; 8192];
@@ -17735,6 +17812,10 @@ div { width: 50px; height: 20px; }
                     .map(|(_, v)| v.trim().to_string());
                 let (ctype, body): (&str, &[u8]) = if path.starts_with("/page") {
                     ("text/html", html.as_bytes())
+                } else if path.ends_with(".svg") {
+                    log.lock().unwrap().push((path.clone(), referer));
+                    let svg = if path == "/green.svg" { &green } else { &blue };
+                    ("image/svg+xml", svg.as_bytes())
                 } else {
                     log.lock().unwrap().push((path, referer));
                     ("image/png", DOT_PNG)
@@ -17793,6 +17874,58 @@ div { width: 50px; height: 20px; }
             "the background image is in the cache paint reads"
         );
         assert!(!engine.is_image_cached(&at("/tracker.png")));
+    }
+
+    /// SVG backgrounds were skipped at discovery: only `<img>` commands
+    /// were spliced from the SVG cache, so a fetched one would never paint.
+    /// Each is fetched now and painted as vector commands, one copy per
+    /// tile the raster lane would draw, clipped to the box.
+    #[test]
+    fn a_css_svg_background_is_fetched_and_painted_per_tile() {
+        let (port, seen) = recording_server_for(SVG_PAGE);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            engine.load_url(view, url).await.expect("load_url");
+            engine.load_subresources(view).await.expect("subresources");
+        });
+
+        let mut paths: Vec<String> = seen.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/blue.svg".to_string(), "/green.svg".to_string()]);
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        assert!(
+            !dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::BackgroundImage { url, .. } if url.ends_with(".svg"))),
+            "a cached SVG background is replaced by its vector commands"
+        );
+        let fills = |r: u8, g: u8, b: u8| -> Vec<(f32, f32, f32, f32)> {
+            dl.commands
+                .iter()
+                .filter_map(|c| match c {
+                    rustkit_layout::DisplayCommand::FillRect { rect, color }
+                        if (color.r, color.g, color.b) == (r, g, b) =>
+                    {
+                        Some((rect.x, rect.y, rect.width, rect.height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(fills(0, 255, 0), vec![(0.0, 0.0, 10.0, 10.0)], "no-repeat paints once at the origin");
+        assert_eq!(
+            fills(0, 0, 255),
+            vec![(0.0, 10.0, 10.0, 10.0), (10.0, 10.0, 10.0, 10.0), (20.0, 10.0, 10.0, 10.0)],
+            "repeat-x paints one tile per 10px across the 30px box"
+        );
     }
 }
 
