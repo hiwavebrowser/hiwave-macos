@@ -276,6 +276,14 @@ pub enum EngineEvent {
     FaviconDetected { view_id: EngineViewId, url: Url },
 }
 
+/// The `Accept` of an image request: Chrome's image header without
+/// `image/avif`, which rustkit-codecs cannot decode. Without a header of
+/// its own an image request carried the transport's navigation default,
+/// which lists AVIF, and the image CDNs answered with it (44 `<img>`s on
+/// microsoft, shopify and walmart failed as "Unknown image format").
+/// Add `image/avif` back when a decoder lands.
+const IMAGE_ACCEPT: &str = "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+
 /// View state.
 #[allow(dead_code)]
 /// The document side of a subresource request (see
@@ -294,9 +302,15 @@ impl SubresourceReferrer {
 
     /// Same, with the fetch destination the shield classifies by.
     fn get_for(&self, url: Url, destination: RequestDestination) -> Request {
-        let request = Request::get(url)
+        let mut request = Request::get(url)
             .referrer_policy(self.policy)
             .destination(destination);
+        if destination == RequestDestination::Image {
+            request = request.header(
+                http::header::ACCEPT,
+                http::HeaderValue::from_static(IMAGE_ACCEPT),
+            );
+        }
         match &self.url {
             Some(referrer) => request.referrer(referrer.clone()),
             None => request,
@@ -18873,6 +18887,105 @@ div { height: 10px; }
             "the background image is in the cache paint reads"
         );
         assert!(!engine.is_image_cached(&at("/tracker.png")));
+    }
+
+    /// Serve `/page` as `page` and every other path as an image negotiated
+    /// the way the image CDNs do it: AVIF to a request whose `Accept` names
+    /// `image/avif`, PNG to any other. Records each request's path and
+    /// `Accept`.
+    fn negotiating_server(page: &'static str) -> (u16, Seen) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        // The start of an AVIF file: an `ftyp` box with the `avif` brand.
+        const AVIF_HEAD: &[u8] = b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf";
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let accept = head
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .find(|(k, _)| k.eq_ignore_ascii_case("accept"))
+                    .map(|(_, v)| v.trim().to_string());
+                let wants_avif = accept.as_deref().is_some_and(|a| a.contains("image/avif"));
+                let (ctype, body): (&str, &[u8]) = if path.starts_with("/page") {
+                    ("text/html", page.as_bytes())
+                } else if wants_avif {
+                    ("image/avif", AVIF_HEAD)
+                } else {
+                    ("image/png", DOT_PNG)
+                };
+                log.lock().unwrap().push((path, accept));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        (port, seen)
+    }
+
+    /// Image requests went out with the navigation's `Accept`, which lists
+    /// `image/avif`. There is no AVIF decoder, and the CDNs answer that
+    /// header with AVIF, so 44 `<img>`s on microsoft, shopify and walmart
+    /// failed as "Unknown image format" (2026-10-03 census). An image
+    /// request now names only what the engine decodes; the navigation's
+    /// header keeps its browser shape.
+    #[test]
+    fn an_image_request_accepts_only_formats_the_engine_decodes() {
+        const NEGOTIATED_PAGE: &str = r#"<html><head><style>
+div { width: 50px; height: 20px; background: url(/bg.jpg) no-repeat; }
+</style></head><body><img src="/hero.jpg"><div></div></body></html>"#;
+        let (port, seen) = negotiating_server(NEGOTIATED_PAGE);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            engine.load_url(view, url).await.expect("load_url");
+            engine.load_subresources(view).await.expect("subresources");
+        });
+
+        let seen = seen.lock().unwrap().clone();
+        let accept_of = |path: &str| -> String {
+            seen.iter()
+                .find(|(p, _)| p == path)
+                .unwrap_or_else(|| panic!("{path} was requested; saw {seen:?}"))
+                .1
+                .clone()
+                .unwrap_or_default()
+        };
+        for path in ["/hero.jpg", "/bg.jpg"] {
+            let accept = accept_of(path);
+            assert!(
+                !accept.contains("avif"),
+                "{path} must not advertise AVIF, which nothing here decodes: {accept:?}"
+            );
+            assert!(
+                accept.contains("image/webp") && accept.contains("image/svg+xml"),
+                "{path} still names the formats that are decoded: {accept:?}"
+            );
+            let at = Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+            assert!(
+                engine.image_manager.is_cached(&at),
+                "{path} decodes: the server sent a format the request asked for"
+            );
+        }
+        assert!(
+            accept_of("/page").starts_with("text/html,"),
+            "the navigation keeps its document Accept"
+        );
     }
 
     /// SVG backgrounds were skipped at discovery: only `<img>` commands
