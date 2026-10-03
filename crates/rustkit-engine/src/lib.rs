@@ -4602,6 +4602,8 @@ impl Engine {
                         element_ids,
                     );
                     note_snapshot_image(&b, explicit_width, explicit_height);
+                    // A click on the image targets the image.
+                    b.node_id = Some(node.id.raw());
                     return b;
                 }
 
@@ -4683,6 +4685,7 @@ impl Engine {
                             &tag_lower,
                             element_ids,
                         );
+                        svg_box.node_id = Some(node.id.raw());
                         return svg_box;
                     }
                     let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
@@ -4694,6 +4697,7 @@ impl Engine {
                         &tag_lower,
                         element_ids,
                     );
+                    svg_box.node_id = Some(node.id.raw());
                     return svg_box;
                 }
 
@@ -4819,6 +4823,10 @@ impl Engine {
                             &tag_lower,
                             element_ids,
                         );
+                        // Without its node, a click on the button was hit
+                        // on behalf of the button's parent and the button's
+                        // own listeners never ran.
+                        b.node_id = Some(node.id.raw());
                         return b;
                     }
                     // Element children present: fall through to normal box
@@ -20916,6 +20924,48 @@ mod node_identity_tests {
             engine.link_at_point(id, 5.0, 60.0).as_deref(),
             Some("https://example.com/opened"),
             "the listener's new element must be in the layout the next click hits"
+        );
+    }
+
+
+    // Pete's live testing, continued: a click on a plain <button> was
+    // delivered to the button's PARENT, so a listener on the button never
+    // ran. The box builder returns early for the leaf boxes (a text-only
+    // button, an image, an inline svg) and did not record their DOM node;
+    // the hit test then answered with the nearest ancestor that had one.
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_button_an_image_or_an_svg_targets_that_element() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let html = concat!(
+            r#"<html><body style="margin:0">"#,
+            r#"<div style="height:40px;overflow:hidden"><button id="b">press</button></div>"#,
+            r#"<div style="height:40px;overflow:hidden"><img id="i" width="40" height="30" alt=""></div>"#,
+            r#"<div style="height:40px;overflow:hidden"><svg id="s" width="40" height="30">"#,
+            r#"<rect width="40" height="30"></rect></svg></div>"#,
+            r#"</body></html>"#,
+        );
+        engine.load_html(id, html).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.own = []; window.seen = []; ['b', 'i', 's'].forEach(function (k) { \
+             document.getElementById(k).addEventListener('click', function () { own.push(k); }); }); \
+             document.addEventListener('click', function (e) { seen.push(e.target.id || e.target.localName); });",
+        );
+
+        for row in 0..3 {
+            engine.click_at_point(id, 12.0, 40.0 * row as f32 + 12.0);
+        }
+
+        assert_eq!(
+            js(&mut engine, id, "seen.join(',') + ' | ' + own.join(',')"),
+            format!("{:?}", rustkit_js::JsValue::String("b,i,s | b,i,s".into())),
+            "each click's target is the element under it, and that element's own listener runs"
         );
     }
 
