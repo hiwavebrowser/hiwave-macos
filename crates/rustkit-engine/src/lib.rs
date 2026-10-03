@@ -351,6 +351,24 @@ fn svg_background_commands(
     commands
 }
 
+/// `svg` as an image document (`<img>`, CSS background): with no `viewBox`,
+/// one is synthesized from an absolute `width`/`height`, as Blink does for
+/// SVG images, so the document scales to the box it is drawn in. Without
+/// it `render` drew it at its own size: a 100x100 data: square stayed
+/// 100x100 in a 48px `<img>`. An inline `<svg>` gets no such viewBox.
+fn image_svg(mut svg: rustkit_svg::SvgDocument) -> rustkit_svg::SvgDocument {
+    if svg.view_box.is_none() {
+        if let (Some(w), Some(h)) = (&svg.width, &svg.height) {
+            let absolute = |l: &rustkit_svg::SvgLength| !matches!(l, rustkit_svg::SvgLength::Percent(_));
+            let (width, height) = (w.to_px(0.0), h.to_px(0.0));
+            if absolute(w) && absolute(h) && width > 0.0 && height > 0.0 {
+                svg.view_box = Some(rustkit_svg::ViewBox { min_x: 0.0, min_y: 0.0, width, height });
+            }
+        }
+    }
+    svg
+}
+
 /// A raster image for `url`, fetched like every other subresource: through
 /// the resource loader, so the shield sees the request, it carries the
 /// Referer the document's policy allows, and the caller's deadline bounds
@@ -8059,7 +8077,7 @@ impl Engine {
         }
         match rustkit_svg::SvgDocument::parse(&String::from_utf8_lossy(&body)) {
             Ok(doc) => {
-                self.svg_cache.insert(url.to_string(), doc);
+                self.svg_cache.insert(url.to_string(), image_svg(doc));
             }
             Err(e) => {
                 debug!(?e, "data: SVG image failed to parse; left to the raster lane");
@@ -8274,7 +8292,7 @@ impl Engine {
                         match fetched {
                             Ok(response) if response.ok() => match response.text().await {
                                 Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
-                                    Ok(doc) => Some((url.to_string(), doc)),
+                                    Ok(doc) => Some((url.to_string(), image_svg(doc))),
                                     Err(e) => {
                                         warn!(?e, %url, "Failed to parse SVG image");
                                         None
@@ -8335,7 +8353,7 @@ impl Engine {
                         match rustkit_svg::SvgDocument::parse(&xml) {
                             Ok(doc) => {
                                 info!(%url, "Image served as image/svg+xml; using the SVG lane");
-                                (true, Some((url.to_string(), doc)))
+                                (true, Some((url.to_string(), image_svg(doc))))
                             }
                             Err(e) => {
                                 warn!(?e, %url, "Failed to parse SVG image");
