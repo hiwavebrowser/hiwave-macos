@@ -3772,8 +3772,10 @@ impl Engine {
         layout_box: &mut LayoutBox,
         images: &HashMap<usize, (Option<f32>, Option<f32>)>,
     ) -> usize {
-        // An inline `<svg>` box has no identity and nothing to refresh: its
-        // size comes from the DOM subtree, which has not changed.
+        // An inline `<svg>` box carries an identity but no recorded size
+        // hints — only `<img>` boxes call `note_snapshot_image` — so the
+        // lookup misses and there is nothing to refresh: an svg's size comes
+        // from the DOM subtree, which has not changed.
         let hints = layout_box
             .identity
             .as_ref()
@@ -4337,10 +4339,24 @@ impl Engine {
                             style.clone(),
                         );
                         Self::transfer_positioning(&mut svg_box, &style);
+                        Self::attach_identity(
+                            &mut svg_box,
+                            selector_path,
+                            attributes,
+                            &tag_lower,
+                            element_ids,
+                        );
                         return svg_box;
                     }
                     let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
                     Self::transfer_positioning(&mut svg_box, &style);
+                    Self::attach_identity(
+                        &mut svg_box,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
                     return svg_box;
                 }
 
@@ -14742,6 +14758,144 @@ mod tests {
             img.1, "body > div.container > img.test-img",
             "the image's join key must be the selector Chrome's capture reports"
         );
+    }
+
+    /// An inline `<svg>` is built by its OWN early-return branch, below the
+    /// `<img>` one and above the general element path, and it carried no
+    /// identity on either of its two exits. So the one case in the gating
+    /// corpus with an inline svg — `shelf` — reached the geometry oracle with
+    /// its `<svg>` filed as a `missing_box` join failure and never compared,
+    /// while the box RustKit actually computed for it was
+    /// `{x: 29, y: 67.5, w: 14, h: 14}` — Chrome's rect to the bit
+    /// (`baselines/chrome-148/builtins/shelf/layout-rects.json`). The
+    /// geometry was already right; the instrument could not see it.
+    ///
+    /// The branch has TWO exits and they need separate cover: a cache HIT
+    /// builds `BoxType::Image` (sized from the parsed document), a MISS
+    /// builds `BoxType::Block`. `a_replaced_element_is_built_with_its_element_identity`
+    /// cannot stand in for either — it collects `Image | FormControl` boxes,
+    /// so the miss path's `Block` is invisible to it, and with an empty
+    /// `svg_cache` the miss path is the only one an engine built by
+    /// `layout_only_engine()` ever takes.
+    ///
+    /// The skip is LOUD for the same reason as the guard above: on macOS a
+    /// missing adapter FAILS, because a guard that skips itself prints the
+    /// same word as one that passed.
+    #[test]
+    fn an_inline_svg_is_built_with_its_element_identity() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!(
+                        "no GPU adapter on a macOS runner — this guard cannot \
+                         report a pass without building a layout tree"
+                    );
+                }
+                eprintln!(
+                    "SKIPPED an_inline_svg_is_built_with_its_element_identity: \
+                     no GPU adapter, so no layout tree was built and NOTHING was \
+                     asserted. Re-run with VK_ICD_FILENAMES set to a software \
+                     Vulkan ICD to make this guard actually execute."
+                );
+                return;
+            }
+        };
+
+        // `shelf`'s markup, which is what the corpus measures.
+        let html = r#"<!DOCTYPE html><html><body>
+            <div class="command-palette">
+              <div class="command-input-wrapper">
+                <svg class="command-input-icon" width="14" height="14" viewBox="0 0 24 24">
+                  <circle cx="11" cy="11" r="8"/>
+                  <path d="M21 21l-4.35-4.35"/>
+                </svg>
+              </div>
+            </div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+
+        const EXPECTED: &str = "body > div.command-palette > div.command-input-wrapper > svg";
+
+        fn svg_identities(b: &LayoutBox, out: &mut Vec<(String, String)>) {
+            if let Some(identity) = b.identity() {
+                if identity.tag == "svg" {
+                    out.push((identity.selector.clone(), format!("{:?}", b.box_type)));
+                }
+            }
+            for c in &b.children {
+                svg_identities(c, out);
+            }
+        }
+
+        // Exit 1: cache MISS — nothing has parsed the subtree, so the branch
+        // builds a plain Block. An empty svg_cache is the default state of
+        // `layout_only_engine()`.
+        assert!(
+            engine.svg_cache.is_empty(),
+            "this half of the guard is only meaningful on a cache miss"
+        );
+        let miss = engine.build_layout_from_document(&document, &[]);
+        let mut found = Vec::new();
+        svg_identities(&miss, &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "a cache-miss inline <svg> must still produce exactly one \
+             identified box; the geometry oracle cannot join it otherwise \
+             (found {found:?})"
+        );
+        assert_eq!(
+            found[0].0, EXPECTED,
+            "the svg's join key must be the selector Chrome's capture reports"
+        );
+
+        // Exit 2: cache HIT — the pre-pass has parsed the subtree, so the
+        // branch builds an Image sized from the viewBox. This is the exit the
+        // real engine takes on every relayout, and the one the `shelf`
+        // capture went through.
+        engine.cache_inline_svgs(&document);
+        assert!(
+            !engine.svg_cache.is_empty(),
+            "the pre-pass did not parse the subtree, so the cache-hit exit \
+             was never entered and this half asserted nothing"
+        );
+        let hit = engine.build_layout_from_document(&document, &[]);
+        let mut found = Vec::new();
+        svg_identities(&hit, &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "a cached inline <svg> must produce exactly one identified box \
+             (found {found:?})"
+        );
+        assert_eq!(
+            found[0].0, EXPECTED,
+            "the svg's join key must be the selector Chrome's capture reports"
+        );
+        assert!(
+            found[0].1.starts_with("Image"),
+            "the cache-hit exit must be the one under test — a Block here \
+             means the subtree did not parse and the miss path ran twice \
+             (box type {:?})",
+            found[0].1
+        );
+
+        // An identity with an EMPTY selector joins nothing and is reported as
+        // a phantom rather than excluded, so it is worse than none.
+        fn assert_no_empty_key(b: &LayoutBox) {
+            if let Some(identity) = b.identity() {
+                assert!(
+                    !identity.selector.is_empty(),
+                    "a box was stamped with an empty join key (tag {:?})",
+                    identity.tag
+                );
+            }
+            for c in &b.children {
+                assert_no_empty_key(c);
+            }
+        }
+        assert_no_empty_key(&hit);
     }
 
     #[test]
