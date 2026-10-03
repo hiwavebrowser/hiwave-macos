@@ -9146,10 +9146,18 @@ mod tests {
     /// The one tile a no-repeat url background paints in a 300x200 box,
     /// for a 240x210 image.
     fn url_background_tile(size: rustkit_css::BackgroundSize) -> Rect {
+        url_background_tile_at(size, rustkit_css::BackgroundPosition::default())
+    }
+
+    fn url_background_tile_at(
+        size: rustkit_css::BackgroundSize,
+        position: rustkit_css::BackgroundPosition,
+    ) -> Rect {
         let mut style = ComputedStyle::new();
         style.background_layers = vec![rustkit_css::BackgroundLayer {
             image: rustkit_css::BackgroundImage::Url("dinosaur.png".to_string()),
             size,
+            position,
             repeat: rustkit_css::BackgroundRepeat::NoRepeat,
             ..Default::default()
         }];
@@ -9199,6 +9207,40 @@ mod tests {
             height: Some(50.0),
         });
         assert_eq!((tile.width, tile.height), (100.0, 50.0));
+    }
+
+    #[test]
+    fn test_url_background_px_position_offsets_the_image() {
+        // `background-position: 10px 20px` reached the painter as 0 0 (the
+        // px arm was "handled in rendering", which never happened), so a
+        // sprite sheet always showed its top-left cell.
+        let px = rustkit_css::BackgroundPositionValue::Px;
+        let size = rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        };
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: px(10.0), y: px(20.0) },
+        );
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (20.0, 40.0, 100.0, 50.0));
+
+        // A sprite cell: negative offsets pull the image up and left.
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: px(-40.0), y: px(-30.0) },
+        );
+        assert_eq!((tile.x, tile.y), (-30.0, -10.0));
+
+        // Mixed: px on one axis, a percentage on the other.
+        let tile = url_background_tile_at(
+            size,
+            rustkit_css::BackgroundPosition {
+                x: px(10.0),
+                y: rustkit_css::BackgroundPositionValue::Percent(1.0),
+            },
+        );
+        assert_eq!((tile.x, tile.y), (20.0, 170.0));
     }
 
     #[test]
