@@ -32,6 +32,8 @@ mod web_blob_tests;
 mod web_utils_tests;
 #[cfg(test)]
 mod dom_utils_tests;
+#[cfg(test)]
+mod web_intl_tests;
 mod web_crypto;
 mod web_url;
 
