@@ -18004,6 +18004,47 @@ img { display: block; width: 10px; height: 10px; }
         );
         assert_eq!(fills(0, 0, 255), vec![(0.0, 10.0, 10.0, 10.0)], "the base64 <img> paints in its box");
     }
+
+    /// An SVG image with `width`/`height` and no `viewBox` scales to its
+    /// box, as Blink synthesizes the viewBox for SVG images; `render` drew
+    /// it at its own size, so moving data: SVGs onto the vector lane left
+    /// every 100x100 square of the images-intrinsic case at 100x100.
+    #[test]
+    fn an_svg_image_without_a_viewbox_scales_to_its_box() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+img { display: block; }
+</style></head><body>
+<img style="width: 20px; height: 20px" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23ff0000'/%3E%3C/svg%3E">
+<div style="width: 40px; height: 20px; background: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%2300ff00'/%3E%3C/svg%3E&quot;) 0 0 / 20px 20px repeat-x"></div>
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let fills = |r: u8, g: u8, b: u8| -> Vec<(f32, f32, f32, f32)> {
+            dl.commands
+                .iter()
+                .filter_map(|c| match c {
+                    rustkit_layout::DisplayCommand::FillRect { rect, color }
+                        if (color.r, color.g, color.b) == (r, g, b) =>
+                    {
+                        Some((rect.x, rect.y, rect.width, rect.height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(fills(255, 0, 0), vec![(0.0, 0.0, 20.0, 20.0)], "the <img> fills its 20px box");
+        assert_eq!(
+            fills(0, 255, 0),
+            vec![(0.0, 20.0, 20.0, 20.0), (20.0, 20.0, 20.0, 20.0)],
+            "background-size 20px scales each tile"
+        );
+    }
 }
 
 #[cfg(test)]
