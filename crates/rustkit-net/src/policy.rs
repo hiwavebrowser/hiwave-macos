@@ -134,6 +134,8 @@ pub enum Denial {
     /// A module script whose response is not 2xx.
     BadStatus(u16),
     Network(String),
+    /// The page navigated away or the script aborted the request.
+    Cancelled,
 }
 
 impl std::fmt::Display for Denial {
@@ -388,6 +390,15 @@ impl FetchPolicy {
             #[cfg(test)]
             address_override: None,
         }
+    }
+
+    /// Cancel every request this policy has in flight or queued, and refuse
+    /// any later one with `Denial::Cancelled`. Idempotent, any thread.
+    pub fn cancel(&self) {}
+
+    /// True once [`cancel`](Self::cancel) has been called.
+    pub fn is_cancelled(&self) -> bool {
+        false
     }
 
     /// Run one request to completion under the policy.
@@ -872,11 +883,17 @@ mod tests {
         hits: Arc<AtomicUsize>,
         seen: Arc<Mutex<Vec<Seen>>>,
         peak: Arc<AtomicUsize>,
+        closed: Arc<AtomicUsize>,
     }
 
     impl Server {
         fn hits(&self) -> usize {
             self.hits.load(Ordering::SeqCst)
+        }
+        /// Connections the client hung up on while the server was still
+        /// holding its response.
+        fn closed(&self) -> usize {
+            self.closed.load(Ordering::SeqCst)
         }
         fn seen(&self) -> Vec<Seen> {
             self.seen.lock().unwrap().clone()
@@ -908,12 +925,13 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let peak = Arc::new(AtomicUsize::new(0));
         let live = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicUsize::new(0));
         let handler = Arc::new(handler);
-        let (h, sn, pk) = (hits.clone(), seen.clone(), peak.clone());
+        let (h, sn, pk, cl) = (hits.clone(), seen.clone(), peak.clone(), closed.clone());
         tokio::spawn(async move {
             while let Ok((mut s, _)) = l.accept().await {
                 h.fetch_add(1, Ordering::SeqCst);
-                let (sn, pk, live, handler) = (sn.clone(), pk.clone(), live.clone(), handler.clone());
+                let (sn, pk, live, handler, cl) = (sn.clone(), pk.clone(), live.clone(), handler.clone(), cl.clone());
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
                     let mut chunk = [0u8; 4096];
@@ -952,7 +970,16 @@ mod tests {
                     let now = live.fetch_add(1, Ordering::SeqCst) + 1;
                     pk.fetch_max(now, Ordering::SeqCst);
                     if !delay.is_zero() {
-                        tokio::time::sleep(delay).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            n = s.read(&mut chunk) => {
+                                if matches!(n, Ok(0) | Err(_)) {
+                                    live.fetch_sub(1, Ordering::SeqCst);
+                                    cl.fetch_add(1, Ordering::SeqCst);
+                                    return;
+                                }
+                            }
+                        }
                     }
                     let reply = handler(&seen_req);
                     live.fetch_sub(1, Ordering::SeqCst);
@@ -961,7 +988,7 @@ mod tests {
                 });
             }
         });
-        Server { port, hits, seen, peak }
+        Server { port, hits, seen, peak, closed }
     }
 
     async fn serve(handler: impl Fn(&Seen) -> Vec<u8> + Send + Sync + 'static) -> Server {
@@ -1353,6 +1380,101 @@ mod tests {
         }
         assert_eq!(s.hits(), 5);
         assert!(s.peak.load(Ordering::SeqCst) <= 2, "more than 2 in flight to one origin: {}", s.peak.load(Ordering::SeqCst));
+    }
+
+    // ---- cancellation (Z2-C5): navigating away must close the sockets ---------
+
+    async fn wait_until(mut f: impl FnMut() -> bool) {
+        for _ in 0..300 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_an_in_flight_request_and_closes_its_socket() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<FetchPolicy>();
+        let s = serve_with(Duration::from_secs(30), |_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"late")).await;
+        let p = Arc::new(allow_ports(page("http://page.test/"), &[s.port]));
+        let l = Arc::new(loader());
+        let task = {
+            let (p, l, url) = (p.clone(), l.clone(), s.url("/slow"));
+            tokio::spawn(async move { p.execute(&l, ScriptRequest::get(url)).await })
+        };
+        wait_until(|| s.seen().len() == 1).await;
+        assert_eq!(s.seen().len(), 1, "the request never reached the server");
+        let started = Instant::now();
+        let canceller = p.clone();
+        std::thread::spawn(move || canceller.cancel()).join().unwrap();
+        assert_eq!(task.await.unwrap().unwrap_err(), Denial::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(2), "cancel did not return promptly");
+        wait_until(|| s.closed() == 1).await;
+        assert_eq!(s.closed(), 1, "the connection stayed open after cancel");
+        assert!(p.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_also_ends_requests_queued_behind_the_in_flight_cap() {
+        let s = serve_with(Duration::from_secs(30), |_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"late")).await;
+        let limits = FetchLimits { max_in_flight_per_origin: 1, ..FetchLimits::default() };
+        let p = Arc::new(allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s.port],
+        ));
+        let l = Arc::new(loader());
+        let mut tasks = Vec::new();
+        for i in 0..3 {
+            let (p, l, url) = (p.clone(), l.clone(), s.url(&format!("/{i}")));
+            tasks.push(tokio::spawn(async move { p.execute(&l, ScriptRequest::get(url)).await }));
+        }
+        wait_until(|| s.seen().len() == 1).await;
+        p.cancel();
+        for t in tasks {
+            assert_eq!(t.await.unwrap().unwrap_err(), Denial::Cancelled);
+        }
+        wait_until(|| s.closed() == 1).await;
+        assert_eq!(s.hits(), 1, "a queued request connected after cancel");
+        assert_eq!(s.closed(), 1);
+    }
+
+    #[tokio::test]
+    async fn after_cancel_every_call_is_refused_at_once_without_spending_the_budget() {
+        let s = serve(|_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"ok")).await;
+        let limits = FetchLimits { max_total_requests: 2, ..FetchLimits::default() };
+        let p = allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s.port],
+        );
+        let l = loader();
+        p.execute(&l, ScriptRequest::get(s.url("/a"))).await.expect("before cancel");
+        p.cancel();
+        p.cancel();
+        for i in 0..5 {
+            let r = p.execute(&l, ScriptRequest::get(s.url(&format!("/{i}")))).await;
+            assert_eq!(r.unwrap_err(), Denial::Cancelled, "call {i}");
+        }
+        let m = p.fetch_module(&l, &s.url("/m.js"), &s.url("/")).await;
+        assert_eq!(m.unwrap_err(), Denial::Cancelled);
+        assert_eq!(s.hits(), 1, "a request connected after cancel");
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_an_in_flight_module_fetch() {
+        let s = serve_with(Duration::from_secs(30), |_| resp(200, &[("Access-Control-Allow-Origin", "*"), ("Content-Type", "text/javascript")], b"export {}")).await;
+        let p = Arc::new(allow_ports(page("http://page.test/"), &[s.port]));
+        let l = Arc::new(loader());
+        let task = {
+            let (p, l, url) = (p.clone(), l.clone(), s.url("/m.js"));
+            tokio::spawn(async move { p.fetch_module(&l, &url, &url).await })
+        };
+        wait_until(|| s.seen().len() == 1).await;
+        p.cancel();
+        assert_eq!(task.await.unwrap().unwrap_err(), Denial::Cancelled);
+        wait_until(|| s.closed() == 1).await;
+        assert_eq!(s.closed(), 1);
     }
 
     // ---- §7.8: the shield ---------------------------------------------------
