@@ -541,6 +541,8 @@ pub struct EngineConfig {
     /// start more requests; whatever is still pending after the last round
     /// completes with a network error.
     pub script_network_rounds: u32,
+    /// Optional replay proxy URL (test-only, for deterministic HAR replay).
+    pub replay_proxy: Option<Url>,
 }
 
 impl Default for EngineConfig {
@@ -557,6 +559,7 @@ impl Default for EngineConfig {
             subresource_budget_ms: 8_000,
             script_network_enabled: true,
             script_network_rounds: 8,
+            replay_proxy: None,
         }
     }
 }
@@ -615,6 +618,16 @@ pub struct ScriptRecord {
     /// Wall time spent running it.
     pub elapsed_ms: u64,
     pub outcome: ScriptOutcome,
+}
+
+/// What a primary-button click did once the page's listeners had run.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClickOutcome {
+    /// Tag of the element the click focused; `None` means focus was cleared.
+    pub focused: Option<String>,
+    /// The link to follow: the click hit an `<a href>` and no `click`
+    /// listener called `preventDefault()`.
+    pub navigate: Option<String>,
 }
 
 /// Classify a `<script>` element. `None` for data blocks
@@ -1164,6 +1177,7 @@ impl Engine {
         let loader_config = LoaderConfig {
             user_agent: config.user_agent.clone(),
             cookies_enabled: config.cookies_enabled,
+            replay_proxy: config.replay_proxy.clone(),
             ..Default::default()
         };
         let loader = Arc::new(
@@ -1684,6 +1698,100 @@ impl Engine {
                 None
             }
         }
+    }
+
+    /// Deliver a primary-button press at VIEWPORT coordinates to the page:
+    /// `mousedown` at the element under the point. Returns false when a
+    /// listener cancelled it.
+    pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y)
+    }
+
+    /// Deliver a primary-button release at VIEWPORT coordinates: `mouseup`
+    /// then `click` at the element under the point, then the click's
+    /// default actions (focus, link navigation) unless a listener called
+    /// `preventDefault()` on the `click`. Whatever the listeners wrote to
+    /// the DOM is laid out before this returns.
+    pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
+        self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        let not_cancelled = self.dispatch_mouse_at_point(id, "click", viewport_x, viewport_y);
+        // The listeners may have moved or replaced what is under the point;
+        // the default action reads the layout they left behind.
+        let focused = self.focus_at_point(id, viewport_x, viewport_y);
+        let navigate = if not_cancelled {
+            self.link_at_point(id, viewport_x, viewport_y)
+        } else {
+            None
+        };
+        ClickOutcome { focused, navigate }
+    }
+
+    /// Fire one mouse event at the element hit at VIEWPORT coordinates and
+    /// flush its DOM writes. Returns false when a listener cancelled it.
+    fn dispatch_mouse_at_point(
+        &mut self,
+        id: EngineViewId,
+        event_type: &str,
+        viewport_x: f32,
+        viewport_y: f32,
+    ) -> bool {
+        let Some(view) = self.views.get_mut(&id) else {
+            return true;
+        };
+        let doc_x = viewport_x + view.scroll_offset.0;
+        let doc_y = viewport_y + view.scroll_offset.1;
+        let Some(hit) = view.layout.as_ref().and_then(|l| l.hit_test(doc_x, doc_y)) else {
+            return true;
+        };
+        // A text run is hit, but mouse events target its element.
+        let target = hit.node_id.and_then(|raw| {
+            let doc = view.document.as_ref()?;
+            let mut node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+            while !node.is_element() {
+                node = node.parent()?;
+            }
+            Some(node.id.raw())
+        });
+        let (Some(target), Some(bindings)) = (target, view.bindings.as_ref()) else {
+            return true;
+        };
+        let data = rustkit_bindings::MouseEventBindingData {
+            client_x: viewport_x as f64,
+            client_y: viewport_y as f64,
+            screen_x: viewport_x as f64,
+            screen_y: viewport_y as f64,
+            offset_x: hit.local_x as f64,
+            offset_y: hit.local_y as f64,
+            button: 0,
+            buttons: if event_type == "mousedown" { 1 } else { 0 },
+            ..Default::default()
+        };
+        let source = format!("event:{event_type}");
+        let not_cancelled = match bindings.fire_mouse_event(target, event_type, &data) {
+            Ok(not_cancelled) => not_cancelled,
+            Err(e) => {
+                view.script_log.push(ScriptRecord {
+                    source: source.clone(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(e.to_string()),
+                });
+                true
+            }
+        };
+        for message in bindings.take_reported_errors() {
+            view.script_log.push(ScriptRecord {
+                source: source.clone(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::Threw(message),
+            });
+        }
+        debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after mouse event failed");
+        }
+        not_cancelled
     }
 
     /// Deliver a key to the focused form control.
@@ -12213,6 +12321,12 @@ impl EngineBuilder {
         self
     }
 
+    /// Set an optional replay proxy URL for deterministic testing (test-only).
+    pub fn replay_proxy(mut self, proxy: Option<Url>) -> Self {
+        self.config.replay_proxy = proxy;
+        self
+    }
+
     /// Build the engine.
     pub fn build(self) -> Result<Engine, EngineError> {
         Engine::with_interceptor(self.config, self.interceptor)
@@ -20243,9 +20357,9 @@ mod node_identity_tests {
 
     #[test]
     fn hit_test_reports_the_node_of_the_box_actually_under_the_cursor() {
-        // node_id must NOT inherit from ancestors the way link_href does:
-        // the caller wants the element under the cursor, not the nearest
-        // interesting one above it.
+        // A box with a node reports its own node, not an ancestor's: the
+        // caller wants the element under the cursor. (A box with NO node
+        // reports its nearest ancestor's, below.)
         let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         parent.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 100.0);
         parent.node_id = Some(1);
@@ -20266,6 +20380,23 @@ mod node_identity_tests {
         let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         b.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 50.0, 50.0);
         assert_eq!(b.hit_test(10.0, 10.0).unwrap().node_id, None);
+    }
+
+    #[test]
+    fn an_anonymous_box_is_hit_on_behalf_of_its_nearest_element() {
+        // Z lane I0: a click on `<a style="display:block">go</a>` landed on
+        // the anchor's anonymous line box, which has no node, so the click
+        // reached no element and its listeners never ran. The element under
+        // the cursor is the box's nearest ancestor with a node, as in a
+        // browser, where a click on text targets the text's element.
+        let mut a = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        a.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 40.0);
+        a.node_id = Some(4);
+        let mut line = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        line.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 20.0);
+        a.children.push(line);
+
+        assert_eq!(a.hit_test(5.0, 10.0).unwrap().node_id, Some(4));
     }
 
     #[test]
@@ -20319,6 +20450,114 @@ mod node_identity_tests {
         // going to an element the user visibly clicked away from.
         assert_eq!(engine.focus_at_point(id, 10.0, 110.0), None);
         assert_eq!(engine.focused_node(id), None);
+    }
+
+    // ---- live clicks reach the page (Z lane I0, 2026-10-03) ----
+    //
+    // Pete's live testing: clicks were logged and nothing changed. The live
+    // click path only hit-tested for focus and links; no mousedown, mouseup
+    // or click ever reached a listener, so every script-driven control was
+    // dead, and a link whose listener cancels the click navigated anyway.
+
+    fn js(engine: &mut Engine, id: EngineViewId, script: &str) -> String {
+        engine.execute_script(id, script).expect("script")
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_reaches_the_pages_listeners_in_order() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                r#"<html><body style="margin:0"><div id="b" style="height:50px">press</div></body></html>"#,
+            )
+            .expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; ['mousedown', 'mouseup', 'click'].forEach(function (t) { \
+             document.body.addEventListener(t, function (e) { \
+             log.push([e.type, e.target.id, e.clientX, e.clientY, e.button, e.isTrusted, e instanceof MouseEvent].join(':')); }); });",
+        );
+
+        assert!(engine.mouse_down_at_point(id, 12.0, 20.0));
+        let outcome = engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(outcome.navigate, None);
+
+        // The text run is hit, but the target is its element (as in Chrome),
+        // and the events bubble to body.
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            format!(
+                "{:?}",
+                rustkit_js::JsValue::String(
+                    "mousedown:b:12:20:0:true:true mouseup:b:12:20:0:true:true click:b:12:20:0:true:true"
+                        .into()
+                )
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn prevent_default_on_click_cancels_the_link_and_only_then() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let html = r#"<html><body style="margin:0"><a id="a" href="https://example.com/x" style="display:block;height:40px">go</a></body></html>"#;
+        engine.load_html(id, html).expect("load_html");
+
+        // No listener: the link is followed.
+        assert_eq!(
+            engine.click_at_point(id, 5.0, 10.0).navigate.as_deref(),
+            Some("https://example.com/x")
+        );
+
+        // A listener that cancels the click keeps the page where it is.
+        js(
+            &mut engine,
+            id,
+            "document.getElementById('a').addEventListener('click', function (e) { e.preventDefault(); });",
+        );
+        assert_eq!(engine.click_at_point(id, 5.0, 10.0).navigate, None);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn what_a_click_listener_writes_is_laid_out_before_the_default_action() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                r#"<html><body style="margin:0"><div id="menu" style="height:40px">menu</div></body></html>"#,
+            )
+            .expect("load_html");
+        // A disclosure control: clicking it adds a link below it.
+        js(
+            &mut engine,
+            id,
+            "document.getElementById('menu').addEventListener('click', function () { \
+             var a = document.createElement('a'); a.setAttribute('href', 'https://example.com/opened'); \
+             a.style.display = 'block'; a.style.height = '40px'; a.textContent = 'opened'; \
+             document.body.appendChild(a); });",
+        );
+        assert_eq!(engine.link_at_point(id, 5.0, 60.0), None, "precondition: nothing below the menu");
+
+        engine.click_at_point(id, 5.0, 10.0);
+
+        assert_eq!(
+            engine.link_at_point(id, 5.0, 60.0).as_deref(),
+            Some("https://example.com/opened"),
+            "the listener's new element must be in the layout the next click hits"
+        );
     }
 }
 

@@ -30,6 +30,8 @@ mod web_interfaces_tests;
 mod web_blob_tests;
 #[cfg(test)]
 mod web_utils_tests;
+#[cfg(test)]
+mod dom_utils_tests;
 mod web_crypto;
 mod web_url;
 
@@ -1114,6 +1116,34 @@ impl DomBindings {
             "document.__rkFireOn({node}, {event_type:?});"
         ))?;
         Ok(())
+    }
+
+    /// Fire the user's mouse input at an element (by node id) as a trusted,
+    /// bubbling, cancelable `MouseEvent`. Returns false when a listener
+    /// called `preventDefault()`. Listener exceptions are queued, see
+    /// [`Self::take_reported_errors`].
+    pub fn fire_mouse_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        data: &MouseEventBindingData,
+    ) -> Result<bool, BindingError> {
+        let result = self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
+             screenX: {}, screenY: {}, button: {}, buttons: {}, ctrlKey: {}, altKey: {}, \
+             shiftKey: {}, metaKey: {} }})",
+            data.client_x,
+            data.client_y,
+            data.screen_x,
+            data.screen_y,
+            data.button,
+            data.buttons,
+            data.ctrl_key,
+            data.alt_key,
+            data.shift_key,
+            data.meta_key,
+        ))?;
+        Ok(!matches!(result, JsValue::Boolean(false)))
     }
 
     /// The document's URL: the base for a root module's imports.

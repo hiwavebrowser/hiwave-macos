@@ -46,6 +46,9 @@ pub(crate) struct DomHost {
     /// Script value writes the engine has not yet copied into its edit
     /// state, which is what layout paints (`DomBindings::take_value_writes`).
     value_writes: Vec<(usize, String)>,
+    /// HTML §4.12.3 template contents: each `<template>`'s content
+    /// fragment, by the template's NodeId (see `adopt_template_contents`).
+    templates: RefCell<HashMap<usize, Rc<Node>>>,
 }
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
@@ -53,6 +56,9 @@ pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
 impl DomHost {
     /// Bind `document`, returning the new generation.
     pub(crate) fn bind(&mut self, document: Rc<Document>) -> u32 {
+        let templates = self.templates.get_mut();
+        templates.clear();
+        adopt_template_contents(&document, document.root(), templates);
         self.document = Some(document);
         self.generation += 1;
         self.values.clear();
@@ -188,6 +194,38 @@ fn is_fragment(node: &Node) -> bool {
     matches!(node.node_type, NodeType::DocumentFragment)
 }
 
+fn is_template(node: &Node) -> bool {
+    is_html_element(node) && node.tag_name() == Some("template")
+}
+
+/// HTML §4.12.3: a parsed `<template>`'s children belong to its content,
+/// a DocumentFragment outside the tree, not to the element. Gives every
+/// template in `root`'s subtree (`root` included, and templates nested in
+/// the moved content) a content fragment and moves its children there.
+/// Run on freshly parsed nodes only: children script appends to a
+/// template later stay real children, as in the spec.
+fn adopt_template_contents(
+    document: &Document,
+    root: &Rc<Node>,
+    templates: &mut HashMap<usize, Rc<Node>>,
+) {
+    let mut pending = vec![root.clone()];
+    while let Some(node) = pending.pop() {
+        if is_template(&node) {
+            let content = templates
+                .entry(node.id.raw())
+                .or_insert_with(|| document.create_node(NodeType::DocumentFragment))
+                .clone();
+            for child in node.children() {
+                child.remove_from_parent();
+                content.append_child(child);
+            }
+            pending.push(content);
+        }
+        pending.extend(node.children());
+    }
+}
+
 /// `mutate(gen, op, parentId, nodeId, childId)`: one tree write. Answers
 /// null on success, else the DOMException name to throw.
 fn mutate(host: &DomHost, args: &[JsValue]) -> Result<(), &'static str> {
@@ -232,6 +270,37 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
     let op = string_arg(args, 1).ok_or("NotSupportedError")?;
     if let Some(kind) = op.strip_prefix("create:") {
         let data = string_arg(args, 2).unwrap_or("").to_string();
+        // DOMParser (HTML §8.5.1): parse `data` as a whole HTML document,
+        // then copy it under a detached Document node here. Its nodes share
+        // this Document's node table (so wrappers and tree moves work on
+        // them) but are in no rendered tree.
+        if kind == "document" {
+            let parsed = Document::parse_html(&data).map_err(|_| "SyntaxError")?;
+            let doc = document.create_node(NodeType::Document);
+            let templates = &mut host.templates.borrow_mut();
+            for child in parsed.root().children() {
+                // The parsed tree's NodeIds are its own: clone with an
+                // empty template table, then give its templates content.
+                doc.append_child(clone_node(document, &child, true, &mut HashMap::new()));
+            }
+            // An HTML document always has a body, but rustkit-html drops
+            // it (and the text) for text-only input; supply an empty one.
+            if let Some(html) = doc
+                .children()
+                .into_iter()
+                .find(|n| n.tag_name() == Some("html"))
+            {
+                if !html.children().iter().any(|n| n.tag_name() == Some("body")) {
+                    html.append_child(document.create_node(NodeType::Element {
+                        tag_name: String::from("body"),
+                        namespace: String::from("http://www.w3.org/1999/xhtml"),
+                        attributes: Default::default(),
+                    }));
+                }
+            }
+            adopt_template_contents(document, &doc, templates);
+            return Ok((node_id(Some(doc)), DomDirty::Clean));
+        }
         let node_type = match kind {
             "element" if is_valid_name(&data) => NodeType::Element {
                 // An HTML document lowercases the name it is given.
@@ -246,10 +315,9 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             _ => return Err("NotSupportedError"),
         };
         // A detached node is in no tree, so nothing needs a restyle yet.
-        return Ok((
-            node_id(Some(document.create_node(node_type))),
-            DomDirty::Clean,
-        ));
+        let node = document.create_node(node_type);
+        adopt_template_contents(document, &node, &mut host.templates.borrow_mut());
+        return Ok((node_id(Some(node)), DomDirty::Clean));
     }
     let node = host.node_at(args, 2).ok_or("NotFoundError")?;
     match (op, &node.node_type) {
@@ -321,23 +389,31 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         // The clone is detached, so nothing needs a restyle yet.
         ("clone", _) => {
             let deep = matches!(args.get(3), Some(JsValue::Boolean(true)));
+            let templates = &mut host.templates.borrow_mut();
             Ok((
-                node_id(Some(clone_node(document, &node, deep))),
+                node_id(Some(clone_node(document, &node, deep, templates))),
                 DomDirty::Clean,
             ))
         }
         // HTML §8.5 innerHTML setter: parse as the element's contents (the
         // fragment parsing algorithm), then replace all children with it.
+        // A template's innerHTML is its content's (HTML §4.12.3).
         ("setHTML", NodeType::Element { tag_name, .. }) => {
             let html = string_arg(args, 3).unwrap_or("");
             let nodes = document
                 .parse_fragment(html, tag_name)
                 .map_err(|_| "SyntaxError")?;
-            for child in node.children() {
+            let templates = &mut host.templates.borrow_mut();
+            let target = templates
+                .get(&node.id.raw())
+                .cloned()
+                .unwrap_or(node.clone());
+            for child in target.children() {
                 child.remove_from_parent();
             }
             for child in nodes {
-                node.append_child(child);
+                adopt_template_contents(document, &child, templates);
+                target.append_child(child);
             }
             Ok((JsValue::Null, DomDirty::Style))
         }
@@ -397,13 +473,23 @@ fn control_value(host: &mut DomHost, args: &[JsValue]) -> (JsValue, DomDirty) {
 }
 
 /// DOM §4.4 "clone a node": a detached copy with fresh NodeIds, its
-/// descendants copied too when `deep`.
-fn clone_node(document: &Document, node: &Rc<Node>, deep: bool) -> Rc<Node> {
+/// descendants copied too when `deep`. A template's copy gets a content
+/// fragment of its own, holding copies of the content when `deep`.
+fn clone_node(
+    document: &Document,
+    node: &Rc<Node>,
+    deep: bool,
+    templates: &mut HashMap<usize, Rc<Node>>,
+) -> Rc<Node> {
     let copy = document.create_node(node.node_type.clone());
     if deep {
         for child in node.children() {
-            copy.append_child(clone_node(document, &child, true));
+            copy.append_child(clone_node(document, &child, true, templates));
         }
+    }
+    if let Some(content) = templates.get(&node.id.raw()).cloned() {
+        let content = clone_node(document, &content, deep, templates);
+        templates.insert(copy.id.raw(), content);
     }
     copy
 }
@@ -455,7 +541,7 @@ const RAW_TEXT_ELEMENTS: &[&str] = &[
 /// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
 /// Attributes come out sorted by name: rustkit-dom keeps them in a
 /// HashMap, so source order is gone.
-fn serialize_node(node: &Rc<Node>, out: &mut String) {
+fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
     match &node.node_type {
         NodeType::Element {
             tag_name,
@@ -475,7 +561,7 @@ fn serialize_node(node: &Rc<Node>, out: &mut String) {
             }
             out.push('>');
             if !VOID_ELEMENTS.contains(&tag_name.as_str()) {
-                serialize_children(node, out);
+                serialize_children(node, out, templates);
                 out.push_str("</");
                 out.push_str(tag_name);
                 out.push('>');
@@ -509,14 +595,16 @@ fn serialize_node(node: &Rc<Node>, out: &mut String) {
             out.push_str(name);
             out.push('>');
         }
-        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out),
+        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out, templates),
     }
 }
 
-/// The children of `node`, serialized (`innerHTML`).
-fn serialize_children(node: &Rc<Node>, out: &mut String) {
-    for child in node.children() {
-        serialize_node(&child, out);
+/// The children of `node`, serialized (`innerHTML`); a template's are
+/// its content's children.
+fn serialize_children(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
+    let source = templates.get(&node.id.raw()).unwrap_or(node);
+    for child in source.children() {
+        serialize_node(&child, out, templates);
     }
 }
 
@@ -536,7 +624,7 @@ fn escape_into(s: &str, attribute: bool, out: &mut String) {
 }
 
 /// `info(gen, id, field)`: one read of one node.
-fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
+fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>) -> JsValue {
     match field {
         "type" => JsValue::Number(match node.node_type {
             NodeType::Element { .. } => 1.0,
@@ -592,14 +680,15 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
         },
         "innerHTML" => {
             let mut out = String::new();
-            serialize_children(node, &mut out);
+            serialize_children(node, &mut out, templates);
             JsValue::String(out)
         }
         "outerHTML" => {
             let mut out = String::new();
-            serialize_node(node, &mut out);
+            serialize_node(node, &mut out, templates);
             JsValue::String(out)
         }
+        "content" => node_id(templates.get(&node.id.raw()).cloned()),
         "innerText" if node.is_element() => JsValue::String(inner_text::inner_text(node)),
         _ => JsValue::Undefined,
     }
@@ -761,7 +850,7 @@ pub(crate) fn install(
         Box::new(move |args| {
             let host = h.borrow();
             match (host.node(args), string_arg(args, 2)) {
-                (Some(node), Some(field)) => node_info(&node, field),
+                (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
                 _ => JsValue::Null,
             }
         }),
@@ -948,7 +1037,7 @@ const WRAPPERS_JS: &str = r#"
         if (w) return w;
         var t = N.info(gen, id, 'type');
         var proto = t === 1 ? elementProtos[N.info(gen, id, 'local')] || HTMLElement.prototype
-                  : t === 3 ? Text.prototype
+                  : t === 3 ? Text.prototype : t === 9 ? Document.prototype
                   : t === 8 ? Comment.prototype : t === 11 ? DocumentFragment.prototype
                   : Node.prototype;
         w = Object.create(proto);
@@ -1026,8 +1115,13 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this);
         return list(NodeList.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', false);
     });
+    // A node in a DOMParser document is owned by it; every other node by
+    // the global document.
     getter(Node.prototype, 'ownerDocument', function () {
-        return info(this, 'type') === 9 ? null : g.document;
+        if (info(this, 'type') === 9) return null;
+        var n = this;
+        while (n.parentNode) n = n.parentNode;
+        return n.nodeType === 9 ? n : g.document;
     });
     Node.prototype.hasChildNodes = function () { return this.firstChild !== null; };
 
@@ -1280,13 +1374,18 @@ const WRAPPERS_JS: &str = r#"
             return elementSibling(this, 'previousSibling');
         });
     });
-    // A node is connected when its root is the current document; an old
-    // document's wrappers have no parent and are never connected.
+    // A node is connected when its root is a document (the current one,
+    // or a DOMParser one); an old document's wrappers have no parent and
+    // are never connected.
     getter(Node.prototype, 'isConnected', function () {
         var n = this;
         while (n.parentNode) n = n.parentNode;
-        return n === g.document && slotOf(n).gen === gen;
+        return n.nodeType === 9 && slotOf(n).gen === gen;
     });
+
+    // HTML §4.12.3 template.content: the fragment its parsed children
+    // were moved into (the host keeps one per template).
+    getter(elementProtos.template, 'content', function () { return related(this, 'content'); });
 
     // HTMLElement reflected attributes (HTML §3.2.6) and dataset (§3.2.6.6).
     ['title', 'lang', 'dir'].forEach(function (k) {
@@ -1299,6 +1398,17 @@ const WRAPPERS_JS: &str = r#"
     function dataAttr(p) {
         if (typeof p !== 'string' || /-[a-z]/.test(p)) return null;
         return 'data-' + p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
+    }
+    // The DOMStringMap's names (HTML §3.2.6.6): each `data-*` attribute
+    // with no ASCII upper alpha after the prefix, `-x` camel-cased.
+    function dataNames(el) {
+        var out = [];
+        el.getAttributeNames().forEach(function (a) {
+            if (a.slice(0, 5) === 'data-' && !/[A-Z]/.test(a.slice(5))) {
+                out.push(a.slice(5).replace(/-([a-z])/g, function (m, c) { return c.toUpperCase(); }));
+            }
+        });
+        return out;
     }
     getter(HTMLElement.prototype, 'dataset', function () {
         slotOf(this);
@@ -1321,6 +1431,13 @@ const WRAPPERS_JS: &str = r#"
                 return true;
             },
             has: function (t, p) { var a = dataAttr(p); return !!a && el.hasAttribute(a); },
+            // Enumeration (Object.keys, for-in, JSON.stringify).
+            ownKeys: function () { return dataNames(el); },
+            getOwnPropertyDescriptor: function (t, p) {
+                var a = dataAttr(p), v = a ? el.getAttribute(a) : null;
+                return v === null ? undefined
+                    : { value: v, writable: true, enumerable: true, configurable: true };
+            },
             deleteProperty: function (t, p) {
                 var a = dataAttr(p);
                 if (a) el.removeAttribute(a);
@@ -1624,6 +1741,13 @@ const WRAPPERS_JS: &str = r#"
         if (!l) {
             l = Object.create(DOMTokenList.prototype);
             Object.defineProperty(l, TOKENS, { value: this });
+            // The indexed getter (`classList[0]`) answers like item().
+            l = new Proxy(l, {
+                get: function (t, p, r) {
+                    return typeof p === 'string' && /^(0|[1-9][0-9]*)$/.test(p)
+                        ? tokens(t)[Number(p)] : Reflect.get(t, p, r);
+                }
+            });
             classLists.set(this, l);
         }
         return l;
@@ -1756,7 +1880,8 @@ const WRAPPERS_JS: &str = r#"
     DocumentFragment.prototype.querySelectorAll = queries.querySelectorAll;
     // NonElementParentNode on a fragment: the id table only knows the
     // document, so walk the fragment's own subtree.
-    DocumentFragment.prototype.getElementById = function (id) {
+    // A DOMParser document's ids are not in the table either.
+    function findById(root, id) {
         id = String(id);
         function find(n) {
             for (var c = n.firstChild; c; c = c.nextSibling) {
@@ -1767,8 +1892,9 @@ const WRAPPERS_JS: &str = r#"
             }
             return null;
         }
-        return find(this);
-    };
+        return find(root);
+    }
+    DocumentFragment.prototype.getElementById = function (id) { return findById(this, id); };
     function matches(el, sel, method) {
         var s = slotOf(el);
         if (s.gen !== gen) return false;
@@ -1799,17 +1925,46 @@ const WRAPPERS_JS: &str = r#"
     Document.prototype.createComment = function (data) {
         return create('comment', String(data), 'createComment');
     };
+    // DOM §4.5 importNode: a copy for this document. Nodes here all share
+    // the one Rust Document, so importing is cloning.
+    Document.prototype.importNode = function (node, deep) {
+        nodeArg(node, 'importNode');
+        if (node.nodeType === 9) {
+            throw new DOMException("Failed to execute 'importNode' on 'Document': " +
+                'The node provided is a document, which may not be imported.', 'NotSupportedError');
+        }
+        return node.cloneNode(!!deep);
+    };
     Document.prototype.createDocumentFragment = function () {
         return create('fragment', '', 'createDocumentFragment');
     };
     Document.prototype.getElementById = function (id) {
         var s = slotOf(this);
+        if (this !== g.document) return findById(this, id);
         return s.gen === gen ? wrap(N.byId(s.gen, String(id))) : null;
     };
+    // A DOMParser document answers these from its own tree.
+    function childNamed(n, name) {
+        for (var c = n && n.firstChild; c; c = c.nextSibling) {
+            if (c.nodeType === 1 && (!name || c.localName === name)) return c;
+        }
+        return null;
+    }
     ['documentElement', 'head', 'body'].forEach(function (k) {
         getter(Document.prototype, k, function () {
-            var s = slotOf(this); return s.gen === gen ? wrap(N.root(s.gen, k)) : null;
+            var s = slotOf(this);
+            if (this !== g.document) {
+                var root = childNamed(this);
+                return k === 'documentElement' ? root : childNamed(root, k);
+            }
+            return s.gen === gen ? wrap(N.root(s.gen, k)) : null;
         });
+    });
+    // The global document's title is an own property the engine sets; a
+    // DOMParser document reads its first <title> (HTML §3.1.3).
+    getter(Document.prototype, 'title', function () {
+        var t = this.querySelector('title');
+        return t ? t.textContent.replace(/[\t\n\f\r ]+/g, ' ').trim() : '';
     });
 
     // `document.currentScript` (HTML §3.1.1): the classic <script> element
@@ -1834,6 +1989,23 @@ const WRAPPERS_JS: &str = r#"
         value: function (id, type) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (target) target.dispatchEvent(new Event(type));
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // The engine delivers the user's mouse input: a trusted MouseEvent
+    // that bubbles and can be cancelled (UI Events §3.4). Returns false
+    // when a listener called preventDefault().
+    Object.defineProperty(Document.prototype, '__rkFireMouse', {
+        value: function (id, type, init) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return true;
+            init.bubbles = true;
+            init.cancelable = true;
+            init.composed = true;
+            init.view = g;
+            var ev = new g.MouseEvent(type, init);
+            ev.isTrusted = true;
+            return target.dispatchEvent(ev);
         },
         configurable: true, enumerable: false, writable: true
     });
@@ -1948,6 +2120,13 @@ const WRAPPERS_JS: &str = r#"
         this.isTrusted = false;
         this.timeStamp = Date.now();
     }
+    // The legacy initializers; they do nothing during dispatch.
+    Event.prototype.initEvent = function (type, bubbles, cancelable) {
+        if (this.eventPhase !== 0) return;
+        this.type = String(type);
+        this.bubbles = !!bubbles;
+        this.cancelable = !!cancelable;
+    };
     Event.prototype.preventDefault = function () { if (this.cancelable) this.defaultPrevented = true; };
     Event.prototype.stopPropagation = function () { this[STOP] = true; };
     Event.prototype.stopImmediatePropagation = function () { this[STOP] = this[STOP_NOW] = true; };
@@ -1967,8 +2146,36 @@ const WRAPPERS_JS: &str = r#"
         constructor: { value: CustomEvent, writable: true, configurable: true }
     });
     Object.defineProperty(CustomEvent.prototype, Symbol.toStringTag, { value: 'CustomEvent' });
+    CustomEvent.prototype.initCustomEvent = function (type, bubbles, cancelable, detail) {
+        if (this.eventPhase !== 0) return;
+        this.initEvent(type, bubbles, cancelable);
+        this.detail = detail === undefined ? null : detail;
+    };
     g.Event = Event;
     g.CustomEvent = CustomEvent;
+
+    // DOMParser (HTML §8.5.1), for 'text/html' only: the XML types need an
+    // XML parser, which RustKit does not have yet.
+    var DOMParser = function DOMParser() {
+        if (!(this instanceof DOMParser)) {
+            throw new TypeError("Failed to construct 'DOMParser': Please use the 'new' operator.");
+        }
+    };
+    DOMParser.prototype.parseFromString = function (str, type) {
+        type = String(type);
+        if (type === 'text/xml' || type === 'application/xml' ||
+            type === 'application/xhtml+xml' || type === 'image/svg+xml') {
+            throw new DOMException("Failed to execute 'parseFromString' on 'DOMParser': " +
+                "XML documents are not supported yet.", 'NotSupportedError');
+        }
+        if (type !== 'text/html') {
+            throw new TypeError("Failed to execute 'parseFromString' on 'DOMParser': The provided value '" +
+                type + "' is not a valid enum value of type DOMParserSupportedType.");
+        }
+        return create('document', String(str), 'parseFromString');
+    };
+    Object.defineProperty(DOMParser.prototype, Symbol.toStringTag, { value: 'DOMParser' });
+    g.DOMParser = DOMParser;
     HTMLElement.prototype.click = function () {
         this.dispatchEvent(new Event('click', { bubbles: true, cancelable: true }));
     };

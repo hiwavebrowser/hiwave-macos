@@ -76,6 +76,15 @@ struct Args {
     #[arg(long)]
     actions_out_dir: Option<String>,
 
+    /// Optional HTTP replay proxy URL (e.g. http://127.0.0.1:8989) for deterministic HAR replay.
+    /// Test-only; routes outbound requests to the local replay server while preserving document origin.
+    #[arg(long)]
+    replay_proxy: Option<String>,
+
+    /// Virtual timer clock horizon in milliseconds (default: 5000).
+    #[arg(long)]
+    timer_horizon_ms: Option<u64>,
+
     /// Enable verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -292,8 +301,23 @@ fn run_capture(args: &Args) -> CaptureResult {
     } else {
         "ParityCapture/1.0"
     };
+
+    let replay_proxy = match &args.replay_proxy {
+        Some(raw) => match Url::parse(raw) {
+            Ok(u) => Some(u),
+            Err(e) => return result.failed("error", format!("Invalid replay proxy URL: {}", e)),
+        },
+        None => None,
+    };
+
+    let mut config = EngineConfig::for_parity_testing();
+    if let Some(horizon) = args.timer_horizon_ms {
+        config.timer_horizon_ms = horizon;
+    }
+    config.replay_proxy = replay_proxy;
+
     let engine_result = EngineBuilder::new()
-        .with_config(EngineConfig::for_parity_testing())
+        .with_config(config)
         .user_agent(user_agent)
         .javascript_enabled(url.is_some() || args.actions.is_some())
         .build();
