@@ -6225,6 +6225,10 @@ pub enum DisplayCommand {
         size: BackgroundSize,
         /// Background position (0-1 range)
         position: (f32, f32),
+        /// Px added to the position: a `background-position` length
+        /// (`10px 20px`, a sprite's `-40px -30px`). Zero on an axis
+        /// positioned by a percentage or keyword.
+        offset: (f32, f32),
         /// Background repeat
         repeat: BackgroundRepeat,
     },
@@ -6710,7 +6714,8 @@ impl BackgroundRepeat {
 
 /// Where each copy of a background image goes: the tiles intersecting
 /// `container` for an image of `image_width` x `image_height`, sized by
-/// `size`, placed by `position` (0-1 per axis) and laid out by `repeat`.
+/// `size`, placed by `position` (0-1 per axis) plus `offset` px and laid
+/// out by `repeat`.
 /// Tiles are unclipped; the painter clips them to `container`.
 ///
 /// Moved out of the renderer so the raster lane and the engine's SVG
@@ -6720,6 +6725,7 @@ pub fn background_tiles(
     container: Rect,
     size: &BackgroundSize,
     position: (f32, f32),
+    offset: (f32, f32),
     repeat: BackgroundRepeat,
     image_width: f32,
     image_height: f32,
@@ -6734,8 +6740,8 @@ pub fn background_tiles(
         return tiles;
     }
 
-    let mut start_x = container.x + (container.width - bg_width) * position.0;
-    let mut start_y = container.y + (container.height - bg_height) * position.1;
+    let mut start_x = container.x + (container.width - bg_width) * position.0 + offset.0;
+    let mut start_y = container.y + (container.height - bg_height) * position.1 + offset.1;
 
     // Adjust size and spacing for space/round modes
     let mut adjusted_bg_width = bg_width;
@@ -7755,7 +7761,7 @@ impl DisplayList {
                 // The actual image dimensions would come from the image cache
                 // For now, use container size as fallback
                 let size = self.convert_background_size(&layer.size, container);
-                let position = self.convert_background_position(&layer.position);
+                let (position, offset) = self.convert_background_position(&layer.position);
                 let repeat = self.convert_background_repeat(layer.repeat);
 
                 self.commands.push(DisplayCommand::BackgroundImage {
@@ -7763,6 +7769,7 @@ impl DisplayList {
                     rect: container,
                     size,
                     position,
+                    offset,
                     repeat,
                 });
             }
@@ -7883,17 +7890,17 @@ impl DisplayList {
         }
     }
 
-    /// Convert rustkit_css::BackgroundPosition to (f32, f32) tuple.
-    fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> (f32, f32) {
-        let x = match &pos.x {
-            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
-            rustkit_css::BackgroundPositionValue::Px(_) => 0.0, // Will be handled in rendering
+    /// Convert rustkit_css::BackgroundPosition to the command's
+    /// `(position, offset)`: a percentage is the 0-1 position with no
+    /// offset, a length is position 0 with that many px of offset.
+    fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> ((f32, f32), (f32, f32)) {
+        let axis = |v: &rustkit_css::BackgroundPositionValue| match v {
+            rustkit_css::BackgroundPositionValue::Percent(p) => (*p, 0.0),
+            rustkit_css::BackgroundPositionValue::Px(px) => (0.0, *px),
         };
-        let y = match &pos.y {
-            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
-            rustkit_css::BackgroundPositionValue::Px(_) => 0.0,
-        };
-        (x, y)
+        let (x, offset_x) = axis(&pos.x);
+        let (y, offset_y) = axis(&pos.y);
+        ((x, y), (offset_x, offset_y))
     }
 
     /// Convert rustkit_css::BackgroundRepeat to layout BackgroundRepeat.
@@ -9165,17 +9172,17 @@ mod tests {
         card.dimensions.content = Rect::new(10.0, 20.0, 300.0, 200.0);
 
         let list = DisplayList::build(&card);
-        let (rect, size, position, repeat) = list
+        let (rect, size, position, offset, repeat) = list
             .commands
             .iter()
             .find_map(|c| match c {
-                DisplayCommand::BackgroundImage { rect, size, position, repeat, .. } => {
-                    Some((*rect, size.clone(), *position, *repeat))
+                DisplayCommand::BackgroundImage { rect, size, position, offset, repeat, .. } => {
+                    Some((*rect, size.clone(), *position, *offset, *repeat))
                 }
                 _ => None,
             })
             .expect("a url background must emit a BackgroundImage command");
-        let tiles = background_tiles(rect, &size, position, repeat, 240.0, 210.0);
+        let tiles = background_tiles(rect, &size, position, offset, repeat, 240.0, 210.0);
         assert_eq!(tiles.len(), 1, "{tiles:?}");
         tiles[0]
     }
