@@ -232,3 +232,42 @@ fn click_activates_checkboxes_radios_and_labels() {
     assert!(b.take_checked_writes().contains(&(inner.0, None)));
     assert!(b.take_checked_writes().is_empty());
 }
+
+// A click on a submit button fires `submit` with the button as submitter
+// and, uncancelled, asks the engine to submit; a reset button resets.
+#[test]
+fn click_on_a_submit_or_reset_button_acts_on_its_form() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var $ = function (i) { return document.getElementById(i); }, seen = []; \
+             $('f').addEventListener('submit', function (e) { \
+                 seen.push('submit:' + e.submitter.id); if (window.block) e.preventDefault(); }); \
+             $('f').addEventListener('reset', function () { seen.push('reset'); }); \
+             $('b').click(); seen.join(',')"
+        ),
+        "submit:b"
+    );
+    let requests = b.take_submit_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].1.is_some(), "the submitter goes with the request");
+
+    // Cancelled: the event runs, the engine is not asked.
+    assert_eq!(
+        ev(&b, "seen.length = 0; window.block = true; $('b').click(); window.block = false; seen.join(',')"),
+        "submit:b"
+    );
+    assert!(b.take_submit_requests().is_empty());
+
+    // A reset button puts the form's controls back and submits nothing.
+    assert_eq!(
+        ev(
+            &b,
+            "seen.length = 0; $('inner').checked = false; $('rb').click(); \
+             seen.join(',') + ' ' + $('inner').checked"
+        ),
+        "reset true"
+    );
+    assert!(b.take_submit_requests().is_empty());
+}

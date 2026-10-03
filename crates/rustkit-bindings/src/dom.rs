@@ -53,6 +53,9 @@ pub(crate) struct DomHost {
     /// checkedness, or `None` when it follows its `checked` attribute
     /// again). The state itself is script's (web_forms.js).
     checked_writes: Vec<(usize, Option<bool>)>,
+    /// Forms whose `submit` event was not cancelled, with the button that
+    /// submitted each, by NodeId (`DomBindings::take_submit_requests`).
+    submit_requests: Vec<(usize, Option<usize>)>,
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
@@ -71,6 +74,7 @@ impl DomHost {
         self.values.clear();
         self.value_writes.clear();
         self.checked_writes.clear();
+        self.submit_requests.clear();
         self.generation
     }
 
@@ -85,6 +89,10 @@ impl DomHost {
 
     pub(crate) fn take_checked_writes(&mut self) -> Vec<(usize, Option<bool>)> {
         std::mem::take(&mut self.checked_writes)
+    }
+
+    pub(crate) fn take_submit_requests(&mut self) -> Vec<(usize, Option<usize>)> {
+        std::mem::take(&mut self.submit_requests)
     }
 
     fn document_for(&self, generation: &JsValue) -> Option<&Rc<Document>> {
@@ -498,6 +506,16 @@ fn control_checked(host: &mut DomHost, args: &[JsValue]) -> DomDirty {
     };
     host.checked_writes.push((node.id.raw(), state));
     DomDirty::Style
+}
+
+/// `submit(gen, form, submitter)`: the form's `submit` event ran and no
+/// listener cancelled it. The engine builds the submission and navigates.
+fn form_submit(host: &mut DomHost, args: &[JsValue]) {
+    let Some(form) = host.node(args) else {
+        return;
+    };
+    let submitter = host.node_at(args, 2).map(|n| n.id.raw());
+    host.submit_requests.push((form.id.raw(), submitter));
 }
 
 /// DOM §4.4 "clone a node": a detached copy with fresh NodeIds, its
@@ -959,6 +977,16 @@ pub(crate) fn install(
         }),
     )?;
 
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_submit",
+        3,
+        Box::new(move |args| {
+            form_submit(&mut h.borrow_mut(), args);
+            JsValue::Null
+        }),
+    )?;
+
     runtime.evaluate_script(WRAPPERS_JS)?;
     node_apis::install(runtime, host)
 }
@@ -973,9 +1001,9 @@ const WRAPPERS_JS: &str = r#"
         attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate,
         write: __rustkit_dom_write, matches: __rustkit_dom_matches,
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
-        checked: __rustkit_dom_checked
+        checked: __rustkit_dom_checked, submit: __rustkit_dom_submit
     };
-    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked'].forEach(function (n) {
+    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -2285,6 +2313,10 @@ const WRAPPERS_JS: &str = r#"
         noteChecked: function (el, v) {
             var s = el != null ? el[SLOT] : undefined;
             if (s && s.gen === gen) N.checked(s.gen, s.id, v);
+        },
+        noteSubmit: function (form, submitter) {
+            var s = form != null ? form[SLOT] : undefined, b = submitter != null ? submitter[SLOT] : undefined;
+            if (s && s.gen === gen) N.submit(s.gen, s.id, b && b.gen === gen ? b.id : null);
         },
         setActivation: function (f) { activation = f; }
     };
