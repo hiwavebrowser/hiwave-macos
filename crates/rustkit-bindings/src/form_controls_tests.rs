@@ -199,3 +199,36 @@ fn option_constructor_sets_text_value_and_selectedness() {
         "OPTION,true,t,v,false,false,x,true,false,0,z,2"
     );
 }
+
+// Activation behaviour: a click (here `el.click()`; the engine's tests
+// cover the user's) checks the control, and the engine is told.
+#[test]
+fn click_activates_checkboxes_radios_and_labels() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var $ = function (i) { return document.getElementById(i); }, r = [], seen = []; \
+             var c = $('inner'); \
+             c.addEventListener('change', function () { seen.push('change:' + c.checked); }); \
+             c.click(); r.push(c.checked); \
+             $('wrap').click(); r.push(c.checked); \
+             c.dispatchEvent(new Event('click', { bubbles: true })); r.push(c.checked); \
+             c.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); r.push(c.checked); \
+             c.setAttribute('disabled', ''); c.click(); $('wrap').click(); r.push(c.checked); \
+             $('r2').click(); r.push($('r1').checked, $('r2').checked); \
+             var q = 0; $('q').addEventListener('click', function () { q++; }); $('lab').click(); r.push(q); \
+             r.join(',') + ' ' + seen.join(',')"
+        ),
+        "false,true,true,false,false,false,true,1 change:false,change:true,change:false"
+    );
+    let inner = match b.evaluate("document.getElementById('inner').checked = true; 0") {
+        Ok(_) => b.take_checked_writes().last().copied().expect("a write"),
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(inner.1, Some(true));
+    // A reset hands the control back to its attribute.
+    b.evaluate("document.getElementById('f').reset()").unwrap();
+    assert!(b.take_checked_writes().contains(&(inner.0, None)));
+    assert!(b.take_checked_writes().is_empty());
+}
