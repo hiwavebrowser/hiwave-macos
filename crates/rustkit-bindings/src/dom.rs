@@ -46,6 +46,9 @@ pub(crate) struct DomHost {
     /// Script value writes the engine has not yet copied into its edit
     /// state, which is what layout paints (`DomBindings::take_value_writes`).
     value_writes: Vec<(usize, String)>,
+    /// HTML §4.12.3 template contents: each `<template>`'s content
+    /// fragment, by the template's NodeId (see `adopt_template_contents`).
+    templates: RefCell<HashMap<usize, Rc<Node>>>,
 }
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
@@ -53,6 +56,9 @@ pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
 impl DomHost {
     /// Bind `document`, returning the new generation.
     pub(crate) fn bind(&mut self, document: Rc<Document>) -> u32 {
+        let templates = self.templates.get_mut();
+        templates.clear();
+        adopt_template_contents(&document, document.root(), templates);
         self.document = Some(document);
         self.generation += 1;
         self.values.clear();
@@ -188,6 +194,38 @@ fn is_fragment(node: &Node) -> bool {
     matches!(node.node_type, NodeType::DocumentFragment)
 }
 
+fn is_template(node: &Node) -> bool {
+    is_html_element(node) && node.tag_name() == Some("template")
+}
+
+/// HTML §4.12.3: a parsed `<template>`'s children belong to its content,
+/// a DocumentFragment outside the tree, not to the element. Gives every
+/// template in `root`'s subtree (`root` included, and templates nested in
+/// the moved content) a content fragment and moves its children there.
+/// Run on freshly parsed nodes only: children script appends to a
+/// template later stay real children, as in the spec.
+fn adopt_template_contents(
+    document: &Document,
+    root: &Rc<Node>,
+    templates: &mut HashMap<usize, Rc<Node>>,
+) {
+    let mut pending = vec![root.clone()];
+    while let Some(node) = pending.pop() {
+        if is_template(&node) {
+            let content = templates
+                .entry(node.id.raw())
+                .or_insert_with(|| document.create_node(NodeType::DocumentFragment))
+                .clone();
+            for child in node.children() {
+                child.remove_from_parent();
+                content.append_child(child);
+            }
+            pending.push(content);
+        }
+        pending.extend(node.children());
+    }
+}
+
 /// `mutate(gen, op, parentId, nodeId, childId)`: one tree write. Answers
 /// null on success, else the DOMException name to throw.
 fn mutate(host: &DomHost, args: &[JsValue]) -> Result<(), &'static str> {
@@ -246,10 +284,9 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             _ => return Err("NotSupportedError"),
         };
         // A detached node is in no tree, so nothing needs a restyle yet.
-        return Ok((
-            node_id(Some(document.create_node(node_type))),
-            DomDirty::Clean,
-        ));
+        let node = document.create_node(node_type);
+        adopt_template_contents(document, &node, &mut host.templates.borrow_mut());
+        return Ok((node_id(Some(node)), DomDirty::Clean));
     }
     let node = host.node_at(args, 2).ok_or("NotFoundError")?;
     match (op, &node.node_type) {
@@ -321,23 +358,31 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         // The clone is detached, so nothing needs a restyle yet.
         ("clone", _) => {
             let deep = matches!(args.get(3), Some(JsValue::Boolean(true)));
+            let templates = &mut host.templates.borrow_mut();
             Ok((
-                node_id(Some(clone_node(document, &node, deep))),
+                node_id(Some(clone_node(document, &node, deep, templates))),
                 DomDirty::Clean,
             ))
         }
         // HTML §8.5 innerHTML setter: parse as the element's contents (the
         // fragment parsing algorithm), then replace all children with it.
+        // A template's innerHTML is its content's (HTML §4.12.3).
         ("setHTML", NodeType::Element { tag_name, .. }) => {
             let html = string_arg(args, 3).unwrap_or("");
             let nodes = document
                 .parse_fragment(html, tag_name)
                 .map_err(|_| "SyntaxError")?;
-            for child in node.children() {
+            let templates = &mut host.templates.borrow_mut();
+            let target = templates
+                .get(&node.id.raw())
+                .cloned()
+                .unwrap_or(node.clone());
+            for child in target.children() {
                 child.remove_from_parent();
             }
             for child in nodes {
-                node.append_child(child);
+                adopt_template_contents(document, &child, templates);
+                target.append_child(child);
             }
             Ok((JsValue::Null, DomDirty::Style))
         }
@@ -397,13 +442,23 @@ fn control_value(host: &mut DomHost, args: &[JsValue]) -> (JsValue, DomDirty) {
 }
 
 /// DOM §4.4 "clone a node": a detached copy with fresh NodeIds, its
-/// descendants copied too when `deep`.
-fn clone_node(document: &Document, node: &Rc<Node>, deep: bool) -> Rc<Node> {
+/// descendants copied too when `deep`. A template's copy gets a content
+/// fragment of its own, holding copies of the content when `deep`.
+fn clone_node(
+    document: &Document,
+    node: &Rc<Node>,
+    deep: bool,
+    templates: &mut HashMap<usize, Rc<Node>>,
+) -> Rc<Node> {
     let copy = document.create_node(node.node_type.clone());
     if deep {
         for child in node.children() {
-            copy.append_child(clone_node(document, &child, true));
+            copy.append_child(clone_node(document, &child, true, templates));
         }
+    }
+    if let Some(content) = templates.get(&node.id.raw()).cloned() {
+        let content = clone_node(document, &content, deep, templates);
+        templates.insert(copy.id.raw(), content);
     }
     copy
 }
@@ -455,7 +510,7 @@ const RAW_TEXT_ELEMENTS: &[&str] = &[
 /// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
 /// Attributes come out sorted by name: rustkit-dom keeps them in a
 /// HashMap, so source order is gone.
-fn serialize_node(node: &Rc<Node>, out: &mut String) {
+fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
     match &node.node_type {
         NodeType::Element {
             tag_name,
@@ -475,7 +530,7 @@ fn serialize_node(node: &Rc<Node>, out: &mut String) {
             }
             out.push('>');
             if !VOID_ELEMENTS.contains(&tag_name.as_str()) {
-                serialize_children(node, out);
+                serialize_children(node, out, templates);
                 out.push_str("</");
                 out.push_str(tag_name);
                 out.push('>');
@@ -509,14 +564,16 @@ fn serialize_node(node: &Rc<Node>, out: &mut String) {
             out.push_str(name);
             out.push('>');
         }
-        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out),
+        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out, templates),
     }
 }
 
-/// The children of `node`, serialized (`innerHTML`).
-fn serialize_children(node: &Rc<Node>, out: &mut String) {
-    for child in node.children() {
-        serialize_node(&child, out);
+/// The children of `node`, serialized (`innerHTML`); a template's are
+/// its content's children.
+fn serialize_children(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
+    let source = templates.get(&node.id.raw()).unwrap_or(node);
+    for child in source.children() {
+        serialize_node(&child, out, templates);
     }
 }
 
@@ -536,7 +593,7 @@ fn escape_into(s: &str, attribute: bool, out: &mut String) {
 }
 
 /// `info(gen, id, field)`: one read of one node.
-fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
+fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>) -> JsValue {
     match field {
         "type" => JsValue::Number(match node.node_type {
             NodeType::Element { .. } => 1.0,
@@ -592,14 +649,15 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
         },
         "innerHTML" => {
             let mut out = String::new();
-            serialize_children(node, &mut out);
+            serialize_children(node, &mut out, templates);
             JsValue::String(out)
         }
         "outerHTML" => {
             let mut out = String::new();
-            serialize_node(node, &mut out);
+            serialize_node(node, &mut out, templates);
             JsValue::String(out)
         }
+        "content" => node_id(templates.get(&node.id.raw()).cloned()),
         "innerText" if node.is_element() => JsValue::String(inner_text::inner_text(node)),
         _ => JsValue::Undefined,
     }
@@ -761,7 +819,7 @@ pub(crate) fn install(
         Box::new(move |args| {
             let host = h.borrow();
             match (host.node(args), string_arg(args, 2)) {
-                (Some(node), Some(field)) => node_info(&node, field),
+                (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
                 _ => JsValue::Null,
             }
         }),
@@ -1287,6 +1345,10 @@ const WRAPPERS_JS: &str = r#"
         while (n.parentNode) n = n.parentNode;
         return n === g.document && slotOf(n).gen === gen;
     });
+
+    // HTML §4.12.3 template.content: the fragment its parsed children
+    // were moved into (the host keeps one per template).
+    getter(elementProtos.template, 'content', function () { return related(this, 'content'); });
 
     // HTMLElement reflected attributes (HTML §3.2.6) and dataset (§3.2.6.6).
     ['title', 'lang', 'dir'].forEach(function (k) {
@@ -1823,6 +1885,16 @@ const WRAPPERS_JS: &str = r#"
     };
     Document.prototype.createComment = function (data) {
         return create('comment', String(data), 'createComment');
+    };
+    // DOM §4.5 importNode: a copy for this document. Nodes here all share
+    // the one Rust Document, so importing is cloning.
+    Document.prototype.importNode = function (node, deep) {
+        nodeArg(node, 'importNode');
+        if (node.nodeType === 9) {
+            throw new DOMException("Failed to execute 'importNode' on 'Document': " +
+                'The node provided is a document, which may not be imported.', 'NotSupportedError');
+        }
+        return node.cloneNode(!!deep);
     };
     Document.prototype.createDocumentFragment = function () {
         return create('fragment', '', 'createDocumentFragment');

@@ -191,6 +191,27 @@ fn template_content_is_a_fragment_holding_the_parsed_children() {
         ),
         "true|true|0|2|A|0|2|true|2|2|2|2|<li class=\"row\">A</li><li class=\"row\">B</li>|0|2|SPAN"
     );
+    // Clones carry their content; nested templates get content of their
+    // own; serialization reads the content; script-appended children stay
+    // real children.
+    assert_eq!(
+        ev(
+            &b,
+            "var t = document.getElementById('tpl'), r = []; \
+             var deep = t.cloneNode(true), shallow = t.cloneNode(false); \
+             r.push(deep.content !== t.content, deep.content.childNodes.length, \
+                    shallow.content.childNodes.length, deep.outerHTML === t.outerHTML); \
+             var d = document.createElement('div'); \
+             d.innerHTML = '<template id=o><p>x</p><template><i>in</i></template></template>'; \
+             var o = d.firstChild, inner = o.content.lastChild; \
+             r.push(o.childNodes.length, o.content.childNodes.length, inner.childNodes.length, \
+                    inner.content.firstChild.tagName, d.innerHTML); \
+             var e = document.createElement('template'); e.appendChild(document.createElement('b')); \
+             r.push(e.childNodes.length, e.content.childNodes.length); \
+             r.join('|')"
+        ),
+        "true|2|0|true|0|2|0|I|<template id=\"o\"><p>x</p><template><i>in</i></template></template>|1|0"
+    );
 }
 
 #[test]
