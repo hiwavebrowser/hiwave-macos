@@ -242,6 +242,25 @@ impl RustKitView {
             .and_then(|view_id| engine.focus_at_point(view_id, x, y))
     }
 
+    /// Deliver a mouse press at viewport coordinates to the page
+    /// (`mousedown`).
+    pub fn mouse_down_at_point(&self, x: f32, y: f32) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            engine.mouse_down_at_point(view_id, x, y);
+        }
+    }
+
+    /// Deliver a mouse release at viewport coordinates to the page
+    /// (`mouseup`, `click`), then report the click's default actions: what
+    /// it focused and the link to follow unless a listener cancelled it.
+    pub fn click_at_point(&self, x: f32, y: f32) -> rustkit_engine::ClickOutcome {
+        let mut engine = self.engine.borrow_mut();
+        self.view_id
+            .map(|view_id| engine.click_at_point(view_id, x, y))
+            .unwrap_or_default()
+    }
+
     /// Resolve a click at viewport coordinates to a link URL, if any.
     pub fn link_at_point(&self, x: f32, y: f32) -> Option<String> {
         let engine = self.engine.borrow();

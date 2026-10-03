@@ -1726,12 +1726,68 @@ impl Engine {
     /// flush its DOM writes. Returns false when a listener cancelled it.
     fn dispatch_mouse_at_point(
         &mut self,
-        _id: EngineViewId,
-        _event_type: &str,
-        _viewport_x: f32,
-        _viewport_y: f32,
+        id: EngineViewId,
+        event_type: &str,
+        viewport_x: f32,
+        viewport_y: f32,
     ) -> bool {
-        true
+        let Some(view) = self.views.get_mut(&id) else {
+            return true;
+        };
+        let doc_x = viewport_x + view.scroll_offset.0;
+        let doc_y = viewport_y + view.scroll_offset.1;
+        let Some(hit) = view.layout.as_ref().and_then(|l| l.hit_test(doc_x, doc_y)) else {
+            return true;
+        };
+        // A text run is hit, but mouse events target its element.
+        let target = hit.node_id.and_then(|raw| {
+            let doc = view.document.as_ref()?;
+            let mut node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+            while !node.is_element() {
+                node = node.parent()?;
+            }
+            Some(node.id.raw())
+        });
+        let (Some(target), Some(bindings)) = (target, view.bindings.as_ref()) else {
+            return true;
+        };
+        let data = rustkit_bindings::MouseEventBindingData {
+            client_x: viewport_x as f64,
+            client_y: viewport_y as f64,
+            screen_x: viewport_x as f64,
+            screen_y: viewport_y as f64,
+            offset_x: hit.local_x as f64,
+            offset_y: hit.local_y as f64,
+            button: 0,
+            buttons: if event_type == "mousedown" { 1 } else { 0 },
+            ..Default::default()
+        };
+        let source = format!("event:{event_type}");
+        let not_cancelled = match bindings.fire_mouse_event(target, event_type, &data) {
+            Ok(not_cancelled) => not_cancelled,
+            Err(e) => {
+                view.script_log.push(ScriptRecord {
+                    source: source.clone(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(e.to_string()),
+                });
+                true
+            }
+        };
+        for message in bindings.take_reported_errors() {
+            view.script_log.push(ScriptRecord {
+                source: source.clone(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::Threw(message),
+            });
+        }
+        debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after mouse event failed");
+        }
+        not_cancelled
     }
 
     /// Deliver a key to the focused form control.
@@ -20291,9 +20347,9 @@ mod node_identity_tests {
 
     #[test]
     fn hit_test_reports_the_node_of_the_box_actually_under_the_cursor() {
-        // node_id must NOT inherit from ancestors the way link_href does:
-        // the caller wants the element under the cursor, not the nearest
-        // interesting one above it.
+        // A box with a node reports its own node, not an ancestor's: the
+        // caller wants the element under the cursor. (A box with NO node
+        // reports its nearest ancestor's, below.)
         let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         parent.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 100.0);
         parent.node_id = Some(1);
@@ -20314,6 +20370,23 @@ mod node_identity_tests {
         let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         b.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 50.0, 50.0);
         assert_eq!(b.hit_test(10.0, 10.0).unwrap().node_id, None);
+    }
+
+    #[test]
+    fn an_anonymous_box_is_hit_on_behalf_of_its_nearest_element() {
+        // Z lane I0: a click on `<a style="display:block">go</a>` landed on
+        // the anchor's anonymous line box, which has no node, so the click
+        // reached no element and its listeners never ran. The element under
+        // the cursor is the box's nearest ancestor with a node, as in a
+        // browser, where a click on text targets the text's element.
+        let mut a = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        a.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 40.0);
+        a.node_id = Some(4);
+        let mut line = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        line.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 20.0);
+        a.children.push(line);
+
+        assert_eq!(a.hit_test(5.0, 10.0).unwrap().node_id, Some(4));
     }
 
     #[test]
@@ -20462,7 +20535,7 @@ mod node_identity_tests {
             &mut engine,
             id,
             "document.getElementById('menu').addEventListener('click', function () { \
-             var a = document.createElement('a'); a.href = 'https://example.com/opened'; \
+             var a = document.createElement('a'); a.setAttribute('href', 'https://example.com/opened'); \
              a.style.display = 'block'; a.style.height = '40px'; a.textContent = 'opened'; \
              document.body.appendChild(a); });",
         );

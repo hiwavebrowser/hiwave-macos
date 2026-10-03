@@ -5781,6 +5781,13 @@ impl LayoutBox {
                 if result.link_href.is_none() {
                     result.link_href = self.link_href.clone();
                 }
+                // Same for the node: an anonymous box (a line, a text run
+                // laid out without one) is hit on behalf of its nearest
+                // ancestor that has a DOM node, or a click on it reaches no
+                // element at all.
+                if result.node_id.is_none() {
+                    result.node_id = self.node_id;
+                }
                 return Some(result);
             }
         }
