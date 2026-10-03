@@ -497,7 +497,10 @@ const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
 
 /// One `<script>` after fetching: its log label, then its source text or
 /// the reason it will not run.
-type FetchedScript = (String, usize, Result<(ScriptTiming, String), ScriptOutcome>);
+/// `(label, node id, fetched source or why not, is a module script)`. A
+/// module's label is the URL it was finally served from (`inline#n` for an
+/// inline one).
+type FetchedScript = (String, usize, Result<(ScriptTiming, String), ScriptOutcome>, bool);
 
 /// What happened to one piece of page script on the load path.
 #[derive(Debug, Clone, PartialEq)]
@@ -541,14 +544,16 @@ fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
     match essence {
         "" | "text/javascript" | "application/javascript" | "application/x-javascript"
         | "text/ecmascript" | "application/ecmascript" | "text/jscript" => {}
-        "module" => return Some(Err("type=module unsupported")),
+        "module" => {}
         _ => return None,
     }
+    let module = essence == "module";
     // `nomodule` scripts are skipped, as Chrome skips them. They are the
     // legacy half of a module/nomodule pair: in practice polyfill bundles
     // (Next.js ships ~110 KB of them) that a modern engine does not need,
-    // and one of them never returns under Boa (yahoo, weather.com).
-    if node.get_attribute("nomodule").is_some() {
+    // and one of them never returns under Boa (yahoo, weather.com). The
+    // attribute is meaningless on a module script.
+    if !module && node.get_attribute("nomodule").is_some() {
         return Some(Err("nomodule (skipped, as in module-capable browsers)"));
     }
     let external = node.get_attribute("src").is_some();
@@ -556,9 +561,20 @@ fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
         ScriptTiming::Async
     } else if external && node.get_attribute("defer").is_some() {
         ScriptTiming::Defer
+    } else if module {
+        // A module script, inline or external, runs after the document is
+        // parsed, in document order with the `defer` scripts.
+        ScriptTiming::Defer
     } else {
         ScriptTiming::Classic
     }))
+}
+
+/// Whether a `<script>` element is `type=module`.
+fn is_module_script(node: &Node) -> bool {
+    node.get_attribute("type")
+        .map(|t| t.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("module"))
+        .unwrap_or(false)
 }
 
 impl EngineConfig {
@@ -1879,6 +1895,7 @@ impl Engine {
         &self,
         id: EngineViewId,
         base: &Url,
+        policy: Option<Arc<FetchPolicy>>,
     ) -> Option<futures::future::LocalBoxFuture<'static, Vec<FetchedScript>>> {
         let document = self.views.get(&id).and_then(|v| v.document.clone())?;
 
@@ -1887,7 +1904,7 @@ impl Engine {
             Inline(String),
             External(Url),
         }
-        let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), &'static str>)> = Vec::new();
+        let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), &'static str>, bool)> = Vec::new();
         let mut index = 0usize;
         document.traverse(|node| {
             if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
@@ -1907,7 +1924,7 @@ impl Engine {
                     .map_err(|_| "unparseable src"),
                 None => Ok((timing, Body::Inline(node.text_content()))),
             });
-            entries.push((label, node.id.raw(), entry));
+            entries.push((label, node.id.raw(), entry, is_module_script(node)));
         });
         if entries.is_empty() {
             return None;
@@ -1921,14 +1938,36 @@ impl Engine {
         const MAX_CONCURRENT_SCRIPT_LOADS: usize = 8;
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
+        let base = base.clone();
         Some(
-            futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry)| {
+            futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module)| {
                 let loader = loader.clone();
                 let referrer = referrer.clone();
+                let policy = policy.clone();
+                let base = base.clone();
                 async move {
+                    let mut label = label;
                     let result = match entry {
                         Err(reason) => Err(ScriptOutcome::Skipped(reason)),
                         Ok((timing, Body::Inline(text))) => Ok((timing, text)),
+                        // A module is fetched through the policy's one
+                        // module entry point (script destination, CORS,
+                        // JavaScript MIME, 2xx, shield, budgets); its
+                        // identity is the URL it ends up at.
+                        Ok((timing, Body::External(url))) if is_module => match &policy {
+                            None => Err(ScriptOutcome::FetchFailed("no network policy for this page".into())),
+                            Some(policy) => {
+                                let fetch = policy.fetch_module(&loader, &url, &base);
+                                match tokio::time::timeout_at(deadline, fetch).await {
+                                    Ok(Ok(module)) => {
+                                        label = module.final_url.to_string();
+                                        Ok((timing, module.source))
+                                    }
+                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(format!("{denial}"))),
+                                    Err(_) => Err(ScriptOutcome::OverBudget),
+                                }
+                            }
+                        },
                         Ok((timing, Body::External(url))) => {
                             let fetch = async {
                                 match loader.fetch(
@@ -1950,7 +1989,7 @@ impl Engine {
                                 .unwrap_or(Err(ScriptOutcome::OverBudget))
                         }
                     };
-                    (label, node_id, result)
+                    (label, node_id, result, is_module)
                 }
             }))
             .buffered(MAX_CONCURRENT_SCRIPT_LOADS)
@@ -1980,15 +2019,28 @@ impl Engine {
         let net_rounds = self.config.script_network_rounds;
         let loader = self.loader.clone();
         let Some(view) = self.views.get_mut(&id) else { return };
+        let document_url = view.url.clone();
         let Some(bindings) = view.bindings.as_ref() else { return };
         let log = &mut view.script_log;
         bindings.set_loop_iteration_limit(loop_limit);
 
-        // Execution order: classic, defer, async (stable within each).
-        let mut runnable: Vec<(String, ScriptTiming, String, usize)> = Vec::new();
-        for (label, node_id, result) in fetched {
+        // Execution order: classic, defer (module scripts run here, in
+        // document order with them), async (stable within each). A module
+        // whose fetch failed keeps its place so its `error` event fires in
+        // order; a classic script failure is only logged.
+        type Job = (String, u8, Result<String, ScriptOutcome>, usize, bool);
+        let mut runnable: Vec<Job> = Vec::new();
+        for (label, node_id, result, is_module) in fetched {
             match result {
-                Ok((timing, text)) => runnable.push((label, timing, text, node_id)),
+                Ok((timing, text)) => {
+                    let key = match timing {
+                        ScriptTiming::Classic => 0,
+                        ScriptTiming::Defer => 1,
+                        ScriptTiming::Async => 2,
+                    };
+                    runnable.push((label, key, Ok(text), node_id, is_module));
+                }
+                Err(outcome) if is_module => runnable.push((label, 1, Err(outcome), node_id, true)),
                 Err(outcome) => log.push(ScriptRecord {
                     source: label,
                     bytes: 0,
@@ -1997,11 +2049,7 @@ impl Engine {
                 }),
             }
         }
-        runnable.sort_by_key(|(_, timing, _, _)| match timing {
-            ScriptTiming::Classic => 0,
-            ScriptTiming::Defer => 1,
-            ScriptTiming::Async => 2,
-        });
+        runnable.sort_by_key(|(_, key, _, _, _)| *key);
 
         // A panic inside the JS engine leaves its state unknowable: record
         // it and run nothing more on this page.
@@ -2032,7 +2080,23 @@ impl Engine {
         };
 
         let _ = bindings.set_ready_state("loading");
-        for (label, _, text, node_id) in runnable {
+        let mut modules_fetched = 0usize;
+        for (label, _, source, node_id, is_module) in runnable {
+            let text = match source {
+                Ok(text) => text,
+                Err(outcome) => {
+                    // A module script that could not be fetched: logged, and
+                    // its element hears `error`.
+                    log.push(ScriptRecord {
+                        source: label,
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome,
+                    });
+                    let _ = bindings.fire_script_event(node_id, "error");
+                    continue;
+                }
+            };
             if poisoned.get() || started.elapsed() >= budget {
                 log.push(ScriptRecord {
                     source: label,
@@ -2057,6 +2121,82 @@ impl Engine {
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Skipped("too large to run inside the script budget"),
                 });
+                continue;
+            }
+            if is_module {
+                // The identity of a module is the URL it was served from; an
+                // inline module is the document plus its position.
+                let module_url = match (label.strip_prefix("inline#"), &document_url) {
+                    (Some(position), Some(document)) => format!("{document}#inline-module-{position}"),
+                    _ => label.clone(),
+                };
+                info!(source = %label, bytes = text.len(), "Running module script");
+                let module_started = std::time::Instant::now();
+                let begun = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings.begin_module(&module_url, &text)
+                }));
+                let (outcome, event) = match begun {
+                    Err(_) => {
+                        poisoned.set(true);
+                        (ScriptOutcome::Threw("JS engine panic".into()), None)
+                    }
+                    // A syntax error: the module graph was never built.
+                    Ok(Err(message)) => (ScriptOutcome::Threw(message), Some("error")),
+                    Ok(Ok(handle)) => {
+                        if let (Some(policy), Some(document)) = (&policy, &document_url) {
+                            let remaining = budget.saturating_sub(started.elapsed());
+                            let found = script_net::pump_modules(
+                                bindings,
+                                policy,
+                                &loader,
+                                tokio::time::Instant::now() + remaining,
+                                document,
+                                &mut modules_fetched,
+                            )
+                            .await;
+                            if found.poisoned {
+                                poisoned.set(true);
+                            }
+                        }
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            bindings.poll_module(&handle)
+                        })) {
+                            Err(_) => {
+                                poisoned.set(true);
+                                (ScriptOutcome::Threw("JS engine panic".into()), None)
+                            }
+                            // Loaded and run (a pending top-level `await` is
+                            // still running): the element hears `load`.
+                            Ok(rustkit_bindings::ModuleState::Done)
+                            | Ok(rustkit_bindings::ModuleState::Evaluating) => {
+                                (ScriptOutcome::Ran, Some("load"))
+                            }
+                            // The graph loaded and ran, and threw: reported,
+                            // and the fetch itself succeeded.
+                            Ok(rustkit_bindings::ModuleState::Threw(message)) => {
+                                (ScriptOutcome::Threw(message), Some("load"))
+                            }
+                            // The graph could not be loaded or linked.
+                            Ok(rustkit_bindings::ModuleState::Failed(message)) => (
+                                ScriptOutcome::Threw(format!("module graph failed: {message}")),
+                                Some("error"),
+                            ),
+                            Ok(rustkit_bindings::ModuleState::Loading) => (
+                                ScriptOutcome::Threw("module imports were not loaded".into()),
+                                Some("error"),
+                            ),
+                        }
+                    }
+                };
+                log.push(ScriptRecord {
+                    source: label,
+                    bytes: text.len(),
+                    elapsed_ms: module_started.elapsed().as_millis() as u64,
+                    outcome,
+                });
+                if let Some(event) = event {
+                    let _ = bindings.fire_script_event(node_id, event);
+                }
                 continue;
             }
             info!(source = %label, bytes = text.len(), "Running page script");
@@ -2356,14 +2496,18 @@ impl Engine {
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
             }
 
+            // One FetchPolicy per URL-loaded document, owning its request
+            // counters and preflight cache; every script-initiated fetch
+            // (module graph, XHR, fetch) goes through it. A page with no URL
+            // (load_html) has none.
+            script_policy = Some(Arc::new(FetchPolicy::for_page(url.clone(), None)));
+            bindings.set_module_base(url.as_str());
             // The script-network bridge exists only with a policy to
-            // answer it: one per document, owning its request counters and
-            // preflight cache. A page with no URL (load_html) has neither.
+            // answer it, and only if enabled.
             if self.config.script_network_enabled {
                 bindings
                     .enable_net_bridge()
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
-                script_policy = Some(Arc::new(FetchPolicy::for_page(url.clone(), None)));
             }
 
             let view = self
@@ -2420,7 +2564,7 @@ impl Engine {
         // the page's scripts at the same time. Scripts still run after the
         // subresources; only their network time overlaps.
         let script_fetch = if self.config.javascript_enabled {
-            self.fetch_page_scripts(id, &url)
+            self.fetch_page_scripts(id, &url, script_policy.clone())
         } else {
             None
         };
@@ -2473,7 +2617,7 @@ impl Engine {
         if let Some((fetched, fetch_done)) = scripts {
             let timed_out = fetched
                 .iter()
-                .any(|(_, _, r)| matches!(r, Err(ScriptOutcome::OverBudget)));
+                .any(|(_, _, r, _)| matches!(r, Err(ScriptOutcome::OverBudget)));
             let budget = if timed_out {
                 std::time::Duration::ZERO
             } else {
@@ -21243,7 +21387,7 @@ window.addEventListener('load', function () {
         let order = engine.execute_script(view, "order.join(',')").unwrap();
         assert_eq!(
             order,
-            r#"String("inline1,classic,inline2,defer,async,dcl:interactive,load:complete,timer")"#
+            r#"String("inline1,classic,inline2,defer,module,async,dcl:interactive,load:complete,timer")"#
         );
 
         let log = engine.script_log(view).unwrap();
@@ -21255,7 +21399,8 @@ window.addEventListener('load', function () {
         };
         assert_eq!(outcome("classic.js"), ScriptOutcome::Ran);
         assert_eq!(outcome("missing.js"), ScriptOutcome::FetchFailed("HTTP 404 Not Found".into()));
-        assert_eq!(outcome("inline#5"), ScriptOutcome::Skipped("type=module unsupported"));
+        // A module script runs, deferred, in document order with the defer ones.
+        assert_eq!(outcome("inline#5"), ScriptOutcome::Ran);
         assert!(
             matches!(outcome("inline#6"), ScriptOutcome::Skipped(why) if why.starts_with("nomodule")),
             "{log:#?}"
