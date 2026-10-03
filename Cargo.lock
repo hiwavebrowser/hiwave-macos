@@ -5317,8 +5317,11 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "bytes",
+ "cocoa 0.25.0",
  "futures",
  "http",
+ "objc",
+ "raw-window-handle",
  "rustkit-bindings",
  "rustkit-compositor",
  "rustkit-core",
