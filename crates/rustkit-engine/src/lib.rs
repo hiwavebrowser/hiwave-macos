@@ -17927,6 +17927,55 @@ div { height: 10px; }
             "repeat-x paints one tile per 10px across the 30px box"
         );
     }
+
+    /// A `data:image/svg+xml` image went to the raster decoder, whose
+    /// stand-in rasterizer draws only solid `<rect>`s: bing's logo (radial
+    /// gradients and paths, as a background and as an `<img>`) painted
+    /// nothing. It is decoded into the SVG cache at the splice instead, so
+    /// it paints as vector commands on the first layout, with no fetch.
+    #[test]
+    fn a_data_svg_background_and_img_paint_as_vectors() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 30px; height: 10px; }
+.bg { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%2300ff00'/%3E%3C/svg%3E") repeat-x; }
+img { display: block; width: 10px; height: 10px; }
+</style></head><body><div class="bg"></div>
+<img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCI+PHJlY3Qgd2lkdGg9IjEwIiBoZWlnaHQ9IjEwIiBmaWxsPSIjMDAwMGZmIi8+PC9zdmc+">
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        assert!(
+            !dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+                | rustkit_layout::DisplayCommand::Image { url, .. } if url.starts_with("data:image/svg+xml"))),
+            "a data: SVG is replaced by its vector commands, not left for the raster upload"
+        );
+        let fills = |r: u8, g: u8, b: u8| -> Vec<(f32, f32, f32, f32)> {
+            dl.commands
+                .iter()
+                .filter_map(|c| match c {
+                    rustkit_layout::DisplayCommand::FillRect { rect, color }
+                        if (color.r, color.g, color.b) == (r, g, b) =>
+                    {
+                        Some((rect.x, rect.y, rect.width, rect.height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            fills(0, 255, 0),
+            vec![(0.0, 0.0, 10.0, 10.0), (10.0, 0.0, 10.0, 10.0), (20.0, 0.0, 10.0, 10.0)],
+            "the url-encoded background tiles across its 30px box"
+        );
+        assert_eq!(fills(0, 0, 255), vec![(0.0, 10.0, 10.0, 10.0)], "the base64 <img> paints in its box");
+    }
 }
 
 #[cfg(test)]
