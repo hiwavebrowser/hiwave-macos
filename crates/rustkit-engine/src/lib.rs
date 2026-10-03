@@ -492,6 +492,10 @@ struct ViewState {
     script_log: Vec<ScriptRecord>,
     /// The document response's `Referrer-Policy` header, if it had a valid one.
     header_referrer_policy: Option<ReferrerPolicy>,
+    /// Every image URL the last full `load_images` pass and the post-script
+    /// passes after it looked at, loaded or not. The post-script pass
+    /// fetches only what is not in here.
+    images_attempted: std::collections::HashSet<Url>,
 }
 
 /// Engine configuration.
@@ -1281,6 +1285,7 @@ impl Engine {
             headless_bounds: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
+            images_attempted: std::collections::HashSet::new(),
         };
 
         self.views.insert(id, view_state);
@@ -1340,6 +1345,7 @@ impl Engine {
             headless_bounds: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
+            images_attempted: std::collections::HashSet::new(),
         };
 
         let id = view_state.id;
@@ -1408,6 +1414,7 @@ impl Engine {
             headless_bounds: Some(bounds),
             script_log: Vec::new(),
             header_referrer_policy: None,
+            images_attempted: std::collections::HashSet::new(),
         };
 
         self.views.insert(id, view_state);
@@ -2761,6 +2768,24 @@ impl Engine {
                 return Ok(());
             }
             self.flush_script_dom_writes(id)?;
+
+            // Images were discovered before the scripts ran. One more pass
+            // fetches what the scripts added, and lays out again only if
+            // one of those arrived.
+            match self.load_images_added_by_scripts(id).await {
+                Ok(0) => {}
+                Ok(count) => {
+                    info!(count, "Loaded images added by page scripts");
+                    if !self.nav_superseded(id, generation) {
+                        self.relayout(id)?;
+                    }
+                }
+                Err(e) => warn!(?e, "Failed to load images added by page scripts"),
+            }
+            if self.nav_superseded(id, generation) {
+                debug!(?id, %url, "Navigation abandoned after script-added images");
+                return Ok(());
+            }
         }
 
         // Finish navigation
@@ -8392,6 +8417,20 @@ impl Engine {
 
     /// Load images asynchronously and store in cache.
     pub async fn load_images(&mut self, id: EngineViewId) -> Result<usize, EngineError> {
+        self.load_images_pass(id, false).await
+    }
+
+    /// The image pass after page scripts: fetch what the scripts added (an
+    /// appended `<img>`, a background a class change turned on) and nothing
+    /// else. A full `load_images` here would count every cached image as
+    /// loaded, so every scripted page would lay out once more, and would
+    /// give each image that already failed or timed out a second budget.
+    /// Returns how many new images arrived.
+    async fn load_images_added_by_scripts(&mut self, id: EngineViewId) -> Result<usize, EngineError> {
+        self.load_images_pass(id, true).await
+    }
+
+    async fn load_images_pass(&mut self, id: EngineViewId, only_new: bool) -> Result<usize, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         let Some(document) = &view.document else {
@@ -8401,6 +8440,18 @@ impl Engine {
         let base_url = view.url.as_ref();
         let mut images = self.discover_images(document.as_ref(), base_url);
         images.extend(Self::discover_background_images(view.display_list.as_ref()));
+        if only_new {
+            images.retain(|(_, url)| !view.images_attempted.contains(url));
+        }
+        let discovered: Vec<Url> = images.iter().map(|(_, url)| url.clone()).collect();
+        if let Some(view) = self.views.get_mut(&id) {
+            // A full pass starts the record over: it is the first thing a
+            // navigation's subresource load does with the new document.
+            if !only_new {
+                view.images_attempted.clear();
+            }
+            view.images_attempted.extend(discovered);
+        }
 
         let image_manager = self.image_manager.clone();
 
@@ -8419,7 +8470,9 @@ impl Engine {
         for (_src, url) in images {
             if image_manager.is_cached(&url) || self.svg_cache.contains_key(url.as_str()) {
                 debug!(%url, "Image already cached");
-                loaded += 1;
+                // The layout that found a script-added image already drew
+                // it from the cache; it is not a reason to lay out again.
+                loaded += usize::from(!only_new);
                 continue;
             }
             // One request per URL, however many elements show it.
@@ -18900,6 +18953,78 @@ div { height: 10px; }
             "the background image is in the cache paint reads"
         );
         assert!(!engine.is_image_cached(&at("/tracker.png")));
+    }
+
+    /// Navigate to `page` and return the image paths the navigation
+    /// requested, then the paths requested once `load_subresources` has run
+    /// again on the finished document. The second list is the control: what
+    /// is in it and not in the first was there to discover and was missed.
+    fn requested_by_navigation_then_reload(page: &'static str) -> (Vec<String>, Vec<String>) {
+        let (port, seen) = recording_server_for(page);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let paths = |seen: &Seen| -> Vec<String> {
+            let mut paths: Vec<String> = seen.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+            paths.sort();
+            paths.dedup();
+            paths
+        };
+        rt.block_on(engine.load_url(view, url)).expect("load_url");
+        let by_navigation = paths(&seen);
+        rt.block_on(engine.load_subresources(view)).expect("subresources");
+        (by_navigation, paths(&seen))
+    }
+
+    /// Images were discovered once, before page scripts ran: `navigate`
+    /// loads subresources, runs the scripts, flushes their DOM writes and
+    /// finishes. An `<img>` a script appended was laid out and never
+    /// fetched.
+    #[test]
+    fn an_img_a_script_adds_is_fetched_by_the_navigation() {
+        const SCRIPTED_IMG_PAGE: &str = r#"<html><body><img src="/parsed.png"><script>
+var img = document.createElement('img');
+img.setAttribute('src', '/added.png');
+document.body.appendChild(img);
+</script></body></html>"#;
+        let (by_navigation, after_reload) = requested_by_navigation_then_reload(SCRIPTED_IMG_PAGE);
+        let has = |paths: &[String], path: &str| paths.iter().any(|p| p == path);
+        assert!(has(&by_navigation, "/parsed.png"), "the parsed <img> is fetched: {by_navigation:?}");
+        assert!(
+            has(&after_reload, "/added.png"),
+            "control: the script appended the <img> and a second discovery finds it: {after_reload:?}"
+        );
+        assert!(
+            has(&by_navigation, "/added.png"),
+            "the navigation itself fetches an <img> a script added: {by_navigation:?}"
+        );
+    }
+
+    /// The same for a CSS background a script switches on by class.
+    #[test]
+    fn a_background_a_script_turns_on_is_fetched_by_the_navigation() {
+        const SCRIPTED_BG_PAGE: &str = r#"<html><head><style>
+div { width: 50px; height: 20px; }
+.late { background: url(/late.png) no-repeat; }
+</style></head><body><div id="box"></div><script>
+document.getElementById('box').setAttribute('class', 'late');
+</script></body></html>"#;
+        let (by_navigation, after_reload) = requested_by_navigation_then_reload(SCRIPTED_BG_PAGE);
+        let has = |paths: &[String], path: &str| paths.iter().any(|p| p == path);
+        assert!(
+            has(&after_reload, "/late.png"),
+            "control: the script set the class and a second discovery finds the background: {after_reload:?}"
+        );
+        assert!(
+            has(&by_navigation, "/late.png"),
+            "the navigation itself fetches a background a script turned on: {by_navigation:?}"
+        );
     }
 
     /// Serve `/page` as `page` and every other path as an image negotiated
