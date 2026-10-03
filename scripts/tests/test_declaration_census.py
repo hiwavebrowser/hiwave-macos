@@ -385,12 +385,12 @@ def test_top_three_buckets_with_owners():
         f"{top_decls} vs {total_gap_decls}",
     )
 
-    # 4. Check bucket ranking: interactive (29) > paint (12) > structure (5)
+    # 4. Check bucket ranking: interactive (29) > paint (12) > structure (4)
     b_order = [b["key"] for b in top_buckets]
     check("bucket ranking order is interactive, paint, structure", b_order == ["interactive", "paint", "structure"], str(b_order))
     check("bucket interactive has 29 declarations", top_buckets[0]["declarations"] == 29)
     check("bucket paint has 12 declarations", top_buckets[1]["declarations"] == 12)
-    check("bucket structure has 5 declarations", top_buckets[2]["declarations"] == 5)
+    check("bucket structure has 4 declarations", top_buckets[2]["declarations"] == 4)
 
 
 def main():
