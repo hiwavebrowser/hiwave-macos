@@ -720,8 +720,6 @@ dependencies = [
 [[package]]
 name = "boa_parser"
 version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cc142dac798cdc6e2dbccfddeb50f36d2523bb977a976e19bdb3ae19b740804"
 dependencies = [
  "bitflags 2.13.2",
  "boa_ast",
