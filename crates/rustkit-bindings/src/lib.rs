@@ -30,6 +30,7 @@ mod web_interfaces_tests;
 mod web_blob_tests;
 #[cfg(test)]
 mod web_utils_tests;
+mod web_crypto;
 mod web_url;
 
 pub use dom::SelectorMatchFn;
@@ -625,6 +626,9 @@ impl DomBindings {
 
         // `URL` and `URLSearchParams` (parsing is the `url` crate's).
         web_url::install(runtime)?;
+
+        // crypto.getRandomValues / randomUUID over the OS random source.
+        web_crypto::install(runtime)?;
 
         // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
         runtime.evaluate_script(include_str!("web_encoding.js"))?;
