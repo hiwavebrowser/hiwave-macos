@@ -652,7 +652,8 @@ image/avif,image/webp,*/*;q=0.8",
         // first, remaining caller headers after, all in canonical casing.
         let mut request = Vec::new();
         writeln!(request, "{} {} HTTP/1.1\r", method, path)?;
-        writeln!(request, "Host: {}\r", host)?;
+        let host_header = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or(host);
+        writeln!(request, "Host: {}\r", host_header)?;
         writeln!(request, "Connection: keep-alive\r")?;
         writeln!(request, "User-Agent: {}\r", self.config.user_agent)?;
 
@@ -706,7 +707,7 @@ image/avif,image/webp,*/*;q=0.8",
 
         // Remaining caller headers, canonical casing, after the known set.
         for (name, value) in headers.iter() {
-            if written.contains(&name.as_str()) {
+            if name.as_str() == "host" || written.contains(&name.as_str()) {
                 continue;
             }
             if let Ok(v) = value.to_str() {

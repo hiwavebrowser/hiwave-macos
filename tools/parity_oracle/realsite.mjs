@@ -197,6 +197,102 @@ async function runActionsChrome(url, actionsArg, outDir, width, height, settleMs
   return result;
 }
 
+async function recordHarChrome(url, harPath, width, height, settleMs) {
+  const started = Date.now();
+  const browser = await chromium.launch(getDeterministicLaunchOptions());
+  const result = { url, status: 'ok', har_path: harPath, error: null };
+  try {
+    const context = await browser.newContext({
+      viewport: { width, height },
+      deviceScaleFactor: 1,
+      colorScheme: 'light',
+      locale: 'en-US',
+      extraHTTPHeaders: { 'Sec-CH-Prefers-Color-Scheme': 'light' },
+      recordHar: {
+        path: harPath,
+        mode: 'minimal',
+      },
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(url, { waitUntil: 'load', timeout: NAV_TIMEOUT_MS });
+    } catch (e) {
+      result.nav_error = String(e.message || e).split('\n')[0];
+    }
+    await page.waitForTimeout(settleMs);
+    await context.close();
+  } catch (e) {
+    result.status = 'error';
+    result.error = String(e.message || e).split('\n')[0];
+  } finally {
+    await browser.close();
+  }
+  result.elapsed_ms = Date.now() - started;
+  return result;
+}
+
+async function runTimestableChrome(url, outDir, prefix, harPath, width, height) {
+  const started = Date.now();
+  const browser = await chromium.launch(getDeterministicLaunchOptions());
+  const result = { url, status: 'ok', error: null, captures: [] };
+  const milestones = [
+    { label: '1s', targetMs: 1000 },
+    { label: '3s', targetMs: 3000 },
+    { label: '5s', targetMs: 5000 },
+    { label: '10s', targetMs: 10000 },
+  ];
+
+  try {
+    const context = await browser.newContext({
+      viewport: { width, height },
+      deviceScaleFactor: 1,
+      colorScheme: 'light',
+      locale: 'en-US',
+      extraHTTPHeaders: { 'Sec-CH-Prefers-Color-Scheme': 'light' },
+    });
+    const page = await context.newPage();
+
+    const isReplay = Boolean(harPath);
+    if (isReplay) {
+      await page.routeFromHAR(harPath, { notFound: 'abort' });
+      // Pinned fixed epoch: 2026-10-01T00:00:00Z
+      await page.clock.install({ time: 1727740800000 });
+    }
+
+    try {
+      await page.goto(url, { waitUntil: 'load', timeout: NAV_TIMEOUT_MS });
+    } catch (e) {
+      result.nav_error = String(e.message || e).split('\n')[0];
+    }
+
+    let currentMs = 0;
+    for (const m of milestones) {
+      const delta = m.targetMs - currentMs;
+      if (isReplay) {
+        await page.clock.fastForward(delta);
+      } else {
+        await page.waitForTimeout(delta);
+      }
+      currentMs = m.targetMs;
+
+      const framePath = pathJoin(outDir, `${prefix}_${m.label}.png`);
+      await page.screenshot({ path: framePath, fullPage: false });
+      result.captures.push({
+        label: m.label,
+        time_ms: m.targetMs,
+        frame: framePath,
+      });
+    }
+  } catch (e) {
+    result.status = 'error';
+    result.error = String(e.message || e).split('\n')[0];
+  } finally {
+    await browser.close();
+  }
+  result.elapsed_ms = Date.now() - started;
+  return result;
+}
+
 async function main() {
   const [mode, ...rest] = process.argv.slice(2);
   let result;
@@ -206,11 +302,17 @@ async function main() {
   } else if (mode === 'actions') {
     const [url, actionsArg, outDir = '.', w = '1280', h = '800', settle = '5000'] = rest;
     result = await runActionsChrome(url, actionsArg, outDir, Number(w), Number(h), Number(settle));
+  } else if (mode === 'record-har') {
+    const [url, harPath, w = '1280', h = '800', settle = '10000'] = rest;
+    result = await recordHarChrome(url, harPath, Number(w), Number(h), Number(settle));
+  } else if (mode === 'timestable') {
+    const [url, outDir = '.', prefix = 'chrome', harPath = '', w = '1280', h = '800'] = rest;
+    result = await runTimestableChrome(url, outDir, prefix, harPath || null, Number(w), Number(h));
   } else if (mode === 'diff') {
     const [a, b, diffPath] = rest;
     result = await comparePixels(a, b, diffPath || null);
   } else {
-    console.error('usage: realsite.mjs chrome|actions|diff ...');
+    console.error('usage: realsite.mjs chrome|actions|record-har|timestable|diff ...');
     process.exit(2);
   }
   console.log(JSON.stringify(result));

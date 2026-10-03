@@ -449,6 +449,8 @@ pub struct LoaderConfig {
     pub max_redirects: usize,
     /// Enable cookies.
     pub cookies_enabled: bool,
+    /// Optional replay proxy URL (test-only, for deterministic HAR replay).
+    pub replay_proxy: Option<Url>,
 }
 
 impl Default for LoaderConfig {
@@ -459,6 +461,7 @@ impl Default for LoaderConfig {
             default_timeout: Duration::from_secs(30),
             max_redirects: 10,
             cookies_enabled: true,
+            replay_proxy: None,
         }
     }
 }
@@ -546,9 +549,25 @@ impl ResourceLoader {
         // loads are unchanged.
         let policy = match (&request.referrer, request.destination) {
             (Some(page), dest) if dest != RequestDestination::Document => {
-                policy::page_address_policy(page, &request.url)
+                if let Some(ref proxy) = self.config.replay_proxy {
+                    let port = proxy.port_or_known_default().unwrap_or(80);
+                    rustkit_http::AddressPolicy::Custom(Arc::new(move |a| {
+                        a.ip().is_loopback() && a.port() == port
+                    }))
+                } else {
+                    policy::page_address_policy(page, &request.url)
+                }
             }
-            _ => rustkit_http::AddressPolicy::Any,
+            _ => {
+                if let Some(ref proxy) = self.config.replay_proxy {
+                    let port = proxy.port_or_known_default().unwrap_or(80);
+                    rustkit_http::AddressPolicy::Custom(Arc::new(move |a| {
+                        a.ip().is_loopback() && a.port() == port
+                    }))
+                } else {
+                    rustkit_http::AddressPolicy::Any
+                }
+            }
         };
         if matches!(policy, rustkit_http::AddressPolicy::Any) {
             return self.fetch_with(request, &self.client, true).await;
@@ -573,10 +592,18 @@ impl ResourceLoader {
         max_body: usize,
         use_cache: bool,
     ) -> Result<Response, NetError> {
+        let policy = if let Some(ref proxy) = self.config.replay_proxy {
+            let port = proxy.port_or_known_default().unwrap_or(80);
+            rustkit_http::AddressPolicy::Custom(Arc::new(move |a| {
+                a.ip().is_loopback() && a.port() == port
+            }))
+        } else {
+            address_policy
+        };
         let client = self
             .client
             .clone()
-            .with_address_policy(address_policy)
+            .with_address_policy(policy)
             .with_follow_redirects(false)
             .with_max_body(max_body);
         self.fetch_with(request, &client, use_cache).await
@@ -589,6 +616,27 @@ impl ResourceLoader {
         use_cache: bool,
     ) -> Result<Response, NetError> {
         debug!(url = %request.url, method = %request.method, "Fetching resource");
+
+        // If replay_proxy is configured, rewrite outbound socket request to proxy on first entry
+        if let Some(ref proxy) = self.config.replay_proxy {
+            if !request.headers.contains_key("x-original-url") {
+                let mut req = request.clone();
+                let orig_url_str = req.url.to_string();
+                if let Ok(val) = HeaderValue::try_from(orig_url_str.as_str()) {
+                    req.headers.insert(HeaderName::from_static("x-original-url"), val);
+                }
+                if let Some(host) = req.url.host_str() {
+                    if let Ok(val) = HeaderValue::try_from(host) {
+                        req.headers.insert(HeaderName::from_static("host"), val);
+                    }
+                }
+                let mut proxy_target = proxy.clone();
+                proxy_target.set_path(req.url.path());
+                proxy_target.set_query(req.url.query());
+                req.url = proxy_target;
+                return Box::pin(self.fetch_with(req, client, false)).await;
+            }
+        }
 
         // Apply interception
         if let Some(interceptor) = &self.interceptor {
