@@ -2649,6 +2649,95 @@ mod tests {
         assert_eq!(black, 1, "render() must still resolve currentColor to black: {plain:?}");
     }
 
+    /// The colors the renderer's triangle fans paint at `p`, in paint order.
+    fn fan_colors(commands: &[DisplayCommand], p: (f32, f32)) -> Vec<Color> {
+        commands
+            .iter()
+            .filter(|c| fan_coverage(std::slice::from_ref(*c), p) == 1)
+            .filter_map(|c| match c {
+                DisplayCommand::FillPolygon { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_linear_gradient_fill_runs_across_the_bounding_box() {
+        // The default gradient: objectBoundingBox units, left to right. The
+        // id keeps its case — `url(#Grad)` names `id="Grad"`.
+        let doc = SvgDocument::parse(
+            r##"<svg width="100" height="10"><defs><linearGradient id="Grad">
+                <stop offset="0" stop-color="#ff0000"/><stop offset="100%" stop-color="#0000ff"/>
+            </linearGradient></defs><rect width="100" height="10" fill="url(#Grad)"/></svg>"##,
+        )
+        .expect("parse");
+        let commands = doc.render(0.0, 0.0, 100.0, 10.0);
+        let at = |x: f32| {
+            let colors = fan_colors(&commands, (x, 5.3));
+            assert_eq!(colors.len(), 1, "x={x} must be painted exactly once: {colors:?}");
+            colors[0]
+        };
+        let (left, mid, right) = (at(5.3), at(50.3), at(94.7));
+        assert!(left.r > 220 && left.b < 35, "left end is the first stop: {left:?}");
+        assert!(right.b > 220 && right.r < 35, "right end is the last stop: {right:?}");
+        assert!((mid.r as i32 - 127).abs() < 12 && (mid.b as i32 - 127).abs() < 12, "midpoint blends: {mid:?}");
+        assert_eq!(left.a, 1.0);
+    }
+
+    #[test]
+    fn test_user_space_gradient_follows_its_transform_and_stop_opacity() {
+        // bing's logo overlay, reduced: a userSpaceOnUse vector flipped by
+        // gradientTransform, fading to a transparent stop, on a concave path.
+        let doc = SvgDocument::parse(
+            r##"<svg width="10" height="10"><defs>
+            <linearGradient id="b" x1="0" y1="0" x2="0" y2="-10" gradientTransform="scale(1 -1)" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#3dcbff"/><stop offset=".5" stop-color="#0588f7" stop-opacity="0"/>
+            </linearGradient></defs><path fill="url(#b)" d="M0 0H10V10H0V6H4V4H0Z"/></svg>"##,
+        )
+        .expect("parse");
+        let commands = doc.render(0.0, 0.0, 10.0, 10.0);
+        let top = fan_colors(&commands, (7.3, 0.4));
+        assert_eq!(top.len(), 1, "the top row is painted once: {top:?}");
+        assert!(top[0].a > 0.8 && top[0].r < 80 && top[0].b > 240, "near the first stop: {:?}", top[0]);
+        let quarter = fan_colors(&commands, (7.3, 2.4));
+        assert!(quarter.len() == 1 && (quarter[0].a - 0.5).abs() < 0.12, "half faded a quarter down: {quarter:?}");
+        // Past the last stop the gradient pads with it: fully transparent.
+        assert!(fan_colors(&commands, (7.3, 8.3)).iter().all(|c| c.a == 0.0));
+        // The notch stays outside the fill.
+        assert!(fan_colors(&commands, (2.3, 5.1)).is_empty(), "the notch is not filled");
+    }
+
+    #[test]
+    fn test_radial_gradient_takes_stops_from_its_href_and_may_follow_its_use() {
+        let doc = SvgDocument::parse(
+            r##"<svg width="20" height="20" xmlns:xlink="http://www.w3.org/1999/xlink">
+            <circle cx="10" cy="10" r="10" fill="url(#r)"/>
+            <radialGradient id="r" xlink:href="#s"/>
+            <linearGradient id="s"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#000000"/></linearGradient>
+            </svg>"##,
+        )
+        .expect("parse");
+        let commands = doc.render(0.0, 0.0, 20.0, 20.0);
+        let centre = fan_colors(&commands, (10.3, 10.3));
+        assert!(centre.len() == 1 && centre[0].r > 225, "the centre is the first stop: {centre:?}");
+        // 80% of the way out, in two directions: the same ring.
+        for p in [(18.3, 10.3), (10.3, 2.3)] {
+            let ring = fan_colors(&commands, p);
+            assert!(ring.len() == 1 && (ring[0].r as i32 - 51).abs() < 20, "{p:?} is 80% out: {ring:?}");
+        }
+        // Outside the circle nothing paints.
+        assert!(fan_colors(&commands, (0.7, 0.7)).is_empty());
+    }
+
+    #[test]
+    fn test_paint_naming_a_missing_server_paints_nothing() {
+        let doc = SvgDocument::parse(
+            r##"<svg width="10" height="10"><rect width="10" height="10" fill="url(#nope)"/></svg>"##,
+        )
+        .expect("parse");
+        assert!(doc.render(0.0, 0.0, 10.0, 10.0).is_empty());
+    }
+
     #[test]
     fn test_transform_identity() {
         let t = Transform2D::identity();
