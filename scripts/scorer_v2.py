@@ -355,6 +355,8 @@ def score_run_v2(run_dir: Path) -> Dict[str, Any]:
         sid = sdir.name
         jf = sdir / f"{sid}.json"
         if not jf.exists():
+            jf = run_dir / f"{sid}.json"
+        if not jf.exists():
             continue
         try:
             v1_rec = json.loads(jf.read_text())
