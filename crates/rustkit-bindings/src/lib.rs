@@ -1049,6 +1049,12 @@ impl DomBindings {
         self.dom_host.borrow_mut().geometry = geometry;
     }
 
+    /// Publish the computed style of each laid-out element (raw NodeId to
+    /// `name\tvalue` lines joined by newlines), for `getComputedStyle`.
+    pub fn set_computed_styles(&self, styles: std::collections::HashMap<usize, String>) {
+        self.dom_host.borrow_mut().computed = styles;
+    }
+
     /// Set the document.
     pub fn set_document(&self, document: Rc<Document>) -> Result<(), BindingError> {
         // Update state. Marks against the previous document are moot: the

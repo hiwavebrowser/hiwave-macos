@@ -3456,7 +3456,9 @@ impl Engine {
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
         // answer from this layout.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
-            bindings.set_geometry(geometry_snapshot(layout));
+            let (geometry, computed) = geometry_snapshot(layout);
+            bindings.set_geometry(geometry);
+            bindings.set_computed_styles(computed);
         }
         view.display_list = Some(display_list);
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
@@ -14792,16 +14794,19 @@ fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32,
 /// `scroll_*` is the extent of the box's descendants from its padding edge.
 /// Transforms are not applied (`getBoundingClientRect` of a transformed
 /// element reports its untransformed box for now).
-fn geometry_snapshot(root: &LayoutBox) -> HashMap<usize, rustkit_bindings::BoxGeometry> {
+fn geometry_snapshot(
+    root: &LayoutBox,
+) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     fn walk(
         b: &LayoutBox,
         out: &mut HashMap<usize, rustkit_bindings::BoxGeometry>,
+        styles: &mut HashMap<usize, String>,
     ) -> Option<(f32, f32, f32, f32)> {
         // The bounding rect (left, top, right, bottom) of this box and everything under it.
         let bb = b.dimensions.border_box();
         let mut extent = Some((bb.x, bb.y, bb.x + bb.width, bb.y + bb.height));
         for child in &b.children {
-            if let Some(c) = walk(child, out) {
+            if let Some(c) = walk(child, out, styles) {
                 extent = Some(match extent {
                     Some(e) => (e.0.min(c.0), e.1.min(c.1), e.2.max(c.2), e.3.max(c.3)),
                     None => c,
@@ -14832,6 +14837,7 @@ fn geometry_snapshot(root: &LayoutBox) -> HashMap<usize, rustkit_bindings::BoxGe
                 scroll_height: (bottom - pb.y).max(pb.height),
                 position,
             };
+            styles.entry(node).or_insert_with(|| computed_style_lines(b));
             out.entry(node)
                 .and_modify(|g| {
                     // A second box of the same element: union.
@@ -14852,8 +14858,112 @@ fn geometry_snapshot(root: &LayoutBox) -> HashMap<usize, rustkit_bindings::BoxGe
         extent
     }
     let mut out = HashMap::new();
-    walk(root, &mut out);
-    out
+    let mut styles = HashMap::new();
+    walk(root, &mut out, &mut styles);
+    (out, styles)
+}
+
+/// A CSS keyword from a `Debug` variant name: `InlineBlock` -> `inline-block`.
+fn css_keyword(debug: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in debug.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('-');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out.replace("no-wrap", "nowrap")
+}
+
+/// `rgb()` / `rgba()` the way `getComputedStyle` serialises a colour.
+fn css_color(c: rustkit_css::Color) -> String {
+    if c.a >= 1.0 {
+        format!("rgb({}, {}, {})", c.r, c.g, c.b)
+    } else {
+        format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a)
+    }
+}
+
+fn css_px(v: f32) -> String {
+    let r = (v * 100.0).round() / 100.0;
+    if r.fract() == 0.0 { format!("{}px", r as i64) } else { format!("{r}px") }
+}
+
+/// The computed style of one box as `name\tvalue` lines, for the properties
+/// the engine models and script commonly reads. Sizes and box edges are the
+/// used values from the laid-out box (what `getComputedStyle` reports for
+/// `width`, `height`, `margin-*`, `padding-*`, `border-*-width`); `display`
+/// is the engine's own set, so `li` reads `block`, not `list-item`.
+fn computed_style_lines(b: &LayoutBox) -> String {
+    let s = &*b.style;
+    let d = &b.dimensions;
+    let font_px = match s.font_size {
+        rustkit_css::Length::Px(p) => p,
+        _ => 16.0,
+    };
+    let offset = |l: &Option<rustkit_css::Length>, size: f32| match l {
+        None | Some(rustkit_css::Length::Auto) => "auto".to_string(),
+        Some(l) => css_px(l.to_px(font_px, 16.0, size)),
+    };
+    let line_height = match s.line_height {
+        rustkit_css::LineHeight::Normal => "normal".to_string(),
+        rustkit_css::LineHeight::Number(n) => css_px(n * font_px),
+        rustkit_css::LineHeight::Px(p) => css_px(p),
+    };
+    let letter_spacing = match s.letter_spacing {
+        rustkit_css::Length::Px(p) if p != 0.0 => css_px(p),
+        _ => "normal".to_string(),
+    };
+    let rows: Vec<(&str, String)> = vec![
+        ("display", css_keyword(&format!("{:?}", s.display))),
+        ("position", css_keyword(&format!("{:?}", s.position))),
+        ("float", css_keyword(&format!("{:?}", s.float))),
+        ("visibility", css_keyword(&format!("{:?}", s.visibility))),
+        ("opacity", format!("{}", s.opacity)),
+        ("overflow-x", css_keyword(&format!("{:?}", s.overflow_x))),
+        ("overflow-y", css_keyword(&format!("{:?}", s.overflow_y))),
+        ("box-sizing", css_keyword(&format!("{:?}", s.box_sizing))),
+        // The computed style keeps `auto` as 0, so an explicit `z-index: 0` reads `auto`.
+        ("z-index", if s.z_index == 0 { "auto".into() } else { s.z_index.to_string() }),
+        ("width", css_px(d.content.width)),
+        ("height", css_px(d.content.height)),
+        ("margin-top", css_px(d.margin.top)),
+        ("margin-right", css_px(d.margin.right)),
+        ("margin-bottom", css_px(d.margin.bottom)),
+        ("margin-left", css_px(d.margin.left)),
+        ("padding-top", css_px(d.padding.top)),
+        ("padding-right", css_px(d.padding.right)),
+        ("padding-bottom", css_px(d.padding.bottom)),
+        ("padding-left", css_px(d.padding.left)),
+        ("border-top-width", css_px(d.border.top)),
+        ("border-right-width", css_px(d.border.right)),
+        ("border-bottom-width", css_px(d.border.bottom)),
+        ("border-left-width", css_px(d.border.left)),
+        ("top", offset(&s.top, d.content.height)),
+        ("right", offset(&s.right, d.content.width)),
+        ("bottom", offset(&s.bottom, d.content.height)),
+        ("left", offset(&s.left, d.content.width)),
+        ("color", css_color(s.color)),
+        ("background-color", css_color(s.background_color)),
+        ("font-size", css_px(font_px)),
+        ("font-weight", s.font_weight.0.to_string()),
+        ("font-style", css_keyword(&format!("{:?}", s.font_style))),
+        ("font-family", s.font_family.clone()),
+        ("line-height", line_height),
+        ("letter-spacing", letter_spacing),
+        ("text-align", css_keyword(&format!("{:?}", s.text_align))),
+        ("text-transform", css_keyword(&format!("{:?}", s.text_transform))),
+        ("white-space", css_keyword(&format!("{:?}", s.white_space))),
+        ("flex-direction", css_keyword(&format!("{:?}", s.flex_direction))),
+    ];
+    rows.into_iter()
+        .map(|(n, v)| format!("{n}\t{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Wrap a serialised layout tree with the provenance an oracle needs.
@@ -29455,6 +29565,24 @@ mod script_selector_tests {
             js("var o = document.getElementById('off'); [o.offsetWidth, o.getBoundingClientRect().height, String(o.offsetParent)].join()"),
             "0,0,null"
         );
+    }
+
+    // getComputedStyle answers from the cascade the painter used.
+    #[test]
+    fn get_computed_style_reads_the_cascade() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>body{margin:0} .card{color:#336699;font-size:20px;opacity:.5;\n             margin-top:10px;position:relative;visibility:hidden;font-weight:bold;width:100px;height:40px}\n             .gone{display:none} #t{text-transform:uppercase}</style></head>\n             <body><div id=a class=card style='padding-left:6px'>x</div><div id=g class=gone></div>\n             <p id=t>t</p></body></html>",
+        );
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        assert_eq!(
+            js("var c = getComputedStyle(document.getElementById('a')); [c.display, c.color, c.fontSize, c.opacity, c.marginTop, c.position, c.visibility, c.fontWeight, c.width, c.height, c.paddingLeft, c.zIndex].join('|')"),
+            "block|rgb(51, 102, 153)|20px|0.5|10px|relative|hidden|700|100px|40px|6px|auto"
+        );
+        assert_eq!(js("getComputedStyle(document.getElementById('g')).display"), "none");
+        assert_eq!(js("getComputedStyle(document.getElementById('t')).textTransform"), "uppercase");
+        assert_eq!(js("getComputedStyle(document.head).display"), "none");
+        // Script writes show through before the next layout.
+        assert_eq!(js("var a = document.getElementById('a'); a.style.display = 'inline'; getComputedStyle(a).display"), "inline");
     }
 
     #[test]
