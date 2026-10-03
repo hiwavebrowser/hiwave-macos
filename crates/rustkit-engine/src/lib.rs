@@ -351,6 +351,26 @@ fn svg_background_commands(
     commands
 }
 
+/// `svg` as an image document (`<img>`, CSS background): with no `viewBox`,
+/// one is synthesized from an absolute `width`/`height` with
+/// `preserveAspectRatio="none"`, as Blink does for SVG images, so the
+/// document stretches to the box it is drawn in like a raster. Without
+/// it `render` drew it at its own size: a 100x100 data: square stayed
+/// 100x100 in a 48px `<img>`. An inline `<svg>` gets no such viewBox.
+fn image_svg(mut svg: rustkit_svg::SvgDocument) -> rustkit_svg::SvgDocument {
+    if svg.view_box.is_none() {
+        if let (Some(w), Some(h)) = (&svg.width, &svg.height) {
+            let absolute = |l: &rustkit_svg::SvgLength| !matches!(l, rustkit_svg::SvgLength::Percent(_));
+            let (width, height) = (w.to_px(0.0), h.to_px(0.0));
+            if absolute(w) && absolute(h) && width > 0.0 && height > 0.0 {
+                svg.view_box = Some(rustkit_svg::ViewBox { min_x: 0.0, min_y: 0.0, width, height });
+                svg.stretch = true;
+            }
+        }
+    }
+    svg
+}
+
 /// A raster image for `url`, fetched like every other subresource: through
 /// the resource loader, so the shield sees the request, it carries the
 /// Referer the document's policy allows, and the caller's deadline bounds
@@ -3035,6 +3055,7 @@ impl Engine {
                         if let Some(abs) = self.resolve_resource_url_in(id, url) {
                             *url = abs.to_string();
                         }
+                        self.cache_data_svg(url);
                     }
                     _ => {}
                 }
@@ -8039,6 +8060,33 @@ impl Engine {
         }
     }
 
+    /// Parse a `data:image/svg+xml` image into svg_cache under its own url,
+    /// the key the display-list splice looks up, so it paints as vector
+    /// commands like a fetched SVG. Left to the raster lane, ImageManager's
+    /// stand-in rasterizer drew only solid `<rect>`s (bing's gradient logo
+    /// painted nothing). A data: url needs no request, so this runs at the
+    /// splice: the first layout paints it, and so does any later one.
+    fn cache_data_svg(&mut self, url: &str) {
+        if !url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) || self.svg_cache.contains_key(url) {
+            return;
+        }
+        let Ok((media_type, body)) = rustkit_net::decode_data_url(url) else {
+            return;
+        };
+        let essence = media_type.split(';').next().unwrap_or_default().trim();
+        if !essence.eq_ignore_ascii_case("image/svg+xml") {
+            return;
+        }
+        match rustkit_svg::SvgDocument::parse(&String::from_utf8_lossy(&body)) {
+            Ok(doc) => {
+                self.svg_cache.insert(url.to_string(), image_svg(doc));
+            }
+            Err(e) => {
+                debug!(?e, "data: SVG image failed to parse; left to the raster lane");
+            }
+        }
+    }
+
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
         let mut images = Vec::new();
 
@@ -8246,7 +8294,7 @@ impl Engine {
                         match fetched {
                             Ok(response) if response.ok() => match response.text().await {
                                 Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
-                                    Ok(doc) => Some((url.to_string(), doc)),
+                                    Ok(doc) => Some((url.to_string(), image_svg(doc))),
                                     Err(e) => {
                                         warn!(?e, %url, "Failed to parse SVG image");
                                         None
@@ -8307,7 +8355,7 @@ impl Engine {
                         match rustkit_svg::SvgDocument::parse(&xml) {
                             Ok(doc) => {
                                 info!(%url, "Image served as image/svg+xml; using the SVG lane");
-                                (true, Some((url.to_string(), doc)))
+                                (true, Some((url.to_string(), image_svg(doc))))
                             }
                             Err(e) => {
                                 warn!(?e, %url, "Failed to parse SVG image");
@@ -17926,6 +17974,124 @@ div { height: 10px; }
             vec![(0.0, 10.0, 10.0, 10.0), (10.0, 10.0, 10.0, 10.0), (20.0, 10.0, 10.0, 10.0)],
             "repeat-x paints one tile per 10px across the 30px box"
         );
+    }
+
+    /// A `data:image/svg+xml` image went to the raster decoder, whose
+    /// stand-in rasterizer draws only solid `<rect>`s: bing's logo (radial
+    /// gradients and paths, as a background and as an `<img>`) painted
+    /// nothing. It is decoded into the SVG cache at the splice instead, so
+    /// it paints as vector commands on the first layout, with no fetch.
+    #[test]
+    fn a_data_svg_background_and_img_paint_as_vectors() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 30px; height: 10px; }
+.bg { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%2300ff00'/%3E%3C/svg%3E") repeat-x; }
+img { display: block; width: 10px; height: 10px; }
+</style></head><body><div class="bg"></div>
+<img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCI+PHJlY3Qgd2lkdGg9IjEwIiBoZWlnaHQ9IjEwIiBmaWxsPSIjMDAwMGZmIi8+PC9zdmc+">
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        assert!(
+            !dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+                | rustkit_layout::DisplayCommand::Image { url, .. } if url.starts_with("data:image/svg+xml"))),
+            "a data: SVG is replaced by its vector commands, not left for the raster upload"
+        );
+        let fills = |r: u8, g: u8, b: u8| -> Vec<(f32, f32, f32, f32)> {
+            dl.commands
+                .iter()
+                .filter_map(|c| match c {
+                    rustkit_layout::DisplayCommand::FillRect { rect, color }
+                        if (color.r, color.g, color.b) == (r, g, b) =>
+                    {
+                        Some((rect.x, rect.y, rect.width, rect.height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            fills(0, 255, 0),
+            vec![(0.0, 0.0, 10.0, 10.0), (10.0, 0.0, 10.0, 10.0), (20.0, 0.0, 10.0, 10.0)],
+            "the url-encoded background tiles across its 30px box"
+        );
+        assert_eq!(fills(0, 0, 255), vec![(0.0, 10.0, 10.0, 10.0)], "the base64 <img> paints in its box");
+    }
+
+    /// An SVG image with `width`/`height` and no `viewBox` scales to its
+    /// box, as Blink synthesizes the viewBox for SVG images; `render` drew
+    /// it at its own size, so moving data: SVGs onto the vector lane left
+    /// every 100x100 square of the images-intrinsic case at 100x100.
+    #[test]
+    fn an_svg_image_without_a_viewbox_scales_to_its_box() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+img { display: block; }
+</style></head><body>
+<img style="width: 20px; height: 20px" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23ff0000'/%3E%3C/svg%3E">
+<div style="width: 40px; height: 20px; background: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%2300ff00'/%3E%3C/svg%3E&quot;) 0 0 / 20px 20px repeat-x"></div>
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let fills = |r: u8, g: u8, b: u8| -> Vec<(f32, f32, f32, f32)> {
+            dl.commands
+                .iter()
+                .filter_map(|c| match c {
+                    rustkit_layout::DisplayCommand::FillRect { rect, color }
+                        if (color.r, color.g, color.b) == (r, g, b) =>
+                    {
+                        Some((rect.x, rect.y, rect.width, rect.height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(fills(255, 0, 0), vec![(0.0, 0.0, 20.0, 20.0)], "the <img> fills its 20px box");
+        assert_eq!(
+            fills(0, 255, 0),
+            vec![(0.0, 20.0, 20.0, 20.0), (20.0, 20.0, 20.0, 20.0)],
+            "background-size 20px scales each tile"
+        );
+    }
+
+    /// The synthesized viewBox comes with `preserveAspectRatio="none"`: a
+    /// square SVG image in a 40x20 `<img>` stretches to fill it, as a
+    /// raster does (images-intrinsic test 4 in pinned Chrome).
+    #[test]
+    fn an_svg_image_without_a_viewbox_stretches_to_its_box() {
+        let html = r#"<html><head><style>body { margin: 0; } img { display: block; }</style></head><body>
+<img style="width: 40px; height: 20px" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23ff0000'/%3E%3C/svg%3E">
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let red: Vec<_> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::FillRect { rect, color } if (color.r, color.g, color.b) == (255, 0, 0) => {
+                    Some((rect.x, rect.y, rect.width, rect.height))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(red, vec![(0.0, 0.0, 40.0, 20.0)], "the square stretches to the 40x20 box");
     }
 }
 

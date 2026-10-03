@@ -61,6 +61,10 @@ pub struct SvgDocument {
     pub height: Option<SvgLength>,
     /// Defined elements (for use references).
     pub defs: HashMap<String, SvgElement>,
+    /// Scale the viewBox to the render rect on each axis independently
+    /// (`preserveAspectRatio="none"`) instead of uniformly. Set by the
+    /// engine for an SVG image whose viewBox it synthesized, as Blink does.
+    pub stretch: bool,
 }
 
 impl SvgDocument {
@@ -72,6 +76,7 @@ impl SvgDocument {
             width: None,
             height: None,
             defs: HashMap::new(),
+            stretch: false,
         }
     }
 
@@ -171,11 +176,16 @@ impl SvgDocument {
         let transform = if let Some(vb) = &self.view_box {
             let scale_x = width / vb.width;
             let scale_y = height / vb.height;
-            let scale = scale_x.min(scale_y);
+            let (scale_x, scale_y) = if self.stretch {
+                (scale_x, scale_y)
+            } else {
+                let scale = scale_x.min(scale_y);
+                (scale, scale)
+            };
 
             Transform2D::identity()
-                .translate(x - vb.min_x * scale, y - vb.min_y * scale)
-                .scale(scale, scale)
+                .translate(x - vb.min_x * scale_x, y - vb.min_y * scale_y)
+                .scale(scale_x, scale_y)
         } else {
             Transform2D::identity().translate(x, y)
         };
