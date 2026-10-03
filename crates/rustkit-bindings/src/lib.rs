@@ -34,10 +34,12 @@ mod web_utils_tests;
 mod dom_utils_tests;
 #[cfg(test)]
 mod web_history_tests;
+#[cfg(test)]
+mod geometry_tests;
 mod web_crypto;
 mod web_url;
 
-pub use dom::SelectorMatchFn;
+pub use dom::{BoxGeometry, SelectorMatchFn};
 pub mod events;
 
 pub use events::{
@@ -1026,6 +1028,14 @@ impl DomBindings {
     /// they fall back to rustkit-dom's single tag/`#id`/`.class` matcher.
     pub fn set_selector_matcher(&self, matcher: SelectorMatchFn) {
         self.dom_host.borrow_mut().matcher = Some(matcher);
+    }
+
+    /// Publish where the layout put each element (by raw NodeId), for
+    /// `getBoundingClientRect`, `offsetWidth/Height/Top/Left`, `offsetParent`,
+    /// `clientWidth/Height` and `scrollWidth/Height`. The engine calls this
+    /// after a layout; script reads answer from the last one published.
+    pub fn set_geometry(&self, geometry: std::collections::HashMap<usize, BoxGeometry>) {
+        self.dom_host.borrow_mut().geometry = geometry;
     }
 
     /// Set the document.
