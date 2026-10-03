@@ -114,7 +114,7 @@ def non_background_fraction(ppm_path):
 
 def rustkit_viewport_text(display_list_path, width, height):
     """Concatenate display-list text runs that fall inside the first viewport."""
-    dl = json.loads(Path(display_list_path).read_text())
+    dl = json.loads(Path(display_list_path).read_text(encoding="utf-8", errors="replace"))
     cmds = dl.get("commands") if isinstance(dl, dict) else dl
     runs = []
 
@@ -259,7 +259,7 @@ def score_site(site, capture_bin, outdir, width, height, env):
         readable["why"] = "chrome capture failed: %s" % chrome[0].get("error")
         readable["oracle_failed"] = True
     else:
-        cw = words(json.loads((d / f"chrome-{oracle}-text.json").read_text())["text"])
+        cw = words(json.loads((d / f"chrome-{oracle}-text.json").read_text(encoding="utf-8", errors="replace"))["text"])
         rw = set()
         if loads and rk_dl.exists():
             rw = words(rustkit_viewport_text(rk_dl, width, height))
@@ -301,7 +301,7 @@ def score_site(site, capture_bin, outdir, width, height, env):
     rec["looks_right"] = looks
 
     rec["points"] = int(loads) + int(readable["pass"]) + int(looks["pass"])
-    (outdir / f"{sid}.json").write_text(json.dumps(rec, indent=2))
+    (outdir / f"{sid}.json").write_text(json.dumps(rec, indent=2), encoding="utf-8")
     return rec
 
 
@@ -387,7 +387,7 @@ def main():
                     for r in rows if r["access"]["blocked"]},
         "per_site": {r["id"]: r["points"] for r in rows},
     }
-    (outdir / "summary.json").write_text(json.dumps(summary, indent=2))
+    (outdir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print("-" * 78)
     print("POINTS %d/%d   loads %d  readable %d  looks-right %d   unstable: %s   oracle failed: %s" % (
         summary["points"], summary["max_points"], summary["loads"], summary["readable"],

@@ -216,7 +216,7 @@ def inspect_display_list(dl_path: Optional[Path]) -> Dict[str, Any]:
     if not dl_path or not dl_path.exists():
         return {"exists": False, "image_ops": 0, "text_ops": 0, "total_ops": 0}
     try:
-        data = json.loads(dl_path.read_text())
+        data = json.loads(dl_path.read_text(encoding="utf-8", errors="replace"))
         cmds = data.get("commands") if isinstance(data, dict) else data
         if not isinstance(cmds, list):
             cmds = []
@@ -355,9 +355,11 @@ def score_run_v2(run_dir: Path) -> Dict[str, Any]:
         sid = sdir.name
         jf = sdir / f"{sid}.json"
         if not jf.exists():
+            jf = run_dir / f"{sid}.json"
+        if not jf.exists():
             continue
         try:
-            v1_rec = json.loads(jf.read_text())
+            v1_rec = json.loads(jf.read_text(encoding="utf-8", errors="replace"))
         except Exception:
             continue
 
@@ -402,7 +404,7 @@ def score_run_v2(run_dir: Path) -> Dict[str, Any]:
         sites_data.append(row)
 
         # Write per-site v2 summary beside the original json without mutating it
-        (sdir / f"{sid}.v2.json").write_text(json.dumps(row, indent=2))
+        (sdir / f"{sid}.v2.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
 
     summary_v2 = {
         "run_dir": str(run_dir),
@@ -414,7 +416,7 @@ def score_run_v2(run_dir: Path) -> Dict[str, Any]:
         "categories": category_counts,
         "sites": sites_data,
     }
-    (run_dir / "summary_v2.json").write_text(json.dumps(summary_v2, indent=2))
+    (run_dir / "summary_v2.json").write_text(json.dumps(summary_v2, indent=2), encoding="utf-8")
     return summary_v2
 
 
