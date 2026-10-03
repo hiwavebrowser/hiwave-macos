@@ -129,6 +129,8 @@ pub struct Request {
     /// never sent as-is.
     pub referrer: Option<Url>,
     pub referrer_policy: ReferrerPolicy,
+    /// Whether this request has already been rewritten to a replay proxy.
+    pub is_replay_proxied: bool,
 }
 
 impl Request {
@@ -145,6 +147,7 @@ impl Request {
             referrer: None,
             referrer_policy: ReferrerPolicy::default(),
             destination: RequestDestination::Other,
+            is_replay_proxied: false,
         }
     }
 
@@ -161,6 +164,7 @@ impl Request {
             referrer: None,
             referrer_policy: ReferrerPolicy::default(),
             destination: RequestDestination::Other,
+            is_replay_proxied: false,
         }
     }
 
@@ -541,33 +545,30 @@ impl ResourceLoader {
         &self.client
     }
 
+    /// Returns the restricted loopback address policy when a replay proxy is configured.
+    pub fn replay_proxy_address_policy(&self) -> Option<rustkit_http::AddressPolicy> {
+        self.config.replay_proxy.as_ref().map(|proxy| {
+            let port = proxy.port_or_known_default().unwrap_or(80);
+            rustkit_http::AddressPolicy::Custom(Arc::new(move |a| {
+                a.ip().is_loopback() && a.port() == port
+            }))
+        })
+    }
+
     /// Fetch a URL.
     pub async fn fetch(&self, request: Request) -> Result<Response, NetError> {
         // A subresource (anything with a document referrer that is not itself
         // the navigation) may not reach private addresses on behalf of a
         // public page, on any redirect hop. Navigations and referrer-less
         // loads are unchanged.
-        let policy = match (&request.referrer, request.destination) {
-            (Some(page), dest) if dest != RequestDestination::Document => {
-                if let Some(ref proxy) = self.config.replay_proxy {
-                    let port = proxy.port_or_known_default().unwrap_or(80);
-                    rustkit_http::AddressPolicy::Custom(Arc::new(move |a| {
-                        a.ip().is_loopback() && a.port() == port
-                    }))
-                } else {
+        let policy = match self.replay_proxy_address_policy() {
+            Some(proxy_policy) => proxy_policy,
+            None => match (&request.referrer, request.destination) {
+                (Some(page), dest) if dest != RequestDestination::Document => {
                     policy::page_address_policy(page, &request.url)
                 }
-            }
-            _ => {
-                if let Some(ref proxy) = self.config.replay_proxy {
-                    let port = proxy.port_or_known_default().unwrap_or(80);
-                    rustkit_http::AddressPolicy::Custom(Arc::new(move |a| {
-                        a.ip().is_loopback() && a.port() == port
-                    }))
-                } else {
-                    rustkit_http::AddressPolicy::Any
-                }
-            }
+                _ => rustkit_http::AddressPolicy::Any,
+            },
         };
         if matches!(policy, rustkit_http::AddressPolicy::Any) {
             return self.fetch_with(request, &self.client, true).await;
@@ -592,14 +593,7 @@ impl ResourceLoader {
         max_body: usize,
         use_cache: bool,
     ) -> Result<Response, NetError> {
-        let policy = if let Some(ref proxy) = self.config.replay_proxy {
-            let port = proxy.port_or_known_default().unwrap_or(80);
-            rustkit_http::AddressPolicy::Custom(Arc::new(move |a| {
-                a.ip().is_loopback() && a.port() == port
-            }))
-        } else {
-            address_policy
-        };
+        let policy = self.replay_proxy_address_policy().unwrap_or(address_policy);
         let client = self
             .client
             .clone()
@@ -619,8 +613,9 @@ impl ResourceLoader {
 
         // If replay_proxy is configured, rewrite outbound socket request to proxy on first entry
         if let Some(ref proxy) = self.config.replay_proxy {
-            if !request.headers.contains_key("x-original-url") {
+            if !request.is_replay_proxied {
                 let mut req = request.clone();
+                req.is_replay_proxied = true;
                 let orig_url_str = req.url.to_string();
                 if let Ok(val) = HeaderValue::try_from(orig_url_str.as_str()) {
                     req.headers.insert(HeaderName::from_static("x-original-url"), val);
@@ -1065,3 +1060,33 @@ mod data_url_tests {
         assert_eq!(rt.block_on(resp.text()).unwrap(), "body{color:red}");
     }
 }
+
+#[cfg(test)]
+mod replay_proxy_tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn test_shipped_default_replay_proxy_is_none_and_leaves_address_policy_untouched() {
+        let config = LoaderConfig::default();
+        assert!(config.replay_proxy.is_none(), "shipped LoaderConfig default must have replay_proxy == None");
+
+        let loader = ResourceLoader::new(config).unwrap();
+        assert!(loader.replay_proxy_address_policy().is_none(), "default loader must yield None for replay_proxy_address_policy");
+
+        // When replay_proxy is configured, it must restrict to loopback on the proxy port
+        let mut custom_config = LoaderConfig::default();
+        custom_config.replay_proxy = Some(Url::parse("http://127.0.0.1:8765").unwrap());
+        let proxy_loader = ResourceLoader::new(custom_config).unwrap();
+        let policy = proxy_loader.replay_proxy_address_policy().expect("proxy policy must be present");
+
+        let loopback_match: SocketAddr = "127.0.0.1:8765".parse().unwrap();
+        let loopback_wrong_port: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let non_loopback: SocketAddr = "93.184.216.34:8765".parse().unwrap();
+
+        assert!(policy.permits(&loopback_match), "loopback with proxy port must be allowed");
+        assert!(!policy.permits(&loopback_wrong_port), "loopback with different port must be denied");
+        assert!(!policy.permits(&non_loopback), "non-loopback address must be denied");
+    }
+}
+

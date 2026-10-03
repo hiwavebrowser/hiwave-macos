@@ -87,7 +87,7 @@ Playwright provides native primitives for deterministic replay:
    ```
 2. **Clock Freezing**:
    ```javascript
-   // Pinned fixed epoch (e.g. 2026-10-01T00:00:00Z)
+   // Pinned fixed epoch (e.g. 2024-10-01T00:00:00Z)
    await page.clock.install({ time: 1727740800000 });
    await page.goto(url, { waitUntil: 'load' });
 
@@ -118,8 +118,8 @@ A lightweight local server (`tools/parity_oracle/har_server.py` or Node service)
 2. **Policy Integrity**:
    - The document URL remains the original canonical HTTPS URL (e.g. `https://en.wikipedia.org/wiki/Web_browser`).
    - All document security origins, cookies, same-origin policies, and DOM `window.location` properties evaluate against the genuine `https://...` origin.
-   - Outbound network requests pass through `rustkit_net::RequestInterceptor`:
-     - Interceptor rewrites the socket destination to `http://127.0.0.1:<port>`.
+   - Outbound network requests pass through `ResourceLoader`:
+     - Rewrites the socket destination to `http://127.0.0.1:<port>` keyed on loader-internal `is_replay_proxied` flag.
      - Preserves the original `Host: <original_domain>` header.
      - Adds `X-Original-URL: <full_https_url>`.
    - The engine's security sandbox, CSP evaluator, and FetchPolicy checks continue to run unmodified on the original origin.
@@ -143,7 +143,7 @@ The time-stable harness produces a comprehensive JSON report and tabular summary
 | `diff_10s` | Pixel diff percentage between Chrome and RustKit at $t=10\text{ s}$. |
 | `chrome_stability` | $\Delta_{\text{motion}}(5\text{s}, 10\text{s})$ on Chrome (measures site's inherent dynamism). |
 | `rustkit_stability` | $\Delta_{\text{motion}}(5\text{s}, 10\text{s})$ on RustKit. |
-| `trajectory` | Classification: `CONVERGING` (diff decreases over time), `STABLE` (constant low diff), `DIVERGING` (diff increases over time), or `UNSTABLE` (engine or oracle fluctuates). |
+| `trajectory` | Classification: `CONVERGING` (diff decreases over time), `STABLE` (constant low diff), `DIVERGING` (diff increases over time), or `DYNAMIC` (engine or oracle fluctuates due to animations/carousels). |
 
 ---
 

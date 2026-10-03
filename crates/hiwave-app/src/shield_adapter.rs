@@ -463,6 +463,7 @@ mod tests {
             referrer: None,
             referrer_policy: Default::default(),
             destination: RequestDestination::Other,
+            is_replay_proxied: false,
         }
     }
 
