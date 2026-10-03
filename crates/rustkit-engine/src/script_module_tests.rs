@@ -263,3 +263,81 @@ fn a_module_defines_a_custom_element_that_upgrades_the_markup() {
         "Boolean(true)"
     );
 }
+
+/// The github pattern: bare specifiers named by the page's import map.
+#[test]
+fn an_import_map_names_the_bare_specifiers_a_module_imports() {
+    let (mut engine, view, _server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(
+                r#"<script type="importmap">{ "imports": { "lib": "/vendor/lib.js", "util/": "/vendor/util/" } }</script>
+<script type="module">import { v } from 'lib'; import { u } from 'util/x.js'; log.push('mapped:' + v + u);</script>
+<script type="module">import 'not-in-the-map'; log.push('SHOULD NOT RUN');</script>"#,
+            ),
+        ),
+        ("/vendor/lib.js", JS, "export const v = 'V';".into()),
+        ("/vendor/util/x.js", JS, "export const u = 'U';".into()),
+    ]);
+    assert_eq!(log(&mut engine, view), "mapped:VU");
+    let records = outcomes(&engine, view);
+    assert!(
+        records
+            .iter()
+            .any(|(_, o)| matches!(o, ScriptOutcome::Threw(m) if m.contains("not-in-the-map"))),
+        "{records:#?}"
+    );
+}
+
+/// An import map that cannot be used is reported and changes nothing.
+#[test]
+fn a_broken_import_map_is_reported_and_the_page_carries_on() {
+    let (mut engine, view, _server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(r#"<script type="importmap">{ not json</script><script>log.push('classic still runs');</script>"#),
+        ),
+    ]);
+    assert_eq!(log(&mut engine, view), "classic still runs");
+    let records = outcomes(&engine, view);
+    assert!(
+        records
+            .iter()
+            .any(|(src, o)| src == "importmap" && matches!(o, ScriptOutcome::Threw(m) if m.starts_with("import map:"))),
+        "{records:#?}"
+    );
+}
+
+/// import() from a classic script, from a timer, and from a module; one that
+/// cannot be fetched rejects instead of hanging the load.
+#[test]
+fn dynamic_import_loads_modules_for_classic_scripts_timers_and_modules() {
+    let (mut engine, view, _server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(
+                r#"<script>
+import('/lazy/a.js').then(function (m) { log.push('classic:' + m.name); });
+setTimeout(function () { import('/lazy/b.js').then(function (m) { log.push('timer:' + m.name); }); }, 50);
+import('/missing/gone.js').then(function () { log.push('RESOLVED'); }, function (e) { log.push('rejected:' + e.name); });
+import('bare-specifier').then(function () { log.push('RESOLVED'); }, function (e) { log.push('bare:' + e.name); });
+</script>
+<script type="module">const m = await import('/lazy/c.js'); log.push('module:' + m.name);</script>"#,
+            ),
+        ),
+        ("/lazy/a.js", JS, "export const name = 'A';".into()),
+        ("/lazy/b.js", JS, "export const name = 'B';".into()),
+        ("/lazy/c.js", JS, "export const name = 'C';".into()),
+    ]);
+    let got = log(&mut engine, view);
+    let mut parts: Vec<&str> = got.split(',').collect();
+    parts.sort();
+    assert_eq!(
+        parts,
+        vec!["bare:TypeError", "classic:A", "module:C", "rejected:TypeError", "timer:B"],
+        "{got}"
+    );
+}

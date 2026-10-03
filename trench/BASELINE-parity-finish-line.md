@@ -20,10 +20,19 @@ so the third does not:
 - **The queue runs off `develop`, not `master`.** Engine work goes on its own
   branch cut from `develop` and opens its own PR; this branch stays the
   instrument lane (see *Branch law* at the foot of this file).
-- **The standing metric is `3/26`** (`bg-pure`, `bg-solid`, `gradients`) — run
-  36100178666, `macos-14`, 2026-09-25. The `1/26` recorded under *The one
+- **The standing metric is `3/26`** (`bg-pure`, `bg-solid`, `gradients`) —
+  confirmed on run **37096150470**, `macos-14`, 2026-10-03, which also reads
+  geometry **15/26**, paint 3/26, stability 26/26, discrete 26/26, 0 unmeasured,
+  467 geometry failures and 8 join failures. The `1/26` recorded under *The one
   metric* below is P0b's original receipt and is kept as history, not as
   current state.
+- **The eight remaining join failures are the board's only UNMEASURED boxes**,
+  and they are worth knowing by name because a join failure can hide correct
+  geometry as easily as broken geometry — night 73 found a case that was RED on
+  three invisible boxes, one of which was bit-identical to Chrome. After night
+  73 closes `shelf`'s three, **five** remain: `form-controls` 4
+  (`select > option`) and `form-elements` 1 (a `phantom_box` on a
+  `toggle-switch > input`).
 - **The queue is geometry-first** — ratified 2026-09-27, see the decision block
   below. Do not open a night on a paint-only case.
 - **This digest was not the whole record.** Nights 10–41 were written to
