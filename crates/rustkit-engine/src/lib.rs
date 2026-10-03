@@ -474,6 +474,12 @@ struct ViewState {
     /// this is the live value. Mutating the DOM instead would conflate the
     /// two and break form-reset semantics.
     edit_states: std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
+    /// Checkedness of the checkboxes and radio buttons a click or script
+    /// has set, keyed by raw NodeId: the other half of the same side table.
+    /// A control missing here is checked when it has the `checked`
+    /// attribute. Script owns the state (`input.checked`); style
+    /// (`:checked`), paint and form submission read it here.
+    checked_states: std::collections::HashMap<usize, bool>,
     /// Whether the view itself has focus.
     view_focused: bool,
     /// Current scroll offset (x, y) in pixels.
@@ -1327,6 +1333,7 @@ impl Engine {
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
+            checked_states: std::collections::HashMap::new(),
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1388,6 +1395,7 @@ impl Engine {
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
+            checked_states: std::collections::HashMap::new(),
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1458,6 +1466,7 @@ impl Engine {
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
+            checked_states: std::collections::HashMap::new(),
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -2046,7 +2055,7 @@ impl Engine {
                         .unwrap_or_else(|| "text".into());
                     let skip = matches!(kind.as_str(), "submit" | "button" | "reset" | "file")
                         || (matches!(kind.as_str(), "checkbox" | "radio")
-                            && !attributes.contains_key("checked"));
+                            && !engine.checked_in(view_id, node.id.raw(), attributes));
                     if !name.is_empty() && !disabled && !skip {
                         let value = engine
                             .edit_value_in(view_id, node.id.raw())
@@ -2122,6 +2131,44 @@ impl Engine {
         match self.views.get(&id).and_then(|v| v.url.as_ref()) {
             Some(base) => base.join(raw).ok(),
             None => Url::parse(raw).ok(),
+        }
+    }
+
+    /// Whether a checkbox or radio button in a SPECIFIC view is checked:
+    /// what a click or script last set, else its `checked` attribute.
+    fn checked_in(&self, id: EngineViewId, node_raw: usize, attributes: &HashMap<String, String>) -> bool {
+        self.views
+            .get(&id)
+            .and_then(|v| v.checked_states.get(&node_raw).copied())
+            .unwrap_or_else(|| attributes.contains_key("checked"))
+    }
+
+    /// An `<input>`'s attributes as the build of the current view reads
+    /// them: with `checked` present exactly when the control is checked.
+    /// Selector matching (`:checked`, also as a sibling) and the control's
+    /// box both read the attribute map, so this one substitution is what
+    /// makes them follow a click.
+    fn live_attributes<'a>(
+        &self,
+        node_raw: usize,
+        attributes: &'a HashMap<String, String>,
+    ) -> std::borrow::Cow<'a, HashMap<String, String>> {
+        let live = self
+            .building_view
+            .get()
+            .and_then(|id| self.views.get(&id))
+            .and_then(|v| v.checked_states.get(&node_raw).copied());
+        match live {
+            Some(checked) if checked != attributes.contains_key("checked") => {
+                let mut attributes = attributes.clone();
+                if checked {
+                    attributes.insert("checked".to_string(), String::new());
+                } else {
+                    attributes.remove("checked");
+                }
+                std::borrow::Cow::Owned(attributes)
+            }
+            _ => std::borrow::Cow::Borrowed(attributes),
         }
     }
 
@@ -2841,6 +2888,7 @@ impl Engine {
         // how a silent correctness bug hides in plain sight.
         // (Prometheus, #110 R1 must-fix.)
         view.edit_states.clear();
+        view.checked_states.clear();
         view.focused_node = None;
         view.script_log.clear();
         view.script_policy = None;
@@ -3140,6 +3188,7 @@ impl Engine {
         // how a silent correctness bug hides in plain sight.
         // (Prometheus, #110 R1 must-fix.)
         view.edit_states.clear();
+        view.checked_states.clear();
         view.focused_node = None;
         view.script_log.clear();
         view.script_policy = None;
@@ -4409,6 +4458,10 @@ impl Engine {
                 ..
             } => {
                 let tag_lower = lower_tag(tag_name);
+                // A checkbox or radio button is styled and painted from its
+                // live checkedness, not from its `checked` attribute.
+                let live = (&*tag_lower == "input").then(|| self.live_attributes(node.id.raw(), attributes));
+                let attributes = live.as_deref().unwrap_or(attributes);
 
                 // Skip rendering for certain elements
                 let is_hidden = matches!(
@@ -5119,7 +5172,8 @@ impl Engine {
                             .unwrap_or_default();
                         let t = lower_tag(tag_name);
                         *type_seen.entry(t.clone()).or_insert(0) += 1;
-                        let state = ElementState::of(&t, attributes);
+                        let live = (&*t == "input").then(|| self.live_attributes(child.id.raw(), attributes));
+                        let state = ElementState::of(&t, live.as_deref().unwrap_or(attributes));
                         preceding_siblings.push((
                             t.into_owned(),
                             child_classes,
@@ -11933,6 +11987,13 @@ impl Engine {
                     view.edit_states.insert(raw, state);
                 }
             }
+        }
+        // Checkedness is script's; style and paint read this copy.
+        for (raw, checked) in bindings.take_checked_writes() {
+            match checked {
+                Some(checked) => view.checked_states.insert(raw, checked),
+                None => view.checked_states.remove(&raw),
+            };
         }
         if dirty == DomDirty::Clean {
             return Ok(false);

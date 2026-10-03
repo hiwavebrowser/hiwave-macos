@@ -48,6 +48,11 @@ pub(crate) struct DomHost {
     /// Script value writes the engine has not yet copied into its edit
     /// state, which is what layout paints (`DomBindings::take_value_writes`).
     value_writes: Vec<(usize, String)>,
+    /// Checkedness changes the engine has not yet taken
+    /// (`DomBindings::take_checked_writes`): (NodeId, the control's
+    /// checkedness, or `None` when it follows its `checked` attribute
+    /// again). The state itself is script's (web_forms.js).
+    checked_writes: Vec<(usize, Option<bool>)>,
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
@@ -65,6 +70,7 @@ impl DomHost {
         self.generation += 1;
         self.values.clear();
         self.value_writes.clear();
+        self.checked_writes.clear();
         self.generation
     }
 
@@ -75,6 +81,10 @@ impl DomHost {
 
     pub(crate) fn take_value_writes(&mut self) -> Vec<(usize, String)> {
         std::mem::take(&mut self.value_writes)
+    }
+
+    pub(crate) fn take_checked_writes(&mut self) -> Vec<(usize, Option<bool>)> {
+        std::mem::take(&mut self.checked_writes)
     }
 
     fn document_for(&self, generation: &JsValue) -> Option<&Rc<Document>> {
@@ -472,6 +482,22 @@ fn control_value(host: &mut DomHost, args: &[JsValue]) -> (JsValue, DomDirty) {
     };
     host.value_writes.push((raw, value.clone()));
     (JsValue::String(value), DomDirty::Layout)
+}
+
+/// `checked(gen, id, v)`: an input's checkedness (HTML §4.10.5.4) became
+/// `v`, or with `v` null follows its `checked` attribute again (form
+/// reset). Script keeps the state; this tells the engine, which styles
+/// (`:checked`) and paints the control from it.
+fn control_checked(host: &mut DomHost, args: &[JsValue]) -> DomDirty {
+    let Some(node) = host.node(args) else {
+        return DomDirty::Clean;
+    };
+    let state = match args.get(2) {
+        Some(JsValue::Boolean(checked)) => Some(*checked),
+        _ => None,
+    };
+    host.checked_writes.push((node.id.raw(), state));
+    DomDirty::Style
 }
 
 /// DOM §4.4 "clone a node": a detached copy with fresh NodeIds, its
@@ -921,6 +947,18 @@ pub(crate) fn install(
         }),
     )?;
 
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_checked",
+        3,
+        Box::new(move |args| {
+            let bucket = control_checked(&mut h.borrow_mut(), args);
+            d.set(d.get().max(bucket));
+            JsValue::Null
+        }),
+    )?;
+
     runtime.evaluate_script(WRAPPERS_JS)?;
     node_apis::install(runtime, host)
 }
@@ -934,9 +972,10 @@ const WRAPPERS_JS: &str = r#"
         collect: __rustkit_dom_collect, info: __rustkit_dom_info,
         attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate,
         write: __rustkit_dom_write, matches: __rustkit_dom_matches,
-        value: __rustkit_dom_value, resolve: __rustkit_dom_resolve
+        value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
+        checked: __rustkit_dom_checked
     };
-    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve'].forEach(function (n) {
+    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -2112,6 +2151,17 @@ const WRAPPERS_JS: &str = r#"
         if (n === doc) return event.type === 'load' ? null : g;
         return n[SLOT] ? n.parentNode : null;
     }
+    // Activation behaviour (DOM §2.9 "dispatch", steps 5 and 11): a click
+    // (the user's, `el.click()`, or a MouseEvent script dispatches) checks a
+    // checkbox before its listeners run and clicks a label's control after.
+    // `activation(target)` is web_forms.js's; it answers the function to
+    // call with "was not cancelled" once the listeners have run, or null.
+    var activation = null, SYNTHETIC_CLICK = Symbol('rustkit.click');
+    function activationFor(t, event) {
+        if (!activation || event.type !== 'click' || !t[SLOT]) return null;
+        if (!event[SYNTHETIC_CLICK] && !(typeof g.MouseEvent === 'function' && event instanceof g.MouseEvent)) return null;
+        return activation(t);
+    }
     EventTarget.prototype.dispatchEvent = function (event) {
         if (event == null || typeof event !== 'object' || event.type === undefined) {
             throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': " +
@@ -2120,6 +2170,7 @@ const WRAPPERS_JS: &str = r#"
         var t = thisTarget(this), path = [], i;
         for (var n = t; n; n = eventParent(n, event)) path.push(n);
         event.target = t;
+        var activated = activationFor(t, event);
         for (i = path.length - 1; i > 0 && !event[STOP]; i--) invoke(path[i], event, 1, true);
         if (!event[STOP]) invoke(t, event, 2, true);
         if (!event[STOP]) invoke(t, event, 2, false);
@@ -2129,6 +2180,7 @@ const WRAPPERS_JS: &str = r#"
         event[STOP] = event[STOP_NOW] = false;
         event.currentTarget = null;
         event.eventPhase = 0;
+        if (activated) activated(!event.defaultPrevented);
         return !event.defaultPrevented;
     };
 
@@ -2208,7 +2260,9 @@ const WRAPPERS_JS: &str = r#"
     Object.defineProperty(DOMParser.prototype, Symbol.toStringTag, { value: 'DOMParser' });
     g.DOMParser = DOMParser;
     HTMLElement.prototype.click = function () {
-        this.dispatchEvent(new Event('click', { bubbles: true, cancelable: true }));
+        var e = new Event('click', { bubbles: true, cancelable: true });
+        e[SYNTHETIC_CLICK] = true;
+        this.dispatchEvent(e);
     };
 
     // The global `document` becomes the Document wrapper.
@@ -2224,6 +2278,16 @@ const WRAPPERS_JS: &str = r#"
         delete doc[k];
         g[k] = EventTarget.prototype[k];
     });
+
+    // For web_forms.js, which deletes it: the engine is told of a
+    // checkedness change, and dispatch is given the activation behaviours.
+    g.__rkFormInternals = {
+        noteChecked: function (el, v) {
+            var s = el != null ? el[SLOT] : undefined;
+            if (s && s.gen === gen) N.checked(s.gen, s.id, v);
+        },
+        setActivation: function (f) { activation = f; }
+    };
 
     // For node_apis.js, which runs next and deletes it.
     g.__rkNodeInternals = {
