@@ -34,7 +34,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SITES_FILE = REPO / "websuite" / "realsite-top20.json"
+DEFAULT_SITES_FILE = REPO / "websuite" / "realsite-top20.json"
+HOLDOUT_SITES_FILE = REPO / "websuite" / "realsite-holdout20.json"
+SITES_FILE = DEFAULT_SITES_FILE
 ORACLE = REPO / "tools" / "parity_oracle" / "realsite.mjs"
 DEFAULT_CHROME = (
     Path.home()
@@ -324,11 +326,15 @@ def fmt_row(r):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--site", action="append", help="only these site ids")
+    ap.add_argument("--sites-file", help="sites JSON manifest (default websuite/realsite-top20.json)")
+    ap.add_argument("--holdout", action="store_true", help="score holdout suite (websuite/realsite-holdout20.json)")
+    ap.add_argument("--v2", action="store_true", help="run Scorer v2 diagnostics beside V1 board upon completion")
     ap.add_argument("--capture-bin", default=str(REPO / "target/release/parity-capture"))
     ap.add_argument("--out", help="run directory (default trench/realsite/runs/<ts>)")
     args = ap.parse_args()
 
-    cfg = json.loads(SITES_FILE.read_text())
+    manifest_path = Path(args.sites_file) if args.sites_file else (HOLDOUT_SITES_FILE if args.holdout else DEFAULT_SITES_FILE)
+    cfg = json.loads(manifest_path.read_text(encoding="utf-8"))
     width, height = cfg["viewport"]["width"], cfg["viewport"]["height"]
     sites = cfg["sites"]
     if args.site:
@@ -389,6 +395,15 @@ def main():
         ", ".join(summary["oracle_failed"]) or "none"))
     print("BLOCKED %s" % (", ".join("%s (%s)" % kv for kv in summary["blocked"].items()) or "none"))
     print("run: %s" % outdir.relative_to(REPO) if outdir.is_relative_to(REPO) else outdir)
+
+    if args.v2:
+        try:
+            import scorer_v2
+            summary_v2 = scorer_v2.score_run_v2(outdir)
+            print()
+            print(scorer_v2.format_table(summary_v2))
+        except Exception as e:
+            print(f"Warning: Scorer v2 diagnostics failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

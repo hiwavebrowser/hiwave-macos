@@ -189,6 +189,39 @@ class TestHoldoutBoard(unittest.TestCase):
         self.assertAlmostEqual(comparison["holdout_points_rate"], 23.33, places=1)
         self.assertAlmostEqual(comparison["points_rate_gap"], 6.67, places=1)
 
+    def test_realsite_board_holdout_support(self):
+        """realsite_board must export DEFAULT_SITES_FILE and HOLDOUT_SITES_FILE."""
+        import realsite_board
+        self.assertTrue(realsite_board.DEFAULT_SITES_FILE.exists())
+        self.assertTrue(realsite_board.HOLDOUT_SITES_FILE.exists())
+        self.assertEqual(realsite_board.DEFAULT_SITES_FILE.name, "realsite-top20.json")
+        self.assertEqual(realsite_board.HOLDOUT_SITES_FILE.name, "realsite-holdout20.json")
+
+    def test_comparison_table_formatting(self):
+        """format_comparison_table must format output containing header, metrics and categories."""
+        comp = {
+            "top20_sites": 20,
+            "holdout_sites": 20,
+            "top20_points_rate": 30.0,
+            "holdout_points_rate": 23.33,
+            "points_rate_gap": 6.67,
+            "top20_v1_loads_rate": 60.0,
+            "holdout_v1_loads_rate": 50.0,
+            "v1_loads_rate_gap": 10.0,
+            "top20_v2_adjusted_loads_rate": 70.0,
+            "holdout_v2_adjusted_loads_rate": 60.0,
+            "v2_adjusted_loads_rate_gap": 10.0,
+            "category_deltas": {
+                "BLANK_SHELL": {"top20": 6, "holdout": 8, "delta": 2},
+                "CONTENT_LOADED": {"top20": 11, "holdout": 10, "delta": -1},
+            },
+        }
+        table = holdout_board.format_comparison_table(comp)
+        self.assertIn("OVERFITTING GENERALIZATION REPORT", table)
+        self.assertIn("V1 Points Rate", table)
+        self.assertIn("BLANK_SHELL", table)
+        self.assertIn("CONTENT_LOADED", table)
+
 
 if __name__ == "__main__":
     unittest.main()
