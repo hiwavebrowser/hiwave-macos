@@ -169,3 +169,67 @@ fn the_root_element_measures_the_viewport_and_the_document() {
         "1280,800,1280,3000"
     );
 }
+
+fn styles(rows: &[(&str, &str)]) -> String {
+    rows.iter().map(|(n, v)| format!("{n}\t{v}")).collect::<Vec<_>>().join("\n")
+}
+
+#[test]
+fn getcomputedstyle_reads_the_published_style() {
+    let (b, doc) = bound();
+    let mut m = HashMap::new();
+    m.insert(id(&doc, "outer"), geom(0.0, 0.0, 10.0, 10.0));
+    b.set_geometry(m);
+    let mut s = HashMap::new();
+    s.insert(
+        id(&doc, "outer"),
+        styles(&[("display", "flex"), ("color", "rgb(1, 2, 3)"), ("font-size", "20px"), ("margin-top", "4px"), ("float", "left")]),
+    );
+    b.set_computed_styles(s);
+    assert_eq!(
+        ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.display, c.getPropertyValue('color'), c.fontSize, c['margin-top'], c.marginTop, c.cssFloat, c.getPropertyValue('nope') === ''].join()"),
+        "flex,rgb(1, 2, 3),20px,4px,4px,left,true"
+    );
+    assert_eq!(ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.length, c.item(0), typeof c.getPropertyPriority].join()"), "5,color,function");
+    assert_eq!(
+        ev(&b, "var c = getComputedStyle(document.getElementById('outer')); try { c.setProperty('color', 'red'); 'no throw' } catch (e) { e.name }"),
+        "NoModificationAllowedError"
+    );
+    assert_eq!(ev(&b, "getComputedStyle(document.getElementById('outer')) instanceof CSSStyleDeclaration"), "true");
+}
+
+#[test]
+fn an_inline_declaration_shows_through_at_once() {
+    let (b, doc) = bound();
+    let mut m = HashMap::new();
+    m.insert(id(&doc, "outer"), geom(0.0, 0.0, 10.0, 10.0));
+    b.set_geometry(m);
+    let mut s = HashMap::new();
+    s.insert(id(&doc, "outer"), styles(&[("display", "block")]));
+    b.set_computed_styles(s);
+    assert_eq!(
+        ev(&b, "var e = document.getElementById('outer'); e.style.display = 'none'; getComputedStyle(e).display"),
+        "none"
+    );
+}
+
+#[test]
+fn an_element_with_no_box_after_a_layout_is_display_none() {
+    let (b, doc) = bound();
+    // Before any layout nothing is known.
+    assert_eq!(ev(&b, "getComputedStyle(document.getElementById('gone')).display"), "");
+    let mut m = HashMap::new();
+    m.insert(id(&doc, "outer"), geom(0.0, 0.0, 10.0, 10.0));
+        b.set_geometry(m);
+    assert_eq!(
+        ev(&b, "var c = getComputedStyle(document.getElementById('gone')); [c.display, c.visibility].join()"),
+        "none,visible"
+    );
+}
+
+#[test]
+fn getcomputedstyle_rejects_a_non_element() {
+    let (b, _) = bound();
+    assert_eq!(ev(&b, "try { getComputedStyle(null); 'no throw' } catch (e) { e.name }"), "TypeError");
+    assert_eq!(ev(&b, "try { getComputedStyle(document); 'no throw' } catch (e) { e.name }"), "TypeError");
+}
