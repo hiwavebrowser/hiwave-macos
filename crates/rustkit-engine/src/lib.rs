@@ -23109,8 +23109,98 @@ document.currentScript.remove();
             took < std::time::Duration::from_millis(2_500),
             "waited for the stalled subresources: {took:?}"
         );
-        // The sheet that did arrive still applies.
-        assert_eq!(engine.views[&view].external_stylesheets.len(), 1);
+        // The sheet that did arrive still applies — and it must be the fast
+        // one. A count-only assertion would still pass if the stalled red
+        // sheet somehow won and blue was dropped.
+        let sheets = &engine.views[&view].external_stylesheets;
+        assert_eq!(sheets.len(), 1);
+        let colors: Vec<&str> = sheets[0]
+            .rules
+            .iter()
+            .flat_map(|r| &r.declarations)
+            .filter(|d| d.property == "color")
+            .filter_map(|d| match &d.value {
+                rustkit_css::PropertyValue::Specified(v) => Some(v.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            colors,
+            ["blue"],
+            "the fast sheet must be the survivor, not the stalled red one: {sheets:#?}"
+        );
+
+        // Image and SVG lanes share the same budget: a hung image must not
+        // keep the load open past the deadline, and must not land in cache.
+        let base = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let slow_png = base.join("/slow.png").unwrap();
+        let slow_svg = base.join("/slow.svg").unwrap();
+        assert!(
+            !engine.image_manager().is_cached(&slow_png),
+            "stalled raster image must not be cached after the budget"
+        );
+        assert!(
+            !engine.svg_cache.contains_key(slow_svg.as_str()),
+            "stalled SVG must not enter the SVG cache after the budget"
+        );
+    }
+
+    /// A hung `@font-face` fetch is cut at `subresource_budget_ms` and marked
+    /// failed so a later relayout does not retry it forever.
+    #[test]
+    fn a_stalled_web_font_is_dropped_at_the_subresource_budget() {
+        let port = serve(vec![(
+            "/slow.ttf",
+            "font/ttf",
+            "not-a-real-font".into(),
+        )]);
+        let html = format!(
+            r#"<html><head><style>
+@font-face {{ font-family: delayed; src: url(http://127.0.0.1:{port}/slow.ttf); }}
+</style></head><body style="font-family: delayed">x</body></html>"#
+        );
+        let config = EngineConfig {
+            subresource_budget_ms: 500,
+            ..EngineConfig::default()
+        };
+        let mut engine = Engine::new(config).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 100,
+            })
+            .expect("view");
+        engine.load_html(view, &html).expect("load");
+
+        let rules = engine.view_font_face_rules(view);
+        assert_eq!(rules.len(), 1, "inline @font-face must be discovered");
+        let partition = Engine::font_partition(engine.views[&view].url.as_ref());
+        let face = Engine::layout_font_face(&rules[0]);
+        let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let loaded = rt.block_on(engine.load_remote_web_fonts(view));
+        let took = started.elapsed();
+
+        assert_eq!(loaded, 0, "a stalled face must not count as loaded");
+        assert!(
+            took < std::time::Duration::from_millis(2_500),
+            "waited for the stalled web font: {took:?}"
+        );
+        assert!(
+            engine.font_loader.is_failed(&key),
+            "timeout must mark the face failed so relayout stops retrying it"
+        );
+        assert!(
+            engine.font_loader.faces_for(&partition).is_empty(),
+            "no face bytes may be installed after a budget timeout"
+        );
     }
 
     /// The first layout waits for linked sheets; when none of them arrives,
@@ -27107,6 +27197,44 @@ mod logical_property_tests {
         // Three values is not a valid two-value shorthand: ignored.
         e.apply_style_property(&mut style, "margin-inline", "1px 2px 3px");
         assert_eq!(style.margin_left, ComputedStyle::new().margin_left);
+
+        // A single calc() with internal spaces is one value, not three.
+        // Before #403's top-level split, `calc(1px + 2px)` was dropped.
+        let mut calc_style = ComputedStyle::new();
+        e.apply_style_property(&mut calc_style, "margin-inline", "calc(1px + 2px)");
+        assert_eq!(
+            calc_style.margin_left,
+            rustkit_css::Length::Px(3.0),
+            "margin-inline: calc(1px + 2px) must apply to both sides"
+        );
+        assert_eq!(calc_style.margin_right, rustkit_css::Length::Px(3.0));
+        e.apply_style_property(
+            &mut calc_style,
+            "padding-inline",
+            "calc(1px + 2px) calc(3px + 4px)",
+        );
+        assert_eq!(calc_style.padding_left, rustkit_css::Length::Px(3.0));
+        assert_eq!(calc_style.padding_right, rustkit_css::Length::Px(7.0));
+    }
+
+    /// Pair shorthands split only at whitespace outside parentheses, so a
+    /// function argument list never becomes extra shorthand values.
+    #[test]
+    fn split_top_level_whitespace_keeps_parenthesized_values_whole() {
+        assert_eq!(
+            split_top_level_whitespace("calc(1px + 2px)"),
+            ["calc(1px + 2px)"]
+        );
+        assert_eq!(
+            split_top_level_whitespace("rgb(1, 2, 3) rgba(0, 0, 0, 0.5)"),
+            ["rgb(1, 2, 3)", "rgba(0, 0, 0, 0.5)"]
+        );
+        assert_eq!(split_top_level_whitespace("1px 2px"), ["1px", "2px"]);
+        assert_eq!(
+            split_top_level_whitespace("  1px   calc(2px + 3px)  "),
+            ["1px", "calc(2px + 3px)"]
+        );
+        assert!(split_top_level_whitespace("   ").is_empty());
     }
 
     /// The flow-relative border properties had no arms, so a box styled

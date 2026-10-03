@@ -497,45 +497,7 @@ impl Client {
             .version(http::Version::HTTP_2);
 
         // Browser-shaped known set, minus h2-illegal connection headers.
-        const ORDERED_H2: &[(&str, Option<&str>)] = &[
-            (
-                "accept",
-                Some(
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,\
-image/avif,image/webp,*/*;q=0.8",
-                ),
-            ),
-            ("accept-language", None),
-            ("accept-encoding", Some(ACCEPT_ENCODING)),
-            ("upgrade-insecure-requests", Some("1")),
-            ("sec-fetch-dest", Some("document")),
-            ("sec-fetch-mode", Some("navigate")),
-            ("sec-fetch-site", Some("none")),
-            ("sec-fetch-user", Some("?1")),
-            ("referer", None),
-            ("cookie", None),
-        ];
-        const H2_ILLEGAL: &[&str] =
-            &["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host"];
-
-        request = request.header("user-agent", &self.config.user_agent);
-        let mut written: Vec<&str> = vec![];
-        for (name, default) in ORDERED_H2 {
-            let value = headers
-                .get(*name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
-                .or_else(|| default.map(str::to_string));
-            if let Some(v) = value {
-                request = request.header(*name, v);
-                written.push(name);
-            }
-        }
-        for (name, value) in headers.iter() {
-            let n = name.as_str();
-            if written.contains(&n) || H2_ILLEGAL.contains(&n) || n == "user-agent" {
-                continue;
-            }
+        for (name, value) in h2_request_headers(&self.config.user_agent, headers) {
             request = request.header(name, value);
         }
 
@@ -855,6 +817,75 @@ fn parse_status_line(line: &str) -> Result<(Version, StatusCode), HttpError> {
 /// The `Accept-Encoding` sent on requests: what `decode_content_encoding`
 /// can undo.
 const ACCEPT_ENCODING: &str = "gzip, deflate";
+
+/// Connection-specific header fields (RFC 9113 §8.1.2) plus `host`
+/// (carried by `:authority`). Must not appear on an HTTP/2 request.
+fn is_h2_illegal_request_header(name: &str) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "keep-alive"
+            | "proxy-connection"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+    )
+}
+
+/// Header pairs `send_request_h2` writes onto the request, in emission order.
+/// Caller headers that are connection-specific, already emitted, or the
+/// user-agent (set from config) are dropped.
+fn h2_request_headers(user_agent: &str, headers: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
+    const ORDERED_H2: &[(&str, Option<&str>)] = &[
+        (
+            "accept",
+            Some(
+                "text/html,application/xhtml+xml,application/xml;q=0.9,\
+image/avif,image/webp,*/*;q=0.8",
+            ),
+        ),
+        ("accept-language", None),
+        ("accept-encoding", Some(ACCEPT_ENCODING)),
+        ("upgrade-insecure-requests", Some("1")),
+        ("sec-fetch-dest", Some("document")),
+        ("sec-fetch-mode", Some("navigate")),
+        ("sec-fetch-site", Some("none")),
+        ("sec-fetch-user", Some("?1")),
+        ("referer", None),
+        ("cookie", None),
+    ];
+
+    let mut out = Vec::new();
+    out.push((
+        HeaderName::from_static("user-agent"),
+        HeaderValue::from_str(user_agent).unwrap_or_else(|_| HeaderValue::from_static("")),
+    ));
+    let mut written: Vec<&str> = vec![];
+    for (name, default) in ORDERED_H2 {
+        // Same as before the extract: a non-UTF-8 caller value falls through
+        // to the default (or is omitted when there is none).
+        let value = headers
+            .get(*name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .or_else(|| default.map(str::to_string));
+        if let Some(v) = value {
+            out.push((
+                HeaderName::from_static(*name),
+                HeaderValue::from_str(&v).unwrap_or_else(|_| HeaderValue::from_static("")),
+            ));
+            written.push(name);
+        }
+    }
+    for (name, value) in headers.iter() {
+        let n = name.as_str();
+        if written.contains(&n) || is_h2_illegal_request_header(n) || n == "user-agent" {
+            continue;
+        }
+        out.push((name.clone(), value.clone()));
+    }
+    out
+}
 
 /// Undo the response's `Content-Encoding`, so callers always see the
 /// resource's bytes. A decoded body drops `Content-Encoding` and
@@ -1226,6 +1257,48 @@ pub mod blocking {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn h2_request_headers_strip_connection_specific_fields() {
+        // RFC 9113 §8.1.2: these are illegal on h2. Before the extract they
+        // lived only inside `send_request_h2`, so a regression could only be
+        // caught by a live h2 negotiation.
+        let mut headers = HeaderMap::new();
+        headers.insert("connection", HeaderValue::from_static("keep-alive"));
+        headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+        headers.insert("proxy-connection", HeaderValue::from_static("close"));
+        headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+        headers.insert("upgrade", HeaderValue::from_static("h2c"));
+        headers.insert("host", HeaderValue::from_static("evil.example"));
+        headers.insert("x-custom", HeaderValue::from_static("ok"));
+        headers.insert("referer", HeaderValue::from_static("https://doc.example/p"));
+
+        let pairs = h2_request_headers("HiWave/test", &headers);
+        let names: Vec<&str> = pairs.iter().map(|(n, _)| n.as_str()).collect();
+
+        for illegal in [
+            "connection",
+            "keep-alive",
+            "proxy-connection",
+            "transfer-encoding",
+            "upgrade",
+            "host",
+        ] {
+            assert!(
+                !names.contains(&illegal),
+                "{illegal} must not appear on an h2 request: {names:?}"
+            );
+            assert!(is_h2_illegal_request_header(illegal));
+        }
+
+        assert_eq!(names[0], "user-agent");
+        assert_eq!(pairs[0].1.to_str().unwrap(), "HiWave/test");
+        assert!(names.contains(&"referer"));
+        assert!(names.contains(&"x-custom"));
+        assert!(names.contains(&"accept-encoding"));
+        assert!(!is_h2_illegal_request_header("referer"));
+        assert!(!is_h2_illegal_request_header("x-custom"));
+    }
 
     #[test]
     fn test_parse_status_line() {
