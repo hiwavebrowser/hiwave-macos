@@ -18198,6 +18198,40 @@ mod element_identity_tests {
     }
 
     #[test]
+    fn a_background_position_keeps_far_edge_offsets_and_calc() {
+        // css-backgrounds-3 §3.6: `right 5px` is 5px in from the right edge,
+        // and a position may be a `calc()` of a percentage and a length.
+        // The far-edge offset was dropped and a `calc()` was split at its
+        // spaces. Read as px for a 100x50 image in a 300x200 area.
+        let at = |v: &str| {
+            let p = parse_background_position(v);
+            (p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0))
+        };
+        assert_eq!(at("right 5px bottom 10px"), (195.0, 140.0));
+        assert_eq!(at("bottom 10px right 5px"), (195.0, 140.0));
+        assert_eq!(at("right 10% top 20px"), (180.0, 20.0));
+        assert_eq!(at("left 5px bottom"), (5.0, 150.0));
+        assert_eq!(at("calc(100% - 20px) 0"), (180.0, 0.0));
+        assert_eq!(at("10px calc(50% + 4px)"), (10.0, 79.0));
+        assert_eq!(at("right calc(10px + 5px) top"), (185.0, 0.0));
+
+        // The shorthand takes them as position tokens too.
+        let (_, layer) =
+            parse_background_shorthand_layer("url(a.png) no-repeat right 5px bottom 10px");
+        let p = layer.expect("layer").position;
+        assert_eq!((p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0)), (195.0, 140.0));
+        let (_, layer) =
+            parse_background_shorthand_layer("url(a.png) calc(100% - 20px) 50% / 100px no-repeat");
+        let layer = layer.expect("layer");
+        let p = &layer.position;
+        assert_eq!((p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0)), (180.0, 75.0));
+        assert_eq!(
+            layer.size,
+            rustkit_css::BackgroundSize::Explicit { width: Some(100.0), height: None }
+        );
+    }
+
+    #[test]
     fn a_shorthand_layers_url_is_taken_whole() {
         // The url ended at the first `)`, which a data: url may contain.
         let (color, layer) = parse_background_shorthand_layer(
