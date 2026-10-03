@@ -497,6 +497,11 @@ struct ViewState {
     /// passes after it looked at, loaded or not. The post-script pass
     /// fetches only what is not in here.
     images_attempted: std::collections::HashSet<Url>,
+    /// The current document's fetch policy: a URL-loaded page with
+    /// JavaScript on has one, anything else has none. The load's script
+    /// requests and the live loop's go through the same one, so its request
+    /// counters cover both.
+    script_policy: Option<Arc<FetchPolicy>>,
 }
 
 /// Engine configuration.
@@ -568,6 +573,21 @@ impl Default for EngineConfig {
 /// across the default 5s horizon is ~300).
 const MAX_TIMER_CALLBACKS: u32 = 10_000;
 
+/// Most timer callbacks one turn of the live loop runs (`Engine::pump_live`).
+/// A page that owes more keeps them for the next turn, so input and paint
+/// get a turn in between.
+const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
+
+/// Longest one turn of the live loop waits on the network. The loop is the
+/// UI thread, so a request slower than this fails as a network error rather
+/// than hold the window.
+const LIVE_NETWORK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Most records the live loop adds to a view's script log. A timer that
+/// throws on every tick would otherwise grow it for as long as the page is
+/// open.
+const MAX_LIVE_SCRIPT_RECORDS: usize = 2_000;
+
 /// How a page `<script>` is scheduled, per its `type`, `src`, `async`
 /// and `defer` attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -628,6 +648,21 @@ pub struct ClickOutcome {
     /// The link to follow: the click hit an `<a href>` and no `click`
     /// listener called `preventDefault()`.
     pub navigate: Option<String>,
+}
+
+/// What one turn of the live loop did for a view (see [`Engine::pump_live`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LivePump {
+    /// Timer callbacks that ran.
+    pub timers_ran: u32,
+    /// Script network requests and module fetches that were answered.
+    pub requests: usize,
+    /// The page was laid out again: a callback wrote to the DOM, or an image
+    /// it added arrived.
+    pub relaid_out: bool,
+    /// Milliseconds until the page's next timer is due. `None`: it has none,
+    /// and the loop can sleep until the next input.
+    pub next_timer_ms: Option<u64>,
 }
 
 /// Classify a `<script>` element. `None` for data blocks
@@ -1301,6 +1336,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            script_policy: None,
         };
 
         self.views.insert(id, view_state);
@@ -1361,6 +1397,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            script_policy: None,
         };
 
         let id = view_state.id;
@@ -1430,6 +1467,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            script_policy: None,
         };
 
         self.views.insert(id, view_state);
@@ -1792,6 +1830,96 @@ impl Engine {
             debug!(?id, error = %e, "relayout after mouse event failed");
         }
         not_cancelled
+    }
+
+    /// One turn of the live loop for a loaded page: run the timers that came
+    /// due in the `elapsed_ms` since the last turn, answer what the page
+    /// asked of the network, and lay out what the callbacks wrote.
+    ///
+    /// The load runs a page's timers once, on a virtual clock up to its
+    /// horizon. This is what runs them afterwards: the caller's loop passes
+    /// the real time since its last turn and comes back when
+    /// [`LivePump::next_timer_ms`] says the next timer is due. Requests go
+    /// through the document's own `FetchPolicy`, as they did during the
+    /// load; a page with none (`load_html`) has no network.
+    pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        let mut out = LivePump::default();
+        let net_rounds = self.config.script_network_rounds;
+        let loader = self.loader.clone();
+        let Some(view) = self.views.get_mut(&id) else {
+            return out;
+        };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return out;
+        };
+        let policy = view.script_policy.clone();
+        let document = view.url.clone();
+        let mut threw: Vec<(&str, String)> = Vec::new();
+
+        // Timers first: what they ask of the network is answered this turn.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
+        })) {
+            Ok(Ok(ran)) => out.timers_ran = ran,
+            Ok(Err(e)) => threw.push(("timers", e.to_string())),
+            Err(_) => threw.push(("timers", "JS engine panic".into())),
+        }
+        if let Some(policy) = policy {
+            // Delivery only: a timer a response handler sets runs on a later
+            // turn, when its time has passed.
+            let mut modules_fetched = 0;
+            let found = script_net::pump_all(
+                bindings,
+                &policy,
+                &loader,
+                tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
+                net_rounds,
+                None,
+                document.as_ref(),
+                &mut modules_fetched,
+            )
+            .await;
+            out.requests = found.requests;
+            threw.extend(found.threw.into_iter().map(|message| ("network", message)));
+            if found.poisoned {
+                threw.push(("network", "JS engine panic".into()));
+            }
+        }
+        threw.extend(bindings.take_reported_errors().into_iter().map(|message| ("timers", message)));
+        out.next_timer_ms = bindings.next_timer_delay();
+        for (source, message) in threw {
+            if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
+                break;
+            }
+            view.script_log.push(ScriptRecord {
+                source: source.to_string(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::Threw(message),
+            });
+        }
+
+        match self.flush_script_dom_writes(id) {
+            Ok(relaid_out) => out.relaid_out = relaid_out,
+            Err(e) => debug!(?id, error = %e, "relayout after a live turn failed"),
+        }
+        // What the callbacks added may show images the load never saw.
+        if out.relaid_out {
+            match self.load_images_added_by_scripts(id).await {
+                Ok(0) => {}
+                Ok(count) => {
+                    info!(count, "Loaded images added by live page scripts");
+                    if let Err(e) = self.relayout(id) {
+                        debug!(?id, error = %e, "relayout after live images failed");
+                    }
+                }
+                Err(e) => debug!(?id, error = %e, "Failed to load images added by live page scripts"),
+            }
+        }
+        if out.timers_ran > 0 || out.requests > 0 {
+            debug!(?id, ?out, "Live turn");
+        }
+        out
     }
 
     /// Deliver a key to the focused form control.
@@ -2715,6 +2843,7 @@ impl Engine {
         view.edit_states.clear();
         view.focused_node = None;
         view.script_log.clear();
+        view.script_policy = None;
 
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
@@ -2762,6 +2891,7 @@ impl Engine {
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
             view.bindings = Some(bindings);
+            view.script_policy = script_policy.clone();
         }
 
         // LAST GATE before we mutate anything visible: a stop that landed
@@ -3012,6 +3142,7 @@ impl Engine {
         view.edit_states.clear();
         view.focused_node = None;
         view.script_log.clear();
+        view.script_policy = None;
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -11739,13 +11870,14 @@ impl Engine {
     /// Apply what script's DOM writes invalidated (the DOM-bindings pin §3
     /// flush): one relayout for however many writes the script made. Runs
     /// once when script settles; `relayout` rebuilds style and layout in
-    /// full, so both `DomDirty` buckets take the same path for now.
-    fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+    /// full, so both `DomDirty` buckets take the same path for now. Returns
+    /// whether it laid out.
+    fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         let Some(view) = self.views.get_mut(&id) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(bindings) = view.bindings.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let dirty = bindings.take_dirty();
         // Script-set control values reach layout through edit state, the
@@ -11761,10 +11893,10 @@ impl Engine {
             }
         }
         if dirty == DomDirty::Clean {
-            return Ok(());
+            return Ok(false);
         }
         debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
-        self.relayout(id)
+        self.relayout(id).map(|_| true)
     }
 
     /// Get the current URL of a view.
@@ -20558,6 +20690,114 @@ mod node_identity_tests {
             Some("https://example.com/opened"),
             "the listener's new element must be in the layout the next click hits"
         );
+    }
+
+    // ---- the live loop runs what the page scheduled (Z lane I0, 2026-10-03) ----
+    //
+    // Pete's live testing: content that arrives after the load never shows.
+    // The load ran the page's timers on a virtual clock up to its horizon
+    // and then nothing ran them again: a `setTimeout` set by a click
+    // listener, or one due past the horizon, never fired.
+
+    fn pump(engine: &mut Engine, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(engine.pump_live(id, elapsed_ms))
+    }
+
+    /// A callback that adds a link below the 40px block at the top.
+    const ADD_LINK: &str = "function () { \
+         var a = document.createElement('a'); a.setAttribute('href', 'https://example.com/late'); \
+         a.style.display = 'block'; a.style.height = '40px'; a.textContent = 'late'; \
+         document.body.appendChild(a); }";
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_timer_set_after_the_load_fires_once_its_time_has_passed() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                r#"<html><body style="margin:0"><div style="height:40px">early</div></body></html>"#,
+            )
+            .expect("load_html");
+        js(&mut engine, id, &format!("setTimeout({ADD_LINK}, 300);"));
+
+        // Not yet due: nothing runs, and the loop is told when to come back.
+        let early = pump(&mut engine, id, 100);
+        assert_eq!((early.timers_ran, early.relaid_out, early.next_timer_ms), (0, false, Some(200)));
+        assert_eq!(engine.link_at_point(id, 5.0, 60.0), None);
+
+        // Due: it runs, and what it wrote is in the layout.
+        let late = pump(&mut engine, id, 250);
+        assert_eq!((late.timers_ran, late.relaid_out, late.next_timer_ms), (1, true, None));
+        assert_eq!(
+            engine.link_at_point(id, 5.0, 60.0).as_deref(),
+            Some("https://example.com/late")
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_timer_set_by_a_click_listener_fires_on_a_later_turn() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                r#"<html><body style="margin:0"><div id="menu" style="height:40px">menu</div></body></html>"#,
+            )
+            .expect("load_html");
+        js(
+            &mut engine,
+            id,
+            &format!(
+                "document.getElementById('menu').addEventListener('click', function () {{ setTimeout({ADD_LINK}, 50); }});"
+            ),
+        );
+        // The clock follows the loop, not the click: time that passed before
+        // the click does not count toward the timer it sets.
+        pump(&mut engine, id, 10_000);
+        engine.click_at_point(id, 5.0, 10.0);
+        assert_eq!(pump(&mut engine, id, 20).timers_ran, 0);
+        assert_eq!(engine.link_at_point(id, 5.0, 60.0), None);
+
+        assert_eq!(pump(&mut engine, id, 40).timers_ran, 1);
+        assert_eq!(
+            engine.link_at_point(id, 5.0, 60.0).as_deref(),
+            Some("https://example.com/late")
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn an_interval_keeps_firing_and_a_cleared_one_stops() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(id, r#"<html><body style="margin:0">tick</body></html>"#)
+            .expect("load_html");
+        js(&mut engine, id, "window.n = 0; window.t = setInterval(function () { n++; }, 100);");
+
+        // 250ms: due at 100 and 200, next at 300. It wrote nothing to the
+        // DOM, so nothing is laid out.
+        let turn = pump(&mut engine, id, 250);
+        assert_eq!((turn.timers_ran, turn.relaid_out, turn.next_timer_ms), (2, false, Some(50)));
+        assert_eq!(pump(&mut engine, id, 50).timers_ran, 1);
+
+        js(&mut engine, id, "clearInterval(t);");
+        let after = pump(&mut engine, id, 1_000);
+        assert_eq!((after.timers_ran, after.next_timer_ms), (0, None));
+        assert_eq!(js(&mut engine, id, "n"), format!("{:?}", rustkit_js::JsValue::Number(3.0)));
     }
 }
 

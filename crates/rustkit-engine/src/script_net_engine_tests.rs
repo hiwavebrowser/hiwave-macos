@@ -137,3 +137,46 @@ setTimeout(function () {
     // The page, plus four fetched requests; the refused one never connected.
     assert_eq!(server.hits.load(std::sync::atomic::Ordering::SeqCst), 5);
 }
+
+/// The live loop (Z lane I0): a request made after the load, here by the
+/// script a click or a late timer would run, is answered on the next turn of
+/// the loop under the same policy, and what its callback writes is laid out.
+#[test]
+fn a_fetch_made_after_the_load_is_answered_on_the_next_live_turn() {
+    let page = r#"<html><body style="margin:0"><div style="height:40px">early</div></body></html>"#;
+    let (mut engine, view, server) = load(
+        EngineConfig::default(),
+        vec![("/", "text/html", page.to_string())],
+    );
+    engine
+        .execute_script(
+            view,
+            "window.log = []; \
+             fetch('/late').then(function (r) { return r.text(); }).then(function (t) { \
+               log.push('late:' + t); \
+               var a = document.createElement('a'); a.setAttribute('href', 'https://example.com' + t); \
+               a.style.display = 'block'; a.style.height = '40px'; a.textContent = t; \
+               document.body.appendChild(a); }); \
+             fetch('http://127.0.0.2:' + location.port + '/secret').catch(function (e) { log.push('denied:' + e.message); });",
+        )
+        .unwrap();
+    assert_eq!(engine.link_at_point(view, 5.0, 60.0), None);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let turn = rt.block_on(engine.pump_live(view, 16));
+
+    assert_eq!((turn.requests, turn.relaid_out), (2, true));
+    assert_eq!(
+        engine.execute_script(view, "log.slice().sort().join('|')").unwrap(),
+        r#"String("denied:Failed to fetch|late:/late")"#
+    );
+    assert_eq!(
+        engine.link_at_point(view, 5.0, 60.0).as_deref(),
+        Some("https://example.com/late")
+    );
+    // The page and the one allowed request; the refused one never connected.
+    assert_eq!(server.hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+}

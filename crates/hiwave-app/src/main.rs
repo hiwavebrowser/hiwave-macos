@@ -1992,10 +1992,16 @@ fn main() {
     // so the current state has to be carried between them.
     let modifiers = std::rc::Rc::new(std::cell::Cell::new(tao::keyboard::ModifiersState::empty()));
     let click_proxy = proxy.clone();
+    // When the content page's next timer is due. The loop sleeps until
+    // input otherwise, and a sleeping loop runs no timers.
+    let live_wake = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        *control_flow = match live_wake.get() {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        };
 
         match event {
             Event::WindowEvent {
@@ -2259,6 +2265,10 @@ fn main() {
             Event::MainEventsCleared => {
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    // The page's clock catches up before it hears any input:
+                    // a timer a click sets counts from the click, not from
+                    // the last time the loop woke.
+                    view.process_events();
                     // Clicks come from the content NSView's own handlers in
                     // VIEW-LOCAL coordinates — already viewport space, no
                     // chrome-height/sidebar math and none of its staleness
@@ -2327,7 +2337,10 @@ fn main() {
                             view.relayout();
                         }
                     }
-                    view.process_events();
+                    // Timers that came due, late fetches, and what the
+                    // input above started; then sleep until the next timer.
+                    let sleep = view.process_events();
+                    live_wake.set(sleep.map(|d| std::time::Instant::now() + d));
                     view.render();
                 }
             }
