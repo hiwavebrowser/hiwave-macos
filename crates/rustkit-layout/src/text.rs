@@ -1122,12 +1122,24 @@ impl FontCache {
 ///
 /// The name is the provenance a capture carries so an oracle can refuse to
 /// attribute, rather than a feature flag: nothing in layout branches on it.
-pub const TEXT_SHAPER_BACKEND: &str = if cfg!(windows) {
-    "directwrite"
+pub const TEXT_SHAPER_BACKEND: &str = match TARGET_FONT_BACKEND {
+    Some(name) if TEXT_METRICS_ARE_FONT_DERIVED => name,
+    _ => "stub-0.5em",
+};
+
+/// The font-reading shaper each target is ported against, named once so the
+/// provenance test checks the current target's name instead of a hardcoded
+/// list. Linux names FreeType as hiwave-linux does; this tree compiles no
+/// FreeType body, so here Linux keeps `TEXT_METRICS_ARE_FONT_DERIVED` false
+/// and `TEXT_SHAPER_BACKEND` still reports the stub.
+pub const TARGET_FONT_BACKEND: Option<&str> = if cfg!(windows) {
+    Some("directwrite")
 } else if cfg!(target_os = "macos") {
-    "coretext"
+    Some("coretext")
+} else if cfg!(target_os = "linux") {
+    Some("freetype")
 } else {
-    "stub-0.5em"
+    None
 };
 
 /// Whether this build's text advances are measured from a real font face.
