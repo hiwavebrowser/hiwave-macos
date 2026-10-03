@@ -468,11 +468,11 @@ fn execute_actions(
                     let timeout = Duration::from_millis(a.timeout_ms.or(a.ms).unwrap_or(2000));
                     let wait_start = Instant::now();
                     let sel_json = serde_json::to_string(sel).unwrap_or_default();
-                    let check_js = format!("Boolean(document.querySelector({}))", sel_json);
+                    let check_js = format!("Boolean(document.querySelector({})) ? 'found' : 'missing'", sel_json);
                     let mut found = false;
                     while wait_start.elapsed() < timeout {
                         if let Ok(eval_res) = engine.execute_script(view_id, &check_js) {
-                            if eval_res.contains("true") {
+                            if eval_res.contains("found") && !eval_res.contains("missing") {
                                 found = true;
                                 break;
                             }
@@ -497,19 +497,19 @@ fn execute_actions(
                         let click_js = format!(
                             r#"(function() {{
                                 var el = document.querySelector({0});
-                                if (!el) return false;
+                                if (!el) return 'missing';
                                 if (typeof el.focus === 'function') el.focus();
                                 if (typeof el.click === 'function') {{
                                     el.click();
                                 }} else {{
                                     el.dispatchEvent(new Event('click', {{ bubbles: true, cancelable: true }}));
                                 }}
-                                return true;
+                                return 'clicked';
                             }})()"#,
                             s_json
                         );
                         if let Ok(eval_res) = engine.execute_script(view_id, &click_js) {
-                            if eval_res.contains("true") {
+                            if eval_res.contains("clicked") {
                                 clicked = true;
                                 a_res.selector_used = Some(s.to_string());
                                 break;
@@ -559,9 +559,6 @@ fn execute_actions(
                         text_json
                     );
                     let _ = engine.execute_script(view_id, &key_js);
-                    for ch in text.chars() {
-                        let _ = engine.handle_text_key(view_id, ch as u32, &ch.to_string(), false, false, false);
-                    }
                     let _ = engine.relayout(view_id);
                 } else if let Some(ref key) = a.key {
                     let key_code = match key.as_str() {

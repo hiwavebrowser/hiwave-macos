@@ -137,7 +137,7 @@ async function runActionsChrome(url, actionsArg, outDir, width, height, settleMs
       try {
         if (a.type === 'wait') {
           if (a.selector) {
-            await page.waitForSelector(a.selector, { timeout: a.ms || 2000 });
+            await page.waitForSelector(a.selector, { timeout: a.timeout_ms || a.ms || 2000 });
           } else {
             await page.waitForTimeout(a.ms || 500);
           }
