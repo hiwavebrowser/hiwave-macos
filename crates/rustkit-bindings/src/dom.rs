@@ -1300,6 +1300,17 @@ const WRAPPERS_JS: &str = r#"
         if (typeof p !== 'string' || /-[a-z]/.test(p)) return null;
         return 'data-' + p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
     }
+    // The DOMStringMap's names (HTML §3.2.6.6): each `data-*` attribute
+    // with no ASCII upper alpha after the prefix, `-x` camel-cased.
+    function dataNames(el) {
+        var out = [];
+        el.getAttributeNames().forEach(function (a) {
+            if (a.slice(0, 5) === 'data-' && !/[A-Z]/.test(a.slice(5))) {
+                out.push(a.slice(5).replace(/-([a-z])/g, function (m, c) { return c.toUpperCase(); }));
+            }
+        });
+        return out;
+    }
     getter(HTMLElement.prototype, 'dataset', function () {
         slotOf(this);
         var el = this, d = datasets.get(el);
@@ -1321,6 +1332,13 @@ const WRAPPERS_JS: &str = r#"
                 return true;
             },
             has: function (t, p) { var a = dataAttr(p); return !!a && el.hasAttribute(a); },
+            // Enumeration (Object.keys, for-in, JSON.stringify).
+            ownKeys: function () { return dataNames(el); },
+            getOwnPropertyDescriptor: function (t, p) {
+                var a = dataAttr(p), v = a ? el.getAttribute(a) : null;
+                return v === null ? undefined
+                    : { value: v, writable: true, enumerable: true, configurable: true };
+            },
             deleteProperty: function (t, p) {
                 var a = dataAttr(p);
                 if (a) el.removeAttribute(a);
@@ -1624,6 +1642,13 @@ const WRAPPERS_JS: &str = r#"
         if (!l) {
             l = Object.create(DOMTokenList.prototype);
             Object.defineProperty(l, TOKENS, { value: this });
+            // The indexed getter (`classList[0]`) answers like item().
+            l = new Proxy(l, {
+                get: function (t, p, r) {
+                    return typeof p === 'string' && /^(0|[1-9][0-9]*)$/.test(p)
+                        ? tokens(t)[Number(p)] : Reflect.get(t, p, r);
+                }
+            });
             classLists.set(this, l);
         }
         return l;
@@ -1948,6 +1973,13 @@ const WRAPPERS_JS: &str = r#"
         this.isTrusted = false;
         this.timeStamp = Date.now();
     }
+    // The legacy initializers; they do nothing during dispatch.
+    Event.prototype.initEvent = function (type, bubbles, cancelable) {
+        if (this.eventPhase !== 0) return;
+        this.type = String(type);
+        this.bubbles = !!bubbles;
+        this.cancelable = !!cancelable;
+    };
     Event.prototype.preventDefault = function () { if (this.cancelable) this.defaultPrevented = true; };
     Event.prototype.stopPropagation = function () { this[STOP] = true; };
     Event.prototype.stopImmediatePropagation = function () { this[STOP] = this[STOP_NOW] = true; };
@@ -1967,6 +1999,11 @@ const WRAPPERS_JS: &str = r#"
         constructor: { value: CustomEvent, writable: true, configurable: true }
     });
     Object.defineProperty(CustomEvent.prototype, Symbol.toStringTag, { value: 'CustomEvent' });
+    CustomEvent.prototype.initCustomEvent = function (type, bubbles, cancelable, detail) {
+        if (this.eventPhase !== 0) return;
+        this.initEvent(type, bubbles, cancelable);
+        this.detail = detail === undefined ? null : detail;
+    };
     g.Event = Event;
     g.CustomEvent = CustomEvent;
     HTMLElement.prototype.click = function () {
