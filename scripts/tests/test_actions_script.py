@@ -9,10 +9,14 @@ Validates:
 """
 
 import json
+import sys
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "scripts"))
+
 CATALOG_PATH = REPO / "websuite" / "interactions-top20.json"
 
 
