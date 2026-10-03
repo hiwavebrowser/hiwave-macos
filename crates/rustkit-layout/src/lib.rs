@@ -7754,7 +7754,7 @@ impl DisplayList {
                 // For URL backgrounds, emit a BackgroundImage command
                 // The actual image dimensions would come from the image cache
                 // For now, use container size as fallback
-                let size = self.convert_background_size(&layer.size);
+                let size = self.convert_background_size(&layer.size, container);
                 let position = self.convert_background_position(&layer.position);
                 let repeat = self.convert_background_repeat(layer.repeat);
 
@@ -7865,14 +7865,20 @@ impl DisplayList {
     }
 
     /// Convert rustkit_css::BackgroundSize to layout BackgroundSize.
-    fn convert_background_size(&self, size: &rustkit_css::BackgroundSize) -> BackgroundSize {
+    ///
+    /// A percentage rides the css `Explicit` variant as a negative value
+    /// and is resolved here against `container`, as
+    /// `calculate_background_rect` does for gradients: the painter knows
+    /// only px.
+    fn convert_background_size(&self, size: &rustkit_css::BackgroundSize, container: Rect) -> BackgroundSize {
+        let resolve = |v: f32, extent: f32| if v < 0.0 { extent * (-v / 100.0) } else { v };
         match size {
             rustkit_css::BackgroundSize::Auto => BackgroundSize::Auto,
             rustkit_css::BackgroundSize::Cover => BackgroundSize::Cover,
             rustkit_css::BackgroundSize::Contain => BackgroundSize::Contain,
             rustkit_css::BackgroundSize::Explicit { width, height } => BackgroundSize::Explicit {
-                width: *width,
-                height: *height,
+                width: width.map(|w| resolve(w, container.width)),
+                height: height.map(|h| resolve(h, container.height)),
             },
         }
     }
