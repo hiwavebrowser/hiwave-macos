@@ -352,8 +352,9 @@ fn svg_background_commands(
 }
 
 /// `svg` as an image document (`<img>`, CSS background): with no `viewBox`,
-/// one is synthesized from an absolute `width`/`height`, as Blink does for
-/// SVG images, so the document scales to the box it is drawn in. Without
+/// one is synthesized from an absolute `width`/`height` with
+/// `preserveAspectRatio="none"`, as Blink does for SVG images, so the
+/// document stretches to the box it is drawn in like a raster. Without
 /// it `render` drew it at its own size: a 100x100 data: square stayed
 /// 100x100 in a 48px `<img>`. An inline `<svg>` gets no such viewBox.
 fn image_svg(mut svg: rustkit_svg::SvgDocument) -> rustkit_svg::SvgDocument {
@@ -363,6 +364,7 @@ fn image_svg(mut svg: rustkit_svg::SvgDocument) -> rustkit_svg::SvgDocument {
             let (width, height) = (w.to_px(0.0), h.to_px(0.0));
             if absolute(w) && absolute(h) && width > 0.0 && height > 0.0 {
                 svg.view_box = Some(rustkit_svg::ViewBox { min_x: 0.0, min_y: 0.0, width, height });
+                svg.stretch = true;
             }
         }
     }
