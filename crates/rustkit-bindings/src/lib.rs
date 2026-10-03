@@ -30,6 +30,8 @@ mod web_interfaces_tests;
 mod web_blob_tests;
 #[cfg(test)]
 mod dom_utils_tests;
+#[cfg(test)]
+mod node_apis_tests;
 mod web_url;
 
 pub use dom::SelectorMatchFn;
