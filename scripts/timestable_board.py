@@ -208,14 +208,22 @@ def run_timestable_site(
             "diff_percent": diff_pct,
         }
 
-    # Internal motion 5s vs 10s
+    # Internal motion 1s vs 10s and 5s vs 10s
+    c_1s = site_out / "chrome_1s.png"
     c_5s = site_out / "chrome_5s.png"
     c_10s = site_out / "chrome_10s.png"
+    r_1s = site_out / "rustkit_1s.ppm"
     r_5s = site_out / "rustkit_5s.ppm"
     r_10s = site_out / "rustkit_10s.ppm"
 
+    result["chrome_motion_1_10"] = compare_frames(c_1s, c_10s)
+    result["rustkit_motion_1_10"] = compare_frames(r_1s, r_10s)
     result["chrome_motion_5_10"] = compare_frames(c_5s, c_10s)
     result["rustkit_motion_5_10"] = compare_frames(r_5s, r_10s)
+
+    c_m1_10 = result["chrome_motion_1_10"] or 0.0
+    r_m1_10 = result["rustkit_motion_1_10"] or 0.0
+    result["late_content"] = bool(c_m1_10 >= 1.0 and r_m1_10 < 0.2)
 
     d_1s = result["milestones"].get("1s", {}).get("diff_percent")
     d_5s = result["milestones"].get("5s", {}).get("diff_percent")
@@ -248,7 +256,12 @@ def main():
         sys.exit(1)
 
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    sites = catalog.get("sites", {})
+    raw_sites = catalog.get("sites", {})
+    if isinstance(raw_sites, list):
+        sites = {s["id"]: s for s in raw_sites}
+    else:
+        sites = raw_sites
+
     if args.site:
         if args.site not in sites:
             sys.stderr.write(f"Error: site {args.site} not found in catalog\n")
@@ -294,8 +307,13 @@ def main():
         d3 = ms.get("3s", {}).get("diff_percent")
         d5 = ms.get("5s", {}).get("diff_percent")
         d10 = ms.get("10s", {}).get("diff_percent")
+        c_m1_10 = site_res.get("chrome_motion_1_10")
+        r_m1_10 = site_res.get("rustkit_motion_1_10")
+        late = site_res.get("late_content")
+        c_m_str = f"{c_m1_10:.2f}%" if c_m1_10 is not None else "N/A"
+        r_m_str = f"{r_m1_10:.2f}%" if r_m1_10 is not None else "N/A"
         print(
-            f"  1s: {d1}% | 3s: {d3}% | 5s: {d5}% | 10s: {d10}% | Trajectory: {site_res['trajectory']}",
+            f"  1s: {d1}% | 3s: {d3}% | 5s: {d5}% | 10s: {d10}% | Trajectory: {site_res['trajectory']} | C-Mot(1-10): {c_m_str} | R-Mot(1-10): {r_m_str} | LateContent: {late}",
             flush=True,
         )
 
