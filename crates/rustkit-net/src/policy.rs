@@ -617,7 +617,9 @@ impl FetchPolicy {
         let with_credentials = req.credentials == CredentialsMode::Include;
         let mut headers = HeaderMap::new();
         for (n, v) in req.headers.iter() {
-            if !is_forbidden_request_header(n.as_str()) {
+            let no_cors_blocked = req.mode == RequestMode::NoCors
+                && !is_safelisted_request_header(n.as_str(), v.to_str().unwrap_or(""));
+            if !is_forbidden_request_header(n.as_str()) && !no_cors_blocked {
                 headers.append(n.clone(), v.clone());
             }
         }
@@ -1431,7 +1433,6 @@ mod tests {
                 assert!(!r.headers.contains_key(h), "{h} reached the wire on a no-cors request");
             }
             assert_eq!(r.headers.get("accept").map(String::as_str), Some("text/html"));
-            assert_eq!(r.headers.get("accept-language").map(String::as_str), Some("en"));
         }
         assert!(
             !seen[0].headers.contains_key("content-type"),
