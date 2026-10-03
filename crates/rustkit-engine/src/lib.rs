@@ -4595,6 +4595,8 @@ impl Engine {
                         element_ids,
                     );
                     note_snapshot_image(&b, explicit_width, explicit_height);
+                    // A click on the image targets the image.
+                    b.node_id = Some(node.id.raw());
                     return b;
                 }
 
@@ -4676,6 +4678,7 @@ impl Engine {
                             &tag_lower,
                             element_ids,
                         );
+                        svg_box.node_id = Some(node.id.raw());
                         return svg_box;
                     }
                     let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
@@ -4687,6 +4690,7 @@ impl Engine {
                         &tag_lower,
                         element_ids,
                     );
+                    svg_box.node_id = Some(node.id.raw());
                     return svg_box;
                 }
 
@@ -4812,6 +4816,10 @@ impl Engine {
                             &tag_lower,
                             element_ids,
                         );
+                        // Without its node, a click on the button was hit
+                        // on behalf of the button's parent and the button's
+                        // own listeners never ran.
+                        b.node_id = Some(node.id.raw());
                         return b;
                     }
                     // Element children present: fall through to normal box
