@@ -182,6 +182,7 @@ pub struct FetchPolicy {
     csp: Option<ContentSecurityPolicy>,
     limits: FetchLimits,
     total: AtomicUsize,
+    cancel: tokio::sync::watch::Sender<bool>,
     page_slots: Arc<Semaphore>,
     origin_slots: Mutex<HashMap<String, Arc<Semaphore>>>,
     preflight: Mutex<HashMap<String, PreflightEntry>>,
@@ -382,6 +383,7 @@ impl FetchPolicy {
             page_origin: Origin::from_url(&page_url),
             csp,
             total: AtomicUsize::new(0),
+            cancel: tokio::sync::watch::channel(false).0,
             page_slots: Arc::new(Semaphore::new(limits.max_in_flight_per_page)),
             origin_slots: Mutex::new(HashMap::new()),
             preflight: Mutex::new(HashMap::new()),
@@ -394,15 +396,34 @@ impl FetchPolicy {
 
     /// Cancel every request this policy has in flight or queued, and refuse
     /// any later one with `Denial::Cancelled`. Idempotent, any thread.
-    pub fn cancel(&self) {}
+    pub fn cancel(&self) {
+        self.cancel.send_replace(true);
+    }
 
     /// True once [`cancel`](Self::cancel) has been called.
     pub fn is_cancelled(&self) -> bool {
-        false
+        *self.cancel.borrow()
     }
 
     /// Run one request to completion under the policy.
+    ///
+    /// Racing the whole request against [`cancel`](Self::cancel) is what
+    /// closes the socket: dropping the in-flight future drops its connection
+    /// and releases its queue slots.
     pub async fn execute(
+        &self,
+        loader: &ResourceLoader,
+        req: ScriptRequest,
+    ) -> Result<ScriptResponse, Denial> {
+        let mut cancelled = self.cancel.subscribe();
+        tokio::select! {
+            biased;
+            _ = async { let _ = cancelled.wait_for(|c| *c).await; } => Err(Denial::Cancelled),
+            r = self.execute_governed(loader, req) => r,
+        }
+    }
+
+    async fn execute_governed(
         &self,
         loader: &ResourceLoader,
         req: ScriptRequest,
