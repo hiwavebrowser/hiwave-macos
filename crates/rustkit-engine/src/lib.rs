@@ -9622,7 +9622,7 @@ impl SelectorMatcher {
         // neither: building them walked every ancestor and every sibling of
         // every node a query visited, which on a wide page made one
         // `querySelector('x-tag')` cost milliseconds.
-        if false && prepared.is_context_free() {
+        if prepared.is_context_free() {
             return Some(SelectorMatcher.selector_matches_prepared(
                 &prepared,
                 &tag,
