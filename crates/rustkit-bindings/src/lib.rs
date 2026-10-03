@@ -2796,6 +2796,63 @@ mod tests {
         );
     }
 
+    // An `on<type>` content attribute is an event handler (HTML §8.1.8.1):
+    // its text is the body of `function (event)`, called with the element as
+    // `this`, with the element and its document in scope.
+    const INLINE: &str = "<html><body><div id='o'><a id='i' href='https://example.com/' \
+         onclick=\"window.seen = [this.id, event.type, id, typeof getElementById].join(':'); return false\">x</a>\
+         <b id='bad' onclick='this is not script'>y</b></div></body></html>";
+
+    #[test]
+    fn an_on_attribute_is_the_elements_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 var c = new Event('click', { bubbles: true, cancelable: true }); \
+                 log.push(i.dispatchEvent(c), c.defaultPrevented, window.seen); \
+                 i.setAttribute('onclick', 'window.seen = 2'); \
+                 var d = new Event('click', { bubbles: true, cancelable: true }); \
+                 log.push(i.dispatchEvent(d), window.seen); \
+                 log.join(',')"
+            ),
+            "false,true,i:click:i:function,true,2"
+        );
+    }
+
+    #[test]
+    fn an_assigned_handler_replaces_the_attributes_and_null_turns_it_off() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 i.onclick = function () { window.seen = 'property'; }; i.click(); log.push(window.seen); \
+                 i.onclick = null; window.seen = 'off'; i.click(); log.push(window.seen); \
+                 i.removeAttribute('onclick'); i.click(); log.push(window.seen); \
+                 log.join(',')"
+            ),
+            "property,off,off"
+        );
+    }
+
+    #[test]
+    fn an_on_attribute_that_does_not_compile_is_logged_once_and_not_thrown() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var bad = document.getElementById('bad'), log = []; \
+                 document.body.addEventListener('click', function () { log.push('bubbled'); }); \
+                 bad.click(); bad.click(); \
+                 log.push(window.__rustkit_errors.length, /SyntaxError/.test(window.__rustkit_errors[0])); \
+                 log.join(',')"
+            ),
+            "bubbled,bubbled,1,true"
+        );
+    }
+
     const ROW: &str =
         "<html><body><div id='r'><i id='a'>a</i><i id='b'>b</i><i id='c'>c</i></div><i id='x'>x</i></body></html>";
 
