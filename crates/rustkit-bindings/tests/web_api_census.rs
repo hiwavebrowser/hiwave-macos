@@ -38,7 +38,8 @@ fn eval_string(b: &DomBindings, script: &str) -> String {
 #[test]
 fn web_api_census() {
     let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-    b.set_document(Rc::new(Document::parse_html(PAGE).unwrap())).unwrap();
+    b.set_document(Rc::new(Document::parse_html(PAGE).unwrap()))
+        .unwrap();
     b.set_location(&Url::parse("https://census.test/start/index.html?a=1#top").unwrap())
         .unwrap();
     b.set_dimensions(1280.0, 800.0).unwrap();
@@ -62,7 +63,11 @@ fn web_api_census() {
     .unwrap();
     let json = eval_string(&b, "JSON.stringify(window.__census)");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
-    assert!(rows.len() >= 300, "probe should cover at least 300 APIs, got {}", rows.len());
+    assert!(
+        rows.len() >= 300,
+        "probe should cover at least 300 APIs, got {}",
+        rows.len()
+    );
 
     let count = |s: &str| rows.iter().filter(|r| r["status"] == s).count();
     println!(
@@ -74,7 +79,13 @@ fn web_api_census() {
     );
     for r in &rows {
         if r["status"] != "works" {
-            println!("  [{}] {} / {} {}", r["status"].as_str().unwrap(), r["area"].as_str().unwrap(), r["name"].as_str().unwrap(), r["detail"].as_str().unwrap());
+            println!(
+                "  [{}] {} / {} {}",
+                r["status"].as_str().unwrap(),
+                r["area"].as_str().unwrap(),
+                r["name"].as_str().unwrap(),
+                r["detail"].as_str().unwrap()
+            );
         }
     }
     if let Ok(path) = std::env::var("WEB_API_CENSUS_OUT") {
