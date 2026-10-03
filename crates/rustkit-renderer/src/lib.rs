@@ -2123,9 +2123,10 @@ impl Renderer {
                 rect,
                 size,
                 position,
+                offset,
                 repeat,
             } => {
-                self.draw_background_image(url, *rect, size, *position, repeat);
+                self.draw_background_image(url, *rect, size, *position, *offset, repeat);
             }
 
             DisplayCommand::BoxShadow {
@@ -5540,6 +5541,7 @@ impl Renderer {
         container: Rect,
         size: &BackgroundSize,
         position: (f32, f32),
+        offset: (f32, f32),
         repeat: &BackgroundRepeat,
     ) {
         // Get the texture to retrieve image dimensions
@@ -5554,7 +5556,7 @@ impl Renderer {
             return;
         }
 
-        for tile in rustkit_layout::background_tiles(container, size, position, *repeat, image_width, image_height) {
+        for tile in rustkit_layout::background_tiles(container, size, position, offset, *repeat, image_width, image_height) {
             self.draw_background_image_tile(url, tile, container);
         }
     }

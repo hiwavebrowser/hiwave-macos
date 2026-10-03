@@ -6225,6 +6225,10 @@ pub enum DisplayCommand {
         size: BackgroundSize,
         /// Background position (0-1 range)
         position: (f32, f32),
+        /// Px added to the position: a `background-position` length
+        /// (`10px 20px`, a sprite's `-40px -30px`). Zero on an axis
+        /// positioned by a percentage or keyword.
+        offset: (f32, f32),
         /// Background repeat
         repeat: BackgroundRepeat,
     },
@@ -6710,7 +6714,8 @@ impl BackgroundRepeat {
 
 /// Where each copy of a background image goes: the tiles intersecting
 /// `container` for an image of `image_width` x `image_height`, sized by
-/// `size`, placed by `position` (0-1 per axis) and laid out by `repeat`.
+/// `size`, placed by `position` (0-1 per axis) plus `offset` px and laid
+/// out by `repeat`.
 /// Tiles are unclipped; the painter clips them to `container`.
 ///
 /// Moved out of the renderer so the raster lane and the engine's SVG
@@ -6720,6 +6725,7 @@ pub fn background_tiles(
     container: Rect,
     size: &BackgroundSize,
     position: (f32, f32),
+    offset: (f32, f32),
     repeat: BackgroundRepeat,
     image_width: f32,
     image_height: f32,
@@ -6734,8 +6740,8 @@ pub fn background_tiles(
         return tiles;
     }
 
-    let mut start_x = container.x + (container.width - bg_width) * position.0;
-    let mut start_y = container.y + (container.height - bg_height) * position.1;
+    let mut start_x = container.x + (container.width - bg_width) * position.0 + offset.0;
+    let mut start_y = container.y + (container.height - bg_height) * position.1 + offset.1;
 
     // Adjust size and spacing for space/round modes
     let mut adjusted_bg_width = bg_width;
@@ -7754,8 +7760,8 @@ impl DisplayList {
                 // For URL backgrounds, emit a BackgroundImage command
                 // The actual image dimensions would come from the image cache
                 // For now, use container size as fallback
-                let size = self.convert_background_size(&layer.size);
-                let position = self.convert_background_position(&layer.position);
+                let size = self.convert_background_size(&layer.size, container);
+                let (position, offset) = self.convert_background_position(&layer.position);
                 let repeat = self.convert_background_repeat(layer.repeat);
 
                 self.commands.push(DisplayCommand::BackgroundImage {
@@ -7763,6 +7769,7 @@ impl DisplayList {
                     rect: container,
                     size,
                     position,
+                    offset,
                     repeat,
                 });
             }
@@ -7865,29 +7872,35 @@ impl DisplayList {
     }
 
     /// Convert rustkit_css::BackgroundSize to layout BackgroundSize.
-    fn convert_background_size(&self, size: &rustkit_css::BackgroundSize) -> BackgroundSize {
+    ///
+    /// A percentage rides the css `Explicit` variant as a negative value
+    /// and is resolved here against `container`, as
+    /// `calculate_background_rect` does for gradients: the painter knows
+    /// only px.
+    fn convert_background_size(&self, size: &rustkit_css::BackgroundSize, container: Rect) -> BackgroundSize {
+        let resolve = |v: f32, extent: f32| if v < 0.0 { extent * (-v / 100.0) } else { v };
         match size {
             rustkit_css::BackgroundSize::Auto => BackgroundSize::Auto,
             rustkit_css::BackgroundSize::Cover => BackgroundSize::Cover,
             rustkit_css::BackgroundSize::Contain => BackgroundSize::Contain,
             rustkit_css::BackgroundSize::Explicit { width, height } => BackgroundSize::Explicit {
-                width: *width,
-                height: *height,
+                width: width.map(|w| resolve(w, container.width)),
+                height: height.map(|h| resolve(h, container.height)),
             },
         }
     }
 
-    /// Convert rustkit_css::BackgroundPosition to (f32, f32) tuple.
-    fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> (f32, f32) {
-        let x = match &pos.x {
-            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
-            rustkit_css::BackgroundPositionValue::Px(_) => 0.0, // Will be handled in rendering
+    /// Convert rustkit_css::BackgroundPosition to the command's
+    /// `(position, offset)`: a percentage is the 0-1 position with no
+    /// offset, a length is position 0 with that many px of offset.
+    fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> ((f32, f32), (f32, f32)) {
+        let axis = |v: &rustkit_css::BackgroundPositionValue| match v {
+            rustkit_css::BackgroundPositionValue::Percent(p) => (*p, 0.0),
+            rustkit_css::BackgroundPositionValue::Px(px) => (0.0, *px),
         };
-        let y = match &pos.y {
-            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
-            rustkit_css::BackgroundPositionValue::Px(_) => 0.0,
-        };
-        (x, y)
+        let (x, offset_x) = axis(&pos.x);
+        let (y, offset_y) = axis(&pos.y);
+        ((x, y), (offset_x, offset_y))
     }
 
     /// Convert rustkit_css::BackgroundRepeat to layout BackgroundRepeat.
@@ -9135,6 +9148,106 @@ mod tests {
         // Negative leading is signed, then floored (n57 + #209): 15 + 3 on a
         // 16px line leaves -1 above, so the baseline is 14, not the clamped 15.
         assert_eq!(blink_baseline_offset(16.0, 15.46875, 3.375), 14.0);
+    }
+
+    /// The one tile a no-repeat url background paints in a 300x200 box,
+    /// for a 240x210 image.
+    fn url_background_tile(size: rustkit_css::BackgroundSize) -> Rect {
+        url_background_tile_at(size, rustkit_css::BackgroundPosition::default())
+    }
+
+    fn url_background_tile_at(
+        size: rustkit_css::BackgroundSize,
+        position: rustkit_css::BackgroundPosition,
+    ) -> Rect {
+        let mut style = ComputedStyle::new();
+        style.background_layers = vec![rustkit_css::BackgroundLayer {
+            image: rustkit_css::BackgroundImage::Url("dinosaur.png".to_string()),
+            size,
+            position,
+            repeat: rustkit_css::BackgroundRepeat::NoRepeat,
+            ..Default::default()
+        }];
+        let mut card = LayoutBox::new(BoxType::Block, style);
+        card.dimensions.content = Rect::new(10.0, 20.0, 300.0, 200.0);
+
+        let list = DisplayList::build(&card);
+        let (rect, size, position, offset, repeat) = list
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::BackgroundImage { rect, size, position, offset, repeat, .. } => {
+                    Some((*rect, size.clone(), *position, *offset, *repeat))
+                }
+                _ => None,
+            })
+            .expect("a url background must emit a BackgroundImage command");
+        let tiles = background_tiles(rect, &size, position, offset, repeat, 240.0, 210.0);
+        assert_eq!(tiles.len(), 1, "{tiles:?}");
+        tiles[0]
+    }
+
+    #[test]
+    fn test_url_background_percentage_size_resolves_against_its_box() {
+        // Percentages ride the Explicit variant as negative values. The
+        // gradient lane resolves them (calculate_background_rect); the url
+        // lane passed them through, so `background-size: 50% auto` reached
+        // the painter as a -50px image and painted nothing (Chrome paints
+        // it 150 wide, 131.25 tall in a 300x200 box).
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: Some(-50.0),
+            height: None,
+        });
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (10.0, 20.0, 150.0, 131.25));
+
+        // `auto 100%`: the height is the box's, the width keeps the ratio.
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: None,
+            height: Some(-100.0),
+        });
+        assert_eq!((tile.y, tile.height), (20.0, 200.0));
+        assert!((tile.width - 200.0 * 240.0 / 210.0).abs() < 0.01, "{tile:?}");
+
+        // Control: a px size is not a percentage.
+        let tile = url_background_tile(rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        });
+        assert_eq!((tile.width, tile.height), (100.0, 50.0));
+    }
+
+    #[test]
+    fn test_url_background_px_position_offsets_the_image() {
+        // `background-position: 10px 20px` reached the painter as 0 0 (the
+        // px arm was "handled in rendering", which never happened), so a
+        // sprite sheet always showed its top-left cell.
+        let px = rustkit_css::BackgroundPositionValue::Px;
+        let size = rustkit_css::BackgroundSize::Explicit {
+            width: Some(100.0),
+            height: Some(50.0),
+        };
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: px(10.0), y: px(20.0) },
+        );
+        assert_eq!((tile.x, tile.y, tile.width, tile.height), (20.0, 40.0, 100.0, 50.0));
+
+        // A sprite cell: negative offsets pull the image up and left.
+        let tile = url_background_tile_at(
+            size.clone(),
+            rustkit_css::BackgroundPosition { x: px(-40.0), y: px(-30.0) },
+        );
+        assert_eq!((tile.x, tile.y), (-30.0, -10.0));
+
+        // Mixed: px on one axis, a percentage on the other.
+        let tile = url_background_tile_at(
+            size,
+            rustkit_css::BackgroundPosition {
+                x: px(10.0),
+                y: rustkit_css::BackgroundPositionValue::Percent(1.0),
+            },
+        );
+        assert_eq!((tile.x, tile.y), (20.0, 170.0));
     }
 
     #[test]

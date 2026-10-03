@@ -338,6 +338,7 @@ fn svg_background_commands(
     rect: rustkit_layout::Rect,
     size: &rustkit_layout::BackgroundSize,
     position: (f32, f32),
+    offset: (f32, f32),
     repeat: rustkit_layout::BackgroundRepeat,
 ) -> Vec<rustkit_layout::DisplayCommand> {
     let (width, height) = match (&svg.width, &svg.height, &svg.view_box) {
@@ -348,7 +349,7 @@ fn svg_background_commands(
         }
         _ => (rect.width, rect.height),
     };
-    let mut tiles = rustkit_layout::background_tiles(rect, size, position, repeat, width, height);
+    let mut tiles = rustkit_layout::background_tiles(rect, size, position, offset, repeat, width, height);
     if tiles.is_empty() {
         return Vec::new();
     }
@@ -3175,10 +3176,11 @@ impl Engine {
                         rect,
                         size,
                         position,
+                        offset,
                         repeat,
                     } => {
                         if let Some(svg) = self.svg_cache.get(url) {
-                            expanded.extend(svg_background_commands(svg, *rect, size, *position, *repeat));
+                            expanded.extend(svg_background_commands(svg, *rect, size, *position, *offset, *repeat));
                             continue;
                         }
                     }
@@ -10970,6 +10972,7 @@ impl Engine {
                     rect: r,
                     size,
                     position,
+                    offset,
                     repeat,
                 } => serde_json::json!({
                     "op": "background_image",
@@ -10977,6 +10980,7 @@ impl Engine {
                     "rect": rect(r),
                     "size": format!("{:?}", size),
                     "position": { "x": position.0, "y": position.1 },
+                    "offset": { "x": offset.0, "y": offset.1 },
                     "repeat": format!("{:?}", repeat)
                 }),
                 Cmd::BoxShadow {
