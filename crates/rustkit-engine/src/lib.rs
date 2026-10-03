@@ -541,6 +541,8 @@ pub struct EngineConfig {
     /// start more requests; whatever is still pending after the last round
     /// completes with a network error.
     pub script_network_rounds: u32,
+    /// Optional replay proxy URL (test-only, for deterministic HAR replay).
+    pub replay_proxy: Option<Url>,
 }
 
 impl Default for EngineConfig {
@@ -557,6 +559,7 @@ impl Default for EngineConfig {
             subresource_budget_ms: 8_000,
             script_network_enabled: true,
             script_network_rounds: 8,
+            replay_proxy: None,
         }
     }
 }
@@ -1174,6 +1177,7 @@ impl Engine {
         let loader_config = LoaderConfig {
             user_agent: config.user_agent.clone(),
             cookies_enabled: config.cookies_enabled,
+            replay_proxy: config.replay_proxy.clone(),
             ..Default::default()
         };
         let loader = Arc::new(
@@ -12314,6 +12318,12 @@ impl EngineBuilder {
     /// Disable animations for deterministic parity testing.
     pub fn disable_animations(mut self, disable: bool) -> Self {
         self.config.disable_animations = disable;
+        self
+    }
+
+    /// Set an optional replay proxy URL for deterministic testing (test-only).
+    pub fn replay_proxy(mut self, proxy: Option<Url>) -> Self {
+        self.config.replay_proxy = proxy;
         self
     }
 
