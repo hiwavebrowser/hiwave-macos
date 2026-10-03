@@ -3035,6 +3035,7 @@ impl Engine {
                         if let Some(abs) = self.resolve_resource_url_in(id, url) {
                             *url = abs.to_string();
                         }
+                        self.cache_data_svg(url);
                     }
                     _ => {}
                 }
@@ -8035,6 +8036,33 @@ impl Engine {
                 Err(e) => {
                     debug!(?e, "Inline SVG failed to parse; box stays unpainted");
                 }
+            }
+        }
+    }
+
+    /// Parse a `data:image/svg+xml` image into svg_cache under its own url,
+    /// the key the display-list splice looks up, so it paints as vector
+    /// commands like a fetched SVG. Left to the raster lane, ImageManager's
+    /// stand-in rasterizer drew only solid `<rect>`s (bing's gradient logo
+    /// painted nothing). A data: url needs no request, so this runs at the
+    /// splice: the first layout paints it, and so does any later one.
+    fn cache_data_svg(&mut self, url: &str) {
+        if !url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) || self.svg_cache.contains_key(url) {
+            return;
+        }
+        let Ok((media_type, body)) = rustkit_net::decode_data_url(url) else {
+            return;
+        };
+        let essence = media_type.split(';').next().unwrap_or_default().trim();
+        if !essence.eq_ignore_ascii_case("image/svg+xml") {
+            return;
+        }
+        match rustkit_svg::SvgDocument::parse(&String::from_utf8_lossy(&body)) {
+            Ok(doc) => {
+                self.svg_cache.insert(url.to_string(), doc);
+            }
+            Err(e) => {
+                debug!(?e, "data: SVG image failed to parse; left to the raster lane");
             }
         }
     }
