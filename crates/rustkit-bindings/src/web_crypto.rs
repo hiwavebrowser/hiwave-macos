@@ -1,17 +1,19 @@
 //! `crypto.getRandomValues` and `crypto.randomUUID` for page script.
 //!
-//! The bytes come from the OS random source (`/dev/urandom`, which macOS and
-//! Linux both provide) through one host function that answers with hex;
+//! The bytes come from the OS random source (`/dev/urandom` on macOS and
+//! Linux, `RtlGenRandom` on Windows) through one host function that answers with hex;
 //! `web_crypto.js` is the object layer over it. No new dependency: nothing
 //! in this crate's tree already reaches the OS RNG.
 
 use rustkit_js::{JsError, JsRuntime, JsValue};
+#[cfg(not(windows))]
 use std::io::Read;
 
 /// Web Crypto §10.1.1: at most 65536 bytes per call.
 const MAX_BYTES: usize = 65536;
 
 /// `n` bytes from the OS random source, or `None` when it cannot be read.
+#[cfg(not(windows))]
 fn random_bytes(n: usize) -> Option<Vec<u8>> {
     let mut bytes = vec![0u8; n];
     std::fs::File::open("/dev/urandom")
@@ -19,6 +21,28 @@ fn random_bytes(n: usize) -> Option<Vec<u8>> {
         .read_exact(&mut bytes)
         .ok()?;
     Some(bytes)
+}
+
+/// Windows has no `/dev/urandom`: it fills from `RtlGenRandom`
+/// (`SystemFunction036` in advapi32), the CSPRNG the CRT and Rust's own
+/// `HashMap` seeding use. Without this, `crypto.getRandomValues` and
+/// `crypto.randomUUID` threw `OperationError` on every Windows page.
+#[cfg(windows)]
+fn random_bytes(n: usize) -> Option<Vec<u8>> {
+    #[link(name = "advapi32")]
+    extern "system" {
+        #[link_name = "SystemFunction036"]
+        fn rtl_gen_random(buffer: *mut u8, length: u32) -> u8;
+    }
+    let mut bytes = vec![0u8; n];
+    // The call takes a u32 length; the caller caps n at 65536.
+    let length = u32::try_from(n).ok()?;
+    if length == 0 {
+        return Some(bytes);
+    }
+    // SAFETY: `bytes` is a live allocation of exactly `length` bytes.
+    let ok = unsafe { rtl_gen_random(bytes.as_mut_ptr(), length) };
+    (ok != 0).then_some(bytes)
 }
 
 pub(crate) fn install(runtime: &mut JsRuntime) -> Result<(), JsError> {
