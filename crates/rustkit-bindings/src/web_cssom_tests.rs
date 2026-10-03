@@ -42,8 +42,8 @@ fn document_style_sheets_lists_style_and_stylesheet_links_in_order() {
             &b,
             "var l = document.styleSheets, r = [l.length, l instanceof StyleSheetList]; \
              for (var i = 0; i < l.length; i++) r.push(l[i].ownerNode.id || l[i].ownerNode.localName); \
-             r.push(l.item(0) === document.getElementById('s1').sheet, l.item(9), l[1].href, \
-                    l[0].href, l[0].type, l[0] instanceof CSSStyleSheet, l[0] instanceof StyleSheet, \
+             r.push(l.item(0) === document.getElementById('s1').sheet, String(l.item(9)), l[1].href, \
+                    String(l[0].href), l[0].type, l[0] instanceof CSSStyleSheet, l[0] instanceof StyleSheet, \
                     Array.from(l).length); \
              r.join(',')"
         ),
@@ -54,9 +54,9 @@ fn document_style_sheets_lists_style_and_stylesheet_links_in_order() {
         ev(
             &b,
             "var s = document.createElement('style'); s.textContent = 'p{color:red}'; \
-             var r = [s.sheet]; document.head.appendChild(s); \
+             var r = [String(s.sheet)]; document.head.appendChild(s); \
              r.push(document.styleSheets.length, s.sheet === s.sheet, s.sheet.cssRules.length); \
-             s.remove(); r.push(document.styleSheets.length, s.sheet); r.join(',')"
+             s.remove(); r.push(document.styleSheets.length, String(s.sheet)); r.join(',')"
         ),
         "null,4,true,1,3,null"
     );
@@ -149,7 +149,7 @@ fn constructed_sheets_replace_and_adopt() {
     assert_eq!(
         ev(
             &b,
-            "var s = new CSSStyleSheet(), r = [s.cssRules.length, s.ownerNode, s.href, s.disabled]; \
+            "var s = new CSSStyleSheet(), r = [s.cssRules.length, String(s.ownerNode), String(s.href), s.disabled]; \
              s.replaceSync('p { color: red } div { color: blue }'); r.push(s.cssRules.length); \
              s.insertRule('span { top: 0 }', 2); s.deleteRule(0); \
              r.push(Array.from(s.cssRules).map(function (x) { return x.selectorText; }).join('+')); \
@@ -169,7 +169,7 @@ fn constructed_sheets_replace_and_adopt() {
     ev(
         &b,
         "globalThis.got = ''; var s = new CSSStyleSheet(); \
-         s.replace('a { color: red }').then(function (x) { got = (x === s) + ',' + x.cssRules.length; });",
+         s.replace('a { color: red }').then(function (x) { got = (x === s) + ',' + x.cssRules.length; }); '';",
     );
     assert_eq!(ev(&b, "got"), "true,1");
 }
@@ -188,7 +188,7 @@ fn css_supports_answers_from_the_engine_property_list() {
               CSS.supports('not (frob: 1)'), CSS.supports('selector(.a > b)'), CSS.supports('garbage'), \
               CSS.supports('DISPLAY', 'block'), CSS.supports('width', 'inherit')].join()"
         ),
-        "true,false,true,true,true,true,false,false,false,true,true,false,true,true,true,false,false,true"
+        "true,false,true,true,true,true,false,false,false,true,true,false,true,true,true,false,true,true"
     );
 }
 
