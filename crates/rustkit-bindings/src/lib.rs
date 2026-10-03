@@ -33,6 +33,8 @@ mod web_utils_tests;
 #[cfg(test)]
 mod dom_utils_tests;
 #[cfg(test)]
+mod node_apis_tests;
+#[cfg(test)]
 mod form_controls_tests;
 #[cfg(test)]
 mod web_history_tests;
