@@ -617,7 +617,9 @@ impl FetchPolicy {
         let with_credentials = req.credentials == CredentialsMode::Include;
         let mut headers = HeaderMap::new();
         for (n, v) in req.headers.iter() {
-            if !is_forbidden_request_header(n.as_str()) {
+            let no_cors_blocked = req.mode == RequestMode::NoCors
+                && !is_safelisted_request_header(n.as_str(), v.to_str().unwrap_or(""));
+            if !is_forbidden_request_header(n.as_str()) && !no_cors_blocked {
                 headers.append(n.clone(), v.clone());
             }
         }
@@ -1395,6 +1397,51 @@ mod tests {
         let mut same = ScriptRequest::get(s.url("/"));
         same.mode = RequestMode::SameOrigin;
         assert_eq!(p.execute(&loader(), same).await.unwrap_err(), Denial::SameOriginOnly);
+    }
+
+    #[tokio::test]
+    async fn a_no_cors_request_never_carries_a_non_safelisted_header() {
+        // The Request guard in script is the first line; this is the boundary
+        // that must hold even if script lets one through (no preflight runs
+        // for no-cors, so nothing else would stop Authorization at the wire).
+        let s = serve(|_| resp(200, &[("Content-Type", "text/plain")], b"ok")).await;
+        let p = allow_ports(page("http://page.test/"), &[s.port]);
+        let l = loader();
+        let mk = |ct: &str| {
+            let mut req = ScriptRequest::get(s.url("/"));
+            req.mode = RequestMode::NoCors;
+            req.method = Method::POST;
+            req.body = Some(Bytes::from_static(b"a=1"));
+            for (k, v) in [
+                ("authorization", "Bearer s3cret"),
+                ("x-custom", "1"),
+                ("range", "bytes=0-9"),
+                ("accept", "text/html"),
+                ("accept-language", "en"),
+                ("content-type", ct),
+            ] {
+                req.headers.insert(k, HeaderValue::from_str(v).unwrap());
+            }
+            req
+        };
+        p.execute(&l, mk("application/json")).await.expect("opaque");
+        p.execute(&l, mk("text/plain;charset=UTF-8")).await.expect("opaque");
+        let seen = s.seen();
+        assert_eq!(seen.len(), 2);
+        for r in &seen {
+            for h in ["authorization", "x-custom", "range"] {
+                assert!(!r.headers.contains_key(h), "{h} reached the wire on a no-cors request");
+            }
+            assert_eq!(r.headers.get("accept").map(String::as_str), Some("text/html"));
+        }
+        assert!(
+            !seen[0].headers.contains_key("content-type"),
+            "a non-safelisted Content-Type reached the wire on a no-cors request"
+        );
+        assert_eq!(
+            seen[1].headers.get("content-type").map(String::as_str),
+            Some("text/plain;charset=UTF-8")
+        );
     }
 
     #[tokio::test]
