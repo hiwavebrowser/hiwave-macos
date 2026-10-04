@@ -21763,6 +21763,66 @@ mod node_identity_tests {
         engine.execute_script(id, script).expect("script")
     }
 
+    // A press on one element released on another sent `click` to the
+    // release's element and followed the link there. Chrome sends it to
+    // the nearest element both are in (`click:BODY` in the two oracle
+    // logs), so a press on one link dragged onto another follows neither.
+
+    const DRAG_CLICK_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<a id="one" href="https://example.test/one" style="display:block">"#,
+        r#"<div id="s1" style="height:20px">first</div><div id="s2" style="height:20px">second</div></a>"#,
+        r#"<a id="two" href="https://example.test/two" style="display:block;height:40px">two</a>"#,
+        r#"<fieldset id="off" disabled style="margin:0;padding:0;border:0">"#,
+        r#"<button id="b1" style="display:block;height:30px;margin:0">one</button>"#,
+        r#"<button id="b2" style="display:block;height:30px;margin:0">two</button></fieldset>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_press_and_a_release_on_different_elements_click_their_common_ancestor() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DRAG_CLICK_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             ['mouseup', 'click'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push(t + ':' + (e.target.id || e.target.nodeName) + ':' + e.offsetY); }); });",
+        );
+        let mut drag = |engine: &mut Engine, from: f32, to: f32| -> (String, Option<String>) {
+            engine.mouse_down_at_point(id, 12.0, from);
+            engine.mouse_move_at_point(id, 12.0, to);
+            let outcome = engine.click_at_point(id, 12.0, to);
+            (js(engine, id, "var out = log.join(' '); log.length = 0; out"), outcome.navigate)
+        };
+
+        // On one element: its click, and its link.
+        assert_eq!(
+            drag(&mut engine, 10.0, 12.0),
+            (js_string("mouseup:s1:12 click:s1:12"), Some("https://example.test/one".to_string()))
+        );
+        // Two elements of one link: the click is the link's, and it is followed.
+        assert_eq!(
+            drag(&mut engine, 10.0, 30.0),
+            (js_string("mouseup:s2:10 click:one:30"), Some("https://example.test/one".to_string()))
+        );
+        // From one link onto another: the click is the body's; neither is followed.
+        assert_eq!(drag(&mut engine, 10.0, 60.0), (js_string("mouseup:two:20 click:BODY:60"), None));
+        // Two controls of a disabled fieldset: the click would be the
+        // fieldset's, which is not a control; it is dispatched.
+        assert_eq!(drag(&mut engine, 90.0, 120.0), (js_string("mouseup:b2:10 click:off:40"), None));
+        // A release with no press before it is a click where it lands.
+        let outcome = engine.click_at_point(id, 12.0, 60.0);
+        assert_eq!(outcome.navigate.as_deref(), Some("https://example.test/two"));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("mouseup:two:20 click:two:20"));
+    }
+
     // The focus moved at the release, whatever the page did with the
     // press: a list of options under a field cancels `mousedown` so the
     // field keeps its focus while an option is clicked, and here the field
@@ -21807,18 +21867,6 @@ mod node_identity_tests {
         fn taken(engine: &mut Engine, id: EngineViewId) -> String {
             js(engine, id, "var out = log.join(' '); log.length = 0; out")
         }
-        // The click of a press and a release on different elements goes to
-        // their common ancestor in Chrome and to the release's element
-        // here: left out of this comparison.
-        fn taken_without_click(engine: &mut Engine, id: EngineViewId) -> String {
-            js(
-                engine,
-                id,
-                "var out = log.filter(function (l) { return l.indexOf('click:') !== 0; }).join(' '); \
-                 log.length = 0; out",
-            )
-        }
-
         // In #f: the focus arrives at the press, after `mousedown`.
         engine.mouse_down_at_point(id, 12.0, 15.0);
         assert_eq!(
@@ -21914,10 +21962,11 @@ mod node_identity_tests {
         engine.mouse_move_at_point(id, 12.0, 160.0);
         engine.click_at_point(id, 12.0, 160.0);
         assert_eq!(
-            taken_without_click(&mut engine, id),
+            taken(&mut engine, id),
             js_string(concat!(
                 "pointerup:drag:null:f ",
-                "mouseup:drag:null:f"
+                "mouseup:drag:null:f ",
+                "click:BODY:null:f"
             ))
         );
         // A cancelled `pointerdown`: no `mousedown`, and no focus move.
