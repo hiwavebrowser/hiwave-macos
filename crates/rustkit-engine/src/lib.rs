@@ -167,6 +167,8 @@ mod script_net_tests;
 mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_module_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_fresh_layout_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -2436,16 +2438,43 @@ impl Engine {
         budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
     ) {
+        // The page's scripts run on the view's bindings and log, taken out of
+        // the view for the run so that the engine can lay the page out again
+        // between the lifecycle steps (`refresh_layout_for_script`), which
+        // needs the view. `&mut self` is held for the whole run, so nothing
+        // else can look for them meanwhile.
+        let (bindings, mut log) = match self.views.get_mut(&id) {
+            Some(view) => match view.bindings.take() {
+                Some(bindings) => (bindings, std::mem::take(&mut view.script_log)),
+                None => return,
+            },
+            None => return,
+        };
+        self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log).await;
+        if let Some(view) = self.views.get_mut(&id) {
+            log.append(&mut view.script_log);
+            view.script_log = log;
+            view.bindings = Some(bindings);
+        }
+    }
+
+    async fn run_page_scripts_with(
+        &mut self,
+        id: EngineViewId,
+        fetched: Vec<FetchedScript>,
+        budget: std::time::Duration,
+        policy: Option<Arc<FetchPolicy>>,
+        bindings: &DomBindings,
+        log: &mut Vec<ScriptRecord>,
+    ) {
         let started = std::time::Instant::now();
         let horizon_ms = self.config.timer_horizon_ms;
         let loop_limit = self.config.script_loop_iteration_limit;
         let net_rounds = self.config.script_network_rounds;
         let loader = self.loader.clone();
-        let Some(view) = self.views.get_mut(&id) else { return };
+        let Some(view) = self.views.get(&id) else { return };
         let document_url = view.url.clone();
         let view_document = view.document.clone();
-        let Some(bindings) = view.bindings.as_ref() else { return };
-        let log = &mut view.script_log;
         bindings.set_loop_iteration_limit(loop_limit);
 
         // Execution order: classic, defer (module scripts run here, in
@@ -2752,6 +2781,9 @@ impl Engine {
             }),
         ];
         for (source, step) in steps {
+            // What the scripts (or the previous step) wrote is laid out
+            // before the next step runs, so its script reads fresh geometry.
+            self.refresh_layout_for_script(id, bindings);
             info!(%source, "Running page lifecycle step");
             let step_started = std::time::Instant::now();
             let record = run(source.to_string(), 0, step);
@@ -12042,30 +12074,65 @@ impl Engine {
             return Ok(false);
         };
         let dirty = bindings.take_dirty();
+        Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
+        if dirty == DomDirty::Clean {
+            return Ok(false);
+        }
+        debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
+        self.relayout(id).map(|_| true)
+    }
+
+    /// Script-set control values and checkedness, copied into the view's
+    /// edit and checked state, which is what layout paints from.
+    fn apply_script_control_writes(
+        edit_states: &mut std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
+        checked_states: &mut std::collections::HashMap<usize, bool>,
+        bindings: &DomBindings,
+    ) {
         // Script-set control values reach layout through edit state, the
         // same path typed text takes.
         for (raw, value) in bindings.take_value_writes() {
-            match view.edit_states.get(&raw) {
+            match edit_states.get(&raw) {
                 Some(state) => state.set_value(value),
                 None => {
                     let state = rustkit_dom::forms::TextEditState::with_value(value);
                     state.move_to_end(false);
-                    view.edit_states.insert(raw, state);
+                    edit_states.insert(raw, state);
                 }
             }
         }
         // Checkedness is script's; style and paint read this copy.
         for (raw, checked) in bindings.take_checked_writes() {
             match checked {
-                Some(checked) => view.checked_states.insert(raw, checked),
-                None => view.checked_states.remove(&raw),
+                Some(checked) => checked_states.insert(raw, checked),
+                None => checked_states.remove(&raw),
             };
         }
-        if dirty == DomDirty::Clean {
-            return Ok(false);
+    }
+
+    /// Lay the page out again if script's writes dirtied it, and publish the
+    /// new geometry and styles to `bindings`, for scripts that run on bindings
+    /// held outside the view (the page's own load: `run_page_scripts`). One
+    /// layout per call, none when nothing changed.
+    fn refresh_layout_for_script(&mut self, id: EngineViewId, bindings: &DomBindings) {
+        let dirty = bindings.take_dirty();
+        if let Some(view) = self.views.get_mut(&id) {
+            Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
         }
-        debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
-        self.relayout(id).map(|_| true)
+        if dirty == DomDirty::Clean {
+            return;
+        }
+        let started = std::time::Instant::now();
+        if let Err(e) = self.relayout(id) {
+            warn!(?id, ?e, "Relayout between lifecycle steps failed");
+            return;
+        }
+        if let Some(layout) = self.views.get(&id).and_then(|v| v.layout.as_ref()) {
+            let (geometry, computed) = geometry_snapshot(layout);
+            bindings.set_geometry(geometry);
+            bindings.set_computed_styles(computed);
+        }
+        info!(?id, elapsed_ms = started.elapsed().as_millis() as u64, "Relaid out for script");
     }
 
     /// Get the current URL of a view.
