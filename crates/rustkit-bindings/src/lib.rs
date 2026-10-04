@@ -1249,7 +1249,8 @@ impl DomBindings {
     }
 
     /// Fire the user's mouse input at an element (by node id) as a trusted,
-    /// bubbling, cancelable `MouseEvent`. Returns false when a listener
+    /// bubbling, cancelable `MouseEvent` (a `PointerEvent` for `pointer*`
+    /// and `click`). Returns false when a listener
     /// called `preventDefault()`. Listener exceptions are queued, see
     /// [`Self::take_reported_errors`].
     pub fn fire_mouse_event(
@@ -1260,12 +1261,14 @@ impl DomBindings {
     ) -> Result<bool, BindingError> {
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
-             screenX: {}, screenY: {}, button: {}, buttons: {}, ctrlKey: {}, altKey: {}, \
-             shiftKey: {}, metaKey: {} }})",
+             screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
+             altKey: {}, shiftKey: {}, metaKey: {} }})",
             data.client_x,
             data.client_y,
             data.screen_x,
             data.screen_y,
+            data.offset_x,
+            data.offset_y,
             data.button,
             data.buttons,
             data.ctrl_key,

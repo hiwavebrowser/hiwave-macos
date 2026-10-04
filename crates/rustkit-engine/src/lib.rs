@@ -484,6 +484,9 @@ struct ViewState {
     /// attribute. Script owns the state (`input.checked`); style
     /// (`:checked`), paint and form submission read it here.
     checked_states: std::collections::HashMap<usize, bool>,
+    /// A listener cancelled the `pointerdown` of the press in progress:
+    /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
+    compat_mouse_suppressed: bool,
     /// Whether the view itself has focus.
     view_focused: bool,
     /// Current scroll offset (x, y) in pixels.
@@ -1338,6 +1341,7 @@ impl Engine {
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1400,6 +1404,7 @@ impl Engine {
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1471,6 +1476,7 @@ impl Engine {
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1857,19 +1863,31 @@ impl Engine {
     }
 
     /// Deliver a primary-button press at VIEWPORT coordinates to the page:
-    /// `mousedown` at the element under the point. Returns false when a
-    /// listener cancelled it.
+    /// `pointerdown` then `mousedown` at the element under the point (no
+    /// `mousedown` when a listener cancelled the `pointerdown`). Returns
+    /// false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
-        self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y)
+        let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
+        if let Some(view) = self.views.get_mut(&id) {
+            view.compat_mouse_suppressed = suppressed;
+        }
+        suppressed || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y)
     }
 
-    /// Deliver a primary-button release at VIEWPORT coordinates: `mouseup`
-    /// then `click` at the element under the point, then the click's
+    /// Deliver a primary-button release at VIEWPORT coordinates: `pointerup`,
+    /// `mouseup`, then `click` at the element under the point, then the click's
     /// default actions (focus, link navigation) unless a listener called
     /// `preventDefault()` on the `click`. Whatever the listeners wrote to
     /// the DOM is laid out before this returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
-        self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
+        let suppressed = self
+            .views
+            .get_mut(&id)
+            .is_some_and(|view| std::mem::take(&mut view.compat_mouse_suppressed));
+        if !suppressed {
+            self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        }
         // The focus moves before `click` fires (it is the press's default
         // action, UI Events §3.4.5.1), so a `click` listener that focuses
         // a field has the last word.
@@ -2056,7 +2074,7 @@ impl Engine {
             offset_x: hit.local_x as f64,
             offset_y: hit.local_y as f64,
             button: 0,
-            buttons: if event_type == "mousedown" { 1 } else { 0 },
+            buttons: if matches!(event_type, "mousedown" | "pointerdown") { 1 } else { 0 },
             ..Default::default()
         };
         let source = format!("event:{event_type}");
