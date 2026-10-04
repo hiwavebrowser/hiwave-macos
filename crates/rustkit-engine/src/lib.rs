@@ -1877,7 +1877,10 @@ impl Engine {
         // A submit made outside a click (a timer, a callback) has nobody to
         // navigate for it yet; this click must not pick it up.
         self.take_submit_request(id);
-        let not_cancelled = self.dispatch_mouse_at_point(id, "click", viewport_x, viewport_y);
+        // A disabled form control takes no click from the user: no event,
+        // and no default action for anything around it (HTML §4.10.18.5).
+        let not_cancelled = !self.disabled_control_at_point(id, viewport_x, viewport_y)
+            && self.dispatch_mouse_at_point(id, "click", viewport_x, viewport_y);
         // The click submitted a form (a submit button's activation, or a
         // listener's `requestSubmit()`) and no `submit` listener cancelled.
         let submitted = self.take_submit_request(id).and_then(|(form, submitter)| {
@@ -1902,6 +1905,46 @@ impl Engine {
             None
         };
         ClickOutcome { focused, navigate }
+    }
+
+    /// Whether the point is on a disabled form control (HTML §4.10.18.5):
+    /// the nearest control at or above the element hit has `disabled`, or
+    /// sits in a `<fieldset disabled>` outside that fieldset's first
+    /// `<legend>`.
+    fn disabled_control_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        let control = (|| {
+            let view = self.views.get(&id)?;
+            let (doc_x, doc_y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+            let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+            let mut node = view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))?;
+            loop {
+                if let Some(tag) = node.tag_name() {
+                    let tag = tag.to_ascii_lowercase();
+                    if matches!(tag.as_str(), "button" | "input" | "select" | "textarea" | "option" | "optgroup") {
+                        return Some(node);
+                    }
+                }
+                node = node.parent()?;
+            }
+        })();
+        let Some(control) = control else {
+            return false;
+        };
+        if control.get_attribute("disabled").is_some() {
+            return true;
+        }
+        let is = |node: &Rc<Node>, tag: &str| node.tag_name().is_some_and(|t| t.eq_ignore_ascii_case(tag));
+        let mut child = control;
+        while let Some(parent) = child.parent() {
+            if is(&parent, "fieldset") && parent.get_attribute("disabled").is_some() {
+                let first_legend = parent.children().into_iter().find(|c| is(c, "legend"));
+                if first_legend.is_none_or(|legend| legend.id != child.id) {
+                    return true;
+                }
+            }
+            child = parent;
+        }
+        false
     }
 
     /// The default action of a click on a link: the URL to load, or `None`
