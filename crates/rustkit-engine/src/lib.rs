@@ -2132,6 +2132,19 @@ impl Engine {
         )
     }
 
+    /// The key was released. (Nothing yet: the page is not told.)
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_key_up(
+        &mut self,
+        _id: EngineViewId,
+        _key_code: u32,
+        _key: &str,
+        _ctrl: bool,
+        _shift: bool,
+        _alt: bool,
+    ) {
+    }
+
     /// Build the submission for the form containing the focused control.
     ///
     /// Returns `None` when nothing is focused, the focused control has no
@@ -21947,6 +21960,100 @@ mod node_identity_tests {
         js(&mut engine, id, "log.length = 0; window.stay = false; window.block = 'Enter'");
         assert_eq!(engine.submit_focused_form(id), None);
         assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:Enter:q:true"));
+    }
+
+    // Pete's live testing, continued: a page's own keyboard shortcuts were
+    // dead. A key pressed with nothing focused reached no listener, and no
+    // key ever fired `keyup`. With nothing focused the key goes to the body
+    // (UI Events §3.7.1: the focused element, else the body), and a
+    // cancelled `keydown` is the page's, so the app must not scroll on it.
+
+    const SHORTCUT_PAGE: &str = concat!(
+        r#"<html><body id="b" style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    fn shortcut_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, SHORTCUT_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             ['keydown', 'keyup'].forEach(function (t) { document.addEventListener(t, function (e) { \
+             log.push(t + ':' + e.key + ':' + e.target.id + ':' + e.isTrusted); \
+             if (t === 'keydown' && e.key === window.block) e.preventDefault(); }); }); \
+             document.addEventListener('input', function (e) { log.push('input:' + e.target.value); });",
+        );
+        (engine, id)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_key_with_nothing_focused_goes_to_the_body() {
+        let (mut engine, id) = shortcut_page();
+
+        // Nobody cancelled it: the caller keeps its own default (scrolling).
+        assert!(!engine.handle_text_key(id, 0, "j", false, false, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:j:b:true"));
+
+        // Named keys, and Enter with no form to submit.
+        js(&mut engine, id, "log.length = 0");
+        assert!(!engine.handle_text_key(id, 0x1B, "", false, false, false));
+        assert!(!engine.handle_text_key(id, 0x28, "", false, false, false));
+        assert!(!engine.handle_text_key(id, 0x0D, "", false, false, false));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:Escape:b:true keydown:ArrowDown:b:true keydown:Enter:b:true")
+        );
+
+        // A shortcut the page handles: it is the page's key, not a scroll.
+        js(&mut engine, id, "log.length = 0; window.block = '/'");
+        assert!(engine.handle_text_key(id, 0, "/", false, false, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:/:b:true"));
+
+        // What the listener wrote is laid out.
+        js(
+            &mut engine,
+            id,
+            "window.block = null; document.addEventListener('keydown', function (e) { \
+             if (e.key === 'n') { var d = document.createElement('div'); d.id = 'made'; \
+             d.style.height = '30px'; d.textContent = 'new'; document.body.appendChild(d); } });",
+        );
+        engine.handle_text_key(id, 0, "n", false, false, false);
+        assert_eq!(
+            js(&mut engine, id, "String($('made').getBoundingClientRect().height)"),
+            js_string("30")
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn releasing_a_key_fires_keyup() {
+        let (mut engine, id) = shortcut_page();
+
+        // Nothing focused: the body hears it.
+        engine.handle_text_key(id, 0, "j", false, false, false);
+        engine.handle_key_up(id, 0, "j", false, false, false);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:j:b:true keyup:j:b:true")
+        );
+
+        // In a field: after the edit and its `input`.
+        engine.click_at_point(id, 12.0, 12.0);
+        js(&mut engine, id, "log.length = 0");
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        engine.handle_key_up(id, 0, "a", false, false, false);
+        engine.handle_key_up(id, 0x0D, "", false, false, false);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:a:q:true input:a keyup:a:q:true keyup:Enter:q:true")
+        );
     }
 
     // Pete's live testing, continued: a click on a <summary> did nothing,
