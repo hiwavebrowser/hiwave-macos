@@ -484,6 +484,9 @@ struct ViewState {
     /// attribute. Script owns the state (`input.checked`); style
     /// (`:checked`), paint and form submission read it here.
     checked_states: std::collections::HashMap<usize, bool>,
+    /// A listener cancelled the `pointerdown` of the press in progress:
+    /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
+    compat_mouse_suppressed: bool,
     /// Whether the view itself has focus.
     view_focused: bool,
     /// Current scroll offset (x, y) in pixels.
@@ -1338,6 +1341,7 @@ impl Engine {
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1400,6 +1404,7 @@ impl Engine {
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1471,6 +1476,7 @@ impl Engine {
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1857,19 +1863,31 @@ impl Engine {
     }
 
     /// Deliver a primary-button press at VIEWPORT coordinates to the page:
-    /// `mousedown` at the element under the point. Returns false when a
-    /// listener cancelled it.
+    /// `pointerdown` then `mousedown` at the element under the point (no
+    /// `mousedown` when a listener cancelled the `pointerdown`). Returns
+    /// false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
-        self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y)
+        let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
+        if let Some(view) = self.views.get_mut(&id) {
+            view.compat_mouse_suppressed = suppressed;
+        }
+        suppressed || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y)
     }
 
-    /// Deliver a primary-button release at VIEWPORT coordinates: `mouseup`
-    /// then `click` at the element under the point, then the click's
+    /// Deliver a primary-button release at VIEWPORT coordinates: `pointerup`,
+    /// `mouseup`, then `click` at the element under the point, then the click's
     /// default actions (focus, link navigation) unless a listener called
     /// `preventDefault()` on the `click`. Whatever the listeners wrote to
     /// the DOM is laid out before this returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
-        self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
+        let suppressed = self
+            .views
+            .get_mut(&id)
+            .is_some_and(|view| std::mem::take(&mut view.compat_mouse_suppressed));
+        if !suppressed {
+            self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        }
         // The focus moves before `click` fires (it is the press's default
         // action, UI Events §3.4.5.1), so a `click` listener that focuses
         // a field has the last word.
@@ -2099,7 +2117,7 @@ impl Engine {
             offset_x: hit.local_x as f64,
             offset_y: hit.local_y as f64,
             button: 0,
-            buttons: if event_type == "mousedown" { 1 } else { 0 },
+            buttons: if matches!(event_type, "mousedown" | "pointerdown") { 1 } else { 0 },
             ..Default::default()
         };
         let source = format!("event:{event_type}");
@@ -21500,6 +21518,84 @@ mod node_identity_tests {
 
     fn js(engine: &mut Engine, id: EngineViewId, script: &str) -> String {
         engine.execute_script(id, script).expect("script")
+    }
+
+    // weather.com's drawer and yahoo's More menu (Pollux, 2026-10-04): the
+    // click was dispatched, nothing threw, and the page did not react. A
+    // press and release in Chrome is pointerdown, mousedown, pointerup,
+    // mouseup, click, the click being a PointerEvent; here it was three
+    // MouseEvents with `detail` 0 and no `which`, so a listener on
+    // `pointerdown`, or one that asks for `which === 1` or a click count,
+    // never ran.
+
+    const POINTER_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<div id="b" style="height:50px">press</div>"#,
+        r#"<div id="p" style="height:50px">no compatibility mouse events</div>"#,
+        r#"<div id="tall" style="height:3000px"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_is_the_full_pointer_and_mouse_sequence() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, POINTER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; window.where = []; window.delegated = 0; \
+             ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push([e.type, e.target.id, e.button, e.buttons, e.which, e.detail, e.isTrusted, e.bubbles, \
+                           e.composed, e instanceof PointerEvent, e.pointerType, e.pointerId].join(':')); \
+                 where.push([e.clientY, e.pageY, e.offsetX, e.offsetY].join(':')); }); }); \
+             window.addEventListener('click', function (e) { \
+               if (e.button === 0 && e.which === 1 && e.detail === 1) delegated++; }, true); \
+             document.getElementById('p').addEventListener('pointerdown', function (e) { e.preventDefault(); });",
+        );
+
+        assert!(engine.mouse_down_at_point(id, 12.0, 20.0));
+        engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string(concat!(
+                "pointerdown:b:0:1:1:0:true:true:true:true:mouse:1 ",
+                "mousedown:b:0:1:1:1:true:true:true:false:: ",
+                "pointerup:b:0:0:1:0:true:true:true:true:mouse:1 ",
+                "mouseup:b:0:0:1:1:true:true:true:false:: ",
+                "click:b:0:0:1:1:true:true:true:true:mouse:1"
+            ))
+        );
+        assert_eq!(js(&mut engine, id, "String(delegated)"), js_string("1"));
+
+        // A cancelled pointerdown stops the compatibility mouse events of
+        // that press (Pointer Events §11.3); the click still fires.
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_down_at_point(id, 12.0, 70.0);
+        engine.click_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            js(&mut engine, id, "log.map(function (l) { return l.split(':')[0]; }).join(' ')"),
+            js_string("pointerdown pointerup click")
+        );
+        // The next press is a new one.
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            js(&mut engine, id, "log.map(function (l) { return l.split(':')[0]; }).join(' ')"),
+            js_string("pointerdown mousedown pointerup mouseup click")
+        );
+
+        // On a scrolled page: client is the viewport, page is the document,
+        // offset is from the target's own box (#tall starts at 100).
+        js(&mut engine, id, "window.scrollTo(0, 150); where.length = 0");
+        assert_eq!(engine.views[&id].scroll_offset.1, 150.0, "precondition: the view scrolled");
+        engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, "where[where.length - 1]"), js_string("20:170:12:70"));
     }
 
     #[test]

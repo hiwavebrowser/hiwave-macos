@@ -95,6 +95,7 @@
         ME.prototype.getModifierState = function (key) {
             return { Control: this.ctrlKey, Shift: this.shiftKey, Alt: this.altKey, Meta: this.metaKey }[key] === true;
         };
+        Object.defineProperty(ME.prototype, 'which', { get: function () { return this.button + 1; }, configurable: true, enumerable: true });
         ['x', 'pageX', 'offsetX'].forEach(function (k) {
             Object.defineProperty(ME.prototype, k, { get: function () { return this.clientX; }, configurable: true, enumerable: true });
         });

@@ -2299,19 +2299,37 @@ const WRAPPERS_JS: &str = r#"
         },
         configurable: true, enumerable: false, writable: true
     });
-    // The engine delivers the user's mouse input: a trusted MouseEvent
-    // that bubbles and can be cancelled (UI Events §3.4). Returns false
-    // when a listener called preventDefault().
+    // The engine delivers the user's mouse input: a trusted event that
+    // bubbles and can be cancelled (UI Events §3.4). `pointer*` and
+    // `click` are PointerEvents of the mouse (Pointer Events §4, §12);
+    // `mousedown`, `mouseup` and `click` carry the click count. Returns
+    // false when a listener called preventDefault().
     Object.defineProperty(Document.prototype, '__rkFireMouse', {
         value: function (id, type, init) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return true;
+            var pointer = type === 'click' || type.indexOf('pointer') === 0;
             init.bubbles = true;
             init.cancelable = true;
             init.composed = true;
             init.view = g;
-            var ev = new g.MouseEvent(type, init);
+            init.detail = type.indexOf('pointer') === 0 ? 0 : 1;
+            if (pointer) {
+                init.pointerId = 1;
+                init.pointerType = 'mouse';
+                init.isPrimary = true;
+                init.pressure = init.buttons ? 0.5 : 0;
+            }
+            var ev = new (pointer && g.PointerEvent || g.MouseEvent)(type, init);
             ev.isTrusted = true;
+            // Where the point is in the document and in the target's box.
+            var at = {
+                pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
+                offsetX: init.offsetX, offsetY: init.offsetY
+            };
+            Object.keys(at).forEach(function (k) {
+                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
+            });
             return target.dispatchEvent(ev);
         },
         configurable: true, enumerable: false, writable: true
