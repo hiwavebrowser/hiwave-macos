@@ -1703,14 +1703,9 @@ impl Engine {
             let view = self.views.get(&id)?;
             let doc = view.document.as_ref()?;
             let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
-            match &node.node_type {
-                NodeType::Element { tag_name, .. } => {
-                    let tag = tag_name.to_lowercase();
-                    matches!(tag.as_str(), "input" | "textarea" | "select")
-                        .then_some((raw, tag))
-                }
-                _ => None,
-            }
+            // A click on a label is a click for the control it labels.
+            Self::form_control(&node)
+                .or_else(|| Self::labeled_control(doc, &node).as_ref().and_then(Self::form_control))
         });
 
         self.set_focus(id, focusable.clone());
@@ -1728,6 +1723,49 @@ impl Engine {
             }
         }
         self.focused_tag(id)
+    }
+
+    /// `node` as a control that takes the engine's focus: its raw NodeId
+    /// and tag.
+    fn form_control(node: &Rc<Node>) -> Option<(usize, String)> {
+        match &node.node_type {
+            NodeType::Element { tag_name, .. } => {
+                let tag = tag_name.to_lowercase();
+                matches!(tag.as_str(), "input" | "textarea" | "select").then_some((node.id.raw(), tag))
+            }
+            _ => None,
+        }
+    }
+
+    /// The control labeled by the `<label>` that `node` is in (HTML
+    /// §4.10.4): the element its `for` names, else the label's first
+    /// field in tree order. `None` outside a label, and for a click on a
+    /// link or a button inside one (that click is theirs).
+    fn labeled_control(doc: &Document, node: &Rc<Node>) -> Option<Rc<Node>> {
+        let mut cur = node.clone();
+        let label = loop {
+            if let NodeType::Element { tag_name, .. } = &cur.node_type {
+                match tag_name.to_lowercase().as_str() {
+                    "label" => break cur,
+                    "a" | "button" => return None,
+                    _ => {}
+                }
+            }
+            cur = cur.parent()?;
+        };
+        if let Some(target) = label.get_attribute("for") {
+            return doc.get_element_by_id(target);
+        }
+        fn first_field(node: &Rc<Node>) -> Option<Rc<Node>> {
+            node.children().into_iter().find_map(|child| {
+                let hidden = child.get_attribute("type").is_some_and(|t| t.eq_ignore_ascii_case("hidden"));
+                match Engine::form_control(&child) {
+                    Some(_) if !hidden => Some(child),
+                    _ => first_field(&child),
+                }
+            })
+        }
+        first_field(&label)
     }
 
     /// The tag of the focused form control, if one is focused.
