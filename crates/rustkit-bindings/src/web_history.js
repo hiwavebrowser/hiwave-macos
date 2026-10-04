@@ -75,6 +75,18 @@
         }, 0);
     }
 
+    // The engine followed a link to a fragment of this document (HTML
+    // §7.4.2.3.3): a new entry, the new URL, then `hashchange`.
+    g.__rustkit_fragment_navigation = function (href) {
+        var oldURL = loc.href;
+        if (oldURL === href) return;
+        entries.length = index + 1;
+        entries.push({ url: href, state: null });
+        index++;
+        setLocation(href);
+        g.dispatchEvent(new HashChangeEvent('hashchange', { oldURL: oldURL, newURL: loc.href }));
+    };
+
     function History() { throw new TypeError('Illegal constructor'); }
     var hp = History.prototype;
     Object.defineProperty(hp, 'length', { get: function () { return entries.length; }, enumerable: true, configurable: true });
