@@ -21862,6 +21862,36 @@ mod node_identity_tests {
         );
     }
 
+    // Node ids restart with each document, so the element hovered in the
+    // last page is some other node of the next one: a new document starts
+    // with nothing hovered and no button held.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_new_document_starts_with_nothing_hovered() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             ['mouseout', 'mouseover', 'mousemove'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push([t, e.target.id, e.relatedTarget, e.buttons, e.movementX].join(':')); }); });",
+        );
+        engine.mouse_move_at_point(id, 30.0, 20.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("mouseover:a::0:0 mousemove:a::0:0")
+        );
+    }
+
     // A cancelled `pointerdown` stops the `mousemove`s of that press, not
     // the boundary events (Pointer Events §11.3). A move writes to the DOM
     // like any other listener: the layout follows before the call returns.
