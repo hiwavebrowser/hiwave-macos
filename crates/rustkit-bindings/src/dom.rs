@@ -66,6 +66,9 @@ pub(crate) struct DomHost {
     /// Where each element's box is, by NodeId; empty until the engine has
     /// laid the page out (`DomBindings::set_geometry`).
     pub(crate) geometry: HashMap<usize, BoxGeometry>,
+    /// The computed style of each laid-out element, by NodeId, as
+    /// `name\tvalue` lines (`DomBindings::set_computed_styles`).
+    pub(crate) computed: HashMap<usize, String>,
     /// HTML §4.10.5.4 "dirty value" of the `<input>`/`<textarea>` controls
     /// that script or the user changed, by NodeId. A control missing here
     /// shows its default value (the `value` attribute, or a textarea's text).
@@ -903,6 +906,12 @@ pub(crate) fn install(
         Box::new(move |args| {
             let host = h.borrow();
             match (host.node(args), string_arg(args, 2)) {
+                (Some(_), Some("laidout")) => {
+                    JsValue::String(if host.geometry.is_empty() { String::new() } else { "1".into() })
+                }
+                (Some(node), Some("computed")) => JsValue::String(
+                    host.computed.get(&node.id.raw()).cloned().unwrap_or_default(),
+                ),
                 (Some(node), Some("geom")) => match host.geometry.get(&node.id.raw()) {
                     Some(g) => JsValue::String(format!(
                         "{} {} {} {} {} {} {} {} {} {} {}",
@@ -1901,6 +1910,71 @@ const WRAPPERS_JS: &str = r#"
     }
     getter(HTMLElement.prototype, 'offsetLeft', function () { return offsetFrom(this, 'x'); });
     getter(HTMLElement.prototype, 'offsetTop', function () { return offsetFrom(this, 'y'); });
+    // getComputedStyle. The engine publishes each laid-out element's computed
+    // style (`set_computed_styles`); a read answers from the last layout,
+    // with the element's own inline declarations laid over it so that
+    // `el.style.display = 'none'` is seen at once. An element with no box
+    // after a layout is not rendered (display:none, or <head>, <script>,
+    // <style>, ...): its display reads 'none'. Before any layout everything
+    // reads as the empty string.
+    var COMPUTED_NAMES = {};
+    function kebab(p) { return p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
+    function computedMap(el) {
+        var raw = info(el, 'computed');
+        var m = {};
+        if (raw) {
+            raw.split('\n').forEach(function (line) {
+                var i = line.indexOf('\t');
+                if (i > 0) m[line.slice(0, i)] = line.slice(i + 1);
+            });
+        } else if (info(el, 'laidout')) {
+            m.display = 'none';
+            m.visibility = 'visible';
+        }
+        var inline = el.style;
+        if (inline) {
+            for (var i = 0; i < inline.length; i++) {
+                var name = inline.item(i);
+                var v = inline.getPropertyValue(name);
+                if (v) m[name] = v;
+            }
+        }
+        return m;
+    }
+    function makeComputed(el) {
+        var m = computedMap(el);
+        var names = Object.keys(m).sort();
+        var decl = Object.create(CSSStyleDeclaration.prototype);
+        function ro() { throw new DOMException('These styles are computed, and therefore read-only.', 'NoModificationAllowedError'); }
+        var own = {
+            getPropertyValue: function (n) { n = kebab(String(n)); return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : ''; },
+            getPropertyPriority: function () { return ''; },
+            item: function (i) { return names[i >>> 0] || ''; },
+            setProperty: ro, removeProperty: ro,
+            cssText: names.map(function (n) { return n + ': ' + m[n] + ';'; }).join(' '),
+            length: names.length,
+            parentRule: null
+        };
+        Object.keys(own).forEach(function (k) {
+            Object.defineProperty(decl, k, { value: own[k], writable: false, configurable: true, enumerable: false });
+        });
+        return new Proxy(decl, {
+            get: function (t, p, r) {
+                if (typeof p !== 'string' || p in t) return Reflect.get(t, p, r);
+                if (/^(0|[1-9][0-9]*)$/.test(p)) return names[Number(p)];
+                var n = kebab(p.indexOf('--') === 0 ? p : p);
+                return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : (p === 'cssFloat' ? (m['float'] || '') : '');
+            },
+            set: function (t, p) { if (typeof p === 'string' && !(p in t)) ro(); return false; }
+        });
+    }
+    g.getComputedStyle = function getComputedStyle(el) {
+        if (!el || el.nodeType !== 1) {
+            throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
+        }
+        return makeComputed(el);
+    };
+
     // The root element's client size is the viewport's, and its scroll size
     // is the document's (the body's bottom/right edge, at least the viewport).
     function isRoot(el) { return el === document.documentElement; }
