@@ -21433,6 +21433,102 @@ mod node_identity_tests {
         assert_eq!(painted(&engine, id), [false]);
     }
 
+    // Pete's live testing, continued: a click on a <summary> did nothing,
+    // and a closed <details> showed everything inside it. Only the first
+    // <summary> child of a <details> without `open` is rendered (HTML
+    // §15.3.9, §4.11.1), and a click on that summary toggles `open`
+    // (§4.11.2).
+
+    const DETAILS_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<details id="d"><summary id="s" style="display:block;height:40px">More</summary>"#,
+        r#"<a href="https://example.com/inside" style="display:block;height:40px">inside</a></details>"#,
+        r#"<details id="o" open><summary id="os" style="display:block;height:40px">Open</summary>"#,
+        r#"<a href="https://example.com/open" style="display:block;height:40px">open</a></details>"#,
+        r#"<a href="https://example.com/after" style="display:block;height:40px">after</a>"#,
+        r#"</body></html>"#,
+    );
+
+    fn details_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DETAILS_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             $('s').addEventListener('click', function (e) { \
+             log.push('click:' + $('d').open); if (window.block) e.preventDefault(); }); \
+             $('d').addEventListener('toggle', function (e) { log.push('toggle:' + $('d').open + ':' + e.bubbles); });",
+        );
+        (engine, id)
+    }
+
+    /// The link at each 40px row, top down.
+    fn link_rows(engine: &Engine, id: EngineViewId, rows: usize) -> Vec<Option<String>> {
+        (0..rows)
+            .map(|r| {
+                engine
+                    .link_at_point(id, 8.0, 40.0 * r as f32 + 10.0)
+                    .map(|u| u.rsplit('/').next().unwrap_or_default().to_string())
+            })
+            .collect()
+    }
+
+    fn rows(names: &[&str]) -> Vec<Option<String>> {
+        names.iter().map(|n| (!n.is_empty()).then(|| n.to_string())).collect()
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_closed_details_shows_only_its_summary() {
+        let (mut engine, id) = details_page();
+        // summary, (closed content), open summary, open content, after
+        assert_eq!(link_rows(&engine, id, 4), rows(&["", "", "open", "after"]));
+        assert_eq!(js(&mut engine, id, "$('d').open + ' ' + $('o').open"), js_string("false true"));
+
+        // Script opening and closing it is laid out.
+        js(&mut engine, id, "$('d').open = true; $('o').removeAttribute('open')");
+        assert_eq!(link_rows(&engine, id, 4), rows(&["", "inside", "", "after"]));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_summary_toggles_its_details() {
+        let (mut engine, id) = details_page();
+
+        // The click's listeners see it closed; it opens after them, then
+        // `toggle` fires on the details (it does not bubble).
+        assert_eq!(engine.click_at_point(id, 8.0, 10.0).navigate, None);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('d').open + ' ' + $('d').hasAttribute('open')"),
+            js_string("click:false toggle:true:false | true true")
+        );
+        assert_eq!(link_rows(&engine, id, 5), rows(&["", "inside", "", "open", "after"]));
+
+        // A cancelled click leaves it as it is.
+        js(&mut engine, id, "log.length = 0; window.block = true");
+        engine.click_at_point(id, 8.0, 10.0);
+        assert_eq!(js(&mut engine, id, "log.join(' ') + ' | ' + $('d').open"), js_string("click:true | true"));
+
+        // A second click closes it.
+        js(&mut engine, id, "log.length = 0; window.block = false");
+        engine.click_at_point(id, 8.0, 10.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('d').open"),
+            js_string("click:true toggle:false:false | false")
+        );
+        assert_eq!(link_rows(&engine, id, 4), rows(&["", "", "open", "after"]));
+
+        // A link inside the open content is still a link.
+        assert_eq!(
+            engine.click_at_point(id, 8.0, 90.0).navigate.as_deref(),
+            Some("https://example.com/open")
+        );
+    }
+
     // ---- the live loop runs what the page scheduled (Z lane I0, 2026-10-03) ----
     //
     // Pete's live testing: content that arrives after the load never shows.
