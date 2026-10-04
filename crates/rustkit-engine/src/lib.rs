@@ -493,6 +493,8 @@ struct ViewState {
     pointer_at: Option<(f32, f32)>,
     /// The primary button is held: between a press and its release.
     primary_button_down: bool,
+    /// The element the press in progress landed on (raw NodeId).
+    press_target: Option<usize>,
     /// The press in progress has had its say on the focus (it moved it, or
     /// a listener cancelled the press): the release leaves the focus alone.
     press_settled_focus: bool,
@@ -1367,6 +1369,7 @@ impl Engine {
             hovered_node: None,
             pointer_at: None,
             primary_button_down: false,
+            press_target: None,
             press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
@@ -1434,6 +1437,7 @@ impl Engine {
             hovered_node: None,
             pointer_at: None,
             primary_button_down: false,
+            press_target: None,
             press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
@@ -1510,6 +1514,7 @@ impl Engine {
             hovered_node: None,
             pointer_at: None,
             primary_button_down: false,
+            press_target: None,
             press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
@@ -1932,8 +1937,10 @@ impl Engine {
     /// listener that cancels either event keeps the focus where it is.
     /// Returns false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        let target = self.element_at_point(id, viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = true;
+            view.press_target = target;
         }
         let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
@@ -2067,6 +2074,67 @@ impl Engine {
         }
     }
 
+    /// A node of the view's document, by raw NodeId.
+    fn node(&self, id: EngineViewId, raw: usize) -> Option<Rc<Node>> {
+        self.views.get(&id)?.document.as_ref()?.get_node(rustkit_dom::NodeId::new(raw))
+    }
+
+    /// The element under VIEWPORT coordinates (a text run's element), as a
+    /// raw NodeId.
+    fn element_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<usize> {
+        let view = self.views.get(&id)?;
+        let hit = view
+            .layout
+            .as_ref()?
+            .hit_test(viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)?;
+        let mut node = self.node(id, hit.node_id?)?;
+        while !node.is_element() {
+            node = node.parent()?;
+        }
+        Some(node.id.raw())
+    }
+
+    /// An element (raw NodeId) and the elements above it, innermost first.
+    fn element_chain(&self, id: EngineViewId, raw: usize) -> Vec<usize> {
+        let mut chain = Vec::new();
+        let mut node = self.node(id, raw);
+        while let Some(n) = node {
+            if n.is_element() {
+                chain.push(n.id.raw());
+            }
+            node = n.parent();
+        }
+        chain
+    }
+
+    /// Fire `click` at an element (raw NodeId) for a release at VIEWPORT
+    /// coordinates, and lay out what its listeners wrote. Returns false
+    /// when a listener cancelled it.
+    fn click_element(&mut self, id: EngineViewId, target: usize, viewport_x: f32, viewport_y: f32) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return true;
+        };
+        let origin = view
+            .layout
+            .as_ref()
+            .and_then(|l| Self::box_origin(l, target))
+            .unwrap_or((0.0, 0.0));
+        let data = rustkit_bindings::MouseEventBindingData {
+            client_x: viewport_x as f64,
+            client_y: viewport_y as f64,
+            screen_x: viewport_x as f64,
+            screen_y: viewport_y as f64,
+            offset_x: (viewport_x + view.scroll_offset.0 - origin.0) as f64,
+            offset_y: (viewport_y + view.scroll_offset.1 - origin.1) as f64,
+            ..Default::default()
+        };
+        let not_cancelled = self.fire_mouse(id, target, "click", &data);
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after a click failed");
+        }
+        not_cancelled
+    }
+
     /// The padding-box origin of the first box `node` generated, in
     /// document coordinates.
     fn box_origin(b: &LayoutBox, node: usize) -> Option<(f32, f32)> {
@@ -2080,8 +2148,11 @@ impl Engine {
     /// Deliver a primary-button release at VIEWPORT coordinates: `pointerup`,
     /// `mouseup`, then `click` at the element under the point, then the click's
     /// default actions (focus, link navigation) unless a listener called
-    /// `preventDefault()` on the `click`. Whatever the listeners wrote to
-    /// the DOM is laid out before this returns.
+    /// `preventDefault()` on the `click`. When the press landed on another
+    /// element, the `click` goes to the nearest element both are in (UI
+    /// Events §3.5) and only that element's default action happens.
+    /// Whatever the listeners wrote to the DOM is laid out before this
+    /// returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
@@ -2104,14 +2175,36 @@ impl Engine {
             .get_mut(&id)
             .is_some_and(|view| std::mem::take(&mut view.press_settled_focus));
         let focus = if pressed { PointFocus::Label } else { PointFocus::Click };
-        self.focus_point(id, viewport_x, viewport_y, focus);
+        // A press elsewhere: the element the click goes to instead (`None`
+        // inside when the two share no element).
+        let pressed_on = self.views.get_mut(&id).and_then(|view| view.press_target.take());
+        let released_on = self.element_at_point(id, viewport_x, viewport_y);
+        let elsewhere = match (pressed_on, released_on) {
+            (Some(pressed_on), Some(released_on)) if pressed_on != released_on => {
+                let above = self.element_chain(id, released_on);
+                Some(self.element_chain(id, pressed_on).into_iter().find(|n| above.contains(n)))
+            }
+            _ => None,
+        };
+        if elsewhere.is_none() {
+            self.focus_point(id, viewport_x, viewport_y, focus);
+        }
         // A submit made outside a click (a timer, a callback) has nobody to
         // navigate for it yet; this click must not pick it up.
         self.take_submit_request(id);
         // A disabled form control takes no click from the user: no event,
         // and no default action for anything around it (HTML §4.10.18.5).
-        let not_cancelled = !self.disabled_control_at_point(id, viewport_x, viewport_y)
-            && self.dispatch_mouse_at_point(id, "click", viewport_x, viewport_y);
+        let not_cancelled = match elsewhere {
+            None => {
+                !self.disabled_control_at_point(id, viewport_x, viewport_y)
+                    && self.dispatch_mouse_at_point(id, "click", viewport_x, viewport_y)
+            }
+            Some(None) => false,
+            Some(Some(target)) => {
+                !self.node(id, target).is_some_and(Self::in_disabled_control)
+                    && self.click_element(id, target, viewport_x, viewport_y)
+            }
+        };
         // The click submitted a form (a submit button's activation, or a
         // listener's `requestSubmit()`) and no `submit` listener cancelled.
         let submitted = self.take_submit_request(id).and_then(|(form, submitter)| {
@@ -2131,7 +2224,20 @@ impl Engine {
         let navigate = if submitted.is_some() {
             submitted
         } else if not_cancelled {
-            self.follow_link_at_point(id, viewport_x, viewport_y)
+            // The link at the point is the click's when the click's element
+            // is the one under the point, or sits in that link too.
+            let in_link = |engine: &Self, target: usize| {
+                engine.element_chain(id, target).into_iter().any(|n| {
+                    engine.node(id, n).is_some_and(|node| {
+                        node.tag_name().is_some_and(|t| t.eq_ignore_ascii_case("a"))
+                            && node.get_attribute("href").is_some()
+                    })
+                })
+            };
+            match elsewhere {
+                Some(Some(target)) if !in_link(self, target) => None,
+                _ => self.follow_link_at_point(id, viewport_x, viewport_y),
+            }
         } else {
             None
         };
@@ -2143,11 +2249,19 @@ impl Engine {
     /// sits in a `<fieldset disabled>` outside that fieldset's first
     /// `<legend>`.
     fn disabled_control_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
-        let control = (|| {
+        let node = (|| {
             let view = self.views.get(&id)?;
             let (doc_x, doc_y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
             let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
-            let mut node = view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))?;
+            view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))
+        })();
+        node.is_some_and(Self::in_disabled_control)
+    }
+
+    /// Whether `node` is, or is inside, a disabled form control.
+    fn in_disabled_control(node: Rc<Node>) -> bool {
+        let control = (|| {
+            let mut node = node;
             loop {
                 if let Some(tag) = node.tag_name() {
                     let tag = tag.to_ascii_lowercase();
@@ -3625,6 +3739,7 @@ impl Engine {
         view.hovered_node = None;
         view.pointer_at = None;
         view.primary_button_down = false;
+        view.press_target = None;
         view.press_settled_focus = false;
         view.compat_mouse_suppressed = false;
         view.script_log.clear();
@@ -3930,6 +4045,7 @@ impl Engine {
         view.hovered_node = None;
         view.pointer_at = None;
         view.primary_button_down = false;
+        view.press_target = None;
         view.press_settled_focus = false;
         view.compat_mouse_suppressed = false;
         view.script_log.clear();
@@ -21763,6 +21879,60 @@ mod node_identity_tests {
         engine.execute_script(id, script).expect("script")
     }
 
+    // A press on one element released on another sent `click` to the
+    // release's element and followed the link there. Chrome sends it to
+    // the nearest element both are in (`click:BODY` in the two oracle
+    // logs), so a press on one link dragged onto another follows neither.
+
+    const DRAG_CLICK_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<a id="one" href="https://example.test/one" style="display:block">"#,
+        r#"<div id="s1" style="height:20px">first</div><div id="s2" style="height:20px">second</div></a>"#,
+        r#"<a id="two" href="https://example.test/two" style="display:block;height:40px">two</a>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_press_and_a_release_on_different_elements_click_their_common_ancestor() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DRAG_CLICK_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             ['mouseup', 'click'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push(t + ':' + (e.target.id || e.target.nodeName) + ':' + e.offsetY); }); });",
+        );
+        let drag = |engine: &mut Engine, from: f32, to: f32| -> (String, Option<String>) {
+            engine.mouse_down_at_point(id, 12.0, from);
+            engine.mouse_move_at_point(id, 12.0, to);
+            let outcome = engine.click_at_point(id, 12.0, to);
+            (js(engine, id, "var out = log.join(' '); log.length = 0; out"), outcome.navigate)
+        };
+
+        // On one element: its click, and its link.
+        assert_eq!(
+            drag(&mut engine, 10.0, 12.0),
+            (js_string("mouseup:s1:12 click:s1:12"), Some("https://example.test/one".to_string()))
+        );
+        // Two elements of one link: the click is the link's, and it is followed.
+        assert_eq!(
+            drag(&mut engine, 10.0, 30.0),
+            (js_string("mouseup:s2:10 click:one:30"), Some("https://example.test/one".to_string()))
+        );
+        // From one link onto another: the click is the body's; neither is followed.
+        assert_eq!(drag(&mut engine, 10.0, 60.0), (js_string("mouseup:two:20 click:BODY:60"), None));
+        // A release with no press before it is a click where it lands.
+        let outcome = engine.click_at_point(id, 12.0, 60.0);
+        assert_eq!(outcome.navigate.as_deref(), Some("https://example.test/two"));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("mouseup:two:20 click:two:20"));
+    }
+
     // The focus moved at the release, whatever the page did with the
     // press: a list of options under a field cancels `mousedown` so the
     // field keeps its focus while an option is clicked, and here the field
@@ -21807,18 +21977,6 @@ mod node_identity_tests {
         fn taken(engine: &mut Engine, id: EngineViewId) -> String {
             js(engine, id, "var out = log.join(' '); log.length = 0; out")
         }
-        // The click of a press and a release on different elements goes to
-        // their common ancestor in Chrome and to the release's element
-        // here: left out of this comparison.
-        fn taken_without_click(engine: &mut Engine, id: EngineViewId) -> String {
-            js(
-                engine,
-                id,
-                "var out = log.filter(function (l) { return l.indexOf('click:') !== 0; }).join(' '); \
-                 log.length = 0; out",
-            )
-        }
-
         // In #f: the focus arrives at the press, after `mousedown`.
         engine.mouse_down_at_point(id, 12.0, 15.0);
         assert_eq!(
@@ -21914,10 +22072,11 @@ mod node_identity_tests {
         engine.mouse_move_at_point(id, 12.0, 160.0);
         engine.click_at_point(id, 12.0, 160.0);
         assert_eq!(
-            taken_without_click(&mut engine, id),
+            taken(&mut engine, id),
             js_string(concat!(
                 "pointerup:drag:null:f ",
-                "mouseup:drag:null:f"
+                "mouseup:drag:null:f ",
+                "click:BODY:null:f"
             ))
         );
         // A cancelled `pointerdown`: no `mousedown`, and no focus move.
