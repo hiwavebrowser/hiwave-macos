@@ -3558,6 +3558,10 @@ impl Engine {
         view.edit_states.clear();
         view.checked_states.clear();
         view.focused_node = None;
+        view.hovered_node = None;
+        view.pointer_at = None;
+        view.primary_button_down = false;
+        view.compat_mouse_suppressed = false;
         view.script_log.clear();
         view.script_policy = None;
 
@@ -3858,6 +3862,10 @@ impl Engine {
         view.edit_states.clear();
         view.checked_states.clear();
         view.focused_node = None;
+        view.hovered_node = None;
+        view.pointer_at = None;
+        view.primary_button_down = false;
+        view.compat_mouse_suppressed = false;
         view.script_log.clear();
         view.script_policy = None;
 
