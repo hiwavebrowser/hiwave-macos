@@ -2291,6 +2291,49 @@ const WRAPPERS_JS: &str = r#"
         configurable: true, enumerable: false, writable: true
     });
 
+    // The engine delivers the user's key press to the focused element: a
+    // trusted KeyboardEvent that bubbles and can be cancelled (UI Events
+    // §3.7). Returns false when a listener called preventDefault().
+    Object.defineProperty(Document.prototype, '__rkFireKey', {
+        value: function (id, type, init) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return true;
+            init.bubbles = true;
+            init.cancelable = true;
+            init.composed = true;
+            init.view = g;
+            var ev = new g.KeyboardEvent(type, init);
+            ev.isTrusted = true;
+            return target.dispatchEvent(ev);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // What the user typed changed the control's value: `input`, which
+    // bubbles and cannot be cancelled (Input Events §5.1). `data` is the
+    // inserted text, null for a deletion.
+    Object.defineProperty(Document.prototype, '__rkFireInput', {
+        value: function (id, data) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return;
+            var ev = new g.InputEvent('input', {
+                bubbles: true, composed: true, view: g, data: data,
+                inputType: data === null ? 'deleteContentBackward' : 'insertText'
+            });
+            ev.isTrusted = true;
+            target.dispatchEvent(ev);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // Enter in a field (web_forms.js's implicit submission).
+    var implicitSubmit = null;
+    Object.defineProperty(Document.prototype, '__rkImplicitSubmit', {
+        value: function (id) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (target && implicitSubmit) implicitSubmit(target);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+
     // EventTarget (DOM §2.7) for node wrappers, document and window: a
     // JS-side listener registry, and dispatch through capture, target and
     // bubble phases along the wrapper tree (then document, then window).
@@ -2529,7 +2572,8 @@ const WRAPPERS_JS: &str = r#"
             var s = form != null ? form[SLOT] : undefined, b = submitter != null ? submitter[SLOT] : undefined;
             if (s && s.gen === gen) N.submit(s.gen, s.id, b && b.gen === gen ? b.id : null);
         },
-        setActivation: function (f) { activation = f; }
+        setActivation: function (f) { activation = f; },
+        setImplicitSubmit: function (f) { implicitSubmit = f; }
     };
 
     // For node_apis.js, which runs next and deletes it.

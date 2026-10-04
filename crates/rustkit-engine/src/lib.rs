@@ -1988,6 +1988,12 @@ impl Engine {
         let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
             return false;
         };
+        // The page hears the key first; a cancelled keydown types nothing.
+        // Enter's keydown is `submit_focused_form`'s, which the caller
+        // tries before this.
+        if key_code != 0x0D && !self.fire_key_down(id, focused.raw(), key_code, key, ctrl, shift, alt) {
+            return false;
+        }
         let Some(state) = self
             .views
             .get(&id)
@@ -1998,9 +2004,17 @@ impl Engine {
 
         let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
         if matches!(result, KeyHandleResult::ValueChanged) {
-            // Script reads `value` from the bindings; keep it current.
+            // Script reads `value` from the bindings; keep it current,
+            // then tell the page.
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
                 bindings.sync_control_value(focused.raw(), state.value());
+                let typed = (!key.is_empty() && !ctrl).then_some(key);
+                if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
+                    debug!(?id, error = %e, "input listener threw");
+                }
+            }
+            if let Err(e) = self.flush_script_dom_writes(id) {
+                debug!(?id, error = %e, "relayout after input event failed");
             }
         }
         matches!(
@@ -2046,10 +2060,93 @@ impl Engine {
 
     /// Enter in the focused field: the URL to load when that submits its
     /// form.
+    ///
+    /// The page hears `keydown` first. Unless a listener cancels it, the
+    /// form is submitted the way the page would see a person do it
+    /// (implicit submission, HTML §4.10.21.2): a click on the form's
+    /// default button, validation, then `submit`. `None` when there is no
+    /// form, a listener cancelled, or the form is not a GET to this view.
+    /// A page without script submits as before.
     pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
-        self.form_submission_for_focus(id)
+        let focused = self.views.get(&id)?.focused_node?.raw();
+        if !self.fire_key_down(id, focused, 0x0D, "", false, false, false) {
+            return None;
+        }
+        let Some(bindings) = self.views.get(&id)?.bindings.as_ref() else {
+            return self
+                .form_submission_for_focus(id)
+                .filter(|sub| sub.is_self_target())
+                .map(|sub| sub.url);
+        };
+        // A submit made before this key has nobody to navigate for it.
+        bindings.take_submit_requests();
+        if let Err(e) = bindings.implicit_submit(focused) {
+            debug!(?id, error = %e, "implicit submission threw");
+        }
+        let request = bindings.take_submit_requests().pop();
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after implicit submission failed");
+        }
+        let (form, submitter) = request?;
+        let form = self
+            .views
+            .get(&id)?
+            .document
+            .as_ref()?
+            .get_node(rustkit_dom::NodeId::new(form))?;
+        self.form_submission(id, &form, submitter)
             .filter(|sub| sub.is_self_target())
             .map(|sub| sub.url)
+    }
+
+    /// Fire `keydown` for a key at `node` and lay out what its listeners
+    /// wrote. `key_code` is the Win32 virtual key `handle_text_key` takes;
+    /// `text` is the typed character, empty for a named key. Returns false
+    /// when a listener cancelled it.
+    #[allow(clippy::too_many_arguments)]
+    fn fire_key_down(
+        &mut self,
+        id: EngineViewId,
+        node: usize,
+        key_code: u32,
+        text: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> bool {
+        let key = match key_code {
+            0x08 => "Backspace",
+            0x09 => "Tab",
+            0x0D => "Enter",
+            0x1B => "Escape",
+            0x23 => "End",
+            0x24 => "Home",
+            0x25 => "ArrowLeft",
+            0x27 => "ArrowRight",
+            0x2E => "Delete",
+            _ => text,
+        };
+        let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) else {
+            return true;
+        };
+        let data = rustkit_bindings::KeyboardEventBindingData {
+            key: key.to_string(),
+            // A named key's code is its name; a character's physical key
+            // is not known here.
+            code: if key.chars().count() > 1 { key.to_string() } else { String::new() },
+            ctrl_key: ctrl,
+            alt_key: alt,
+            shift_key: shift,
+            ..Default::default()
+        };
+        let not_cancelled = bindings.fire_key_event(node, "keydown", &data).unwrap_or_else(|e| {
+            debug!(?id, error = %e, "keydown listener threw");
+            true
+        });
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after key event failed");
+        }
+        not_cancelled
     }
 
     /// Build the submission of `form`. `submitter` is the button that
