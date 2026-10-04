@@ -49,6 +49,10 @@ mod observers_tests;
 #[cfg(test)]
 mod shadow_tests;
 #[cfg(test)]
+mod legacy_tests;
+#[cfg(test)]
+mod reflect_tests;
+#[cfg(test)]
 mod web_intl_tests;
 mod web_crypto;
 mod web_scroll;
@@ -528,6 +532,8 @@ impl DomBindings {
     pub fn new(mut runtime: JsRuntime) -> Result<Self, BindingError> {
         debug!("Initializing DOM bindings");
 
+        // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
+        runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
         Self::inject_globals(&mut runtime)?;
         let dom_host = dom::SharedDomHost::default();
@@ -541,6 +547,8 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_components.js"))?;
         // attachShadow, ShadowRoot, slots, event retargeting (web_shadow.js).
         runtime.evaluate_script(include_str!("web_shadow.js"))?;
+        // Reflected IDL attributes: link.href, script.type, img.alt, a.target, el.tabIndex, ... (web_reflect.js).
+        runtime.evaluate_script(include_str!("web_reflect.js"))?;
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
         // insertRule writes into the <style>'s text, which the engine restyles from.
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
