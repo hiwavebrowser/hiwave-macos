@@ -1874,6 +1874,9 @@ impl Engine {
         suppressed || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y)
     }
 
+    /// Deliver a pointer move to VIEWPORT coordinates.
+    pub fn mouse_move_at_point(&mut self, _id: EngineViewId, _viewport_x: f32, _viewport_y: f32) {}
+
     /// Deliver a primary-button release at VIEWPORT coordinates: `pointerup`,
     /// `mouseup`, then `click` at the element under the point, then the click's
     /// default actions (focus, link navigation) unless a listener called
@@ -21518,6 +21521,225 @@ mod node_identity_tests {
 
     fn js(engine: &mut Engine, id: EngineViewId, script: &str) -> String {
         engine.execute_script(id, script).expect("script")
+    }
+
+    // Nothing told the page where the mouse was: no `mousemove`, no
+    // `mouseover` or `mouseenter`, so a menu that opens on hover never
+    // opened and a drag never moved. The expected lines below are what the
+    // oracle's Chrome logged for the same page and the same moves
+    // (tools/parity_oracle, Playwright `mouse.move`), at-target listeners on
+    // the elements with an id:
+    // type:target:relatedTarget:bubbles:cancelable:composed:button:buttons:
+    // which:detail:is a PointerEvent:clientX:clientY:offsetX:offsetY:
+    // movementX:isTrusted.
+
+    const HOVER_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<div id="a" style="height:50px">a</div>"#,
+        r#"<div id="o" style="height:100px"><div id="i" style="height:50px">inner</div></div>"#,
+        r#"<div id="tall" style="height:3000px"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_mouse_move_reaches_the_page_as_chrome_sends_it() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             function nm(n) { return n ? (n.id || n.nodeName || 'window') : 'null'; } \
+             ['pointerover', 'pointerenter', 'pointerout', 'pointerleave', 'pointermove', \
+              'mouseover', 'mouseenter', 'mouseout', 'mouseleave', 'mousemove', \
+              'pointerdown', 'mousedown', 'pointerup', 'mouseup'].forEach(function (t) { \
+               document.querySelectorAll('[id]').forEach(function (el) { \
+                 el.addEventListener(t, function (e) { \
+                   if (e.eventPhase !== 2) return; \
+                   log.push([e.type, nm(e.target), nm(e.relatedTarget), e.bubbles, e.cancelable, e.composed, \
+                     e.button, e.buttons, e.which, e.detail, e instanceof PointerEvent, e.clientX, e.clientY, \
+                     e.offsetX, e.offsetY, e.movementX, e.isTrusted].join(':')); }); }); }); \
+             window.heard = []; \
+             document.addEventListener('mouseover', function (e) { heard.push('over:' + e.target.id); }); \
+             document.addEventListener('mouseenter', function (e) { heard.push('enter:' + e.target.id); }); \
+             document.addEventListener('mouseenter', function (e) { heard.push('enter-capture:' + e.target.id); }, true);",
+        );
+        fn taken(engine: &mut Engine, id: EngineViewId) -> String {
+            js(engine, id, "var out = log.join(' '); log.length = 0; out")
+        }
+
+        // Onto #a from nowhere.
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerover:a:null:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "pointerenter:a:null:false:false:false:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mouseover:a:null:true:true:true:0:0:0:0:false:12:20:12:20:0:true ",
+                "mouseenter:a:null:false:false:false:0:0:0:0:false:12:20:12:20:0:true ",
+                "pointermove:a:null:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mousemove:a:null:true:true:true:0:0:0:0:false:12:20:12:20:0:true"
+            ))
+        );
+        // `mouseover` bubbles to the document; `mouseenter` does not, but a
+        // capturing listener above still hears it, once per element entered
+        // (html and body have no id).
+        assert_eq!(
+            js(&mut engine, id, "heard.join(' ')"),
+            js_string("over:a enter-capture: enter-capture: enter-capture:a")
+        );
+        // Within #a: moves only.
+        engine.mouse_move_at_point(id, 30.0, 25.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointermove:a:null:true:true:true:-1:0:0:0:true:30:25:30:25:18:true ",
+                "mousemove:a:null:true:true:true:0:0:0:0:false:30:25:30:25:18:true"
+            ))
+        );
+        // #a to #i, which is inside #o: both are entered, the outer first.
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:a:i:true:true:true:-1:0:0:0:true:12:70:12:70:0:true ",
+                "pointerleave:a:i:false:false:false:-1:0:0:0:true:12:70:12:70:0:true ",
+                "pointerover:i:a:true:true:true:-1:0:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:o:a:false:false:false:-1:0:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:i:a:false:false:false:-1:0:0:0:true:12:70:12:20:0:true ",
+                "mouseout:a:i:true:true:true:0:0:0:0:false:12:70:12:70:0:true ",
+                "mouseleave:a:i:false:false:false:0:0:0:0:false:12:70:12:70:0:true ",
+                "mouseover:i:a:true:true:true:0:0:0:0:false:12:70:12:20:0:true ",
+                "mouseenter:o:a:false:false:false:0:0:0:0:false:12:70:12:20:0:true ",
+                "mouseenter:i:a:false:false:false:0:0:0:0:false:12:70:12:20:0:true ",
+                "pointermove:i:null:true:true:true:-1:0:0:0:true:12:70:12:20:-18:true ",
+                "mousemove:i:null:true:true:true:0:0:0:0:false:12:70:12:20:-18:true"
+            ))
+        );
+        // #i to its parent #o: #i is left, #o is not entered again.
+        engine.mouse_move_at_point(id, 12.0, 120.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:i:o:true:true:true:-1:0:0:0:true:12:120:12:70:0:true ",
+                "pointerleave:i:o:false:false:false:-1:0:0:0:true:12:120:12:70:0:true ",
+                "pointerover:o:i:true:true:true:-1:0:0:0:true:12:120:12:70:0:true ",
+                "mouseout:i:o:true:true:true:0:0:0:0:false:12:120:12:70:0:true ",
+                "mouseleave:i:o:false:false:false:0:0:0:0:false:12:120:12:70:0:true ",
+                "mouseover:o:i:true:true:true:0:0:0:0:false:12:120:12:70:0:true ",
+                "pointermove:o:null:true:true:true:-1:0:0:0:true:12:120:12:70:0:true ",
+                "mousemove:o:null:true:true:true:0:0:0:0:false:12:120:12:70:0:true"
+            ))
+        );
+        // #o back to #a.
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:o:a:true:true:true:-1:0:0:0:true:12:20:12:-30:0:true ",
+                "pointerleave:o:a:false:false:false:-1:0:0:0:true:12:20:12:-30:0:true ",
+                "pointerover:a:o:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "pointerenter:a:o:false:false:false:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mouseout:o:a:true:true:true:0:0:0:0:false:12:20:12:-30:0:true ",
+                "mouseleave:o:a:false:false:false:0:0:0:0:false:12:20:12:-30:0:true ",
+                "mouseover:a:o:true:true:true:0:0:0:0:false:12:20:12:20:0:true ",
+                "mouseenter:a:o:false:false:false:0:0:0:0:false:12:20:12:20:0:true ",
+                "pointermove:a:null:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mousemove:a:null:true:true:true:0:0:0:0:false:12:20:12:20:0:true"
+            ))
+        );
+        // A press, then a drag onto #i: the button is held in `buttons`,
+        // and in `which` on the mouse events.
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:a:null:true:true:true:0:1:1:0:true:12:20:12:20:0:true ",
+                "mousedown:a:null:true:true:true:0:1:1:1:false:12:20:12:20:0:true"
+            ))
+        );
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:a:i:true:true:true:-1:1:0:0:true:12:70:12:70:0:true ",
+                "pointerleave:a:i:false:false:false:-1:1:0:0:true:12:70:12:70:0:true ",
+                "pointerover:i:a:true:true:true:-1:1:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:o:a:false:false:false:-1:1:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:i:a:false:false:false:-1:1:0:0:true:12:70:12:20:0:true ",
+                "mouseout:a:i:true:true:true:0:1:1:0:false:12:70:12:70:0:true ",
+                "mouseleave:a:i:false:false:false:0:1:1:0:false:12:70:12:70:0:true ",
+                "mouseover:i:a:true:true:true:0:1:1:0:false:12:70:12:20:0:true ",
+                "mouseenter:o:a:false:false:false:0:1:1:0:false:12:70:12:20:0:true ",
+                "mouseenter:i:a:false:false:false:0:1:1:0:false:12:70:12:20:0:true ",
+                "pointermove:i:null:true:true:true:-1:1:0:0:true:12:70:12:20:0:true ",
+                "mousemove:i:null:true:true:true:0:1:1:0:false:12:70:12:20:0:true"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:i:null:true:true:true:0:0:1:0:true:12:70:12:20:0:true ",
+                "mouseup:i:null:true:true:true:0:0:1:1:false:12:70:12:20:0:true"
+            ))
+        );
+        // The button is up again.
+        engine.mouse_move_at_point(id, 13.0, 70.0);
+        assert_eq!(
+            js(&mut engine, id, "log.map(function (l) { var f = l.split(':'); return f[0] + ':' + f[7] + ':' + f[15]; }).join(' ')"),
+            js_string("pointermove:0:1 mousemove:0:1")
+        );
+    }
+
+    // A cancelled `pointerdown` stops the `mousemove`s of that press, not
+    // the boundary events (Pointer Events §11.3). A move writes to the DOM
+    // like any other listener: the layout follows before the call returns.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_hover_listener_changes_the_page() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             var o = document.getElementById('o'); \
+             o.addEventListener('mouseenter', function () { o.style.height = '400px'; }); \
+             o.addEventListener('mouseleave', function () { o.style.height = '100px'; }); \
+             document.getElementById('a').addEventListener('pointerdown', function (e) { e.preventDefault(); }); \
+             ['mousemove', 'pointermove', 'mouseover'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { log.push(t + ':' + e.target.id); }); });",
+        );
+        // #o is 50..150; hovering it opens it to 50..450, leaving closes it.
+        engine.mouse_move_at_point(id, 12.0, 120.0);
+        engine.mouse_move_at_point(id, 12.0, 300.0);
+        assert_eq!(js(&mut engine, id, "log[log.length - 1]"), js_string("mousemove:o"));
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        engine.mouse_move_at_point(id, 12.0, 300.0);
+        assert_eq!(js(&mut engine, id, "log[log.length - 1]"), js_string("mousemove:tall"));
+
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        engine.mouse_move_at_point(id, 12.0, 30.0);
+        engine.mouse_move_at_point(id, 12.0, 300.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("pointermove:a mouseover:tall pointermove:tall")
+        );
+        engine.click_at_point(id, 12.0, 300.0);
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_move_at_point(id, 12.0, 310.0);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("pointermove:tall mousemove:tall"));
     }
 
     // weather.com's drawer and yahoo's More menu (Pollux, 2026-10-04): the
