@@ -493,6 +493,9 @@ struct ViewState {
     pointer_at: Option<(f32, f32)>,
     /// The primary button is held: between a press and its release.
     primary_button_down: bool,
+    /// The press in progress has had its say on the focus (it moved it, or
+    /// a listener cancelled the press): the release leaves the focus alone.
+    press_settled_focus: bool,
     /// Whether the view itself has focus.
     view_focused: bool,
     /// Current scroll offset (x, y) in pixels.
@@ -657,6 +660,19 @@ pub struct ScriptRecord {
     /// Wall time spent running it.
     pub elapsed_ms: u64,
     pub outcome: ScriptOutcome,
+}
+
+/// Which part of a click is moving the focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointFocus {
+    /// The press: the control under the point, else nothing is focused.
+    Press,
+    /// The release of a press that already moved the focus: a label's
+    /// control, else the focus stays.
+    Label,
+    /// A click with no press before it: the control under the point or
+    /// the one its label names, else nothing is focused.
+    Click,
 }
 
 /// What a primary-button click did once the page's listeners had run.
@@ -1351,6 +1367,7 @@ impl Engine {
             hovered_node: None,
             pointer_at: None,
             primary_button_down: false,
+            press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1417,6 +1434,7 @@ impl Engine {
             hovered_node: None,
             pointer_at: None,
             primary_button_down: false,
+            press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1492,6 +1510,7 @@ impl Engine {
             hovered_node: None,
             pointer_at: None,
             primary_button_down: false,
+            press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1705,6 +1724,19 @@ impl Engine {
         viewport_x: f32,
         viewport_y: f32,
     ) -> Option<String> {
+        self.focus_point(id, viewport_x, viewport_y, PointFocus::Click)
+    }
+
+    /// Move the focus for a press, a release or a whole click at VIEWPORT
+    /// coordinates (see [`PointFocus`]). Returns the tag of the focused
+    /// control afterwards.
+    fn focus_point(
+        &mut self,
+        id: EngineViewId,
+        viewport_x: f32,
+        viewport_y: f32,
+        why: PointFocus,
+    ) -> Option<String> {
         let (doc_x, doc_y) = {
             let view = self.views.get(&id)?;
             (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)
@@ -1720,14 +1752,29 @@ impl Engine {
         // Resolve focusability against the DOM, not the layout box: a
         // FormControl box type would miss `contenteditable` and tabindex
         // later, and the tag name is what callers want reported.
-        let focusable = hit_node.and_then(|raw| {
-            let view = self.views.get(&id)?;
-            let doc = view.document.as_ref()?;
-            let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
-            // A click on a label is a click for the control it labels.
-            Self::form_control(&node)
-                .or_else(|| Self::labeled_control(doc, &node).as_ref().and_then(Self::form_control))
-        });
+        let (control, labeled) = hit_node
+            .and_then(|raw| {
+                let view = self.views.get(&id)?;
+                let doc = view.document.as_ref()?;
+                let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+                let control = Self::form_control(&node);
+                // A click on a label is a click for the control it labels.
+                let labeled = match control {
+                    Some(_) => None,
+                    None => Self::labeled_control(doc, &node).as_ref().and_then(Self::form_control),
+                };
+                Some((control, labeled))
+            })
+            .unwrap_or((None, None));
+        let focusable = match why {
+            PointFocus::Press => control,
+            PointFocus::Click => control.or(labeled),
+            // Only a label has anything left to do at the release.
+            PointFocus::Label => match labeled {
+                Some(labeled) => Some(labeled),
+                None => return self.focused_tag(id),
+            },
+        };
 
         self.set_focus(id, focusable.clone());
         // The page's focus follows, and has the last word: it refuses a
@@ -1879,8 +1926,11 @@ impl Engine {
 
     /// Deliver a primary-button press at VIEWPORT coordinates to the page:
     /// `pointerdown` then `mousedown` at the element under the point (no
-    /// `mousedown` when a listener cancelled the `pointerdown`). Returns
-    /// false when a listener cancelled the `mousedown`.
+    /// `mousedown` when a listener cancelled the `pointerdown`), then the
+    /// press's default action: the focus moves to the control under the
+    /// point, or away from the focused one (UI Events §3.4.5.1). A
+    /// listener that cancels either event keeps the focus where it is.
+    /// Returns false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = true;
@@ -1889,7 +1939,14 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.compat_mouse_suppressed = suppressed;
         }
-        suppressed || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y)
+        let not_cancelled = suppressed || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
+        if !suppressed && not_cancelled {
+            self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.press_settled_focus = true;
+        }
+        not_cancelled
     }
 
     /// Deliver a pointer move to VIEWPORT coordinates. When the element
@@ -2037,10 +2094,17 @@ impl Engine {
         if !suppressed {
             self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
         }
-        // The focus moves before `click` fires (it is the press's default
-        // action, UI Events §3.4.5.1), so a `click` listener that focuses
-        // a field has the last word.
-        self.focus_at_point(id, viewport_x, viewport_y);
+        // The focus moved at the press. What is left for the release is a
+        // label: its click focuses the control it labels. A release with
+        // no press before it (a caller that only clicks) does both here,
+        // before `click` fires, so a `click` listener that focuses a field
+        // has the last word.
+        let pressed = self
+            .views
+            .get_mut(&id)
+            .is_some_and(|view| std::mem::take(&mut view.press_settled_focus));
+        let focus = if pressed { PointFocus::Label } else { PointFocus::Click };
+        self.focus_point(id, viewport_x, viewport_y, focus);
         // A submit made outside a click (a timer, a callback) has nobody to
         // navigate for it yet; this click must not pick it up.
         self.take_submit_request(id);
@@ -3561,6 +3625,7 @@ impl Engine {
         view.hovered_node = None;
         view.pointer_at = None;
         view.primary_button_down = false;
+        view.press_settled_focus = false;
         view.compat_mouse_suppressed = false;
         view.script_log.clear();
         view.script_policy = None;
@@ -3865,6 +3930,7 @@ impl Engine {
         view.hovered_node = None;
         view.pointer_at = None;
         view.primary_button_down = false;
+        view.press_settled_focus = false;
         view.compat_mouse_suppressed = false;
         view.script_log.clear();
         view.script_policy = None;
@@ -21697,6 +21763,183 @@ mod node_identity_tests {
         engine.execute_script(id, script).expect("script")
     }
 
+    // The focus moved at the release, whatever the page did with the
+    // press: a list of options under a field cancels `mousedown` so the
+    // field keeps its focus while an option is clicked, and here the field
+    // was blurred (and its list closed) before the `click` arrived. The
+    // expected lines are the oracle Chrome's log for the same page and the
+    // same presses (tools/parity_oracle/focus_press_log.mjs), capturing
+    // listeners on the document:
+    // type:target:relatedTarget:document.activeElement.
+
+    const FOCUS_PRESS_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<input id="f" style="display:block;height:30px;margin:0;box-sizing:border-box">"#,
+        r#"<input id="g" style="display:block;height:30px;margin:0;box-sizing:border-box">"#,
+        r#"<div id="opt" style="height:40px">an option that keeps the field's focus</div>"#,
+        r#"<div id="d" style="height:40px">plain text</div>"#,
+        r#"<div id="drag" style="height:40px">release target</div>"#,
+        r#"<div id="pd" style="height:40px">its pointerdown is cancelled</div>"#,
+        r#"</body></html>"#
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn the_focus_moves_at_the_press() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, FOCUS_PRESS_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             function nm(n) { return n ? (n.id || n.nodeName) : 'null'; } \
+             ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'focus', 'blur', 'focusin', 'focusout', \
+              'change'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push([e.type, nm(e.target), nm(e.relatedTarget), nm(document.activeElement)].join(':')); \
+               }, true); }); \
+             document.getElementById('opt').addEventListener('mousedown', function (e) { e.preventDefault(); }); \
+             document.getElementById('pd').addEventListener('pointerdown', function (e) { e.preventDefault(); });",
+        );
+        fn taken(engine: &mut Engine, id: EngineViewId) -> String {
+            js(engine, id, "var out = log.join(' '); log.length = 0; out")
+        }
+        // The click of a press and a release on different elements goes to
+        // their common ancestor in Chrome and to the release's element
+        // here: left out of this comparison.
+        fn taken_without_click(engine: &mut Engine, id: EngineViewId) -> String {
+            js(
+                engine,
+                id,
+                "var out = log.filter(function (l) { return l.indexOf('click:') !== 0; }).join(' '); \
+                 log.length = 0; out",
+            )
+        }
+
+        // In #f: the focus arrives at the press, after `mousedown`.
+        engine.mouse_down_at_point(id, 12.0, 15.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:f:null:BODY ",
+                "mousedown:f:null:BODY ",
+                "focus:f:null:f ",
+                "focusin:f:null:f"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 15.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:f:null:f ",
+                "mouseup:f:null:f ",
+                "click:f:null:f"
+            ))
+        );
+        // In #g: #f hears `blur` with nothing focused, then #g `focus`.
+        engine.mouse_down_at_point(id, 12.0, 45.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:g:null:f ",
+                "mousedown:g:null:f ",
+                "blur:f:g:BODY ",
+                "focusout:f:g:BODY ",
+                "focus:g:f:g ",
+                "focusin:g:f:g"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 45.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:g:null:g ",
+                "mouseup:g:null:g ",
+                "click:g:null:g"
+            ))
+        );
+        // A cancelled `mousedown` moves no focus: an option list under a
+        // field keeps the field focused while the option is clicked.
+        engine.mouse_down_at_point(id, 12.0, 80.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:opt:null:g ",
+                "mousedown:opt:null:g"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 80.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:opt:null:g ",
+                "mouseup:opt:null:g ",
+                "click:opt:null:g"
+            ))
+        );
+        // Plain text: the field is blurred at the press.
+        engine.mouse_down_at_point(id, 12.0, 120.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:d:null:g ",
+                "mousedown:d:null:g ",
+                "blur:g:null:BODY ",
+                "focusout:g:null:BODY"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 120.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:d:null:BODY ",
+                "mouseup:d:null:BODY ",
+                "click:d:null:BODY"
+            ))
+        );
+        // A press in #f released somewhere else: #f keeps the focus.
+        engine.mouse_down_at_point(id, 12.0, 15.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:f:null:BODY ",
+                "mousedown:f:null:BODY ",
+                "focus:f:null:f ",
+                "focusin:f:null:f"
+            ))
+        );
+        engine.mouse_move_at_point(id, 12.0, 160.0);
+        engine.click_at_point(id, 12.0, 160.0);
+        assert_eq!(
+            taken_without_click(&mut engine, id),
+            js_string(concat!(
+                "pointerup:drag:null:f ",
+                "mouseup:drag:null:f"
+            ))
+        );
+        // A cancelled `pointerdown`: no `mousedown`, and no focus move.
+        engine.mouse_down_at_point(id, 12.0, 200.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:pd:null:f"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 200.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:pd:null:f ",
+                "click:pd:null:f"
+            ))
+        );
+        // The engine's own focus (where typing goes) is where the page's is.
+        assert_eq!(engine.focused_tag(id).as_deref(), Some("input"));
+    }
+
     // Nothing told the page where the mouse was: no `mousemove`, no
     // `mouseover` or `mouseenter`, so a menu that opens on hover never
     // opened and a drag never moved. The expected lines below are what the
@@ -22875,6 +23118,16 @@ mod node_identity_tests {
         let outcome = engine.click_at_point(id, 12.0, 132.0);
         assert_eq!(outcome.focused, None);
         assert_eq!(engine.focused_node(id), None);
+
+        // The way a person clicks, a press and then a release: the focus
+        // moves at the press, and the label's field takes it at the release.
+        engine.click_at_point(id, 12.0, 92.0);
+        assert_eq!(engine.focused_node(id), Some(r));
+        engine.mouse_down_at_point(id, 12.0, 52.0);
+        let outcome = engine.click_at_point(id, 12.0, 52.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert_eq!(js(&mut engine, id, "document.activeElement.id"), js_string("q"));
     }
 
     // Pete's live testing, continued: typing in a field told the page
