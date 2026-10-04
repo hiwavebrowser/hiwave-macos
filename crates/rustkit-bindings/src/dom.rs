@@ -32,7 +32,7 @@ mod node_apis;
 
 /// Does this element match this selector list? `None` means the list is
 /// invalid, and script throws `SyntaxError`.
-pub type SelectorMatchFn = Rc<dyn Fn(&Rc<Node>, &str) -> Option<bool>>;
+pub type SelectorMatchFn = Rc<dyn Fn(&Rc<Node>, &str, &HashMap<usize, bool>) -> Option<bool>>;
 
 /// Where the layout put one element, in document coordinates, as the engine
 /// last measured it (`DomBindings::set_geometry`). The border box is what
@@ -81,6 +81,10 @@ pub(crate) struct DomHost {
     /// checkedness, or `None` when it follows its `checked` attribute
     /// again). The state itself is script's (web_forms.js).
     checked_writes: Vec<(usize, Option<bool>)>,
+    /// The checkedness script holds for each control that no longer
+    /// follows its `checked` attribute, by NodeId. The selector matcher
+    /// reads it, so `:checked` in a query answers what the page paints.
+    checked: HashMap<usize, bool>,
     /// Forms whose `submit` event was not cancelled, with the button that
     /// submitted each, by NodeId (`DomBindings::take_submit_requests`).
     submit_requests: Vec<(usize, Option<usize>)>,
@@ -102,6 +106,7 @@ impl DomHost {
         self.values.clear();
         self.value_writes.clear();
         self.checked_writes.clear();
+        self.checked.clear();
         self.submit_requests.clear();
         self.generation
     }
@@ -533,6 +538,10 @@ fn control_checked(host: &mut DomHost, args: &[JsValue]) -> DomDirty {
         _ => None,
     };
     host.checked_writes.push((node.id.raw(), state));
+    match state {
+        Some(checked) => host.checked.insert(node.id.raw(), checked),
+        None => host.checked.remove(&node.id.raw()),
+    };
     DomDirty::Style
 }
 
@@ -859,12 +868,12 @@ pub(crate) fn install(
                 // throws even where nothing could match. Matching reads each
                 // element's whole ancestor chain, so `.outer p` scoped to
                 // an inner element still sees `.outer` above the scope.
-                if matcher(&scope, arg).is_none() {
+                if matcher(&scope, arg, &host.checked).is_none() {
                     return JsValue::Boolean(false);
                 }
                 let mut all = Vec::new();
                 descendant_elements(&scope, &mut all);
-                return id_list(all.into_iter().filter(|n| matcher(n, arg) == Some(true)));
+                return id_list(all.into_iter().filter(|n| matcher(n, arg, &host.checked) == Some(true)));
             }
             let found = match string_arg(args, 2) {
                 Some("tag") if arg == "*" => {
@@ -902,7 +911,7 @@ pub(crate) fn install(
                 return JsValue::Null;
             };
             let matched = match (&host.matcher, &host.document) {
-                (Some(matcher), _) => matcher(&node, selector),
+                (Some(matcher), _) => matcher(&node, selector, &host.checked),
                 (None, Some(document)) => Some(
                     QuerySelector::select(document, selector)
                         .iter()
