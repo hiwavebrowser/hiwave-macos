@@ -246,6 +246,14 @@ impl RustKitView {
             .unwrap_or(false)
     }
 
+    /// A key was released: the page hears `keyup`.
+    pub fn handle_key_up(&self, key_code: u32, key: &str, ctrl: bool, shift: bool, alt: bool) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            engine.handle_key_up(view_id, key_code, key, ctrl, shift, alt);
+        }
+    }
+
     /// Enter in the focused field: the page hears `keydown` and `submit`,
     /// and this is the URL to navigate to when its form submits. `None`
     /// when there is no form, a listener cancelled, or the form is not a

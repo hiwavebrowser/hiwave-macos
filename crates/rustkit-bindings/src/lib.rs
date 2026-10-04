@@ -51,6 +51,8 @@ mod shadow_tests;
 #[cfg(test)]
 mod traversal_tests;
 #[cfg(test)]
+mod document_members_tests;
+#[cfg(test)]
 mod web_intl_tests;
 mod web_crypto;
 mod web_scroll;
@@ -545,6 +547,10 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_shadow.js"))?;
         // NodeFilter, TreeWalker, NodeIterator, createTreeWalker/createNodeIterator (web_traversal.js).
         runtime.evaluate_script(include_str!("web_traversal.js"))?;
+        // document.location/fonts/forms/visibilityState/..., FontFace (web_document.js) and
+        // DOMMatrix (web_dommatrix.js): members pages read without feature-testing.
+        runtime.evaluate_script(include_str!("web_document.js"))?;
+        runtime.evaluate_script(include_str!("web_dommatrix.js"))?;
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
         // insertRule writes into the <style>'s text, which the engine restyles from.
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
@@ -1272,16 +1278,18 @@ impl DomBindings {
         Ok(!matches!(result, JsValue::Boolean(false)))
     }
 
-    /// Fire the user's key press at an element (by node id) as a trusted,
-    /// bubbling, cancelable `KeyboardEvent`. Returns false when a listener
-    /// called `preventDefault()`. Listener exceptions are queued, see
-    /// [`Self::take_reported_errors`].
+    /// Fire the user's key press or release at an element (by node id) as
+    /// a trusted, bubbling, cancelable `KeyboardEvent`. `None` is the
+    /// page's active element (the body unless script focused something).
+    /// Returns false when a listener called `preventDefault()`. Listener
+    /// exceptions are queued, see [`Self::take_reported_errors`].
     pub fn fire_key_event(
         &self,
-        node: usize,
+        node: Option<usize>,
         event_type: &str,
         data: &KeyboardEventBindingData,
     ) -> Result<bool, BindingError> {
+        let node = node.map_or("null".to_string(), |n| n.to_string());
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireKey({node}, {event_type:?}, {{ key: {:?}, code: {:?}, repeat: {}, \
              ctrlKey: {}, altKey: {}, shiftKey: {}, metaKey: {} }})",
