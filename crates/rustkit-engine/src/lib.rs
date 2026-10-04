@@ -1786,11 +1786,105 @@ impl Engine {
         let navigate = if submitted.is_some() {
             submitted
         } else if not_cancelled {
-            self.link_at_point(id, viewport_x, viewport_y)
+            self.follow_link_at_point(id, viewport_x, viewport_y)
         } else {
             None
         };
         ClickOutcome { focused, navigate }
+    }
+
+    /// The default action of a click on a link: the URL to load, or `None`
+    /// when there is nothing to load because the link was handled here. A
+    /// URL that differs from the document's only in its fragment scrolls
+    /// this document, and a `javascript:` URL runs its script.
+    fn follow_link_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<String> {
+        if let Some(url) = self.link_at_point(id, viewport_x, viewport_y) {
+            return match self.fragment_of_this_document(id, &url) {
+                Some(target) => {
+                    self.navigate_to_fragment(id, target);
+                    None
+                }
+                None => Some(url),
+            };
+        }
+        if let Some(script) = self.javascript_href_at_point(id, viewport_x, viewport_y) {
+            if let Err(e) = self.execute_script(id, &script) {
+                debug!(?id, ?e, "javascript: link threw");
+            }
+        }
+        None
+    }
+
+    /// `url` parsed, when it has a fragment and is otherwise the view's URL.
+    fn fragment_of_this_document(&self, id: EngineViewId, url: &str) -> Option<Url> {
+        let mut document = self.views.get(&id)?.url.clone()?;
+        let target = Url::parse(url).ok()?;
+        target.fragment()?;
+        let mut bare = target.clone();
+        bare.set_fragment(None);
+        document.set_fragment(None);
+        (bare == document).then_some(target)
+    }
+
+    /// Navigate to a fragment of the current document (HTML §7.4.2.3.3,
+    /// §7.4.6.4): scroll to the element whose id it names (the top of the
+    /// page for an empty fragment or `top`; nowhere when nothing matches),
+    /// make `target` the URL and tell script, which fires `hashchange`.
+    fn navigate_to_fragment(&mut self, id: EngineViewId, target: Url) {
+        let fragment = String::from_utf8_lossy(&percent_decode(target.fragment().unwrap_or_default())).into_owned();
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        let element = (!fragment.is_empty())
+            .then(|| view.document.as_ref()?.get_element_by_id(&fragment))
+            .flatten();
+        let top = match element {
+            Some(el) => view.layout.as_ref().and_then(|l| Self::box_top(l, el.id.raw())),
+            None => (fragment.is_empty() || fragment.eq_ignore_ascii_case("top")).then_some(0.0),
+        };
+        if let Some(top) = top {
+            view.scroll_offset.1 = top.max(0.0).min(view.max_scroll_offset.1);
+        }
+        debug!(?id, %target, offset = ?view.scroll_offset, "Navigated to a fragment");
+        let script = format!("__rustkit_fragment_navigation({:?})", target.as_str());
+        view.url = Some(target);
+        if let Err(e) = self.execute_script(id, &script) {
+            debug!(?id, ?e, "hashchange listener threw");
+        }
+        // The scroll is a translate at render time; nothing was laid out.
+        if let Err(e) = self.render(id) {
+            debug!(?id, ?e, "Render after a fragment navigation failed");
+        }
+    }
+
+    /// The top border edge of the first box `node` generated, in document
+    /// coordinates.
+    fn box_top(b: &LayoutBox, node: usize) -> Option<f32> {
+        if b.node_id == Some(node) {
+            return Some(b.dimensions.border_box().y);
+        }
+        b.children.iter().find_map(|c| Self::box_top(c, node))
+    }
+
+    /// The script of the `javascript:` link under the point, if any. Such
+    /// a link has no `link_href` in the layout, so the DOM is asked.
+    fn javascript_href_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<String> {
+        let view = self.views.get(&id)?;
+        let (doc_x, doc_y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+        let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+        let mut node = view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))?;
+        loop {
+            if let NodeType::Element { tag_name, attributes, .. } = &node.node_type {
+                if tag_name.eq_ignore_ascii_case("a") {
+                    let href = attributes.get("href")?.trim();
+                    let scheme = href.get(.."javascript:".len())?;
+                    return scheme
+                        .eq_ignore_ascii_case("javascript:")
+                        .then(|| String::from_utf8_lossy(&percent_decode(&href[scheme.len()..])).into_owned());
+                }
+            }
+            node = node.parent()?;
+        }
     }
 
     /// The last form script asked to submit since the previous call, with
@@ -21427,7 +21521,7 @@ mod node_identity_tests {
 
         let outcome = click_row(&mut engine, id, 3);
         assert_eq!(outcome.navigate, None);
-        assert_eq!(js(&mut engine, id, "window.ran"), "Integer(1)");
+        assert_eq!(js(&mut engine, id, "String(window.ran)"), js_string("1"));
         // What the script wrote to the DOM is laid out.
         assert_eq!(
             engine.link_at_point(id, 12.0, 172.0).as_deref(),
@@ -21441,7 +21535,7 @@ mod node_identity_tests {
             "document.addEventListener('click', function (e) { e.preventDefault(); })",
         );
         click_row(&mut engine, id, 3);
-        assert_eq!(js(&mut engine, id, "window.ran"), "Integer(1)");
+        assert_eq!(js(&mut engine, id, "String(window.ran)"), js_string("1"));
     }
 
     // Pete's live testing, continued: a click on a form's submit button did
