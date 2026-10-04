@@ -5216,6 +5216,19 @@ impl Engine {
                     }
                 }
                 let mut type_seen: HashMap<Cow<'_, str>, usize> = HashMap::new();
+                // A <details> without `open` renders its first <summary>
+                // child and nothing else (HTML §15.3.9: the rest sits in a
+                // slot the UA hides, which author `display` cannot reach).
+                // The hidden children are still styled below: they count
+                // as siblings for the selectors of the one that shows.
+                let closed_details = &*tag_lower == "details" && !attributes.contains_key("open");
+                let details_summary = closed_details
+                    .then(|| {
+                        child_nodes.iter().position(|c| {
+                            matches!(&c.node_type, NodeType::Element { tag_name, .. } if &*lower_tag(tag_name) == "summary")
+                        })
+                    })
+                    .flatten();
                 let children_parent_style: &ComputedStyle = match &unblockified {
                     Some(s) => s,
                     None => &layout_box.style,
@@ -5301,7 +5314,7 @@ impl Engine {
                         | BoxType::LineBreak => true,
                     };
 
-                    if should_include {
+                    if should_include && (!closed_details || details_summary == Some(child_index)) {
                         Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     }
                 }
