@@ -18,7 +18,7 @@ fn bound() -> DomBindings {
         .set_document(Rc::new(Document::parse_html(PAGE).unwrap()))
         .unwrap();
     // The stand-in matcher: a tag name, `.class` or `#id`; "!" is invalid.
-    bindings.set_selector_matcher(Rc::new(|node, sel| {
+    bindings.set_selector_matcher(Rc::new(|node, sel, _| {
         if sel == "!" {
             return None;
         }

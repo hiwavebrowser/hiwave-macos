@@ -3338,8 +3338,8 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
-            bindings.set_selector_matcher(Rc::new(|node, selector| {
-                SelectorMatcher.node_matches(node, selector)
+            bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
+                SelectorMatcher.node_matches(node, selector, checked)
             }));
 
             bindings
@@ -3637,8 +3637,8 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
-            bindings.set_selector_matcher(Rc::new(|node, selector| {
-                SelectorMatcher.node_matches(node, selector)
+            bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
+                SelectorMatcher.node_matches(node, selector, checked)
             }));
 
             bindings
@@ -10129,7 +10129,14 @@ impl SelectorMatcher {
     /// matcher: it builds the same ancestor, sibling and position context
     /// the cascade threads down, from the node's current place in the tree,
     /// so a script query and the style that paints agree on what matches.
-    pub(crate) fn node_matches(&self, node: &Rc<Node>, selector: &str) -> Option<bool> {
+    /// `checked` is the checkedness script holds for the controls that no
+    /// longer follow their `checked` attribute, by raw NodeId.
+    pub(crate) fn node_matches(
+        &self,
+        node: &Rc<Node>,
+        selector: &str,
+        checked: &HashMap<usize, bool>,
+    ) -> Option<bool> {
         let selector = selector.trim();
         // A query asks this for every node of the tree with one selector, so
         // the selector is validated and prepared once, not once per node.
@@ -10141,6 +10148,23 @@ impl SelectorMatcher {
             return Some(false);
         };
         let tag = tag_name.to_lowercase();
+        // `:checked` reads the attribute map; a control whose checkedness
+        // has left its attribute is matched with the attribute as it would
+        // be (the cascade does the same, `Engine::live_attributes`).
+        let live = |raw: usize, attributes: &HashMap<String, String>| match checked.get(&raw) {
+            Some(&on) if on != attributes.contains_key("checked") => {
+                let mut attributes = attributes.clone();
+                if on {
+                    attributes.insert("checked".to_string(), String::new());
+                } else {
+                    attributes.remove("checked");
+                }
+                Some(attributes)
+            }
+            _ => None,
+        };
+        let live_own = live(node.id.raw(), attributes);
+        let attributes = live_own.as_ref().unwrap_or(attributes);
         // A selector that reads neither the ancestors nor the siblings (`.a`,
         // `div`, `#id`, `[data-x]`, `div.a.b`, and lists of those) needs
         // neither: building them walked every ancestor and every sibling of
@@ -10203,7 +10227,8 @@ impl SelectorMatcher {
                         }
                     }
                     if before {
-                        let state = ElementState::of(&t, attributes);
+                        let live = live(c.id.raw(), attributes);
+                        let state = ElementState::of(&t, live.as_ref().unwrap_or(attributes));
                         siblings_before.push((t, classes(attributes), attributes.get("id").cloned(), state));
                     }
                 }

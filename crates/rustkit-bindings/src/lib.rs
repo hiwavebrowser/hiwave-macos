@@ -2327,7 +2327,7 @@ mod tests {
     #[test]
     fn document_fragment_children_move_in_on_insert() {
         let b = bound(MIXED);
-        b.set_selector_matcher(Rc::new(|node, selector| {
+        b.set_selector_matcher(Rc::new(|node, selector, _| {
             (selector != "!").then(|| node.tag_name() == Some(selector))
         }));
         assert_eq!(
@@ -2389,7 +2389,7 @@ mod tests {
     #[test]
     fn an_injected_selector_matcher_answers_queries_matches_and_closest() {
         let b = bound(PAGE);
-        b.set_selector_matcher(Rc::new(|node, selector| {
+        b.set_selector_matcher(Rc::new(|node, selector, _| {
             (selector != "!").then(|| node.tag_name() == Some(selector))
         }));
         assert!(eval_bool(&b, "document.querySelectorAll('p').length === 3"));
