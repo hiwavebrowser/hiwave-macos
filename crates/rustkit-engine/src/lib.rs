@@ -22110,6 +22110,64 @@ mod node_identity_tests {
         assert_eq!(focused_id(&mut engine, id), js_string("b/none"));
     }
 
+    // A click on a disabled button still fired `click` at it and bubbled,
+    // so a page's handler ran for a control the page had switched off (a
+    // greyed-out "Pay" button paid). A disabled form control takes no
+    // click from the user (HTML §4.10.18.5); the release is still heard.
+
+    const DISABLED_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="off" disabled style="display:block;width:100px;height:30px">off</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="on" style="display:block;width:100px;height:30px">on</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="cb" type="checkbox" disabled style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<fieldset disabled style="margin:0;padding:0;border:0">"#,
+        r#"<legend style="padding:0"><button id="lg" style="display:block;width:100px;height:30px;margin:0 0 10px">legend</button></legend>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="fs" style="display:block;width:100px;height:30px">set</button></div>"#,
+        r#"<div id="plain" style="height:40px;overflow:hidden">plain</div>"#,
+        r#"</fieldset>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn the_users_click_on_a_disabled_control_is_not_dispatched() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DISABLED_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             document.addEventListener('mouseup', function (e) { log.push('up:' + e.target.id); }); \
+             document.addEventListener('click', function (e) { log.push('click:' + e.target.id); });",
+        );
+        let top = |engine: &Engine, name: &str| {
+            let view = &engine.views[&id];
+            let node = view.document.as_ref().unwrap().get_element_by_id(name).unwrap().id.raw();
+            Engine::box_top(view.layout.as_ref().unwrap(), node).unwrap()
+        };
+        let mut click = |engine: &mut Engine, name: &str| {
+            js(engine, id, "log.length = 0");
+            let y = top(engine, name) + 10.0;
+            engine.click_at_point(id, 8.0, y);
+            js(engine, id, "log.join(' ')")
+        };
+
+        assert_eq!(click(&mut engine, "on"), js_string("up:on click:on"), "precondition");
+        assert_eq!(click(&mut engine, "off"), js_string("up:off"));
+        assert_eq!(click(&mut engine, "cb"), js_string("up:cb"));
+        // Disabled by its fieldset; the fieldset's own legend is not, and
+        // neither is content that is not a form control.
+        assert_eq!(click(&mut engine, "fs"), js_string("up:fs"));
+        assert_eq!(click(&mut engine, "lg"), js_string("up:lg click:lg"));
+        assert_eq!(click(&mut engine, "plain"), js_string("up:plain click:plain"));
+        // Script enables it again.
+        js(&mut engine, id, "$('off').disabled = false");
+        assert_eq!(click(&mut engine, "off"), js_string("up:off click:off"));
+    }
+
     // A click on a label's text did not focus the field it labels, so the
     // usual "click the word, then type" did nothing. The labeled control
     // (HTML §4.10.4: the `for` target, else the first labelable
