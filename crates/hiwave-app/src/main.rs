@@ -2315,6 +2315,19 @@ fn main() {
                         // which a listener's preventDefault() cancels. Until
                         // 2026-10-03 no event reached the page at all, so
                         // every script-driven control was dead (Z lane I0).
+                        // Where the pointer is, and when it goes: what a
+                        // hover menu or a drag listens for.
+                        match click.input {
+                            rustkit_viewhost::PointerInput::Move => {
+                                view.mouse_move_at_point(click.x as f32, click.y as f32);
+                                continue;
+                            }
+                            rustkit_viewhost::PointerInput::Leave => {
+                                view.mouse_leave();
+                                continue;
+                            }
+                            rustkit_viewhost::PointerInput::Button => {}
+                        }
                         if click.down {
                             view.mouse_down_at_point(click.x as f32, click.y as f32);
                             continue;
