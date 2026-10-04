@@ -925,6 +925,24 @@ mod tests {
         assert_eq!(request.method, Method::GET);
         assert!(request.headers.contains_key("accept"));
         assert_eq!(request.timeout, Some(Duration::from_secs(10)));
+        assert_eq!(
+            request.destination,
+            RequestDestination::Other,
+            "untagged fetches still hit the shield without a type-specific option"
+        );
+    }
+
+    #[test]
+    fn request_destination_tags_carry_through_the_builder() {
+        // Privacy pin #364: every engine call site tags destination so
+        // EasyList `$script`/`$image`/… options classify correctly.
+        let url = Url::parse("https://cdn.example/a.js").unwrap();
+        let referrer = Url::parse("https://news.example/").unwrap();
+        let request = Request::get(url)
+            .destination(RequestDestination::Script)
+            .referrer(referrer.clone());
+        assert_eq!(request.destination, RequestDestination::Script);
+        assert_eq!(request.referrer, Some(referrer));
     }
 
     #[test]
