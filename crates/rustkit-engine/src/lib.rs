@@ -2150,7 +2150,7 @@ impl Engine {
     /// default actions (focus, link navigation) unless a listener called
     /// `preventDefault()` on the `click`. When the press landed on another
     /// element, the `click` goes to the nearest element both are in (UI
-    /// Events §3.5) and only that element's default action happens.
+    /// Events §3.5) and no link is followed.
     /// Whatever the listeners wrote to the DOM is laid out before this
     /// returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
@@ -2223,21 +2223,12 @@ impl Engine {
         // the default action reads the layout they left behind.
         let navigate = if submitted.is_some() {
             submitted
-        } else if not_cancelled {
-            // The link at the point is the click's when the click's element
-            // is the one under the point, or sits in that link too.
-            let in_link = |engine: &Self, target: usize| {
-                engine.element_chain(id, target).into_iter().any(|n| {
-                    engine.node(id, n).is_some_and(|node| {
-                        node.tag_name().is_some_and(|t| t.eq_ignore_ascii_case("a"))
-                            && node.get_attribute("href").is_some()
-                    })
-                })
-            };
-            match elsewhere {
-                Some(Some(target)) if !in_link(self, target) => None,
-                _ => self.follow_link_at_point(id, viewport_x, viewport_y),
-            }
+        } else if not_cancelled && elsewhere.is_none() {
+            // A press that ended on another element follows no link, not
+            // even one both elements are in: Chrome starts a drag of the
+            // link there and sends no click at all (oracle probe,
+            // 2026-10-04).
+            self.follow_link_at_point(id, viewport_x, viewport_y)
         } else {
             None
         };
@@ -21882,7 +21873,8 @@ mod node_identity_tests {
     // A press on one element released on another sent `click` to the
     // release's element and followed the link there. Chrome sends it to
     // the nearest element both are in (`click:BODY` in the two oracle
-    // logs), so a press on one link dragged onto another follows neither.
+    // logs), so a press on one link dragged onto another follows neither,
+    // nor does a press on one part of a link released on another part.
 
     const DRAG_CLICK_PAGE: &str = concat!(
         r#"<html><body style="margin:0">"#,
@@ -21920,11 +21912,10 @@ mod node_identity_tests {
             drag(&mut engine, 10.0, 12.0),
             (js_string("mouseup:s1:12 click:s1:12"), Some("https://example.test/one".to_string()))
         );
-        // Two elements of one link: the click is the link's, and it is followed.
-        assert_eq!(
-            drag(&mut engine, 10.0, 30.0),
-            (js_string("mouseup:s2:10 click:one:30"), Some("https://example.test/one".to_string()))
-        );
+        // Two elements of one link: the click is the link's, and the link
+        // is not followed (Chrome starts a drag of the link here and sends
+        // no click at all; the engine has no drag).
+        assert_eq!(drag(&mut engine, 10.0, 30.0), (js_string("mouseup:s2:10 click:one:30"), None));
         // From one link onto another: the click is the body's; neither is followed.
         assert_eq!(drag(&mut engine, 10.0, 60.0), (js_string("mouseup:two:20 click:BODY:60"), None));
         // A release with no press before it is a click where it lands.
