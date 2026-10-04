@@ -64,7 +64,9 @@
         ['ClipboardEvent', 'Event', [['clipboardData', null, 'any']]],
         ['PageTransitionEvent', 'Event', [['persisted', false, 'bool']]],
         ['BeforeUnloadEvent', 'Event', [['returnValue', '', 'str']]],
-        ['MediaQueryListEvent', 'Event', [['media', '', 'str'], ['matches', false, 'bool']]]
+        ['MediaQueryListEvent', 'Event', [['media', '', 'str'], ['matches', false, 'bool']]],
+        ['PromiseRejectionEvent', 'Event', [['promise', null, 'any'], ['reason', undefined, 'any']]],
+        ['SubmitEvent', 'Event', [['submitter', null, 'any']]]
     ];
     EVENTS.forEach(function (spec) {
         var name = spec[0], Parent = g[spec[1]], fields = spec[2];

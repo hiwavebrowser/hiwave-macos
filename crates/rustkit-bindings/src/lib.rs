@@ -49,6 +49,8 @@ mod observers_tests;
 #[cfg(test)]
 mod shadow_tests;
 #[cfg(test)]
+mod rejection_event_tests;
+#[cfg(test)]
 mod document_members_tests;
 #[cfg(test)]
 mod web_intl_tests;
