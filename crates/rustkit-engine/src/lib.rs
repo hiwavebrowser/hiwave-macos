@@ -2083,6 +2083,11 @@ impl Engine {
     /// platform wiring); `key` carries the typed character for insertions.
     /// Returns true when the control's value or caret changed, i.e. when the
     /// caller must relayout.
+    ///
+    /// With nothing focused the page still hears `keydown`, at its active
+    /// element (the body unless script focused something). Then true means
+    /// a listener cancelled it: the key was the page's (a shortcut), and
+    /// the caller must not apply its own default (scrolling).
     pub fn handle_text_key(
         &mut self,
         id: EngineViewId,
@@ -2095,12 +2100,14 @@ impl Engine {
         use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
         let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
-            return false;
+            return !self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
         };
         // The page hears the key first; a cancelled keydown types nothing.
         // Enter's keydown is `submit_focused_form`'s, which the caller
         // tries before this.
-        if key_code != 0x0D && !self.fire_key_down(id, focused.raw(), key_code, key, ctrl, shift, alt) {
+        if key_code != 0x0D
+            && !self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt)
+        {
             return false;
         }
         let Some(state) = self
@@ -2130,6 +2137,22 @@ impl Engine {
             result,
             KeyHandleResult::ValueChanged | KeyHandleResult::SelectionChanged
         )
+    }
+
+    /// The key was released: `keyup` at the focused element, or at the
+    /// page's active element when nothing is focused. Same key arguments
+    /// as [`Self::handle_text_key`]. What its listeners wrote is laid out.
+    pub fn handle_key_up(
+        &mut self,
+        id: EngineViewId,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) {
+        let focused = self.views.get(&id).and_then(|v| v.focused_node).map(|n| n.raw());
+        self.fire_key(id, focused, "keyup", key_code, key, ctrl, shift, alt);
     }
 
     /// Build the submission for the form containing the focused control.
@@ -2178,7 +2201,7 @@ impl Engine {
     /// A page without script submits as before.
     pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
         let focused = self.views.get(&id)?.focused_node?.raw();
-        if !self.fire_key_down(id, focused, 0x0D, "", false, false, false) {
+        if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
             return None;
         }
         let Some(bindings) = self.views.get(&id)?.bindings.as_ref() else {
@@ -2208,15 +2231,17 @@ impl Engine {
             .map(|sub| sub.url)
     }
 
-    /// Fire `keydown` for a key at `node` and lay out what its listeners
-    /// wrote. `key_code` is the Win32 virtual key `handle_text_key` takes;
-    /// `text` is the typed character, empty for a named key. Returns false
-    /// when a listener cancelled it.
+    /// Fire `keydown` or `keyup` for a key at `node` (`None`: the page's
+    /// active element) and lay out what its listeners wrote. `key_code` is
+    /// the Win32 virtual key `handle_text_key` takes; `text` is the typed
+    /// character, empty for a named key. Returns false when a listener
+    /// cancelled it.
     #[allow(clippy::too_many_arguments)]
-    fn fire_key_down(
+    fn fire_key(
         &mut self,
         id: EngineViewId,
-        node: usize,
+        node: Option<usize>,
+        event_type: &str,
         key_code: u32,
         text: &str,
         ctrl: bool,
@@ -2228,10 +2253,14 @@ impl Engine {
             0x09 => "Tab",
             0x0D => "Enter",
             0x1B => "Escape",
+            0x21 => "PageUp",
+            0x22 => "PageDown",
             0x23 => "End",
             0x24 => "Home",
             0x25 => "ArrowLeft",
+            0x26 => "ArrowUp",
             0x27 => "ArrowRight",
+            0x28 => "ArrowDown",
             0x2E => "Delete",
             _ => text,
         };
@@ -2248,8 +2277,8 @@ impl Engine {
             shift_key: shift,
             ..Default::default()
         };
-        let not_cancelled = bindings.fire_key_event(node, "keydown", &data).unwrap_or_else(|e| {
-            debug!(?id, error = %e, "keydown listener threw");
+        let not_cancelled = bindings.fire_key_event(node, event_type, &data).unwrap_or_else(|e| {
+            debug!(?id, event_type, error = %e, "key listener threw");
             true
         });
         if let Err(e) = self.flush_script_dom_writes(id) {
@@ -21949,6 +21978,100 @@ mod node_identity_tests {
         assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:Enter:q:true"));
     }
 
+    // Pete's live testing, continued: a page's own keyboard shortcuts were
+    // dead. A key pressed with nothing focused reached no listener, and no
+    // key ever fired `keyup`. With nothing focused the key goes to the body
+    // (UI Events §3.7.1: the focused element, else the body), and a
+    // cancelled `keydown` is the page's, so the app must not scroll on it.
+
+    const SHORTCUT_PAGE: &str = concat!(
+        r#"<html><body id="b" style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    fn shortcut_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, SHORTCUT_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             ['keydown', 'keyup'].forEach(function (t) { document.addEventListener(t, function (e) { \
+             log.push(t + ':' + e.key + ':' + e.target.id + ':' + e.isTrusted); \
+             if (t === 'keydown' && e.key === window.block) e.preventDefault(); }); }); \
+             document.addEventListener('input', function (e) { log.push('input:' + e.target.value); });",
+        );
+        (engine, id)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_key_with_nothing_focused_goes_to_the_body() {
+        let (mut engine, id) = shortcut_page();
+
+        // Nobody cancelled it: the caller keeps its own default (scrolling).
+        assert!(!engine.handle_text_key(id, 0, "j", false, false, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:j:b:true"));
+
+        // Named keys, and Enter with no form to submit.
+        js(&mut engine, id, "log.length = 0");
+        assert!(!engine.handle_text_key(id, 0x1B, "", false, false, false));
+        assert!(!engine.handle_text_key(id, 0x28, "", false, false, false));
+        assert!(!engine.handle_text_key(id, 0x0D, "", false, false, false));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:Escape:b:true keydown:ArrowDown:b:true keydown:Enter:b:true")
+        );
+
+        // A shortcut the page handles: it is the page's key, not a scroll.
+        js(&mut engine, id, "log.length = 0; window.block = '/'");
+        assert!(engine.handle_text_key(id, 0, "/", false, false, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:/:b:true"));
+
+        // What the listener wrote is laid out.
+        js(
+            &mut engine,
+            id,
+            "window.block = null; document.addEventListener('keydown', function (e) { \
+             if (e.key === 'n') { var d = document.createElement('div'); d.id = 'made'; \
+             d.style.height = '30px'; d.textContent = 'new'; document.body.appendChild(d); } });",
+        );
+        engine.handle_text_key(id, 0, "n", false, false, false);
+        assert_eq!(
+            js(&mut engine, id, "String($('made').getBoundingClientRect().height)"),
+            js_string("30")
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn releasing_a_key_fires_keyup() {
+        let (mut engine, id) = shortcut_page();
+
+        // Nothing focused: the body hears it.
+        engine.handle_text_key(id, 0, "j", false, false, false);
+        engine.handle_key_up(id, 0, "j", false, false, false);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:j:b:true keyup:j:b:true")
+        );
+
+        // In a field: after the edit and its `input`.
+        engine.click_at_point(id, 12.0, 12.0);
+        js(&mut engine, id, "log.length = 0");
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        engine.handle_key_up(id, 0, "a", false, false, false);
+        engine.handle_key_up(id, 0x0D, "", false, false, false);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:a:q:true input:a keyup:a:q:true keyup:Enter:q:true")
+        );
+    }
+
     // Pete's live testing, continued: a click on a <summary> did nothing,
     // and a closed <details> showed everything inside it. Only the first
     // <summary> child of a <details> without `open` is rendered (HTML
@@ -22322,8 +22445,8 @@ mod form_typing_tests {
     #[cfg(all(target_os = "macos", feature = "headless"))]
     fn keys_go_nowhere_when_nothing_is_focused() {
         // The property that makes it safe to route window-level keys here:
-        // with no focus, handle_text_key must decline so the caller can fall
-        // back to scrolling.
+        // with no focus and no listener cancelling the key, handle_text_key
+        // must decline so the caller can fall back to scrolling.
         let (mut engine, id) =
             engine_with_html(r#"<html><body><input type="text"></body></html>"#);
         assert!(!engine.handle_text_key(id, 0, "c", false, false, false));

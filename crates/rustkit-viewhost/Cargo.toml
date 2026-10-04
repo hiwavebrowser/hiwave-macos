@@ -50,3 +50,7 @@ harness = false
 [[test]]
 name = "macos_click_point"
 harness = false
+
+[[test]]
+name = "macos_key_events"
+harness = false

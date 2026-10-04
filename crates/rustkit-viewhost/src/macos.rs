@@ -59,12 +59,14 @@ pub fn drain_pending_clicks() -> Vec<PendingClick> {
 /// A key event captured by the content view while it is first responder.
 ///
 /// `text` carries the typed characters (empty for pure control keys);
-/// `mac_keycode` is the hardware-independent macOS keyCode for specials.
+/// `mac_keycode` is the hardware-independent macOS keyCode for specials;
+/// `up` is a release.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 pub struct PendingKey {
     pub text: String,
     pub mac_keycode: u16,
+    pub up: bool,
     pub ctrl: bool,
     pub cmd: bool,
     pub shift: bool,
@@ -131,7 +133,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             // and only one was wired.
             true
         }
-        extern "C" fn key_down(this: &Object, _sel: Sel, event: id) {
+        extern "C" fn record_key(event: id, up: bool) {
             unsafe {
                 let chars: id = msg_send![event, characters];
                 let text = if chars != nil {
@@ -149,6 +151,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 let key = PendingKey {
                     text,
                     mac_keycode: keycode,
+                    up,
                     ctrl: flags & (1 << 18) != 0,   // NSEventModifierFlagControl
                     cmd: flags & (1 << 20) != 0,    // NSEventModifierFlagCommand
                     shift: flags & (1 << 17) != 0,  // NSEventModifierFlagShift
@@ -158,11 +161,16 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                     q.push(key);
                 }
             }
-            let _ = this;
+        }
+        extern "C" fn key_down(_this: &Object, _sel: Sel, event: id) {
+            record_key(event, false);
             // Deliberately NOT calling super: consuming here is what keeps a
             // keystroke from ALSO reaching whatever else might interpret it.
             // Cmd-shortcuts still work: the menu system sees key equivalents
             // before the responder chain does.
+        }
+        extern "C" fn key_up(_this: &Object, _sel: Sel, event: id) {
+            record_key(event, true);
         }
         extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> bool {
             // A click on an inactive window should reach the page (this is
@@ -180,6 +188,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 accepts_first_responder as extern "C" fn(&Object, Sel) -> bool,
             );
             decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(keyUp:), key_up as extern "C" fn(&Object, Sel, id));
             decl.add_method(
                 sel!(mouseDown:),
                 mouse_down as extern "C" fn(&Object, Sel, id),

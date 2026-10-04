@@ -1268,16 +1268,18 @@ impl DomBindings {
         Ok(!matches!(result, JsValue::Boolean(false)))
     }
 
-    /// Fire the user's key press at an element (by node id) as a trusted,
-    /// bubbling, cancelable `KeyboardEvent`. Returns false when a listener
-    /// called `preventDefault()`. Listener exceptions are queued, see
-    /// [`Self::take_reported_errors`].
+    /// Fire the user's key press or release at an element (by node id) as
+    /// a trusted, bubbling, cancelable `KeyboardEvent`. `None` is the
+    /// page's active element (the body unless script focused something).
+    /// Returns false when a listener called `preventDefault()`. Listener
+    /// exceptions are queued, see [`Self::take_reported_errors`].
     pub fn fire_key_event(
         &self,
-        node: usize,
+        node: Option<usize>,
         event_type: &str,
         data: &KeyboardEventBindingData,
     ) -> Result<bool, BindingError> {
+        let node = node.map_or("null".to_string(), |n| n.to_string());
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireKey({node}, {event_type:?}, {{ key: {:?}, code: {:?}, repeat: {}, \
              ctrlKey: {}, altKey: {}, shiftKey: {}, metaKey: {} }})",
