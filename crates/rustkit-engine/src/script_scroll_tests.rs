@@ -68,3 +68,33 @@ fn a_user_scroll_is_what_the_page_reads() {
     assert!(engine.scroll_view(view, 0.0, -120.0).unwrap());
     assert_eq!(read(&mut engine, view, "scrollY"), "120");
 }
+
+#[test]
+fn an_intersection_observer_reports_the_initial_state_and_then_a_user_scroll() {
+    let (mut engine, view, _server) = load(&page(
+        "window.__log = []; new IntersectionObserver(function (es) { es.forEach(function (e) { window.__log.push(e.isIntersecting); }); }).observe(document.getElementById('t'));",
+    ));
+    // The target starts at 1000 px, below the 200 px viewport.
+    assert_eq!(read(&mut engine, view, "window.__log.join()"), "false");
+    // The user scrolls it into view: it is reported without script running.
+    assert!(engine.scroll_view(view, 0.0, -900.0).unwrap());
+    assert_eq!(read(&mut engine, view, "window.__log.join()"), "false,true");
+}
+
+#[test]
+fn a_user_scroll_fires_a_scroll_event() {
+    let (mut engine, view, _server) =
+        load(&page("window.__n = 0; window.addEventListener('scroll', function () { window.__n++; });"));
+    assert_eq!(read(&mut engine, view, "window.__n"), "0");
+    engine.scroll_view(view, 0.0, -50.0).unwrap();
+    assert_eq!(read(&mut engine, view, "window.__n"), "1");
+}
+
+#[test]
+fn a_resize_observer_reports_the_laid_out_size() {
+    let (mut engine, view, _server) = load(&page(
+        "window.__sizes = []; new ResizeObserver(function (es) { es.forEach(function (e) { window.__sizes.push(e.contentRect.width + 'x' + e.contentRect.height); }); }).observe(document.getElementById('t'));",
+    ));
+    // #t is 400 px tall; its width is the 400 px viewport's.
+    assert_eq!(read(&mut engine, view, "window.__sizes.join()"), "400x400");
+}

@@ -1631,7 +1631,12 @@ impl Engine {
             debug!(?id, ?old_offset, new_offset = ?view.scroll_offset, "View scrolled");
             if let Some(bindings) = view.bindings.as_ref() {
                 bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
+                // The page hears the scroll, and its observers report.
+                bindings.notify_scrolled();
             }
+        }
+        if changed {
+            self.flush_script_dom_writes(id)?;
         }
 
         Ok(changed)
@@ -12077,6 +12082,26 @@ impl Engine {
     /// full, so both `DomDirty` buckets take the same path for now. Returns
     /// whether it laid out.
     fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let mut laid = self.flush_script_dom_writes_once(id)?;
+        // Observers report from the layout as it now stands. A callback that
+        // changes the page gets one more flush and one more report, bounded.
+        for _ in 0..3 {
+            let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) else {
+                break;
+            };
+            if bindings.tick_observers() == 0 {
+                break;
+            }
+            if bindings.take_dirty() == DomDirty::Clean {
+                break;
+            }
+            bindings.mark_dirty(DomDirty::Layout);
+            laid |= self.flush_script_dom_writes_once(id)?;
+        }
+        Ok(laid)
+    }
+
+    fn flush_script_dom_writes_once(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         let Some(view) = self.views.get_mut(&id) else {
             return Ok(false);
         };
@@ -12168,6 +12193,7 @@ impl Engine {
             }
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
+        bindings.tick_observers();
         info!(?id, elapsed_ms = started.elapsed().as_millis() as u64, "Relaid out for script");
     }
 
