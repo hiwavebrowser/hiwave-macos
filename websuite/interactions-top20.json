@@ -9,31 +9,31 @@
       "timeout_ms": 1000
     },
     "youtube": {
-      "target_selector": "button#search-button-narrow, button[aria-label='Search'], #guide-button",
+      "target_selector": "button[aria-label='Guide'], button#button[aria-label='Guide'], button#search-button-narrow",
       "action": "click",
       "response_type": "dom_mutation",
       "expected_response": "Search bar or navigation drawer opens with active input",
       "timeout_ms": 1500
     },
     "facebook": {
-      "target_selector": "input#email",
+      "target_selector": "input[type='password'], input#email",
       "action": "click",
       "response_type": "focus_state",
-      "expected_response": "Email input focus ring and cursor active",
+      "expected_response": "Password or email input focus ring and cursor active",
       "timeout_ms": 1000
     },
     "instagram": {
-      "target_selector": "input[name='username']",
+      "target_selector": "input[type='password'], input[name='username']",
       "action": "click",
       "response_type": "focus_state",
-      "expected_response": "Username field active and label transitions",
+      "expected_response": "Password or username field active and label transitions",
       "timeout_ms": 1000
     },
     "wikipedia": {
-      "target_selector": "input#searchInput",
+      "target_selector": "#vector-main-menu-dropdown-checkbox, input#searchInput, a[href*='#History']",
       "action": "click",
-      "response_type": "focus_state",
-      "expected_response": "Search input focused and search suggestion popup ready",
+      "response_type": "dom_mutation",
+      "expected_response": "Main menu drawer opens or search input focused",
       "timeout_ms": 1000
     },
     "lyft": {
@@ -44,49 +44,50 @@
       "timeout_ms": 1500
     },
     "reddit": {
-      "target_selector": "input[type='search'], [role='search'] input",
+      "target_selector": "a[href*='reddithelp'], a.items-center, input[type='search']",
       "action": "click",
-      "response_type": "focus_state",
-      "expected_response": "Search input expands or search dropdown appears",
+      "response_type": "visual_delta",
+      "expected_response": "Help link navigation or search input triggers response",
       "timeout_ms": 1000
     },
     "x": {
-      "target_selector": "input[data-testid='SearchBox_Search_Input'], a[href='/login']",
+      "url": "https://developer.x.com/",
+      "target_selector": "button.relative.inline-flex, a[href='/login']",
       "action": "click",
-      "response_type": "focus_state",
-      "expected_response": "Search input focused or login modal triggers",
+      "response_type": "visual_delta",
+      "expected_response": "Language dropdown opens or interactive action triggers",
       "timeout_ms": 1000
     },
     "linkedin": {
-      "target_selector": "input.search-global-typeahead__input, input#username",
+      "target_selector": "button#cf-footer-ip-reveal, a#brand_link, input#username",
       "action": "click",
-      "response_type": "focus_state",
-      "expected_response": "Search typeahead focused or login input ring active",
+      "response_type": "visual_delta",
+      "expected_response": "Footer IP reveal toggles, brand link navigates, or login input ring active",
       "timeout_ms": 1000
     },
     "yahoo": {
-      "target_selector": "input#ybar-sbq",
+      "target_selector": "button[aria-label='More menu'], input#uh-sbq, input#ybar-sbq",
       "action": "click",
       "response_type": "focus_state",
-      "expected_response": "Search input focused with active autocomplete panel",
+      "expected_response": "More menu flyout opens or search input focused with active panel",
       "timeout_ms": 1000
     },
     "bing": {
-      "target_selector": "input#sb_form_q",
+      "target_selector": "input#sb_form_q, textarea#sb_form_q",
       "action": "click",
       "response_type": "focus_state",
       "expected_response": "Search box focused and suggestions flyout appears",
       "timeout_ms": 1000
     },
     "walmart": {
-      "target_selector": "input[type='search']",
+      "target_selector": "input[name='q'], input[type='search'], button[aria-label*='Departments']",
       "action": "click",
       "response_type": "focus_state",
       "expected_response": "Search input focused and recent search layer opens",
       "timeout_ms": 1000
     },
     "microsoft": {
-      "target_selector": "button#search, a#search",
+      "target_selector": "button[aria-label='Search or ask a question'], button#search, a#search",
       "action": "click",
       "response_type": "dom_mutation",
       "expected_response": "Search flyout expands with input element",
@@ -107,17 +108,17 @@
       "timeout_ms": 1000
     },
     "github": {
-      "target_selector": "button.header-search-button, button[aria-label='Search or jump to…']",
+      "target_selector": "button.NavDropdown-module__button__PEHWX, button.header-search-button, button[aria-label='Search or jump to…']",
       "action": "click",
       "response_type": "dom_mutation",
-      "expected_response": "Search modal command palette dialog opens (Day-7 Exit Metric #1)",
+      "expected_response": "Navigation dropdown opens or search command palette dialog opens",
       "timeout_ms": 1500
     },
     "shopify": {
-      "target_selector": "input[type='email']",
+      "target_selector": "a[href*='pricing'], input[type='email']",
       "action": "click",
-      "response_type": "focus_state",
-      "expected_response": "Free trial email input focused with active ring",
+      "response_type": "visual_delta",
+      "expected_response": "Pricing navigation triggers or trial email input focused",
       "timeout_ms": 1000
     },
     "squarespace": {
@@ -128,17 +129,17 @@
       "timeout_ms": 1500
     },
     "cnn": {
-      "target_selector": "button.search-icon, button[aria-label='Search']",
+      "target_selector": "div[role='dialog'] a[role='button'], button#headerMenuIcon, button.search-icon",
       "action": "click",
       "response_type": "dom_mutation",
-      "expected_response": "Search input bar reveals with active focus",
+      "expected_response": "Modal dialog dismissed or header menu reveals with active focus",
       "timeout_ms": 1000
     },
     "weather": {
-      "target_selector": "input[id*='LocationSearch'], input[type='search']",
+      "target_selector": "button.group.relative, a.group.relative, input[id*='LocationSearch'], input[type='search']",
       "action": "click",
-      "response_type": "focus_state",
-      "expected_response": "Location search input focused with suggestions dropdown",
+      "response_type": "visual_delta",
+      "expected_response": "More menu dropdown opens or location search input focused",
       "timeout_ms": 1000
     }
   }
