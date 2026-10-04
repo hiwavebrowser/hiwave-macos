@@ -1761,16 +1761,40 @@ impl Engine {
     /// the DOM is laid out before this returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        // A submit made outside a click (a timer, a callback) has nobody to
+        // navigate for it yet; this click must not pick it up.
+        self.take_submit_request(id);
         let not_cancelled = self.dispatch_mouse_at_point(id, "click", viewport_x, viewport_y);
+        // The click submitted a form (a submit button's activation, or a
+        // listener's `requestSubmit()`) and no `submit` listener cancelled.
+        let submitted = self.take_submit_request(id).and_then(|(form, submitter)| {
+            let form = self
+                .views
+                .get(&id)?
+                .document
+                .as_ref()?
+                .get_node(rustkit_dom::NodeId::new(form))?;
+            self.form_submission(id, &form, submitter)
+                .filter(|sub| sub.is_self_target())
+                .map(|sub| sub.url)
+        });
         // The listeners may have moved or replaced what is under the point;
         // the default action reads the layout they left behind.
         let focused = self.focus_at_point(id, viewport_x, viewport_y);
-        let navigate = if not_cancelled {
+        let navigate = if submitted.is_some() {
+            submitted
+        } else if not_cancelled {
             self.link_at_point(id, viewport_x, viewport_y)
         } else {
             None
         };
         ClickOutcome { focused, navigate }
+    }
+
+    /// The last form script asked to submit since the previous call, with
+    /// its submitter (raw NodeIds).
+    fn take_submit_request(&self, id: EngineViewId) -> Option<(usize, Option<usize>)> {
+        self.views.get(&id)?.bindings.as_ref()?.take_submit_requests().pop()
     }
 
     /// Fire one mouse event at the element hit at VIEWPORT coordinates and
@@ -1989,12 +2013,9 @@ impl Engine {
         &self,
         id: EngineViewId,
     ) -> Option<rustkit_dom::forms::FormSubmission> {
-        use rustkit_dom::forms::{FormDataEntry, FormDataValue, FormState};
-
         let view = self.views.get(&id)?;
         let focused = view.focused_node?;
         let document = view.document.as_ref()?;
-        let base = view.url.as_ref()?.to_string();
 
         // Walk up to the enclosing <form>.
         let form = {
@@ -2008,7 +2029,22 @@ impl Engine {
                 }
             }
         };
+        self.form_submission(id, &form, None)
+    }
 
+    /// Build the submission of `form`. `submitter` is the button that
+    /// submitted it (by raw NodeId): its own name and value go with the
+    /// form's data, in tree order. The same limits as
+    /// [`Self::form_submission_for_focus`].
+    fn form_submission(
+        &self,
+        id: EngineViewId,
+        form: &Rc<Node>,
+        submitter: Option<usize>,
+    ) -> Option<rustkit_dom::forms::FormSubmission> {
+        use rustkit_dom::forms::{FormDataEntry, FormDataValue, FormState};
+
+        let base = self.views.get(&id)?.url.as_ref()?.to_string();
         let NodeType::Element {
             attributes: form_attrs,
             ..
@@ -2035,6 +2071,7 @@ impl Engine {
             node: &std::rc::Rc<Node>,
             engine: &Engine,
             view_id: EngineViewId,
+            submitter: Option<usize>,
             out: &mut Vec<FormDataEntry>,
         ) {
             if let NodeType::Element {
@@ -2044,7 +2081,17 @@ impl Engine {
             } = &node.node_type
             {
                 let tag = tag_name.to_lowercase();
-                if matches!(tag.as_str(), "input" | "textarea") {
+                let is_submitter = submitter == Some(node.id.raw());
+                if tag == "button" {
+                    // A button is successful only as the submitter.
+                    let name = attributes.get("name").cloned().unwrap_or_default();
+                    if is_submitter && !name.is_empty() && !attributes.contains_key("disabled") {
+                        out.push(FormDataEntry {
+                            name,
+                            value: FormDataValue::String(attributes.get("value").cloned().unwrap_or_default()),
+                        });
+                    }
+                } else if matches!(tag.as_str(), "input" | "textarea") {
                     // A control without a name is not successful (HTML §4.10),
                     // and disabled controls never submit.
                     let name = attributes.get("name").cloned().unwrap_or_default();
@@ -2053,12 +2100,16 @@ impl Engine {
                         .get("type")
                         .map(|t| t.to_lowercase())
                         .unwrap_or_else(|| "text".into());
-                    let skip = matches!(kind.as_str(), "submit" | "button" | "reset" | "file")
+                    let skip = matches!(kind.as_str(), "button" | "reset" | "file")
+                        || (kind == "submit" && !is_submitter)
                         || (matches!(kind.as_str(), "checkbox" | "radio")
                             && !engine.checked_in(view_id, node.id.raw(), attributes));
                     if !name.is_empty() && !disabled && !skip {
-                        let value = engine
-                            .edit_value_in(view_id, node.id.raw())
+                        // A button's value is its attribute; edit state
+                        // (seeded on focus) is a text control's.
+                        let value = (kind != "submit")
+                            .then(|| engine.edit_value_in(view_id, node.id.raw()))
+                            .flatten()
                             .map(|(v, _)| v)
                             .unwrap_or_else(|| {
                                 if tag == "textarea" {
@@ -2075,10 +2126,10 @@ impl Engine {
                 }
             }
             for child in node.children() {
-                collect(&child, engine, view_id, out);
+                collect(&child, engine, view_id, submitter, out);
             }
         }
-        collect(&form, self, id, &mut entries);
+        collect(form, self, id, submitter, &mut entries);
 
         if entries.is_empty() {
             return None;
@@ -21211,6 +21262,108 @@ mod node_identity_tests {
         js(&mut engine, id, "$('s').checked = false");
         assert_eq!(engine.link_at_point(id, 8.0, 285.0), None);
         assert_eq!(painted(&engine, id), [false, false, true, false, false, false]);
+    }
+
+    // Pete's live testing, continued: a click on a form's submit button did
+    // nothing. Only Enter in a focused field submitted, and that path fires
+    // no `submit` event. A click on a submit button is the form's
+    // activation (HTML §4.10.21.3): validate, fire `submit`, and unless a
+    // listener cancels it, navigate with the form's data and the button's.
+
+    const SUBMIT_PAGE: &str = concat!(
+        r#"<html><body style="margin:0"><form id="f" action="/search">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q" value="rust"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="box" type="checkbox" name="box" value="on" style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="go" name="via" value="button">Go</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="alt" type="submit" name="via" value="input"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="plain" type="button">Plain</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="reset" type="reset">Reset</button></div>"#,
+        r#"</form></body></html>"#,
+    );
+
+    /// The page above with a document URL. Each control is alone in a 40px
+    /// row, so `click_row(n)` clicks the nth control.
+    fn submit_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, SUBMIT_PAGE).expect("load_html");
+        engine.views.get_mut(&id).expect("view").url = Some(Url::parse("https://example.com/page").unwrap());
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             document.addEventListener('click', function (e) { log.push('click:' + e.target.id); }); \
+             $('f').addEventListener('submit', function (e) { \
+             log.push('submit:' + (e.submitter && e.submitter.id) + ':' + e.cancelable); \
+             if (window.block) e.preventDefault(); });",
+        );
+        (engine, id)
+    }
+
+    fn click_row(engine: &mut Engine, id: EngineViewId, row: usize) -> ClickOutcome {
+        engine.click_at_point(id, 12.0, 40.0 * row as f32 + 12.0)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_submit_button_submits_its_form() {
+        let (mut engine, id) = submit_page();
+
+        // The button's own name and value go with the form's data.
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("click:go submit:go:true"));
+        assert_eq!(
+            outcome.navigate.as_deref(),
+            Some("https://example.com/search?q=rust&via=button")
+        );
+
+        // An <input type=submit> the same; the other button's pair stays out.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = click_row(&mut engine, id, 3);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("click:alt submit:alt:true"));
+        assert_eq!(
+            outcome.navigate.as_deref(),
+            Some("https://example.com/search?q=rust&via=input")
+        );
+
+        // A checkbox the user checked is submitted (and only then).
+        click_row(&mut engine, id, 1);
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(
+            outcome.navigate.as_deref(),
+            Some("https://example.com/search?q=rust&box=on&via=button")
+        );
+
+        // A listener that cancels `submit` keeps the page.
+        js(&mut engine, id, "log.length = 0; window.block = true");
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("click:go submit:go:true"));
+        assert_eq!(outcome.navigate, None);
+
+        // type=button submits nothing.
+        js(&mut engine, id, "log.length = 0; window.block = false");
+        let outcome = click_row(&mut engine, id, 4);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("click:plain"));
+        assert_eq!(outcome.navigate, None);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_reset_button_resets_its_form() {
+        let (mut engine, id) = submit_page();
+        click_row(&mut engine, id, 1);
+        assert_eq!(painted(&engine, id), [true]);
+        js(&mut engine, id, "$('f').addEventListener('reset', function () { log.push('reset'); })");
+
+        let outcome = click_row(&mut engine, id, 5);
+        assert_eq!(outcome.navigate, None);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('box').checked"),
+            js_string("click:box click:reset reset | false")
+        );
+        assert_eq!(painted(&engine, id), [false]);
     }
 
     // ---- the live loop runs what the page scheduled (Z lane I0, 2026-10-03) ----

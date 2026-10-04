@@ -92,7 +92,7 @@
     var INTERACTIVE = /^(button|select|textarea|input|summary|option)$/;
     function activationTarget(t) {
         for (var n = t; n && n.nodeType === 1; n = n.parentNode) {
-            if (n.localName === 'label' || checkable(n)) return n;
+            if (n.localName === 'label' || checkable(n) || isSubmitButton(n) || isResetButton(n)) return n;
             if (INTERACTIVE.test(n.localName) || (n.localName === 'a' && n.hasAttribute('href'))) return null;
         }
         return null;
@@ -110,6 +110,14 @@
             };
         }
         if (el.hasAttribute('disabled')) return null;
+        if (!checkable(el)) {
+            // A submit or reset button acts on its form (HTML §4.10.6).
+            return function (ok) {
+                var form = ok ? el.closest('form') : null;
+                if (!form) return;
+                if (isSubmitButton(el)) submit(form, el); else form.reset();
+            };
+        }
         // Legacy-pre-activation: the control is already in its new state
         // when the click's listeners run, and a cancelled click undoes it.
         var was = el.checked, radio = el.type === 'radio';
@@ -307,8 +315,21 @@
         if (el.localName === 'button') return el.type === 'submit';
         return el.localName === 'input' && (el.type === 'submit' || el.type === 'image');
     }
-    // HTML §4.10.21.3 up to the submit event. Navigation from script is not
-    // wired, so an uncanceled submit goes no further.
+    function isResetButton(el) {
+        return (el.localName === 'button' || el.localName === 'input') && el.type === 'reset';
+    }
+    // HTML §4.10.21.3 from validation on: the `submit` event, and when no
+    // listener cancels it the engine is told. It navigates for a submit
+    // made by a click; one made from a timer or a callback goes no further.
+    var noteSubmit = internals.noteSubmit || function () {};
+    function submit(form, submitter) {
+        if (!form.isConnected) return;
+        var noValidate = form.noValidate || (submitter !== null && submitter.hasAttribute('formnovalidate'));
+        if (!noValidate && !validate(form)) return;
+        var e = new g.Event('submit', { bubbles: true, cancelable: true });
+        Object.defineProperty(e, 'submitter', { value: submitter, enumerable: true });
+        if (form.dispatchEvent(e)) noteSubmit(form, submitter);
+    }
     Form.requestSubmit = function (submitter) {
         if (submitter != null) {
             if (!isSubmitButton(submitter)) {
@@ -320,12 +341,7 @@
         } else {
             submitter = null;
         }
-        if (!this.isConnected) return;
-        var noValidate = this.noValidate || (submitter !== null && submitter.hasAttribute('formnovalidate'));
-        if (!noValidate && !validate(this)) return;
-        var e = new g.Event('submit', { bubbles: true, cancelable: true });
-        Object.defineProperty(e, 'submitter', { value: submitter, enumerable: true });
-        this.dispatchEvent(e);
+        submit(this, submitter);
     };
     // Reset also restores checkedness and selectedness. The dom.rs reset
     // fires the cancelable `reset` event; its answer decides.

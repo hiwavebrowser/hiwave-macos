@@ -576,6 +576,13 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_checked_writes()
     }
 
+    /// The forms whose `submit` event ran uncancelled since the last call,
+    /// as (the form's raw NodeId, the submitting button's). The engine
+    /// builds the submission; nothing navigates until it does.
+    pub fn take_submit_requests(&self) -> Vec<(usize, Option<usize>)> {
+        self.dom_host.borrow_mut().take_submit_requests()
+    }
+
     /// Tell script what the user typed into a control, so its `value`
     /// reads the edit state's text rather than the default.
     pub fn sync_control_value(&self, node: usize, value: String) {
