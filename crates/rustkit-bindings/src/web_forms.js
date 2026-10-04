@@ -337,6 +337,18 @@
         Object.defineProperty(e, 'submitter', { value: submitter, enumerable: true });
         if (form.dispatchEvent(e)) noteSubmit(form, submitter);
     }
+    // Implicit submission (HTML §4.10.21.2): Enter in a text field clicks
+    // the form's default button, its first submit button. A form with none
+    // is submitted as it is. A textarea takes the Enter itself.
+    if (internals.setImplicitSubmit) internals.setImplicitSubmit(function (el) {
+        var form = el.localName === 'input' ? el.closest('form') : null;
+        if (!form) return;
+        var button = descendants(form, /^(button|input)$/).filter(function (b) {
+            return isSubmitButton(b) && b.closest('form') === form;
+        })[0];
+        if (!button) return submit(form, null);
+        if (!button.hasAttribute('disabled')) button.click();
+    });
     Form.requestSubmit = function (submitter) {
         if (submitter != null) {
             if (!isSubmitButton(submitter)) {

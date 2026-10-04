@@ -246,14 +246,14 @@ impl RustKitView {
             .unwrap_or(false)
     }
 
-    /// URL to navigate to if the focused field's form were submitted.
-    /// `None` when there is no form, no fields, or the form is not a GET.
+    /// Enter in the focused field: the page hears `keydown` and `submit`,
+    /// and this is the URL to navigate to when its form submits. `None`
+    /// when there is no form, a listener cancelled, or the form is not a
+    /// GET.
     pub fn form_submit_url(&self) -> Option<String> {
-        let engine = self.engine.borrow();
+        let mut engine = self.engine.borrow_mut();
         self.view_id
-            .and_then(|view_id| engine.form_submission_for_focus(view_id))
-            .filter(|sub| sub.is_self_target())
-            .map(|sub| sub.url)
+            .and_then(|view_id| engine.submit_focused_form(view_id))
     }
 
     /// Whether a content element currently holds focus.

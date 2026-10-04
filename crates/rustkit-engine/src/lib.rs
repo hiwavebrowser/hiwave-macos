@@ -2082,6 +2082,12 @@ impl Engine {
         let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
             return false;
         };
+        // The page hears the key first; a cancelled keydown types nothing.
+        // Enter's keydown is `submit_focused_form`'s, which the caller
+        // tries before this.
+        if key_code != 0x0D && !self.fire_key_down(id, focused.raw(), key_code, key, ctrl, shift, alt) {
+            return false;
+        }
         let Some(state) = self
             .views
             .get(&id)
@@ -2092,9 +2098,17 @@ impl Engine {
 
         let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
         if matches!(result, KeyHandleResult::ValueChanged) {
-            // Script reads `value` from the bindings; keep it current.
+            // Script reads `value` from the bindings; keep it current,
+            // then tell the page.
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
                 bindings.sync_control_value(focused.raw(), state.value());
+                let typed = (!key.is_empty() && !ctrl).then_some(key);
+                if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
+                    debug!(?id, error = %e, "input listener threw");
+                }
+            }
+            if let Err(e) = self.flush_script_dom_writes(id) {
+                debug!(?id, error = %e, "relayout after input event failed");
             }
         }
         matches!(
@@ -2136,6 +2150,97 @@ impl Engine {
             }
         };
         self.form_submission(id, &form, None)
+    }
+
+    /// Enter in the focused field: the URL to load when that submits its
+    /// form.
+    ///
+    /// The page hears `keydown` first. Unless a listener cancels it, the
+    /// form is submitted the way the page would see a person do it
+    /// (implicit submission, HTML §4.10.21.2): a click on the form's
+    /// default button, validation, then `submit`. `None` when there is no
+    /// form, a listener cancelled, or the form is not a GET to this view.
+    /// A page without script submits as before.
+    pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
+        let focused = self.views.get(&id)?.focused_node?.raw();
+        if !self.fire_key_down(id, focused, 0x0D, "", false, false, false) {
+            return None;
+        }
+        let Some(bindings) = self.views.get(&id)?.bindings.as_ref() else {
+            return self
+                .form_submission_for_focus(id)
+                .filter(|sub| sub.is_self_target())
+                .map(|sub| sub.url);
+        };
+        // A submit made before this key has nobody to navigate for it.
+        bindings.take_submit_requests();
+        if let Err(e) = bindings.implicit_submit(focused) {
+            debug!(?id, error = %e, "implicit submission threw");
+        }
+        let request = bindings.take_submit_requests().pop();
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after implicit submission failed");
+        }
+        let (form, submitter) = request?;
+        let form = self
+            .views
+            .get(&id)?
+            .document
+            .as_ref()?
+            .get_node(rustkit_dom::NodeId::new(form))?;
+        self.form_submission(id, &form, submitter)
+            .filter(|sub| sub.is_self_target())
+            .map(|sub| sub.url)
+    }
+
+    /// Fire `keydown` for a key at `node` and lay out what its listeners
+    /// wrote. `key_code` is the Win32 virtual key `handle_text_key` takes;
+    /// `text` is the typed character, empty for a named key. Returns false
+    /// when a listener cancelled it.
+    #[allow(clippy::too_many_arguments)]
+    fn fire_key_down(
+        &mut self,
+        id: EngineViewId,
+        node: usize,
+        key_code: u32,
+        text: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> bool {
+        let key = match key_code {
+            0x08 => "Backspace",
+            0x09 => "Tab",
+            0x0D => "Enter",
+            0x1B => "Escape",
+            0x23 => "End",
+            0x24 => "Home",
+            0x25 => "ArrowLeft",
+            0x27 => "ArrowRight",
+            0x2E => "Delete",
+            _ => text,
+        };
+        let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) else {
+            return true;
+        };
+        let data = rustkit_bindings::KeyboardEventBindingData {
+            key: key.to_string(),
+            // A named key's code is its name; a character's physical key
+            // is not known here.
+            code: if key.chars().count() > 1 { key.to_string() } else { String::new() },
+            ctrl_key: ctrl,
+            alt_key: alt,
+            shift_key: shift,
+            ..Default::default()
+        };
+        let not_cancelled = bindings.fire_key_event(node, "keydown", &data).unwrap_or_else(|e| {
+            debug!(?id, error = %e, "keydown listener threw");
+            true
+        });
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after key event failed");
+        }
+        not_cancelled
     }
 
     /// Build the submission of `form`. `submitter` is the button that
@@ -21713,6 +21818,98 @@ mod node_identity_tests {
             js_string("click:box click:reset reset | false")
         );
         assert_eq!(painted(&engine, id), [false]);
+    }
+
+    // Pete's live testing, continued: typing in a field told the page
+    // nothing. No `keydown`, no `input`, and Enter built the form's URL
+    // without a `submit` event, so a page that handles its own search box
+    // was navigated away from. Keys go to the focused element as trusted
+    // events (UI Events §3.7), a cancelled `keydown` types nothing, and
+    // Enter is implicit submission (HTML §4.10.21.2).
+
+    const KEYS_PAGE: &str = concat!(
+        r#"<html><body style="margin:0"><form id="f" action="/search">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="go" name="via" value="button">Go</button></div>"#,
+        r#"</form></body></html>"#,
+    );
+
+    fn keys_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, KEYS_PAGE).expect("load_html");
+        engine.views.get_mut(&id).expect("view").url = Some(Url::parse("https://example.com/page").unwrap());
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             document.addEventListener('keydown', function (e) { \
+             log.push('keydown:' + e.key + ':' + e.target.id + ':' + e.isTrusted); \
+             if (e.key === window.block) e.preventDefault(); }); \
+             document.addEventListener('input', function (e) { log.push('input:' + e.target.value); }); \
+             document.addEventListener('click', function (e) { log.push('click:' + e.target.id); }); \
+             $('f').addEventListener('submit', function (e) { \
+             log.push('submit:' + (e.submitter && e.submitter.id)); if (window.stay) e.preventDefault(); });",
+        );
+        // Focus the field.
+        engine.click_at_point(id, 12.0, 12.0);
+        js(&mut engine, id, "log.length = 0");
+        (engine, id)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn typing_fires_keydown_and_input_at_the_focused_field() {
+        let (mut engine, id) = keys_page();
+
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:a:q:true input:a"));
+
+        // Backspace is a key too, and its edit is an input.
+        js(&mut engine, id, "log.length = 0");
+        assert!(engine.handle_text_key(id, 0x08, "", false, false, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:Backspace:q:true input:"));
+
+        // A cancelled keydown types nothing.
+        js(&mut engine, id, "log.length = 0; window.block = 'x'");
+        assert!(!engine.handle_text_key(id, 0, "x", false, false, false));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('q').value"),
+            js_string("keydown:x:q:true | ")
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn enter_in_a_field_submits_its_form_through_the_page() {
+        let (mut engine, id) = keys_page();
+        engine.handle_text_key(id, 0, "r", false, false, false);
+        js(&mut engine, id, "log.length = 0");
+
+        // Enter clicks the form's default button, which submits the form.
+        assert_eq!(
+            engine.submit_focused_form(id).as_deref(),
+            Some("https://example.com/search?q=r&via=button")
+        );
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:Enter:q:true click:go submit:go")
+        );
+
+        // A `submit` listener that cancels keeps the page.
+        js(&mut engine, id, "log.length = 0; window.stay = true");
+        assert_eq!(engine.submit_focused_form(id), None);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:Enter:q:true click:go submit:go")
+        );
+
+        // A cancelled keydown submits nothing.
+        js(&mut engine, id, "log.length = 0; window.stay = false; window.block = 'Enter'");
+        assert_eq!(engine.submit_focused_form(id), None);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:Enter:q:true"));
     }
 
     // Pete's live testing, continued: a click on a <summary> did nothing,

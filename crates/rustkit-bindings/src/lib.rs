@@ -1268,6 +1268,43 @@ impl DomBindings {
         Ok(!matches!(result, JsValue::Boolean(false)))
     }
 
+    /// Fire the user's key press at an element (by node id) as a trusted,
+    /// bubbling, cancelable `KeyboardEvent`. Returns false when a listener
+    /// called `preventDefault()`. Listener exceptions are queued, see
+    /// [`Self::take_reported_errors`].
+    pub fn fire_key_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        data: &KeyboardEventBindingData,
+    ) -> Result<bool, BindingError> {
+        let result = self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireKey({node}, {event_type:?}, {{ key: {:?}, code: {:?}, repeat: {}, \
+             ctrlKey: {}, altKey: {}, shiftKey: {}, metaKey: {} }})",
+            data.key, data.code, data.repeat, data.ctrl_key, data.alt_key, data.shift_key, data.meta_key,
+        ))?;
+        Ok(!matches!(result, JsValue::Boolean(false)))
+    }
+
+    /// Fire `input` at a control (by node id) whose value the user's typing
+    /// changed. `data` is the inserted text, `None` for a deletion.
+    pub fn fire_input_event(&self, node: usize, data: Option<&str>) -> Result<(), BindingError> {
+        let data = data.map_or("null".to_string(), |d| format!("{d:?}"));
+        self.runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkFireInput({node}, {data});"))?;
+        Ok(())
+    }
+
+    /// Enter in a field (by node id): implicit submission of its form. An
+    /// uncancelled `submit` is then in [`Self::take_submit_requests`].
+    pub fn implicit_submit(&self, node: usize) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkImplicitSubmit({node});"))?;
+        Ok(())
+    }
+
     /// The document's URL: the base for a root module's imports.
     pub fn set_module_base(&self, url: &str) {
         self.runtime.borrow_mut().set_module_base(url);
