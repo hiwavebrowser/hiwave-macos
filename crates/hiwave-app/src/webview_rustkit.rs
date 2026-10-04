@@ -300,6 +300,24 @@ impl RustKitView {
         }
     }
 
+    /// Deliver a pointer move to viewport coordinates to the page (the
+    /// over/out/enter/leave events when the element under it changed, then
+    /// `pointermove` and `mousemove`).
+    pub fn mouse_move_at_point(&self, x: f32, y: f32) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            engine.mouse_move_at_point(view_id, x, y);
+        }
+    }
+
+    /// Tell the page the pointer left the view.
+    pub fn mouse_leave(&self) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            engine.mouse_leave(view_id);
+        }
+    }
+
     /// Deliver a mouse release at viewport coordinates to the page
     /// (`mouseup`, `click`), then report the click's default actions: what
     /// it focused and the link to follow unless a listener cancelled it.

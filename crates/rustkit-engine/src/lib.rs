@@ -487,6 +487,12 @@ struct ViewState {
     /// A listener cancelled the `pointerdown` of the press in progress:
     /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
     compat_mouse_suppressed: bool,
+    /// The element the pointer was over at its last move (raw NodeId).
+    hovered_node: Option<usize>,
+    /// Where the pointer was at its last move, in viewport coordinates.
+    pointer_at: Option<(f32, f32)>,
+    /// The primary button is held: between a press and its release.
+    primary_button_down: bool,
     /// Whether the view itself has focus.
     view_focused: bool,
     /// Current scroll offset (x, y) in pixels.
@@ -1342,6 +1348,9 @@ impl Engine {
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
+            hovered_node: None,
+            pointer_at: None,
+            primary_button_down: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1405,6 +1414,9 @@ impl Engine {
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
+            hovered_node: None,
+            pointer_at: None,
+            primary_button_down: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1477,6 +1489,9 @@ impl Engine {
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
+            hovered_node: None,
+            pointer_at: None,
+            primary_button_down: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1867,6 +1882,9 @@ impl Engine {
     /// `mousedown` when a listener cancelled the `pointerdown`). Returns
     /// false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        if let Some(view) = self.views.get_mut(&id) {
+            view.primary_button_down = true;
+        }
         let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
             view.compat_mouse_suppressed = suppressed;
@@ -1874,8 +1892,133 @@ impl Engine {
         suppressed || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y)
     }
 
-    /// Deliver a pointer move to VIEWPORT coordinates.
-    pub fn mouse_move_at_point(&mut self, _id: EngineViewId, _viewport_x: f32, _viewport_y: f32) {}
+    /// Deliver a pointer move to VIEWPORT coordinates. When the element
+    /// under the pointer changed, the page first hears that: `pointerout`
+    /// and `pointerleave` where it was, `pointerover` and `pointerenter`
+    /// where it is, then the same four as mouse events; the leave and
+    /// enter events go to each element left (innermost first) or entered
+    /// (outermost first) and do not bubble. Then `pointermove` and
+    /// `mousemove` at the element under the pointer. Whatever the
+    /// listeners wrote to the DOM is laid out before this returns.
+    pub fn mouse_move_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
+        self.pointer_moved(id, viewport_x, viewport_y, true);
+    }
+
+    /// The pointer left the view: the page hears the out and leave events
+    /// of everything it was over, with no `relatedTarget`, at the point it
+    /// was last seen.
+    pub fn mouse_leave(&mut self, id: EngineViewId) {
+        let last = self.views.get(&id).and_then(|view| view.pointer_at);
+        if let Some((x, y)) = last {
+            self.pointer_moved(id, x, y, false);
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pointer_at = None;
+        }
+    }
+
+    /// The pointer is at VIEWPORT coordinates, inside the view or (`inside`
+    /// false) just gone from it.
+    fn pointer_moved(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32, inside: bool) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        let doc_x = viewport_x + view.scroll_offset.0;
+        let doc_y = viewport_y + view.scroll_offset.1;
+        let movement = view
+            .pointer_at
+            .map_or((0.0, 0.0), |(x, y)| (viewport_x - x, viewport_y - y));
+        view.pointer_at = Some((viewport_x, viewport_y));
+        let buttons = u16::from(view.primary_button_down);
+        // The compatibility `mousemove` of a press whose `pointerdown` was
+        // cancelled is not fired; the boundary events always are (Pointer
+        // Events §11.3).
+        let mousemove = !(view.primary_button_down && view.compat_mouse_suppressed);
+        // An element and the elements above it, innermost first.
+        let chain = |raw: Option<usize>| -> Vec<usize> {
+            let mut chain = Vec::new();
+            let mut node = raw.and_then(|raw| view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(raw)));
+            while let Some(n) = node {
+                if n.is_element() {
+                    chain.push(n.id.raw());
+                }
+                node = n.parent();
+            }
+            chain
+        };
+        let hit = view
+            .layout
+            .as_ref()
+            .filter(|_| inside)
+            .and_then(|l| l.hit_test(doc_x, doc_y));
+        let now = chain(hit.and_then(|hit| hit.node_id));
+        let before = chain(view.hovered_node);
+        let (over, out) = (now.first().copied(), before.first().copied());
+        view.hovered_node = over;
+
+        // (target, type, relatedTarget)
+        let mut events: Vec<(usize, &str, Option<usize>)> = Vec::new();
+        if over != out {
+            let left: Vec<usize> = before.iter().copied().filter(|n| !now.contains(n)).collect();
+            let entered: Vec<usize> = now.iter().rev().copied().filter(|n| !before.contains(n)).collect();
+            for [out_type, leave_type, over_type, enter_type] in [
+                ["pointerout", "pointerleave", "pointerover", "pointerenter"],
+                ["mouseout", "mouseleave", "mouseover", "mouseenter"],
+            ] {
+                events.extend(out.map(|n| (n, out_type, over)));
+                events.extend(left.iter().map(|n| (*n, leave_type, over)));
+                events.extend(over.map(|n| (n, over_type, out)));
+                events.extend(entered.iter().map(|n| (*n, enter_type, out)));
+            }
+        }
+        if let Some(over) = over {
+            events.push((over, "pointermove", None));
+            if mousemove {
+                events.push((over, "mousemove", None));
+            }
+        }
+        if events.is_empty() {
+            return;
+        }
+        for (target, event_type, related_target) in events {
+            // `offsetX/Y` are from the target's own box, as it is now: an
+            // earlier listener may have moved it.
+            let origin = self
+                .views
+                .get(&id)
+                .and_then(|v| Self::box_origin(v.layout.as_ref()?, target))
+                .unwrap_or((0.0, 0.0));
+            let moved = event_type.ends_with("move");
+            let data = rustkit_bindings::MouseEventBindingData {
+                client_x: viewport_x as f64,
+                client_y: viewport_y as f64,
+                screen_x: viewport_x as f64,
+                screen_y: viewport_y as f64,
+                offset_x: (doc_x - origin.0) as f64,
+                offset_y: (doc_y - origin.1) as f64,
+                button: if event_type.starts_with("pointer") { -1 } else { 0 },
+                buttons,
+                movement_x: if moved { movement.0 as f64 } else { 0.0 },
+                movement_y: if moved { movement.1 as f64 } else { 0.0 },
+                related_target,
+                ..Default::default()
+            };
+            self.fire_mouse(id, target, event_type, &data);
+        }
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after a mouse move failed");
+        }
+    }
+
+    /// The padding-box origin of the first box `node` generated, in
+    /// document coordinates.
+    fn box_origin(b: &LayoutBox, node: usize) -> Option<(f32, f32)> {
+        if b.node_id == Some(node) {
+            let padding_box = b.dimensions.padding_box();
+            return Some((padding_box.x, padding_box.y));
+        }
+        b.children.iter().find_map(|c| Self::box_origin(c, node))
+    }
 
     /// Deliver a primary-button release at VIEWPORT coordinates: `pointerup`,
     /// `mouseup`, then `click` at the element under the point, then the click's
@@ -1883,6 +2026,9 @@ impl Engine {
     /// `preventDefault()` on the `click`. Whatever the listeners wrote to
     /// the DOM is laid out before this returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
+        if let Some(view) = self.views.get_mut(&id) {
+            view.primary_button_down = false;
+        }
         self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
         let suppressed = self
             .views
@@ -2109,7 +2255,7 @@ impl Engine {
             }
             Some(node.id.raw())
         });
-        let (Some(target), Some(bindings)) = (target, view.bindings.as_ref()) else {
+        let Some(target) = target else {
             return true;
         };
         let data = rustkit_bindings::MouseEventBindingData {
@@ -2123,8 +2269,31 @@ impl Engine {
             buttons: if matches!(event_type, "mousedown" | "pointerdown") { 1 } else { 0 },
             ..Default::default()
         };
+        let not_cancelled = self.fire_mouse(id, target, event_type, &data);
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after mouse event failed");
+        }
+        not_cancelled
+    }
+
+    /// Fire one mouse event at an element (raw NodeId) and file what its
+    /// listeners threw. Returns false when a listener cancelled it. The
+    /// caller flushes the DOM writes.
+    fn fire_mouse(
+        &mut self,
+        id: EngineViewId,
+        target: usize,
+        event_type: &str,
+        data: &rustkit_bindings::MouseEventBindingData,
+    ) -> bool {
+        let Some(view) = self.views.get_mut(&id) else {
+            return true;
+        };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return true;
+        };
         let source = format!("event:{event_type}");
-        let not_cancelled = match bindings.fire_mouse_event(target, event_type, &data) {
+        let not_cancelled = match bindings.fire_mouse_event(target, event_type, data) {
             Ok(not_cancelled) => not_cancelled,
             Err(e) => {
                 view.script_log.push(ScriptRecord {
@@ -2145,9 +2314,6 @@ impl Engine {
             });
         }
         debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
-        if let Err(e) = self.flush_script_dom_writes(id) {
-            debug!(?id, error = %e, "relayout after mouse event failed");
-        }
         not_cancelled
     }
 
@@ -21740,6 +21906,35 @@ mod node_identity_tests {
         js(&mut engine, id, "log.length = 0");
         engine.mouse_move_at_point(id, 12.0, 310.0);
         assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("pointermove:tall mousemove:tall"));
+
+        // The pointer leaves the view from inside #i: everything it was
+        // over is left, toward nothing; coming back enters it all again.
+        js(
+            &mut engine,
+            id,
+            "log.length = 0; \
+             ['mouseout', 'mouseleave', 'mouseenter'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push(t + ':' + (e.target.id || e.target.nodeName) + ':' + e.relatedTarget); }, true); });",
+        );
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_leave(id);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("mouseout:i:null mouseleave:i:null mouseleave:o:null mouseleave:BODY:null mouseleave:HTML:null")
+        );
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_leave(id);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string(""));
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string(
+                "mouseover:i mouseenter:HTML:null mouseenter:BODY:null mouseenter:o:null mouseenter:i:null \
+                 pointermove:i mousemove:i"
+            )
+        );
     }
 
     // weather.com's drawer and yahoo's More menu (Pollux, 2026-10-04): the

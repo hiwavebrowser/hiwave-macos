@@ -54,3 +54,7 @@ harness = false
 [[test]]
 name = "macos_key_events"
 harness = false
+
+[[test]]
+name = "macos_pointer_moves"
+harness = false

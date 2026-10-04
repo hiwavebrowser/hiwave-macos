@@ -130,6 +130,12 @@ pub struct MouseEventBindingData {
     pub alt_key: bool,
     pub shift_key: bool,
     pub meta_key: bool,
+    /// How far the pointer moved since the last move event.
+    pub movement_x: f64,
+    pub movement_y: f64,
+    /// The element the pointer came from or went to (raw NodeId), for the
+    /// over/out/enter/leave events.
+    pub related_target: Option<usize>,
 }
 
 /// Keyboard event data for JavaScript binding.
@@ -1250,7 +1256,8 @@ impl DomBindings {
 
     /// Fire the user's mouse input at an element (by node id) as a trusted,
     /// bubbling, cancelable `MouseEvent` (a `PointerEvent` for `pointer*`
-    /// and `click`). Returns false when a listener
+    /// and `click`; the enter and leave events neither bubble nor can be
+    /// cancelled). Returns false when a listener
     /// called `preventDefault()`. Listener exceptions are queued, see
     /// [`Self::take_reported_errors`].
     pub fn fire_mouse_event(
@@ -1262,7 +1269,7 @@ impl DomBindings {
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
              screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
-             altKey: {}, shiftKey: {}, metaKey: {} }})",
+             altKey: {}, shiftKey: {}, metaKey: {}, movementX: {}, movementY: {}, related: {} }})",
             data.client_x,
             data.client_y,
             data.screen_x,
@@ -1275,6 +1282,9 @@ impl DomBindings {
             data.alt_key,
             data.shift_key,
             data.meta_key,
+            data.movement_x,
+            data.movement_y,
+            data.related_target.map_or("null".to_string(), |n| n.to_string()),
         ))?;
         Ok(!matches!(result, JsValue::Boolean(false)))
     }
