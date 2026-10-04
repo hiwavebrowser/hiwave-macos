@@ -169,6 +169,8 @@ mod script_net_engine_tests;
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_scroll_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -1627,6 +1629,9 @@ impl Engine {
         let changed = view.scroll_offset != old_offset;
         if changed {
             debug!(?id, ?old_offset, new_offset = ?view.scroll_offset, "View scrolled");
+            if let Some(bindings) = view.bindings.as_ref() {
+                bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
+            }
         }
 
         Ok(changed)
@@ -2475,6 +2480,7 @@ impl Engine {
         let Some(view) = self.views.get(&id) else { return };
         let document_url = view.url.clone();
         let view_document = view.document.clone();
+        bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         bindings.set_loop_iteration_limit(loop_limit);
 
         // Execution order: classic, defer (module scripts run here, in
@@ -3601,6 +3607,10 @@ impl Engine {
             view.scroll_offset.0.min(view.max_scroll_offset.0),
             view.scroll_offset.1.min(max_scroll_y),
         );
+        // window.scrollX/scrollY and the clamp on scrollTo read these.
+        if let Some(bindings) = view.bindings.as_ref() {
+            bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
+        }
 
         // Render
         self.render(id)?;
@@ -12075,11 +12085,33 @@ impl Engine {
         };
         let dirty = bindings.take_dirty();
         Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
+        let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
         if dirty == DomDirty::Clean {
-            return Ok(false);
+            // A scroll alone moves what is painted, not the layout.
+            if scrolled {
+                self.render(id)?;
+            }
+            return Ok(scrolled);
         }
         debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
         self.relayout(id).map(|_| true)
+    }
+
+    /// Move the view to where script last scrolled the window, if it did.
+    /// The bindings clamp to the maximum they were last told, and the
+    /// engine clamps again, so a stale maximum cannot scroll past the end.
+    fn apply_script_scroll(
+        offset: &mut (f32, f32),
+        max: (f32, f32),
+        bindings: &DomBindings,
+    ) -> bool {
+        let Some((x, y)) = bindings.take_scroll_request() else {
+            return false;
+        };
+        let new = (x.clamp(0.0, max.0.max(0.0)), y.clamp(0.0, max.1.max(0.0)));
+        let changed = new != *offset;
+        *offset = new;
+        changed
     }
 
     /// Script-set control values and checkedness, copied into the view's
@@ -12118,6 +12150,7 @@ impl Engine {
         let dirty = bindings.take_dirty();
         if let Some(view) = self.views.get_mut(&id) {
             Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
+            Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
         }
         if dirty == DomDirty::Clean {
             return;
@@ -12127,10 +12160,13 @@ impl Engine {
             warn!(?id, ?e, "Relayout between lifecycle steps failed");
             return;
         }
-        if let Some(layout) = self.views.get(&id).and_then(|v| v.layout.as_ref()) {
-            let (geometry, computed) = geometry_snapshot(layout);
-            bindings.set_geometry(geometry);
-            bindings.set_computed_styles(computed);
+        if let Some(view) = self.views.get(&id) {
+            if let Some(layout) = view.layout.as_ref() {
+                let (geometry, computed) = geometry_snapshot(layout);
+                bindings.set_geometry(geometry);
+                bindings.set_computed_styles(computed);
+            }
+            bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
         info!(?id, elapsed_ms = started.elapsed().as_millis() as u64, "Relaid out for script");
     }

@@ -43,8 +43,11 @@ mod web_history_tests;
 #[cfg(test)]
 mod geometry_tests;
 #[cfg(test)]
+mod scroll_tests;
+#[cfg(test)]
 mod web_intl_tests;
 mod web_crypto;
+mod web_scroll;
 mod web_url;
 
 pub use dom::{BoxGeometry, SelectorMatchFn};
@@ -512,6 +515,8 @@ pub struct DomBindings {
     /// Pending invalidation from script DOM writes (see `DomDirty`).
     /// Shared with the tree-write host functions, which mark it.
     dirty: Rc<Cell<DomDirty>>,
+    /// The scroll offset script reads and writes (see `web_scroll`).
+    scroll: web_scroll::SharedScroll,
 }
 
 impl DomBindings {
@@ -538,6 +543,9 @@ impl DomBindings {
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
         runtime.evaluate_script(include_str!("web_history.js"))?;
+        // window.scrollTo/scrollBy/scrollX/scrollY, Element.scrollTop/scrollIntoView (web_scroll.js).
+        let scroll = web_scroll::SharedScroll::default();
+        web_scroll::install(&mut runtime, &scroll)?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -546,6 +554,7 @@ impl DomBindings {
             dom_host,
             _ipc_queue: RefCell::new(Vec::new()),
             dirty,
+            scroll,
         })
     }
 
@@ -1067,6 +1076,23 @@ impl DomBindings {
     /// after a layout; script reads answer from the last one published.
     pub fn set_geometry(&self, geometry: std::collections::HashMap<usize, BoxGeometry>) {
         self.dom_host.borrow_mut().geometry = geometry;
+    }
+
+    /// Publish the view's scroll offset and the furthest it can scroll, for
+    /// `window.scrollX/scrollY` and the clamp on `scrollTo`. The engine calls
+    /// this after a layout and after the user scrolls.
+    pub fn set_scroll_state(&self, offset: (f32, f32), max: (f32, f32)) {
+        let mut s = self.scroll.borrow_mut();
+        s.x = offset.0;
+        s.y = offset.1;
+        s.max_x = max.0;
+        s.max_y = max.1;
+    }
+
+    /// Where script last scrolled the window to since the last call, if it
+    /// did. The engine applies it to the view when script settles.
+    pub fn take_scroll_request(&self) -> Option<(f32, f32)> {
+        self.scroll.borrow_mut().request.take()
     }
 
     /// Publish the computed style of each laid-out element (raw NodeId to
