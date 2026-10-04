@@ -22043,6 +22043,53 @@ mod node_identity_tests {
         assert_eq!(focused_id(&mut engine, id), js_string("b/none"));
     }
 
+    // A click on a label's text did not focus the field it labels, so the
+    // usual "click the word, then type" did nothing. The labeled control
+    // (HTML §4.10.4: the `for` target, else the first labelable
+    // descendant) takes the focus.
+
+    const LABEL_PAGE: &str = concat!(
+        r#"<html><body id="b" style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="l" for="q">Name</label></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="w">Wrap <input id="r" name="r"></label></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="n" for="missing">Nobody</label></div>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_label_focuses_its_control() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, LABEL_PAGE).expect("load_html");
+        js(&mut engine, id, "var $ = function (i) { return document.getElementById(i); };");
+        let node = |engine: &Engine, name: &str| {
+            engine.views[&id].document.as_ref().unwrap().get_element_by_id(name).unwrap().id
+        };
+        let (q, r) = (node(&engine, "q"), node(&engine, "r"));
+
+        // `for` names the field.
+        let outcome = engine.click_at_point(id, 12.0, 52.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert_eq!(js(&mut engine, id, "document.activeElement.id"), js_string("q"));
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("a"));
+
+        // The label's own text, with the field inside the label.
+        engine.click_at_point(id, 12.0, 92.0);
+        assert_eq!(engine.focused_node(id), Some(r));
+        assert_eq!(js(&mut engine, id, "document.activeElement.id"), js_string("r"));
+
+        // A label with no control focuses nothing.
+        let outcome = engine.click_at_point(id, 12.0, 132.0);
+        assert_eq!(outcome.focused, None);
+        assert_eq!(engine.focused_node(id), None);
+    }
+
     // Pete's live testing, continued: typing in a field told the page
     // nothing. No `keydown`, no `input`, and Enter built the form's URL
     // without a `submit` event, so a page that handles its own search box
