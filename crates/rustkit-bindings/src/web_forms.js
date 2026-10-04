@@ -5,6 +5,9 @@
 // DOM wrappers (dom.rs), whose text-control value and reset path it keeps:
 // it only wraps `form.reset` to also reset the state kept here.
 (function (g) {
+    // dom.rs's side of checkedness and activation (see there).
+    var internals = g.__rkFormInternals || {};
+    delete g.__rkFormInternals;
     var HTMLElement = g.HTMLElement;
     if (typeof HTMLElement !== 'function' || typeof g.HTMLFormElement !== 'function') return;
     var Input = g.HTMLInputElement.prototype, Form = g.HTMLFormElement.prototype;
@@ -65,11 +68,63 @@
             return o !== el && o.type === 'radio' && o.getAttribute('name') === name && o.form === form;
         });
     }
+    // The engine styles and paints a control from what it is told here.
+    var noteChecked = internals.noteChecked || function () {};
+    function setChecked(el, v) {
+        checks.set(el, v);
+        noteChecked(el, v);
+    }
     accessor(Input, 'checked', function () {
         return checks.has(this) ? checks.get(this) : this.hasAttribute('checked');
     }, function (v) {
-        checks.set(this, !!v);
-        if (v && this.type === 'radio') radioGroup(this).forEach(function (o) { checks.set(o, false); });
+        setChecked(this, !!v);
+        if (v && this.type === 'radio') radioGroup(this).forEach(function (o) { setChecked(o, false); });
+    });
+
+    // ---- activation behaviour of a click (HTML §4.10.5.1.15 checkbox,
+    // §4.10.5.1.16 radio button, §4.10.4 label). dom.rs's dispatch asks
+    // before the listeners run and calls the answer after them.
+    function checkable(el) {
+        return el.localName === 'input' && (el.type === 'checkbox' || el.type === 'radio');
+    }
+    // The nearest element up from the target with a behaviour here. Other
+    // interactive content in between keeps the click to itself.
+    var INTERACTIVE = /^(button|select|textarea|input|summary|option)$/;
+    function activationTarget(t) {
+        for (var n = t; n && n.nodeType === 1; n = n.parentNode) {
+            if (n.localName === 'label' || checkable(n)) return n;
+            if (INTERACTIVE.test(n.localName) || (n.localName === 'a' && n.hasAttribute('href'))) return null;
+        }
+        return null;
+    }
+    function fire(el, type) {
+        el.dispatchEvent(new g.Event(type, { bubbles: true }));
+    }
+    if (internals.setActivation) internals.setActivation(function (target) {
+        var el = activationTarget(target);
+        if (!el) return null;
+        if (el.localName === 'label') {
+            return function (ok) {
+                var c = ok ? el.control : null;
+                if (c && !c.hasAttribute('disabled')) c.click();
+            };
+        }
+        if (el.hasAttribute('disabled')) return null;
+        // Legacy-pre-activation: the control is already in its new state
+        // when the click's listeners run, and a cancelled click undoes it.
+        var was = el.checked, radio = el.type === 'radio';
+        var before = radio ? radioGroup(el).filter(function (o) { return o.checked; })[0] : null;
+        el.checked = radio ? true : !was;
+        return function (ok) {
+            if (!ok) {
+                el.checked = was;
+                if (before) before.checked = true;
+                return;
+            }
+            if (el.checked === was || !el.isConnected) return;
+            fire(el, 'input');
+            fire(el, 'change');
+        };
     });
     reflectBool(Input, 'defaultChecked', 'checked');
     // No file picker yet: a file input's list is always empty.
@@ -281,7 +336,10 @@
         try { textReset.call(this); } finally { delete this.dispatchEvent; }
         if (!ok) return;
         descendants(this, /^(input|select)$/).forEach(function (el) {
-            if (el.localName === 'input') return checks.delete(el);
+            if (el.localName === 'input') {
+                if (checks.delete(el)) noteChecked(el, null);
+                return;
+            }
             optionsOf(el).forEach(function (o) { picked.delete(o); });
         });
     };

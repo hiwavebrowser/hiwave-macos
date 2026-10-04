@@ -568,6 +568,14 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_value_writes()
     }
 
+    /// The checkbox and radio checkedness changes since the last call, as
+    /// (raw NodeId, checkedness) in write order; `None` means the control
+    /// follows its `checked` attribute again. The engine styles and paints
+    /// a control from these, when it flushes `take_dirty`.
+    pub fn take_checked_writes(&self) -> Vec<(usize, Option<bool>)> {
+        self.dom_host.borrow_mut().take_checked_writes()
+    }
+
     /// Tell script what the user typed into a control, so its `value`
     /// reads the edit state's text rather than the default.
     pub fn sync_control_value(&self, node: usize, value: String) {
