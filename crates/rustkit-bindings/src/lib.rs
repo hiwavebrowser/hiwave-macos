@@ -33,17 +33,21 @@ mod web_utils_tests;
 #[cfg(test)]
 mod dom_utils_tests;
 #[cfg(test)]
+mod web_cssom_tests;
+#[cfg(test)]
 mod node_apis_tests;
 #[cfg(test)]
 mod form_controls_tests;
 #[cfg(test)]
 mod web_history_tests;
 #[cfg(test)]
+mod geometry_tests;
+#[cfg(test)]
 mod web_intl_tests;
 mod web_crypto;
 mod web_url;
 
-pub use dom::SelectorMatchFn;
+pub use dom::{BoxGeometry, SelectorMatchFn};
 pub mod events;
 
 pub use events::{
@@ -526,6 +530,9 @@ impl DomBindings {
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_script(include_str!("web_components.js"))?;
+        // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
+        // insertRule writes into the <style>'s text, which the engine restyles from.
+        runtime.evaluate_script(include_str!("web_cssom.js"))?;
         // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
         runtime.evaluate_script(include_str!("web_forms.js"))?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
@@ -1037,6 +1044,14 @@ impl DomBindings {
     /// they fall back to rustkit-dom's single tag/`#id`/`.class` matcher.
     pub fn set_selector_matcher(&self, matcher: SelectorMatchFn) {
         self.dom_host.borrow_mut().matcher = Some(matcher);
+    }
+
+    /// Publish where the layout put each element (by raw NodeId), for
+    /// `getBoundingClientRect`, `offsetWidth/Height/Top/Left`, `offsetParent`,
+    /// `clientWidth/Height` and `scrollWidth/Height`. The engine calls this
+    /// after a layout; script reads answer from the last one published.
+    pub fn set_geometry(&self, geometry: std::collections::HashMap<usize, BoxGeometry>) {
+        self.dom_host.borrow_mut().geometry = geometry;
     }
 
     /// Set the document.

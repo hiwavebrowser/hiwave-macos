@@ -34,6 +34,28 @@ mod node_apis;
 /// invalid, and script throws `SyntaxError`.
 pub type SelectorMatchFn = Rc<dyn Fn(&Rc<Node>, &str) -> Option<bool>>;
 
+/// Where the layout put one element, in document coordinates, as the engine
+/// last measured it (`DomBindings::set_geometry`). The border box is what
+/// `getBoundingClientRect()` and `offsetWidth` report; the client box is the
+/// padding box (`clientWidth`); the scroll size is the extent of the content
+/// and descendants inside the padding box (`scrollWidth`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BoxGeometry {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// Left and top border widths (`clientLeft`, `clientTop`).
+    pub border_left: f32,
+    pub border_top: f32,
+    pub client_width: f32,
+    pub client_height: f32,
+    pub scroll_width: f32,
+    pub scroll_height: f32,
+    /// 0 static, 1 positioned (relative, absolute, sticky), 2 fixed.
+    pub position: u8,
+}
+
 /// The document the host functions read, and its generation.
 #[derive(Default)]
 pub(crate) struct DomHost {
@@ -41,6 +63,9 @@ pub(crate) struct DomHost {
     generation: u32,
     /// The injected selector matcher (`DomBindings::set_selector_matcher`).
     pub(crate) matcher: Option<SelectorMatchFn>,
+    /// Where each element's box is, by NodeId; empty until the engine has
+    /// laid the page out (`DomBindings::set_geometry`).
+    pub(crate) geometry: HashMap<usize, BoxGeometry>,
     /// HTML §4.10.5.4 "dirty value" of the `<input>`/`<textarea>` controls
     /// that script or the user changed, by NodeId. A control missing here
     /// shows its default value (the `value` attribute, or a textarea's text).
@@ -852,6 +877,14 @@ pub(crate) fn install(
         Box::new(move |args| {
             let host = h.borrow();
             match (host.node(args), string_arg(args, 2)) {
+                (Some(node), Some("geom")) => match host.geometry.get(&node.id.raw()) {
+                    Some(g) => JsValue::String(format!(
+                        "{} {} {} {} {} {} {} {} {} {} {}",
+                        g.x, g.y, g.width, g.height, g.border_left, g.border_top,
+                        g.client_width, g.client_height, g.scroll_width, g.scroll_height, g.position
+                    )),
+                    None => JsValue::String(String::new()),
+                },
                 (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
                 _ => JsValue::Null,
             }
@@ -1754,6 +1787,110 @@ const WRAPPERS_JS: &str = r#"
             classLists.set(this, l);
         }
         return l;
+    });
+
+    // Layout geometry (CSSOM View). The engine publishes where each element's
+    // box is after a layout (`set_geometry`); a read answers from the last
+    // layout, so it can be stale between a script's own DOM writes and the
+    // next layout. An element with no box (display:none, not rendered, or
+    // measured before any layout) reads as all zeros, and has no offsetParent.
+    function geom(el) {
+        var raw = info(el, 'geom');
+        if (!raw) return null;
+        var p = raw.split(' ');
+        var n = [];
+        for (var i = 0; i < p.length; i++) n.push(Number(p[i]));
+        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10] };
+    }
+    function scrollOffset(axis) {
+        var v = axis === 'x' ? (g.scrollX || g.pageXOffset) : (g.scrollY || g.pageYOffset);
+        return typeof v === 'number' ? v : 0;
+    }
+    // DOMRect is installed after this layer (web_interfaces.js), so it is
+    // looked up when a rect is made.
+    function rect(x, y, w, h) {
+        return typeof g.DOMRect === 'function'
+            ? new g.DOMRect(x, y, w, h)
+            : { x: x, y: y, width: w, height: h, top: y, left: x, right: x + w, bottom: y + h };
+    }
+    Element.prototype.getBoundingClientRect = function () {
+        var b = geom(this);
+        if (!b) return rect(0, 0, 0, 0);
+        return rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.w, b.h);
+    };
+    Element.prototype.getClientRects = function () {
+        var b = geom(this);
+        var out = b ? [rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.w, b.h)] : [];
+        return out;
+    };
+    function metric(name, pick) {
+        getter(HTMLElement.prototype, name, function () {
+            var b = geom(this);
+            return b ? pick(b, this) : 0;
+        });
+    }
+    function round(v) { return Math.round(v); }
+    metric('offsetWidth', function (b) { return round(b.w); });
+    metric('offsetHeight', function (b) { return round(b.h); });
+    // offsetParent: the nearest positioned ancestor, else body. null when
+    // the element has no box, is fixed, or is the body itself.
+    function offsetParentOf(el) {
+        var b = geom(el);
+        if (!b || b.pos === 2) return null;
+        var body = document.body;
+        if (el === body || el === document.documentElement) return null;
+        for (var p = el.parentElement; p; p = p.parentElement) {
+            if (p === body) return body;
+            var pb = geom(p);
+            if (pb && pb.pos !== 0) return p;
+        }
+        return body;
+    }
+    getter(HTMLElement.prototype, 'offsetParent', function () { return offsetParentOf(this); });
+    // Offsets are from the offsetParent's padding edge; from the document
+    // origin when that is the body.
+    function offsetFrom(el, axis) {
+        var b = geom(el);
+        if (!b) return 0;
+        var parent = offsetParentOf(el);
+        var base = 0;
+        if (parent && parent !== document.body) {
+            var pb = geom(parent);
+            if (pb) base = axis === 'x' ? pb.x + pb.bl : pb.y + pb.bt;
+        }
+        return round((axis === 'x' ? b.x : b.y) - base);
+    }
+    getter(HTMLElement.prototype, 'offsetLeft', function () { return offsetFrom(this, 'x'); });
+    getter(HTMLElement.prototype, 'offsetTop', function () { return offsetFrom(this, 'y'); });
+    // The root element's client size is the viewport's, and its scroll size
+    // is the document's (the body's bottom/right edge, at least the viewport).
+    function isRoot(el) { return el === document.documentElement; }
+    function viewport(axis) {
+        var v = axis === 'x' ? g.innerWidth : g.innerHeight;
+        return typeof v === 'number' ? v : 0;
+    }
+    function documentExtent(axis) {
+        var body = document.body, b = body ? geom(body) : null;
+        var edge = b ? (axis === 'x' ? b.x + b.w + b.sw - b.cw : b.y + b.h + b.sh - b.ch) : 0;
+        return Math.max(viewport(axis), edge);
+    }
+    getter(Element.prototype, 'clientWidth', function () {
+        if (isRoot(this)) return round(viewport('x'));
+        var b = geom(this); return b ? round(b.cw) : 0;
+    });
+    getter(Element.prototype, 'clientHeight', function () {
+        if (isRoot(this)) return round(viewport('y'));
+        var b = geom(this); return b ? round(b.ch) : 0;
+    });
+    getter(Element.prototype, 'clientLeft', function () { var b = geom(this); return b ? round(b.bl) : 0; });
+    getter(Element.prototype, 'clientTop', function () { var b = geom(this); return b ? round(b.bt) : 0; });
+    getter(Element.prototype, 'scrollWidth', function () {
+        if (isRoot(this)) return round(documentExtent('x'));
+        var b = geom(this); return b ? round(Math.max(b.sw, b.cw)) : 0;
+    });
+    getter(Element.prototype, 'scrollHeight', function () {
+        if (isRoot(this)) return round(documentExtent('y'));
+        var b = geom(this); return b ? round(Math.max(b.sh, b.ch)) : 0;
     });
 
     // style: a CSSStyleDeclaration over the style attribute, one per

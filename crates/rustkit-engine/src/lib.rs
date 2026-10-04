@@ -3453,6 +3453,11 @@ impl Engine {
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
         view.layout = Some(root_box);
+        // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
+        // answer from this layout.
+        if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
+            bindings.set_geometry(geometry_snapshot(layout));
+        }
         view.display_list = Some(display_list);
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
         // Re-clamp: a relayout can shrink the document (or a navigation can
@@ -4595,6 +4600,8 @@ impl Engine {
                         element_ids,
                     );
                     note_snapshot_image(&b, explicit_width, explicit_height);
+                    // A click on the image targets the image.
+                    b.node_id = Some(node.id.raw());
                     return b;
                 }
 
@@ -4676,6 +4683,7 @@ impl Engine {
                             &tag_lower,
                             element_ids,
                         );
+                        svg_box.node_id = Some(node.id.raw());
                         return svg_box;
                     }
                     let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
@@ -4687,6 +4695,7 @@ impl Engine {
                         &tag_lower,
                         element_ids,
                     );
+                    svg_box.node_id = Some(node.id.raw());
                     return svg_box;
                 }
 
@@ -4812,6 +4821,10 @@ impl Engine {
                             &tag_lower,
                             element_ids,
                         );
+                        // Without its node, a click on the button was hit
+                        // on behalf of the button's parent and the button's
+                        // own listeners never ran.
+                        b.node_id = Some(node.id.raw());
                         return b;
                     }
                     // Element children present: fall through to normal box
@@ -14781,6 +14794,76 @@ fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32,
     (min_x, min_y, max_x - min_x, max_y - min_y)
 }
 
+/// Where the layout put every element, by DOM node, for script geometry reads
+/// (`DomBindings::set_geometry`). An element laid out as several boxes (a
+/// block split around anonymous boxes) reports the union of its boxes.
+/// `scroll_*` is the extent of the box's descendants from its padding edge.
+/// Transforms are not applied (`getBoundingClientRect` of a transformed
+/// element reports its untransformed box for now).
+fn geometry_snapshot(root: &LayoutBox) -> HashMap<usize, rustkit_bindings::BoxGeometry> {
+    fn walk(
+        b: &LayoutBox,
+        out: &mut HashMap<usize, rustkit_bindings::BoxGeometry>,
+    ) -> Option<(f32, f32, f32, f32)> {
+        // The bounding rect (left, top, right, bottom) of this box and everything under it.
+        let bb = b.dimensions.border_box();
+        let mut extent = Some((bb.x, bb.y, bb.x + bb.width, bb.y + bb.height));
+        for child in &b.children {
+            if let Some(c) = walk(child, out) {
+                extent = Some(match extent {
+                    Some(e) => (e.0.min(c.0), e.1.min(c.1), e.2.max(c.2), e.3.max(c.3)),
+                    None => c,
+                });
+            }
+        }
+        if let Some(node) = b.node_id {
+            let pb = b.dimensions.padding_box();
+            let (right, bottom) = extent.map_or((pb.x + pb.width, pb.y + pb.height), |e| (e.2, e.3));
+            // The computed value, not the layout box's: a relative or sticky
+            // box is laid out as static, but it is still positioned (it is
+            // an offsetParent).
+            let position = match b.style.position {
+                rustkit_css::Position::Static => 0,
+                rustkit_css::Position::Fixed => 2,
+                _ => 1,
+            };
+            let geometry = rustkit_bindings::BoxGeometry {
+                x: bb.x,
+                y: bb.y,
+                width: bb.width,
+                height: bb.height,
+                border_left: b.dimensions.border.left,
+                border_top: b.dimensions.border.top,
+                client_width: pb.width,
+                client_height: pb.height,
+                scroll_width: (right - pb.x).max(pb.width),
+                scroll_height: (bottom - pb.y).max(pb.height),
+                position,
+            };
+            out.entry(node)
+                .and_modify(|g| {
+                    // A second box of the same element: union.
+                    let (l, t) = (g.x.min(geometry.x), g.y.min(geometry.y));
+                    let (r, bt) = (
+                        (g.x + g.width).max(geometry.x + geometry.width),
+                        (g.y + g.height).max(geometry.y + geometry.height),
+                    );
+                    g.x = l;
+                    g.y = t;
+                    g.width = r - l;
+                    g.height = bt - t;
+                    g.scroll_width = g.scroll_width.max(geometry.scroll_width);
+                    g.scroll_height = g.scroll_height.max(geometry.scroll_height);
+                })
+                .or_insert(geometry);
+        }
+        extent
+    }
+    let mut out = HashMap::new();
+    walk(root, &mut out);
+    out
+}
+
 /// Wrap a serialised layout tree with the provenance an oracle needs.
 ///
 /// Split out of `export_layout_json` so it can be asserted on directly. The
@@ -20731,6 +20814,48 @@ mod node_identity_tests {
             engine.link_at_point(id, 5.0, 60.0).as_deref(),
             Some("https://example.com/opened"),
             "the listener's new element must be in the layout the next click hits"
+        );
+    }
+
+
+    // Pete's live testing, continued: a click on a plain <button> was
+    // delivered to the button's PARENT, so a listener on the button never
+    // ran. The box builder returns early for the leaf boxes (a text-only
+    // button, an image, an inline svg) and did not record their DOM node;
+    // the hit test then answered with the nearest ancestor that had one.
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_button_an_image_or_an_svg_targets_that_element() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let html = concat!(
+            r#"<html><body style="margin:0">"#,
+            r#"<div style="height:40px;overflow:hidden"><button id="b">press</button></div>"#,
+            r#"<div style="height:40px;overflow:hidden"><img id="i" width="40" height="30" alt=""></div>"#,
+            r#"<div style="height:40px;overflow:hidden"><svg id="s" width="40" height="30">"#,
+            r#"<rect width="40" height="30"></rect></svg></div>"#,
+            r#"</body></html>"#,
+        );
+        engine.load_html(id, html).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.own = []; window.seen = []; ['b', 'i', 's'].forEach(function (k) { \
+             document.getElementById(k).addEventListener('click', function () { own.push(k); }); }); \
+             document.addEventListener('click', function (e) { seen.push(e.target.id || e.target.localName); });",
+        );
+
+        for row in 0..3 {
+            engine.click_at_point(id, 12.0, 40.0 * row as f32 + 12.0);
+        }
+
+        assert_eq!(
+            js(&mut engine, id, "seen.join(',') + ' | ' + own.join(',')"),
+            format!("{:?}", rustkit_js::JsValue::String("b,i,s | b,i,s".into())),
+            "each click's target is the element under it, and that element's own listener runs"
         );
     }
 
@@ -29350,6 +29475,36 @@ mod script_selector_tests {
             assert_eq!(js(&format!("document.querySelectorAll({selector:?}).length")), want, "{selector}");
             assert!(QUERY_CONTEXT_BUILDS.with(|n| n.get()) > 0, "{selector} reads the tree");
         }
+    }
+
+    // Geometry reads answer from the layout the engine just did: the box the
+    // painter draws is the box script measures.
+    #[test]
+    fn script_geometry_reads_come_from_the_layout() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>body{margin:0} #a{width:120px;height:50px;margin-top:10px;             padding:4px;border:2px solid #000} #wrap{position:relative;margin-left:30px;width:200px}             #in{margin-left:5px;width:50px;height:20px} #off{display:none}</style></head>             <body><div id=a></div><div id=wrap><div id=in></div></div><div id=off></div></body></html>",
+        );
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        // #a: content 120x50 + padding 4 + border 2 each side = 132x62, top margin 10.
+        assert_eq!(
+            js("var r = document.getElementById('a').getBoundingClientRect(); [r.x, r.y, r.width, r.height].join()"),
+            "0,10,132,62"
+        );
+        assert_eq!(
+            js("var a = document.getElementById('a'); [a.offsetWidth, a.offsetHeight, a.clientWidth, a.clientHeight, a.clientLeft, a.clientTop].join()"),
+            "132,62,128,58,2,2"
+        );
+        // #in is inside the positioned #wrap: its offsets are from #wrap's padding edge.
+        assert_eq!(
+            js("var i = document.getElementById('in'); [i.offsetParent.id, i.offsetLeft, i.offsetTop, i.offsetWidth].join()"),
+            "wrap,5,0,50"
+        );
+        assert_eq!(js("document.getElementById('wrap').getBoundingClientRect().x"), "30");
+        // display:none has no box.
+        assert_eq!(
+            js("var o = document.getElementById('off'); [o.offsetWidth, o.getBoundingClientRect().height, String(o.offsetParent)].join()"),
+            "0,0,null"
+        );
     }
 
     #[test]
