@@ -21756,6 +21756,49 @@ mod node_identity_tests {
         assert_eq!(painted(&engine, id), [false, false, true, false, false, false]);
     }
 
+    // `matches(':checked')`, `closest` and `querySelector[All]` read the
+    // `checked` attribute, so after a click or `input.checked = ...` script
+    // was told the opposite of what the page painted (the usual
+    // `form.querySelector('input[name=x]:checked')` returned the default
+    // choice). They read the same live checkedness as the cascade.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn script_queries_read_live_checkedness() {
+        let (mut engine, id) = activation_page();
+        let checked = "Array.prototype.map.call(document.querySelectorAll('input:checked'), \
+                       function (e) { return e.id; }).join(',')";
+        assert_eq!(js(&mut engine, id, checked), js_string("r1"), "precondition: the attribute");
+
+        // The user checks the box and picks the other radio button.
+        engine.click_at_point(id, 8.0, 10.0);
+        engine.click_at_point(id, 8.0, 130.0);
+        assert_eq!(js(&mut engine, id, checked), js_string("c,r2"));
+        assert_eq!(
+            js(
+                &mut engine,
+                id,
+                "[$('c').matches(':checked'), $('r1').matches(':checked'), $('r2').matches('input:checked'), \
+                 $('r2').closest(':checked') === $('r2'), \
+                 document.querySelector('input[name=g]:checked').id].join('|')"
+            ),
+            js_string("true|false|true|true|r2")
+        );
+
+        // Script's own writes, and `:checked` left of a sibling combinator.
+        assert_eq!(js(&mut engine, id, "String(document.querySelector('input:checked + a'))"), js_string("null"));
+        assert_eq!(
+            js(
+                &mut engine,
+                id,
+                "$('s').checked = true; $('c').checked = false; \
+                 [document.querySelector('input:checked + a') !== null, $('c').matches(':checked'), \
+                  $('c').matches(':not(:checked)')].join('|')"
+            ),
+            js_string("true|false|true")
+        );
+        assert_eq!(js(&mut engine, id, checked), js_string("r2,s"));
+    }
+
     // Pete's live testing, continued: a link to a place in the same page
     // (`href="#id"`) loaded the page again from the top, and a
     // `javascript:` link did nothing. A URL that differs from the
