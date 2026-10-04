@@ -82,8 +82,8 @@
     });
 
     // ---- activation behaviour of a click (HTML §4.10.5.1.15 checkbox,
-    // §4.10.5.1.16 radio button, §4.10.4 label). dom.rs's dispatch asks
-    // before the listeners run and calls the answer after them.
+    // §4.10.5.1.16 radio button, §4.10.4 label, §4.11.2 summary). dom.rs's
+    // dispatch asks before the listeners run and calls the answer after them.
     function checkable(el) {
         return el.localName === 'input' && (el.type === 'checkbox' || el.type === 'radio');
     }
@@ -93,6 +93,7 @@
     function activationTarget(t) {
         for (var n = t; n && n.nodeType === 1; n = n.parentNode) {
             if (n.localName === 'label' || checkable(n) || isSubmitButton(n) || isResetButton(n)) return n;
+            if (isDetailsSummary(n)) return n;
             if (INTERACTIVE.test(n.localName) || (n.localName === 'a' && n.hasAttribute('href'))) return null;
         }
         return null;
@@ -107,6 +108,12 @@
             return function (ok) {
                 var c = ok ? el.control : null;
                 if (c && !c.hasAttribute('disabled')) c.click();
+            };
+        }
+        if (el.localName === 'summary') {
+            return function (ok) {
+                var d = el.parentNode;
+                if (ok && isDetailsSummary(el)) setOpen(d, !d.hasAttribute('open'));
             };
         }
         if (el.hasAttribute('disabled')) return null;
@@ -359,6 +366,35 @@
             optionsOf(el).forEach(function (o) { picked.delete(o); });
         });
     };
+
+    // ---- details (HTML §4.11.1, §4.11.2): `open` is the attribute; the
+    // engine renders a closed details as its summary alone. Only its first
+    // summary child opens it. `toggle` follows a change made by a click or
+    // through `open`, once the running script is done.
+    function isDetailsSummary(n) {
+        var p = n.parentNode;
+        if (n.localName !== 'summary' || !p || p.localName !== 'details') return false;
+        for (var c = p.firstChild; c; c = c.nextSibling) {
+            if (c.nodeType === 1 && c.localName === 'summary') return c === n;
+        }
+        return false;
+    }
+    function setOpen(details, open) {
+        var was = details.hasAttribute('open');
+        if (was === open) return;
+        details.toggleAttribute('open', open);
+        Promise.resolve().then(function () {
+            var e = new g.Event('toggle');
+            e.oldState = was ? 'open' : 'closed';
+            e.newState = open ? 'open' : 'closed';
+            details.dispatchEvent(e);
+        });
+    }
+    if (typeof g.HTMLDetailsElement === 'function') {
+        accessor(g.HTMLDetailsElement.prototype, 'open', function () { return this.hasAttribute('open'); },
+            function (v) { setOpen(this, !!v); });
+        reflectString(g.HTMLDetailsElement.prototype, 'name', 'name');
+    }
 
     // ---- img size (HTML §4.8.4.3): the attributes, 0 when absent; there
     // is no layout box to measure here.
