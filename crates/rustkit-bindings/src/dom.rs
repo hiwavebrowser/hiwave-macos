@@ -2332,6 +2332,11 @@ const WRAPPERS_JS: &str = r#"
         value: function (id, data) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return;
+            // The user edited it: `change` when it loses the focus
+            // (node_apis.js).
+            Object.defineProperty(target, '__rkEdited', {
+                value: true, configurable: true, enumerable: false, writable: true
+            });
             var ev = new g.InputEvent('input', {
                 bubbles: true, composed: true, view: g, data: data,
                 inputType: data === null ? 'deleteContentBackward' : 'insertText'

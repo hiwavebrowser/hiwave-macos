@@ -1675,7 +1675,9 @@ impl Engine {
     ///
     /// Returns the tag name of the newly focused element, or `None` when the
     /// click landed on nothing focusable — in which case focus is CLEARED,
-    /// matching the behavior of clicking a page's background.
+    /// matching the behavior of clicking a page's background. The page's
+    /// focus moves with it (`document.activeElement`, `change`, `blur`,
+    /// `focus`).
     pub fn focus_at_point(
         &mut self,
         id: EngineViewId,
@@ -1711,6 +1713,65 @@ impl Engine {
             }
         });
 
+        self.set_focus(id, focusable.clone());
+        // The page's focus follows, and has the last word: it refuses a
+        // disabled control, and a `focus` or `blur` listener may move the
+        // focus again.
+        let told = self.views.get(&id).and_then(|v| v.bindings.as_ref()).map(|bindings| {
+            if let Err(e) = bindings.set_focus(focusable.as_ref().map(|(raw, _)| *raw)) {
+                debug!(?id, error = %e, "focus listener threw");
+            }
+        });
+        if told.is_some() {
+            if let Err(e) = self.flush_script_dom_writes(id) {
+                debug!(?id, error = %e, "relayout after focus events failed");
+            }
+        }
+        self.focused_tag(id)
+    }
+
+    /// The tag of the focused form control, if one is focused.
+    fn focused_tag(&self, id: EngineViewId) -> Option<String> {
+        let view = self.views.get(&id)?;
+        let node = view.document.as_ref()?.get_node(view.focused_node?)?;
+        match &node.node_type {
+            NodeType::Element { tag_name, .. } => Some(tag_name.to_lowercase()),
+            _ => None,
+        }
+    }
+
+    /// Follow the page's focus when it moved (script's `focus()`/`blur()`,
+    /// or the page's answer to a click): a form control it focused takes
+    /// the keys; anything else leaves the engine with nothing focused.
+    /// Returns true when the engine's focus changed.
+    fn follow_script_focus(&mut self, id: EngineViewId) -> bool {
+        let Some(moved) = self
+            .views
+            .get(&id)
+            .and_then(|v| v.bindings.as_ref())
+            .and_then(|b| b.take_focus_move())
+        else {
+            return false;
+        };
+        let control = moved.and_then(|raw| {
+            let doc = self.views.get(&id)?.document.as_ref()?;
+            let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+            match &node.node_type {
+                NodeType::Element { tag_name, .. } => {
+                    let tag = tag_name.to_lowercase();
+                    matches!(tag.as_str(), "input" | "textarea" | "select").then_some((raw, tag))
+                }
+                _ => None,
+            }
+        });
+        let before = self.views.get(&id).and_then(|v| v.focused_node);
+        self.set_focus(id, control);
+        before != self.views.get(&id).and_then(|v| v.focused_node)
+    }
+
+    /// Make a form control (raw NodeId and tag) the focused node, or
+    /// nothing.
+    fn set_focus(&mut self, id: EngineViewId, focusable: Option<(usize, String)>) {
         // Seed edit state from the element's authored value the FIRST time it
         // is focused. Re-focusing must not reset what the user has typed, so
         // the seed is guarded by the entry being absent.
@@ -1745,17 +1806,15 @@ impl Engine {
             }
         }
 
-        let view = self.views.get_mut(&id)?;
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
         match focusable {
             Some((raw, tag)) => {
                 view.focused_node = Some(rustkit_dom::NodeId::new(raw));
                 debug!(?id, %tag, "Focused element");
-                Some(tag)
             }
-            None => {
-                view.focused_node = None;
-                None
-            }
+            None => view.focused_node = None,
         }
     }
 
@@ -1773,6 +1832,10 @@ impl Engine {
     /// the DOM is laid out before this returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        // The focus moves before `click` fires (it is the press's default
+        // action, UI Events §3.4.5.1), so a `click` listener that focuses
+        // a field has the last word.
+        self.focus_at_point(id, viewport_x, viewport_y);
         // A submit made outside a click (a timer, a callback) has nobody to
         // navigate for it yet; this click must not pick it up.
         self.take_submit_request(id);
@@ -1790,9 +1853,9 @@ impl Engine {
                 .filter(|sub| sub.is_self_target())
                 .map(|sub| sub.url)
         });
+        let focused = self.focused_tag(id);
         // The listeners may have moved or replaced what is under the point;
         // the default action reads the layout they left behind.
-        let focused = self.focus_at_point(id, viewport_x, viewport_y);
         let navigate = if submitted.is_some() {
             submitted
         } else if not_cancelled {
@@ -12324,6 +12387,12 @@ impl Engine {
             }
             bindings.mark_dirty(DomDirty::Layout);
             laid |= self.flush_script_dom_writes_once(id)?;
+        }
+        // The focused control paints its caret, so a focus script moved is
+        // a relayout.
+        if self.follow_script_focus(id) {
+            self.relayout(id)?;
+            laid = true;
         }
         Ok(laid)
     }

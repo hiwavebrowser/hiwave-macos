@@ -164,11 +164,12 @@
         return this.attributes.getNamedItemNS(ns, local);
     };
 
-    // ---- document.activeElement with focus()/blur() (HTML §6.6). Script
-    // focus only: the engine's focus (a click into a control) does not
-    // reach this yet. Nothing focused, or the focused element gone from
-    // the document, answers the body.
-    var focused = null;
+    // ---- document.activeElement with focus()/blur() (HTML §6.6). One
+    // focus for script and the user: the engine moves it on a click
+    // (`__rkSetFocus`) and follows what script did (`__rkTakeFocus`).
+    // Nothing focused, or the focused element gone from the document,
+    // answers the body.
+    var focused = null, moved = false;
     function inDocument(el) {
         var n = el;
         while (n.parentNode) n = n.parentNode;
@@ -192,13 +193,21 @@
         el.dispatchEvent(new FE(type, { bubbles: type === 'focusin' || type === 'focusout',
                                         composed: true, relatedTarget: related }));
     }
-    // The focus update steps: blur/focusout on the old element (with
-    // nothing focused), then focus/focusin on the new one.
+    // A field the user edited commits when it loses the focus: `change`
+    // (HTML §4.10.5.5). `__rkFireInput` marks the edit.
+    function commit(el) {
+        if (!el.__rkEdited) return;
+        el.__rkEdited = false;
+        el.dispatchEvent(new g.Event('change', { bubbles: true }));
+    }
+    // The focus update steps: change, then blur/focusout on the old
+    // element (with nothing focused), then focus/focusin on the new one.
     function focus() {
         var old = current();
         if (old === this || !isFocusable(this)) return;
         focused = null;
-        if (old) { fire(old, 'blur', this); fire(old, 'focusout', this); }
+        moved = true;
+        if (old) { commit(old); fire(old, 'blur', this); fire(old, 'focusout', this); }
         focused = this;
         fire(this, 'focus', old);
         fire(this, 'focusin', old);
@@ -206,9 +215,35 @@
     function blur() {
         if (current() !== this) return;
         focused = null;
+        moved = true;
+        commit(this);
         fire(this, 'blur', null);
         fire(this, 'focusout', null);
     }
+    // The user's click focused an element (by node id), or landed on
+    // nothing focusable (null): the same steps script's focus() runs.
+    Object.defineProperty(Document.prototype, '__rkSetFocus', {
+        value: function (id) {
+            var el = typeof id === 'number' ? I.wrap(id) : null;
+            var old = current();
+            if (el) focus.call(el);
+            if (old && current() === old && old !== el) blur.call(old);
+            // The engine always asks afterwards: the page may have refused.
+            moved = true;
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // Where the focus is, when it moved since the engine last asked: the
+    // node id, -1 for nothing; undefined when it has not moved.
+    Object.defineProperty(Document.prototype, '__rkTakeFocus', {
+        value: function () {
+            if (!moved) return undefined;
+            moved = false;
+            var el = current(), s = el && I.slotOf(el);
+            return s && s.gen === I.gen() ? s.id : -1;
+        },
+        configurable: true, enumerable: false, writable: true
+    });
     [g.HTMLElement, g.SVGElement].forEach(function (C) {
         C.prototype.focus = focus;
         C.prototype.blur = blur;

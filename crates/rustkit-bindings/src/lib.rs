@@ -1286,6 +1286,29 @@ impl DomBindings {
         Ok(!matches!(result, JsValue::Boolean(false)))
     }
 
+    /// The user's click focused an element (by node id), or landed on
+    /// nothing focusable (`None`): the page's focus follows, with `change`,
+    /// `blur`/`focusout` and `focus`/`focusin`. The page may refuse (a
+    /// disabled control); [`Self::take_focus_move`] has where it ended up.
+    pub fn set_focus(&self, node: Option<usize>) -> Result<(), BindingError> {
+        let node = node.map_or("null".to_string(), |n| n.to_string());
+        self.runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkSetFocus({node});"))?;
+        Ok(())
+    }
+
+    /// Where the page's focus is, when it moved since the last call (the
+    /// user's click, or script's `focus()`/`blur()`): `Some(Some(node))`,
+    /// `Some(None)` for nothing focused, `None` when it has not moved.
+    pub fn take_focus_move(&self) -> Option<Option<usize>> {
+        match self.evaluate("document.__rkTakeFocus()") {
+            Ok(JsValue::Number(n)) if n >= 0.0 => Some(Some(n as usize)),
+            Ok(JsValue::Number(_)) => Some(None),
+            _ => None,
+        }
+    }
+
     /// Fire `input` at a control (by node id) whose value the user's typing
     /// changed. `data` is the inserted text, `None` for a deletion.
     pub fn fire_input_event(&self, node: usize, data: Option<&str>) -> Result<(), BindingError> {
