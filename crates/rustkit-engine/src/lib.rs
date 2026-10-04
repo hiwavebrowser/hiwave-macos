@@ -21331,6 +21331,119 @@ mod node_identity_tests {
         assert_eq!(painted(&engine, id), [false, false, true, false, false, false]);
     }
 
+    // Pete's live testing, continued: a link to a place in the same page
+    // (`href="#id"`) loaded the page again from the top, and a
+    // `javascript:` link did nothing. A URL that differs from the
+    // document's only in its fragment is a navigation inside the document
+    // (HTML §7.4.2.3.3): scroll to the element, change the URL, fire
+    // `hashchange`, load nothing. A `javascript:` URL runs its script
+    // (§7.4.2.3.2).
+
+    const FRAGMENT_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r##"<a href="#target" style="display:block;height:40px">jump</a>"##,
+        r##"<a href="#missing" style="display:block;height:40px">nowhere</a>"##,
+        r##"<a id="no" href="#target" style="display:block;height:40px">cancelled</a>"##,
+        r#"<a href="javascript:window.ran = (window.ran || 0) + 1; document.getElementById('gone').remove()" style="display:block;height:40px">run</a>"#,
+        r#"<a id="gone" href="https://example.com/gone" style="display:block;height:40px">gone</a>"#,
+        r#"<a href="/page?q=1" style="display:block;height:40px">same page, no fragment</a>"#,
+        r#"<div style="height:2000px"></div>"#,
+        r#"<div id="target" style="height:40px">here</div>"#,
+        r#"<div style="height:2000px"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    fn fragment_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, FRAGMENT_PAGE).expect("load_html");
+        let url = Url::parse("https://example.com/page?q=1").unwrap();
+        let view = engine.views.get_mut(&id).expect("view");
+        view.bindings.as_ref().expect("bindings").set_location(&url).expect("location");
+        view.url = Some(url);
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             document.getElementById('no').addEventListener('click', function (e) { e.preventDefault(); }); \
+             window.addEventListener('hashchange', function (e) { \
+             log.push(e.oldURL.split('/').pop() + '>' + e.newURL.split('/').pop()); });",
+        );
+        (engine, id)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_fragment_link_scrolls_to_its_target_and_loads_nothing() {
+        let (mut engine, id) = fragment_page();
+
+        let outcome = click_row(&mut engine, id, 0);
+        assert_eq!(outcome.navigate, None, "a fragment of this document is not a load");
+        // Six 40px links and the 2000px spacer sit above the target.
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 2240.0));
+        assert_eq!(
+            engine.get_url(id).map(|u| u.to_string()).as_deref(),
+            Some("https://example.com/page?q=1#target")
+        );
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + location.hash + ' ' + history.length"),
+            js_string("page?q=1>page?q=1#target | #target 2")
+        );
+
+        // No element has the id: the URL changes, the page stays where it is.
+        engine.set_scroll_offset(id, 0.0, 0.0).unwrap();
+        js(&mut engine, id, "log.length = 0");
+        let outcome = click_row(&mut engine, id, 1);
+        assert_eq!(outcome.navigate, None);
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 0.0));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + location.hash"),
+            js_string("page?q=1#target>page?q=1#missing | #missing")
+        );
+
+        // A cancelled click goes nowhere.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(outcome.navigate, None);
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 0.0));
+        assert_eq!(js(&mut engine, id, "log.join(' ') + ' | ' + location.hash"), js_string(" | #missing"));
+
+        // The same page without a fragment is still a load.
+        let outcome = click_row(&mut engine, id, 5);
+        assert_eq!(outcome.navigate.as_deref(), Some("https://example.com/page?q=1"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_javascript_link_runs_its_script() {
+        let (mut engine, id) = fragment_page();
+        assert_eq!(
+            engine.link_at_point(id, 12.0, 172.0).as_deref(),
+            Some("https://example.com/gone"),
+            "precondition: the link the script removes is in row 4"
+        );
+
+        let outcome = click_row(&mut engine, id, 3);
+        assert_eq!(outcome.navigate, None);
+        assert_eq!(js(&mut engine, id, "window.ran"), "Integer(1)");
+        // What the script wrote to the DOM is laid out.
+        assert_eq!(
+            engine.link_at_point(id, 12.0, 172.0).as_deref(),
+            Some("https://example.com/page?q=1")
+        );
+
+        // A cancelled click does not run it.
+        js(
+            &mut engine,
+            id,
+            "document.addEventListener('click', function (e) { e.preventDefault(); })",
+        );
+        click_row(&mut engine, id, 3);
+        assert_eq!(js(&mut engine, id, "window.ran"), "Integer(1)");
+    }
+
     // Pete's live testing, continued: a click on a form's submit button did
     // nothing. Only Enter in a focused field submitted, and that path fires
     // no `submit` event. A click on a submit button is the form's
