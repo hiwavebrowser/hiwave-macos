@@ -31044,9 +31044,9 @@ mod text_provenance_tests {
                  stub is what ran and the claim is false — a parity receipt \
                  taken here would be measured against a ruler, not a font."
             );
-            assert!(
-                rustkit_layout::TEXT_SHAPER_BACKEND == "coretext"
-                    || rustkit_layout::TEXT_SHAPER_BACKEND == "directwrite",
+            assert_eq!(
+                Some(rustkit_layout::TEXT_SHAPER_BACKEND),
+                rustkit_layout::TARGET_FONT_BACKEND,
                 "a font-derived build must name the backend that read the font"
             );
         } else {

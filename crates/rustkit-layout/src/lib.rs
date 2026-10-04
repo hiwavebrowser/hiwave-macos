@@ -60,7 +60,8 @@ pub use scroll::{
 pub use text::{
     apply_text_transform, collapse_whitespace, FontCache, FontCacheKey, FontDisplay, FontFaceRule,
     FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
-    TextMetrics, TextShaper, TopLevelSite, TEXT_METRICS_ARE_FONT_DERIVED, TEXT_SHAPER_BACKEND,
+    TextMetrics, TextShaper, TopLevelSite, TARGET_FONT_BACKEND, TEXT_METRICS_ARE_FONT_DERIVED,
+    TEXT_SHAPER_BACKEND,
 };
 pub use text::{FaceIdentity, FaceSynthesis, GlyphRun, RunGlyph};
 
