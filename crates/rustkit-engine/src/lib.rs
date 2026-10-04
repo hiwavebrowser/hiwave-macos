@@ -2083,6 +2083,11 @@ impl Engine {
     /// platform wiring); `key` carries the typed character for insertions.
     /// Returns true when the control's value or caret changed, i.e. when the
     /// caller must relayout.
+    ///
+    /// With nothing focused the page still hears `keydown`, at its active
+    /// element (the body unless script focused something). Then true means
+    /// a listener cancelled it: the key was the page's (a shortcut), and
+    /// the caller must not apply its own default (scrolling).
     pub fn handle_text_key(
         &mut self,
         id: EngineViewId,
@@ -2095,12 +2100,14 @@ impl Engine {
         use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
         let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
-            return false;
+            return !self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
         };
         // The page hears the key first; a cancelled keydown types nothing.
         // Enter's keydown is `submit_focused_form`'s, which the caller
         // tries before this.
-        if key_code != 0x0D && !self.fire_key_down(id, focused.raw(), key_code, key, ctrl, shift, alt) {
+        if key_code != 0x0D
+            && !self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt)
+        {
             return false;
         }
         let Some(state) = self
@@ -2132,17 +2139,20 @@ impl Engine {
         )
     }
 
-    /// The key was released. (Nothing yet: the page is not told.)
-    #[allow(clippy::too_many_arguments)]
+    /// The key was released: `keyup` at the focused element, or at the
+    /// page's active element when nothing is focused. Same key arguments
+    /// as [`Self::handle_text_key`]. What its listeners wrote is laid out.
     pub fn handle_key_up(
         &mut self,
-        _id: EngineViewId,
-        _key_code: u32,
-        _key: &str,
-        _ctrl: bool,
-        _shift: bool,
-        _alt: bool,
+        id: EngineViewId,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
     ) {
+        let focused = self.views.get(&id).and_then(|v| v.focused_node).map(|n| n.raw());
+        self.fire_key(id, focused, "keyup", key_code, key, ctrl, shift, alt);
     }
 
     /// Build the submission for the form containing the focused control.
@@ -2191,7 +2201,7 @@ impl Engine {
     /// A page without script submits as before.
     pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
         let focused = self.views.get(&id)?.focused_node?.raw();
-        if !self.fire_key_down(id, focused, 0x0D, "", false, false, false) {
+        if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
             return None;
         }
         let Some(bindings) = self.views.get(&id)?.bindings.as_ref() else {
@@ -2221,15 +2231,17 @@ impl Engine {
             .map(|sub| sub.url)
     }
 
-    /// Fire `keydown` for a key at `node` and lay out what its listeners
-    /// wrote. `key_code` is the Win32 virtual key `handle_text_key` takes;
-    /// `text` is the typed character, empty for a named key. Returns false
-    /// when a listener cancelled it.
+    /// Fire `keydown` or `keyup` for a key at `node` (`None`: the page's
+    /// active element) and lay out what its listeners wrote. `key_code` is
+    /// the Win32 virtual key `handle_text_key` takes; `text` is the typed
+    /// character, empty for a named key. Returns false when a listener
+    /// cancelled it.
     #[allow(clippy::too_many_arguments)]
-    fn fire_key_down(
+    fn fire_key(
         &mut self,
         id: EngineViewId,
-        node: usize,
+        node: Option<usize>,
+        event_type: &str,
         key_code: u32,
         text: &str,
         ctrl: bool,
@@ -2241,10 +2253,14 @@ impl Engine {
             0x09 => "Tab",
             0x0D => "Enter",
             0x1B => "Escape",
+            0x21 => "PageUp",
+            0x22 => "PageDown",
             0x23 => "End",
             0x24 => "Home",
             0x25 => "ArrowLeft",
+            0x26 => "ArrowUp",
             0x27 => "ArrowRight",
+            0x28 => "ArrowDown",
             0x2E => "Delete",
             _ => text,
         };
@@ -2261,8 +2277,8 @@ impl Engine {
             shift_key: shift,
             ..Default::default()
         };
-        let not_cancelled = bindings.fire_key_event(node, "keydown", &data).unwrap_or_else(|e| {
-            debug!(?id, error = %e, "keydown listener threw");
+        let not_cancelled = bindings.fire_key_event(node, event_type, &data).unwrap_or_else(|e| {
+            debug!(?id, event_type, error = %e, "key listener threw");
             true
         });
         if let Err(e) = self.flush_script_dom_writes(id) {
@@ -22429,8 +22445,8 @@ mod form_typing_tests {
     #[cfg(all(target_os = "macos", feature = "headless"))]
     fn keys_go_nowhere_when_nothing_is_focused() {
         // The property that makes it safe to route window-level keys here:
-        // with no focus, handle_text_key must decline so the caller can fall
-        // back to scrolling.
+        // with no focus and no listener cancelling the key, handle_text_key
+        // must decline so the caller can fall back to scrolling.
         let (mut engine, id) =
             engine_with_html(r#"<html><body><input type="text"></body></html>"#);
         assert!(!engine.handle_text_key(id, 0, "c", false, false, false));

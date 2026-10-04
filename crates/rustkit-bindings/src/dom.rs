@@ -2308,12 +2308,14 @@ const WRAPPERS_JS: &str = r#"
         configurable: true, enumerable: false, writable: true
     });
 
-    // The engine delivers the user's key press to the focused element: a
-    // trusted KeyboardEvent that bubbles and can be cancelled (UI Events
-    // §3.7). Returns false when a listener called preventDefault().
+    // The engine delivers the user's key press or release to the focused
+    // element: a trusted KeyboardEvent that bubbles and can be cancelled
+    // (UI Events §3.7). With nothing focused in the engine (`id` null) it
+    // goes to the page's active element: what script focused, else the
+    // body. Returns false when a listener called preventDefault().
     Object.defineProperty(Document.prototype, '__rkFireKey', {
         value: function (id, type, init) {
-            var target = typeof id === 'number' ? wrap(id) : null;
+            var target = typeof id === 'number' ? wrap(id) : g.document.activeElement;
             if (!target) return true;
             init.bubbles = true;
             init.cancelable = true;
