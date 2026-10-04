@@ -1852,14 +1852,29 @@ impl Engine {
             Some(el) => view.layout.as_ref().and_then(|l| Self::box_top(l, el.id.raw())),
             None => (fragment.is_empty() || fragment.eq_ignore_ascii_case("top")).then_some(0.0),
         };
+        let before = view.scroll_offset;
         if let Some(top) = top {
             view.scroll_offset.1 = top.max(0.0).min(view.max_scroll_offset.1);
+        }
+        let scrolled = view.scroll_offset != before;
+        // Script reads the new offset from here on, `hashchange` included.
+        if let (true, Some(bindings)) = (scrolled, view.bindings.as_ref()) {
+            bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
         debug!(?id, %target, offset = ?view.scroll_offset, "Navigated to a fragment");
         let script = format!("__rustkit_fragment_navigation({:?})", target.as_str());
         view.url = Some(target);
         if let Err(e) = self.execute_script(id, &script) {
             debug!(?id, ?e, "hashchange listener threw");
+        }
+        // The page hears the scroll, and its observers report.
+        if scrolled {
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+                bindings.notify_scrolled();
+            }
+            if let Err(e) = self.flush_script_dom_writes(id) {
+                debug!(?id, ?e, "relayout after a fragment scroll failed");
+            }
         }
         // The scroll is a translate at render time; nothing was laid out.
         if let Err(e) = self.render(id) {
@@ -21716,6 +21731,28 @@ mod node_identity_tests {
         );
         click_row(&mut engine, id, 3);
         assert_eq!(js(&mut engine, id, "String(window.ran)"), js_string("1"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_fragment_jump_is_a_scroll_the_page_sees() {
+        let (mut engine, id) = fragment_page();
+        js(
+            &mut engine,
+            id,
+            "window.scrolls = []; window.addEventListener('scroll', function () { scrolls.push(window.scrollY); });",
+        );
+        click_row(&mut engine, id, 0);
+        assert_eq!(
+            js(&mut engine, id, "window.scrollY + ' | ' + scrolls.join()"),
+            js_string("2240 | 2240"),
+            "script reads the new offset and hears `scroll`"
+        );
+        // A fragment with no target moves nothing, so no `scroll`.
+        engine.execute_script(id, "window.scrollTo(0, 0)").unwrap();
+        js(&mut engine, id, "scrolls.length = 0");
+        click_row(&mut engine, id, 1);
+        assert_eq!(js(&mut engine, id, "window.scrollY + ' | ' + scrolls.join()"), js_string("0 | "));
     }
 
     // Pete's live testing, continued: a click on a form's submit button did
