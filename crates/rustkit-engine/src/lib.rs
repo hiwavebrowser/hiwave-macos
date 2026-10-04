@@ -1675,7 +1675,9 @@ impl Engine {
     ///
     /// Returns the tag name of the newly focused element, or `None` when the
     /// click landed on nothing focusable — in which case focus is CLEARED,
-    /// matching the behavior of clicking a page's background.
+    /// matching the behavior of clicking a page's background. The page's
+    /// focus moves with it (`document.activeElement`, `change`, `blur`,
+    /// `focus`).
     pub fn focus_at_point(
         &mut self,
         id: EngineViewId,
@@ -1711,6 +1713,65 @@ impl Engine {
             }
         });
 
+        self.set_focus(id, focusable.clone());
+        // The page's focus follows, and has the last word: it refuses a
+        // disabled control, and a `focus` or `blur` listener may move the
+        // focus again.
+        let told = self.views.get(&id).and_then(|v| v.bindings.as_ref()).map(|bindings| {
+            if let Err(e) = bindings.set_focus(focusable.as_ref().map(|(raw, _)| *raw)) {
+                debug!(?id, error = %e, "focus listener threw");
+            }
+        });
+        if told.is_some() {
+            if let Err(e) = self.flush_script_dom_writes(id) {
+                debug!(?id, error = %e, "relayout after focus events failed");
+            }
+        }
+        self.focused_tag(id)
+    }
+
+    /// The tag of the focused form control, if one is focused.
+    fn focused_tag(&self, id: EngineViewId) -> Option<String> {
+        let view = self.views.get(&id)?;
+        let node = view.document.as_ref()?.get_node(view.focused_node?)?;
+        match &node.node_type {
+            NodeType::Element { tag_name, .. } => Some(tag_name.to_lowercase()),
+            _ => None,
+        }
+    }
+
+    /// Follow the page's focus when it moved (script's `focus()`/`blur()`,
+    /// or the page's answer to a click): a form control it focused takes
+    /// the keys; anything else leaves the engine with nothing focused.
+    /// Returns true when the engine's focus changed.
+    fn follow_script_focus(&mut self, id: EngineViewId) -> bool {
+        let Some(moved) = self
+            .views
+            .get(&id)
+            .and_then(|v| v.bindings.as_ref())
+            .and_then(|b| b.take_focus_move())
+        else {
+            return false;
+        };
+        let control = moved.and_then(|raw| {
+            let doc = self.views.get(&id)?.document.as_ref()?;
+            let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+            match &node.node_type {
+                NodeType::Element { tag_name, .. } => {
+                    let tag = tag_name.to_lowercase();
+                    matches!(tag.as_str(), "input" | "textarea" | "select").then_some((raw, tag))
+                }
+                _ => None,
+            }
+        });
+        let before = self.views.get(&id).and_then(|v| v.focused_node);
+        self.set_focus(id, control);
+        before != self.views.get(&id).and_then(|v| v.focused_node)
+    }
+
+    /// Make a form control (raw NodeId and tag) the focused node, or
+    /// nothing.
+    fn set_focus(&mut self, id: EngineViewId, focusable: Option<(usize, String)>) {
         // Seed edit state from the element's authored value the FIRST time it
         // is focused. Re-focusing must not reset what the user has typed, so
         // the seed is guarded by the entry being absent.
@@ -1745,17 +1806,15 @@ impl Engine {
             }
         }
 
-        let view = self.views.get_mut(&id)?;
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
         match focusable {
             Some((raw, tag)) => {
                 view.focused_node = Some(rustkit_dom::NodeId::new(raw));
                 debug!(?id, %tag, "Focused element");
-                Some(tag)
             }
-            None => {
-                view.focused_node = None;
-                None
-            }
+            None => view.focused_node = None,
         }
     }
 
@@ -1773,6 +1832,10 @@ impl Engine {
     /// the DOM is laid out before this returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        // The focus moves before `click` fires (it is the press's default
+        // action, UI Events §3.4.5.1), so a `click` listener that focuses
+        // a field has the last word.
+        self.focus_at_point(id, viewport_x, viewport_y);
         // A submit made outside a click (a timer, a callback) has nobody to
         // navigate for it yet; this click must not pick it up.
         self.take_submit_request(id);
@@ -1790,9 +1853,9 @@ impl Engine {
                 .filter(|sub| sub.is_self_target())
                 .map(|sub| sub.url)
         });
+        let focused = self.focused_tag(id);
         // The listeners may have moved or replaced what is under the point;
         // the default action reads the layout they left behind.
-        let focused = self.focus_at_point(id, viewport_x, viewport_y);
         let navigate = if submitted.is_some() {
             submitted
         } else if not_cancelled {
@@ -12354,6 +12417,12 @@ impl Engine {
             bindings.mark_dirty(DomDirty::Layout);
             laid |= self.flush_script_dom_writes_once(id)?;
         }
+        // The focused control paints its caret, so a focus script moved is
+        // a relayout.
+        if self.follow_script_focus(id) {
+            self.relayout(id)?;
+            laid = true;
+        }
         Ok(laid)
     }
 
@@ -21884,6 +21953,123 @@ mod node_identity_tests {
             js_string("click:box click:reset reset | false")
         );
         assert_eq!(painted(&engine, id), [false]);
+    }
+
+    // Pete's live testing, continued: the engine and the page each had a
+    // focus and neither knew the other's. A field script focused (a search
+    // shortcut, a click on a search icon) took no typing, and a field the
+    // user clicked into was not `document.activeElement` and heard no
+    // `focus`, `blur` or `change`. One focus (HTML §6.6.4 focus update
+    // steps), moved by the user's click before the `click` event and by
+    // script's `focus()`/`blur()`.
+
+    const FOCUS_PAGE: &str = concat!(
+        r#"<html><body id="b" style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="r" name="r" value="was"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="find" type="button">Find</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="off" disabled></div>"#,
+        r#"<div id="plain" style="height:40px">text</div>"#,
+        r#"</body></html>"#,
+    );
+
+    fn focus_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, FOCUS_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             ['focus', 'blur', 'focusin', 'focusout', 'change', 'click'].forEach(function (t) { \
+             document.addEventListener(t, function (e) { log.push(t + ':' + e.target.id); }, true); }); \
+             $('find').addEventListener('click', function () { $('q').focus(); });",
+        );
+        (engine, id)
+    }
+
+    fn focused_id(engine: &mut Engine, id: EngineViewId) -> String {
+        let raw = engine.focused_node(id).map(|n| n.raw());
+        let script = match raw {
+            Some(raw) => format!("(function () {{ var a = document.activeElement; return a.id + '/' + {raw}; }})()"),
+            None => "document.activeElement.id + '/none'".to_string(),
+        };
+        js(engine, id, &script)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_field_script_focuses_takes_the_typing() {
+        let (mut engine, id) = focus_page();
+        let q = engine.views[&id].document.as_ref().unwrap().get_element_by_id("q").unwrap().id;
+
+        // Script focuses the field; the user's keys go into it.
+        js(&mut engine, id, "$('q').focus()");
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("a"));
+
+        // Script blurs it; the keys are nobody's.
+        js(&mut engine, id, "$('q').blur()");
+        assert_eq!(engine.focused_node(id), None);
+        assert!(!engine.handle_text_key(id, 0, "b", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("a"));
+
+        // A click on a button whose listener focuses the field: the field
+        // has the focus when the click is over, and takes the typing.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = engine.click_at_point(id, 12.0, 92.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("click:find focus:q focusin:q")
+        );
+        assert!(engine.handle_text_key(id, 0, "c", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("ac"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_into_a_field_is_the_pages_focus() {
+        let (mut engine, id) = focus_page();
+
+        // The click focuses the field before `click` fires.
+        let outcome = engine.click_at_point(id, 12.0, 12.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + document.activeElement.id"),
+            js_string("focus:q focusin:q click:q | q")
+        );
+
+        // Typing, then a click into another field: the first hears
+        // `change` (the user edited it) and loses the focus.
+        engine.handle_text_key(id, 0, "a", false, false, false);
+        js(&mut engine, id, "log.length = 0");
+        engine.click_at_point(id, 12.0, 52.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + document.activeElement.id"),
+            js_string("change:q blur:q focusout:q focus:r focusin:r click:r | r")
+        );
+
+        // A click on plain content: nothing is focused, and no `change`
+        // for a field nobody edited.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = engine.click_at_point(id, 12.0, 172.0);
+        assert_eq!(outcome.focused, None);
+        assert_eq!(engine.focused_node(id), None);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + document.activeElement.id"),
+            js_string("blur:r focusout:r click:plain | b")
+        );
+
+        // A disabled field does not take the focus.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = engine.click_at_point(id, 12.0, 132.0);
+        assert_eq!(outcome.focused, None);
+        assert_eq!(focused_id(&mut engine, id), js_string("b/none"));
     }
 
     // Pete's live testing, continued: typing in a field told the page
