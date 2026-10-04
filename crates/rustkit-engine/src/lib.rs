@@ -21613,6 +21613,28 @@ mod node_identity_tests {
         assert_eq!(js(&mut engine, id, "String(window.ran)"), js_string("1"));
     }
 
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_fragment_jump_is_a_scroll_the_page_sees() {
+        let (mut engine, id) = fragment_page();
+        js(
+            &mut engine,
+            id,
+            "window.scrolls = []; window.addEventListener('scroll', function () { scrolls.push(window.scrollY); });",
+        );
+        click_row(&mut engine, id, 0);
+        assert_eq!(
+            js(&mut engine, id, "window.scrollY + ' | ' + scrolls.join()"),
+            js_string("2240 | 2240"),
+            "script reads the new offset and hears `scroll`"
+        );
+        // A fragment with no target moves nothing, so no `scroll`.
+        engine.execute_script(id, "window.scrollTo(0, 0)").unwrap();
+        js(&mut engine, id, "scrolls.length = 0");
+        click_row(&mut engine, id, 1);
+        assert_eq!(js(&mut engine, id, "window.scrollY + ' | ' + scrolls.join()"), js_string("0 | "));
+    }
+
     // Pete's live testing, continued: a click on a form's submit button did
     // nothing. Only Enter in a focused field submitted, and that path fires
     // no `submit` event. A click on a submit button is the form's
