@@ -30101,6 +30101,22 @@ mod script_selector_tests {
         );
     }
 
+    // A shadow root's tree answers the engine's selector matcher, and (until the
+    // flat tree lands) nothing in it is painted.
+    #[test]
+    fn a_shadow_root_answers_queries_and_is_not_painted_yet() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>body{margin:0}</style></head><body><div id=h><span slot=x id=a>A</span></div>\n             <p id=out>outside</p></body></html>",
+        );
+        let before = painted_text(&engine, view);
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        assert_eq!(
+            js("var r = document.getElementById('h').attachShadow({ mode: 'open' }); r.innerHTML = '<p class=c id=p>hi</p><slot name=x></slot>'; [r.querySelectorAll('.c').length, r.querySelector('p').id, r.querySelectorAll('p, slot').length, String(document.querySelector('.c')), r.querySelector('slot').assignedElements()[0].id].join()"),
+            "1,p,2,null,a"
+        );
+        assert_eq!(painted_text(&engine, view), before, "the shadow tree is not in the rendered tree yet");
+    }
+
     // getComputedStyle answers from the cascade the painter used.
     #[test]
     fn get_computed_style_reads_the_cascade() {

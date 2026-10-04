@@ -1062,6 +1062,13 @@ const WRAPPERS_JS: &str = r#"
     var DOMException = g.DOMException;
 
     var SLOT = Symbol('rustkit.node');
+    // Hooks web_shadow.js fills in so that events and tree queries can cross
+    // a shadow boundary: `shadowParent(root, event)` is the host a composed
+    // event goes on to from a shadow root, `retarget(target, against)` the
+    // target as seen from another node's tree, `hostOf(root)` a shadow
+    // root's host (or null for any other node).
+    var HOOKS = {};
+    Object.defineProperty(g, '__rkDomHooks', { value: HOOKS, configurable: true, enumerable: false });
     var gen = 0;
     var cache = new Map();
 
@@ -1366,9 +1373,14 @@ const WRAPPERS_JS: &str = r#"
         return false;
     };
     Node.prototype.isSameNode = function (other) { return this === other; };
-    Node.prototype.getRootNode = function () {
+    Node.prototype.getRootNode = function (options) {
         var n = this;
         while (n.parentNode) n = n.parentNode;
+        // { composed: true } continues through shadow roots to their hosts.
+        for (var host; options && options.composed && HOOKS.hostOf && (host = HOOKS.hostOf(n));) {
+            n = host;
+            while (n.parentNode) n = n.parentNode;
+        }
         return n;
     };
     Node.prototype.cloneNode = function (deep) {
@@ -1495,6 +1507,11 @@ const WRAPPERS_JS: &str = r#"
     getter(Node.prototype, 'isConnected', function () {
         var n = this;
         while (n.parentNode) n = n.parentNode;
+        // A node in a shadow tree is connected when its host is.
+        for (var host; HOOKS.hostOf && (host = HOOKS.hostOf(n));) {
+            n = host;
+            while (n.parentNode) n = n.parentNode;
+        }
         return n.nodeType === 9 && slotOf(n).gen === gen;
     });
 
@@ -2364,9 +2381,13 @@ const WRAPPERS_JS: &str = r#"
         }
         return c.fn;
     }
+    var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
     function invoke(t, event, phase, capture) {
         event.currentTarget = t;
         event.eventPhase = phase;
+        // A listener sees the target as its own tree sees it: a node inside a
+        // shadow tree is the host to a listener outside.
+        if (HOOKS.retarget && event[ORIGIN]) event.target = HOOKS.retarget(event[ORIGIN], t);
         var all = LISTENERS.get(t), list = all && all[event.type];
         if (list) {
             list = list.slice();
@@ -2388,7 +2409,10 @@ const WRAPPERS_JS: &str = r#"
     function eventParent(n, event) {
         if (n === g) return null;
         if (n === doc) return event.type === 'load' ? null : g;
-        return n[SLOT] ? n.parentNode : null;
+        if (!n[SLOT]) return null;
+        var p = n.parentNode;
+        // A composed event goes on from a shadow root to its host.
+        return p || (HOOKS.shadowParent ? HOOKS.shadowParent(n, event) : null);
     }
     // Activation behaviour (DOM §2.9 "dispatch", steps 5 and 11): a click
     // (the user's, `el.click()`, or a MouseEvent script dispatches) checks a
@@ -2409,6 +2433,8 @@ const WRAPPERS_JS: &str = r#"
         var t = thisTarget(this), path = [], i;
         for (var n = t; n; n = eventParent(n, event)) path.push(n);
         event.target = t;
+        event[ORIGIN] = t;
+        event[PATH] = path;
         var activated = activationFor(t, event);
         for (i = path.length - 1; i > 0 && !event[STOP]; i--) invoke(path[i], event, 1, true);
         if (!event[STOP]) invoke(t, event, 2, true);
@@ -2419,6 +2445,11 @@ const WRAPPERS_JS: &str = r#"
         event[STOP] = event[STOP_NOW] = false;
         event.currentTarget = null;
         event.eventPhase = 0;
+        // After dispatch the target is the outermost host (the node itself
+        // when it is in the document), and there is no path.
+        event.target = HOOKS.retarget ? HOOKS.retarget(t, g) : t;
+        event[ORIGIN] = null;
+        event[PATH] = null;
         if (activated) activated(!event.defaultPrevented);
         return !event.defaultPrevented;
     };
@@ -2450,6 +2481,8 @@ const WRAPPERS_JS: &str = r#"
         this.cancelable = !!cancelable;
     };
     Event.prototype.preventDefault = function () { if (this.cancelable) this.defaultPrevented = true; };
+    // The nodes the event is going through, target first; empty outside dispatch.
+    Event.prototype.composedPath = function () { return this[PATH] ? this[PATH].slice() : []; };
     Event.prototype.stopPropagation = function () { this[STOP] = true; };
     Event.prototype.stopImmediatePropagation = function () { this[STOP] = this[STOP_NOW] = true; };
     getter(Event.prototype, 'srcElement', function () { return this.target; });
