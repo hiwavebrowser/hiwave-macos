@@ -49,6 +49,8 @@ mod observers_tests;
 #[cfg(test)]
 mod shadow_tests;
 #[cfg(test)]
+mod traversal_tests;
+#[cfg(test)]
 mod web_intl_tests;
 mod web_crypto;
 mod web_scroll;
@@ -541,6 +543,8 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_components.js"))?;
         // attachShadow, ShadowRoot, slots, event retargeting (web_shadow.js).
         runtime.evaluate_script(include_str!("web_shadow.js"))?;
+        // NodeFilter, TreeWalker, NodeIterator, createTreeWalker/createNodeIterator (web_traversal.js).
+        runtime.evaluate_script(include_str!("web_traversal.js"))?;
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
         // insertRule writes into the <style>'s text, which the engine restyles from.
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
