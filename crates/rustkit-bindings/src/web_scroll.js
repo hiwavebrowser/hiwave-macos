@@ -155,6 +155,15 @@
         scrolled(p);
     });
 
+    // The engine calls this when the USER scrolled (wheel, keys, scrollbar):
+    // the scroll event fires at once, not from a timer.
+    Object.defineProperty(g, '__rkUserScrolled', {
+        value: function () {
+            try { document.dispatchEvent(new g.Event('scroll', { bubbles: true })); } catch (_) {}
+        },
+        configurable: true, writable: true, enumerable: false
+    });
+
     var D = g.Document && g.Document.prototype;
     if (D && D.scrollingElement === undefined) {
         Object.defineProperty(D, 'scrollingElement', {

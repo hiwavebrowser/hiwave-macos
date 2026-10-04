@@ -45,6 +45,8 @@ mod geometry_tests;
 #[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]
+mod observers_tests;
+#[cfg(test)]
 mod web_intl_tests;
 mod web_crypto;
 mod web_scroll;
@@ -546,6 +548,9 @@ impl DomBindings {
         // window.scrollTo/scrollBy/scrollX/scrollY, Element.scrollTop/scrollIntoView (web_scroll.js).
         let scroll = web_scroll::SharedScroll::default();
         web_scroll::install(&mut runtime, &scroll)?;
+        // IntersectionObserver and ResizeObserver that report, over the geometry and
+        // scroll state (web_observers_live.js); replace the inert stubs.
+        runtime.evaluate_script(include_str!("web_observers_live.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -1093,6 +1098,21 @@ impl DomBindings {
     /// did. The engine applies it to the view when script settles.
     pub fn take_scroll_request(&self) -> Option<(f32, f32)> {
         self.scroll.borrow_mut().request.take()
+    }
+
+    /// Compute and deliver the IntersectionObserver and ResizeObserver
+    /// records from the geometry as it stands. The engine calls this after a
+    /// layout and after a scroll. Returns how many observers have targets.
+    pub fn tick_observers(&self) -> usize {
+        match self.evaluate("typeof __rkObserversTick === 'function' ? __rkObserversTick() : 0") {
+            Ok(JsValue::Number(n)) if n >= 0.0 => n as usize,
+            _ => 0,
+        }
+    }
+
+    /// Tell the page its window was scrolled by the user: fires `scroll`.
+    pub fn notify_scrolled(&self) {
+        let _ = self.evaluate("typeof __rkUserScrolled === 'function' && __rkUserScrolled()");
     }
 
     /// Publish the computed style of each laid-out element (raw NodeId to
@@ -1942,8 +1962,10 @@ mod tests {
             ev("var io2 = new IntersectionObserver(function () {}, { rootMargin: '10px', threshold: [1, 0.5] }); String([io2.rootMargin, io2.thresholds.join()].join('|'))"),
             "10px|0.5,1"
         );
-        assert_eq!(ev("io.observe(el); io.unobserve(el); io.disconnect(); String(io.takeRecords().length)"), "0");
-        assert_eq!(ev("var ro = new ResizeObserver(function () {}); ro.observe(el); ro.unobserve(el); ro.disconnect(); 'ok'"), "ok");
+        // Targets must be elements, as in the platform (web_observers_live.js).
+        assert_eq!(ev("var f; try { io.observe(el); f = 'no throw'; } catch (e) { f = e.name; } f"), "TypeError");
+        assert_eq!(ev("io.unobserve(el); io.disconnect(); String(io.takeRecords().length)"), "0");
+        assert_eq!(ev("var ro = new ResizeObserver(function () {}); var g2; try { ro.observe(el); g2 = 'no throw'; } catch (e) { g2 = e.name; } ro.unobserve(el); ro.disconnect(); g2"), "TypeError");
         assert_eq!(ev("var po = new PerformanceObserver(function () {}); po.observe({ entryTypes: ['mark'] }); po.disconnect(); String(PerformanceObserver.supportedEntryTypes.length)"), "0");
     }
 
