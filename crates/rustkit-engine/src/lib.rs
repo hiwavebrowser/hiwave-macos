@@ -495,10 +495,10 @@ struct ViewState {
     /// The element the press in progress landed on and the elements above
     /// it: what `:active` matches, from the press to the release.
     active_chain: Vec<usize>,
-    /// Some rule of the sheets this view was last built from names
-    /// `:hover` (`:active`), so a change of that chain is a restyle.
-    hover_rules: std::cell::Cell<bool>,
-    active_rules: std::cell::Cell<bool>,
+    /// The rule index this view was last built with: its `reads` say
+    /// which elements a `:hover` or `:active` rule can match, so which
+    /// changes of the two chains are a restyle.
+    rule_reads: std::cell::RefCell<Option<Rc<RuleIndex>>>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
     /// Where the pointer was at its last move, in viewport coordinates.
@@ -1381,8 +1381,7 @@ impl Engine {
             hovered_node: None,
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
-            hover_rules: std::cell::Cell::new(false),
-            active_rules: std::cell::Cell::new(false),
+            rule_reads: std::cell::RefCell::new(None),
             pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
@@ -1454,8 +1453,7 @@ impl Engine {
             hovered_node: None,
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
-            hover_rules: std::cell::Cell::new(false),
-            active_rules: std::cell::Cell::new(false),
+            rule_reads: std::cell::RefCell::new(None),
             pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
@@ -1536,8 +1534,7 @@ impl Engine {
             hovered_node: None,
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
-            hover_rules: std::cell::Cell::new(false),
-            active_rules: std::cell::Cell::new(false),
+            rule_reads: std::cell::RefCell::new(None),
             pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
@@ -1972,7 +1969,8 @@ impl Engine {
         // `:active` from here to the release, wherever the pointer goes.
         let pressed = target.map_or_else(Vec::new, |target| self.element_chain(id, target));
         if let Some(view) = self.views.get_mut(&id) {
-            view.pointer_restyle |= view.active_rules.get() && view.active_chain != pressed;
+            let changed = Self::in_one_chain(&view.active_chain, &pressed);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
             view.active_chain = pressed;
         }
         let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
@@ -2056,8 +2054,9 @@ impl Engine {
         // `:hover` follows the pointer: when a sheet names it, the page is
         // restyled once the listeners below have run.
         if over != out {
+            let changed = Self::in_one_chain(&before, &now);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.hover, &changed);
             view.hover_chain = now.clone();
-            view.pointer_restyle |= view.hover_rules.get();
         }
 
         // (target, type, relatedTarget)
@@ -2113,6 +2112,52 @@ impl Engine {
             debug!(?id, error = %e, "relayout after a mouse move failed");
         }
         self.settle_pointer_restyle(id);
+    }
+
+    /// The elements in exactly one of two chains: the ones a pointer change
+    /// took `:hover` or `:active` from, or gave it to.
+    fn in_one_chain(before: &[usize], now: &[usize]) -> Vec<usize> {
+        let left = before.iter().filter(|n| !now.contains(n));
+        let entered = now.iter().filter(|n| !before.contains(n));
+        left.chain(entered).copied().collect()
+    }
+
+    /// Whether some rule of the view's sheets can match differently now
+    /// that `changed` (raw NodeIds) gained or lost the pseudo-class `reads`
+    /// picks. A restyle is a whole cascade and layout, so a move between
+    /// two elements no `:hover` compound can match must not cost one.
+    fn chain_change_restyles(
+        view: &ViewState,
+        reads: fn(&SelectorReads) -> &PointerReads,
+        changed: &[usize],
+    ) -> bool {
+        let index = view.rule_reads.borrow();
+        let Some(reads) = index.as_ref().map(|index| reads(&index.reads)) else {
+            return false;
+        };
+        if reads.anywhere {
+            return !changed.is_empty();
+        }
+        let Some(document) = view.document.as_ref() else {
+            return false;
+        };
+        !reads.compounds.is_empty()
+            && changed.iter().any(|raw| {
+                let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                    return true;
+                };
+                let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+                    return false;
+                };
+                let classes: Vec<String> = attributes
+                    .get("class")
+                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                reads
+                    .compounds
+                    .iter()
+                    .any(|compound| compound.matches(tag_name, &classes, attributes.get("id")))
+            })
     }
 
     /// Restyle the view when the hovered or the pressed chain changed, a
@@ -2208,8 +2253,8 @@ impl Engine {
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
-            view.pointer_restyle |= view.active_rules.get() && !view.active_chain.is_empty();
-            view.active_chain.clear();
+            let changed = std::mem::take(&mut view.active_chain);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
         }
         self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
         let suppressed = self
@@ -3804,8 +3849,7 @@ impl Engine {
         view.hovered_node = None;
         view.hover_chain.clear();
         view.active_chain.clear();
-        view.hover_rules.set(false);
-        view.active_rules.set(false);
+        view.rule_reads.get_mut().take();
         view.pointer_restyle = false;
         view.pointer_at = None;
         view.primary_button_down = false;
@@ -4115,8 +4159,7 @@ impl Engine {
         view.hovered_node = None;
         view.hover_chain.clear();
         view.active_chain.clear();
-        view.hover_rules.set(false);
-        view.active_rules.set(false);
+        view.rule_reads.get_mut().take();
         view.pointer_restyle = false;
         view.pointer_at = None;
         view.primary_button_down = false;
@@ -4872,8 +4915,7 @@ impl Engine {
             false => {
                 let index = self.shared_rule_index(&stylesheets);
                 if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
-                    view.hover_rules.set(index.reads.hover);
-                    view.active_rules.set(index.reads.active);
+                    *view.rule_reads.borrow_mut() = Some(index.clone());
                 }
                 Some(RuleIndexScope::install_for(RuleIndex::source_of(&stylesheets), index))
             }
@@ -10390,8 +10432,8 @@ impl Engine {
                 ix.specificity.push(whole);
                 ix.member_specificity.push(members);
                 let prepared = SelectorMatcher.prepared_selector(rule.selector.trim());
-                ix.reads.hover |= rule.selector.contains(":hover");
-                ix.reads.active |= rule.selector.contains(":active");
+                ix.reads.hover.note(rule.selector.trim(), ":hover", HOVER_MARK);
+                ix.reads.active.note(rule.selector.trim(), ":active", ACTIVE_MARK);
                 let positional = ix.reads.note(&prepared);
                 ix.reads.positional.push(positional);
                 ix.prepared.push(prepared);
@@ -22475,7 +22517,7 @@ mod node_identity_tests {
                 ),
             )
             .expect("load_html");
-        let mut cascades = |engine: &mut Engine, act: &dyn Fn(&mut Engine)| {
+        let cascades = |engine: &mut Engine, act: &dyn Fn(&mut Engine)| {
             FULL_SELECTOR_MATCHES.with(|n| n.set(0));
             act(engine);
             FULL_SELECTOR_MATCHES.with(|n| n.get()) > 0
@@ -27904,9 +27946,75 @@ struct SelectorReads {
     /// every element ran `match_attribute_selector` over the selector text
     /// for each of them, 14% of wikipedia's build with sharing on.
     attribute_tests: HashMap<String, Vec<(&'static str, String)>>,
-    /// Some selector names `:hover` (`:active`).
-    hover: bool,
-    active: bool,
+    /// Where the sheets read `:hover` and `:active`.
+    hover: PointerReads,
+    active: PointerReads,
+}
+
+/// Which elements a pointer pseudo-class (`:hover`, `:active`) can change
+/// a rule's match from.
+#[derive(Default)]
+struct PointerReads {
+    /// The compounds that carry it, without it: an element none of them
+    /// matches by tag, classes and id gains or loses the pseudo-class
+    /// without any rule noticing.
+    compounds: Vec<AncestorCompound>,
+    seen: std::collections::HashSet<(Option<String>, Vec<String>, Option<String>)>,
+    /// Some selector names it where `compounds` does not show it (inside
+    /// `:not()`, `:has()`, or an `:is()` member with a combinator): any
+    /// element may count.
+    anywhere: bool,
+}
+
+impl PointerReads {
+    /// Record where `selector` reads `name` (`":hover"`), which the
+    /// compound parser turns into the class `mark`.
+    fn note(&mut self, selector: &str, name: &str, mark: &str) {
+        if !selector.contains(name) {
+            return;
+        }
+        for member in SelectorMatcher::split_top_level_commas(selector) {
+            let member = member.trim();
+            let named = member.matches(name).count();
+            if named == 0 {
+                continue;
+            }
+            // A `::before` / `::after` rule is matched by its base selector.
+            let base = [(":before", "::before"), (":after", "::after")]
+                .into_iter()
+                .find(|(suffix, _)| member.ends_with(suffix))
+                .map_or(member, |(suffix, pseudo)| pseudo_base_selector(member, pseudo, suffix));
+            let prepared = SelectorMatcher.prepared_selector(base);
+            let PreparedSelector::Complex { compounds, .. } = &*prepared else {
+                // Invalid, or some other pseudo-element's: it styles nothing.
+                continue;
+            };
+            let mut found = 0;
+            for compound in compounds {
+                let marks = compound.classes.iter().filter(|c| *c == mark).count();
+                if marks == 0 {
+                    continue;
+                }
+                found += marks;
+                let classes: Vec<String> = compound
+                    .classes
+                    .iter()
+                    .filter(|c| !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK))
+                    .cloned()
+                    .collect();
+                if self.seen.insert((compound.tag.clone(), classes.clone(), compound.id.clone())) {
+                    self.compounds.push(AncestorCompound {
+                        never: compound.never,
+                        tag: compound.tag.clone(),
+                        classes,
+                        id: compound.id.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+            self.anywhere |= found != named;
+        }
+    }
 }
 
 impl SelectorReads {
