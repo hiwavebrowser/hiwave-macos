@@ -22293,6 +22293,54 @@ mod node_identity_tests {
         );
     }
 
+    // `:hover` was false for every element, always: a rule that restyles
+    // what the pointer is over, or opens a menu under it, never applied, so
+    // a page gave no sign the pointer was on anything. It matches the
+    // element under the pointer and every element above it, as the subject
+    // of a rule, as an ancestor and as an earlier sibling, and stops
+    // matching when the pointer moves on or leaves the view.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn css_hover_follows_the_pointer() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        // Rows of 40px: #b, #c, then #a holding #t and #sub. Only widths
+        // change, so nothing moves under the pointer.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } #a { height: auto }"#,
+                    r#"#b:hover { width: 300px } #b:hover + #c { width: 200px }"#,
+                    r#".menu:hover .sub { width: 100px } #c:not(:hover) { margin-left: 5px }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="c">c</div>"#,
+                    r#"<div id="a" class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let read = "['b', 'c', 'sub'].map(function (i) { \
+                      var r = document.getElementById(i).getBoundingClientRect(); \
+                      return r.width + '@' + r.left; }).join(' ')";
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 400@0"));
+
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("300@0 200@5 400@0"), "over #b");
+
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@0 400@0"), "over #c");
+
+        engine.mouse_move_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "over #t, inside .menu");
+
+        engine.mouse_leave(id);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 400@0"), "outside the view");
+    }
+
     // A cancelled `pointerdown` stops the `mousemove`s of that press, not
     // the boundary events (Pointer Events §11.3). A move writes to the DOM
     // like any other listener: the layout follows before the call returns.
