@@ -49,6 +49,8 @@ mod observers_tests;
 #[cfg(test)]
 mod shadow_tests;
 #[cfg(test)]
+mod rejection_event_tests;
+#[cfg(test)]
 mod legacy_tests;
 #[cfg(test)]
 mod reflect_tests;
@@ -132,6 +134,12 @@ pub struct MouseEventBindingData {
     pub alt_key: bool,
     pub shift_key: bool,
     pub meta_key: bool,
+    /// How far the pointer moved since the last move event.
+    pub movement_x: f64,
+    pub movement_y: f64,
+    /// The element the pointer came from or went to (raw NodeId), for the
+    /// over/out/enter/leave events.
+    pub related_target: Option<usize>,
 }
 
 /// Keyboard event data for JavaScript binding.
@@ -1255,7 +1263,9 @@ impl DomBindings {
     }
 
     /// Fire the user's mouse input at an element (by node id) as a trusted,
-    /// bubbling, cancelable `MouseEvent`. Returns false when a listener
+    /// bubbling, cancelable `MouseEvent` (a `PointerEvent` for `pointer*`
+    /// and `click`; the enter and leave events neither bubble nor can be
+    /// cancelled). Returns false when a listener
     /// called `preventDefault()`. Listener exceptions are queued, see
     /// [`Self::take_reported_errors`].
     pub fn fire_mouse_event(
@@ -1266,18 +1276,23 @@ impl DomBindings {
     ) -> Result<bool, BindingError> {
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
-             screenX: {}, screenY: {}, button: {}, buttons: {}, ctrlKey: {}, altKey: {}, \
-             shiftKey: {}, metaKey: {} }})",
+             screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
+             altKey: {}, shiftKey: {}, metaKey: {}, movementX: {}, movementY: {}, related: {} }})",
             data.client_x,
             data.client_y,
             data.screen_x,
             data.screen_y,
+            data.offset_x,
+            data.offset_y,
             data.button,
             data.buttons,
             data.ctrl_key,
             data.alt_key,
             data.shift_key,
             data.meta_key,
+            data.movement_x,
+            data.movement_y,
+            data.related_target.map_or("null".to_string(), |n| n.to_string()),
         ))?;
         Ok(!matches!(result, JsValue::Boolean(false)))
     }
@@ -1300,6 +1315,29 @@ impl DomBindings {
             data.key, data.code, data.repeat, data.ctrl_key, data.alt_key, data.shift_key, data.meta_key,
         ))?;
         Ok(!matches!(result, JsValue::Boolean(false)))
+    }
+
+    /// The user's click focused an element (by node id), or landed on
+    /// nothing focusable (`None`): the page's focus follows, with `change`,
+    /// `blur`/`focusout` and `focus`/`focusin`. The page may refuse (a
+    /// disabled control); [`Self::take_focus_move`] has where it ended up.
+    pub fn set_focus(&self, node: Option<usize>) -> Result<(), BindingError> {
+        let node = node.map_or("null".to_string(), |n| n.to_string());
+        self.runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkSetFocus({node});"))?;
+        Ok(())
+    }
+
+    /// Where the page's focus is, when it moved since the last call (the
+    /// user's click, or script's `focus()`/`blur()`): `Some(Some(node))`,
+    /// `Some(None)` for nothing focused, `None` when it has not moved.
+    pub fn take_focus_move(&self) -> Option<Option<usize>> {
+        match self.evaluate("document.__rkTakeFocus()") {
+            Ok(JsValue::Number(n)) if n >= 0.0 => Some(Some(n as usize)),
+            Ok(JsValue::Number(_)) => Some(None),
+            _ => None,
+        }
     }
 
     /// Fire `input` at a control (by node id) whose value the user's typing
@@ -2310,7 +2348,7 @@ mod tests {
     #[test]
     fn document_fragment_children_move_in_on_insert() {
         let b = bound(MIXED);
-        b.set_selector_matcher(Rc::new(|node, selector| {
+        b.set_selector_matcher(Rc::new(|node, selector, _| {
             (selector != "!").then(|| node.tag_name() == Some(selector))
         }));
         assert_eq!(
@@ -2372,7 +2410,7 @@ mod tests {
     #[test]
     fn an_injected_selector_matcher_answers_queries_matches_and_closest() {
         let b = bound(PAGE);
-        b.set_selector_matcher(Rc::new(|node, selector| {
+        b.set_selector_matcher(Rc::new(|node, selector, _| {
             (selector != "!").then(|| node.tag_name() == Some(selector))
         }));
         assert!(eval_bool(&b, "document.querySelectorAll('p').length === 3"));

@@ -32,7 +32,7 @@ mod node_apis;
 
 /// Does this element match this selector list? `None` means the list is
 /// invalid, and script throws `SyntaxError`.
-pub type SelectorMatchFn = Rc<dyn Fn(&Rc<Node>, &str) -> Option<bool>>;
+pub type SelectorMatchFn = Rc<dyn Fn(&Rc<Node>, &str, &HashMap<usize, bool>) -> Option<bool>>;
 
 /// Where the layout put one element, in document coordinates, as the engine
 /// last measured it (`DomBindings::set_geometry`). The border box is what
@@ -81,6 +81,10 @@ pub(crate) struct DomHost {
     /// checkedness, or `None` when it follows its `checked` attribute
     /// again). The state itself is script's (web_forms.js).
     checked_writes: Vec<(usize, Option<bool>)>,
+    /// The checkedness script holds for each control that no longer
+    /// follows its `checked` attribute, by NodeId. The selector matcher
+    /// reads it, so `:checked` in a query answers what the page paints.
+    checked: HashMap<usize, bool>,
     /// Forms whose `submit` event was not cancelled, with the button that
     /// submitted each, by NodeId (`DomBindings::take_submit_requests`).
     submit_requests: Vec<(usize, Option<usize>)>,
@@ -102,6 +106,7 @@ impl DomHost {
         self.values.clear();
         self.value_writes.clear();
         self.checked_writes.clear();
+        self.checked.clear();
         self.submit_requests.clear();
         self.generation
     }
@@ -533,6 +538,10 @@ fn control_checked(host: &mut DomHost, args: &[JsValue]) -> DomDirty {
         _ => None,
     };
     host.checked_writes.push((node.id.raw(), state));
+    match state {
+        Some(checked) => host.checked.insert(node.id.raw(), checked),
+        None => host.checked.remove(&node.id.raw()),
+    };
     DomDirty::Style
 }
 
@@ -859,12 +868,12 @@ pub(crate) fn install(
                 // throws even where nothing could match. Matching reads each
                 // element's whole ancestor chain, so `.outer p` scoped to
                 // an inner element still sees `.outer` above the scope.
-                if matcher(&scope, arg).is_none() {
+                if matcher(&scope, arg, &host.checked).is_none() {
                     return JsValue::Boolean(false);
                 }
                 let mut all = Vec::new();
                 descendant_elements(&scope, &mut all);
-                return id_list(all.into_iter().filter(|n| matcher(n, arg) == Some(true)));
+                return id_list(all.into_iter().filter(|n| matcher(n, arg, &host.checked) == Some(true)));
             }
             let found = match string_arg(args, 2) {
                 Some("tag") if arg == "*" => {
@@ -902,7 +911,7 @@ pub(crate) fn install(
                 return JsValue::Null;
             };
             let matched = match (&host.matcher, &host.document) {
-                (Some(matcher), _) => matcher(&node, selector),
+                (Some(matcher), _) => matcher(&node, selector, &host.checked),
                 (None, Some(document)) => Some(
                     QuerySelector::select(document, selector)
                         .iter()
@@ -2290,19 +2299,45 @@ const WRAPPERS_JS: &str = r#"
         },
         configurable: true, enumerable: false, writable: true
     });
-    // The engine delivers the user's mouse input: a trusted MouseEvent
-    // that bubbles and can be cancelled (UI Events §3.4). Returns false
-    // when a listener called preventDefault().
+    // The engine delivers the user's mouse input: a trusted event that
+    // bubbles and can be cancelled (UI Events §3.4), except the enter and
+    // leave events, which do neither and go to one element each.
+    // `pointer*` and `click` are PointerEvents of the mouse (Pointer
+    // Events §4, §12); `mousedown`, `mouseup` and `click` carry the click
+    // count. Returns false when a listener called preventDefault().
     Object.defineProperty(Document.prototype, '__rkFireMouse', {
         value: function (id, type, init) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return true;
-            init.bubbles = true;
-            init.cancelable = true;
-            init.composed = true;
+            var pointer = type === 'click' || type.indexOf('pointer') === 0;
+            var edge = /(enter|leave)$/.test(type);
+            var press = type === 'mousedown' || type === 'mouseup' || type === 'click';
+            init.bubbles = !edge;
+            init.cancelable = !edge;
+            init.composed = !edge;
             init.view = g;
-            var ev = new g.MouseEvent(type, init);
+            init.detail = press ? 1 : 0;
+            init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
+            if (pointer) {
+                init.pointerId = 1;
+                init.pointerType = 'mouse';
+                init.isPrimary = true;
+                init.pressure = init.buttons ? 0.5 : 0;
+            }
+            var ev = new (pointer && g.PointerEvent || g.MouseEvent)(type, init);
             ev.isTrusted = true;
+            // Where the point is in the document and in the target's box.
+            var at = {
+                pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
+                offsetX: init.offsetX, offsetY: init.offsetY,
+                movementX: init.movementX, movementY: init.movementY
+            };
+            // A move or a boundary event has no button of its own: `which`
+            // is the primary button while it is held.
+            if (!press && !pointer) at.which = init.buttons & 1;
+            Object.keys(at).forEach(function (k) {
+                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
+            });
             return target.dispatchEvent(ev);
         },
         configurable: true, enumerable: false, writable: true
@@ -2334,6 +2369,11 @@ const WRAPPERS_JS: &str = r#"
         value: function (id, data) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return;
+            // The user edited it: `change` when it loses the focus
+            // (node_apis.js).
+            Object.defineProperty(target, '__rkEdited', {
+                value: true, configurable: true, enumerable: false, writable: true
+            });
             var ev = new g.InputEvent('input', {
                 bubbles: true, composed: true, view: g, data: data,
                 inputType: data === null ? 'deleteContentBackward' : 'insertText'

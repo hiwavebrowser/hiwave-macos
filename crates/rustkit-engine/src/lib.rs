@@ -484,6 +484,20 @@ struct ViewState {
     /// attribute. Script owns the state (`input.checked`); style
     /// (`:checked`), paint and form submission read it here.
     checked_states: std::collections::HashMap<usize, bool>,
+    /// A listener cancelled the `pointerdown` of the press in progress:
+    /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
+    compat_mouse_suppressed: bool,
+    /// The element the pointer was over at its last move (raw NodeId).
+    hovered_node: Option<usize>,
+    /// Where the pointer was at its last move, in viewport coordinates.
+    pointer_at: Option<(f32, f32)>,
+    /// The primary button is held: between a press and its release.
+    primary_button_down: bool,
+    /// The element the press in progress landed on (raw NodeId).
+    press_target: Option<usize>,
+    /// The press in progress has had its say on the focus (it moved it, or
+    /// a listener cancelled the press): the release leaves the focus alone.
+    press_settled_focus: bool,
     /// Whether the view itself has focus.
     view_focused: bool,
     /// Current scroll offset (x, y) in pixels.
@@ -648,6 +662,19 @@ pub struct ScriptRecord {
     /// Wall time spent running it.
     pub elapsed_ms: u64,
     pub outcome: ScriptOutcome,
+}
+
+/// Which part of a click is moving the focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointFocus {
+    /// The press: the control under the point, else nothing is focused.
+    Press,
+    /// The release of a press that already moved the focus: a label's
+    /// control, else the focus stays.
+    Label,
+    /// A click with no press before it: the control under the point or
+    /// the one its label names, else nothing is focused.
+    Click,
 }
 
 /// What a primary-button click did once the page's listeners had run.
@@ -1338,6 +1365,12 @@ impl Engine {
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
+            hovered_node: None,
+            pointer_at: None,
+            primary_button_down: false,
+            press_target: None,
+            press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1400,6 +1433,12 @@ impl Engine {
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
+            hovered_node: None,
+            pointer_at: None,
+            primary_button_down: false,
+            press_target: None,
+            press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1471,6 +1510,12 @@ impl Engine {
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
             checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
+            hovered_node: None,
+            pointer_at: None,
+            primary_button_down: false,
+            press_target: None,
+            press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -1675,12 +1720,27 @@ impl Engine {
     ///
     /// Returns the tag name of the newly focused element, or `None` when the
     /// click landed on nothing focusable — in which case focus is CLEARED,
-    /// matching the behavior of clicking a page's background.
+    /// matching the behavior of clicking a page's background. The page's
+    /// focus moves with it (`document.activeElement`, `change`, `blur`,
+    /// `focus`).
     pub fn focus_at_point(
         &mut self,
         id: EngineViewId,
         viewport_x: f32,
         viewport_y: f32,
+    ) -> Option<String> {
+        self.focus_point(id, viewport_x, viewport_y, PointFocus::Click)
+    }
+
+    /// Move the focus for a press, a release or a whole click at VIEWPORT
+    /// coordinates (see [`PointFocus`]). Returns the tag of the focused
+    /// control afterwards.
+    fn focus_point(
+        &mut self,
+        id: EngineViewId,
+        viewport_x: f32,
+        viewport_y: f32,
+        why: PointFocus,
     ) -> Option<String> {
         let (doc_x, doc_y) = {
             let view = self.views.get(&id)?;
@@ -1697,20 +1757,132 @@ impl Engine {
         // Resolve focusability against the DOM, not the layout box: a
         // FormControl box type would miss `contenteditable` and tabindex
         // later, and the tag name is what callers want reported.
-        let focusable = hit_node.and_then(|raw| {
-            let view = self.views.get(&id)?;
-            let doc = view.document.as_ref()?;
+        let (control, labeled) = hit_node
+            .and_then(|raw| {
+                let view = self.views.get(&id)?;
+                let doc = view.document.as_ref()?;
+                let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+                let control = Self::form_control(&node);
+                // A click on a label is a click for the control it labels.
+                let labeled = match control {
+                    Some(_) => None,
+                    None => Self::labeled_control(doc, &node).as_ref().and_then(Self::form_control),
+                };
+                Some((control, labeled))
+            })
+            .unwrap_or((None, None));
+        let focusable = match why {
+            PointFocus::Press => control,
+            PointFocus::Click => control.or(labeled),
+            // Only a label has anything left to do at the release.
+            PointFocus::Label => match labeled {
+                Some(labeled) => Some(labeled),
+                None => return self.focused_tag(id),
+            },
+        };
+
+        self.set_focus(id, focusable.clone());
+        // The page's focus follows, and has the last word: it refuses a
+        // disabled control, and a `focus` or `blur` listener may move the
+        // focus again.
+        let told = self.views.get(&id).and_then(|v| v.bindings.as_ref()).map(|bindings| {
+            if let Err(e) = bindings.set_focus(focusable.as_ref().map(|(raw, _)| *raw)) {
+                debug!(?id, error = %e, "focus listener threw");
+            }
+        });
+        if told.is_some() {
+            if let Err(e) = self.flush_script_dom_writes(id) {
+                debug!(?id, error = %e, "relayout after focus events failed");
+            }
+        }
+        self.focused_tag(id)
+    }
+
+    /// `node` as a control that takes the engine's focus: its raw NodeId
+    /// and tag.
+    fn form_control(node: &Rc<Node>) -> Option<(usize, String)> {
+        match &node.node_type {
+            NodeType::Element { tag_name, .. } => {
+                let tag = tag_name.to_lowercase();
+                matches!(tag.as_str(), "input" | "textarea" | "select").then_some((node.id.raw(), tag))
+            }
+            _ => None,
+        }
+    }
+
+    /// The control labeled by the `<label>` that `node` is in (HTML
+    /// §4.10.4): the element its `for` names, else the label's first
+    /// field in tree order. `None` outside a label, and for a click on a
+    /// link or a button inside one (that click is theirs).
+    fn labeled_control(doc: &Document, node: &Rc<Node>) -> Option<Rc<Node>> {
+        let mut cur = node.clone();
+        let label = loop {
+            if let NodeType::Element { tag_name, .. } = &cur.node_type {
+                match tag_name.to_lowercase().as_str() {
+                    "label" => break cur,
+                    "a" | "button" => return None,
+                    _ => {}
+                }
+            }
+            cur = cur.parent()?;
+        };
+        if let Some(target) = label.get_attribute("for") {
+            return doc.get_element_by_id(target);
+        }
+        fn first_field(node: &Rc<Node>) -> Option<Rc<Node>> {
+            node.children().into_iter().find_map(|child| {
+                let hidden = child.get_attribute("type").is_some_and(|t| t.eq_ignore_ascii_case("hidden"));
+                match Engine::form_control(&child) {
+                    Some(_) if !hidden => Some(child),
+                    _ => first_field(&child),
+                }
+            })
+        }
+        first_field(&label)
+    }
+
+    /// The tag of the focused form control, if one is focused.
+    fn focused_tag(&self, id: EngineViewId) -> Option<String> {
+        let view = self.views.get(&id)?;
+        let node = view.document.as_ref()?.get_node(view.focused_node?)?;
+        match &node.node_type {
+            NodeType::Element { tag_name, .. } => Some(tag_name.to_lowercase()),
+            _ => None,
+        }
+    }
+
+    /// Follow the page's focus when it moved (script's `focus()`/`blur()`,
+    /// or the page's answer to a click): a form control it focused takes
+    /// the keys; anything else leaves the engine with nothing focused.
+    /// Returns true when the engine's focus changed.
+    fn follow_script_focus(&mut self, id: EngineViewId) -> bool {
+        let Some(moved) = self
+            .views
+            .get(&id)
+            .and_then(|v| v.bindings.as_ref())
+            .and_then(|b| b.take_focus_move())
+        else {
+            return false;
+        };
+        let control = moved.and_then(|raw| {
+            let doc = self.views.get(&id)?.document.as_ref()?;
             let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
             match &node.node_type {
                 NodeType::Element { tag_name, .. } => {
                     let tag = tag_name.to_lowercase();
-                    matches!(tag.as_str(), "input" | "textarea" | "select")
-                        .then_some((raw, tag))
+                    matches!(tag.as_str(), "input" | "textarea" | "select").then_some((raw, tag))
                 }
                 _ => None,
             }
         });
+        let before = self.views.get(&id).and_then(|v| v.focused_node);
+        self.set_focus(id, control);
+        before != self.views.get(&id).and_then(|v| v.focused_node)
+    }
 
+    /// Make a form control (raw NodeId and tag) the focused node, or
+    /// nothing.
+    fn set_focus(&mut self, id: EngineViewId, focusable: Option<(usize, String)>) {
         // Seed edit state from the element's authored value the FIRST time it
         // is focused. Re-focusing must not reset what the user has typed, so
         // the seed is guarded by the entry being absent.
@@ -1745,38 +1917,294 @@ impl Engine {
             }
         }
 
-        let view = self.views.get_mut(&id)?;
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
         match focusable {
             Some((raw, tag)) => {
                 view.focused_node = Some(rustkit_dom::NodeId::new(raw));
                 debug!(?id, %tag, "Focused element");
-                Some(tag)
             }
-            None => {
-                view.focused_node = None;
-                None
-            }
+            None => view.focused_node = None,
         }
     }
 
     /// Deliver a primary-button press at VIEWPORT coordinates to the page:
-    /// `mousedown` at the element under the point. Returns false when a
-    /// listener cancelled it.
+    /// `pointerdown` then `mousedown` at the element under the point (no
+    /// `mousedown` when a listener cancelled the `pointerdown`), then the
+    /// press's default action: the focus moves to the control under the
+    /// point, or away from the focused one (UI Events §3.4.5.1). A
+    /// listener that cancels either event keeps the focus where it is.
+    /// Returns false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
-        self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y)
+        let target = self.element_at_point(id, viewport_x, viewport_y);
+        if let Some(view) = self.views.get_mut(&id) {
+            view.primary_button_down = true;
+            view.press_target = target;
+        }
+        let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
+        if let Some(view) = self.views.get_mut(&id) {
+            view.compat_mouse_suppressed = suppressed;
+        }
+        let not_cancelled = suppressed || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
+        if !suppressed && not_cancelled {
+            self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.press_settled_focus = true;
+        }
+        not_cancelled
     }
 
-    /// Deliver a primary-button release at VIEWPORT coordinates: `mouseup`
-    /// then `click` at the element under the point, then the click's
+    /// Deliver a pointer move to VIEWPORT coordinates. When the element
+    /// under the pointer changed, the page first hears that: `pointerout`
+    /// and `pointerleave` where it was, `pointerover` and `pointerenter`
+    /// where it is, then the same four as mouse events; the leave and
+    /// enter events go to each element left (innermost first) or entered
+    /// (outermost first) and do not bubble. Then `pointermove` and
+    /// `mousemove` at the element under the pointer. Whatever the
+    /// listeners wrote to the DOM is laid out before this returns.
+    pub fn mouse_move_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
+        self.pointer_moved(id, viewport_x, viewport_y, true);
+    }
+
+    /// The pointer left the view: the page hears the out and leave events
+    /// of everything it was over, with no `relatedTarget`, at the point it
+    /// was last seen.
+    pub fn mouse_leave(&mut self, id: EngineViewId) {
+        let last = self.views.get(&id).and_then(|view| view.pointer_at);
+        if let Some((x, y)) = last {
+            self.pointer_moved(id, x, y, false);
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pointer_at = None;
+        }
+    }
+
+    /// The pointer is at VIEWPORT coordinates, inside the view or (`inside`
+    /// false) just gone from it.
+    fn pointer_moved(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32, inside: bool) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        let doc_x = viewport_x + view.scroll_offset.0;
+        let doc_y = viewport_y + view.scroll_offset.1;
+        let movement = view
+            .pointer_at
+            .map_or((0.0, 0.0), |(x, y)| (viewport_x - x, viewport_y - y));
+        view.pointer_at = Some((viewport_x, viewport_y));
+        let buttons = u16::from(view.primary_button_down);
+        // The compatibility `mousemove` of a press whose `pointerdown` was
+        // cancelled is not fired; the boundary events always are (Pointer
+        // Events §11.3).
+        let mousemove = !(view.primary_button_down && view.compat_mouse_suppressed);
+        // An element and the elements above it, innermost first.
+        let chain = |raw: Option<usize>| -> Vec<usize> {
+            let mut chain = Vec::new();
+            let mut node = raw.and_then(|raw| view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(raw)));
+            while let Some(n) = node {
+                if n.is_element() {
+                    chain.push(n.id.raw());
+                }
+                node = n.parent();
+            }
+            chain
+        };
+        let hit = view
+            .layout
+            .as_ref()
+            .filter(|_| inside)
+            .and_then(|l| l.hit_test(doc_x, doc_y));
+        let now = chain(hit.and_then(|hit| hit.node_id));
+        let before = chain(view.hovered_node);
+        let (over, out) = (now.first().copied(), before.first().copied());
+        view.hovered_node = over;
+
+        // (target, type, relatedTarget)
+        let mut events: Vec<(usize, &str, Option<usize>)> = Vec::new();
+        if over != out {
+            let left: Vec<usize> = before.iter().copied().filter(|n| !now.contains(n)).collect();
+            let entered: Vec<usize> = now.iter().rev().copied().filter(|n| !before.contains(n)).collect();
+            for [out_type, leave_type, over_type, enter_type] in [
+                ["pointerout", "pointerleave", "pointerover", "pointerenter"],
+                ["mouseout", "mouseleave", "mouseover", "mouseenter"],
+            ] {
+                events.extend(out.map(|n| (n, out_type, over)));
+                events.extend(left.iter().map(|n| (*n, leave_type, over)));
+                events.extend(over.map(|n| (n, over_type, out)));
+                events.extend(entered.iter().map(|n| (*n, enter_type, out)));
+            }
+        }
+        if let Some(over) = over {
+            events.push((over, "pointermove", None));
+            if mousemove {
+                events.push((over, "mousemove", None));
+            }
+        }
+        if events.is_empty() {
+            return;
+        }
+        for (target, event_type, related_target) in events {
+            // `offsetX/Y` are from the target's own box, as it is now: an
+            // earlier listener may have moved it.
+            let origin = self
+                .views
+                .get(&id)
+                .and_then(|v| Self::box_origin(v.layout.as_ref()?, target))
+                .unwrap_or((0.0, 0.0));
+            let moved = event_type.ends_with("move");
+            let data = rustkit_bindings::MouseEventBindingData {
+                client_x: viewport_x as f64,
+                client_y: viewport_y as f64,
+                screen_x: viewport_x as f64,
+                screen_y: viewport_y as f64,
+                offset_x: (doc_x - origin.0) as f64,
+                offset_y: (doc_y - origin.1) as f64,
+                button: if event_type.starts_with("pointer") { -1 } else { 0 },
+                buttons,
+                movement_x: if moved { movement.0 as f64 } else { 0.0 },
+                movement_y: if moved { movement.1 as f64 } else { 0.0 },
+                related_target,
+                ..Default::default()
+            };
+            self.fire_mouse(id, target, event_type, &data);
+        }
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after a mouse move failed");
+        }
+    }
+
+    /// A node of the view's document, by raw NodeId.
+    fn node(&self, id: EngineViewId, raw: usize) -> Option<Rc<Node>> {
+        self.views.get(&id)?.document.as_ref()?.get_node(rustkit_dom::NodeId::new(raw))
+    }
+
+    /// The element under VIEWPORT coordinates (a text run's element), as a
+    /// raw NodeId.
+    fn element_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<usize> {
+        let view = self.views.get(&id)?;
+        let hit = view
+            .layout
+            .as_ref()?
+            .hit_test(viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)?;
+        let mut node = self.node(id, hit.node_id?)?;
+        while !node.is_element() {
+            node = node.parent()?;
+        }
+        Some(node.id.raw())
+    }
+
+    /// An element (raw NodeId) and the elements above it, innermost first.
+    fn element_chain(&self, id: EngineViewId, raw: usize) -> Vec<usize> {
+        let mut chain = Vec::new();
+        let mut node = self.node(id, raw);
+        while let Some(n) = node {
+            if n.is_element() {
+                chain.push(n.id.raw());
+            }
+            node = n.parent();
+        }
+        chain
+    }
+
+    /// Fire `click` at an element (raw NodeId) for a release at VIEWPORT
+    /// coordinates, and lay out what its listeners wrote. Returns false
+    /// when a listener cancelled it.
+    fn click_element(&mut self, id: EngineViewId, target: usize, viewport_x: f32, viewport_y: f32) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return true;
+        };
+        let origin = view
+            .layout
+            .as_ref()
+            .and_then(|l| Self::box_origin(l, target))
+            .unwrap_or((0.0, 0.0));
+        let data = rustkit_bindings::MouseEventBindingData {
+            client_x: viewport_x as f64,
+            client_y: viewport_y as f64,
+            screen_x: viewport_x as f64,
+            screen_y: viewport_y as f64,
+            offset_x: (viewport_x + view.scroll_offset.0 - origin.0) as f64,
+            offset_y: (viewport_y + view.scroll_offset.1 - origin.1) as f64,
+            ..Default::default()
+        };
+        let not_cancelled = self.fire_mouse(id, target, "click", &data);
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after a click failed");
+        }
+        not_cancelled
+    }
+
+    /// The padding-box origin of the first box `node` generated, in
+    /// document coordinates.
+    fn box_origin(b: &LayoutBox, node: usize) -> Option<(f32, f32)> {
+        if b.node_id == Some(node) {
+            let padding_box = b.dimensions.padding_box();
+            return Some((padding_box.x, padding_box.y));
+        }
+        b.children.iter().find_map(|c| Self::box_origin(c, node))
+    }
+
+    /// Deliver a primary-button release at VIEWPORT coordinates: `pointerup`,
+    /// `mouseup`, then `click` at the element under the point, then the click's
     /// default actions (focus, link navigation) unless a listener called
-    /// `preventDefault()` on the `click`. Whatever the listeners wrote to
-    /// the DOM is laid out before this returns.
+    /// `preventDefault()` on the `click`. When the press landed on another
+    /// element, the `click` goes to the nearest element both are in (UI
+    /// Events §3.5) and no link is followed.
+    /// Whatever the listeners wrote to the DOM is laid out before this
+    /// returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
-        self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        if let Some(view) = self.views.get_mut(&id) {
+            view.primary_button_down = false;
+        }
+        self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
+        let suppressed = self
+            .views
+            .get_mut(&id)
+            .is_some_and(|view| std::mem::take(&mut view.compat_mouse_suppressed));
+        if !suppressed {
+            self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        }
+        // The focus moved at the press. What is left for the release is a
+        // label: its click focuses the control it labels. A release with
+        // no press before it (a caller that only clicks) does both here,
+        // before `click` fires, so a `click` listener that focuses a field
+        // has the last word.
+        let pressed = self
+            .views
+            .get_mut(&id)
+            .is_some_and(|view| std::mem::take(&mut view.press_settled_focus));
+        let focus = if pressed { PointFocus::Label } else { PointFocus::Click };
+        // A press elsewhere: the element the click goes to instead (`None`
+        // inside when the two share no element).
+        let pressed_on = self.views.get_mut(&id).and_then(|view| view.press_target.take());
+        let released_on = self.element_at_point(id, viewport_x, viewport_y);
+        let elsewhere = match (pressed_on, released_on) {
+            (Some(pressed_on), Some(released_on)) if pressed_on != released_on => {
+                let above = self.element_chain(id, released_on);
+                Some(self.element_chain(id, pressed_on).into_iter().find(|n| above.contains(n)))
+            }
+            _ => None,
+        };
+        if elsewhere.is_none() {
+            self.focus_point(id, viewport_x, viewport_y, focus);
+        }
         // A submit made outside a click (a timer, a callback) has nobody to
         // navigate for it yet; this click must not pick it up.
         self.take_submit_request(id);
-        let not_cancelled = self.dispatch_mouse_at_point(id, "click", viewport_x, viewport_y);
+        // A disabled form control takes no click from the user: no event,
+        // and no default action for anything around it (HTML §4.10.18.5).
+        let not_cancelled = match elsewhere {
+            None => {
+                !self.disabled_control_at_point(id, viewport_x, viewport_y)
+                    && self.dispatch_mouse_at_point(id, "click", viewport_x, viewport_y)
+            }
+            Some(None) => false,
+            Some(Some(target)) => {
+                !self.node(id, target).is_some_and(Self::in_disabled_control)
+                    && self.click_element(id, target, viewport_x, viewport_y)
+            }
+        };
         // The click submitted a form (a submit button's activation, or a
         // listener's `requestSubmit()`) and no `submit` listener cancelled.
         let submitted = self.take_submit_request(id).and_then(|(form, submitter)| {
@@ -1790,17 +2218,69 @@ impl Engine {
                 .filter(|sub| sub.is_self_target())
                 .map(|sub| sub.url)
         });
+        let focused = self.focused_tag(id);
         // The listeners may have moved or replaced what is under the point;
         // the default action reads the layout they left behind.
-        let focused = self.focus_at_point(id, viewport_x, viewport_y);
         let navigate = if submitted.is_some() {
             submitted
-        } else if not_cancelled {
+        } else if not_cancelled && elsewhere.is_none() {
+            // A press that ended on another element follows no link, not
+            // even one both elements are in: Chrome starts a drag of the
+            // link there and sends no click at all (oracle probe,
+            // 2026-10-04).
             self.follow_link_at_point(id, viewport_x, viewport_y)
         } else {
             None
         };
         ClickOutcome { focused, navigate }
+    }
+
+    /// Whether the point is on a disabled form control (HTML §4.10.18.5):
+    /// the nearest control at or above the element hit has `disabled`, or
+    /// sits in a `<fieldset disabled>` outside that fieldset's first
+    /// `<legend>`.
+    fn disabled_control_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        let node = (|| {
+            let view = self.views.get(&id)?;
+            let (doc_x, doc_y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+            let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+            view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))
+        })();
+        node.is_some_and(Self::in_disabled_control)
+    }
+
+    /// Whether `node` is, or is inside, a disabled form control.
+    fn in_disabled_control(node: Rc<Node>) -> bool {
+        let control = (|| {
+            let mut node = node;
+            loop {
+                if let Some(tag) = node.tag_name() {
+                    let tag = tag.to_ascii_lowercase();
+                    if matches!(tag.as_str(), "button" | "input" | "select" | "textarea" | "option" | "optgroup") {
+                        return Some(node);
+                    }
+                }
+                node = node.parent()?;
+            }
+        })();
+        let Some(control) = control else {
+            return false;
+        };
+        if control.get_attribute("disabled").is_some() {
+            return true;
+        }
+        let is = |node: &Rc<Node>, tag: &str| node.tag_name().is_some_and(|t| t.eq_ignore_ascii_case(tag));
+        let mut child = control;
+        while let Some(parent) = child.parent() {
+            if is(&parent, "fieldset") && parent.get_attribute("disabled").is_some() {
+                let first_legend = parent.children().into_iter().find(|c| is(c, "legend"));
+                if first_legend.is_none_or(|legend| legend.id != child.id) {
+                    return true;
+                }
+            }
+            child = parent;
+        }
+        false
     }
 
     /// The default action of a click on a link: the URL to load, or `None`
@@ -1944,7 +2424,7 @@ impl Engine {
             }
             Some(node.id.raw())
         });
-        let (Some(target), Some(bindings)) = (target, view.bindings.as_ref()) else {
+        let Some(target) = target else {
             return true;
         };
         let data = rustkit_bindings::MouseEventBindingData {
@@ -1955,11 +2435,34 @@ impl Engine {
             offset_x: hit.local_x as f64,
             offset_y: hit.local_y as f64,
             button: 0,
-            buttons: if event_type == "mousedown" { 1 } else { 0 },
+            buttons: if matches!(event_type, "mousedown" | "pointerdown") { 1 } else { 0 },
             ..Default::default()
         };
+        let not_cancelled = self.fire_mouse(id, target, event_type, &data);
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after mouse event failed");
+        }
+        not_cancelled
+    }
+
+    /// Fire one mouse event at an element (raw NodeId) and file what its
+    /// listeners threw. Returns false when a listener cancelled it. The
+    /// caller flushes the DOM writes.
+    fn fire_mouse(
+        &mut self,
+        id: EngineViewId,
+        target: usize,
+        event_type: &str,
+        data: &rustkit_bindings::MouseEventBindingData,
+    ) -> bool {
+        let Some(view) = self.views.get_mut(&id) else {
+            return true;
+        };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return true;
+        };
         let source = format!("event:{event_type}");
-        let not_cancelled = match bindings.fire_mouse_event(target, event_type, &data) {
+        let not_cancelled = match bindings.fire_mouse_event(target, event_type, data) {
             Ok(not_cancelled) => not_cancelled,
             Err(e) => {
                 view.script_log.push(ScriptRecord {
@@ -1980,9 +2483,6 @@ impl Engine {
             });
         }
         debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
-        if let Err(e) = self.flush_script_dom_writes(id) {
-            debug!(?id, error = %e, "relayout after mouse event failed");
-        }
         not_cancelled
     }
 
@@ -3227,6 +3727,12 @@ impl Engine {
         view.edit_states.clear();
         view.checked_states.clear();
         view.focused_node = None;
+        view.hovered_node = None;
+        view.pointer_at = None;
+        view.primary_button_down = false;
+        view.press_target = None;
+        view.press_settled_focus = false;
+        view.compat_mouse_suppressed = false;
         view.script_log.clear();
         view.script_policy = None;
 
@@ -3237,8 +3743,8 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
-            bindings.set_selector_matcher(Rc::new(|node, selector| {
-                SelectorMatcher.node_matches(node, selector)
+            bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
+                SelectorMatcher.node_matches(node, selector, checked)
             }));
 
             bindings
@@ -3527,6 +4033,12 @@ impl Engine {
         view.edit_states.clear();
         view.checked_states.clear();
         view.focused_node = None;
+        view.hovered_node = None;
+        view.pointer_at = None;
+        view.primary_button_down = false;
+        view.press_target = None;
+        view.press_settled_focus = false;
+        view.compat_mouse_suppressed = false;
         view.script_log.clear();
         view.script_policy = None;
 
@@ -3536,8 +4048,8 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
-            bindings.set_selector_matcher(Rc::new(|node, selector| {
-                SelectorMatcher.node_matches(node, selector)
+            bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
+                SelectorMatcher.node_matches(node, selector, checked)
             }));
 
             bindings
@@ -10028,7 +10540,14 @@ impl SelectorMatcher {
     /// matcher: it builds the same ancestor, sibling and position context
     /// the cascade threads down, from the node's current place in the tree,
     /// so a script query and the style that paints agree on what matches.
-    pub(crate) fn node_matches(&self, node: &Rc<Node>, selector: &str) -> Option<bool> {
+    /// `checked` is the checkedness script holds for the controls that no
+    /// longer follow their `checked` attribute, by raw NodeId.
+    pub(crate) fn node_matches(
+        &self,
+        node: &Rc<Node>,
+        selector: &str,
+        checked: &HashMap<usize, bool>,
+    ) -> Option<bool> {
         let selector = selector.trim();
         // A query asks this for every node of the tree with one selector, so
         // the selector is validated and prepared once, not once per node.
@@ -10040,6 +10559,23 @@ impl SelectorMatcher {
             return Some(false);
         };
         let tag = tag_name.to_lowercase();
+        // `:checked` reads the attribute map; a control whose checkedness
+        // has left its attribute is matched with the attribute as it would
+        // be (the cascade does the same, `Engine::live_attributes`).
+        let live = |raw: usize, attributes: &HashMap<String, String>| match checked.get(&raw) {
+            Some(&on) if on != attributes.contains_key("checked") => {
+                let mut attributes = attributes.clone();
+                if on {
+                    attributes.insert("checked".to_string(), String::new());
+                } else {
+                    attributes.remove("checked");
+                }
+                Some(attributes)
+            }
+            _ => None,
+        };
+        let live_own = live(node.id.raw(), attributes);
+        let attributes = live_own.as_ref().unwrap_or(attributes);
         // A selector that reads neither the ancestors nor the siblings (`.a`,
         // `div`, `#id`, `[data-x]`, `div.a.b`, and lists of those) needs
         // neither: building them walked every ancestor and every sibling of
@@ -10102,7 +10638,8 @@ impl SelectorMatcher {
                         }
                     }
                     if before {
-                        let state = ElementState::of(&t, attributes);
+                        let live = live(c.id.raw(), attributes);
+                        let state = ElementState::of(&t, live.as_ref().unwrap_or(attributes));
                         siblings_before.push((t, classes(attributes), attributes.get("id").cloned(), state));
                     }
                 }
@@ -12353,6 +12890,12 @@ impl Engine {
             }
             bindings.mark_dirty(DomDirty::Layout);
             laid |= self.flush_script_dom_writes_once(id)?;
+        }
+        // The focused control paints its caret, so a focus script moved is
+        // a relayout.
+        if self.follow_script_focus(id) {
+            self.relayout(id)?;
+            laid = true;
         }
         Ok(laid)
     }
@@ -21327,6 +21870,582 @@ mod node_identity_tests {
         engine.execute_script(id, script).expect("script")
     }
 
+    // A press on one element released on another sent `click` to the
+    // release's element and followed the link there. Chrome sends it to
+    // the nearest element both are in (`click:BODY` in the two oracle
+    // logs), so a press on one link dragged onto another follows neither,
+    // nor does a press on one part of a link released on another part.
+
+    const DRAG_CLICK_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<a id="one" href="https://example.test/one" style="display:block">"#,
+        r#"<div id="s1" style="height:20px">first</div><div id="s2" style="height:20px">second</div></a>"#,
+        r#"<a id="two" href="https://example.test/two" style="display:block;height:40px">two</a>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_press_and_a_release_on_different_elements_click_their_common_ancestor() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DRAG_CLICK_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             ['mouseup', 'click'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push(t + ':' + (e.target.id || e.target.nodeName) + ':' + e.offsetY); }); });",
+        );
+        let drag = |engine: &mut Engine, from: f32, to: f32| -> (String, Option<String>) {
+            engine.mouse_down_at_point(id, 12.0, from);
+            engine.mouse_move_at_point(id, 12.0, to);
+            let outcome = engine.click_at_point(id, 12.0, to);
+            (js(engine, id, "var out = log.join(' '); log.length = 0; out"), outcome.navigate)
+        };
+
+        // On one element: its click, and its link.
+        assert_eq!(
+            drag(&mut engine, 10.0, 12.0),
+            (js_string("mouseup:s1:12 click:s1:12"), Some("https://example.test/one".to_string()))
+        );
+        // Two elements of one link: the click is the link's, and the link
+        // is not followed (Chrome starts a drag of the link here and sends
+        // no click at all; the engine has no drag).
+        assert_eq!(drag(&mut engine, 10.0, 30.0), (js_string("mouseup:s2:10 click:one:30"), None));
+        // From one link onto another: the click is the body's; neither is followed.
+        assert_eq!(drag(&mut engine, 10.0, 60.0), (js_string("mouseup:two:20 click:BODY:60"), None));
+        // A release with no press before it is a click where it lands.
+        let outcome = engine.click_at_point(id, 12.0, 60.0);
+        assert_eq!(outcome.navigate.as_deref(), Some("https://example.test/two"));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("mouseup:two:20 click:two:20"));
+    }
+
+    // The focus moved at the release, whatever the page did with the
+    // press: a list of options under a field cancels `mousedown` so the
+    // field keeps its focus while an option is clicked, and here the field
+    // was blurred (and its list closed) before the `click` arrived. The
+    // expected lines are the oracle Chrome's log for the same page and the
+    // same presses (tools/parity_oracle/focus_press_log.mjs), capturing
+    // listeners on the document:
+    // type:target:relatedTarget:document.activeElement.
+
+    const FOCUS_PRESS_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<input id="f" style="display:block;height:30px;margin:0;box-sizing:border-box">"#,
+        r#"<input id="g" style="display:block;height:30px;margin:0;box-sizing:border-box">"#,
+        r#"<div id="opt" style="height:40px">an option that keeps the field's focus</div>"#,
+        r#"<div id="d" style="height:40px">plain text</div>"#,
+        r#"<div id="drag" style="height:40px">release target</div>"#,
+        r#"<div id="pd" style="height:40px">its pointerdown is cancelled</div>"#,
+        r#"</body></html>"#
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn the_focus_moves_at_the_press() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, FOCUS_PRESS_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             function nm(n) { return n ? (n.id || n.nodeName) : 'null'; } \
+             ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'focus', 'blur', 'focusin', 'focusout', \
+              'change'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push([e.type, nm(e.target), nm(e.relatedTarget), nm(document.activeElement)].join(':')); \
+               }, true); }); \
+             document.getElementById('opt').addEventListener('mousedown', function (e) { e.preventDefault(); }); \
+             document.getElementById('pd').addEventListener('pointerdown', function (e) { e.preventDefault(); });",
+        );
+        fn taken(engine: &mut Engine, id: EngineViewId) -> String {
+            js(engine, id, "var out = log.join(' '); log.length = 0; out")
+        }
+        // In #f: the focus arrives at the press, after `mousedown`.
+        engine.mouse_down_at_point(id, 12.0, 15.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:f:null:BODY ",
+                "mousedown:f:null:BODY ",
+                "focus:f:null:f ",
+                "focusin:f:null:f"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 15.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:f:null:f ",
+                "mouseup:f:null:f ",
+                "click:f:null:f"
+            ))
+        );
+        // In #g: #f hears `blur` with nothing focused, then #g `focus`.
+        engine.mouse_down_at_point(id, 12.0, 45.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:g:null:f ",
+                "mousedown:g:null:f ",
+                "blur:f:g:BODY ",
+                "focusout:f:g:BODY ",
+                "focus:g:f:g ",
+                "focusin:g:f:g"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 45.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:g:null:g ",
+                "mouseup:g:null:g ",
+                "click:g:null:g"
+            ))
+        );
+        // A cancelled `mousedown` moves no focus: an option list under a
+        // field keeps the field focused while the option is clicked.
+        engine.mouse_down_at_point(id, 12.0, 80.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:opt:null:g ",
+                "mousedown:opt:null:g"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 80.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:opt:null:g ",
+                "mouseup:opt:null:g ",
+                "click:opt:null:g"
+            ))
+        );
+        // Plain text: the field is blurred at the press.
+        engine.mouse_down_at_point(id, 12.0, 120.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:d:null:g ",
+                "mousedown:d:null:g ",
+                "blur:g:null:BODY ",
+                "focusout:g:null:BODY"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 120.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:d:null:BODY ",
+                "mouseup:d:null:BODY ",
+                "click:d:null:BODY"
+            ))
+        );
+        // A press in #f released somewhere else: #f keeps the focus.
+        engine.mouse_down_at_point(id, 12.0, 15.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:f:null:BODY ",
+                "mousedown:f:null:BODY ",
+                "focus:f:null:f ",
+                "focusin:f:null:f"
+            ))
+        );
+        engine.mouse_move_at_point(id, 12.0, 160.0);
+        engine.click_at_point(id, 12.0, 160.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:drag:null:f ",
+                "mouseup:drag:null:f ",
+                "click:BODY:null:f"
+            ))
+        );
+        // A cancelled `pointerdown`: no `mousedown`, and no focus move.
+        engine.mouse_down_at_point(id, 12.0, 200.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:pd:null:f"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 200.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:pd:null:f ",
+                "click:pd:null:f"
+            ))
+        );
+        // The engine's own focus (where typing goes) is where the page's is.
+        assert_eq!(engine.focused_tag(id).as_deref(), Some("input"));
+    }
+
+    // Nothing told the page where the mouse was: no `mousemove`, no
+    // `mouseover` or `mouseenter`, so a menu that opens on hover never
+    // opened and a drag never moved. The expected lines below are what the
+    // oracle's Chrome logged for the same page and the same moves
+    // (tools/parity_oracle, Playwright `mouse.move`), at-target listeners on
+    // the elements with an id:
+    // type:target:relatedTarget:bubbles:cancelable:composed:button:buttons:
+    // which:detail:is a PointerEvent:clientX:clientY:offsetX:offsetY:
+    // movementX:isTrusted.
+
+    const HOVER_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<div id="a" style="height:50px">a</div>"#,
+        r#"<div id="o" style="height:100px"><div id="i" style="height:50px">inner</div></div>"#,
+        r#"<div id="tall" style="height:3000px"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_mouse_move_reaches_the_page_as_chrome_sends_it() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             function nm(n) { return n ? (n.id || n.nodeName || 'window') : 'null'; } \
+             ['pointerover', 'pointerenter', 'pointerout', 'pointerleave', 'pointermove', \
+              'mouseover', 'mouseenter', 'mouseout', 'mouseleave', 'mousemove', \
+              'pointerdown', 'mousedown', 'pointerup', 'mouseup'].forEach(function (t) { \
+               document.querySelectorAll('[id]').forEach(function (el) { \
+                 el.addEventListener(t, function (e) { \
+                   if (e.eventPhase !== 2) return; \
+                   log.push([e.type, nm(e.target), nm(e.relatedTarget), e.bubbles, e.cancelable, e.composed, \
+                     e.button, e.buttons, e.which, e.detail, e instanceof PointerEvent, e.clientX, e.clientY, \
+                     e.offsetX, e.offsetY, e.movementX, e.isTrusted].join(':')); }); }); }); \
+             window.heard = []; \
+             document.addEventListener('mouseover', function (e) { heard.push('over:' + e.target.id); }); \
+             document.addEventListener('mouseenter', function (e) { heard.push('enter:' + e.target.id); }); \
+             document.addEventListener('mouseenter', function (e) { heard.push('enter-capture:' + e.target.id); }, true);",
+        );
+        fn taken(engine: &mut Engine, id: EngineViewId) -> String {
+            js(engine, id, "var out = log.join(' '); log.length = 0; out")
+        }
+
+        // Onto #a from nowhere.
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerover:a:null:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "pointerenter:a:null:false:false:false:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mouseover:a:null:true:true:true:0:0:0:0:false:12:20:12:20:0:true ",
+                "mouseenter:a:null:false:false:false:0:0:0:0:false:12:20:12:20:0:true ",
+                "pointermove:a:null:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mousemove:a:null:true:true:true:0:0:0:0:false:12:20:12:20:0:true"
+            ))
+        );
+        // `mouseover` bubbles to the document; `mouseenter` does not, but a
+        // capturing listener above still hears it, once per element entered
+        // (html and body have no id).
+        assert_eq!(
+            js(&mut engine, id, "heard.join(' ')"),
+            js_string("over:a enter-capture: enter-capture: enter-capture:a")
+        );
+        // Within #a: moves only.
+        engine.mouse_move_at_point(id, 30.0, 25.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointermove:a:null:true:true:true:-1:0:0:0:true:30:25:30:25:18:true ",
+                "mousemove:a:null:true:true:true:0:0:0:0:false:30:25:30:25:18:true"
+            ))
+        );
+        // #a to #i, which is inside #o: both are entered, the outer first.
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:a:i:true:true:true:-1:0:0:0:true:12:70:12:70:0:true ",
+                "pointerleave:a:i:false:false:false:-1:0:0:0:true:12:70:12:70:0:true ",
+                "pointerover:i:a:true:true:true:-1:0:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:o:a:false:false:false:-1:0:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:i:a:false:false:false:-1:0:0:0:true:12:70:12:20:0:true ",
+                "mouseout:a:i:true:true:true:0:0:0:0:false:12:70:12:70:0:true ",
+                "mouseleave:a:i:false:false:false:0:0:0:0:false:12:70:12:70:0:true ",
+                "mouseover:i:a:true:true:true:0:0:0:0:false:12:70:12:20:0:true ",
+                "mouseenter:o:a:false:false:false:0:0:0:0:false:12:70:12:20:0:true ",
+                "mouseenter:i:a:false:false:false:0:0:0:0:false:12:70:12:20:0:true ",
+                "pointermove:i:null:true:true:true:-1:0:0:0:true:12:70:12:20:-18:true ",
+                "mousemove:i:null:true:true:true:0:0:0:0:false:12:70:12:20:-18:true"
+            ))
+        );
+        // #i to its parent #o: #i is left, #o is not entered again.
+        engine.mouse_move_at_point(id, 12.0, 120.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:i:o:true:true:true:-1:0:0:0:true:12:120:12:70:0:true ",
+                "pointerleave:i:o:false:false:false:-1:0:0:0:true:12:120:12:70:0:true ",
+                "pointerover:o:i:true:true:true:-1:0:0:0:true:12:120:12:70:0:true ",
+                "mouseout:i:o:true:true:true:0:0:0:0:false:12:120:12:70:0:true ",
+                "mouseleave:i:o:false:false:false:0:0:0:0:false:12:120:12:70:0:true ",
+                "mouseover:o:i:true:true:true:0:0:0:0:false:12:120:12:70:0:true ",
+                "pointermove:o:null:true:true:true:-1:0:0:0:true:12:120:12:70:0:true ",
+                "mousemove:o:null:true:true:true:0:0:0:0:false:12:120:12:70:0:true"
+            ))
+        );
+        // #o back to #a.
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:o:a:true:true:true:-1:0:0:0:true:12:20:12:-30:0:true ",
+                "pointerleave:o:a:false:false:false:-1:0:0:0:true:12:20:12:-30:0:true ",
+                "pointerover:a:o:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "pointerenter:a:o:false:false:false:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mouseout:o:a:true:true:true:0:0:0:0:false:12:20:12:-30:0:true ",
+                "mouseleave:o:a:false:false:false:0:0:0:0:false:12:20:12:-30:0:true ",
+                "mouseover:a:o:true:true:true:0:0:0:0:false:12:20:12:20:0:true ",
+                "mouseenter:a:o:false:false:false:0:0:0:0:false:12:20:12:20:0:true ",
+                "pointermove:a:null:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mousemove:a:null:true:true:true:0:0:0:0:false:12:20:12:20:0:true"
+            ))
+        );
+        // A press, then a drag onto #i: the button is held in `buttons`,
+        // and in `which` on the mouse events.
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:a:null:true:true:true:0:1:1:0:true:12:20:12:20:0:true ",
+                "mousedown:a:null:true:true:true:0:1:1:1:false:12:20:12:20:0:true"
+            ))
+        );
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:a:i:true:true:true:-1:1:0:0:true:12:70:12:70:0:true ",
+                "pointerleave:a:i:false:false:false:-1:1:0:0:true:12:70:12:70:0:true ",
+                "pointerover:i:a:true:true:true:-1:1:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:o:a:false:false:false:-1:1:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:i:a:false:false:false:-1:1:0:0:true:12:70:12:20:0:true ",
+                "mouseout:a:i:true:true:true:0:1:1:0:false:12:70:12:70:0:true ",
+                "mouseleave:a:i:false:false:false:0:1:1:0:false:12:70:12:70:0:true ",
+                "mouseover:i:a:true:true:true:0:1:1:0:false:12:70:12:20:0:true ",
+                "mouseenter:o:a:false:false:false:0:1:1:0:false:12:70:12:20:0:true ",
+                "mouseenter:i:a:false:false:false:0:1:1:0:false:12:70:12:20:0:true ",
+                "pointermove:i:null:true:true:true:-1:1:0:0:true:12:70:12:20:0:true ",
+                "mousemove:i:null:true:true:true:0:1:1:0:false:12:70:12:20:0:true"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:i:null:true:true:true:0:0:1:0:true:12:70:12:20:0:true ",
+                "mouseup:i:null:true:true:true:0:0:1:1:false:12:70:12:20:0:true"
+            ))
+        );
+        // The button is up again.
+        engine.mouse_move_at_point(id, 13.0, 70.0);
+        assert_eq!(
+            js(&mut engine, id, "log.map(function (l) { var f = l.split(':'); return f[0] + ':' + f[7] + ':' + f[15]; }).join(' ')"),
+            js_string("pointermove:0:1 mousemove:0:1")
+        );
+    }
+
+    // Node ids restart with each document, so the element hovered in the
+    // last page is some other node of the next one: a new document starts
+    // with nothing hovered and no button held.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_new_document_starts_with_nothing_hovered() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             ['mouseout', 'mouseover', 'mousemove'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push([t, e.target.id, e.relatedTarget, e.buttons, e.movementX].join(':')); }); });",
+        );
+        engine.mouse_move_at_point(id, 30.0, 20.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("mouseover:a::0:0 mousemove:a::0:0")
+        );
+    }
+
+    // A cancelled `pointerdown` stops the `mousemove`s of that press, not
+    // the boundary events (Pointer Events §11.3). A move writes to the DOM
+    // like any other listener: the layout follows before the call returns.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_hover_listener_changes_the_page() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             var o = document.getElementById('o'); \
+             o.addEventListener('mouseenter', function () { o.style.height = '400px'; }); \
+             o.addEventListener('mouseleave', function () { o.style.height = '100px'; }); \
+             document.getElementById('a').addEventListener('pointerdown', function (e) { e.preventDefault(); }); \
+             ['mousemove', 'pointermove', 'mouseover'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { log.push(t + ':' + e.target.id); }); });",
+        );
+        // #o is 50..150; hovering it opens it to 50..450, leaving closes it.
+        engine.mouse_move_at_point(id, 12.0, 120.0);
+        engine.mouse_move_at_point(id, 12.0, 300.0);
+        assert_eq!(js(&mut engine, id, "log[log.length - 1]"), js_string("mousemove:o"));
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        engine.mouse_move_at_point(id, 12.0, 300.0);
+        assert_eq!(js(&mut engine, id, "log[log.length - 1]"), js_string("mousemove:tall"));
+
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        engine.mouse_move_at_point(id, 12.0, 30.0);
+        engine.mouse_move_at_point(id, 12.0, 300.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("pointermove:a mouseover:tall pointermove:tall")
+        );
+        engine.click_at_point(id, 12.0, 300.0);
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_move_at_point(id, 12.0, 310.0);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("pointermove:tall mousemove:tall"));
+
+        // The pointer leaves the view from inside #i: everything it was
+        // over is left, toward nothing; coming back enters it all again.
+        js(
+            &mut engine,
+            id,
+            "log.length = 0; \
+             ['mouseout', 'mouseleave', 'mouseenter'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push(t + ':' + (e.target.id || e.target.nodeName) + ':' + e.relatedTarget); }, true); });",
+        );
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_leave(id);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("mouseout:i:null mouseleave:i:null mouseleave:o:null mouseleave:BODY:null mouseleave:HTML:null")
+        );
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_leave(id);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string(""));
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string(
+                "mouseover:i mouseenter:HTML:null mouseenter:BODY:null mouseenter:o:null mouseenter:i:null \
+                 pointermove:i mousemove:i"
+            )
+        );
+    }
+
+    // weather.com's drawer and yahoo's More menu (Pollux, 2026-10-04): the
+    // click was dispatched, nothing threw, and the page did not react. A
+    // press and release in Chrome is pointerdown, mousedown, pointerup,
+    // mouseup, click, the click being a PointerEvent; here it was three
+    // MouseEvents with `detail` 0 and no `which`, so a listener on
+    // `pointerdown`, or one that asks for `which === 1` or a click count,
+    // never ran.
+
+    const POINTER_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<div id="b" style="height:50px">press</div>"#,
+        r#"<div id="p" style="height:50px">no compatibility mouse events</div>"#,
+        r#"<div id="tall" style="height:3000px"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_is_the_full_pointer_and_mouse_sequence() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, POINTER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; window.where = []; window.delegated = 0; \
+             ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push([e.type, e.target.id, e.button, e.buttons, e.which, e.detail, e.isTrusted, e.bubbles, \
+                           e.composed, e instanceof PointerEvent, e.pointerType, e.pointerId].join(':')); \
+                 where.push([e.clientY, e.pageY, e.offsetX, e.offsetY].join(':')); }); }); \
+             window.addEventListener('click', function (e) { \
+               if (e.button === 0 && e.which === 1 && e.detail === 1) delegated++; }, true); \
+             document.getElementById('p').addEventListener('pointerdown', function (e) { e.preventDefault(); });",
+        );
+
+        assert!(engine.mouse_down_at_point(id, 12.0, 20.0));
+        engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string(concat!(
+                "pointerdown:b:0:1:1:0:true:true:true:true:mouse:1 ",
+                "mousedown:b:0:1:1:1:true:true:true:false:: ",
+                "pointerup:b:0:0:1:0:true:true:true:true:mouse:1 ",
+                "mouseup:b:0:0:1:1:true:true:true:false:: ",
+                "click:b:0:0:1:1:true:true:true:true:mouse:1"
+            ))
+        );
+        assert_eq!(js(&mut engine, id, "String(delegated)"), js_string("1"));
+
+        // A cancelled pointerdown stops the compatibility mouse events of
+        // that press (Pointer Events §11.3); the click still fires.
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_down_at_point(id, 12.0, 70.0);
+        engine.click_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            js(&mut engine, id, "log.map(function (l) { return l.split(':')[0]; }).join(' ')"),
+            js_string("pointerdown pointerup click")
+        );
+        // The next press is a new one.
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            js(&mut engine, id, "log.map(function (l) { return l.split(':')[0]; }).join(' ')"),
+            js_string("pointerdown mousedown pointerup mouseup click")
+        );
+
+        // On a scrolled page: client is the viewport, page is the document,
+        // offset is from the target's own box (#tall starts at 100).
+        js(&mut engine, id, "window.scrollTo(0, 150); where.length = 0");
+        assert_eq!(engine.views[&id].scroll_offset.1, 150.0, "precondition: the view scrolled");
+        engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, "where[where.length - 1]"), js_string("20:170:12:70"));
+    }
+
     #[test]
     #[cfg(all(target_os = "macos", feature = "headless"))]
     fn a_click_reaches_the_pages_listeners_in_order() {
@@ -21649,6 +22768,49 @@ mod node_identity_tests {
         assert_eq!(painted(&engine, id), [false, false, true, false, false, false]);
     }
 
+    // `matches(':checked')`, `closest` and `querySelector[All]` read the
+    // `checked` attribute, so after a click or `input.checked = ...` script
+    // was told the opposite of what the page painted (the usual
+    // `form.querySelector('input[name=x]:checked')` returned the default
+    // choice). They read the same live checkedness as the cascade.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn script_queries_read_live_checkedness() {
+        let (mut engine, id) = activation_page();
+        let checked = "Array.prototype.map.call(document.querySelectorAll('input:checked'), \
+                       function (e) { return e.id; }).join(',')";
+        assert_eq!(js(&mut engine, id, checked), js_string("r1"), "precondition: the attribute");
+
+        // The user checks the box and picks the other radio button.
+        engine.click_at_point(id, 8.0, 10.0);
+        engine.click_at_point(id, 8.0, 130.0);
+        assert_eq!(js(&mut engine, id, checked), js_string("c,r2"));
+        assert_eq!(
+            js(
+                &mut engine,
+                id,
+                "[$('c').matches(':checked'), $('r1').matches(':checked'), $('r2').matches('input:checked'), \
+                 $('r2').closest(':checked') === $('r2'), \
+                 document.querySelector('input[name=g]:checked').id].join('|')"
+            ),
+            js_string("true|false|true|true|r2")
+        );
+
+        // Script's own writes, and `:checked` left of a sibling combinator.
+        assert_eq!(js(&mut engine, id, "String(document.querySelector('input:checked + a'))"), js_string("null"));
+        assert_eq!(
+            js(
+                &mut engine,
+                id,
+                "$('s').checked = true; $('c').checked = false; \
+                 [document.querySelector('input:checked + a') !== null, $('c').matches(':checked'), \
+                  $('c').matches(':not(:checked)')].join('|')"
+            ),
+            js_string("true|false|true")
+        );
+        assert_eq!(js(&mut engine, id, checked), js_string("r2,s"));
+    }
+
     // Pete's live testing, continued: a link to a place in the same page
     // (`href="#id"`) loaded the page again from the top, and a
     // `javascript:` link did nothing. A URL that differs from the
@@ -21884,6 +23046,238 @@ mod node_identity_tests {
             js_string("click:box click:reset reset | false")
         );
         assert_eq!(painted(&engine, id), [false]);
+    }
+
+    // Pete's live testing, continued: the engine and the page each had a
+    // focus and neither knew the other's. A field script focused (a search
+    // shortcut, a click on a search icon) took no typing, and a field the
+    // user clicked into was not `document.activeElement` and heard no
+    // `focus`, `blur` or `change`. One focus (HTML §6.6.4 focus update
+    // steps), moved by the user's click before the `click` event and by
+    // script's `focus()`/`blur()`.
+
+    const FOCUS_PAGE: &str = concat!(
+        r#"<html><body id="b" style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="r" name="r" value="was"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="find" type="button">Find</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="off" disabled></div>"#,
+        r#"<div id="plain" style="height:40px">text</div>"#,
+        r#"</body></html>"#,
+    );
+
+    fn focus_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, FOCUS_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             ['focus', 'blur', 'focusin', 'focusout', 'change', 'click'].forEach(function (t) { \
+             document.addEventListener(t, function (e) { log.push(t + ':' + e.target.id); }, true); }); \
+             $('find').addEventListener('click', function () { $('q').focus(); });",
+        );
+        (engine, id)
+    }
+
+    fn focused_id(engine: &mut Engine, id: EngineViewId) -> String {
+        let raw = engine.focused_node(id).map(|n| n.raw());
+        let script = match raw {
+            Some(raw) => format!("(function () {{ var a = document.activeElement; return a.id + '/' + {raw}; }})()"),
+            None => "document.activeElement.id + '/none'".to_string(),
+        };
+        js(engine, id, &script)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_field_script_focuses_takes_the_typing() {
+        let (mut engine, id) = focus_page();
+        let q = engine.views[&id].document.as_ref().unwrap().get_element_by_id("q").unwrap().id;
+
+        // Script focuses the field; the user's keys go into it.
+        js(&mut engine, id, "$('q').focus()");
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("a"));
+
+        // Script blurs it; the keys are nobody's.
+        js(&mut engine, id, "$('q').blur()");
+        assert_eq!(engine.focused_node(id), None);
+        assert!(!engine.handle_text_key(id, 0, "b", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("a"));
+
+        // A click on a button whose listener focuses the field: the field
+        // has the focus when the click is over, and takes the typing.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = engine.click_at_point(id, 12.0, 92.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("click:find focus:q focusin:q")
+        );
+        assert!(engine.handle_text_key(id, 0, "c", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("ac"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_into_a_field_is_the_pages_focus() {
+        let (mut engine, id) = focus_page();
+
+        // The click focuses the field before `click` fires.
+        let outcome = engine.click_at_point(id, 12.0, 12.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + document.activeElement.id"),
+            js_string("focus:q focusin:q click:q | q")
+        );
+
+        // Typing, then a click into another field: the first hears
+        // `change` (the user edited it) and loses the focus.
+        engine.handle_text_key(id, 0, "a", false, false, false);
+        js(&mut engine, id, "log.length = 0");
+        engine.click_at_point(id, 12.0, 52.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + document.activeElement.id"),
+            js_string("change:q blur:q focusout:q focus:r focusin:r click:r | r")
+        );
+
+        // A click on plain content: nothing is focused, and no `change`
+        // for a field nobody edited.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = engine.click_at_point(id, 12.0, 172.0);
+        assert_eq!(outcome.focused, None);
+        assert_eq!(engine.focused_node(id), None);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + document.activeElement.id"),
+            js_string("blur:r focusout:r click:plain | b")
+        );
+
+        // A disabled field does not take the focus.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = engine.click_at_point(id, 12.0, 132.0);
+        assert_eq!(outcome.focused, None);
+        assert_eq!(focused_id(&mut engine, id), js_string("b/none"));
+    }
+
+    // A click on a disabled button still fired `click` at it and bubbled,
+    // so a page's handler ran for a control the page had switched off (a
+    // greyed-out "Pay" button paid). A disabled form control takes no
+    // click from the user (HTML §4.10.18.5); the release is still heard.
+
+    const DISABLED_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="off" disabled style="display:block;width:100px;height:30px">off</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="on" style="display:block;width:100px;height:30px">on</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="cb" type="checkbox" disabled style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<fieldset disabled style="margin:0;padding:0;border:0">"#,
+        r#"<legend style="padding:0"><button id="lg" style="display:block;width:100px;height:30px;margin:0 0 10px">legend</button></legend>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="fs" style="display:block;width:100px;height:30px">set</button></div>"#,
+        r#"<div id="plain" style="height:40px;overflow:hidden">plain</div>"#,
+        r#"</fieldset>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn the_users_click_on_a_disabled_control_is_not_dispatched() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DISABLED_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             document.addEventListener('mouseup', function (e) { log.push('up:' + e.target.id); }); \
+             document.addEventListener('click', function (e) { log.push('click:' + e.target.id); });",
+        );
+        let top = |engine: &Engine, name: &str| {
+            let view = &engine.views[&id];
+            let node = view.document.as_ref().unwrap().get_element_by_id(name).unwrap().id.raw();
+            Engine::box_top(view.layout.as_ref().unwrap(), node).unwrap()
+        };
+        let mut click = |engine: &mut Engine, name: &str| {
+            js(engine, id, "log.length = 0");
+            let y = top(engine, name) + 10.0;
+            engine.click_at_point(id, 8.0, y);
+            js(engine, id, "log.join(' ')")
+        };
+
+        assert_eq!(click(&mut engine, "on"), js_string("up:on click:on"), "precondition");
+        assert_eq!(click(&mut engine, "off"), js_string("up:off"));
+        assert_eq!(click(&mut engine, "cb"), js_string("up:cb"));
+        // Disabled by its fieldset; the fieldset's own legend is not, and
+        // neither is content that is not a form control.
+        assert_eq!(click(&mut engine, "fs"), js_string("up:fs"));
+        assert_eq!(click(&mut engine, "lg"), js_string("up:lg click:lg"));
+        assert_eq!(click(&mut engine, "plain"), js_string("up:plain click:plain"));
+        // Script enables it again.
+        js(&mut engine, id, "$('off').disabled = false");
+        assert_eq!(click(&mut engine, "off"), js_string("up:off click:off"));
+    }
+
+    // A click on a label's text did not focus the field it labels, so the
+    // usual "click the word, then type" did nothing. The labeled control
+    // (HTML §4.10.4: the `for` target, else the first labelable
+    // descendant) takes the focus.
+
+    const LABEL_PAGE: &str = concat!(
+        r#"<html><body id="b" style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="l" for="q">Name</label></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="w">Wrap <input id="r" name="r"></label></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="n" for="missing">Nobody</label></div>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_label_focuses_its_control() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, LABEL_PAGE).expect("load_html");
+        js(&mut engine, id, "var $ = function (i) { return document.getElementById(i); };");
+        let node = |engine: &Engine, name: &str| {
+            engine.views[&id].document.as_ref().unwrap().get_element_by_id(name).unwrap().id
+        };
+        let (q, r) = (node(&engine, "q"), node(&engine, "r"));
+
+        // `for` names the field.
+        let outcome = engine.click_at_point(id, 12.0, 52.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert_eq!(js(&mut engine, id, "document.activeElement.id"), js_string("q"));
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("a"));
+
+        // The label's own text, with the field inside the label.
+        engine.click_at_point(id, 12.0, 92.0);
+        assert_eq!(engine.focused_node(id), Some(r));
+        assert_eq!(js(&mut engine, id, "document.activeElement.id"), js_string("r"));
+
+        // A label with no control focuses nothing.
+        let outcome = engine.click_at_point(id, 12.0, 132.0);
+        assert_eq!(outcome.focused, None);
+        assert_eq!(engine.focused_node(id), None);
+
+        // The way a person clicks, a press and then a release: the focus
+        // moves at the press, and the label's field takes it at the release.
+        engine.click_at_point(id, 12.0, 92.0);
+        assert_eq!(engine.focused_node(id), Some(r));
+        engine.mouse_down_at_point(id, 12.0, 52.0);
+        let outcome = engine.click_at_point(id, 12.0, 52.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert_eq!(js(&mut engine, id, "document.activeElement.id"), js_string("q"));
     }
 
     // Pete's live testing, continued: typing in a field told the page
