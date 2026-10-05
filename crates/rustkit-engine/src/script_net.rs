@@ -116,12 +116,12 @@ pub(crate) async fn pump(
     out
 }
 
-/// A request the live loop has started and not yet delivered. Dropping it
-/// abandons the request.
-pub(crate) struct LiveRequest {
-    id: u64,
-    outcome: Pin<Box<dyn Future<Output = NetDelivery>>>,
-}
+/// Work the live loop has started and not yet taken the result of. It runs
+/// only while [`settle_live`] polls it; dropping it abandons it.
+pub(crate) type LiveFuture<T> = Pin<Box<dyn Future<Output = T>>>;
+
+/// A script request that is out: its id and, in the end, its outcome.
+pub(crate) type LiveRequest = LiveFuture<(u64, NetDelivery)>;
 
 /// Start `request` for the live loop. Nothing runs until
 /// [`settle_live`] polls it; it fails as a network error at `deadline`.
@@ -131,22 +131,16 @@ pub(crate) fn start_live(
     request: NetRequest,
     deadline: tokio::time::Instant,
 ) -> LiveRequest {
-    LiveRequest {
-        id: request.id,
-        outcome: Box::pin(async move { execute(&policy, &loader, deadline, &request).await }),
-    }
+    Box::pin(async move { (request.id, execute(&policy, &loader, deadline, &request).await) })
 }
 
-/// Let the requests that are out make progress for at most `slice`, and take
-/// the ones that have an outcome, in the order the page made them. Returns
-/// as soon as one has; the rest stay in `in_flight` for a later turn.
+/// Let what is out make progress for at most `slice`, and take the results
+/// that are ready, in the order the work was started. Returns as soon as one
+/// is; the rest stays in `in_flight` for a later turn.
 ///
-/// The requests live on the runtime that polls them: every turn of one view
-/// must come from the same runtime.
-pub(crate) async fn settle_live(
-    in_flight: &mut Vec<LiveRequest>,
-    slice: std::time::Duration,
-) -> Vec<(u64, NetDelivery)> {
+/// The work lives on the runtime that polls it: every turn of one view must
+/// come from the same runtime.
+pub(crate) async fn settle_live<T>(in_flight: &mut Vec<LiveFuture<T>>, slice: std::time::Duration) -> Vec<T> {
     let mut done = Vec::new();
     if in_flight.is_empty() {
         return done;
@@ -156,8 +150,11 @@ pub(crate) async fn settle_live(
     std::future::poll_fn(|cx| {
         let mut i = 0;
         while i < in_flight.len() {
-            match in_flight[i].outcome.as_mut().poll(cx) {
-                Poll::Ready(outcome) => done.push((in_flight.remove(i).id, outcome)),
+            match in_flight[i].as_mut().poll(cx) {
+                Poll::Ready(outcome) => {
+                    drop(in_flight.remove(i));
+                    done.push(outcome);
+                }
                 Poll::Pending => i += 1,
             }
         }

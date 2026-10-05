@@ -424,6 +424,37 @@ async fn fetch_raster_image(
     image_manager.insert_fetched(&url, content_type.as_deref(), &body)
 }
 
+/// What one image pass is to fetch, and everything the fetch needs
+/// ([`Engine::plan_image_loads`]). It owns its parts, so the fetch can
+/// outlive the call that planned it.
+struct ImagePlan {
+    /// Raster images (and anything not named `.svg`).
+    pending: Vec<Url>,
+    svg_urls: Vec<Url>,
+    /// Images already in a cache that the pass counts as loaded.
+    already_loaded: usize,
+    budget: std::time::Duration,
+    deadline: tokio::time::Instant,
+    referrer: SubresourceReferrer,
+    loader: Arc<ResourceLoader>,
+    image_manager: Arc<ImageManager>,
+}
+
+impl ImagePlan {
+    /// Nothing to fetch.
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.svg_urls.is_empty()
+    }
+}
+
+/// What an image pass fetched ([`Engine::fetch_planned_images`]). Raster
+/// images are already in the image manager's cache; the SVG documents wait
+/// here for the engine's.
+struct FetchedImages {
+    loaded: usize,
+    svgs: Vec<(String, rustkit_svg::SvgDocument)>,
+}
+
 struct ViewState {
     id: EngineViewId,
     viewhost_id: ViewId,
@@ -544,6 +575,9 @@ struct ViewState {
     /// Script requests the live loop has started for the current document
     /// and not yet delivered.
     live_requests: Vec<script_net::LiveRequest>,
+    /// Image fetches the live loop has started for what the current
+    /// document's scripts added, and not yet kept.
+    live_images: Vec<script_net::LiveFuture<FetchedImages>>,
 }
 
 /// Engine configuration.
@@ -725,9 +759,9 @@ pub struct LivePump {
     pub timers_ran: u32,
     /// Script network requests and module fetches that were answered.
     pub requests: usize,
-    /// Script network requests that are out and not answered yet. While
-    /// there are any, the loop has to keep turning: nothing else wakes it
-    /// when an answer comes.
+    /// Script network requests and script-added images that are out and
+    /// have not arrived yet. While there are any, the loop has to keep
+    /// turning: nothing else wakes it when one comes.
     pub in_flight: usize,
     /// The page was laid out again: a callback wrote to the DOM, or an image
     /// it added arrived.
@@ -1422,6 +1456,7 @@ impl Engine {
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
+            live_images: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -1496,6 +1531,7 @@ impl Engine {
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
+            live_images: Vec::new(),
         };
 
         let id = view_state.id;
@@ -1579,6 +1615,7 @@ impl Engine {
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
+            live_images: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -2713,18 +2750,37 @@ impl Engine {
             Ok(relaid_out) => out.relaid_out = relaid_out,
             Err(e) => debug!(?id, error = %e, "relayout after a live turn failed"),
         }
-        // What the callbacks added may show images the load never saw.
+        // What the callbacks added may show images the load never saw. Their
+        // fetch starts here and no turn waits for it (until 2026-10-05 this
+        // one did, for as long as the slowest image took).
         if out.relaid_out {
-            match self.load_images_added_by_scripts(id).await {
-                Ok(0) => {}
-                Ok(count) => {
-                    info!(count, "Loaded images added by live page scripts");
-                    if let Err(e) = self.relayout(id) {
-                        debug!(?id, error = %e, "relayout after live images failed");
+            match self.plan_image_loads(id, true) {
+                Ok(Some(plan)) if !plan.is_empty() => {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
                     }
                 }
-                Err(e) => debug!(?id, error = %e, "Failed to load images added by live page scripts"),
+                Ok(_) => {}
+                Err(e) => debug!(?id, error = %e, "Failed to look for images added by live page scripts"),
             }
+        }
+        let fetched = match self.views.get_mut(&id) {
+            Some(view) => script_net::settle_live(&mut view.live_images, LIVE_NETWORK_SLICE).await,
+            None => Vec::new(),
+        };
+        let mut arrived = 0;
+        for images in fetched {
+            arrived += self.keep_fetched_images(images);
+        }
+        if arrived > 0 {
+            info!(count = arrived, "Loaded images added by live page scripts");
+            match self.relayout(id) {
+                Ok(()) => out.relaid_out = true,
+                Err(e) => debug!(?id, error = %e, "relayout after live images failed"),
+            }
+        }
+        if let Some(view) = self.views.get(&id) {
+            out.in_flight += view.live_images.len();
         }
         if out.timers_ran > 0 || out.requests > 0 {
             debug!(?id, ?out, "Live turn");
@@ -3946,6 +4002,7 @@ impl Engine {
         view.script_policy = None;
         // The last document's requests are nobody's now.
         view.live_requests.clear();
+        view.live_images.clear();
 
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
@@ -4259,6 +4316,7 @@ impl Engine {
         view.script_policy = None;
         // The last document's requests are nobody's now.
         view.live_requests.clear();
+        view.live_images.clear();
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -9837,10 +9895,21 @@ impl Engine {
     }
 
     async fn load_images_pass(&mut self, id: EngineViewId, only_new: bool) -> Result<usize, EngineError> {
+        let Some(plan) = self.plan_image_loads(id, only_new)? else {
+            return Ok(0);
+        };
+        let fetched = Self::fetch_planned_images(plan).await;
+        Ok(self.keep_fetched_images(fetched))
+    }
+
+    /// The first part of an image pass, which waits for nothing: find the
+    /// images the document shows, record them as attempted, and sort out
+    /// what there is to fetch. `None`: the view has no document.
+    fn plan_image_loads(&mut self, id: EngineViewId, only_new: bool) -> Result<Option<ImagePlan>, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         let Some(document) = &view.document else {
-            return Ok(0);
+            return Ok(None);
         };
 
         let base_url = view.url.as_ref();
@@ -9860,14 +9929,6 @@ impl Engine {
         }
 
         let image_manager = self.image_manager.clone();
-
-        // Fetch concurrently with bounded parallelism. The serial loop cost
-        // 69 seconds on a Wikipedia article whose ~30 thumbnails each burned
-        // a sequential round-trip failing (2026-08-05 live session);
-        // buffer_unordered polls the futures on this thread, so no Send
-        // bounds are required and the engine stays single-threaded.
-        use futures::stream::StreamExt;
-        const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
 
         let mut pending = Vec::new();
         let mut svg_urls = Vec::new();
@@ -9897,16 +9958,40 @@ impl Engine {
             }
         }
 
+        Ok(Some(ImagePlan {
+            pending,
+            svg_urls,
+            already_loaded: loaded,
+            budget: std::time::Duration::from_millis(self.config.subresource_budget_ms),
+            deadline: self.subresource_deadline(),
+            referrer: self.subresource_referrer(id),
+            loader: self.loader.clone(),
+            image_manager,
+        }))
+    }
+
+    /// The second part: fetch and decode what the plan lists. It borrows
+    /// nothing from the engine, so the load awaits it in place and the live
+    /// loop keeps it across turns.
+    async fn fetch_planned_images(plan: ImagePlan) -> FetchedImages {
+        // Fetch concurrently with bounded parallelism. The serial loop cost
+        // 69 seconds on a Wikipedia article whose ~30 thumbnails each burned
+        // a sequential round-trip failing (2026-08-05 live session);
+        // buffer_unordered polls the futures on this thread, so no Send
+        // bounds are required and the engine stays single-threaded.
+        use futures::stream::StreamExt;
+        const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
+
+        let ImagePlan { pending, svg_urls, already_loaded, budget, deadline, referrer, loader, image_manager } = plan;
+        let mut loaded = already_loaded;
+        let mut svgs = Vec::new();
+
         // Concurrent like the raster lane (Prometheus, #104 R1: SVG was left
         // serial while images were parallelized). Parsing happens inside the
-        // futures; only the cache insert is serialized afterwards, because
-        // &mut self cannot be held across them.
-        let budget = std::time::Duration::from_millis(self.config.subresource_budget_ms);
-        let deadline = self.subresource_deadline();
-        let referrer = self.subresource_referrer(id);
+        // futures; the engine's cache insert comes afterwards, in
+        // `keep_fetched_images`.
         {
-            use futures::stream::StreamExt;
-            let loader = self.loader.clone();
+            let loader = loader.clone();
             let referrer = &referrer;
             let parsed: Vec<Option<(String, rustkit_svg::SvgDocument)>> =
                 futures::stream::iter(svg_urls.into_iter().map(|url| {
@@ -9946,7 +10031,7 @@ impl Engine {
                 .await;
 
             for (url, doc) in parsed.into_iter().flatten() {
-                self.svg_cache.insert(url, doc);
+                svgs.push((url, doc));
                 loaded += 1;
             }
         }
@@ -9954,7 +10039,6 @@ impl Engine {
         // Each raster load is loaded (true), failed (false), or turned out to
         // be SVG by its type and parsed here for the SVG cache.
         type RasterOutcome = (bool, Option<(String, rustkit_svg::SvgDocument)>);
-        let loader = self.loader.clone();
         let referrer = &referrer;
         let results: Vec<RasterOutcome> = futures::stream::iter(pending.into_iter().map(|url| {
             let image_manager = image_manager.clone();
@@ -10000,13 +10084,18 @@ impl Engine {
         .await;
 
         for (ok, svg) in results {
-            if let Some((url, doc)) = svg {
-                self.svg_cache.insert(url, doc);
-            }
+            svgs.extend(svg);
             loaded += usize::from(ok);
         }
 
-        Ok(loaded)
+        FetchedImages { loaded, svgs }
+    }
+
+    /// The last part: keep what a fetch brought. Returns how many images
+    /// the pass loaded.
+    fn keep_fetched_images(&mut self, fetched: FetchedImages) -> usize {
+        self.svg_cache.extend(fetched.svgs);
+        fetched.loaded
     }
 
     /// Who a subresource request comes from: the document URL and the

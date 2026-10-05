@@ -241,3 +241,56 @@ fn a_slow_request_does_not_hold_the_live_turn() {
     let ticks: f64 = ticks.trim_start_matches("Number(").trim_end_matches(')').parse().unwrap();
     assert!(ticks >= 3.0, "only {ticks} 10 ms ticks ran while a 300 ms request was out");
 }
+
+/// The same for an image a script adds after the load (tools/real_window's
+/// `h4_slow`: an image held three seconds stopped the page for three
+/// seconds). The turn that finds the image starts its fetch and returns; a
+/// later turn keeps it and lays the page out again.
+#[test]
+fn a_slow_image_added_by_a_script_does_not_hold_the_live_turn() {
+    let page = r#"<html><body style="margin:0"><div style="height:40px">early</div></body></html>"#;
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="red"/></svg>"#;
+    let (mut engine, view, server) = load(
+        EngineConfig::default(),
+        vec![("/", "text/html", page.to_string()), ("/held.svg", "image/svg+xml", svg.to_string())],
+    );
+    let image = format!("http://127.0.0.1:{}/held.svg", server.port);
+    engine
+        .execute_script(
+            view,
+            "setTimeout(function () { \
+               var img = document.createElement('img'); img.setAttribute('src', '/held.svg'); \
+               document.body.appendChild(img); }, 10);",
+        )
+        .unwrap();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let first = rt.block_on(engine.pump_live(view, 16));
+    let held = started.elapsed();
+    assert!(first.relaid_out, "the turn lays out what its timer appended");
+    assert!(
+        held < std::time::Duration::from_millis(150),
+        "the turn that found an image the server holds for 300 ms lasted {held:?}"
+    );
+    assert!(!engine.svg_cache.contains_key(&image));
+
+    let mut turns = 0;
+    loop {
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the slow image never arrived");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let turn = rt.block_on(engine.pump_live(view, 5));
+        turns += 1;
+        if engine.svg_cache.contains_key(&image) {
+            assert!(turn.relaid_out, "the turn that keeps the image lays the page out again");
+            break;
+        }
+        assert!(!turn.relaid_out, "nothing changed on turn {turns}");
+    }
+    assert!(turns > 3, "the image came on turn {turns}; it should take many 5 ms turns");
+    // The page and the image, once.
+    assert_eq!(server.hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
