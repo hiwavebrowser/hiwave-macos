@@ -854,14 +854,159 @@
     });
     tag(DateTimeFormat.prototype, 'Intl.DateTimeFormat');
 
+    // ---- Segmenter (ECMA-402 Intl.Segmenter)
+    function Segmenter(locales, options) {
+        if (!(this instanceof Segmenter)) throw new TypeError("Constructor Intl.Segmenter requires 'new'");
+        var o = toOptions(options), r = {};
+        r.locale = resolveLocale(locales);
+        getOpt(o, 'localeMatcher', ['lookup', 'best fit'], 'best fit');
+        r.granularity = getOpt(o, 'granularity', ['grapheme', 'word', 'sentence'], 'grapheme');
+        hidden(this, '_intl', r);
+    }
+    var segCheck = checker(Segmenter, 'Segmenter');
+
+    function segmentGraphemes(str) {
+        var segments = [], i = 0, len = str.length;
+        while (i < len) {
+            var start = i;
+            var code = str.charCodeAt(i);
+            if (code >= 0xD800 && code <= 0xDBFF && i + 1 < len) {
+                var next = str.charCodeAt(i + 1);
+                if (next >= 0xDC00 && next <= 0xDFFF) {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            while (i < len) {
+                var c = str.charCodeAt(i);
+                if ((c >= 0x0300 && c <= 0x036F) || (c >= 0x1DC0 && c <= 0x1DFF) || (c >= 0x20D0 && c <= 0x20FF) || (c >= 0xFE20 && c <= 0xFE2F) || c === 0x200D) {
+                    i++;
+                    if (c === 0x200D && i < len) {
+                        var c2 = str.charCodeAt(i);
+                        if (c2 >= 0xD800 && c2 <= 0xDBFF && i + 1 < len) i += 2;
+                        else i += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            segments.push({ segment: str.slice(start, i), index: start, input: str, isWordLike: undefined });
+        }
+        return segments;
+    }
+
+    function segmentWords(str) {
+        var segments = [], i = 0, len = str.length;
+        var isWordChar = function (c) {
+            var code = c.charCodeAt(0);
+            return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 95 || code > 127;
+        };
+        while (i < len) {
+            var start = i;
+            var wordLike = isWordChar(str.charAt(i));
+            if (wordLike) {
+                while (i < len && isWordChar(str.charAt(i))) i++;
+            } else {
+                var isSpace = /\s/.test(str.charAt(i));
+                if (isSpace) {
+                    while (i < len && /\s/.test(str.charAt(i))) i++;
+                } else {
+                    i++;
+                }
+            }
+            segments.push({ segment: str.slice(start, i), index: start, input: str, isWordLike: wordLike });
+        }
+        return segments;
+    }
+
+    function segmentSentences(str) {
+        var segments = [], i = 0, len = str.length;
+        while (i < len) {
+            var start = i;
+            while (i < len) {
+                var ch = str.charAt(i);
+                i++;
+                if (ch === '.' || ch === '!' || ch === '?' || ch === '\n') {
+                    while (i < len && str.charAt(i) === ' ') i++;
+                    break;
+                }
+            }
+            segments.push({ segment: str.slice(start, i), index: start, input: str, isWordLike: undefined });
+        }
+        return segments;
+    }
+
+    function getSegments(granularity, str) {
+        if (granularity === 'word') return segmentWords(str);
+        if (granularity === 'sentence') return segmentSentences(str);
+        return segmentGraphemes(str);
+    }
+
+    function Segments(r, input) {
+        hidden(this, '_intl', r);
+        hidden(this, '_input', input);
+    }
+    methods(Segments.prototype, {
+        containing: function containing(index) {
+            index = Number(index);
+            if (isNaN(index)) index = 0;
+            else index = Math.floor(index);
+            var str = this._input;
+            if (index < 0 || index >= str.length) return undefined;
+            var segs = getSegments(this._intl.granularity, str);
+            for (var i = 0; i < segs.length; i++) {
+                var s = segs[i];
+                if (index >= s.index && index < s.index + s.segment.length) {
+                    return s;
+                }
+            }
+            return undefined;
+        }
+    });
+    if (typeof Symbol === 'function' && Symbol.iterator) {
+        hidden(Segments.prototype, Symbol.iterator, function () {
+            var segs = getSegments(this._intl.granularity, this._input);
+            var idx = 0;
+            var iter = {};
+            methods(iter, {
+                next: function next() {
+                    if (idx < segs.length) {
+                        return { value: segs[idx++], done: false };
+                    }
+                    return { value: undefined, done: true };
+                }
+            });
+            hidden(iter, Symbol.iterator, function () { return this; });
+            return iter;
+        });
+    }
+    tag(Segments.prototype, 'Intl.Segments');
+
+    methods(Segmenter.prototype, {
+        segment: function segment(input) {
+            var r = segCheck(this, 'segment')._intl;
+            if (input === undefined) input = '';
+            else input = String(input);
+            return new Segments(r, input);
+        },
+        resolvedOptions: function resolvedOptions() {
+            var r = segCheck(this, 'resolvedOptions')._intl;
+            return { locale: r.locale, granularity: r.granularity };
+        }
+    });
+    tag(Segmenter.prototype, 'Intl.Segmenter');
+
     // ---- the namespace
     var Intl = {};
     methods(Intl, {
         getCanonicalLocales: function getCanonicalLocales(locales) { return canonicalList(locales); },
         NumberFormat: NumberFormat, DateTimeFormat: DateTimeFormat, PluralRules: PluralRules, Collator: Collator,
-        ListFormat: ListFormat, RelativeTimeFormat: RelativeTimeFormat
+        ListFormat: ListFormat, RelativeTimeFormat: RelativeTimeFormat, Segmenter: Segmenter
     });
-    [NumberFormat, DateTimeFormat, PluralRules, Collator, ListFormat, RelativeTimeFormat].forEach(function (C) {
+    [NumberFormat, DateTimeFormat, PluralRules, Collator, ListFormat, RelativeTimeFormat, Segmenter].forEach(function (C) {
         hidden(C, 'supportedLocalesOf', function supportedLocalesOf(locales, options) { return supportedOf(locales, options); });
     });
     tag(Intl, 'Intl');
