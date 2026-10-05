@@ -180,3 +180,55 @@ fn a_fetch_made_after_the_load_is_answered_on_the_next_live_turn() {
     // The page and the one allowed request; the refused one never connected.
     assert_eq!(server.hits.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+/// The loop that calls `pump_live` is the app's UI thread, so a turn may not
+/// wait for the network. A request the server holds (300 ms here, three
+/// seconds in tools/real_window's `h1_slow`) used to hold the turn that
+/// took it, up to two seconds, and then fail: the window took no input and
+/// drew nothing meanwhile, and a slower request never arrived. The turn
+/// returns with the request still out, the page's timers run on the turns
+/// in between, and the turn after the answer comes delivers it.
+#[test]
+fn a_slow_request_does_not_hold_the_live_turn() {
+    let page = r#"<html><body style="margin:0"><div style="height:40px">early</div></body></html>"#;
+    let (mut engine, view, _server) = load(
+        EngineConfig::default(),
+        vec![("/", "text/html", page.to_string())],
+    );
+    engine
+        .execute_script(
+            view,
+            "window.log = []; window.ticks = 0; window.ticksAtAnswer = -1; \
+             setInterval(function () { ticks += 1; }, 10); \
+             fetch('/slow').then(function (r) { return r.text(); }).then(function (t) { \
+               ticksAtAnswer = ticks; log.push('slow:' + t); });",
+        )
+        .unwrap();
+
+    // One runtime for every turn, as in the app: the connection lives on it.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    rt.block_on(engine.pump_live(view, 16));
+    let held = started.elapsed();
+    assert!(
+        held < std::time::Duration::from_millis(150),
+        "the turn that took a request the server holds for 300 ms lasted {held:?}"
+    );
+
+    let mut turns = 0;
+    while engine.execute_script(view, "log.length").unwrap() == "Number(0)" {
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the slow request never arrived");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        rt.block_on(engine.pump_live(view, 5));
+        turns += 1;
+    }
+    assert_eq!(engine.execute_script(view, "log.join('|')").unwrap(), r#"String("slow:/slow")"#);
+    assert!(turns > 3, "the answer came on turn {turns}; it should take many 5 ms turns");
+    // The page's clock ran while the request was out.
+    let ticks = engine.execute_script(view, "ticksAtAnswer").unwrap();
+    let ticks: f64 = ticks.trim_start_matches("Number(").trim_end_matches(')').parse().unwrap();
+    assert!(ticks >= 3.0, "only {ticks} 10 ms ticks ran while a 300 ms request was out");
+}
