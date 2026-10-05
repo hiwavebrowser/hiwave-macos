@@ -69,6 +69,7 @@ of a run (about a minute for all checks).
 | `h4` | H4 images | `h4_images.html`: five flat-colour images | no |
 | `h4_slow` | H4 | `h4_slow.html`: a 200 ms tick, then one image held for 3 s | no |
 | `h6` | H6 scroll | `h6_scroll.html`: three 1500 px bands | yes |
+| `h8` | H8 error page | `h8_error.html`, which the server answers with 403: its script and its image | no |
 
 Pages use targets that fill the viewport or flat colours counted over the
 whole frame, so no check depends on where the content view sits inside the

@@ -104,7 +104,9 @@ class Fixture:
                     return self.send(200, "image/png", flat_png(bytes.fromhex(m.group(2))))
                 page = PAGES / url.path.lstrip("/")
                 if page.is_file() and page.parent == PAGES:
-                    return self.send(200, "text/html; charset=utf-8", page.read_bytes())
+                    # h8's page comes as a server's error page does.
+                    code = 403 if page.name == "h8_error.html" else 200
+                    return self.send(code, "text/html; charset=utf-8", page.read_bytes())
                 self.send(404, "text/plain", b"not found")
 
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -558,7 +560,24 @@ class Driver:
         self.expect(c, "the first screen is the red band only", top[RED] > 1000 and top[GREEN] == 0, str(top))
         self.expect(c, "after the wheel the green band is on screen", down[GREEN] > 1000, str(down))
 
-    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6"]
+    def h8(self):
+        """H8: a server's error page (a 403 with a body) is shown as the page."""
+        c = "h8"
+        if not self.open_page(c, "h8_error.html"):
+            return
+        self.expect(c, "the error page's script ran", self.fixture.wait("beacon?h8-ran", 10, self.since))
+        self.expect(c, "the app asked for the error page's image",
+                    self.fixture.wait("/img/00ff00.png", 5, self.since))
+        m = self.app.wait_log(r"Showing the body of an error response", 2)
+        self.expect(c, "the engine logged that it showed an error response's body", bool(m),
+                    "" if m else "no such line; 'HTTP error' in the log: %s" % ("HTTP error" in self.app.log_text()))
+        time.sleep(1.0)
+        frame = self.frame(c, "loaded", [GREEN])
+        if frame is None:
+            return self.not_run(c, "the window shows the error page's green image", self.why_not("Screen Recording"))
+        self.expect(c, "the window shows the error page's green image", frame[GREEN] > 2000, str(frame))
+
+    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h8"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
