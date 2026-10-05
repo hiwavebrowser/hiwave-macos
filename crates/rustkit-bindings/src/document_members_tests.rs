@@ -42,6 +42,12 @@ fn document_location_is_window_location() {
 }
 
 #[test]
+fn document_default_view_is_window() {
+    let b = bound();
+    assert_eq!(ev(&b, "[document.defaultView === window, typeof document.defaultView].join()"), "true,object");
+}
+
+#[test]
 fn state_members_read_as_a_visible_focused_utf8_html_document() {
     let b = bound();
     assert_eq!(
