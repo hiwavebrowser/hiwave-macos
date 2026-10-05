@@ -3602,6 +3602,12 @@ mod tests {
             ComputedStyle::new(),
         ));
         assert!(!crate::fragment::in_l0_inline_class(&row));
+        // A grid container is not measured by the estimators either.
+        let mut grid_row = row.clone();
+        grid_row.children.pop();
+        assert!(crate::fragment::in_l0_inline_class(&grid_row));
+        grid_row.style.display = rustkit_css::Display::Grid;
+        assert!(!crate::fragment::in_l0_inline_class(&grid_row));
         row.dimensions.content = Rect::new(0.0, 0.0, 300.0, 20.0);
         container.children.push(row);
 

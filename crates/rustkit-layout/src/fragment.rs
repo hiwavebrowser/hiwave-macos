@@ -313,35 +313,44 @@ pub(crate) fn in_l0_class(item: &LayoutBox) -> bool {
         && holds_text_or_control(item)
 }
 
-/// An unsized form control somewhere in the subtree, and no unsized image.
-/// The first is what the width estimators could not see until they grew a
-/// control arm (`own_max_content_width`, `form_control_min_content_width`);
-/// the second they still cannot.
-fn unsized_replaced(b: &LayoutBox) -> (bool, bool) {
+/// (an unsized form control somewhere in the subtree, something in the
+/// subtree the width estimators do not measure). The first is what they
+/// could not see until they grew a control arm (`own_max_content_width`,
+/// `form_control_min_content_width`). The second is an unsized image, or
+/// a grid container: `own_max_content_width` has no grid arm, so a grid
+/// answers its widest child and not the sum of its columns.
+fn unsized_control_and_unmeasured(b: &LayoutBox) -> (bool, bool) {
     if b.style.display == rustkit_css::Display::None {
         return (false, false);
     }
     let unsized_box = !matches!(b.style.width, Length::Px(_));
     let mut control = unsized_box && matches!(b.box_type, BoxType::FormControl(_));
-    let mut image = unsized_box && matches!(b.box_type, BoxType::Image { .. });
+    let mut unmeasured =
+        unsized_box && (matches!(b.box_type, BoxType::Image { .. }) || b.style.display.is_grid());
     for child in &b.children {
-        let (c, i) = unsized_replaced(child);
+        let (c, u) = unsized_control_and_unmeasured(child);
         control |= c;
-        image |= i;
+        unmeasured |= u;
     }
-    (control, image)
+    (control, unmeasured)
 }
 
-/// Whether `item` is in the L0 class for an inline-size query: a flex or
-/// grid container, inline size `auto`, holding a form control with no
-/// specified width. An unsized image anywhere in the subtree keeps the
-/// item out: its natural size is not something the estimators measure.
+/// Whether `item` is in the L0 class for an inline-size query: a flex
+/// container, inline size `auto`, holding a form control with no
+/// specified width.
+///
+/// Out of the class, and so answered as before: an item with an unsized
+/// image anywhere in its subtree, and an item that is, or holds, a grid
+/// container without a specified width. The design puts a nested grid
+/// item in the slice. It stays out here because the answer would be the
+/// estimators' and they do not measure a grid: on the fixture a grid of
+/// two `auto` columns answered 67.80 where Chromium gives 115.73.
 pub(crate) fn in_l0_inline_class(item: &LayoutBox) -> bool {
     let s = &item.style;
-    (s.display.is_flex() || s.display.is_grid())
+    s.display.is_flex()
         && s.writing_mode == WritingMode::HorizontalTb
         && matches!(s.width, Length::Auto)
-        && unsized_replaced(item) == (true, false)
+        && unsized_control_and_unmeasured(item) == (true, false)
 }
 
 /// The fit-content arm of the query (§4, call site 2): the inline size of
