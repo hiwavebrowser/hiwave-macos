@@ -36,10 +36,10 @@ fn intl_is_an_object_with_its_constructors() {
             &b,
             "[typeof Intl, Object.prototype.toString.call(Intl), typeof Intl.NumberFormat, \
               typeof Intl.DateTimeFormat, typeof Intl.PluralRules, typeof Intl.Collator, \
-              typeof Intl.ListFormat, typeof Intl.RelativeTimeFormat, \
+              typeof Intl.ListFormat, typeof Intl.RelativeTimeFormat, typeof Intl.Segmenter, \
               typeof Intl.getCanonicalLocales].join(',')"
         ),
-        "object,[object Intl],function,function,function,function,function,function,function"
+        "object,[object Intl],function,function,function,function,function,function,function,function"
     );
 }
 
@@ -491,5 +491,92 @@ fn canonical_locales_and_supported_locales_of() {
             "var t; try { Intl.getCanonicalLocales('en_US'); t = 'no throw'; } catch (e) { t = e.name; } t"
         ),
         "RangeError"
+    );
+}
+
+#[test]
+fn intl_segmenter_grapheme_word_and_sentence() {
+    let b = bindings();
+    assert_eq!(
+        ev(
+            &b,
+            "[typeof Intl.Segmenter, typeof Intl.Segmenter.supportedLocalesOf].join(',')"
+        ),
+        "function,function"
+    );
+    // resolvedOptions default
+    assert_eq!(
+        ev(
+            &b,
+            "var s = new Intl.Segmenter('en-US'); \
+             var o = s.resolvedOptions(); \
+             [o.locale, o.granularity].join(',')"
+        ),
+        "en-US,grapheme"
+    );
+    // options granularity
+    assert_eq!(
+        ev(
+            &b,
+            "var s = new Intl.Segmenter('en-US', { granularity: 'word' }); \
+             s.resolvedOptions().granularity"
+        ),
+        "word"
+    );
+    // invalid granularity throws RangeError
+    assert_eq!(
+        ev(
+            &b,
+            "var t; try { new Intl.Segmenter('en', { granularity: 'invalid' }); t = 'no throw'; } \
+             catch (e) { t = e.name; } t"
+        ),
+        "RangeError"
+    );
+    // segment iterating graphemes
+    assert_eq!(
+        ev(
+            &b,
+            "var seg = new Intl.Segmenter('en', { granularity: 'grapheme' }); \
+             var res = []; \
+             for (var item of seg.segment('Hello!')) { \
+                 res.push(item.segment + '@' + item.index + '@' + (typeof item.isWordLike)); \
+             } \
+             res.join('|')"
+        ),
+        "H@0@undefined|e@1@undefined|l@2@undefined|l@3@undefined|o@4@undefined|!@5@undefined"
+    );
+    // segment iterating words with isWordLike
+    assert_eq!(
+        ev(
+            &b,
+            "var seg = new Intl.Segmenter('en', { granularity: 'word' }); \
+             var res = []; \
+             for (var item of seg.segment('Hello, world!')) { \
+                 res.push(item.segment + ':' + item.isWordLike + '@' + item.index); \
+             } \
+             res.join('|')"
+        ),
+        "Hello:true@0|,:false@5| :false@6|world:true@7|!:false@12"
+    );
+    // containing(index)
+    assert_eq!(
+        ev(
+            &b,
+            "var seg = new Intl.Segmenter('en', { granularity: 'word' }); \
+             var segments = seg.segment('Hello world'); \
+             var c = segments.containing(7); \
+             [c.segment, c.index, c.isWordLike].join(',')"
+        ),
+        "world,6,true"
+    );
+    // containing out of bounds returns undefined
+    assert_eq!(
+        ev(
+            &b,
+            "var seg = new Intl.Segmenter('en'); \
+             var segments = seg.segment('abc'); \
+             [String(segments.containing(-1)), String(segments.containing(3))].join(',')"
+        ),
+        "undefined,undefined"
     );
 }
