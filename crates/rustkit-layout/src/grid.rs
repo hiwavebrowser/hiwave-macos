@@ -1888,14 +1888,26 @@ pub fn layout_grid_container(
                     child.dimensions.content.height = area_height;
                 }
             } else if child.style.display.is_grid() {
-                // Nested grid container
+                // Nested grid container. As in the flex arm above: the grid
+                // pass sizes an auto-height container by its content and
+                // writes that over the area, the content height is what
+                // Phase 9.5 sizes the row from, and a stretched item gets
+                // its area back. Without this it kept the content height
+                // unless a row repair happened to fire.
+                let area_height = child.dimensions.content.height;
                 layout_grid_container(
                     child,
                     child.dimensions.content.width,
                     child.dimensions.content.height,
                 );
+                let content_height = child.dimensions.content.height;
                 if let Some(slot) = real_heights.get_mut(item_idx) {
-                    *slot = Some(child.dimensions.content.height);
+                    *slot = Some(content_height);
+                }
+                if area_height > content_height
+                    && stretches_to_its_row(child, &container_align_items)
+                {
+                    child.dimensions.content.height = area_height;
                 }
             } else {
                 // Block container: re-layout children with correct positioning and height resolution.
