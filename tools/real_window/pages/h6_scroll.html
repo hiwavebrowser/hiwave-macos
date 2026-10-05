@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H6 scroll</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  .band { height: 1500px; }
+  #a { background: #ff0000; }
+  #b { background: #00ff00; }
+  #c { background: #0000ff; }
+</style>
+<!-- Three bands, each taller than any window: the first screen is all red,
+     and green can only be on screen after the page has scrolled. -->
+<div id="a" class="band"></div>
+<div id="b" class="band"></div>
+<div id="c" class="band"></div>
+<script>
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  var sent = false;
+  window.addEventListener('scroll', function () {
+    if (!sent && window.scrollY > 0) { sent = true; beacon('h6-scroll'); }
+  });
+</script>
