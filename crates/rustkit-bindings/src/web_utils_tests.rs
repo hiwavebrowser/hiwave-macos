@@ -177,13 +177,23 @@ fn structured_clone_shares_buffers_and_rejects_platform_objects() {
     );
     // Only own enumerable string keys; the prototype becomes Object.prototype.
     assert_eq!(ev(&b, "class K { constructor() { this.a = 1; } } var k = structuredClone(new K()); (Object.getPrototypeOf(k) === Object.prototype) + ',' + k.a"), "true,1");
-    // Wrapped BigInts stay wrapped BigInts.
+    // Primitive wrappers stay wrappers (Boolean/Number/String and BigInt).
+    // Object(10n) used to clone as a plain object before the BigInt arm.
     assert_eq!(
         ev(
             &b,
             "var big = structuredClone(Object(10n)); typeof big + ',' + String(big.valueOf())"
         ),
         "object,10"
+    );
+    assert_eq!(
+        ev(
+            &b,
+            "var w = structuredClone({ b: Object(true), n: Object(4), s: Object('z') }); \
+             [w.b instanceof Boolean, w.b.valueOf(), w.n instanceof Number, w.n.valueOf(), \
+              w.s instanceof String, String(w.s.valueOf())].join()"
+        ),
+        "true,true,true,4,true,z"
     );
     // Nodes, WeakMaps and promises are not serializable.
     b.set_document(Rc::new(
