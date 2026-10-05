@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Pool ab2.py logs: per site, the median of per-pair B/A.
+"""Pool ab2.py / ab_flag.py logs: per site, the median of per-pair B/A.
 
     ab2_summary.py <log> [<log> ...] [--max-load 6]
 
-A pair counts only if both of its loads started at or below --max-load and
-(when the log records them) logged the same number of layout builds. Prints
-the AB/BA split, so a pooled read can be checked against the A/B standard
-(at least 5 AB and 5 BA pairs).
+A pair counts only if both of its loads started at or below --max-load.
+Every such pair with two finished loads counts; the pairs whose loads logged
+equal build counts are summarised beside it, with the AB/BA split of each
+line, so a pooled read can be checked against the A/B standard (at least
+5 AB and 5 BA pairs). See ab_pairs.py for why unequal pairs are kept.
 """
+import os
 import re
-import statistics as st
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ab_pairs import summarize  # noqa: E402
 
 argv = sys.argv[1:]
 max_load = 6.0
@@ -19,7 +23,7 @@ if "--max-load" in argv:
     max_load = float(argv[i + 1])
     del argv[i:i + 2]
 SITES = ("cnn", "github", "wikipedia")
-LINE = re.compile(r"== pair (\d+) order (\w\w) (\w) \S+ load=([\d.]+) (.*)")
+LINE = re.compile(r"== pair (\d+) order (\w\w) (\w) .*? load=([\d.]+) ([^|]*)")
 pairs = []
 for path in argv:
     cur = {}
@@ -37,12 +41,12 @@ for path in argv:
     pairs += cur.values()
 quiet = [p for p in pairs if len(p["load"]) == 2 and max(p["load"]) <= max_load]
 print(f"{len(pairs)} pairs read, {len(quiet)} with both loads at load <= {max_load}: "
-      f"{sum(p['order'] == 'AB' for p in quiet)} AB + {sum(p['order'] == 'BA' for p in quiet)} BA, "
-      f"load {min(min(p['load']) for p in quiet):.1f}-{max(max(p['load']) for p in quiet):.1f}")
+      f"{sum(p['order'] == 'AB' for p in quiet)} AB + {sum(p['order'] == 'BA' for p in quiet)} BA"
+      + (f", load {min(min(p['load']) for p in quiet):.1f}-{max(max(p['load']) for p in quiet):.1f}"
+         if quiet else ""))
 for s in SITES:
-    good = [p["ms"][s] for p in quiet
-            if len(p["ms"].get(s, {})) == 2 and len(set(p["builds"][s].values())) == 1]
-    ratios = [g["B"] / g["A"] for g in good]
-    print(f"{s}: {len(good)} pairs | median B/A {st.median(ratios):.3f} | below 1 in "
-          f"{sum(r < 1 for r in ratios)} | range {min(ratios):.2f}-{max(ratios):.2f} | "
-          f"A median {st.median(g['A'] for g in good)} ms, B median {st.median(g['B'] for g in good)} ms")
+    summarize(s, [{
+        "order": p["order"],
+        "ms": (p["ms"].get(s, {}).get("A"), p["ms"].get(s, {}).get("B")),
+        "builds": (p["builds"].get(s, {}).get("A"), p["builds"].get(s, {}).get("B")),
+    } for p in quiet])

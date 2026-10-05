@@ -9,15 +9,20 @@ with nothing set (for a flag whose default has flipped: A is the old path).
 Each load line ends with the per-build cascade ms of every site. Otherwise this is ab2.py: each pair loads every pinned page once
 each way, in the order AB BA BA AB ..., and prints every load with the
 1-minute load average and its layout-build count, then per site the per-pair
-B/A, their median and how many pairs read below 1. A pair whose two loads
-logged different build counts is dropped for that site. Use at least 10 pairs
-(5 AB + 5 BA); a read above load ~6 does not count.
+B/A, their median and how many pairs read below 1. Every complete pair
+counts; the pairs with equal build counts are summarised beside it (see
+ab_pairs.py). Use at least 10 pairs (5 AB + 5 BA); a read above load ~6 does
+not count. A last line per site splits the equal-build pairs by layout build.
 """
+import ast
 import os
 import re
 import statistics as st
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ab_pairs import summarize  # noqa: E402
 
 BENCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cascade_bench.py")
 SITES = ("cnn", "github", "wikipedia")
@@ -26,10 +31,10 @@ pairs = int(sys.argv[3]) if len(sys.argv) > 3 else 10
 # What each arm adds to the environment, and what the load lines call it.
 arm_env = ([sys.argv[4]], []) if len(sys.argv) > 4 else ([], [flag])
 arm_name = tuple(" ".join(e) or "flag unset" for e in arm_env)
-data = []
+data = {s: [] for s in SITES}
 for i in range(pairs):
     order = (0, 1) if i % 4 in (0, 3) else (1, 0)
-    row, builds, per_build = {}, {}, {}
+    row, builds, per = {}, {}, {}
     for b in order:
         load = os.getloadavg()[0]
         out = subprocess.run(
@@ -44,25 +49,30 @@ for i in range(pairs):
                 builds.setdefault(m[1], {})[b] = int(m[3])
             m = re.match(r"\s+(\w+)\s+run 1: .* per-build (\[.*\])", line)
             if m and m[1] in SITES:
-                per_build[m[1]] = m[2].replace(" ", "")
+                per.setdefault(m[1], {})[b] = ast.literal_eval(m[2])
         print(f"== pair {i + 1} order {''.join('AB'[x] for x in order)} {'AB'[b]} "
               f"{arm_name[b]} load={load:.1f} "
               + " ".join(f"{s}={row.get(s, {}).get(b)}/{builds.get(s, {}).get(b)}b"
                          for s in SITES)
-              + " | " + " ".join(per_build.get(s, "[]") for s in SITES), flush=True)
+              + " | " + " ".join(str(per.get(s, {}).get(b, [])).replace(" ", "")
+                                 for s in SITES), flush=True)
     for s in SITES:
-        if len(set(builds.get(s, {}).values())) > 1:
-            print(f"   pair {i + 1} {s}: build counts differ, pair dropped", flush=True)
-            row.pop(s, None)
-    data.append(row)
+        data[s].append({
+            "order": "".join("AB"[x] for x in order),
+            "ms": (row.get(s, {}).get(0), row.get(s, {}).get(1)),
+            "builds": (builds.get(s, {}).get(0), builds.get(s, {}).get(1)),
+            "per": per.get(s, {}),
+        })
 for s in SITES:
-    good = [r[s] for r in data if len(r.get(s, {})) == 2 and all(v > 0 for v in r[s].values())]
-    if not good:
-        print(s, "no complete pairs")
+    if summarize(s, data[s]) is None:
         continue
-    ratios = [r[1] / r[0] for r in good]
-    print(f"{s}: B/A over {len(good)} pairs: " + " ".join(f"{x:.2f}" for x in ratios)
-          + f" | median {st.median(ratios):.3f} | below 1 in {sum(x < 1 for x in ratios)}"
-          f" | A med {st.median(r[0] for r in good)} B med {st.median(r[1] for r in good)}",
-          flush=True)
+    split = [p["per"] for p in data[s]
+             if len(p["per"]) == 2 and len(p["per"][0]) == len(p["per"][1])]
+    for k in range(min((len(p[0]) for p in split), default=0)):
+        fr = [p[1][k] / p[0][k] for p in split if p[0][k] > 0]
+        if fr:
+            print(f"   build {k + 1}: B/A median {st.median(fr):.3f} | below 1 in "
+                  f"{sum(x < 1 for x in fr)} of {len(fr)} | A med "
+                  f"{st.median(p[0][k] for p in split):.1f} B med "
+                  f"{st.median(p[1][k] for p in split):.1f}", flush=True)
 print(os.popen("uptime").read())
