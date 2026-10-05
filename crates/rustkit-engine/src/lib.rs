@@ -33792,3 +33792,77 @@ mod grid_item_child_abspos_tests {
         );
     }
 }
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod error_response_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// `/blocked` answers 403 with a page, `/missing` 404 with nothing,
+    /// `/` 200 with a page.
+    fn serve() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => req.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&req);
+                    let (status, body) = match req.split_whitespace().nth(1).unwrap_or("/") {
+                        "/" => ("200 OK", "<html><head><title>Home</title></head><body><p>home</p></body></html>"),
+                        "/blocked" => (
+                            "403 Forbidden",
+                            "<html><head><title>Blocked</title></head><body><p>Access denied</p></body></html>",
+                        ),
+                        _ => ("404 Not Found", ""),
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        port
+    }
+
+    // A navigation that got a 403 or a 404 failed with "HTTP error" and the
+    // view kept whatever it had, though the server had sent a page saying
+    // why (ebay's 403, any site's 404 page). A browser shows that page. An
+    // error with no body still fails: there is nothing of the site's to
+    // show.
+    #[test]
+    fn the_body_of_an_error_response_is_shown_as_the_page() {
+        let port = serve();
+        let url = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+        rt.block_on(engine.load_url(view, url("/blocked")))
+            .expect("a 403 with a page is a navigation to that page");
+        assert_eq!(engine.views[&view].title.as_deref(), Some("Blocked"));
+        assert_eq!(engine.views[&view].url, Some(url("/blocked")));
+        assert!(engine.views[&view].layout.is_some(), "the error page is laid out");
+        let failed = rt.block_on(engine.load_url(view, url("/missing")));
+        assert!(
+            matches!(failed, Err(EngineError::NavigationError(_))),
+            "a 404 with no body is a failed navigation: {failed:?}"
+        );
+        assert_eq!(engine.views[&view].title.as_deref(), Some("Blocked"), "the view keeps the page it had");
+        rt.block_on(engine.load_url(view, url("/"))).expect("load_url");
+        assert_eq!(engine.views[&view].title.as_deref(), Some("Home"));
+    }
+}
