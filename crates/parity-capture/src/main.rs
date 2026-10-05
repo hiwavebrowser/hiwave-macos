@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tracing::{error, warn};
 use url::Url;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "parity-capture")]
 #[command(about = "Headless frame capture for parity testing")]
 #[command(group(clap::ArgGroup::new("source").required(true).args(["html_file", "url"])))]
@@ -171,6 +171,8 @@ struct ActionResult {
     label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     selector_used: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<String>,
     elapsed_ms: u64,
 }
 
@@ -252,7 +254,16 @@ fn main() {
     }
 
     let started = Instant::now();
-    let mut result = run_capture(&args);
+    let args_clone = args.clone();
+    let handler = std::thread::Builder::new()
+        .name("capture-worker".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || run_capture(&args_clone))
+        .expect("failed to spawn capture worker thread");
+    let mut result = match handler.join() {
+        Ok(r) => r,
+        Err(_) => CaptureResult::new(&args).failed("error", "worker thread panicked".to_string()),
+    };
     result.elapsed_ms = Some(started.elapsed().as_millis() as u64);
 
     // Output JSON result
@@ -361,7 +372,10 @@ fn run_capture(args: &Args) -> CaptureResult {
         // error page: it fails as it did when the engine refused the
         // response, with the same message first, so no board counts a 403
         // as a load.
-        if let Some(status) = engine.http_status(view_id).filter(|s| !(200..300).contains(s)) {
+        if let Some(status) = engine
+            .http_status(view_id)
+            .filter(|s| !(200..300).contains(s))
+        {
             return result.failed(
                 "error",
                 format!("Failed to load URL: NavigationError(\"HTTP error\") (HTTP {status}; the engine rendered its body)"),
@@ -473,6 +487,20 @@ fn parse_actions(raw: &str) -> Result<Vec<ActionItem>, String> {
     }
 }
 
+fn parse_point(eval_res: &str) -> Option<(f32, f32)> {
+    let idx = eval_res.find("point:")?;
+    let rest = &eval_res[idx + 6..];
+    let parts: Vec<&str> = rest.split(':').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let x_part = parts[0].trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-');
+    let y_part = parts[1].trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-');
+    let x = x_part.parse::<f32>().ok()?;
+    let y = y_part.parse::<f32>().ok()?;
+    Some((x, y))
+}
+
 fn execute_actions(
     engine: &mut rustkit_engine::Engine,
     view_id: rustkit_engine::EngineViewId,
@@ -492,8 +520,9 @@ fn execute_actions(
             status: "ok".to_string(),
             error: None,
             frame: None,
-            label: None,
+            label: a.label.clone(),
             selector_used: None,
+            method: None,
             elapsed_ms: 0,
         };
 
@@ -503,7 +532,10 @@ fn execute_actions(
                     let timeout = Duration::from_millis(a.timeout_ms.or(a.ms).unwrap_or(2000));
                     let wait_start = Instant::now();
                     let sel_json = serde_json::to_string(sel).unwrap_or_default();
-                    let check_js = format!("Boolean(document.querySelector({})) ? 'found' : 'missing'", sel_json);
+                    let check_js = format!(
+                        "Boolean(document.querySelector({})) ? 'found' : 'missing'",
+                        sel_json
+                    );
                     let mut found = false;
                     while wait_start.elapsed() < timeout {
                         if let Ok(eval_res) = engine.execute_script(view_id, &check_js) {
@@ -529,43 +561,68 @@ fn execute_actions(
                     let mut clicked = false;
                     for s in selectors {
                         let s_json = serde_json::to_string(s).unwrap_or_default();
-                        let click_js = format!(
+                        let query_js = format!(
                             r#"(function() {{
-                                var el = document.querySelector({0});
-                                if (!el) return 'missing';
-                                if (typeof el.focus === 'function') el.focus();
-                                if (typeof el.click === 'function') {{
-                                    el.click();
-                                }} else {{
-                                    el.dispatchEvent(new Event('click', {{ bubbles: true, cancelable: true }}));
+                                try {{
+                                    var el = document.querySelector({0});
+                                    if (!el) return 'missing';
+                                    if (typeof el.getBoundingClientRect === 'function') {{
+                                        var r = el.getBoundingClientRect();
+                                        if (r && r.width > 0 && r.height > 0) {{
+                                            var cx = r.left + r.width / 2.0;
+                                            var cy = r.top + r.height / 2.0;
+                                            return 'point:' + cx + ':' + cy;
+                                        }}
+                                    }}
+                                    if (typeof el.focus === 'function') {{
+                                        try {{ el.focus(); }} catch (e) {{}}
+                                    }}
+                                    if (typeof el.click === 'function') {{
+                                        try {{ el.click(); }} catch (e) {{}}
+                                    }} else {{
+                                        try {{ el.dispatchEvent(new Event('click', {{ bubbles: true, cancelable: true }})); }} catch (e) {{}}
+                                    }}
+                                    return 'fallback_clicked';
+                                }} catch (e) {{
+                                    return 'error:' + e;
                                 }}
-                                return 'clicked';
                             }})()"#,
                             s_json
                         );
-                        if let Ok(eval_res) = engine.execute_script(view_id, &click_js) {
-                            if eval_res.contains("clicked") {
+                        if let Ok(eval_res) = engine.execute_script(view_id, &query_js) {
+                            if let Some((cx, cy)) = parse_point(&eval_res) {
+                                engine.mouse_move_at_point(view_id, cx, cy);
+                                let _ = engine.mouse_down_at_point(view_id, cx, cy);
+                                let _ = engine.click_at_point(view_id, cx, cy);
+                                let _ = engine.relayout(view_id);
                                 clicked = true;
                                 a_res.selector_used = Some(s.to_string());
+                                a_res.method = Some(format!("engine_point({:.1}, {:.1})", cx, cy));
+                                break;
+                            }
+                            if eval_res.contains("fallback_clicked") {
+                                let _ = engine.relayout(view_id);
+                                clicked = true;
+                                a_res.selector_used = Some(s.to_string());
+                                a_res.method = Some("synthetic_fallback".to_string());
+                                if a_res.label.is_none() {
+                                    a_res.label = Some("fallback".to_string());
+                                }
                                 break;
                             }
                         }
                     }
                     if !clicked {
                         a_res.status = "selector_not_found".to_string();
-                        a_res.error = Some(format!("no matching element found for selector {}", sel));
-                    } else {
-                        let _ = engine.relayout(view_id);
+                        a_res.error =
+                            Some(format!("no matching element found for selector {}", sel));
                     }
                 } else if let (Some(x), Some(y)) = (a.x, a.y) {
-                    let _ = engine.focus_at_point(view_id, x, y);
-                    let click_js = r#"(function() {
-                        if (document.activeElement && typeof document.activeElement.click === 'function') {
-                            document.activeElement.click();
-                        }
-                    })()"#;
-                    let _ = engine.execute_script(view_id, click_js);
+                    engine.mouse_move_at_point(view_id, x, y);
+                    let _ = engine.mouse_down_at_point(view_id, x, y);
+                    let _ = engine.click_at_point(view_id, x, y);
                     let _ = engine.relayout(view_id);
+                    a_res.method = Some(format!("engine_point({:.1}, {:.1})", x, y));
                 } else {
                     a_res.status = "error".to_string();
                     a_res.error = Some("click action requires selector or (x, y)".to_string());
@@ -643,7 +700,9 @@ fn execute_actions(
             "capture" => {
                 if let Some(ref frame) = a.frame {
                     let frame_path = match actions_out_dir {
-                        Some(out_dir) => Path::new(out_dir).join(frame).to_string_lossy().to_string(),
+                        Some(out_dir) => {
+                            Path::new(out_dir).join(frame).to_string_lossy().to_string()
+                        }
                         None => frame.clone(),
                     };
                     if let Some(parent) = Path::new(&frame_path).parent() {
@@ -902,9 +961,9 @@ fn inject_style_first_in_head(html: &str, attrs: &str, css: &str) -> String {
     let lower = html.to_ascii_lowercase();
 
     let insert_at = ["<head", "<html"].iter().find_map(|open| {
-        lower.find(open).and_then(|start| {
-            lower[start..].find('>').map(|end| start + end + 1)
-        })
+        lower
+            .find(open)
+            .and_then(|start| lower[start..].find('>').map(|end| start + end + 1))
     });
 
     match insert_at {
@@ -915,7 +974,7 @@ fn inject_style_first_in_head(html: &str, attrs: &str, css: &str) -> String {
 
 fn analyze_layout_json(json_str: &str) -> Option<LayoutStats> {
     let data: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    
+
     let mut stats = LayoutStats {
         total_boxes: 0,
         sized: 0,
@@ -1039,10 +1098,14 @@ mod tests {
         // Canonicalization needs a real file, so use one from the tree.
         let real = Path::new("websuite/micro/gradients/index.html");
         if real.exists() {
-            assert!(is_micro_suite_path(real),
-                "relative micro path must be detected");
+            assert!(
+                is_micro_suite_path(real),
+                "relative micro path must be detected"
+            );
         }
-        assert!(!is_micro_suite_path(Path::new("websuite/cases/x/index.html")));
+        assert!(!is_micro_suite_path(Path::new(
+            "websuite/cases/x/index.html"
+        )));
     }
 
     #[test]
@@ -1054,5 +1117,16 @@ mod tests {
             "/repo/websuite/pages/blog/index.html"
         )));
     }
-}
 
+    #[test]
+    fn parse_point_extracts_coordinates_from_js_string() {
+        assert_eq!(
+            parse_point("String(\"point:100:200\")"),
+            Some((100.0, 200.0))
+        );
+        assert_eq!(parse_point("point:12.5:30.25"), Some((12.5, 30.25)));
+        assert_eq!(parse_point("point:-10.0:40.5"), Some((-10.0, 40.5)));
+        assert_eq!(parse_point("String(\"fallback_clicked\")"), None);
+        assert_eq!(parse_point("missing"), None);
+    }
+}
