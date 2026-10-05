@@ -64,7 +64,9 @@
         ['ClipboardEvent', 'Event', [['clipboardData', null, 'any']]],
         ['PageTransitionEvent', 'Event', [['persisted', false, 'bool']]],
         ['BeforeUnloadEvent', 'Event', [['returnValue', '', 'str']]],
-        ['MediaQueryListEvent', 'Event', [['media', '', 'str'], ['matches', false, 'bool']]]
+        ['MediaQueryListEvent', 'Event', [['media', '', 'str'], ['matches', false, 'bool']]],
+        ['PromiseRejectionEvent', 'Event', [['promise', null, 'any'], ['reason', undefined, 'any']]],
+        ['SubmitEvent', 'Event', [['submitter', null, 'any']]]
     ];
     EVENTS.forEach(function (spec) {
         var name = spec[0], Parent = g[spec[1]], fields = spec[2];
@@ -93,6 +95,7 @@
         ME.prototype.getModifierState = function (key) {
             return { Control: this.ctrlKey, Shift: this.shiftKey, Alt: this.altKey, Meta: this.metaKey }[key] === true;
         };
+        Object.defineProperty(ME.prototype, 'which', { get: function () { return this.button + 1; }, configurable: true, enumerable: true });
         ['x', 'pageX', 'offsetX'].forEach(function (k) {
             Object.defineProperty(ME.prototype, k, { get: function () { return this.clientX; }, configurable: true, enumerable: true });
         });
