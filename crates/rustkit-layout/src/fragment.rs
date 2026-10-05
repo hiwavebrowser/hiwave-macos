@@ -316,19 +316,37 @@ pub(crate) fn in_l0_class(item: &LayoutBox) -> bool {
 /// (an unsized form control somewhere in the subtree, something in the
 /// subtree the width estimators do not measure). The first is what they
 /// could not see until they grew a control arm (`own_max_content_width`,
-/// `form_control_min_content_width`). The second is an unsized image, or
-/// a grid container: `own_max_content_width` has no grid arm, so a grid
-/// answers its widest child and not the sum of its columns.
-fn unsized_control_and_unmeasured(b: &LayoutBox) -> (bool, bool) {
-    if b.style.display == rustkit_css::Display::None {
+/// `form_control_min_content_width`). The second is any of:
+///
+/// - an unsized image;
+/// - a grid container: `own_max_content_width` has no grid arm, so a grid
+///   answers its widest child and not the sum of its columns;
+/// - below the item itself, a box whose width is a definite length that is
+///   not written in px (`em`, `rem`, viewport units, `calc()`), or that has
+///   a `min-width` floor or a `max-width` cap that is not a percentage. The
+///   estimators read `width: <px>` and nothing else of the three. The
+///   item's own `min-width` and `max-width` are applied by the caller.
+fn unsized_control_and_unmeasured(b: &LayoutBox, is_item: bool) -> (bool, bool) {
+    let s = &b.style;
+    if s.display == rustkit_css::Display::None {
         return (false, false);
     }
-    let unsized_box = !matches!(b.style.width, Length::Px(_));
+    let unsized_box = !matches!(s.width, Length::Px(_));
     let mut control = unsized_box && matches!(b.box_type, BoxType::FormControl(_));
     let mut unmeasured =
-        unsized_box && (matches!(b.box_type, BoxType::Image { .. }) || b.style.display.is_grid());
+        unsized_box && (matches!(b.box_type, BoxType::Image { .. }) || s.display.is_grid());
+    if !is_item && !matches!(b.box_type, BoxType::Text(_)) {
+        let floor = match s.min_width {
+            Length::Auto | Length::Percent(_) => false,
+            Length::Px(v) => v > 0.0,
+            _ => true,
+        };
+        unmeasured |= floor
+            || !matches!(s.width, Length::Auto | Length::Px(_) | Length::Percent(_))
+            || !matches!(s.max_width, Length::Auto | Length::Percent(_));
+    }
     for child in &b.children {
-        let (c, u) = unsized_control_and_unmeasured(child);
+        let (c, u) = unsized_control_and_unmeasured(child, false);
         control |= c;
         unmeasured |= u;
     }
@@ -337,20 +355,22 @@ fn unsized_control_and_unmeasured(b: &LayoutBox) -> (bool, bool) {
 
 /// Whether `item` is in the L0 class for an inline-size query: a flex
 /// container, inline size `auto`, holding a form control with no
-/// specified width.
+/// specified width, and nothing the width estimators do not measure.
 ///
-/// Out of the class, and so answered as before: an item with an unsized
-/// image anywhere in its subtree, and an item that is, or holds, a grid
-/// container without a specified width. The design puts a nested grid
-/// item in the slice. It stays out here because the answer would be the
-/// estimators' and they do not measure a grid: on the fixture a grid of
-/// two `auto` columns answered 67.80 where Chromium gives 115.73.
+/// The design puts a nested grid item in the slice, and does not make the
+/// class depend on what the estimators can see. Both narrowings are this
+/// engine's: the answer is the estimators', and where they are blind the
+/// item keeps the width it had. Measured, not assumed: on the fixture a
+/// grid of two `auto` columns answered 67.80 where Chromium gives 115.73,
+/// and on facebook.com the login column answered 197.63 where Chromium's
+/// max-content is 536, because a box inside it is
+/// `width: calc(-104px + 50vw)`; the form was pushed off the right edge.
 pub(crate) fn in_l0_inline_class(item: &LayoutBox) -> bool {
     let s = &item.style;
     s.display.is_flex()
         && s.writing_mode == WritingMode::HorizontalTb
         && matches!(s.width, Length::Auto)
-        && unsized_control_and_unmeasured(item) == (true, false)
+        && unsized_control_and_unmeasured(item, true) == (true, false)
 }
 
 /// The fit-content arm of the query (§4, call site 2): the inline size of

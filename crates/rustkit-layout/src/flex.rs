@@ -3608,6 +3608,24 @@ mod tests {
         assert!(crate::fragment::in_l0_inline_class(&grid_row));
         grid_row.style.display = rustkit_css::Display::Grid;
         assert!(!crate::fragment::in_l0_inline_class(&grid_row));
+        // Nor is a box below the item with a width that is definite and not
+        // in px, a min-width floor or a max-width cap (facebook's login
+        // column holds a `width: calc(-104px + 50vw)` box).
+        let mut inner = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        for edit in [
+            (|s: &mut ComputedStyle| s.width = Length::Vw(50.0)) as fn(&mut ComputedStyle),
+            |s| s.width = Length::Em(20.0),
+            |s| s.min_width = Length::Px(446.0),
+            |s| s.max_width = Length::Px(546.0),
+        ] {
+            let mut holder = grid_row.clone();
+            holder.style.display = rustkit_css::Display::Flex;
+            assert!(crate::fragment::in_l0_inline_class(&holder));
+            inner.style = Box::new(ComputedStyle::new());
+            edit(&mut inner.style);
+            holder.children.push(inner.clone());
+            assert!(!crate::fragment::in_l0_inline_class(&holder));
+        }
         row.dimensions.content = Rect::new(0.0, 0.0, 300.0, 20.0);
         container.children.push(row);
 
