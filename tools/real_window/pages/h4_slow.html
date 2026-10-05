@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H4 a slow image</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  #first { height: 60px; margin: 20px; background: #ff0000; }
+  img { display: block; width: 120px; height: 60px; margin: 20px; }
+</style>
+<!-- As h1_slow.html, with an image in place of the request: when the server
+     answers a beacon with "go", the page adds an image the server holds for
+     three seconds (cyan). The 200 ms ticks should not notice. -->
+<div id="first"></div>
+<script>
+  var n = 0, started = false;
+  function beacon(name) { return fetch('/beacon?' + name).then(function (r) { return r.text(); }); }
+  setInterval(function () {
+    n += 1;
+    beacon('img-tick-' + n).then(function (reply) {
+      if (reply !== 'go' || started) { return; }
+      started = true;
+      var img = document.createElement('img');
+      img.onload = function () { beacon('img-onload'); };
+      img.src = '/slowimg/00ffff.png?ms=3000';
+      document.body.appendChild(img);
+    }, function () {});
+  }, 200);
+</script>

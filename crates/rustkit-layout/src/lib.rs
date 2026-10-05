@@ -16,6 +16,7 @@
 
 pub mod flex;
 pub mod forms;
+pub mod fragment;
 pub mod grid;
 pub mod images;
 pub mod intrinsic_cache;
