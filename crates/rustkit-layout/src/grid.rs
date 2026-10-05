@@ -7526,6 +7526,41 @@ mod tests {
         );
     }
 
+    /// The same for an item that is itself a grid: it fills its row. The
+    /// nested grid pass writes the content height over the area, and the
+    /// only thing that gave the row back was the stretch inside Phase 9.5,
+    /// which runs only when some row changed size. Beside a 100px sibling
+    /// no row changes, and the nested grid stayed as tall as its content.
+    #[test]
+    fn a_grid_grid_item_fills_its_row() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(200.0), TrackSize::Px(200.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut tall = ComputedStyle::new();
+        tall.height = Length::Px(100.0);
+        container.children.push(LayoutBox::new(BoxType::Block, tall));
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.display = Display::Grid;
+        let mut inner = LayoutBox::new(BoxType::Block, inner_style);
+        let mut mark = ComputedStyle::new();
+        mark.height = Length::Px(20.0);
+        inner.children.push(LayoutBox::new(BoxType::Block, mark));
+        container.children.push(inner);
+
+        layout_grid_container(&mut container, 400.0, 0.0);
+
+        let item = &container.children[1];
+        assert!(
+            (item.dimensions.content.height - 100.0).abs() < 0.01,
+            "the nested grid fills the 100px row, got {}",
+            item.dimensions.content.height
+        );
+    }
+
     /// The same on a column container's main axis: `justify-content: center`
     /// distributes the stretched height.
     #[test]
