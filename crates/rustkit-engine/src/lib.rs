@@ -22445,10 +22445,69 @@ mod node_identity_tests {
         engine.mouse_leave(id);
         assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 400@0"), "outside the view");
 
-        // A page whose sheets never name `:hover` is not restyled by a move.
-        assert!(engine.views[&id].hover_rules.get());
+    }
+
+    // A hover restyle is a whole cascade and layout (0.1 s on wikipedia's
+    // front page, 0.4 s on github's), so it runs only when an element that
+    // gained or lost the pointer is one a `:hover` compound can match. The
+    // matcher's own counter says whether a move ran the cascade.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_move_no_hover_rule_can_see_does_not_restyle() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        // Rows of 40px: #b, then .menu holding #t and #sub, then #c.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } .menu { height: auto }"#,
+                    r#"#b:hover { width: 300px } .menu:hover .sub { width: 100px }"#,
+                    r#"#c:active { width: 310px } p:hover::after { content: "x" }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div>"#,
+                    r#"<div class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"<div id="c">c</div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let mut cascades = |engine: &mut Engine, act: &dyn Fn(&mut Engine)| {
+            FULL_SELECTOR_MATCHES.with(|n| n.set(0));
+            act(engine);
+            FULL_SELECTOR_MATCHES.with(|n| n.get()) > 0
+        };
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t: .menu gains the pointer");
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#t to #sub, inside .menu");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 140.0)), "onto #c: .menu loses it");
+        assert!(!cascades(&mut engine, &|e| e.mouse_leave(id)), "off #c, which no :hover rule names");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "onto #b");
+        // A press restyles only where an `:active` compound can match.
+        assert!(!cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 20.0); }), "press on #b");
+        assert!(!cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 20.0); }), "release on #b");
+        assert!(cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 140.0); }), "press on #c");
+        assert!(cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 140.0); }), "release on #c");
+
+        // `:hover` where the compounds do not show it: every change counts.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>body { margin: 0 } div { height: 40px } "#,
+                    r#"#b:not(:hover) { width: 300px }</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="t">t</div><div id="c">c</div></body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#t to #c");
+
+        // No sheet names `:hover`: no move restyles.
         engine.load_html(id, HOVER_PAGE).expect("load_html");
-        assert!(!engine.views[&id].hover_rules.get());
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "a page with no :hover rule");
     }
 
     // `:active` was false for every element too, so a press showed nothing.
