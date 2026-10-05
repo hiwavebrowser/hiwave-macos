@@ -2021,7 +2021,8 @@ impl Engine {
 
     /// Deliver a primary-button press at VIEWPORT coordinates to the page:
     /// `pointerdown` then `mousedown` at the element under the point (no
-    /// `mousedown` when a listener cancelled the `pointerdown`), then the
+    /// `mousedown` when a listener cancelled the `pointerdown`, or the
+    /// point is on a disabled form control), then the
     /// press's default action: the focus moves to the control under the
     /// point, or away from the focused one (UI Events §3.4.5.1). A
     /// listener that cancels either event keeps the focus where it is.
@@ -2043,7 +2044,11 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.compat_mouse_suppressed = suppressed;
         }
-        let not_cancelled = suppressed || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
+        // A disabled form control hears the pointer events and no mouse
+        // event (the oracle's Chrome; tools/parity_oracle/disabled_press_log.mjs).
+        let not_cancelled = suppressed
+            || self.disabled_control_at_point(id, viewport_x, viewport_y)
+            || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
         if !suppressed && not_cancelled {
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
         }
@@ -2327,7 +2332,7 @@ impl Engine {
             .views
             .get_mut(&id)
             .is_some_and(|view| std::mem::take(&mut view.compat_mouse_suppressed));
-        if !suppressed {
+        if !suppressed && !self.disabled_control_at_point(id, viewport_x, viewport_y) {
             self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
         }
         // The focus moved at the press. What is left for the release is a
@@ -23662,13 +23667,14 @@ mod node_identity_tests {
     // A click on a disabled button still fired `click` at it and bubbled,
     // so a page's handler ran for a control the page had switched off (a
     // greyed-out "Pay" button paid). A disabled form control takes no
-    // click from the user (HTML §4.10.18.5); the release is still heard.
+    // click from the user (HTML §4.10.18.5), and no `mouseup` either.
 
     const DISABLED_PAGE: &str = concat!(
         r#"<html><body style="margin:0">"#,
         r#"<div style="height:40px;overflow:hidden"><button id="off" disabled style="display:block;width:100px;height:30px">off</button></div>"#,
         r#"<div style="height:40px;overflow:hidden"><button id="on" style="display:block;width:100px;height:30px">on</button></div>"#,
         r#"<div style="height:40px;overflow:hidden"><input id="cb" type="checkbox" disabled style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button disabled style="display:block;width:100px;height:30px;padding:0;border:0"><span id="in" style="display:block;width:100px;height:30px">in</span></button></div>"#,
         r#"<fieldset disabled style="margin:0;padding:0;border:0">"#,
         r#"<legend style="padding:0"><button id="lg" style="display:block;width:100px;height:30px;margin:0 0 10px">legend</button></legend>"#,
         r#"<div style="height:40px;overflow:hidden"><button id="fs" style="display:block;width:100px;height:30px">set</button></div>"#,
@@ -23705,16 +23711,68 @@ mod node_identity_tests {
         };
 
         assert_eq!(click(&mut engine, "on"), js_string("up:on click:on"), "precondition");
-        assert_eq!(click(&mut engine, "off"), js_string("up:off"));
-        assert_eq!(click(&mut engine, "cb"), js_string("up:cb"));
+        assert_eq!(click(&mut engine, "off"), js_string(""));
+        assert_eq!(click(&mut engine, "cb"), js_string(""));
         // Disabled by its fieldset; the fieldset's own legend is not, and
         // neither is content that is not a form control.
-        assert_eq!(click(&mut engine, "fs"), js_string("up:fs"));
+        assert_eq!(click(&mut engine, "fs"), js_string(""));
         assert_eq!(click(&mut engine, "lg"), js_string("up:lg click:lg"));
         assert_eq!(click(&mut engine, "plain"), js_string("up:plain click:plain"));
         // Script enables it again.
         js(&mut engine, id, "$('off').disabled = false");
         assert_eq!(click(&mut engine, "off"), js_string("up:off click:off"));
+    }
+
+    // A press and release on a disabled control sent it `mousedown` and
+    // `mouseup`, so a page's "press" handler ran on a greyed-out button.
+    // The oracle's Chrome sends such a control `pointerdown` and `pointerup`
+    // and no mouse event at all, also when the point is on an element
+    // inside it or it is disabled by its fieldset
+    // (tools/parity_oracle/disabled_press_log.mjs, Chromium 143).
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_disabled_control_hears_pointer_events_and_no_mouse_events() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DISABLED_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { log.push(e.type + ':' + e.target.id); }, true); });",
+        );
+        let top = |engine: &Engine, name: &str| {
+            let view = &engine.views[&id];
+            let node = view.document.as_ref().unwrap().get_element_by_id(name).unwrap().id.raw();
+            Engine::box_top(view.layout.as_ref().unwrap(), node).unwrap()
+        };
+        let mut press_release = |engine: &mut Engine, name: &str| {
+            js(engine, id, "log.length = 0");
+            let y = top(engine, name) + 10.0;
+            engine.mouse_down_at_point(id, 8.0, y);
+            engine.click_at_point(id, 8.0, y);
+            js(engine, id, "log.join(' ')")
+        };
+        let all = |n: &str| js_string(&format!("pointerdown:{n} mousedown:{n} pointerup:{n} mouseup:{n} click:{n}"));
+        let pointer_only = |n: &str| js_string(&format!("pointerdown:{n} pointerup:{n}"));
+
+        assert_eq!(press_release(&mut engine, "on"), all("on"), "precondition");
+        assert_eq!(press_release(&mut engine, "off"), pointer_only("off"));
+        assert_eq!(press_release(&mut engine, "cb"), pointer_only("cb"));
+        // On an element inside a disabled button.
+        assert_eq!(press_release(&mut engine, "in"), pointer_only("in"));
+        // Disabled by its fieldset; the fieldset's own legend is not, and
+        // neither is content that is not a form control.
+        assert_eq!(press_release(&mut engine, "fs"), pointer_only("fs"));
+        assert_eq!(press_release(&mut engine, "lg"), all("lg"));
+        assert_eq!(press_release(&mut engine, "plain"), all("plain"));
+        // Script enables it again.
+        js(&mut engine, id, "document.getElementById('off').disabled = false");
+        assert_eq!(press_release(&mut engine, "off"), all("off"));
     }
 
     // A click on a label's text did not focus the field it labels, so the
