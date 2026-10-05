@@ -62,6 +62,8 @@ mod document_members_tests;
 mod web_intl_tests;
 #[cfg(test)]
 mod mutation_observer_tests;
+#[cfg(test)]
+mod web_messaging_tests;
 mod web_crypto;
 mod web_scroll;
 mod web_url;
@@ -586,6 +588,8 @@ impl DomBindings {
         // MutationObserver that records every DOM write and delivers in a microtask; replaces
         // the inert stub through the dom.rs write hook (web_mutation_observer.js).
         runtime.evaluate_script(include_str!("web_mutation_observer.js"))?;
+        // postMessage, MessageChannel/MessagePort, MessageEvent, requestIdleCallback (web_messaging.js).
+        runtime.evaluate_script(include_str!("web_messaging.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
