@@ -5567,6 +5567,7 @@ dependencies = [
  "png",
  "raw-window-handle",
  "rustkit-core",
+ "tao",
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",

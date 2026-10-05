@@ -533,6 +533,10 @@ struct ViewState {
     /// which elements a `:hover` or `:active` rule can match, so which
     /// changes of the two chains are a restyle.
     rule_reads: std::cell::RefCell<Option<Rc<RuleIndex>>>,
+    /// Whether `html` had a non-visible `overflow` at the last build. The
+    /// viewport then takes html's, and a body with its own is a scroller
+    /// that clips what it holds (see `scrollable_bottom`).
+    html_clips: std::cell::Cell<bool>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
     /// Where the pointer was at its last move, in viewport coordinates.
@@ -1440,6 +1444,7 @@ impl Engine {
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
             rule_reads: std::cell::RefCell::new(None),
+            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
@@ -1515,6 +1520,7 @@ impl Engine {
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
             rule_reads: std::cell::RefCell::new(None),
+            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
@@ -1599,6 +1605,7 @@ impl Engine {
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
             rule_reads: std::cell::RefCell::new(None),
+            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
@@ -4626,7 +4633,8 @@ impl Engine {
         }
 
         // Update max scroll offset based on content size
-        let content_height = root_box.dimensions.margin_box().height;
+        let html_clips = self.views.get(&id).is_some_and(|v| v.html_clips.get());
+        let content_height = scrollable_bottom(&root_box, html_clips);
         let viewport_height = bounds.height as f32;
         let max_scroll_y = (content_height - viewport_height).max(0.0);
 
@@ -5133,6 +5141,13 @@ impl Engine {
                 None
             }
         });
+
+        if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
+            view.html_clips.set(html_style.as_ref().is_some_and(|s| {
+                s.overflow_x != rustkit_css::Overflow::Visible
+                    || s.overflow_y != rustkit_css::Overflow::Visible
+            }));
+        }
 
         // Get the body element and build layout from it
         if let Some(body) = document.body() {
@@ -16166,6 +16181,43 @@ fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32,
     let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
     let max_y = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
     (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+/// How far down the viewport can scroll: the bottom of the root box, or of
+/// the lowest box under it if that is lower. Content that overflows a box of
+/// fixed height (a `height: 100%` body), an absolutely positioned box, a
+/// float and a relatively shifted box all extend the page, as in Chrome.
+///
+/// Not counted: a fixed box and what it holds (it does not move with the
+/// page), and what is inside a box that clips or scrolls its own overflow.
+/// `body` is such a box only when `html` keeps a non-visible overflow for
+/// itself (`html_clips`); otherwise body's overflow belongs to the viewport.
+/// Transforms are not applied.
+fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
+    fn clips(b: &LayoutBox) -> bool {
+        b.style.overflow_x != rustkit_css::Overflow::Visible
+            || b.style.overflow_y != rustkit_css::Overflow::Visible
+    }
+    fn walk(b: &LayoutBox, descend: bool, bottom: &mut f32) {
+        if b.style.position == rustkit_css::Position::Fixed {
+            return;
+        }
+        let bb = b.dimensions.border_box();
+        let edge = bb.y + bb.height;
+        if edge.is_finite() {
+            *bottom = bottom.max(edge);
+        }
+        if descend {
+            for child in &b.children {
+                walk(child, !clips(child), bottom);
+            }
+        }
+    }
+    let mut bottom = root.dimensions.margin_box().height;
+    for body in &root.children {
+        walk(body, !(html_clips && clips(body)), &mut bottom);
+    }
+    bottom
 }
 
 /// Where the layout put every element, by DOM node, for script geometry reads
@@ -34529,5 +34581,80 @@ mod error_response_tests {
 
         engine.load_html(view, "<p>local</p>").expect("load_html");
         assert_eq!(engine.http_status(view), None, "a document that came from no response has no status");
+    }
+}
+
+#[cfg(test)]
+mod scroll_extent_tests {
+    use super::*;
+
+    // How far a page scrolls, against the pinned Chromium (Z lane I0, H6,
+    // 2026-10-05). The pages and Chrome's answers are in
+    // tools/parity_oracle/scroll_extent_cases.json, written by
+    // scroll_extent_log.mjs: `chrome_script_y` is where window.scrollTo to a
+    // very large y ends, `chrome_wheel_y` where a very large wheel turn ends.
+
+    /// Transforms do not move a box in the layout tree, and the offsets of
+    /// a relative box are not applied (`positioning_of`), so neither box
+    /// extends the page yet. `html` has no box of its own, so with
+    /// `html { height: 100% }` the body's bottom margin still counts (16
+    /// where Chrome has 8).
+    const SCRIPT_GAPS: &[&str] = &["translate-down", "relative-top", "html-body-overflow-x-hidden"];
+    /// Chrome's wheel does not scroll a viewport whose overflow is hidden
+    /// (script still does). The engine's wheel is not locked yet.
+    /// And a body that scrolls takes the wheel itself: the 8px of its
+    /// margin are left to the viewport, which only script moves.
+    const WHEEL_GAPS: &[&str] = &[
+        "translate-down",
+        "relative-top",
+        "body-overflow-hidden",
+        "html-overflow-hidden",
+        "html-body-overflow-x-hidden",
+    ];
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_page_scrolls_as_far_as_it_does_in_chrome() {
+        let data: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tools/parity_oracle/scroll_extent_cases.json"))
+                .expect("case file");
+        let (w, h) = (data["viewport"][0].as_u64().unwrap(), data["viewport"][1].as_u64().unwrap());
+        let mut wrong = Vec::new();
+        let mut gaps_that_pass = Vec::new();
+        for case in data["cases"].as_array().expect("cases") {
+            let name = case["name"].as_str().unwrap();
+            let chrome_script = case["chrome_script_y"].as_f64().expect("run scroll_extent_log.mjs --write") as f32;
+            let chrome_wheel = case["chrome_wheel_y"].as_f64().unwrap() as f32;
+
+            let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+            let id = engine
+                .create_headless_view(Bounds::new(0, 0, w as u32, h as u32))
+                .expect("headless view");
+            engine.load_html(id, case["html"].as_str().unwrap()).expect("load_html");
+
+            engine.set_scroll_offset(id, 0.0, 1.0e7).unwrap();
+            let script = engine.get_scroll_offset(id).unwrap().1;
+            engine.set_scroll_offset(id, 0.0, 0.0).unwrap();
+            // A wheel turned down arrives as a negative delta.
+            engine.scroll_view(id, 0.0, -1.0e7).unwrap();
+            let wheel = engine.get_scroll_offset(id).unwrap().1;
+
+            for (what, got, chrome, gaps) in [
+                ("script", script, chrome_script, SCRIPT_GAPS),
+                ("wheel", wheel, chrome_wheel, WHEEL_GAPS),
+            ] {
+                let same = (got - chrome).abs() <= 1.0;
+                match (same, gaps.contains(&name)) {
+                    (false, false) => wrong.push(format!("{name}: {what} reaches {got}, Chrome {chrome}")),
+                    (true, true) if chrome > 0.0 => gaps_that_pass.push(format!("{name} ({what})")),
+                    _ => {}
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong:\n{}", wrong.len(), wrong.join("\n"));
+        assert!(
+            gaps_that_pass.is_empty(),
+            "listed as a gap but matches Chrome now, take it off the list: {gaps_that_pass:?}"
+        );
     }
 }

@@ -560,6 +560,26 @@ class Driver:
         self.expect(c, "the first screen is the red band only", top[RED] > 1000 and top[GREEN] == 0, str(top))
         self.expect(c, "after the wheel the green band is on screen", down[GREEN] > 1000, str(down))
 
+    def h6_extent(self):
+        """H6: a page whose content overflows a viewport-tall body can be scrolled to its end."""
+        c = "h6_extent"
+        if not self.open_page(c, "h6_extent.html"):
+            return
+        self.fixture.wait("beacon?h6x-reach-", 10, self.since)
+        seen = self.fixture.seen("beacon?h6x-reach-", self.since)
+        m = re.search(r"h6x-reach-(-?\d+)-of-(-?\d+)", seen[0]) if seen else None
+        self.expect(c, "the page reported how far it scrolls", bool(m), str(seen))
+        if not m:
+            return
+        reach, whole = int(m.group(1)), int(m.group(2))
+        self.expect(c, "script scrolls to the end of the overflowing content",
+                    whole > 0 and abs(reach - whole) <= 1, "scrollY %d of %d" % (reach, whole))
+        time.sleep(0.8)
+        frame = self.frame(c, "end", [RED, GREEN, BLUE])
+        if frame is None:
+            return self.not_run(c, "the window shows the last band", self.why_not("Screen Recording"))
+        self.expect(c, "the window shows the last band", frame[BLUE] > 1000 and frame[RED] == 0, str(frame))
+
     def h8(self):
         """H8: a server's error page (a 403 with a body) is shown as the page."""
         c = "h8"
@@ -577,7 +597,7 @@ class Driver:
             return self.not_run(c, "the window shows the error page's green image", self.why_not("Screen Recording"))
         self.expect(c, "the window shows the error page's green image", frame[GREEN] > 2000, str(frame))
 
-    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h8"]
+    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
