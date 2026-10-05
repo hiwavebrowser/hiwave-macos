@@ -1,8 +1,8 @@
 // Document members pages read without feature-testing (HTML §3.1, CSSOM View,
-// CSS Font Loading): document.location, document.fonts and FontFace, the
-// document's collections (forms, images, links, scripts, anchors, embeds,
+// CSS Font Loading, DOM §4.5): document.location, document.fonts and FontFace,
+// the document's collections (forms, images, links, scripts, anchors, embeds,
 // getElementsByName), visibilityState/hidden, characterSet, compatMode,
-// contentType, doctype, hasFocus, fullscreen*, adoptNode.
+// contentType, doctype, hasFocus, fullscreen*, adoptNode, document.implementation.
 //
 // Why: the Windows interactive board's script logs showed pages dying in
 // bootstrap on `const { pathname } = document.location` and
@@ -190,4 +190,42 @@
         m('removeEventListener', function (type, cb) { ev.remove(String(type), cb); });
         getter('fonts', function () { return set; });
     }
+
+    // ---- document.implementation (DOM §4.5)
+    var DI = g.DOMImplementation;
+    if (typeof DI !== 'function') {
+        DI = function DOMImplementation() { throw new TypeError('Illegal constructor'); };
+        Object.defineProperty(DI.prototype, Symbol.toStringTag, { value: 'DOMImplementation', configurable: true });
+        Object.defineProperty(g, 'DOMImplementation', { value: DI, writable: true, configurable: true, enumerable: false });
+    }
+    var DIP = DI.prototype;
+    function defDI(name, fn) {
+        if (typeof DIP[name] !== 'function') {
+            Object.defineProperty(DIP, name, { value: fn, writable: true, configurable: true, enumerable: true });
+        }
+    }
+    defDI('hasFeature', function hasFeature() { return true; });
+    defDI('createDocumentType', function createDocumentType(qualifiedName, publicId, systemId) {
+        var dt = Object.create(g.DocumentType ? g.DocumentType.prototype : (g.Node ? g.Node.prototype : Object.prototype));
+        Object.defineProperty(dt, 'nodeType', { value: 10, configurable: true, enumerable: true });
+        Object.defineProperty(dt, 'nodeName', { value: String(qualifiedName), configurable: true, enumerable: true });
+        Object.defineProperty(dt, 'name', { value: String(qualifiedName), configurable: true, enumerable: true });
+        Object.defineProperty(dt, 'publicId', { value: String(publicId || ''), configurable: true, enumerable: true });
+        Object.defineProperty(dt, 'systemId', { value: String(systemId || ''), configurable: true, enumerable: true });
+        return dt;
+    });
+    defDI('createHTMLDocument', function createHTMLDocument(title) {
+        var html = '<!DOCTYPE html><html><head>';
+        if (title !== undefined) {
+            html += '<title>' + String(title).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</title>';
+        }
+        html += '</head><body></body></html>';
+        return new g.DOMParser().parseFromString(html, 'text/html');
+    });
+    defDI('createDocument', function createDocument(ns, qname, doctype) {
+        var html = '<!DOCTYPE html><html><head></head><body></body></html>';
+        return new g.DOMParser().parseFromString(html, 'text/html');
+    });
+    var impl = Object.create(DIP);
+    getter('implementation', function () { return impl; });
 })(typeof globalThis === 'object' ? globalThis : this);
