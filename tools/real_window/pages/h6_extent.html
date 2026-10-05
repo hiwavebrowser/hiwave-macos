@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H6 scroll extent</title>
+<style>
+  /* The common shell: html, body and a wrapper are each one viewport tall,
+     and the content overflows the wrapper. */
+  html, body, #app { height: 100%; margin: 0; background: #ffffff; }
+  .band { height: 1500px; }
+  #a { background: #ff0000; }
+  #b { background: #00ff00; }
+  #c { background: #0000ff; }
+</style>
+<div id="app">
+  <div id="a" class="band"></div>
+  <div id="b" class="band"></div>
+  <div id="c" class="band"></div>
+</div>
+<script>
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  // How far the page lets itself be scrolled. Asked on a timer: the answer
+  // needs a layout, and the first one may come after this script.
+  var tries = 0;
+  var timer = setInterval(function () {
+    tries += 1;
+    window.scrollTo(0, 10000000);
+    if (window.scrollY > 0 || tries >= 15) {
+      clearInterval(timer);
+      beacon('h6x-reach-' + Math.round(window.scrollY) + '-of-' + (4500 - window.innerHeight));
+    }
+  }, 200);
+</script>
