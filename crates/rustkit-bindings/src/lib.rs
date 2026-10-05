@@ -54,6 +54,8 @@ mod rejection_event_tests;
 mod document_members_tests;
 #[cfg(test)]
 mod web_intl_tests;
+#[cfg(test)]
+mod mutation_observer_tests;
 mod web_crypto;
 mod web_scroll;
 mod web_url;
