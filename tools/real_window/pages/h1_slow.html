@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H1 a slow request</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  #first { height: 60px; margin: 20px; background: #ff0000; }
+</style>
+<!-- A beacon every 200 ms shows the page's clock is running. When the server
+     answers a beacon with "go" (the driver decides when: after the load, with
+     the ticks steady), the page starts one request the server holds for
+     three seconds. The ticks should not notice, and the request should
+     reach its then(). -->
+<div id="first"></div>
+<script>
+  var n = 0, started = false;
+  function beacon(name) { return fetch('/beacon?' + name).then(function (r) { return r.text(); }); }
+  setInterval(function () {
+    n += 1;
+    beacon('slow-tick-' + n).then(function (reply) {
+      if (reply !== 'go' || started) { return; }
+      started = true;
+      fetch('/slow?ms=3000').then(function (r) { return r.text(); }).then(
+        function () { beacon('slow-then'); },
+        function (e) { beacon('slow-catch-' + encodeURIComponent(String(e))); }
+      );
+    }, function () {});
+  }, 200);
+</script>

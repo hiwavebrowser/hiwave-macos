@@ -24,6 +24,10 @@ use url::Url;
 /// asks for none).
 const MIN_LIVE_TURN: Duration = Duration::from_millis(4);
 
+/// How soon the loop turns again while a page's request is out. Nothing
+/// wakes the loop when the answer comes, so it looks.
+const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
+
 /// A RustKit-based WebView that implements IWebContent.
 ///
 /// # Thread Safety
@@ -161,8 +165,13 @@ impl RustKitView {
         }
         // A page that keeps the loop busy gets at most half of it: the next
         // turn waits at least as long as this one took.
-        turn.next_timer_ms
-            .map(|ms| Duration::from_millis(ms).max(started.elapsed()).max(MIN_LIVE_TURN))
+        let timer = turn.next_timer_ms.map(Duration::from_millis);
+        let next = if turn.in_flight > 0 {
+            Some(timer.map_or(LIVE_REQUEST_POLL, |t| t.min(LIVE_REQUEST_POLL)))
+        } else {
+            timer
+        };
+        next.map(|wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN))
     }
 
     /// Render the view (call this in the event loop).

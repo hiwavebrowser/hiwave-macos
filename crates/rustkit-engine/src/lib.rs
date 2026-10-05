@@ -424,11 +424,45 @@ async fn fetch_raster_image(
     image_manager.insert_fetched(&url, content_type.as_deref(), &body)
 }
 
+/// What one image pass is to fetch, and everything the fetch needs
+/// ([`Engine::plan_image_loads`]). It owns its parts, so the fetch can
+/// outlive the call that planned it.
+struct ImagePlan {
+    /// Raster images (and anything not named `.svg`).
+    pending: Vec<Url>,
+    svg_urls: Vec<Url>,
+    /// Images already in a cache that the pass counts as loaded.
+    already_loaded: usize,
+    budget: std::time::Duration,
+    deadline: tokio::time::Instant,
+    referrer: SubresourceReferrer,
+    loader: Arc<ResourceLoader>,
+    image_manager: Arc<ImageManager>,
+}
+
+impl ImagePlan {
+    /// Nothing to fetch.
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.svg_urls.is_empty()
+    }
+}
+
+/// What an image pass fetched ([`Engine::fetch_planned_images`]). Raster
+/// images are already in the image manager's cache; the SVG documents wait
+/// here for the engine's.
+struct FetchedImages {
+    loaded: usize,
+    svgs: Vec<(String, rustkit_svg::SvgDocument)>,
+}
+
 struct ViewState {
     id: EngineViewId,
     viewhost_id: ViewId,
     url: Option<Url>,
     title: Option<String>,
+    /// The HTTP status the view's document came with; None for a document
+    /// that came from no response (`load_html`).
+    http_status: Option<u16>,
     document: Option<Rc<Document>>,
     #[allow(dead_code)]
     layout: Option<LayoutBox>,
@@ -489,6 +523,18 @@ struct ViewState {
     compat_mouse_suppressed: bool,
     /// The element the pointer was over at its last move (raw NodeId).
     hovered_node: Option<usize>,
+    /// `hovered_node` and the elements above it (raw NodeIds): what
+    /// `:hover` matches in this view's next build.
+    hover_chain: Vec<usize>,
+    /// The element the press in progress landed on and the elements above
+    /// it: what `:active` matches, from the press to the release.
+    active_chain: Vec<usize>,
+    /// The rule index this view was last built with: its `reads` say
+    /// which elements a `:hover` or `:active` rule can match, so which
+    /// changes of the two chains are a restyle.
+    rule_reads: std::cell::RefCell<Option<Rc<RuleIndex>>>,
+    /// A chain a sheet reads has changed since the last build.
+    pointer_restyle: bool,
     /// Where the pointer was at its last move, in viewport coordinates.
     pointer_at: Option<(f32, f32)>,
     /// The primary button is held: between a press and its release.
@@ -526,6 +572,12 @@ struct ViewState {
     /// requests and the live loop's go through the same one, so its request
     /// counters cover both.
     script_policy: Option<Arc<FetchPolicy>>,
+    /// Script requests the live loop has started for the current document
+    /// and not yet delivered.
+    live_requests: Vec<script_net::LiveRequest>,
+    /// Image fetches the live loop has started for what the current
+    /// document's scripts added, and not yet kept.
+    live_images: Vec<script_net::LiveFuture<FetchedImages>>,
 }
 
 /// Engine configuration.
@@ -602,10 +654,23 @@ const MAX_TIMER_CALLBACKS: u32 = 10_000;
 /// get a turn in between.
 const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
 
-/// Longest one turn of the live loop waits on the network. The loop is the
-/// UI thread, so a request slower than this fails as a network error rather
-/// than hold the window.
+/// Longest one turn of the live loop waits for the modules a dynamic
+/// `import()` asked for, which are still fetched inside the turn. The loop is
+/// the UI thread, so a module slower than this fails rather than hold the
+/// window longer.
 const LIVE_NETWORK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Longest one turn of the live loop spends on the script requests that are
+/// out (XHR, fetch). The loop is the UI thread: a request is started on the
+/// turn that finds it and delivered on the turn after its answer comes, and
+/// no turn waits for one. Until 2026-10-05 a turn waited up to two seconds
+/// for its requests and then failed them, so one slow request stopped
+/// input, timers and paint for two seconds and never arrived.
+const LIVE_NETWORK_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// How long a request started by the live loop may take before the page gets
+/// a network error for it.
+const LIVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Most records the live loop adds to a view's script log. A timer that
 /// throws on every tick would otherwise grow it for as long as the page is
@@ -694,6 +759,10 @@ pub struct LivePump {
     pub timers_ran: u32,
     /// Script network requests and module fetches that were answered.
     pub requests: usize,
+    /// Script network requests and script-added images that are out and
+    /// have not arrived yet. While there are any, the loop has to keep
+    /// turning: nothing else wakes it when one comes.
+    pub in_flight: usize,
     /// The page was laid out again: a callback wrote to the DOM, or an image
     /// it added arrived.
     pub relaid_out: bool,
@@ -1355,6 +1424,7 @@ impl Engine {
             viewhost_id,
             url: None,
             title: None,
+            http_status: None,
             document: None,
             layout: None,
             display_list: None,
@@ -1367,6 +1437,10 @@ impl Engine {
             checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
+            hover_chain: Vec::new(),
+            active_chain: Vec::new(),
+            rule_reads: std::cell::RefCell::new(None),
+            pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1381,6 +1455,8 @@ impl Engine {
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
+            live_requests: Vec::new(),
+            live_images: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -1423,6 +1499,7 @@ impl Engine {
             viewhost_id,
             url: None,
             title: None,
+            http_status: None,
             document: None,
             layout: None,
             display_list: None,
@@ -1435,6 +1512,10 @@ impl Engine {
             checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
+            hover_chain: Vec::new(),
+            active_chain: Vec::new(),
+            rule_reads: std::cell::RefCell::new(None),
+            pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1449,6 +1530,8 @@ impl Engine {
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
+            live_requests: Vec::new(),
+            live_images: Vec::new(),
         };
 
         let id = view_state.id;
@@ -1500,6 +1583,7 @@ impl Engine {
             viewhost_id,
             url: None,
             title: None,
+            http_status: None,
             document: None,
             layout: None,
             display_list: None,
@@ -1512,6 +1596,10 @@ impl Engine {
             checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
+            hover_chain: Vec::new(),
+            active_chain: Vec::new(),
+            rule_reads: std::cell::RefCell::new(None),
+            pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1526,6 +1614,8 @@ impl Engine {
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
+            live_requests: Vec::new(),
+            live_images: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -1942,6 +2032,13 @@ impl Engine {
             view.primary_button_down = true;
             view.press_target = target;
         }
+        // `:active` from here to the release, wherever the pointer goes.
+        let pressed = target.map_or_else(Vec::new, |target| self.element_chain(id, target));
+        if let Some(view) = self.views.get_mut(&id) {
+            let changed = Self::in_one_chain(&view.active_chain, &pressed);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
+            view.active_chain = pressed;
+        }
         let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
             view.compat_mouse_suppressed = suppressed;
@@ -1953,6 +2050,7 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.press_settled_focus = true;
         }
+        self.settle_pointer_restyle(id);
         not_cancelled
     }
 
@@ -2019,6 +2117,13 @@ impl Engine {
         let before = chain(view.hovered_node);
         let (over, out) = (now.first().copied(), before.first().copied());
         view.hovered_node = over;
+        // `:hover` follows the pointer: when a sheet names it, the page is
+        // restyled once the listeners below have run.
+        if over != out {
+            let changed = Self::in_one_chain(&before, &now);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.hover, &changed);
+            view.hover_chain = now.clone();
+        }
 
         // (target, type, relatedTarget)
         let mut events: Vec<(usize, &str, Option<usize>)> = Vec::new();
@@ -2071,6 +2176,64 @@ impl Engine {
         }
         if let Err(e) = self.flush_script_dom_writes(id) {
             debug!(?id, error = %e, "relayout after a mouse move failed");
+        }
+        self.settle_pointer_restyle(id);
+    }
+
+    /// The elements in exactly one of two chains: the ones a pointer change
+    /// took `:hover` or `:active` from, or gave it to.
+    fn in_one_chain(before: &[usize], now: &[usize]) -> Vec<usize> {
+        let left = before.iter().filter(|n| !now.contains(n));
+        let entered = now.iter().filter(|n| !before.contains(n));
+        left.chain(entered).copied().collect()
+    }
+
+    /// Whether some rule of the view's sheets can match differently now
+    /// that `changed` (raw NodeIds) gained or lost the pseudo-class `reads`
+    /// picks. A restyle is a whole cascade and layout, so a move between
+    /// two elements no `:hover` compound can match must not cost one.
+    fn chain_change_restyles(
+        view: &ViewState,
+        reads: fn(&SelectorReads) -> &PointerReads,
+        changed: &[usize],
+    ) -> bool {
+        let index = view.rule_reads.borrow();
+        let Some(reads) = index.as_ref().map(|index| reads(&index.reads)) else {
+            return false;
+        };
+        if reads.anywhere {
+            return !changed.is_empty();
+        }
+        let Some(document) = view.document.as_ref() else {
+            return false;
+        };
+        !reads.compounds.is_empty()
+            && changed.iter().any(|raw| {
+                let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                    return true;
+                };
+                let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+                    return false;
+                };
+                let classes: Vec<String> = attributes
+                    .get("class")
+                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                reads
+                    .compounds
+                    .iter()
+                    .any(|compound| compound.matches(tag_name, &classes, attributes.get("id")))
+            })
+    }
+
+    /// Restyle the view when the hovered or the pressed chain changed, a
+    /// sheet reads it, and nothing has built the view since (a listener's
+    /// write lays the page out with the new chains already).
+    fn settle_pointer_restyle(&mut self, id: EngineViewId) {
+        if self.views.get(&id).is_some_and(|view| view.pointer_restyle) {
+            if let Err(e) = self.relayout(id) {
+                debug!(?id, error = %e, "restyle after a pointer change failed");
+            }
         }
     }
 
@@ -2156,6 +2319,8 @@ impl Engine {
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
+            let changed = std::mem::take(&mut view.active_chain);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
         }
         self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
         let suppressed = self
@@ -2232,6 +2397,7 @@ impl Engine {
         } else {
             None
         };
+        self.settle_pointer_restyle(id);
         ClickOutcome { focused, navigate }
     }
 
@@ -2498,7 +2664,6 @@ impl Engine {
     /// load; a page with none (`load_html`) has no network.
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
         let mut out = LivePump::default();
-        let net_rounds = self.config.script_network_rounds;
         let loader = self.loader.clone();
         let Some(view) = self.views.get_mut(&id) else {
             return out;
@@ -2508,6 +2673,7 @@ impl Engine {
         };
         let policy = view.script_policy.clone();
         let document = view.url.clone();
+        let live_requests = &mut view.live_requests;
         let mut threw: Vec<(&str, String)> = Vec::new();
 
         // Timers first: what they ask of the network is answered this turn.
@@ -2519,24 +2685,51 @@ impl Engine {
             Err(_) => threw.push(("timers", "JS engine panic".into())),
         }
         if let Some(policy) = policy {
+            // Start what the page has asked for since the last turn. No turn
+            // waits for an answer: this thread is the window's.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())) {
+                Ok(requests) => {
+                    let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
+                    live_requests.extend(
+                        requests
+                            .into_iter()
+                            .map(|request| script_net::start_live(policy.clone(), loader.clone(), request, deadline)),
+                    );
+                }
+                Err(_) => threw.push(("network", "JS engine panic".into())),
+            }
             // Delivery only: a timer a response handler sets runs on a later
-            // turn, when its time has passed.
-            let mut modules_fetched = 0;
-            let found = script_net::pump_all(
-                bindings,
-                &policy,
-                &loader,
-                tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
-                net_rounds,
-                None,
-                document.as_ref(),
-                &mut modules_fetched,
-            )
-            .await;
-            out.requests = found.requests;
-            threw.extend(found.threw.into_iter().map(|message| ("network", message)));
-            if found.poisoned {
-                threw.push(("network", "JS engine panic".into()));
+            // turn, when its time has passed, and a request it makes starts
+            // on the next.
+            for (request_id, outcome) in script_net::settle_live(live_requests, LIVE_NETWORK_SLICE).await {
+                out.requests += 1;
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings.deliver_net_response(request_id, outcome)
+                })) {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => threw.push(("network", e.to_string())),
+                    Err(_) => threw.push(("network", "JS engine panic".into())),
+                }
+            }
+            out.in_flight = live_requests.len();
+            // The modules a dynamic `import()` asked for are still fetched
+            // inside the turn.
+            if let Some(document) = document.as_ref() {
+                let mut modules_fetched = 0;
+                let found = script_net::pump_modules(
+                    bindings,
+                    &policy,
+                    &loader,
+                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
+                    document,
+                    &mut modules_fetched,
+                )
+                .await;
+                out.requests += found.requests;
+                threw.extend(found.threw.into_iter().map(|message| ("network", message)));
+                if found.poisoned {
+                    threw.push(("network", "JS engine panic".into()));
+                }
             }
         }
         threw.extend(bindings.take_reported_errors().into_iter().map(|message| ("timers", message)));
@@ -2557,18 +2750,37 @@ impl Engine {
             Ok(relaid_out) => out.relaid_out = relaid_out,
             Err(e) => debug!(?id, error = %e, "relayout after a live turn failed"),
         }
-        // What the callbacks added may show images the load never saw.
+        // What the callbacks added may show images the load never saw. Their
+        // fetch starts here and no turn waits for it (until 2026-10-05 this
+        // one did, for as long as the slowest image took).
         if out.relaid_out {
-            match self.load_images_added_by_scripts(id).await {
-                Ok(0) => {}
-                Ok(count) => {
-                    info!(count, "Loaded images added by live page scripts");
-                    if let Err(e) = self.relayout(id) {
-                        debug!(?id, error = %e, "relayout after live images failed");
+            match self.plan_image_loads(id, true) {
+                Ok(Some(plan)) if !plan.is_empty() => {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
                     }
                 }
-                Err(e) => debug!(?id, error = %e, "Failed to load images added by live page scripts"),
+                Ok(_) => {}
+                Err(e) => debug!(?id, error = %e, "Failed to look for images added by live page scripts"),
             }
+        }
+        let fetched = match self.views.get_mut(&id) {
+            Some(view) => script_net::settle_live(&mut view.live_images, LIVE_NETWORK_SLICE).await,
+            None => Vec::new(),
+        };
+        let mut arrived = 0;
+        for images in fetched {
+            arrived += self.keep_fetched_images(images);
+        }
+        if arrived > 0 {
+            info!(count = arrived, "Loaded images added by live page scripts");
+            match self.relayout(id) {
+                Ok(()) => out.relaid_out = true,
+                Err(e) => debug!(?id, error = %e, "relayout after live images failed"),
+            }
+        }
+        if let Some(view) = self.views.get(&id) {
+            out.in_flight += view.live_images.len();
         }
         if out.timers_ran > 0 || out.requests > 0 {
             debug!(?id, ?out, "Live turn");
@@ -2949,33 +3161,59 @@ impl Engine {
             .unwrap_or_else(|| attributes.contains_key("checked"))
     }
 
-    /// An `<input>`'s attributes as the build of the current view reads
-    /// them: with `checked` present exactly when the control is checked.
-    /// Selector matching (`:checked`, also as a sibling) and the control's
-    /// box both read the attribute map, so this one substitution is what
-    /// makes them follow a click.
+    /// An element's attributes as the build of the current view reads
+    /// them: an `<input>`'s with `checked` present exactly when the control
+    /// is checked, and the hovered (pressed) element's and its ancestors'
+    /// with [`HOVER_MARK`] ([`ACTIVE_MARK`]). Selector matching (`:checked`,
+    /// `:hover` and `:active`, also on an ancestor or a sibling) and the
+    /// control's box read the attribute map, so this one substitution is
+    /// what makes them follow a click and the pointer.
     fn live_attributes<'a>(
         &self,
         node_raw: usize,
+        tag_lower: &str,
         attributes: &'a HashMap<String, String>,
     ) -> std::borrow::Cow<'a, HashMap<String, String>> {
-        let live = self
-            .building_view
-            .get()
-            .and_then(|id| self.views.get(&id))
-            .and_then(|v| v.checked_states.get(&node_raw).copied());
-        match live {
-            Some(checked) if checked != attributes.contains_key("checked") => {
-                let mut attributes = attributes.clone();
-                if checked {
-                    attributes.insert("checked".to_string(), String::new());
-                } else {
-                    attributes.remove("checked");
-                }
-                std::borrow::Cow::Owned(attributes)
-            }
-            _ => std::borrow::Cow::Borrowed(attributes),
+        let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) else {
+            return std::borrow::Cow::Borrowed(attributes);
+        };
+        let checked = match tag_lower {
+            "input" => view
+                .checked_states
+                .get(&node_raw)
+                .copied()
+                .filter(|checked| *checked != attributes.contains_key("checked")),
+            _ => None,
+        };
+        let hovered = view.hover_chain.contains(&node_raw);
+        let active = view.active_chain.contains(&node_raw);
+        if checked.is_none() && !hovered && !active {
+            return std::borrow::Cow::Borrowed(attributes);
         }
+        let mut attributes = attributes.clone();
+        match checked {
+            Some(true) => {
+                attributes.insert("checked".to_string(), String::new());
+            }
+            Some(false) => {
+                attributes.remove("checked");
+            }
+            None => {}
+        }
+        if hovered {
+            attributes.insert(HOVER_MARK.to_string(), String::new());
+        }
+        if active {
+            attributes.insert(ACTIVE_MARK.to_string(), String::new());
+        }
+        std::borrow::Cow::Owned(attributes)
+    }
+
+    /// The HTTP status the view's document came with: 200 for an ordinary
+    /// page, 403 or 404 for a server's error page shown as the page. None
+    /// for a document that came from no response.
+    pub fn http_status(&self, id: EngineViewId) -> Option<u16> {
+        self.views.get(&id).and_then(|v| v.http_status)
     }
 
     /// Live value + caret for a control in a SPECIFIC view.
@@ -3650,23 +3888,47 @@ impl Engine {
             return Ok(());
         }
 
-        if !response.ok() {
-            let error = format!("HTTP {}", response.status);
-            let view = self
-                .views
-                .get_mut(&id)
-                .ok_or(EngineError::ViewNotFound(id))?;
-            view.navigation
-                .fail_navigation(error.clone())
-                .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        let status = response.status;
+        let header_referrer_policy = response
+            .headers
+            .get("referrer-policy")
+            .and_then(|v| v.to_str().ok())
+            .and_then(ReferrerPolicy::parse_header);
 
-            let _ = self.event_tx.send(EngineEvent::NavigationFailed {
-                view_id: id,
-                url,
-                error,
-            });
+        // A server's error page is a page: the body of a 403 or a 404 is
+        // shown like any other document. Only an error response with
+        // nothing in it fails the navigation.
+        let mut response = Some(response);
+        let mut error_page = None;
+        if !status.is_success() {
+            let body = match response.take() {
+                Some(response) => response.text().await.unwrap_or_default(),
+                None => String::new(),
+            };
+            if self.nav_superseded(id, generation) {
+                debug!(?id, %url, "Navigation abandoned after the body of an error response");
+                return Ok(());
+            }
+            if body.trim().is_empty() {
+                let error = format!("HTTP {status}");
+                let view = self
+                    .views
+                    .get_mut(&id)
+                    .ok_or(EngineError::ViewNotFound(id))?;
+                view.navigation
+                    .fail_navigation(error.clone())
+                    .map_err(|e| EngineError::NavigationError(e.to_string()))?;
 
-            return Err(EngineError::NavigationError("HTTP error".into()));
+                let _ = self.event_tx.send(EngineEvent::NavigationFailed {
+                    view_id: id,
+                    url,
+                    error,
+                });
+
+                return Err(EngineError::NavigationError("HTTP error".into()));
+            }
+            warn!(?id, %url, %status, bytes = body.len(), "Showing the body of an error response as the page");
+            error_page = Some(body);
         }
 
         // Commit navigation
@@ -3685,14 +3947,12 @@ impl Engine {
             url: url.clone(),
         });
 
-        let header_referrer_policy = response
-            .headers
-            .get("referrer-policy")
-            .and_then(|v| v.to_str().ok())
-            .and_then(ReferrerPolicy::parse_header);
-
         // Parse HTML
-        let html = response.text().await?;
+        let html = match (error_page, response) {
+            (Some(body), _) => body,
+            (None, Some(response)) => response.text().await?,
+            (None, None) => String::new(),
+        };
 
         // Body fully read — still current?
         if self.nav_superseded(id, generation) {
@@ -3715,6 +3975,7 @@ impl Engine {
         view.document = Some(document.clone());
         view.title = title.clone();
         view.header_referrer_policy = header_referrer_policy;
+        view.http_status = Some(status.as_u16());
         // A new document invalidates every per-node side table. NodeId is
         // PER-DOCUMENT (each Document restarts its counter at 1), so a
         // surviving entry keyed by raw id 4 would be read as the NEW page's
@@ -3728,6 +3989,10 @@ impl Engine {
         view.checked_states.clear();
         view.focused_node = None;
         view.hovered_node = None;
+        view.hover_chain.clear();
+        view.active_chain.clear();
+        view.rule_reads.get_mut().take();
+        view.pointer_restyle = false;
         view.pointer_at = None;
         view.primary_button_down = false;
         view.press_target = None;
@@ -3735,6 +4000,9 @@ impl Engine {
         view.compat_mouse_suppressed = false;
         view.script_log.clear();
         view.script_policy = None;
+        // The last document's requests are nobody's now.
+        view.live_requests.clear();
+        view.live_images.clear();
 
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
@@ -4021,6 +4289,7 @@ impl Engine {
         view.document = Some(document.clone());
         view.title = title.clone();
         view.header_referrer_policy = None;
+        view.http_status = None;
         // A new document invalidates every per-node side table. NodeId is
         // PER-DOCUMENT (each Document restarts its counter at 1), so a
         // surviving entry keyed by raw id 4 would be read as the NEW page's
@@ -4034,6 +4303,10 @@ impl Engine {
         view.checked_states.clear();
         view.focused_node = None;
         view.hovered_node = None;
+        view.hover_chain.clear();
+        view.active_chain.clear();
+        view.rule_reads.get_mut().take();
+        view.pointer_restyle = false;
         view.pointer_at = None;
         view.primary_button_down = false;
         view.press_target = None;
@@ -4041,6 +4314,9 @@ impl Engine {
         view.compat_mouse_suppressed = false;
         view.script_log.clear();
         view.script_policy = None;
+        // The last document's requests are nobody's now.
+        view.live_requests.clear();
+        view.live_images.clear();
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -4119,6 +4395,10 @@ impl Engine {
     pub fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("relayout", ?id).entered();
 
+        // This build reads the hovered and pressed chains as they are now.
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pointer_restyle = false;
+        }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         // Text measurement below resolves family names; make THIS view's
@@ -4689,6 +4969,16 @@ impl Engine {
             external_sheets: external_stylesheets.len(),
             viewport,
             focus: self.building_focus.get(),
+            hover: self
+                .building_view
+                .get()
+                .and_then(|id| self.views.get(&id))
+                .and_then(|v| v.hover_chain.first().copied()),
+            active: self
+                .building_view
+                .get()
+                .and_then(|id| self.views.get(&id))
+                .and_then(|v| v.active_chain.first().copied()),
             fonts: self.web_font_count(),
         };
 
@@ -4771,10 +5061,13 @@ impl Engine {
         // missed still cascades correctly, by the unindexed scan.
         let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) {
             true => None,
-            false => Some(RuleIndexScope::install_for(
-                RuleIndex::source_of(&stylesheets),
-                self.shared_rule_index(&stylesheets),
-            )),
+            false => {
+                let index = self.shared_rule_index(&stylesheets);
+                if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
+                    *view.rule_reads.borrow_mut() = Some(index.clone());
+                }
+                Some(RuleIndexScope::install_for(RuleIndex::source_of(&stylesheets), index))
+            }
         };
 
         // On unless RUSTKIT_STYLE_SHARE turns it off. A shared style records
@@ -5319,9 +5612,10 @@ impl Engine {
             } => {
                 let tag_lower = lower_tag(tag_name);
                 // A checkbox or radio button is styled and painted from its
-                // live checkedness, not from its `checked` attribute.
-                let live = (&*tag_lower == "input").then(|| self.live_attributes(node.id.raw(), attributes));
-                let attributes = live.as_deref().unwrap_or(attributes);
+                // live checkedness, not from its `checked` attribute; the
+                // elements under the pointer are styled as hovered.
+                let live = self.live_attributes(node.id.raw(), &tag_lower, attributes);
+                let attributes = &*live;
 
                 // Skip rendering for certain elements
                 let is_hidden = matches!(
@@ -5934,10 +6228,7 @@ impl Engine {
 
                 // Build ancestors list for child elements with class and ID info
                 // Insert at beginning so ancestors[0] is always the immediate parent
-                let classes: Vec<String> = attributes
-                    .get("class")
-                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
-                    .unwrap_or_default();
+                let classes = element_classes(attributes);
                 let id = attributes.get("id").cloned();
                 let mut child_ancestors: Vec<Ancestor> = Vec::with_capacity(ancestors.len() + 1);
                 child_ancestors.push(Rc::new((tag_lower.to_string(), classes, id)));
@@ -6047,14 +6338,11 @@ impl Engine {
                         ..
                     } = &child.node_type
                     {
-                        let child_classes: Vec<String> = attributes
-                            .get("class")
-                            .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
-                            .unwrap_or_default();
                         let t = lower_tag(tag_name);
                         *type_seen.entry(t.clone()).or_insert(0) += 1;
-                        let live = (&*t == "input").then(|| self.live_attributes(child.id.raw(), attributes));
-                        let state = ElementState::of(&t, live.as_deref().unwrap_or(attributes));
+                        let live = self.live_attributes(child.id.raw(), &t, attributes);
+                        let child_classes = element_classes(&live);
+                        let state = ElementState::of(&t, &live);
                         preceding_siblings.push((
                             t.into_owned(),
                             child_classes,
@@ -9607,10 +9895,21 @@ impl Engine {
     }
 
     async fn load_images_pass(&mut self, id: EngineViewId, only_new: bool) -> Result<usize, EngineError> {
+        let Some(plan) = self.plan_image_loads(id, only_new)? else {
+            return Ok(0);
+        };
+        let fetched = Self::fetch_planned_images(plan).await;
+        Ok(self.keep_fetched_images(fetched))
+    }
+
+    /// The first part of an image pass, which waits for nothing: find the
+    /// images the document shows, record them as attempted, and sort out
+    /// what there is to fetch. `None`: the view has no document.
+    fn plan_image_loads(&mut self, id: EngineViewId, only_new: bool) -> Result<Option<ImagePlan>, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         let Some(document) = &view.document else {
-            return Ok(0);
+            return Ok(None);
         };
 
         let base_url = view.url.as_ref();
@@ -9630,14 +9929,6 @@ impl Engine {
         }
 
         let image_manager = self.image_manager.clone();
-
-        // Fetch concurrently with bounded parallelism. The serial loop cost
-        // 69 seconds on a Wikipedia article whose ~30 thumbnails each burned
-        // a sequential round-trip failing (2026-08-05 live session);
-        // buffer_unordered polls the futures on this thread, so no Send
-        // bounds are required and the engine stays single-threaded.
-        use futures::stream::StreamExt;
-        const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
 
         let mut pending = Vec::new();
         let mut svg_urls = Vec::new();
@@ -9667,16 +9958,40 @@ impl Engine {
             }
         }
 
+        Ok(Some(ImagePlan {
+            pending,
+            svg_urls,
+            already_loaded: loaded,
+            budget: std::time::Duration::from_millis(self.config.subresource_budget_ms),
+            deadline: self.subresource_deadline(),
+            referrer: self.subresource_referrer(id),
+            loader: self.loader.clone(),
+            image_manager,
+        }))
+    }
+
+    /// The second part: fetch and decode what the plan lists. It borrows
+    /// nothing from the engine, so the load awaits it in place and the live
+    /// loop keeps it across turns.
+    async fn fetch_planned_images(plan: ImagePlan) -> FetchedImages {
+        // Fetch concurrently with bounded parallelism. The serial loop cost
+        // 69 seconds on a Wikipedia article whose ~30 thumbnails each burned
+        // a sequential round-trip failing (2026-08-05 live session);
+        // buffer_unordered polls the futures on this thread, so no Send
+        // bounds are required and the engine stays single-threaded.
+        use futures::stream::StreamExt;
+        const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
+
+        let ImagePlan { pending, svg_urls, already_loaded, budget, deadline, referrer, loader, image_manager } = plan;
+        let mut loaded = already_loaded;
+        let mut svgs = Vec::new();
+
         // Concurrent like the raster lane (Prometheus, #104 R1: SVG was left
         // serial while images were parallelized). Parsing happens inside the
-        // futures; only the cache insert is serialized afterwards, because
-        // &mut self cannot be held across them.
-        let budget = std::time::Duration::from_millis(self.config.subresource_budget_ms);
-        let deadline = self.subresource_deadline();
-        let referrer = self.subresource_referrer(id);
+        // futures; the engine's cache insert comes afterwards, in
+        // `keep_fetched_images`.
         {
-            use futures::stream::StreamExt;
-            let loader = self.loader.clone();
+            let loader = loader.clone();
             let referrer = &referrer;
             let parsed: Vec<Option<(String, rustkit_svg::SvgDocument)>> =
                 futures::stream::iter(svg_urls.into_iter().map(|url| {
@@ -9716,7 +10031,7 @@ impl Engine {
                 .await;
 
             for (url, doc) in parsed.into_iter().flatten() {
-                self.svg_cache.insert(url, doc);
+                svgs.push((url, doc));
                 loaded += 1;
             }
         }
@@ -9724,7 +10039,6 @@ impl Engine {
         // Each raster load is loaded (true), failed (false), or turned out to
         // be SVG by its type and parsed here for the SVG cache.
         type RasterOutcome = (bool, Option<(String, rustkit_svg::SvgDocument)>);
-        let loader = self.loader.clone();
         let referrer = &referrer;
         let results: Vec<RasterOutcome> = futures::stream::iter(pending.into_iter().map(|url| {
             let image_manager = image_manager.clone();
@@ -9770,13 +10084,18 @@ impl Engine {
         .await;
 
         for (ok, svg) in results {
-            if let Some((url, doc)) = svg {
-                self.svg_cache.insert(url, doc);
-            }
+            svgs.extend(svg);
             loaded += usize::from(ok);
         }
 
-        Ok(loaded)
+        FetchedImages { loaded, svgs }
+    }
+
+    /// The last part: keep what a fetch brought. Returns how many images
+    /// the pass loaded.
+    fn keep_fetched_images(&mut self, fetched: FetchedImages) -> usize {
+        self.svg_cache.extend(fetched.svgs);
+        fetched.loaded
     }
 
     /// Who a subresource request comes from: the document URL and the
@@ -10293,6 +10612,8 @@ impl Engine {
                 ix.specificity.push(whole);
                 ix.member_specificity.push(members);
                 let prepared = SelectorMatcher.prepared_selector(rule.selector.trim());
+                ix.reads.hover.note(rule.selector.trim(), ":hover", HOVER_MARK);
+                ix.reads.active.note(rule.selector.trim(), ":active", ACTIVE_MARK);
                 let positional = ix.reads.note(&prepared);
                 ix.reads.positional.push(positional);
                 ix.prepared.push(prepared);
@@ -11236,8 +11557,10 @@ impl SelectorMatcher {
     /// Pseudo-classes that are false for every element of the first static
     /// frame: nothing is hovered, pressed, focused, or fragment-targeted,
     /// and no link has been visited. Shared by the subject matcher and the
-    /// ancestor/sibling matcher so a compound like `.card:hover` fails in
-    /// either position.
+    /// ancestor/sibling matcher so a compound like `.card:focus` fails in
+    /// either position. `:hover` and `:active` are listed for the first
+    /// frame only: both matchers decide them from [`HOVER_MARK`] and
+    /// [`ACTIVE_MARK`] before they ask here.
     fn pseudo_class_is_static_false(name: &str) -> bool {
         matches!(
             name,
@@ -11527,6 +11850,10 @@ impl SelectorMatcher {
             // and `focus-visible` used to fall to the catch-all below and
             // MATCH EVERYTHING, so `.wrapper:focus-within .icon { color }`
             // styled every icon as if its input were focused.
+            // The build marks the element under the pointer and the elements
+            // above it (`Engine::live_attributes`).
+            "hover" => attributes.contains_key(HOVER_MARK),
+            "active" => attributes.contains_key(ACTIVE_MARK),
             n if SelectorMatcher::pseudo_class_is_static_false(n) => false,
             // Link pseudo-classes: an <a>/<area> with an href.
             "link" | "any-link" => matches!(tag, "a" | "area") && attributes.contains_key("href"),
@@ -22293,6 +22620,173 @@ mod node_identity_tests {
         );
     }
 
+    // `:hover` was false for every element, always: a rule that restyles
+    // what the pointer is over, or opens a menu under it, never applied, so
+    // a page gave no sign the pointer was on anything. It matches the
+    // element under the pointer and every element above it, as the subject
+    // of a rule, as an ancestor and as an earlier sibling, and stops
+    // matching when the pointer moves on or leaves the view.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn css_hover_follows_the_pointer() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        // Rows of 40px: #b, #c, then #a holding #t and #sub. Only widths
+        // change, so nothing moves under the pointer.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } #a { height: auto }"#,
+                    r#"#b:hover { width: 300px } #b:hover + #c { width: 200px }"#,
+                    r#".menu:hover .sub { width: 100px } #c:not(:hover) { margin-left: 5px }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="c">c</div>"#,
+                    r#"<div id="a" class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let read = "['b', 'c', 'sub'].map(function (i) { \
+                      var r = document.getElementById(i).getBoundingClientRect(); \
+                      return r.width + '@' + r.left; }).join(' ')";
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 400@0"));
+
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("300@0 200@5 400@0"), "over #b");
+
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@0 400@0"), "over #c");
+
+        engine.mouse_move_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "over #t, inside .menu");
+
+        engine.mouse_leave(id);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 400@0"), "outside the view");
+
+    }
+
+    // A hover restyle is a whole cascade and layout (0.1 s on wikipedia's
+    // front page, 0.4 s on github's), so it runs only when an element that
+    // gained or lost the pointer is one a `:hover` compound can match. The
+    // matcher's own counter says whether a move ran the cascade.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_move_no_hover_rule_can_see_does_not_restyle() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        // Rows of 40px: #b, then .menu holding #t and #sub, then #c.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } .menu { height: auto }"#,
+                    r#"#b:hover { width: 300px } .menu:hover .sub { width: 100px }"#,
+                    r#"#c:active { width: 310px } p:hover::after { content: "x" }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div>"#,
+                    r#"<div class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"<div id="c">c</div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let cascades = |engine: &mut Engine, act: &dyn Fn(&mut Engine)| {
+            FULL_SELECTOR_MATCHES.with(|n| n.set(0));
+            act(engine);
+            FULL_SELECTOR_MATCHES.with(|n| n.get()) > 0
+        };
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t: .menu gains the pointer");
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#t to #sub, inside .menu");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 140.0)), "onto #c: .menu loses it");
+        assert!(!cascades(&mut engine, &|e| e.mouse_leave(id)), "off #c, which no :hover rule names");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "onto #b");
+        // A press restyles only where an `:active` compound can match.
+        assert!(!cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 20.0); }), "press on #b");
+        assert!(!cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 20.0); }), "release on #b");
+        assert!(cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 140.0); }), "press on #c");
+        assert!(cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 140.0); }), "release on #c");
+
+        // `:hover` where the compounds do not show it: every change counts.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>body { margin: 0 } div { height: 40px } "#,
+                    r#"#b:not(:hover) { width: 300px }</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="t">t</div><div id="c">c</div></body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#t to #c");
+
+        // No sheet names `:hover`: no move restyles.
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "a page with no :hover rule");
+    }
+
+    // `:active` was false for every element too, so a press showed nothing.
+    // It matches the element pressed and the elements above it from the
+    // press to the release, wherever the pointer goes in between, while
+    // `:hover` goes on following the pointer. The page is
+    // tools/parity_oracle/css_hover_page.html and every expected line is
+    // what the oracle's Chrome measured for the same step
+    // (tools/parity_oracle/css_hover_log.mjs).
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn css_active_holds_from_the_press_to_the_release() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } #a { height: auto }"#,
+                    r#"#b:hover { width: 300px } #b:hover + #c { width: 200px }"#,
+                    r#".menu:hover .sub { width: 100px } #c:not(:hover) { margin-left: 5px }"#,
+                    r#"#b:active { width: 310px } #b:active + #c { width: 210px }"#,
+                    r#".menu:active .sub { width: 110px }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="c">c</div>"#,
+                    r#"<div id="a" class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let read = "['b', 'c', 'sub'].map(function (i) { \
+                      var r = document.getElementById(i).getBoundingClientRect(); \
+                      return r.width + '@' + r.left; }).join(' ')";
+
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("300@0 200@5 400@0"), "over #b");
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@5 400@0"), "press on #b");
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@0 400@0"), "held, over #c");
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@5 400@0"), "held, back over #b");
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        engine.click_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@0 400@0"), "released over #c");
+
+        engine.mouse_move_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "over #t");
+        engine.mouse_down_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 110@0"), "press on #t, inside .menu");
+        engine.click_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "released on #t");
+    }
+
     // A cancelled `pointerdown` stops the `mousemove`s of that press, not
     // the boundary events (Pointer Events §11.3). A move writes to the DOM
     // like any other listener: the layout follows before the call returns.
@@ -26865,6 +27359,28 @@ impl SubjectCompound {
     }
 }
 
+/// What marks an element as hovered (pressed) for one build: an attribute
+/// name on the element itself (the subject matcher reads attributes) and a
+/// class on it as an ancestor or an earlier sibling (those are known by
+/// tag, classes and id). A page can spell it only by writing U+0001 into a
+/// class or an attribute name, and then styles that element as hovered.
+const HOVER_MARK: &str = "\u{1}hover";
+const ACTIVE_MARK: &str = "\u{1}active";
+
+/// An element's classes as its descendants and later siblings see them.
+fn element_classes(attributes: &HashMap<String, String>) -> Vec<String> {
+    let mut classes: Vec<String> = attributes
+        .get("class")
+        .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    for mark in [HOVER_MARK, ACTIVE_MARK] {
+        if attributes.contains_key(mark) {
+            classes.push(mark.to_string());
+        }
+    }
+    classes
+}
+
 /// An earlier sibling as `+` / `~` see it: tag, classes, id, and the form
 /// state its attributes decide.
 type SiblingKey = (String, Vec<String>, Option<String>, ElementState);
@@ -27027,6 +27543,10 @@ impl AncestorCompound {
                             // Relational: the subject path under-matches it
                             // too.
                             ("has", _) => out.never = true,
+                            // A hovered ancestor or sibling carries the
+                            // mark among its classes (`element_classes`).
+                            ("hover", None) => out.classes.push(HOVER_MARK.to_string()),
+                            ("active", None) => out.classes.push(ACTIVE_MARK.to_string()),
                             (n, _) if SelectorMatcher::pseudo_class_is_static_false(n) => out.never = true,
                             // Structural and the rest need context the tuple
                             // does not carry: permissive.
@@ -27606,6 +28126,75 @@ struct SelectorReads {
     /// every element ran `match_attribute_selector` over the selector text
     /// for each of them, 14% of wikipedia's build with sharing on.
     attribute_tests: HashMap<String, Vec<(&'static str, String)>>,
+    /// Where the sheets read `:hover` and `:active`.
+    hover: PointerReads,
+    active: PointerReads,
+}
+
+/// Which elements a pointer pseudo-class (`:hover`, `:active`) can change
+/// a rule's match from.
+#[derive(Default)]
+struct PointerReads {
+    /// The compounds that carry it, without it: an element none of them
+    /// matches by tag, classes and id gains or loses the pseudo-class
+    /// without any rule noticing.
+    compounds: Vec<AncestorCompound>,
+    seen: std::collections::HashSet<(Option<String>, Vec<String>, Option<String>)>,
+    /// Some selector names it where `compounds` does not show it (inside
+    /// `:not()`, `:has()`, or an `:is()` member with a combinator): any
+    /// element may count.
+    anywhere: bool,
+}
+
+impl PointerReads {
+    /// Record where `selector` reads `name` (`":hover"`), which the
+    /// compound parser turns into the class `mark`.
+    fn note(&mut self, selector: &str, name: &str, mark: &str) {
+        if !selector.contains(name) {
+            return;
+        }
+        for member in SelectorMatcher::split_top_level_commas(selector) {
+            let member = member.trim();
+            let named = member.matches(name).count();
+            if named == 0 {
+                continue;
+            }
+            // A `::before` / `::after` rule is matched by its base selector.
+            let base = [(":before", "::before"), (":after", "::after")]
+                .into_iter()
+                .find(|(suffix, _)| member.ends_with(suffix))
+                .map_or(member, |(suffix, pseudo)| pseudo_base_selector(member, pseudo, suffix));
+            let prepared = SelectorMatcher.prepared_selector(base);
+            let PreparedSelector::Complex { compounds, .. } = &*prepared else {
+                // Invalid, or some other pseudo-element's: it styles nothing.
+                continue;
+            };
+            let mut found = 0;
+            for compound in compounds {
+                let marks = compound.classes.iter().filter(|c| *c == mark).count();
+                if marks == 0 {
+                    continue;
+                }
+                found += marks;
+                let classes: Vec<String> = compound
+                    .classes
+                    .iter()
+                    .filter(|c| !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK))
+                    .cloned()
+                    .collect();
+                if self.seen.insert((compound.tag.clone(), classes.clone(), compound.id.clone())) {
+                    self.compounds.push(AncestorCompound {
+                        never: compound.never,
+                        tag: compound.tag.clone(),
+                        classes,
+                        id: compound.id.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+            self.anywhere |= found != named;
+        }
+    }
 }
 
 impl SelectorReads {
@@ -28222,6 +28811,10 @@ struct StyleMemoKey {
     external_sheets: usize,
     viewport: Option<(f32, f32)>,
     focus: Option<rustkit_dom::NodeId>,
+    /// The hovered and the pressed element: `:hover` and `:active` style
+    /// them and the elements above them.
+    hover: Option<usize>,
+    active: Option<usize>,
     /// How many web faces the view's font partition has loaded (the loader
     /// only grows a partition, so the count names the set): `ch` lengths
     /// resolve against the element's font, so a face arriving between two
@@ -29077,6 +29670,8 @@ mod incremental_restyle_tests {
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                hover: None,
+                active: None,
                 fonts: 0,
             };
             let mut changed = original.clone();
@@ -29102,6 +29697,8 @@ mod incremental_restyle_tests {
         assert_restarts("focus", |key| {
             key.focus = Some(rustkit_dom::NodeId::new(1))
         });
+        assert_restarts("hover", |key| key.hover = Some(1));
+        assert_restarts("active", |key| key.active = Some(1));
         assert_restarts("web fonts", |key| key.fonts = 1);
     }
 
@@ -29356,6 +29953,8 @@ mod incremental_restyle_tests {
             external_sheets: 0,
             viewport: None,
             focus: None,
+            hover: None,
+            active: None,
             fonts: 0,
         };
         let recorded_node = rustkit_dom::NodeId::new(7);
@@ -29411,6 +30010,8 @@ mod incremental_restyle_tests {
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                hover: None,
+                active: None,
                 fonts: 0,
             })
             .expect("records");
@@ -33790,5 +34391,85 @@ mod grid_item_child_abspos_tests {
             "`left: 50%` must stay correct: expected {}, got {inset}",
             demo.dimensions.content.width / 2.0
         );
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod error_response_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// `/blocked` answers 403 with a page, `/missing` 404 with nothing,
+    /// `/` 200 with a page.
+    fn serve() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => req.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&req);
+                    let (status, body) = match req.split_whitespace().nth(1).unwrap_or("/") {
+                        "/" => ("200 OK", "<html><head><title>Home</title></head><body><p>home</p></body></html>"),
+                        "/blocked" => (
+                            "403 Forbidden",
+                            "<html><head><title>Blocked</title></head><body><p>Access denied</p></body></html>",
+                        ),
+                        _ => ("404 Not Found", ""),
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        port
+    }
+
+    // A navigation that got a 403 or a 404 failed with "HTTP error" and the
+    // view kept whatever it had, though the server had sent a page saying
+    // why (ebay's 403, any site's 404 page). A browser shows that page. An
+    // error with no body still fails: there is nothing of the site's to
+    // show.
+    #[test]
+    fn the_body_of_an_error_response_is_shown_as_the_page() {
+        let port = serve();
+        let url = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+        rt.block_on(engine.load_url(view, url("/blocked")))
+            .expect("a 403 with a page is a navigation to that page");
+        assert_eq!(engine.views[&view].title.as_deref(), Some("Blocked"));
+        assert_eq!(engine.views[&view].url, Some(url("/blocked")));
+        assert!(engine.views[&view].layout.is_some(), "the error page is laid out");
+        assert_eq!(engine.http_status(view), Some(403), "the status stays known");
+        let failed = rt.block_on(engine.load_url(view, url("/missing")));
+        assert!(
+            matches!(failed, Err(EngineError::NavigationError(_))),
+            "a 404 with no body is a failed navigation: {failed:?}"
+        );
+        assert_eq!(engine.views[&view].title.as_deref(), Some("Blocked"), "the view keeps the page it had");
+        assert_eq!(engine.http_status(view), Some(403));
+        rt.block_on(engine.load_url(view, url("/"))).expect("load_url");
+        assert_eq!(engine.views[&view].title.as_deref(), Some("Home"));
+        assert_eq!(engine.http_status(view), Some(200));
+
+        engine.load_html(view, "<p>local</p>").expect("load_html");
+        assert_eq!(engine.http_status(view), None, "a document that came from no response has no status");
     }
 }

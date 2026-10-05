@@ -40,9 +40,11 @@ nul
 .ai/logs/
 .ai/*
 
-# Tools (ignore all except parity_oracle)
+# Tools (ignore all except parity_oracle and real_window)
 tools/*
 !tools/parity_oracle/
+!tools/real_window/
+tools/real_window/out/
 
 # Keep work_orders, roadmap_index.json, and README.md tracked
 # (they are NOT ignored because only the above subdirs are)
