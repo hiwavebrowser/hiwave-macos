@@ -7157,6 +7157,70 @@ mod tests {
         );
     }
 
+    /// Two auto rows. Column 1 holds a 10px-tall block spanning both rows;
+    /// column 2 holds one flex row of three chips in each row.
+    fn chip_rows_beside_a_spanning_item(font_px: f32, gap: f32) -> LayoutBox {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(40.0), TrackSize::Px(262.0)]);
+        container_style.row_gap = Length::Px(gap);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut span = ComputedStyle::new();
+        span.height = Length::Px(10.0);
+        span.align_self = AlignSelf::FlexStart;
+        span.grid_column_start = GridLine::Number(1);
+        span.grid_row_start = GridLine::Number(1);
+        span.grid_row_end = GridLine::Number(3);
+        container.children.push(LayoutBox::new(BoxType::Block, span));
+
+        for row in 1..=2 {
+            let mut item = shortcut_row(font_px);
+            item.style.grid_column_start = GridLine::Number(2);
+            item.style.grid_row_start = GridLine::Number(row);
+            container.children.push(item);
+        }
+        layout_grid_container(&mut container, 302.0, 0.0);
+        container
+    }
+
+    /// L0 (docs/LAYOUT_CONSTRAINTS_FRAGMENTS_2026-09-30.md §4, call site 1).
+    /// Three one-word chips on one line are charged three lines by
+    /// `count_text_lines`. Phase 9.5 shrinks an over-estimated row only when
+    /// no item spans it; beside a spanning item the rows are grow-only, so
+    /// they keep the estimate: each chip row is two lines too tall and the
+    /// second starts two lines low. The spanning item is 10px and asks
+    /// nothing of either row.
+    #[test]
+    fn l0_a_one_line_flex_item_sizes_a_row_the_repair_pass_cannot_shrink() {
+        const FONT: f32 = 14.0;
+        const GAP: f32 = 12.0;
+        let container = chip_rows_beside_a_spanning_item(FONT, GAP);
+        let first = container.children[1].dimensions.border_box();
+        let second = container.children[2].dimensions.border_box();
+        let one_line = crate::resolve_line_height(&container.children[1].style, FONT);
+        let real = one_line + 26.0;
+        assert!(
+            (first.height - real).abs() < 1.0,
+            "a flex row of three chips is one line tall ({real}), got {} \
+             (three lines + padding is the per-text-node estimate)",
+            first.height
+        );
+        assert!(
+            (second.y - (first.y + real + GAP)).abs() < 1.0,
+            "row 2 starts one real row + gap below row 1: expected {}, got {}",
+            first.y + real + GAP,
+            second.y
+        );
+        assert!(
+            (container.dimensions.content.height - (2.0 * real + GAP)).abs() < 1.0,
+            "the container is two real rows and a gap ({}), got {}",
+            2.0 * real + GAP,
+            container.dimensions.content.height
+        );
+    }
+
     /// A grid of one row: a 100px-tall block beside a flex container holding
     /// one 30x20 box. `item` styles the flex container.
     fn flex_item_beside_a_tall_sibling(item: impl FnOnce(&mut ComputedStyle)) -> LayoutBox {
