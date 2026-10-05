@@ -27182,8 +27182,8 @@ impl SubjectCompound {
 /// What marks an element as hovered (pressed) for one build: an attribute
 /// name on the element itself (the subject matcher reads attributes) and a
 /// class on it as an ancestor or an earlier sibling (those are known by
-/// tag, classes and id). U+0001 is in no attribute name and no class the
-/// HTML parser hands over, so markup cannot spell it.
+/// tag, classes and id). A page can spell it only by writing U+0001 into a
+/// class or an attribute name, and then styles that element as hovered.
 const HOVER_MARK: &str = "\u{1}hover";
 const ACTIVE_MARK: &str = "\u{1}active";
 
