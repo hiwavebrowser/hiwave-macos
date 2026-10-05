@@ -526,6 +526,9 @@ struct ViewState {
     /// requests and the live loop's go through the same one, so its request
     /// counters cover both.
     script_policy: Option<Arc<FetchPolicy>>,
+    /// Script requests the live loop has started for the current document
+    /// and not yet delivered.
+    live_requests: Vec<script_net::LiveRequest>,
 }
 
 /// Engine configuration.
@@ -602,10 +605,23 @@ const MAX_TIMER_CALLBACKS: u32 = 10_000;
 /// get a turn in between.
 const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
 
-/// Longest one turn of the live loop waits on the network. The loop is the
-/// UI thread, so a request slower than this fails as a network error rather
-/// than hold the window.
+/// Longest one turn of the live loop waits for the modules a dynamic
+/// `import()` asked for, which are still fetched inside the turn. The loop is
+/// the UI thread, so a module slower than this fails rather than hold the
+/// window longer.
 const LIVE_NETWORK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Longest one turn of the live loop spends on the script requests that are
+/// out (XHR, fetch). The loop is the UI thread: a request is started on the
+/// turn that finds it and delivered on the turn after its answer comes, and
+/// no turn waits for one. Until 2026-10-05 a turn waited up to two seconds
+/// for its requests and then failed them, so one slow request stopped
+/// input, timers and paint for two seconds and never arrived.
+const LIVE_NETWORK_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// How long a request started by the live loop may take before the page gets
+/// a network error for it.
+const LIVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Most records the live loop adds to a view's script log. A timer that
 /// throws on every tick would otherwise grow it for as long as the page is
@@ -694,6 +710,10 @@ pub struct LivePump {
     pub timers_ran: u32,
     /// Script network requests and module fetches that were answered.
     pub requests: usize,
+    /// Script network requests that are out and not answered yet. While
+    /// there are any, the loop has to keep turning: nothing else wakes it
+    /// when an answer comes.
+    pub in_flight: usize,
     /// The page was laid out again: a callback wrote to the DOM, or an image
     /// it added arrived.
     pub relaid_out: bool,
@@ -1381,6 +1401,7 @@ impl Engine {
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
+            live_requests: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -1449,6 +1470,7 @@ impl Engine {
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
+            live_requests: Vec::new(),
         };
 
         let id = view_state.id;
@@ -1526,6 +1548,7 @@ impl Engine {
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
+            live_requests: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -2498,7 +2521,6 @@ impl Engine {
     /// load; a page with none (`load_html`) has no network.
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
         let mut out = LivePump::default();
-        let net_rounds = self.config.script_network_rounds;
         let loader = self.loader.clone();
         let Some(view) = self.views.get_mut(&id) else {
             return out;
@@ -2508,6 +2530,7 @@ impl Engine {
         };
         let policy = view.script_policy.clone();
         let document = view.url.clone();
+        let live_requests = &mut view.live_requests;
         let mut threw: Vec<(&str, String)> = Vec::new();
 
         // Timers first: what they ask of the network is answered this turn.
@@ -2519,24 +2542,51 @@ impl Engine {
             Err(_) => threw.push(("timers", "JS engine panic".into())),
         }
         if let Some(policy) = policy {
+            // Start what the page has asked for since the last turn. No turn
+            // waits for an answer: this thread is the window's.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())) {
+                Ok(requests) => {
+                    let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
+                    live_requests.extend(
+                        requests
+                            .into_iter()
+                            .map(|request| script_net::start_live(policy.clone(), loader.clone(), request, deadline)),
+                    );
+                }
+                Err(_) => threw.push(("network", "JS engine panic".into())),
+            }
             // Delivery only: a timer a response handler sets runs on a later
-            // turn, when its time has passed.
-            let mut modules_fetched = 0;
-            let found = script_net::pump_all(
-                bindings,
-                &policy,
-                &loader,
-                tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
-                net_rounds,
-                None,
-                document.as_ref(),
-                &mut modules_fetched,
-            )
-            .await;
-            out.requests = found.requests;
-            threw.extend(found.threw.into_iter().map(|message| ("network", message)));
-            if found.poisoned {
-                threw.push(("network", "JS engine panic".into()));
+            // turn, when its time has passed, and a request it makes starts
+            // on the next.
+            for (request_id, outcome) in script_net::settle_live(live_requests, LIVE_NETWORK_SLICE).await {
+                out.requests += 1;
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings.deliver_net_response(request_id, outcome)
+                })) {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => threw.push(("network", e.to_string())),
+                    Err(_) => threw.push(("network", "JS engine panic".into())),
+                }
+            }
+            out.in_flight = live_requests.len();
+            // The modules a dynamic `import()` asked for are still fetched
+            // inside the turn.
+            if let Some(document) = document.as_ref() {
+                let mut modules_fetched = 0;
+                let found = script_net::pump_modules(
+                    bindings,
+                    &policy,
+                    &loader,
+                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
+                    document,
+                    &mut modules_fetched,
+                )
+                .await;
+                out.requests += found.requests;
+                threw.extend(found.threw.into_iter().map(|message| ("network", message)));
+                if found.poisoned {
+                    threw.push(("network", "JS engine panic".into()));
+                }
             }
         }
         threw.extend(bindings.take_reported_errors().into_iter().map(|message| ("timers", message)));
@@ -3735,6 +3785,8 @@ impl Engine {
         view.compat_mouse_suppressed = false;
         view.script_log.clear();
         view.script_policy = None;
+        // The last document's requests are nobody's now.
+        view.live_requests.clear();
 
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
@@ -4041,6 +4093,8 @@ impl Engine {
         view.compat_mouse_suppressed = false;
         view.script_log.clear();
         view.script_policy = None;
+        // The last document's requests are nobody's now.
+        view.live_requests.clear();
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
