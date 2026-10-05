@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tracing::{error, warn};
 use url::Url;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "parity-capture")]
 #[command(about = "Headless frame capture for parity testing")]
 #[command(group(clap::ArgGroup::new("source").required(true).args(["html_file", "url"])))]
@@ -171,6 +171,8 @@ struct ActionResult {
     label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     selector_used: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<String>,
     elapsed_ms: u64,
 }
 
@@ -252,7 +254,16 @@ fn main() {
     }
 
     let started = Instant::now();
-    let mut result = run_capture(&args);
+    let args_clone = args.clone();
+    let handler = std::thread::Builder::new()
+        .name("capture-worker".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || run_capture(&args_clone))
+        .expect("failed to spawn capture worker thread");
+    let mut result = match handler.join() {
+        Ok(r) => r,
+        Err(_) => CaptureResult::new(&args).failed("error", "worker thread panicked".to_string()),
+    };
     result.elapsed_ms = Some(started.elapsed().as_millis() as u64);
 
     // Output JSON result
@@ -492,8 +503,9 @@ fn execute_actions(
             status: "ok".to_string(),
             error: None,
             frame: None,
-            label: None,
+            label: a.label.clone(),
             selector_used: None,
+            method: None,
             elapsed_ms: 0,
         };
 
@@ -529,24 +541,61 @@ fn execute_actions(
                     let mut clicked = false;
                     for s in selectors {
                         let s_json = serde_json::to_string(s).unwrap_or_default();
-                        let click_js = format!(
+                        let query_js = format!(
                             r#"(function() {{
-                                var el = document.querySelector({0});
-                                if (!el) return 'missing';
-                                if (typeof el.focus === 'function') el.focus();
-                                if (typeof el.click === 'function') {{
-                                    el.click();
-                                }} else {{
-                                    el.dispatchEvent(new Event('click', {{ bubbles: true, cancelable: true }}));
+                                try {{
+                                    var el = document.querySelector({0});
+                                    if (!el) return 'missing';
+                                    if (typeof el.getBoundingClientRect === 'function') {{
+                                        var r = el.getBoundingClientRect();
+                                        if (r && r.width > 0 && r.height > 0) {{
+                                            var cx = r.left + r.width / 2.0;
+                                            var cy = r.top + r.height / 2.0;
+                                            return 'point:' + cx + ':' + cy;
+                                        }}
+                                    }}
+                                    if (typeof el.focus === 'function') {{
+                                        try {{ el.focus(); }} catch (e) {{}}
+                                    }}
+                                    if (typeof el.click === 'function') {{
+                                        try {{ el.click(); }} catch (e) {{}}
+                                    }} else {{
+                                        try {{ el.dispatchEvent(new Event('click', {{ bubbles: true, cancelable: true }})); }} catch (e) {{}}
+                                    }}
+                                    return 'fallback_clicked';
+                                }} catch (e) {{
+                                    return 'error:' + e;
                                 }}
-                                return 'clicked';
                             }})()"#,
                             s_json
                         );
-                        if let Ok(eval_res) = engine.execute_script(view_id, &click_js) {
-                            if eval_res.contains("clicked") {
+                        if let Ok(eval_res) = engine.execute_script(view_id, &query_js) {
+                            if let Some(idx) = eval_res.find("point:") {
+                                let rest = &eval_res[idx + 6..];
+                                let parts: Vec<&str> = rest.split(':').collect();
+                                if parts.len() >= 2 {
+                                    let x_part = parts[0].trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-');
+                                    let y_part = parts[1].trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-');
+                                    if let (Ok(cx), Ok(cy)) = (x_part.parse::<f32>(), y_part.parse::<f32>()) {
+                                        engine.mouse_move_at_point(view_id, cx, cy);
+                                        let _ = engine.mouse_down_at_point(view_id, cx, cy);
+                                        let _ = engine.click_at_point(view_id, cx, cy);
+                                        let _ = engine.relayout(view_id);
+                                        clicked = true;
+                                        a_res.selector_used = Some(s.to_string());
+                                        a_res.method = Some(format!("engine_point({:.1}, {:.1})", cx, cy));
+                                        break;
+                                    }
+                                }
+                            }
+                            if eval_res.contains("fallback_clicked") {
+                                let _ = engine.relayout(view_id);
                                 clicked = true;
                                 a_res.selector_used = Some(s.to_string());
+                                a_res.method = Some("synthetic_fallback".to_string());
+                                if a_res.label.is_none() {
+                                    a_res.label = Some("fallback".to_string());
+                                }
                                 break;
                             }
                         }
@@ -554,18 +603,13 @@ fn execute_actions(
                     if !clicked {
                         a_res.status = "selector_not_found".to_string();
                         a_res.error = Some(format!("no matching element found for selector {}", sel));
-                    } else {
-                        let _ = engine.relayout(view_id);
                     }
                 } else if let (Some(x), Some(y)) = (a.x, a.y) {
-                    let _ = engine.focus_at_point(view_id, x, y);
-                    let click_js = r#"(function() {
-                        if (document.activeElement && typeof document.activeElement.click === 'function') {
-                            document.activeElement.click();
-                        }
-                    })()"#;
-                    let _ = engine.execute_script(view_id, click_js);
+                    engine.mouse_move_at_point(view_id, x, y);
+                    let _ = engine.mouse_down_at_point(view_id, x, y);
+                    let _ = engine.click_at_point(view_id, x, y);
                     let _ = engine.relayout(view_id);
+                    a_res.method = Some(format!("engine_point({:.1}, {:.1})", x, y));
                 } else {
                     a_res.status = "error".to_string();
                     a_res.error = Some("click action requires selector or (x, y)".to_string());
