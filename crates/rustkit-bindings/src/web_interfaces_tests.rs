@@ -114,7 +114,7 @@ fn existing_singletons_get_their_interfaces_and_the_rest_are_interface_only() {
     // Constructors for features the engine does not have stay UNDEFINED, so
     // `typeof Worker` style feature detection keeps working.
     assert_eq!(
-        ev(&b, "[typeof Worker, typeof WebAssembly, typeof Notification, typeof AudioContext, typeof OffscreenCanvas, typeof BroadcastChannel, typeof MessageChannel].join()"),
-        "undefined,undefined,undefined,undefined,undefined,undefined,undefined"
+        ev(&b, "[typeof Worker, typeof WebAssembly, typeof Notification, typeof AudioContext, typeof OffscreenCanvas, typeof BroadcastChannel].join()"),
+        "undefined,undefined,undefined,undefined,undefined,undefined"
     );
 }

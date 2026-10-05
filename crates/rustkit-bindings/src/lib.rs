@@ -571,6 +571,8 @@ impl DomBindings {
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
         runtime.evaluate_script(include_str!("web_observers_live.js"))?;
+        // postMessage, MessageChannel/MessagePort, MessageEvent, requestIdleCallback (web_messaging.js).
+        runtime.evaluate_script(include_str!("web_messaging.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
