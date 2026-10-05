@@ -51,6 +51,10 @@ mod shadow_tests;
 #[cfg(test)]
 mod rejection_event_tests;
 #[cfg(test)]
+mod legacy_tests;
+#[cfg(test)]
+mod reflect_tests;
+#[cfg(test)]
 mod document_members_tests;
 #[cfg(test)]
 mod web_intl_tests;
@@ -538,6 +542,8 @@ impl DomBindings {
     pub fn new(mut runtime: JsRuntime) -> Result<Self, BindingError> {
         debug!("Initializing DOM bindings");
 
+        // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
+        runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
         Self::inject_globals(&mut runtime)?;
         let dom_host = dom::SharedDomHost::default();
@@ -551,6 +557,8 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_components.js"))?;
         // attachShadow, ShadowRoot, slots, event retargeting (web_shadow.js).
         runtime.evaluate_script(include_str!("web_shadow.js"))?;
+        // Reflected IDL attributes: link.href, script.type, img.alt, a.target, el.tabIndex, ... (web_reflect.js).
+        runtime.evaluate_script(include_str!("web_reflect.js"))?;
         // document.location/fonts/forms/visibilityState/..., FontFace (web_document.js) and
         // DOMMatrix (web_dommatrix.js): members pages read without feature-testing.
         runtime.evaluate_script(include_str!("web_document.js"))?;
