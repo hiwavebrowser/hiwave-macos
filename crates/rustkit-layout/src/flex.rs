@@ -3462,6 +3462,67 @@ mod tests {
         );
     }
 
+    /// A flex row holding a 60px block and a button, as a non-stretching
+    /// item of a 660px column container. `stale` is the width the block
+    /// pre-pass left on the item.
+    fn column_with_a_row_that_holds_a_button(stale: f32) -> (LayoutBox, f32) {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::FlexStart;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut row_style = ComputedStyle::new();
+        row_style.display = rustkit_css::Display::Flex;
+        let mut row = LayoutBox::new(BoxType::Block, row_style);
+        let mut label = ComputedStyle::new();
+        label.width = Length::Px(60.0);
+        label.height = Length::Px(20.0);
+        row.children.push(LayoutBox::new(BoxType::Block, label));
+
+        let mut button_style = ComputedStyle::new();
+        button_style.font_size = Length::Px(13.0);
+        let control = crate::FormControlType::Button {
+            label: "Save changes".to_string(),
+            button_type: "button".to_string(),
+        };
+        let button_width = crate::form_control_intrinsic_size(&button_style, &control).0;
+        row.children
+            .push(LayoutBox::new(BoxType::FormControl(control), button_style));
+        row.dimensions.content = Rect::new(0.0, 0.0, stale, 20.0);
+        container.children.push(row);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 660.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+        (container, button_width)
+    }
+
+    /// L0 call site 2 (docs/LAYOUT_CONSTRAINTS_FRAGMENTS_2026-09-30.md §4):
+    /// a non-stretching column item that is itself a flex row and holds an
+    /// unsized button. `estimators_can_measure` refuses the subtree because
+    /// of the button, so the item keeps the width the block pre-pass left
+    /// on it: the whole container. Its fit-content width is its
+    /// max-content, the 60px block plus the button with its label.
+    /// Chromium 143 on parity-tests/repro/l0-flex-control-fit-content.html:
+    /// `#e-1` is 140.67 wide in a 400px column; it was 400.
+    #[test]
+    fn l0_a_non_stretch_column_item_that_holds_a_button_takes_its_fit_content_width() {
+        let (container, button_width) = column_with_a_row_that_holds_a_button(660.0);
+        assert!(
+            button_width > 40.0,
+            "the button's own width includes its label, got {button_width}"
+        );
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - (60.0 + button_width)).abs() < 0.5,
+            "the row is its 60px block plus its {button_width}px button, got {w} \
+             (660 is the stale fill-available width)"
+        );
+    }
+
     /// Fit-content is `min(max(min-content, available), max-content)`, so the
     /// available cross space is a real term and not decoration: two 200px
     /// inline-level children give max-content 400 and min-content 200, and in
