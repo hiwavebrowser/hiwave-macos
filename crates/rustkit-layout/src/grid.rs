@@ -1703,15 +1703,17 @@ pub fn layout_grid_container(
         .zip(l0_fragments)
         .map(|(item, fragment)| {
             let estimate = item.get_height_contribution(height_for_contributions);
-            let contribution = match fragment {
-                Some(fragment) => {
+            let blocks = fragment
+                .as_ref()
+                .and_then(|f| Some((f.border_box.block.px()?, f.content_box.block.px()?)));
+            let contribution = match (fragment, blocks) {
+                (Some(fragment), Some((mut border_box, content_block))) => {
                     let item_style = &item.layout_box.style;
-                    let mut border_box = fragment.border_box.block.to_px();
                     if let Length::Px(min_h) = item_style.min_height {
                         let floor = if item_style.box_sizing == BoxSizing::BorderBox {
                             min_h
                         } else {
-                            min_h + border_box - fragment.content_box.block.to_px()
+                            min_h + border_box - content_block
                         };
                         border_box = border_box.max(floor);
                     }
@@ -1723,7 +1725,7 @@ pub fn layout_grid_container(
                     )));
                     outer
                 }
-                None => {
+                _ => {
                     l0_records.push(None);
                     estimate
                 }
@@ -2532,12 +2534,16 @@ pub fn layout_grid_container(
             let Some(&(r0, _)) = row_spans.get(idx) else {
                 continue;
             };
+            let crate::fragment::AxisSize::Definite(fragment_block) = fragment.border_box.block
+            else {
+                continue;
+            };
             let outer = row_contributions.get(idx).map_or(0.0, |c| c.2);
             crate::fragment::differential::record(crate::fragment::Differential {
                 selector,
                 old_estimate_px,
                 fragment_outer_px: outer,
-                fragment_block: fragment.border_box.block,
+                fragment_block,
                 unsnapped_block_px: fragment.unsnapped_block_px,
                 phase_9_5_delta_px: phase_9_5_row_delta
                     .as_ref()
