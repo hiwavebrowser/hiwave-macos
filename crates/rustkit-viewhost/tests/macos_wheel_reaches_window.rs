@@ -84,7 +84,9 @@ fn main() {
         unsafe {
             let name: id = msg_send![view, className];
             let utf8: *const std::os::raw::c_char = msg_send![name, UTF8String];
-            std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+            std::ffi::CStr::from_ptr(utf8)
+                .to_string_lossy()
+                .into_owned()
         }
     };
 
@@ -108,12 +110,8 @@ fn main() {
                     let frame_view: id = msg_send![tao_view, superview];
                     let hit: id = msg_send![frame_view, hitTest: NSPoint::new(640.0, 360.0)];
                     hit_class = class_name(hit);
-                    let cg = CGEventCreateScrollWheelEvent(
-                        std::ptr::null(),
-                        UNIT_PIXEL,
-                        1,
-                        WHEEL_DOWN,
-                    );
+                    let cg =
+                        CGEventCreateScrollWheelEvent(std::ptr::null(), UNIT_PIXEL, 1, WHEEL_DOWN);
                     assert!(!cg.is_null(), "a scroll CGEvent was made");
                     let wheel: id = msg_send![class!(NSEvent), eventWithCGEvent: cg];
                     assert!(wheel != nil, "the CGEvent became an NSEvent");
