@@ -30,6 +30,9 @@
     // ---- document.location is window.location; assigning navigates.
     getter('location', function () { return g.location; }, function (v) { g.location.href = String(v); });
 
+    // ---- document.defaultView is window (HTML §3.1.2)
+    getter('defaultView', function () { return g; });
+
     // ---- state
     getter('visibilityState', function () { return 'visible'; });
     getter('hidden', function () { return false; });
