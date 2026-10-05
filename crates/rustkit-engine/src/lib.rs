@@ -489,6 +489,18 @@ struct ViewState {
     compat_mouse_suppressed: bool,
     /// The element the pointer was over at its last move (raw NodeId).
     hovered_node: Option<usize>,
+    /// `hovered_node` and the elements above it (raw NodeIds): what
+    /// `:hover` matches in this view's next build.
+    hover_chain: Vec<usize>,
+    /// The element the press in progress landed on and the elements above
+    /// it: what `:active` matches, from the press to the release.
+    active_chain: Vec<usize>,
+    /// The rule index this view was last built with: its `reads` say
+    /// which elements a `:hover` or `:active` rule can match, so which
+    /// changes of the two chains are a restyle.
+    rule_reads: std::cell::RefCell<Option<Rc<RuleIndex>>>,
+    /// A chain a sheet reads has changed since the last build.
+    pointer_restyle: bool,
     /// Where the pointer was at its last move, in viewport coordinates.
     pointer_at: Option<(f32, f32)>,
     /// The primary button is held: between a press and its release.
@@ -1387,6 +1399,10 @@ impl Engine {
             checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
+            hover_chain: Vec::new(),
+            active_chain: Vec::new(),
+            rule_reads: std::cell::RefCell::new(None),
+            pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1456,6 +1472,10 @@ impl Engine {
             checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
+            hover_chain: Vec::new(),
+            active_chain: Vec::new(),
+            rule_reads: std::cell::RefCell::new(None),
+            pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1534,6 +1554,10 @@ impl Engine {
             checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
+            hover_chain: Vec::new(),
+            active_chain: Vec::new(),
+            rule_reads: std::cell::RefCell::new(None),
+            pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1965,6 +1989,13 @@ impl Engine {
             view.primary_button_down = true;
             view.press_target = target;
         }
+        // `:active` from here to the release, wherever the pointer goes.
+        let pressed = target.map_or_else(Vec::new, |target| self.element_chain(id, target));
+        if let Some(view) = self.views.get_mut(&id) {
+            let changed = Self::in_one_chain(&view.active_chain, &pressed);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
+            view.active_chain = pressed;
+        }
         let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
             view.compat_mouse_suppressed = suppressed;
@@ -1976,6 +2007,7 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.press_settled_focus = true;
         }
+        self.settle_pointer_restyle(id);
         not_cancelled
     }
 
@@ -2042,6 +2074,13 @@ impl Engine {
         let before = chain(view.hovered_node);
         let (over, out) = (now.first().copied(), before.first().copied());
         view.hovered_node = over;
+        // `:hover` follows the pointer: when a sheet names it, the page is
+        // restyled once the listeners below have run.
+        if over != out {
+            let changed = Self::in_one_chain(&before, &now);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.hover, &changed);
+            view.hover_chain = now.clone();
+        }
 
         // (target, type, relatedTarget)
         let mut events: Vec<(usize, &str, Option<usize>)> = Vec::new();
@@ -2094,6 +2133,64 @@ impl Engine {
         }
         if let Err(e) = self.flush_script_dom_writes(id) {
             debug!(?id, error = %e, "relayout after a mouse move failed");
+        }
+        self.settle_pointer_restyle(id);
+    }
+
+    /// The elements in exactly one of two chains: the ones a pointer change
+    /// took `:hover` or `:active` from, or gave it to.
+    fn in_one_chain(before: &[usize], now: &[usize]) -> Vec<usize> {
+        let left = before.iter().filter(|n| !now.contains(n));
+        let entered = now.iter().filter(|n| !before.contains(n));
+        left.chain(entered).copied().collect()
+    }
+
+    /// Whether some rule of the view's sheets can match differently now
+    /// that `changed` (raw NodeIds) gained or lost the pseudo-class `reads`
+    /// picks. A restyle is a whole cascade and layout, so a move between
+    /// two elements no `:hover` compound can match must not cost one.
+    fn chain_change_restyles(
+        view: &ViewState,
+        reads: fn(&SelectorReads) -> &PointerReads,
+        changed: &[usize],
+    ) -> bool {
+        let index = view.rule_reads.borrow();
+        let Some(reads) = index.as_ref().map(|index| reads(&index.reads)) else {
+            return false;
+        };
+        if reads.anywhere {
+            return !changed.is_empty();
+        }
+        let Some(document) = view.document.as_ref() else {
+            return false;
+        };
+        !reads.compounds.is_empty()
+            && changed.iter().any(|raw| {
+                let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                    return true;
+                };
+                let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+                    return false;
+                };
+                let classes: Vec<String> = attributes
+                    .get("class")
+                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                reads
+                    .compounds
+                    .iter()
+                    .any(|compound| compound.matches(tag_name, &classes, attributes.get("id")))
+            })
+    }
+
+    /// Restyle the view when the hovered or the pressed chain changed, a
+    /// sheet reads it, and nothing has built the view since (a listener's
+    /// write lays the page out with the new chains already).
+    fn settle_pointer_restyle(&mut self, id: EngineViewId) {
+        if self.views.get(&id).is_some_and(|view| view.pointer_restyle) {
+            if let Err(e) = self.relayout(id) {
+                debug!(?id, error = %e, "restyle after a pointer change failed");
+            }
         }
     }
 
@@ -2179,6 +2276,8 @@ impl Engine {
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
+            let changed = std::mem::take(&mut view.active_chain);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
         }
         self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
         let suppressed = self
@@ -2255,6 +2354,7 @@ impl Engine {
         } else {
             None
         };
+        self.settle_pointer_restyle(id);
         ClickOutcome { focused, navigate }
     }
 
@@ -2999,33 +3099,52 @@ impl Engine {
             .unwrap_or_else(|| attributes.contains_key("checked"))
     }
 
-    /// An `<input>`'s attributes as the build of the current view reads
-    /// them: with `checked` present exactly when the control is checked.
-    /// Selector matching (`:checked`, also as a sibling) and the control's
-    /// box both read the attribute map, so this one substitution is what
-    /// makes them follow a click.
+    /// An element's attributes as the build of the current view reads
+    /// them: an `<input>`'s with `checked` present exactly when the control
+    /// is checked, and the hovered (pressed) element's and its ancestors'
+    /// with [`HOVER_MARK`] ([`ACTIVE_MARK`]). Selector matching (`:checked`,
+    /// `:hover` and `:active`, also on an ancestor or a sibling) and the
+    /// control's box read the attribute map, so this one substitution is
+    /// what makes them follow a click and the pointer.
     fn live_attributes<'a>(
         &self,
         node_raw: usize,
+        tag_lower: &str,
         attributes: &'a HashMap<String, String>,
     ) -> std::borrow::Cow<'a, HashMap<String, String>> {
-        let live = self
-            .building_view
-            .get()
-            .and_then(|id| self.views.get(&id))
-            .and_then(|v| v.checked_states.get(&node_raw).copied());
-        match live {
-            Some(checked) if checked != attributes.contains_key("checked") => {
-                let mut attributes = attributes.clone();
-                if checked {
-                    attributes.insert("checked".to_string(), String::new());
-                } else {
-                    attributes.remove("checked");
-                }
-                std::borrow::Cow::Owned(attributes)
-            }
-            _ => std::borrow::Cow::Borrowed(attributes),
+        let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) else {
+            return std::borrow::Cow::Borrowed(attributes);
+        };
+        let checked = match tag_lower {
+            "input" => view
+                .checked_states
+                .get(&node_raw)
+                .copied()
+                .filter(|checked| *checked != attributes.contains_key("checked")),
+            _ => None,
+        };
+        let hovered = view.hover_chain.contains(&node_raw);
+        let active = view.active_chain.contains(&node_raw);
+        if checked.is_none() && !hovered && !active {
+            return std::borrow::Cow::Borrowed(attributes);
         }
+        let mut attributes = attributes.clone();
+        match checked {
+            Some(true) => {
+                attributes.insert("checked".to_string(), String::new());
+            }
+            Some(false) => {
+                attributes.remove("checked");
+            }
+            None => {}
+        }
+        if hovered {
+            attributes.insert(HOVER_MARK.to_string(), String::new());
+        }
+        if active {
+            attributes.insert(ACTIVE_MARK.to_string(), String::new());
+        }
+        std::borrow::Cow::Owned(attributes)
     }
 
     /// Live value + caret for a control in a SPECIFIC view.
@@ -3778,6 +3897,10 @@ impl Engine {
         view.checked_states.clear();
         view.focused_node = None;
         view.hovered_node = None;
+        view.hover_chain.clear();
+        view.active_chain.clear();
+        view.rule_reads.get_mut().take();
+        view.pointer_restyle = false;
         view.pointer_at = None;
         view.primary_button_down = false;
         view.press_target = None;
@@ -4086,6 +4209,10 @@ impl Engine {
         view.checked_states.clear();
         view.focused_node = None;
         view.hovered_node = None;
+        view.hover_chain.clear();
+        view.active_chain.clear();
+        view.rule_reads.get_mut().take();
+        view.pointer_restyle = false;
         view.pointer_at = None;
         view.primary_button_down = false;
         view.press_target = None;
@@ -4173,6 +4300,10 @@ impl Engine {
     pub fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("relayout", ?id).entered();
 
+        // This build reads the hovered and pressed chains as they are now.
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pointer_restyle = false;
+        }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         // Text measurement below resolves family names; make THIS view's
@@ -4743,6 +4874,16 @@ impl Engine {
             external_sheets: external_stylesheets.len(),
             viewport,
             focus: self.building_focus.get(),
+            hover: self
+                .building_view
+                .get()
+                .and_then(|id| self.views.get(&id))
+                .and_then(|v| v.hover_chain.first().copied()),
+            active: self
+                .building_view
+                .get()
+                .and_then(|id| self.views.get(&id))
+                .and_then(|v| v.active_chain.first().copied()),
             fonts: self.web_font_count(),
         };
 
@@ -4825,10 +4966,13 @@ impl Engine {
         // missed still cascades correctly, by the unindexed scan.
         let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) {
             true => None,
-            false => Some(RuleIndexScope::install_for(
-                RuleIndex::source_of(&stylesheets),
-                self.shared_rule_index(&stylesheets),
-            )),
+            false => {
+                let index = self.shared_rule_index(&stylesheets);
+                if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
+                    *view.rule_reads.borrow_mut() = Some(index.clone());
+                }
+                Some(RuleIndexScope::install_for(RuleIndex::source_of(&stylesheets), index))
+            }
         };
 
         // On unless RUSTKIT_STYLE_SHARE turns it off. A shared style records
@@ -5373,9 +5517,10 @@ impl Engine {
             } => {
                 let tag_lower = lower_tag(tag_name);
                 // A checkbox or radio button is styled and painted from its
-                // live checkedness, not from its `checked` attribute.
-                let live = (&*tag_lower == "input").then(|| self.live_attributes(node.id.raw(), attributes));
-                let attributes = live.as_deref().unwrap_or(attributes);
+                // live checkedness, not from its `checked` attribute; the
+                // elements under the pointer are styled as hovered.
+                let live = self.live_attributes(node.id.raw(), &tag_lower, attributes);
+                let attributes = &*live;
 
                 // Skip rendering for certain elements
                 let is_hidden = matches!(
@@ -5988,10 +6133,7 @@ impl Engine {
 
                 // Build ancestors list for child elements with class and ID info
                 // Insert at beginning so ancestors[0] is always the immediate parent
-                let classes: Vec<String> = attributes
-                    .get("class")
-                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
-                    .unwrap_or_default();
+                let classes = element_classes(attributes);
                 let id = attributes.get("id").cloned();
                 let mut child_ancestors: Vec<Ancestor> = Vec::with_capacity(ancestors.len() + 1);
                 child_ancestors.push(Rc::new((tag_lower.to_string(), classes, id)));
@@ -6101,14 +6243,11 @@ impl Engine {
                         ..
                     } = &child.node_type
                     {
-                        let child_classes: Vec<String> = attributes
-                            .get("class")
-                            .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
-                            .unwrap_or_default();
                         let t = lower_tag(tag_name);
                         *type_seen.entry(t.clone()).or_insert(0) += 1;
-                        let live = (&*t == "input").then(|| self.live_attributes(child.id.raw(), attributes));
-                        let state = ElementState::of(&t, live.as_deref().unwrap_or(attributes));
+                        let live = self.live_attributes(child.id.raw(), &t, attributes);
+                        let child_classes = element_classes(&live);
+                        let state = ElementState::of(&t, &live);
                         preceding_siblings.push((
                             t.into_owned(),
                             child_classes,
@@ -10347,6 +10486,8 @@ impl Engine {
                 ix.specificity.push(whole);
                 ix.member_specificity.push(members);
                 let prepared = SelectorMatcher.prepared_selector(rule.selector.trim());
+                ix.reads.hover.note(rule.selector.trim(), ":hover", HOVER_MARK);
+                ix.reads.active.note(rule.selector.trim(), ":active", ACTIVE_MARK);
                 let positional = ix.reads.note(&prepared);
                 ix.reads.positional.push(positional);
                 ix.prepared.push(prepared);
@@ -11290,8 +11431,10 @@ impl SelectorMatcher {
     /// Pseudo-classes that are false for every element of the first static
     /// frame: nothing is hovered, pressed, focused, or fragment-targeted,
     /// and no link has been visited. Shared by the subject matcher and the
-    /// ancestor/sibling matcher so a compound like `.card:hover` fails in
-    /// either position.
+    /// ancestor/sibling matcher so a compound like `.card:focus` fails in
+    /// either position. `:hover` and `:active` are listed for the first
+    /// frame only: both matchers decide them from [`HOVER_MARK`] and
+    /// [`ACTIVE_MARK`] before they ask here.
     fn pseudo_class_is_static_false(name: &str) -> bool {
         matches!(
             name,
@@ -11581,6 +11724,10 @@ impl SelectorMatcher {
             // and `focus-visible` used to fall to the catch-all below and
             // MATCH EVERYTHING, so `.wrapper:focus-within .icon { color }`
             // styled every icon as if its input were focused.
+            // The build marks the element under the pointer and the elements
+            // above it (`Engine::live_attributes`).
+            "hover" => attributes.contains_key(HOVER_MARK),
+            "active" => attributes.contains_key(ACTIVE_MARK),
             n if SelectorMatcher::pseudo_class_is_static_false(n) => false,
             // Link pseudo-classes: an <a>/<area> with an href.
             "link" | "any-link" => matches!(tag, "a" | "area") && attributes.contains_key("href"),
@@ -22347,6 +22494,173 @@ mod node_identity_tests {
         );
     }
 
+    // `:hover` was false for every element, always: a rule that restyles
+    // what the pointer is over, or opens a menu under it, never applied, so
+    // a page gave no sign the pointer was on anything. It matches the
+    // element under the pointer and every element above it, as the subject
+    // of a rule, as an ancestor and as an earlier sibling, and stops
+    // matching when the pointer moves on or leaves the view.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn css_hover_follows_the_pointer() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        // Rows of 40px: #b, #c, then #a holding #t and #sub. Only widths
+        // change, so nothing moves under the pointer.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } #a { height: auto }"#,
+                    r#"#b:hover { width: 300px } #b:hover + #c { width: 200px }"#,
+                    r#".menu:hover .sub { width: 100px } #c:not(:hover) { margin-left: 5px }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="c">c</div>"#,
+                    r#"<div id="a" class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let read = "['b', 'c', 'sub'].map(function (i) { \
+                      var r = document.getElementById(i).getBoundingClientRect(); \
+                      return r.width + '@' + r.left; }).join(' ')";
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 400@0"));
+
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("300@0 200@5 400@0"), "over #b");
+
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@0 400@0"), "over #c");
+
+        engine.mouse_move_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "over #t, inside .menu");
+
+        engine.mouse_leave(id);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 400@0"), "outside the view");
+
+    }
+
+    // A hover restyle is a whole cascade and layout (0.1 s on wikipedia's
+    // front page, 0.4 s on github's), so it runs only when an element that
+    // gained or lost the pointer is one a `:hover` compound can match. The
+    // matcher's own counter says whether a move ran the cascade.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_move_no_hover_rule_can_see_does_not_restyle() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        // Rows of 40px: #b, then .menu holding #t and #sub, then #c.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } .menu { height: auto }"#,
+                    r#"#b:hover { width: 300px } .menu:hover .sub { width: 100px }"#,
+                    r#"#c:active { width: 310px } p:hover::after { content: "x" }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div>"#,
+                    r#"<div class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"<div id="c">c</div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let cascades = |engine: &mut Engine, act: &dyn Fn(&mut Engine)| {
+            FULL_SELECTOR_MATCHES.with(|n| n.set(0));
+            act(engine);
+            FULL_SELECTOR_MATCHES.with(|n| n.get()) > 0
+        };
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t: .menu gains the pointer");
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#t to #sub, inside .menu");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 140.0)), "onto #c: .menu loses it");
+        assert!(!cascades(&mut engine, &|e| e.mouse_leave(id)), "off #c, which no :hover rule names");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "onto #b");
+        // A press restyles only where an `:active` compound can match.
+        assert!(!cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 20.0); }), "press on #b");
+        assert!(!cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 20.0); }), "release on #b");
+        assert!(cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 140.0); }), "press on #c");
+        assert!(cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 140.0); }), "release on #c");
+
+        // `:hover` where the compounds do not show it: every change counts.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>body { margin: 0 } div { height: 40px } "#,
+                    r#"#b:not(:hover) { width: 300px }</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="t">t</div><div id="c">c</div></body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#t to #c");
+
+        // No sheet names `:hover`: no move restyles.
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "a page with no :hover rule");
+    }
+
+    // `:active` was false for every element too, so a press showed nothing.
+    // It matches the element pressed and the elements above it from the
+    // press to the release, wherever the pointer goes in between, while
+    // `:hover` goes on following the pointer. The page is
+    // tools/parity_oracle/css_hover_page.html and every expected line is
+    // what the oracle's Chrome measured for the same step
+    // (tools/parity_oracle/css_hover_log.mjs).
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn css_active_holds_from_the_press_to_the_release() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } #a { height: auto }"#,
+                    r#"#b:hover { width: 300px } #b:hover + #c { width: 200px }"#,
+                    r#".menu:hover .sub { width: 100px } #c:not(:hover) { margin-left: 5px }"#,
+                    r#"#b:active { width: 310px } #b:active + #c { width: 210px }"#,
+                    r#".menu:active .sub { width: 110px }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="c">c</div>"#,
+                    r#"<div id="a" class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let read = "['b', 'c', 'sub'].map(function (i) { \
+                      var r = document.getElementById(i).getBoundingClientRect(); \
+                      return r.width + '@' + r.left; }).join(' ')";
+
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("300@0 200@5 400@0"), "over #b");
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@5 400@0"), "press on #b");
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@0 400@0"), "held, over #c");
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@5 400@0"), "held, back over #b");
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        engine.click_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@0 400@0"), "released over #c");
+
+        engine.mouse_move_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "over #t");
+        engine.mouse_down_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 110@0"), "press on #t, inside .menu");
+        engine.click_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "released on #t");
+    }
+
     // A cancelled `pointerdown` stops the `mousemove`s of that press, not
     // the boundary events (Pointer Events §11.3). A move writes to the DOM
     // like any other listener: the layout follows before the call returns.
@@ -26919,6 +27233,28 @@ impl SubjectCompound {
     }
 }
 
+/// What marks an element as hovered (pressed) for one build: an attribute
+/// name on the element itself (the subject matcher reads attributes) and a
+/// class on it as an ancestor or an earlier sibling (those are known by
+/// tag, classes and id). A page can spell it only by writing U+0001 into a
+/// class or an attribute name, and then styles that element as hovered.
+const HOVER_MARK: &str = "\u{1}hover";
+const ACTIVE_MARK: &str = "\u{1}active";
+
+/// An element's classes as its descendants and later siblings see them.
+fn element_classes(attributes: &HashMap<String, String>) -> Vec<String> {
+    let mut classes: Vec<String> = attributes
+        .get("class")
+        .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    for mark in [HOVER_MARK, ACTIVE_MARK] {
+        if attributes.contains_key(mark) {
+            classes.push(mark.to_string());
+        }
+    }
+    classes
+}
+
 /// An earlier sibling as `+` / `~` see it: tag, classes, id, and the form
 /// state its attributes decide.
 type SiblingKey = (String, Vec<String>, Option<String>, ElementState);
@@ -27081,6 +27417,10 @@ impl AncestorCompound {
                             // Relational: the subject path under-matches it
                             // too.
                             ("has", _) => out.never = true,
+                            // A hovered ancestor or sibling carries the
+                            // mark among its classes (`element_classes`).
+                            ("hover", None) => out.classes.push(HOVER_MARK.to_string()),
+                            ("active", None) => out.classes.push(ACTIVE_MARK.to_string()),
                             (n, _) if SelectorMatcher::pseudo_class_is_static_false(n) => out.never = true,
                             // Structural and the rest need context the tuple
                             // does not carry: permissive.
@@ -27660,6 +28000,75 @@ struct SelectorReads {
     /// every element ran `match_attribute_selector` over the selector text
     /// for each of them, 14% of wikipedia's build with sharing on.
     attribute_tests: HashMap<String, Vec<(&'static str, String)>>,
+    /// Where the sheets read `:hover` and `:active`.
+    hover: PointerReads,
+    active: PointerReads,
+}
+
+/// Which elements a pointer pseudo-class (`:hover`, `:active`) can change
+/// a rule's match from.
+#[derive(Default)]
+struct PointerReads {
+    /// The compounds that carry it, without it: an element none of them
+    /// matches by tag, classes and id gains or loses the pseudo-class
+    /// without any rule noticing.
+    compounds: Vec<AncestorCompound>,
+    seen: std::collections::HashSet<(Option<String>, Vec<String>, Option<String>)>,
+    /// Some selector names it where `compounds` does not show it (inside
+    /// `:not()`, `:has()`, or an `:is()` member with a combinator): any
+    /// element may count.
+    anywhere: bool,
+}
+
+impl PointerReads {
+    /// Record where `selector` reads `name` (`":hover"`), which the
+    /// compound parser turns into the class `mark`.
+    fn note(&mut self, selector: &str, name: &str, mark: &str) {
+        if !selector.contains(name) {
+            return;
+        }
+        for member in SelectorMatcher::split_top_level_commas(selector) {
+            let member = member.trim();
+            let named = member.matches(name).count();
+            if named == 0 {
+                continue;
+            }
+            // A `::before` / `::after` rule is matched by its base selector.
+            let base = [(":before", "::before"), (":after", "::after")]
+                .into_iter()
+                .find(|(suffix, _)| member.ends_with(suffix))
+                .map_or(member, |(suffix, pseudo)| pseudo_base_selector(member, pseudo, suffix));
+            let prepared = SelectorMatcher.prepared_selector(base);
+            let PreparedSelector::Complex { compounds, .. } = &*prepared else {
+                // Invalid, or some other pseudo-element's: it styles nothing.
+                continue;
+            };
+            let mut found = 0;
+            for compound in compounds {
+                let marks = compound.classes.iter().filter(|c| *c == mark).count();
+                if marks == 0 {
+                    continue;
+                }
+                found += marks;
+                let classes: Vec<String> = compound
+                    .classes
+                    .iter()
+                    .filter(|c| !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK))
+                    .cloned()
+                    .collect();
+                if self.seen.insert((compound.tag.clone(), classes.clone(), compound.id.clone())) {
+                    self.compounds.push(AncestorCompound {
+                        never: compound.never,
+                        tag: compound.tag.clone(),
+                        classes,
+                        id: compound.id.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+            self.anywhere |= found != named;
+        }
+    }
 }
 
 impl SelectorReads {
@@ -28276,6 +28685,10 @@ struct StyleMemoKey {
     external_sheets: usize,
     viewport: Option<(f32, f32)>,
     focus: Option<rustkit_dom::NodeId>,
+    /// The hovered and the pressed element: `:hover` and `:active` style
+    /// them and the elements above them.
+    hover: Option<usize>,
+    active: Option<usize>,
     /// How many web faces the view's font partition has loaded (the loader
     /// only grows a partition, so the count names the set): `ch` lengths
     /// resolve against the element's font, so a face arriving between two
@@ -29131,6 +29544,8 @@ mod incremental_restyle_tests {
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                hover: None,
+                active: None,
                 fonts: 0,
             };
             let mut changed = original.clone();
@@ -29156,6 +29571,8 @@ mod incremental_restyle_tests {
         assert_restarts("focus", |key| {
             key.focus = Some(rustkit_dom::NodeId::new(1))
         });
+        assert_restarts("hover", |key| key.hover = Some(1));
+        assert_restarts("active", |key| key.active = Some(1));
         assert_restarts("web fonts", |key| key.fonts = 1);
     }
 
@@ -29410,6 +29827,8 @@ mod incremental_restyle_tests {
             external_sheets: 0,
             viewport: None,
             focus: None,
+            hover: None,
+            active: None,
             fonts: 0,
         };
         let recorded_node = rustkit_dom::NodeId::new(7);
@@ -29465,6 +29884,8 @@ mod incremental_restyle_tests {
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                hover: None,
+                active: None,
                 fonts: 0,
             })
             .expect("records");
