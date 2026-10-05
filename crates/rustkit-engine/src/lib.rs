@@ -429,6 +429,9 @@ struct ViewState {
     viewhost_id: ViewId,
     url: Option<Url>,
     title: Option<String>,
+    /// The HTTP status the view's document came with; None for a document
+    /// that came from no response (`load_html`).
+    http_status: Option<u16>,
     document: Option<Rc<Document>>,
     #[allow(dead_code)]
     layout: Option<LayoutBox>,
@@ -1355,6 +1358,7 @@ impl Engine {
             viewhost_id,
             url: None,
             title: None,
+            http_status: None,
             document: None,
             layout: None,
             display_list: None,
@@ -1423,6 +1427,7 @@ impl Engine {
             viewhost_id,
             url: None,
             title: None,
+            http_status: None,
             document: None,
             layout: None,
             display_list: None,
@@ -1500,6 +1505,7 @@ impl Engine {
             viewhost_id,
             url: None,
             title: None,
+            http_status: None,
             document: None,
             layout: None,
             display_list: None,
@@ -2978,6 +2984,13 @@ impl Engine {
         }
     }
 
+    /// The HTTP status the view's document came with: 200 for an ordinary
+    /// page, 403 or 404 for a server's error page shown as the page. None
+    /// for a document that came from no response.
+    pub fn http_status(&self, id: EngineViewId) -> Option<u16> {
+        self.views.get(&id).and_then(|v| v.http_status)
+    }
+
     /// Live value + caret for a control in a SPECIFIC view.
     pub fn edit_value_in(&self, id: EngineViewId, node_raw: usize) -> Option<(String, usize)> {
         self.views
@@ -3650,23 +3663,47 @@ impl Engine {
             return Ok(());
         }
 
-        if !response.ok() {
-            let error = format!("HTTP {}", response.status);
-            let view = self
-                .views
-                .get_mut(&id)
-                .ok_or(EngineError::ViewNotFound(id))?;
-            view.navigation
-                .fail_navigation(error.clone())
-                .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        let status = response.status;
+        let header_referrer_policy = response
+            .headers
+            .get("referrer-policy")
+            .and_then(|v| v.to_str().ok())
+            .and_then(ReferrerPolicy::parse_header);
 
-            let _ = self.event_tx.send(EngineEvent::NavigationFailed {
-                view_id: id,
-                url,
-                error,
-            });
+        // A server's error page is a page: the body of a 403 or a 404 is
+        // shown like any other document. Only an error response with
+        // nothing in it fails the navigation.
+        let mut response = Some(response);
+        let mut error_page = None;
+        if !status.is_success() {
+            let body = match response.take() {
+                Some(response) => response.text().await.unwrap_or_default(),
+                None => String::new(),
+            };
+            if self.nav_superseded(id, generation) {
+                debug!(?id, %url, "Navigation abandoned after the body of an error response");
+                return Ok(());
+            }
+            if body.trim().is_empty() {
+                let error = format!("HTTP {status}");
+                let view = self
+                    .views
+                    .get_mut(&id)
+                    .ok_or(EngineError::ViewNotFound(id))?;
+                view.navigation
+                    .fail_navigation(error.clone())
+                    .map_err(|e| EngineError::NavigationError(e.to_string()))?;
 
-            return Err(EngineError::NavigationError("HTTP error".into()));
+                let _ = self.event_tx.send(EngineEvent::NavigationFailed {
+                    view_id: id,
+                    url,
+                    error,
+                });
+
+                return Err(EngineError::NavigationError("HTTP error".into()));
+            }
+            warn!(?id, %url, %status, bytes = body.len(), "Showing the body of an error response as the page");
+            error_page = Some(body);
         }
 
         // Commit navigation
@@ -3685,14 +3722,12 @@ impl Engine {
             url: url.clone(),
         });
 
-        let header_referrer_policy = response
-            .headers
-            .get("referrer-policy")
-            .and_then(|v| v.to_str().ok())
-            .and_then(ReferrerPolicy::parse_header);
-
         // Parse HTML
-        let html = response.text().await?;
+        let html = match (error_page, response) {
+            (Some(body), _) => body,
+            (None, Some(response)) => response.text().await?,
+            (None, None) => String::new(),
+        };
 
         // Body fully read — still current?
         if self.nav_superseded(id, generation) {
@@ -3715,6 +3750,7 @@ impl Engine {
         view.document = Some(document.clone());
         view.title = title.clone();
         view.header_referrer_policy = header_referrer_policy;
+        view.http_status = Some(status.as_u16());
         // A new document invalidates every per-node side table. NodeId is
         // PER-DOCUMENT (each Document restarts its counter at 1), so a
         // surviving entry keyed by raw id 4 would be read as the NEW page's
@@ -4021,6 +4057,7 @@ impl Engine {
         view.document = Some(document.clone());
         view.title = title.clone();
         view.header_referrer_policy = None;
+        view.http_status = None;
         // A new document invalidates every per-node side table. NodeId is
         // PER-DOCUMENT (each Document restarts its counter at 1), so a
         // surviving entry keyed by raw id 4 would be read as the NEW page's
@@ -33856,13 +33893,19 @@ mod error_response_tests {
         assert_eq!(engine.views[&view].title.as_deref(), Some("Blocked"));
         assert_eq!(engine.views[&view].url, Some(url("/blocked")));
         assert!(engine.views[&view].layout.is_some(), "the error page is laid out");
+        assert_eq!(engine.http_status(view), Some(403), "the status stays known");
         let failed = rt.block_on(engine.load_url(view, url("/missing")));
         assert!(
             matches!(failed, Err(EngineError::NavigationError(_))),
             "a 404 with no body is a failed navigation: {failed:?}"
         );
         assert_eq!(engine.views[&view].title.as_deref(), Some("Blocked"), "the view keeps the page it had");
+        assert_eq!(engine.http_status(view), Some(403));
         rt.block_on(engine.load_url(view, url("/"))).expect("load_url");
         assert_eq!(engine.views[&view].title.as_deref(), Some("Home"));
+        assert_eq!(engine.http_status(view), Some(200));
+
+        engine.load_html(view, "<p>local</p>").expect("load_html");
+        assert_eq!(engine.http_status(view), None, "a document that came from no response has no status");
     }
 }
