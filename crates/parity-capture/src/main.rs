@@ -356,6 +356,17 @@ fn run_capture(args: &Args) -> CaptureResult {
         if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
             return result.failed("error", format!("Failed to load URL: {:?}", e));
         }
+        // The engine shows a server's error page as the page, which is what
+        // the app's user should see. A capture is of the site, not of its
+        // error page: it fails as it did when the engine refused the
+        // response, with the same message first, so no board counts a 403
+        // as a load.
+        if let Some(status) = engine.http_status(view_id).filter(|s| !(200..300).contains(s)) {
+            return result.failed(
+                "error",
+                format!("Failed to load URL: NavigationError(\"HTTP error\") (HTTP {status}; the engine rendered its body)"),
+            );
+        }
         if let Some(log) = engine.script_log(view_id) {
             result.script_stats = Some(script_stats(log));
             if let Some(ref path) = args.dump_scripts {
