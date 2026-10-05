@@ -2165,3 +2165,36 @@ ORACLE BLOCKED linkedin (top-level document HTTP 403)
 SCORABLE 25/57 on 19 sites
 trench/realsite/runs/20261004T0845Z-quiet-dev8e86ed6e
 ```
+
+## 2026-10-05 04:44 — daily QUIET board (quiet), develop 15d2c3a6
+
+**26/60 (loads 16, readable 7, looks-right 3; scorable 25/57)** (load at start: { 4.68 4.22 6.16 })
+
+```
+google     PASS PASS 100.0% PASS   8.8% (cc   0.3%)  3/3  
+youtube    fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.25% non-background)
+facebook   PASS fail  58.7% PASS  13.5% (cc   8.2%)  2/3  
+instagram  fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.59% non-background)
+wikipedia  PASS fail  74.3% fail  15.3% (cc  14.9%)  1/3  
+lyft       PASS PASS 100.0% fail  17.9% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% fail    -   (cc   3.1%)  0/3  blank frame (1.51% non-background)
+x          PASS PASS  95.3% PASS  10.1% (cc   0.0%)  3/3  
+linkedin   PASS fail    -   fail    -   (cc    -  )  1/3  
+yahoo      PASS fail  34.6% unst  27.3% (cc  16.9%)  1/3  
+bing       PASS fail  12.5% fail  88.7% (cc   5.1%)  1/3  
+walmart    PASS fail  22.4% unst  82.5% (cc  91.5%)  1/3  
+microsoft  fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.96% non-background)
+apple      PASS PASS 100.0% fail  41.6% (cc   0.0%)  2/3  
+netflix    PASS PASS  87.9% fail  66.0% (cc   6.5%)  2/3  
+github     PASS fail  71.7% fail  16.2% (cc   0.2%)  1/3  
+shopify    PASS PASS  96.7% unst  91.1% (cc  58.6%)  2/3  
+squarespace PASS PASS  85.7% fail  80.7% (cc   3.2%)  2/3  
+cnn        PASS fail  44.5% fail  54.4% (cc   0.0%)  1/3  
+weather    PASS fail   9.9% unst  38.0% (cc  23.5%)  1/3  
+------------------------------------------------------------------------------
+POINTS 26/60   loads 16  readable 7  looks-right 3   unstable: yahoo, walmart, shopify, weather   oracle failed: linkedin
+BLOCKED none
+ORACLE BLOCKED linkedin (top-level document HTTP 403)
+SCORABLE 25/57 on 19 sites
+trench/realsite/runs/20261005T0834Z-quiet-dev15d2c3a6
+```
