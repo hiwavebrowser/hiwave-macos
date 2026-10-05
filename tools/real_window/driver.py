@@ -97,9 +97,11 @@ class Fixture:
                     ms = int(urllib.parse.parse_qs(url.query).get("ms", ["1000"])[0])
                     time.sleep(ms / 1000)
                     return self.send(200, "text/plain", b"late")
-                m = re.fullmatch(r"/img/([0-9a-f]{6})\.png", url.path)
+                m = re.fullmatch(r"/(slow)?img/([0-9a-f]{6})\.png", url.path)
                 if m:
-                    return self.send(200, "image/png", flat_png(bytes.fromhex(m.group(1))))
+                    if m.group(1):
+                        time.sleep(int(urllib.parse.parse_qs(url.query).get("ms", ["1000"])[0]) / 1000)
+                    return self.send(200, "image/png", flat_png(bytes.fromhex(m.group(2))))
                 page = PAGES / url.path.lstrip("/")
                 if page.is_file() and page.parent == PAGES:
                     return self.send(200, "text/html; charset=utf-8", page.read_bytes())
@@ -375,6 +377,42 @@ class Driver:
         self.expect(c, "the window shows the late fetch's blue band", late[BLUE] > 1000, str(late))
         self.expect(c, "the window shows the late image", late[CYAN] > 2000, str(late))
 
+    def widest_gap(self, tick, start, end):
+        """The longest stretch of [start, end] with no `tick` beacon, and how many there were."""
+        ticks = [t for (t, _) in self.fixture.rows(tick, self.since) if start <= t <= end]
+        edges = [start] + ticks + [end]
+        return round(max(b - a for a, b in zip(edges, edges[1:])), 2), len(ticks)
+
+    def h4_slow(self):
+        """H4: an image that takes three seconds does not stop the page's clock, and arrives."""
+        c = "h4_slow"
+        if not self.open_page(c, "h4_slow.html"):
+            return
+        self.app.wait_log(r"Navigation finished", 20)
+        time.sleep(2.5)
+        now = time.time() - self.fixture.t0
+        gap, count = self.widest_gap("beacon?img-tick-", now - 2.0, now)
+        self.expect(c, "with nothing pending, the 200 ms ticks arrive steadily", gap <= 0.6,
+                    "%d ticks in 2 s, widest gap %.2f s" % (count, gap))
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.fixture.reply = b"go"
+        started = self.fixture.wait("/slowimg/", 4, mark)
+        self.fixture.reply = b"ok"
+        if not self.expect(c, "the app asked for the image the page added", started):
+            return
+        t_img = self.fixture.rows("/slowimg/", mark)[0][0]
+        loaded = self.app.wait_log(r"Loaded images added by live page scripts", 8, log_from)
+        time.sleep(0.5)
+        gap, count = self.widest_gap("beacon?img-tick-", t_img, t_img + 3.0)
+        self.expect(c, "the ticks keep arriving while the image is out", gap <= 0.6,
+                    "%d ticks in the 3 s it was out, widest gap %.2f s" % (count, gap))
+        self.expect(c, "the engine logged the image as loaded by the live loop", bool(loaded))
+        time.sleep(1.0)
+        frame = self.frame(c, "loaded", [CYAN])
+        if frame is None:
+            return self.not_run(c, "the window shows the slow image", self.why_not("Screen Recording"))
+        self.expect(c, "the window shows the slow image", frame[CYAN] > 2000, str(frame))
+
     def h1_slow(self):
         """H1: a request that takes three seconds neither stops the page's clock nor fails."""
         c = "h1_slow"
@@ -383,13 +421,8 @@ class Driver:
         self.app.wait_log(r"Navigation finished", 20)
         time.sleep(2.5)
 
-        def widest_gap(start, end):
-            ticks = [t for (t, _) in self.fixture.rows("beacon?slow-tick-", self.since) if start <= t <= end]
-            edges = [start] + ticks + [end]
-            return round(max(b - a for a, b in zip(edges, edges[1:])), 2), len(ticks)
-
         now = time.time() - self.fixture.t0
-        gap, count = widest_gap(now - 2.0, now)
+        gap, count = self.widest_gap("beacon?slow-tick-", now - 2.0, now)
         self.expect(c, "with nothing pending, the 200 ms ticks arrive steadily", gap <= 0.6,
                     "%d ticks in 2 s, widest gap %.2f s" % (count, gap))
         mark = self.fixture.mark()
@@ -401,7 +434,7 @@ class Driver:
         t_slow = self.fixture.rows("/slow?", mark)[0][0]
         self.fixture.wait("beacon?slow-then", 6, mark)
         time.sleep(0.5)
-        gap, count = widest_gap(t_slow, t_slow + 3.0)
+        gap, count = self.widest_gap("beacon?slow-tick-", t_slow, t_slow + 3.0)
         self.expect(c, "the ticks keep arriving while the request is out", gap <= 0.6,
                     "%d ticks in the 3 s it was out, widest gap %.2f s" % (count, gap))
         caught = [urllib.parse.unquote(p) for p in self.fixture.seen("beacon?slow-catch", mark)]
@@ -525,7 +558,7 @@ class Driver:
         self.expect(c, "the first screen is the red band only", top[RED] > 1000 and top[GREEN] == 0, str(top))
         self.expect(c, "after the wheel the green band is on screen", down[GREEN] > 1000, str(down))
 
-    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h6"]
+    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

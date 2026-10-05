@@ -67,6 +67,7 @@ of a run (about a minute for all checks).
 | `h2` | H2 resize | `h2_resize.html`: a 200x100 px box and a 50% box | resize |
 | `h3` | H3 hover and press | `h3_hover.html`: one viewport-sized target with `:hover` and `:active` | yes |
 | `h4` | H4 images | `h4_images.html`: five flat-colour images | no |
+| `h4_slow` | H4 | `h4_slow.html`: a 200 ms tick, then one image held for 3 s | no |
 | `h6` | H6 scroll | `h6_scroll.html`: three 1500 px bands | yes |
 
 Pages use targets that fill the viewport or flat colours counted over the
