@@ -22406,6 +22406,61 @@ mod node_identity_tests {
         assert!(!engine.views[&id].hover_rules.get());
     }
 
+    // `:active` was false for every element too, so a press showed nothing.
+    // It matches the element pressed and the elements above it from the
+    // press to the release, wherever the pointer goes in between, while
+    // `:hover` goes on following the pointer. The page is
+    // tools/parity_oracle/css_hover_page.html and every expected line is
+    // what the oracle's Chrome measured for the same step
+    // (tools/parity_oracle/css_hover_log.mjs).
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn css_active_holds_from_the_press_to_the_release() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } #a { height: auto }"#,
+                    r#"#b:hover { width: 300px } #b:hover + #c { width: 200px }"#,
+                    r#".menu:hover .sub { width: 100px } #c:not(:hover) { margin-left: 5px }"#,
+                    r#"#b:active { width: 310px } #b:active + #c { width: 210px }"#,
+                    r#".menu:active .sub { width: 110px }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="c">c</div>"#,
+                    r#"<div id="a" class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let read = "['b', 'c', 'sub'].map(function (i) { \
+                      var r = document.getElementById(i).getBoundingClientRect(); \
+                      return r.width + '@' + r.left; }).join(' ')";
+
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("300@0 200@5 400@0"), "over #b");
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@5 400@0"), "press on #b");
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@0 400@0"), "held, over #c");
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@5 400@0"), "held, back over #b");
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        engine.click_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@0 400@0"), "released over #c");
+
+        engine.mouse_move_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "over #t");
+        engine.mouse_down_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 110@0"), "press on #t, inside .menu");
+        engine.click_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "released on #t");
+    }
+
     // A cancelled `pointerdown` stops the `mousemove`s of that press, not
     // the boundary events (Pointer Events §11.3). A move writes to the DOM
     // like any other listener: the layout follows before the call returns.
