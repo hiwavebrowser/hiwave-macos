@@ -572,6 +572,145 @@
     add(A, 'speechSynthesis', 'speechSynthesis', shallow(function () { return typeof speechSynthesis.speak === 'function'; }));
     add(A, 'FontFace', 'FontFace', function () { return new FontFace('x', 'url(x.woff2)').family === 'x'; });
 
+    // ---------------- Added 2026-10-05 ----------------
+    // Members referenced in src/web_*.js that the 2026-10-03 probe did not
+    // cover. Each goes in the area it belongs to; the source file is noted.
+
+    // web_platform.js
+    A = 'Window & globals';
+    add(A, 'window.outerWidth/outerHeight', 'outerWidth', function () { return outerWidth > 0 && outerHeight > 0; });
+    add(A, 'window.opener/closed', 'closed', function () { return opener === null && closed === false; });
+    add(A, 'screen.availWidth/colorDepth', 'screen.availWidth', function () { return screen.availWidth > 0 && screen.colorDepth > 0; });
+    add(A, 'screen.orientation', 'screen.orientation', function () { return typeof screen.orientation.type === 'string'; });
+    add(A, 'window.scroll (alias)', 'scroll', function () { scroll(0, 0); return scrollY === 0; });
+    // web_encoding.js
+    add(A, 'escape/unescape', 'escape', function () { return escape('a b') === 'a%20b' && unescape('a%20b') === 'a b'; });
+    // web_interfaces.js
+    add(A, 'DOMException', 'DOMException', function () { var e = new DOMException('m', 'AbortError'); return e.name === 'AbortError' && e.code === 20; });
+    add(A, 'Window/Navigator/Location/History/Screen interfaces', 'Navigator', function () { return window instanceof Window && navigator instanceof Navigator && location instanceof Location && history instanceof History && screen instanceof Screen; });
+
+    // web_intl.js
+    A = 'Intl';
+    add(A, 'Intl.NumberFormat currency', 'Intl.NumberFormat', function () { return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(1234.5) === '$1,234.50'; });
+    add(A, 'Intl.NumberFormat compact', 'Intl.NumberFormat', function () { return new Intl.NumberFormat('en-US', { notation: 'compact' }).format(1500) === '1.5K'; });
+    add(A, 'Intl.NumberFormat.formatToParts', 'Intl.NumberFormat.prototype.formatToParts', function () { return new Intl.NumberFormat('en-US').formatToParts(1234)[1].type === 'group'; });
+    add(A, 'Intl.DateTimeFormat options', 'Intl.DateTimeFormat', function () { return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }).format(new Date(0)) === 'January 1, 1970'; });
+    add(A, 'Intl.DateTimeFormat.formatToParts', 'Intl.DateTimeFormat.prototype.formatToParts', function () { return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC' }).formatToParts(new Date(0)).some(function (p) { return p.type === 'year' && p.value === '1970'; }); });
+    add(A, 'Intl.DateTimeFormat resolvedOptions().timeZone', 'Intl.DateTimeFormat', function () { return typeof new Intl.DateTimeFormat().resolvedOptions().timeZone === 'string'; });
+    add(A, 'Intl.DisplayNames', 'Intl.DisplayNames', function () { return new Intl.DisplayNames('en', { type: 'region' }).of('US') === 'United States'; });
+    add(A, 'Intl.supportedValuesOf', 'Intl.supportedValuesOf', function () { return Intl.supportedValuesOf('currency').indexOf('USD') >= 0; });
+    add(A, 'Date.prototype.toLocaleTimeString', 'Date.prototype.toLocaleTimeString', function () { return new Date(0).toLocaleTimeString('en-US', { timeZone: 'UTC' }) === '12:00:00 AM'; });
+    add(A, 'Date.prototype.toLocaleString (en-US, UTC)', 'Date.prototype.toLocaleString', function () { return new Date(0).toLocaleString('en-US', { timeZone: 'UTC' }) === '1/1/1970, 12:00:00 AM'; });
+
+    // web_document.js
+    A = 'Document';
+    add(A, 'document.anchors/embeds', 'document.anchors', function () { return typeof d.anchors.length === 'number' && typeof d.embeds.length === 'number'; });
+    add(A, 'document.fonts.ready resolves', 'document.fonts', function () { return d.fonts.ready.then(function (f) { return f === d.fonts; }); });
+    add(A, 'document.fonts.check/load', 'document.fonts.check', function () { return typeof d.fonts.check('12px x') === 'boolean' && typeof d.fonts.load === 'function'; });
+    add(A, 'document.fullscreenEnabled', 'document.fullscreenEnabled', function () { return typeof d.fullscreenEnabled === 'boolean'; });
+    // web_scroll.js
+    add(A, 'document.scrollingElement', 'document.scrollingElement', function () { return d.scrollingElement === d.documentElement; });
+    // web_interfaces.js
+    add(A, 'document.implementation (DOMImplementation)', 'document.implementation', function () { return d.implementation instanceof DOMImplementation; });
+
+    // web_scroll.js
+    A = 'Element';
+    add(A, 'Element.scrollLeft/scrollBy', '@div.scrollBy', function () { var e = el('div'); e.scrollBy(0, 0); return typeof e.scrollLeft === 'number'; });
+    // web_shadow.js
+    add(A, 'slot.assignedElements / assignedSlot', '@div.attachShadow', function () { var h = el('div'); var c = h.appendChild(el('i')); var s = h.attachShadow({ mode: 'open' }); s.innerHTML = '<slot></slot>'; return s.firstChild.assignedElements().length === 1 && c.assignedSlot === s.firstChild; });
+    add(A, 'closed shadow root hides shadowRoot', '@div.attachShadow', function () { var h = el('div'); h.attachShadow({ mode: 'closed' }); return h.shadowRoot === null; });
+    add(A, 'event retargeting across shadow boundary', '@div.attachShadow', function () { var h = el('div'); var s = h.attachShadow({ mode: 'open' }); s.innerHTML = '<b></b>'; var t; h.addEventListener('x', function (e) { t = e.target; }); s.firstChild.dispatchEvent(new Event('x', { bubbles: true, composed: true })); return t === h; });
+
+    // web_forms.js
+    A = 'HTML elements';
+    add(A, 'option.selected/defaultSelected', '@select.options', function () { var s = d.getElementById('sel'); return s.options[1].selected === true && s.options[1].defaultSelected === true; });
+    add(A, 'input.defaultChecked/indeterminate', '@input.indeterminate', function () { var i = el('input'); i.type = 'checkbox'; i.indeterminate = true; return i.indeterminate === true && i.defaultChecked === false; });
+    add(A, 'setCustomValidity/reportValidity', '@input.setCustomValidity', function () { var i = el('input'); i.setCustomValidity('bad'); return i.validity.customError === true && i.validationMessage === 'bad' && typeof i.reportValidity === 'function'; });
+    add(A, 'fieldset.elements/disabled', 'HTMLFieldSetElement', function () { var f = el('fieldset'); f.appendChild(el('input')); return f.elements.length === 1 && f.disabled === false; });
+    add(A, 'form.length/namedItem', '@form.length', function () { var f = d.getElementById('f'); return f.length >= 2 && f.elements.namedItem('q') === d.getElementById('q'); });
+    add(A, 'SubmitEvent.submitter', 'SubmitEvent', function () { var b = el('button'); return new SubmitEvent('submit', { submitter: b }).submitter === b; });
+    // web_history.js
+    add(A, 'HTMLAnchorElement.origin', '@a.origin', function () { return d.getElementById('lnk').origin === 'https://census.test'; });
+    // web_document.js / web_interfaces.js
+    add(A, 'HTMLDetailsElement / details toggle', 'HTMLDetailsElement', function () { var x = el('details'); x.open = true; return x instanceof HTMLDetailsElement && x.hasAttribute('open'); });
+
+    // web_interfaces.js
+    A = 'Events';
+    add(A, 'UIEvent / CompositionEvent', 'CompositionEvent', function () { return new CompositionEvent('compositionend', { data: 'x' }).data === 'x' && new UIEvent('x') instanceof Event; });
+    add(A, 'HashChangeEvent / PopStateEvent / PageTransitionEvent', 'HashChangeEvent', function () { return new HashChangeEvent('hashchange', { newURL: 'u' }).newURL === 'u' && new PopStateEvent('popstate', { state: 1 }).state === 1 && new PageTransitionEvent('pageshow', { persisted: true }).persisted === true; });
+    add(A, 'StorageEvent / ProgressEvent', 'StorageEvent', function () { return new StorageEvent('storage', { key: 'k' }).key === 'k' && new ProgressEvent('progress', { loaded: 3 }).loaded === 3; });
+    add(A, 'KeyboardEvent.getModifierState', 'KeyboardEvent.prototype.getModifierState', function () { return new KeyboardEvent('keydown', { shiftKey: true }).getModifierState('Shift') === true; });
+    add(A, 'MediaQueryListEvent', 'MediaQueryListEvent', function () { return new MediaQueryListEvent('change', { matches: true }).matches === true; });
+
+    // web_observers_live.js
+    A = 'Observers';
+    add(A, 'IntersectionObserver rootMargin/thresholds', 'IntersectionObserver', function () { var o = new IntersectionObserver(function () {}, { rootMargin: '10px', threshold: [0, 0.5] }); return o.thresholds.length === 2 && typeof o.rootMargin === 'string'; });
+    add(A, 'IntersectionObserver.takeRecords', 'IntersectionObserver.prototype.takeRecords', function () { var o = new IntersectionObserver(function () {}); return Array.isArray(o.takeRecords()); });
+    add(A, 'IntersectionObserverEntry / ResizeObserverEntry / MutationRecord', 'IntersectionObserverEntry', function () { return typeof IntersectionObserverEntry === 'function' && typeof ResizeObserverEntry === 'function' && typeof MutationRecord === 'function'; });
+
+    // web_components.js
+    A = 'Web Components';
+    add(A, 'customElements.getName', 'customElements.getName', function () { var C = class extends HTMLElement {}; customElements.define('census-getname', C); return customElements.getName(C) === 'census-getname'; });
+    add(A, 'connected/disconnectedCallback', 'customElements', function () { var log = []; customElements.define('census-life', class extends HTMLElement { connectedCallback() { log.push('c'); } disconnectedCallback() { log.push('d'); } }); var x = el('census-life'); d.body.appendChild(x); x.remove(); return log.join('') === 'cd'; });
+    add(A, 'CustomElementRegistry (interface)', 'CustomElementRegistry', function () { return customElements instanceof CustomElementRegistry; });
+
+    // web_xhr.js / web_fetch.js / web_streams.js
+    A = 'Networking';
+    add(A, 'XMLHttpRequest.upload / getAllResponseHeaders', 'XMLHttpRequestUpload', function () { var x = new XMLHttpRequest(); return x.upload instanceof XMLHttpRequestUpload && x.getAllResponseHeaders() === ''; });
+    add(A, 'XMLHttpRequest synchronous open', 'XMLHttpRequest', function () { var x = new XMLHttpRequest(); x.open('GET', '/x', false); return true; });
+    add(A, 'Request.clone / Response.clone', 'Response.prototype.clone', function () { var r = new Response('ab'); return r.clone().text().then(function (t) { return t === 'ab' && new Request('/x').clone().url === 'https://census.test/x'; }); });
+    add(A, 'Response.error / Response.redirect', 'Response.redirect', function () { return Response.error().type === 'error' && Response.redirect('https://census.test/r', 302).status === 302; });
+    add(A, 'Response.formData (urlencoded)', 'Response.prototype.formData', function () { return new Response('a=1', { headers: { 'content-type': 'application/x-www-form-urlencoded' } }).formData().then(function (f) { return f.get('a') === '1'; }); });
+    add(A, 'ReadableStream.tee / pipeThrough', 'ReadableStream.prototype.tee', function () { var rs = new ReadableStream({ start: function (c) { c.enqueue('x'); c.close(); } }); var t = rs.tee(); return t[0].pipeThrough(new TransformStream()).getReader().read().then(function (r) { return r.value === 'x'; }); });
+    add(A, 'ReadableStream async iteration', 'ReadableStream', function () { var rs = new ReadableStream({ start: function (c) { c.enqueue(1); c.enqueue(2); c.close(); } }); return (0, eval)('(async function(rs){ var s = 0; for await (var v of rs) s += v; return s; })')(rs).then(function (s) { return s === 3; }); });
+    add(A, 'CountQueuingStrategy / ByteLengthQueuingStrategy', 'CountQueuingStrategy', function () { return new CountQueuingStrategy({ highWaterMark: 2 }).highWaterMark === 2 && new ByteLengthQueuingStrategy({ highWaterMark: 8 }).size(new Uint8Array(3)) === 3; });
+    add(A, 'TextEncoderStream / TextDecoderStream', 'TextEncoderStream', function () { return new TextEncoderStream().encoding === 'utf-8' && new TextDecoderStream().encoding === 'utf-8'; });
+    add(A, 'byob reader', 'ReadableStream', function () { new ReadableStream({ type: 'bytes' }).getReader({ mode: 'byob' }); return true; });
+
+    // web_url.js / web_encoding.js
+    A = 'URL & encoding';
+    add(A, 'URL.revokeObjectURL', 'URL.revokeObjectURL', function () { URL.revokeObjectURL(URL.createObjectURL(new Blob(['x']))); return true; });
+    add(A, 'URL.parse', 'URL.parse', function () { return URL.parse('nope') === null && URL.parse('https://a.test/').host === 'a.test'; });
+    add(A, 'webkitURL alias', 'webkitURL', function () { return webkitURL === URL; });
+    add(A, 'URLSearchParams.size', 'URLSearchParams', function () { return new URLSearchParams('a=1&b=2').size === 2; });
+    add(A, 'TextEncoder.encodeInto', 'TextEncoder.prototype.encodeInto', function () { var u = new Uint8Array(4); var r = new TextEncoder().encodeInto('hi', u); return r.written === 2 && u[0] === 104; });
+    add(A, 'TextDecoder fatal', 'TextDecoder', function () { try { new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array([0xff])); return false; } catch (e) { return e instanceof TypeError; } });
+
+    // web_blob.js
+    A = 'Blob, File & FormData';
+    add(A, 'Blob.bytes', 'Blob.prototype.bytes', function () { return new Blob(['ab']).bytes().then(function (u) { return u instanceof Uint8Array && u.length === 2; }); });
+    add(A, 'File.lastModified/name', 'File', function () { var f = new File(['x'], 'n.txt', { lastModified: 5 }); return f.name === 'n.txt' && f.lastModified === 5; });
+    add(A, 'FormData.entries/getAll', 'FormData.prototype.getAll', function () { var f = new FormData(); f.append('a', '1'); f.append('a', '2'); return f.getAll('a').length === 2 && Array.from(f.entries()).length === 2; });
+    add(A, 'AbortSignal.abort / throwIfAborted', 'AbortSignal.abort', function () { var s = AbortSignal.abort(); try { s.throwIfAborted(); return false; } catch (e) { return s.aborted && e.name === 'AbortError'; } });
+
+    // web_history.js
+    A = 'Location, History & Navigator';
+    add(A, 'history.scrollRestoration', 'history.scrollRestoration', function () { return history.scrollRestoration === 'auto'; });
+    add(A, 'popstate on history.back()', 'history.back', function () { var u = location.href; history.pushState({ p: 1 }, '', '/start/pop'); return later(function (r) { addEventListener('popstate', function f() { removeEventListener('popstate', f); r(location.href === u); }); history.back(); }); });
+    add(A, 'pushState cross-origin throws SecurityError', 'history.pushState', function () { try { history.pushState(null, '', 'https://other.test/'); return false; } catch (e) { return e.name === 'SecurityError'; } });
+    // web_platform.js
+    add(A, 'navigator.plugins/mimeTypes/pdfViewerEnabled', 'navigator.plugins', function () { return typeof navigator.plugins.length === 'number' && typeof navigator.mimeTypes.length === 'number' && typeof navigator.pdfViewerEnabled === 'boolean'; });
+    add(A, 'navigator.doNotTrack/javaEnabled', 'navigator.javaEnabled', function () { return navigator.javaEnabled() === false && 'doNotTrack' in navigator; });
+
+    // web_cssom.js / web_dommatrix.js
+    A = 'CSSOM & view';
+    add(A, 'CSSStyleSheet.replaceSync + adoptedStyleSheets', 'CSSStyleSheet.prototype.replaceSync', function () { var s = new CSSStyleSheet(); s.replaceSync('a{color:red}'); d.adoptedStyleSheets = [s]; return s.cssRules.length === 1 && d.adoptedStyleSheets[0] === s; });
+    add(A, 'CSSStyleSheet.replace (Promise)', 'CSSStyleSheet.prototype.replace', function () { return new CSSStyleSheet().replace('b{color:red}').then(function (s) { return s.cssRules.length === 1; }); });
+    add(A, 'CSSStyleSheet.deleteRule', 'CSSStyleSheet.prototype.deleteRule', function () { var s = new CSSStyleSheet(); s.replaceSync('a{color:red} b{color:blue}'); s.deleteRule(0); return s.cssRules.length === 1; });
+    add(A, 'CSSStyleRule.selectorText / style.setProperty', 'CSSStyleRule', function () { var s = new CSSStyleSheet(); s.replaceSync('a{color:red}'); var r = s.cssRules[0]; r.style.setProperty('color', 'blue'); return r instanceof CSSStyleRule && r.selectorText === 'a' && r.style.getPropertyValue('color') === 'blue'; });
+    add(A, '<style>.sheet reflects text', '@style.sheet', function () { var st = el('style'); st.textContent = 'p{margin:0}'; d.head.appendChild(st); var ok = st.sheet.cssRules.length === 1; st.remove(); return ok; });
+    add(A, 'DOMMatrix from CSS string', 'DOMMatrix', function () { var m = new DOMMatrix('translate(10px, 20px) scale(2)'); return m.e === 10 && m.f === 20 && m.a === 2; });
+    add(A, 'DOMMatrix.multiply/inverse', 'DOMMatrix.prototype.multiply', function () { var m = new DOMMatrix([2, 0, 0, 2, 5, 5]); return m.multiply(m.inverse()).isIdentity === true; });
+    add(A, 'DOMMatrixReadOnly / WebKitCSSMatrix', 'DOMMatrixReadOnly', function () { return typeof DOMMatrixReadOnly === 'function' && typeof WebKitCSSMatrix === 'function'; });
+    add(A, 'DOMRectReadOnly / DOMPointReadOnly', 'DOMRectReadOnly', function () { return new DOMRectReadOnly(1, 2, 3, 4).right === 4 && new DOMPointReadOnly(1, 2).y === 2; });
+
+    // web_crypto.js
+    A = 'Crypto & performance';
+    add(A, 'crypto.getRandomValues rejects Float32Array', 'crypto.getRandomValues', function () { try { crypto.getRandomValues(new Float32Array(1)); return false; } catch (e) { return e.name === 'TypeMismatchError'; } });
+    // web_platform.js
+    add(A, 'performance.getEntriesByName / clearMarks', 'performance.getEntriesByName', function () { performance.mark('census-m'); var n = performance.getEntriesByName('census-m').length; performance.clearMarks('census-m'); return n === 1 && performance.getEntriesByName('census-m').length === 0; });
+    add(A, 'performance.toJSON', 'performance.toJSON', function () { return typeof performance.toJSON().timeOrigin === 'number'; });
+
     // ---------------- run ----------------
     var results = [];
     var pending = [];
