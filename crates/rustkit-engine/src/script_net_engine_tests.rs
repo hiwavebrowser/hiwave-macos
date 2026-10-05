@@ -139,10 +139,10 @@ setTimeout(function () {
 }
 
 /// The live loop (Z lane I0): a request made after the load, here by the
-/// script a click or a late timer would run, is answered on the next turn of
+/// script a click or a late timer would run, is answered on a later turn of
 /// the loop under the same policy, and what its callback writes is laid out.
 #[test]
-fn a_fetch_made_after_the_load_is_answered_on_the_next_live_turn() {
+fn a_fetch_made_after_the_load_is_answered_on_a_later_live_turn() {
     let page = r#"<html><body style="margin:0"><div style="height:40px">early</div></body></html>"#;
     let (mut engine, view, server) = load(
         EngineConfig::default(),
@@ -166,9 +166,17 @@ fn a_fetch_made_after_the_load_is_answered_on_the_next_live_turn() {
         .enable_all()
         .build()
         .unwrap();
-    let turn = rt.block_on(engine.pump_live(view, 16));
-
-    assert_eq!((turn.requests, turn.relaid_out), (2, true));
+    // The turn that finds the requests starts them; the answers come on the
+    // turns after. The refused one is answered without a connection.
+    let started = std::time::Instant::now();
+    let (mut answered, mut relaid_out) = (0, false);
+    while answered < 2 {
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{answered} of 2 answered");
+        let turn = rt.block_on(engine.pump_live(view, 16));
+        answered += turn.requests;
+        relaid_out |= turn.relaid_out;
+    }
+    assert!(relaid_out);
     assert_eq!(
         engine.execute_script(view, "log.slice().sort().join('|')").unwrap(),
         r#"String("denied:Failed to fetch|late:/late")"#
@@ -211,15 +219,16 @@ fn a_slow_request_does_not_hold_the_live_turn() {
         .build()
         .unwrap();
     let started = std::time::Instant::now();
-    rt.block_on(engine.pump_live(view, 16));
+    let first = rt.block_on(engine.pump_live(view, 16));
     let held = started.elapsed();
     assert!(
         held < std::time::Duration::from_millis(150),
         "the turn that took a request the server holds for 300 ms lasted {held:?}"
     );
+    assert_eq!((first.requests, first.in_flight), (0, 1));
 
     let mut turns = 0;
-    while engine.execute_script(view, "log.length").unwrap() == "Number(0)" {
+    while engine.execute_script(view, "log.join('|')").unwrap() == r#"String("")"# {
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "the slow request never arrived");
         std::thread::sleep(std::time::Duration::from_millis(5));
         rt.block_on(engine.pump_live(view, 5));

@@ -13,7 +13,11 @@
 //! in that same order, so a run does not depend on which response was
 //! fastest.
 
+use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::Poll;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -110,6 +114,60 @@ pub(crate) async fn pump(
         out.poisoned = true;
     }
     out
+}
+
+/// A request the live loop has started and not yet delivered. Dropping it
+/// abandons the request.
+pub(crate) struct LiveRequest {
+    id: u64,
+    outcome: Pin<Box<dyn Future<Output = NetDelivery>>>,
+}
+
+/// Start `request` for the live loop. Nothing runs until
+/// [`settle_live`] polls it; it fails as a network error at `deadline`.
+pub(crate) fn start_live(
+    policy: Arc<FetchPolicy>,
+    loader: Arc<ResourceLoader>,
+    request: NetRequest,
+    deadline: tokio::time::Instant,
+) -> LiveRequest {
+    LiveRequest {
+        id: request.id,
+        outcome: Box::pin(async move { execute(&policy, &loader, deadline, &request).await }),
+    }
+}
+
+/// Let the requests that are out make progress for at most `slice`, and take
+/// the ones that have an outcome, in the order the page made them. Returns
+/// as soon as one has; the rest stay in `in_flight` for a later turn.
+///
+/// The requests live on the runtime that polls them: every turn of one view
+/// must come from the same runtime.
+pub(crate) async fn settle_live(
+    in_flight: &mut Vec<LiveRequest>,
+    slice: std::time::Duration,
+) -> Vec<(u64, NetDelivery)> {
+    let mut done = Vec::new();
+    if in_flight.is_empty() {
+        return done;
+    }
+    let pause = tokio::time::sleep(slice);
+    tokio::pin!(pause);
+    std::future::poll_fn(|cx| {
+        let mut i = 0;
+        while i < in_flight.len() {
+            match in_flight[i].outcome.as_mut().poll(cx) {
+                Poll::Ready(outcome) => done.push((in_flight.remove(i).id, outcome)),
+                Poll::Pending => i += 1,
+            }
+        }
+        if !done.is_empty() {
+            return Poll::Ready(());
+        }
+        pause.as_mut().poll(cx)
+    })
+    .await;
+    done
 }
 
 async fn execute(
