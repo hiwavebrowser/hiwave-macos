@@ -55,6 +55,8 @@ mod legacy_tests;
 #[cfg(test)]
 mod reflect_tests;
 #[cfg(test)]
+mod traversal_tests;
+#[cfg(test)]
 mod document_members_tests;
 #[cfg(test)]
 mod web_intl_tests;
@@ -561,6 +563,8 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_shadow.js"))?;
         // Reflected IDL attributes: link.href, script.type, img.alt, a.target, el.tabIndex, ... (web_reflect.js).
         runtime.evaluate_script(include_str!("web_reflect.js"))?;
+        // NodeFilter, TreeWalker, NodeIterator, createTreeWalker/createNodeIterator (web_traversal.js).
+        runtime.evaluate_script(include_str!("web_traversal.js"))?;
         // document.location/fonts/forms/visibilityState/..., FontFace (web_document.js) and
         // DOMMatrix (web_dommatrix.js): members pages read without feature-testing.
         runtime.evaluate_script(include_str!("web_document.js"))?;
