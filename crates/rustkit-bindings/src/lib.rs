@@ -571,6 +571,9 @@ impl DomBindings {
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
         runtime.evaluate_script(include_str!("web_observers_live.js"))?;
+        // MutationObserver that records every DOM write and delivers in a microtask; replaces
+        // the inert stub through the dom.rs write hook (web_mutation_observer.js).
+        runtime.evaluate_script(include_str!("web_mutation_observer.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -2024,7 +2027,7 @@ mod tests {
     /// The observer interfaces and requestIdleCallback: pages construct them
     /// during start-up (walmart died on MutationObserver and
     /// IntersectionObserver, microsoft on MutationObserver). They exist and
-    /// validate like the real ones, and report no records.
+    /// validate like the real ones.
     #[test]
     fn observers_exist_validate_their_arguments_and_report_nothing() {
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
@@ -2040,7 +2043,9 @@ mod tests {
         // MutationObserver.observe needs a target and at least one record type.
         assert_eq!(ev("var el = {}; var m = new MutationObserver(function () {}); var d; try { m.observe(el, {}); d = 'no throw'; } catch (e) { d = e.name; } d"), "TypeError");
         assert_eq!(ev("var e2; try { m.observe(null, { childList: true }); e2 = 'no throw'; } catch (e) { e2 = e.name; } e2"), "TypeError");
-        assert_eq!(ev("m.observe(el, { childList: true, subtree: true }); String(m.takeRecords().length)"), "0");
+        // A target that is not a Node throws (DOM §4.3.1); records are in mutation_observer_tests.
+        assert_eq!(ev("var e3; try { m.observe(el, { childList: true }); e3 = 'no throw'; } catch (e) { e3 = e.name; } e3"), "TypeError");
+        assert_eq!(ev("String(m.takeRecords().length)"), "0");
         assert_eq!(ev("m.disconnect(); String(typeof WebKitMutationObserver)"), "function");
         // IntersectionObserver reports its configuration.
         assert_eq!(
