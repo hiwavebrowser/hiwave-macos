@@ -34531,3 +34531,67 @@ mod error_response_tests {
         assert_eq!(engine.http_status(view), None, "a document that came from no response has no status");
     }
 }
+
+#[cfg(test)]
+mod scroll_extent_tests {
+    use super::*;
+
+    // How far a page scrolls, against the pinned Chromium (Z lane I0, H6,
+    // 2026-10-05). The pages and Chrome's answers are in
+    // tools/parity_oracle/scroll_extent_cases.json, written by
+    // scroll_extent_log.mjs: `chrome_script_y` is where window.scrollTo to a
+    // very large y ends, `chrome_wheel_y` where a very large wheel turn ends.
+
+    /// Transforms do not move a box in the layout tree, so a box translated
+    /// down does not extend the page yet.
+    const SCRIPT_GAPS: &[&str] = &["translate-down"];
+    /// Chrome's wheel does not scroll a viewport whose overflow is hidden
+    /// (script still does). The engine's wheel is not locked yet.
+    const WHEEL_GAPS: &[&str] = &["translate-down", "body-overflow-hidden", "html-overflow-hidden"];
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_page_scrolls_as_far_as_it_does_in_chrome() {
+        let data: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tools/parity_oracle/scroll_extent_cases.json"))
+                .expect("case file");
+        let (w, h) = (data["viewport"][0].as_u64().unwrap(), data["viewport"][1].as_u64().unwrap());
+        let mut wrong = Vec::new();
+        let mut gaps_that_pass = Vec::new();
+        for case in data["cases"].as_array().expect("cases") {
+            let name = case["name"].as_str().unwrap();
+            let chrome_script = case["chrome_script_y"].as_f64().expect("run scroll_extent_log.mjs --write") as f32;
+            let chrome_wheel = case["chrome_wheel_y"].as_f64().unwrap() as f32;
+
+            let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+            let id = engine
+                .create_headless_view(Bounds::new(0, 0, w as u32, h as u32))
+                .expect("headless view");
+            engine.load_html(id, case["html"].as_str().unwrap()).expect("load_html");
+
+            engine.set_scroll_offset(id, 0.0, 1.0e7).unwrap();
+            let script = engine.get_scroll_offset(id).unwrap().1;
+            engine.set_scroll_offset(id, 0.0, 0.0).unwrap();
+            // A wheel turned down arrives as a negative delta.
+            engine.scroll_view(id, 0.0, -1.0e7).unwrap();
+            let wheel = engine.get_scroll_offset(id).unwrap().1;
+
+            for (what, got, chrome, gaps) in [
+                ("script", script, chrome_script, SCRIPT_GAPS),
+                ("wheel", wheel, chrome_wheel, WHEEL_GAPS),
+            ] {
+                let same = (got - chrome).abs() <= 1.0;
+                match (same, gaps.contains(&name)) {
+                    (false, false) => wrong.push(format!("{name}: {what} reaches {got}, Chrome {chrome}")),
+                    (true, true) if chrome > 0.0 => gaps_that_pass.push(format!("{name} ({what})")),
+                    _ => {}
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong:\n{}", wrong.len(), wrong.join("\n"));
+        assert!(
+            gaps_that_pass.is_empty(),
+            "listed as a gap but matches Chrome now, take it off the list: {gaps_that_pass:?}"
+        );
+    }
+}
