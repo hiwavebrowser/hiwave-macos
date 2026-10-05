@@ -71,7 +71,9 @@ impl AxisSize {
 pub enum SizeQuery {
     MinContent,
     MaxContent,
-    FitContent { available: LayoutUnit },
+    FitContent {
+        available: LayoutUnit,
+    },
     /// Lay out under the constraint's definite sizes.
     Definite,
 }
@@ -221,7 +223,10 @@ fn holds_text_or_control(b: &LayoutBox) -> bool {
 pub(crate) fn in_l0_class(item: &LayoutBox) -> bool {
     let s = &item.style;
     let container = if s.display.is_flex() {
-        matches!(s.flex_direction, FlexDirection::Row | FlexDirection::RowReverse)
+        matches!(
+            s.flex_direction,
+            FlexDirection::Row | FlexDirection::RowReverse
+        )
     } else {
         s.display.is_grid()
     };
@@ -231,7 +236,10 @@ pub(crate) fn in_l0_class(item: &LayoutBox) -> bool {
         && matches!(s.min_height, Length::Auto | Length::Px(_))
         && matches!(s.max_height, Length::Auto | Length::Px(_))
         && s.aspect_ratio.is_none()
-        && !matches!(s.position, rustkit_css::Position::Absolute | rustkit_css::Position::Fixed)
+        && !matches!(
+            s.position,
+            rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+        )
         && holds_text_or_control(item)
 }
 
@@ -284,7 +292,10 @@ pub(crate) fn intrinsic_fragment(
         let own_box = probe.dimensions.clone();
         crate::flex::layout_flex_container(&mut probe, &own_box);
     } else {
-        let (w, h) = (probe.dimensions.content.width, probe.dimensions.content.height);
+        let (w, h) = (
+            probe.dimensions.content.width,
+            probe.dimensions.content.height,
+        );
         crate::grid::layout_grid_container(&mut probe, w, h);
     }
     QUERY_DEPTH.with(|d| d.set(d.get() - 1));
@@ -376,7 +387,10 @@ mod tests {
         // 0.01 px is 0.64 units: the nearest unit is 1.
         assert_eq!(LayoutUnit::from_px(0.01).raw(), 1);
         // Two ulps under a whole pixel is that pixel.
-        assert_eq!(LayoutUnit::from_px(20.0 - 2.0 * f32::EPSILON * 20.0).raw(), 20 * 64);
+        assert_eq!(
+            LayoutUnit::from_px(20.0 - 2.0 * f32::EPSILON * 20.0).raw(),
+            20 * 64
+        );
         assert_eq!(LayoutUnit::from_px(f32::NAN), LayoutUnit::ZERO);
         assert_eq!(LayoutUnit::from_px(f32::INFINITY).raw(), i32::MAX);
     }
