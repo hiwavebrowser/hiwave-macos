@@ -1,0 +1,135 @@
+{
+ "viewport": [
+  1280,
+  800
+ ],
+ "boxes": "xywh",
+ "cases": [
+  {
+   "name": "an-empty-link-with-inset-0",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{inset:0}</style></head><body><div class=r id=r>Card title <a id=o class=abs href=#></a></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:0:0:300:100 after:0:100:1280:20"
+  },
+  {
+   "name": "an-empty-link-with-inset-0-alone",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{inset:0}</style></head><body><div class=r id=r><a id=o class=abs href=#></a></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:0:0:300:100 after:0:100:1280:20"
+  },
+  {
+   "name": "an-empty-span-with-inset-0-after-a-block",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{inset:0}</style></head><body><div class=r id=r><div style=height:20px></div><span id=o class=abs></span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:0:0:300:100 after:0:100:1280:20"
+  },
+  {
+   "name": "an-empty-span-with-a-size",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{right:0;bottom:0;width:30px;height:10px}</style></head><body><div class=r id=r>text <span id=o class=abs></span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:270:90:30:10 after:0:100:1280:20"
+  },
+  {
+   "name": "an-empty-i-with-a-size-and-a-background",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{left:10px;top:10px;width:16px;height:16px;background:red}</style></head><body><div class=r id=r>text <i id=o class=abs></i></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:10:10:16:16 after:0:100:1280:20"
+  },
+  {
+   "name": "an-empty-span-with-top-and-bottom",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{left:0;top:10px;bottom:10px;width:5px}</style></head><body><div class=r id=r>text <span id=o class=abs></span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:0:10:5:80 after:0:100:1280:20"
+  },
+  {
+   "name": "an-empty-span-with-left-and-right",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{left:10px;right:10px;top:0;height:5px}</style></head><body><div class=r id=r>text <span id=o class=abs></span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:10:0:280:5 after:0:100:1280:20"
+  },
+  {
+   "name": "an-empty-span-with-percent-sizes",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{left:0;top:0;width:50%;height:50%}</style></head><body><div class=r id=r>text <span id=o class=abs></span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:0:0:150:50 after:0:100:1280:20"
+  },
+  {
+   "name": "a-span-of-text-in-a-corner",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{right:0;bottom:0}</style></head><body><div class=r id=r>text <span id=o class=abs>badge</span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:252:80:48:20 after:0:100:1280:20"
+  },
+  {
+   "name": "a-span-of-text-at-top-left",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{left:10px;top:10px}</style></head><body><div class=r id=r>text <span id=o class=abs>badge</span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:10:10:48:20 after:0:100:1280:20"
+  },
+  {
+   "name": "a-span-of-text-with-a-width",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{left:0;top:0;width:120px}</style></head><body><div class=r id=r>text <span id=o class=abs>badge</span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:0:0:120:20 after:0:100:1280:20"
+  },
+  {
+   "name": "a-span-of-text-with-padding",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{left:0;top:0;padding:5px 10px}</style></head><body><div class=r id=r>text <span id=o class=abs>badge</span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:0:0:68:30 after:0:100:1280:20"
+  },
+  {
+   "name": "a-span-of-text-that-wraps",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{left:0;top:0;width:100px}</style></head><body><div class=r id=r>text <span id=o class=abs>aaaa bbbb cccc dddd eeee ffff</span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:0:0:100:60 after:0:100:1280:20"
+  },
+  {
+   "name": "a-span-of-text-with-left-and-right",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{left:10px;right:10px;top:0}</style></head><body><div class=r id=r>text <span id=o class=abs>badge</span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:10:0:280:20 after:0:100:1280:20"
+  },
+  {
+   "name": "a-span-with-no-offsets",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}</style></head><body><div class=r id=r>text <span id=o class=abs>badge</span> more</div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:48:0:48:20 after:0:100:1280:20"
+  },
+  {
+   "name": "a-link-holding-a-block",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{left:0;top:0}</style></head><body><div class=r id=r><a id=o class=abs href=#><div id=k style=width:50px;height:30px></div></a></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:0:0:50:30 k:0:0:50:30 after:0:100:1280:20"
+  },
+  {
+   "name": "an-inline-block-span",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{display:inline-block;right:0;top:0}</style></head><body><div class=r id=r>text <span id=o class=abs>badge</span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:252:0:48:20 after:0:100:1280:20"
+  },
+  {
+   "name": "an-inline-flex-span",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{display:inline-flex;right:0;top:0}</style></head><body><div class=r id=r>text <span id=o class=abs><b id=k>x</b><b>y</b></span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:281:0:19:20 k:281:0:10:20 after:0:100:1280:20"
+  },
+  {
+   "name": "a-fixed-empty-span-with-a-size",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{position:fixed;right:0;top:0;width:40px;height:40px}</style></head><body><div class=r id=r>text <span id=o></span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:1240:0:40:40 after:0:100:1280:20"
+  },
+  {
+   "name": "a-fixed-span-of-text",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{position:fixed;left:20px;top:300px}</style></head><body><div class=r id=r>text <span id=o>badge</span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 o:20:300:48:20 after:0:100:1280:20"
+  },
+  {
+   "name": "an-empty-link-with-inset-0-in-a-flex-item",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}.r{display:flex}#f{position:relative;width:100px}#o{inset:0}</style></head><body><div class=r id=r><div id=f>x<a id=o class=abs href=#></a></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 f:0:0:100:100 o:0:0:100:100 after:0:100:1280:20"
+  },
+  {
+   "name": "an-empty-link-with-inset-0-in-a-static-parent-of-text",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{inset:0}</style></head><body><div class=r id=r><p id=p style=margin:0>Card title <a id=o class=abs href=#></a></p></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 p:0:0:300:20 o:0:0:300:100 after:0:100:1280:20"
+  },
+  {
+   "name": "a-span-inside-a-span",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{right:0;top:0}</style></head><body><div class=r id=r><span id=s>text <span id=o class=abs>badge</span></span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 s:0:1:38:18 o:252:0:48:20 after:0:100:1280:20"
+  },
+  {
+   "name": "an-empty-span-inside-a-link",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{inset:0}</style></head><body><div class=r id=r><a id=s href=#>text <span id=o class=abs></span></a></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 s:0:1:38:18 o:0:0:300:100 after:0:100:1280:20"
+  },
+  {
+   "name": "text-around-an-empty-abspos-span-stays-on-one-line",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.r{position:relative;width:300px;height:100px}.abs{position:absolute}#o{inset:0}</style></head><body><div class=r id=r><span id=s1>aaa</span> <span id=o class=abs></span> <span id=s2>bbb</span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "r:0:0:300:100 s1:0:1:29:18 o:0:0:300:100 s2:38:1:29:18 after:0:100:1280:20"
+  }
+ ],
+ "chrome": "143.0.7499.4"
+}
