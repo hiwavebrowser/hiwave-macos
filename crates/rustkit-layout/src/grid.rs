@@ -1960,9 +1960,18 @@ pub fn layout_grid_container(
                 if let Some(slot) = real_heights.get_mut(item_idx) {
                     *slot = Some(content_height);
                 }
+                // A stretched item in rows of a fixed size is as tall as
+                // they are and its lines overflow (Chrome: five lines in a
+                // 40px row, the item is 40). In an intrinsic row the area is
+                // only the estimate so far, and the lines are the floor.
+                let in_fixed_rows = row_spans.get(item_idx).is_some_and(|&(r0, r1)| {
+                    r0 < grid.rows.len()
+                        && (r0..r1.clamp(r0 + 1, grid.rows.len()))
+                            .all(|r| track_is_fixed(&grid.rows[r]))
+                });
                 child.dimensions.content.height = if !matches!(child.style.height, Length::Auto) {
                     area_height
-                } else if area_height > content_height
+                } else if (area_height > content_height || in_fixed_rows)
                     && stretches_to_its_row(child, &container_align_items)
                 {
                     area_height.min(cap)
@@ -4262,11 +4271,15 @@ fn apply_justify_self(
 /// forced break or an atomic inline (the same test the block children pass
 /// makes). Such an item is flowed by that pass, which builds line boxes and
 /// wraps the inline runs around any block children. An item with only block
-/// children keeps the block arm of Phase 9, and so does an item with a
-/// single child: a lone text child has always been placed by that arm, and
-/// a lone image is drawn by it at its own size even where the item's column
-/// came out too narrow (bing's search icon: an svg in a label whose column
-/// is 1.6px wide; flowed, the icon shrank to a dot).
+/// children keeps the block arm of Phase 9.
+///
+/// An item with a single child is flowed when that child is text or an
+/// inline box: the block arm gives a lone text child the item's width
+/// without wrapping it again, so a sentence in a 100px column was one line
+/// tall. A lone image, control or atomic inline keeps the block arm, which
+/// draws an image at its own size even where the item's column came out too
+/// narrow (bing's search icon: an svg in a label whose column is 1.6px
+/// wide; flowed, the icon shrank to a dot).
 fn item_children_flow_inline(item: &LayoutBox) -> bool {
     let mut in_flow = item.children.iter().filter(|c| {
         !matches!(
@@ -4285,7 +4298,15 @@ fn item_children_flow_inline(item: &LayoutBox) -> bool {
                     | crate::BoxType::LineBreak
             )
     };
-    in_flow.clone().any(inline_level) && in_flow.nth(1).is_some()
+    let lone_run = |c: &LayoutBox| {
+        !c.style.display.is_atomic_inline()
+            && matches!(c.box_type, crate::BoxType::Inline | crate::BoxType::Text(_))
+    };
+    let (first, second) = (in_flow.clone().next(), in_flow.clone().nth(1));
+    match (first, second) {
+        (Some(only), None) => lone_run(only),
+        _ => in_flow.any(inline_level),
+    }
 }
 
 /// The content-box height a grid container's own style gives it outright: a
@@ -8214,6 +8235,11 @@ mod tests {
     /// the clause removed, `gradient-backgrounds` loses height under its grid
     /// items and Gate A goes 2500 -> 2572 failing axes, 72 of them added and
     /// 45 worsened.
+    ///
+    /// The test used a lone text box until an item whose ONLY child is text
+    /// was given to the inline flow (`item_children_flow_inline`), which
+    /// measures the text again. A childless block with a measured height is
+    /// the same shape and stays on this arm.
     #[test]
     fn a_childless_grandchild_keeps_its_measured_height() {
         const CONTAINER_WIDTH: f32 = 1000.0;
@@ -8230,16 +8256,15 @@ mod tests {
         item_style.box_sizing = BoxSizing::BorderBox;
         let mut item = LayoutBox::new(BoxType::Block, item_style);
 
-        // A text box: measured height, no children. The pre-pass measured it
+        // A leaf box: measured height, no children. The pre-pass measured it
         // against the CONTAINER, so the column assignment moves its width and
         // anything keyed on "the width changed" fires on it.
-        let text_style = ComputedStyle::new();
-        let mut text = LayoutBox::new(BoxType::Text("a text run".to_string()), text_style);
-        text.dimensions.content.width = CONTAINER_WIDTH;
-        text.dimensions.content.height = TEXT_HEIGHT;
+        let mut leaf = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        leaf.dimensions.content.width = CONTAINER_WIDTH;
+        leaf.dimensions.content.height = TEXT_HEIGHT;
 
         item.dimensions.content.width = CONTAINER_WIDTH;
-        item.children.push(text);
+        item.children.push(leaf);
         container.children.push(item);
 
         layout_grid_container(&mut container, CONTAINER_WIDTH, 600.0);
