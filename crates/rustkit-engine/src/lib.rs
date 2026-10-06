@@ -25179,6 +25179,85 @@ thread_local! {
     static ANCESTOR_FILTER_REJECTS: Cell<u64> = const { Cell::new(0) };
 }
 
+/// Pure `SelectorMatcher` pins that do not need a GPU / compositor. Kept
+/// off the macOS-only `rule_prefilter_tests` gate so Linux CI exercises them.
+#[cfg(test)]
+mod selector_is_escape_tests {
+    use super::*;
+
+    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn ancestor(tag: &str, classes: &[&str], id: Option<&str>) -> Ancestor {
+        Rc::new((
+            tag.to_string(),
+            classes.iter().map(|c| c.to_string()).collect(),
+            id.map(str::to_string),
+        ))
+    }
+
+    #[test]
+    fn escaped_class_inside_is_matches_the_literal_name() {
+        // Subject `.sm\:flex` is covered in web_font_tests. Tailwind also
+        // nests escapes inside forgiving lists (`:is(.sm\:flex)`,
+        // `:is(.w-1\/2)`). If the functional-pseudo argument path skips
+        // escape decoding, the rule never matches and responsive utilities
+        // vanish on real sites. Selectors are pre-encoded the way the CSS
+        // parser leaves them after `encode_selector_escapes`.
+        let is_sm = rustkit_css::encode_selector_escapes(":is(.sm\\:flex, .lg\\:flex)").into_owned();
+        let is_half = rustkit_css::encode_selector_escapes("div:is(.w-1\\/2) span").into_owned();
+
+        assert!(
+            SelectorMatcher.selector_matches(
+                &is_sm,
+                "p",
+                &attrs(&[("class", "sm:flex")]),
+                &[],
+                &[],
+                SiblingContext::SOLE,
+            ),
+            ":is(.sm\\:flex)"
+        );
+        assert!(
+            SelectorMatcher.selector_matches(
+                &is_half,
+                "span",
+                &attrs(&[]),
+                &[ancestor("div", &["w-1/2"], None)],
+                &[],
+                SiblingContext::SOLE,
+            ),
+            "div:is(.w-1\\/2) span"
+        );
+        assert!(
+            !SelectorMatcher.selector_matches(
+                ":is(.nope)",
+                "p",
+                &attrs(&[("class", "sm")]),
+                &[],
+                &[],
+                SiblingContext::SOLE,
+            ),
+            ":is(.nope) must not match .sm"
+        );
+        assert!(
+            SelectorMatcher.selector_matches(
+                ".sm",
+                "p",
+                &attrs(&[("class", "sm")]),
+                &[],
+                &[],
+                SiblingContext::SOLE,
+            ),
+            "plain .sm must not be poisoned by a failed :is(.sm\\:flex) parse"
+        );
+    }
+}
+
 // Real Engine (Compositor wants a device) — macOS only, like
 // element_identity_tests.
 #[cfg(all(test, target_os = "macos"))]
