@@ -147,4 +147,13 @@ fn cdatasection_and_processinginstruction_interfaces_exist() {
         ev(&b, "['Document','DocumentFragment','Element','Text','Comment','CDATASection','ProcessingInstruction'].every(function(a){ return typeof Object.create(window[a].prototype) === 'object'; })"),
         "true"
     );
+    // Interface-only PI instances expose an empty target getter.
+    assert_eq!(
+        ev(
+            &b,
+            "var pi = Object.create(ProcessingInstruction.prototype); \
+             [pi.target, Object.getOwnPropertyDescriptor(ProcessingInstruction.prototype, 'target').get !== undefined].join()"
+        ),
+        ",true"
+    );
 }

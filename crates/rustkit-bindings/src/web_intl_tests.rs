@@ -580,3 +580,52 @@ fn intl_segmenter_grapheme_word_and_sentence() {
         "undefined,undefined"
     );
 }
+
+#[test]
+fn intl_segmenter_sentence_granularity_splits_on_delimiters() {
+    // CNN and similar pages request granularity: 'sentence'. The grapheme/word
+    // pins above do not exercise segmentSentences at all.
+    let b = bindings();
+    assert_eq!(
+        ev(
+            &b,
+            "new Intl.Segmenter('en-US', { granularity: 'sentence' }).resolvedOptions().granularity"
+        ),
+        "sentence"
+    );
+    assert_eq!(
+        ev(
+            &b,
+            "var seg = new Intl.Segmenter('en', { granularity: 'sentence' }); \
+             var res = []; \
+             for (var item of seg.segment('Hello. World!\\nNext')) { \
+                 res.push(JSON.stringify(item.segment) + '@' + item.index + '@' + (typeof item.isWordLike)); \
+             } \
+             res.join('|')"
+        ),
+        // `!` ends a sentence (trailing spaces absorbed); a following `\\n` is
+        // its own delimiter segment, then the next sentence starts.
+        "\"Hello. \"@0@undefined|\"World!\"@7@undefined|\"\\n\"@13@undefined|\"Next\"@14@undefined"
+    );
+    assert_eq!(
+        ev(
+            &b,
+            "var segments = new Intl.Segmenter('en', { granularity: 'sentence' }).segment('Hello. World!'); \
+             var c = segments.containing(8); \
+             [c.segment, c.index, typeof c.isWordLike].join('|')"
+        ),
+        "World!|7|undefined"
+    );
+    assert_eq!(
+        ev(
+            &b,
+            "var seg = new Intl.Segmenter('en', { granularity: 'sentence' }); \
+             var empty = []; \
+             for (var item of seg.segment('')) { empty.push(item.segment); } \
+             var trail = []; \
+             for (var item of seg.segment('Done?')) { trail.push(item.segment + '@' + item.index); } \
+             [empty.length, trail.join('|')].join(':')"
+        ),
+        "0:Done?@0"
+    );
+}
