@@ -3028,6 +3028,32 @@ pub fn layout_grid_container(
         }
     }
 
+    // Phase 9.9: every item's box is final; anchor the absolutely positioned
+    // children of a positioned item to it.
+    //
+    // An abspos child is first placed against a stand-in whose height is the
+    // flow cursor, and the owner of the box re-anchors it once the box is
+    // final (`reanchor_absolute_children`). For a grid item that is here and
+    // nowhere earlier: the inline arm of Phase 9 flows the children and then
+    // writes the item's height, the flex and grid arms give a stretched item
+    // its area back after their own pass, Phase 9.5 grows rows and the items
+    // in them, 9.55 to 9.7 set heights, and 9.75 shrinks and moves an item
+    // that is not stretched. A whole-card `inset: 0` link over a text-only
+    // card was 0px tall, and the overlay of a centred card ran 80px past it
+    // (issue #560).
+    //
+    // The STYLE position, as in the block arm of Phase 9: the layout field
+    // reads Static for `position: relative`. A static item is not the
+    // containing block and its abspos children are left alone.
+    for child in container.children.iter_mut() {
+        if child.style.display == Display::None
+            || matches!(child.style.position, rustkit_css::Position::Static)
+        {
+            continue;
+        }
+        child.reanchor_absolute_children();
+    }
+
     debug!(
         "Grid layout complete: {} columns, {} rows, {} items",
         grid.column_count(),
@@ -8924,6 +8950,94 @@ mod tests {
         assert!(
             from_bottom.abs() < 0.01,
             "a `bottom: 0` caption sits on the card's padding edge, {from_bottom}px off"
+        );
+    }
+
+    /// One `position: relative` item in a 288px column and a 100px row,
+    /// holding `content` and then an `inset: 0` overlay (issue #560).
+    fn positioned_item_with_an_overlay(
+        align_items: AlignItems,
+        content: Vec<LayoutBox>,
+    ) -> LayoutBox {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.align_items = align_items;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(288.0)]);
+        container_style.grid_template_rows = GridTemplate::from_sizes(vec![TrackSize::Px(100.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.position = rustkit_css::Position::Relative;
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+        item.children = content;
+
+        let mut overlay = LayoutBox::with_position(
+            BoxType::Block,
+            ComputedStyle::new(),
+            crate::Position::Absolute,
+        );
+        overlay.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        item.children.push(overlay);
+        container.children.push(item);
+
+        layout_grid_container(&mut container, 288.0, 100.0);
+        container
+    }
+
+    /// Issue #560, the inline arm of Phase 9: a card of text with a
+    /// whole-card link. The arm flows the item's children, the overlay is
+    /// placed against the flow cursor, and the item's height is written
+    /// afterwards.
+    ///
+    /// T-RED without Phase 9.9: the overlay is 0px tall.
+    #[test]
+    fn an_overlay_fills_a_positioned_grid_item_of_text() {
+        let text = LayoutBox::new(BoxType::Text("Card title".to_string()), ComputedStyle::new());
+        let container = positioned_item_with_an_overlay(AlignItems::Stretch, vec![text]);
+
+        let item = &container.children[0];
+        assert_eq!(
+            item.dimensions.content.height, 100.0,
+            "the precondition: a stretched item fills its 100px row"
+        );
+        let overlay = item.children.last().unwrap();
+        assert!(
+            (overlay.dimensions.content.height - 100.0).abs() < 0.01
+                && (overlay.dimensions.content.y - item.dimensions.content.y).abs() < 0.01,
+            "an `inset: 0` overlay fills the 100px item, got {}px at +{}",
+            overlay.dimensions.content.height,
+            overlay.dimensions.content.y - item.dimensions.content.y
+        );
+    }
+
+    /// Issue #560, Phase 9.75: a centred item is shrunk to its content and
+    /// moved, and its overlay goes with it.
+    ///
+    /// T-RED without Phase 9.9: the overlay keeps the 100px area and runs
+    /// 80px past the 20px item.
+    #[test]
+    fn an_overlay_follows_a_centred_grid_item() {
+        let mut block_style = ComputedStyle::new();
+        block_style.height = Length::Px(20.0);
+        let block = LayoutBox::new(BoxType::Block, block_style);
+        let container = positioned_item_with_an_overlay(AlignItems::Center, vec![block]);
+
+        let item = &container.children[0];
+        assert!(
+            (item.dimensions.content.height - 20.0).abs() < 0.01
+                && (item.dimensions.content.y - container.dimensions.content.y - 40.0).abs() < 0.01,
+            "the precondition: the item is 20px tall, centred at +40; got {}px at +{}",
+            item.dimensions.content.height,
+            item.dimensions.content.y - container.dimensions.content.y
+        );
+        let overlay = item.children.last().unwrap();
+        assert!(
+            (overlay.dimensions.content.height - 20.0).abs() < 0.01
+                && (overlay.dimensions.content.y - item.dimensions.content.y).abs() < 0.01,
+            "an `inset: 0` overlay is the item's box, got {}px at +{}",
+            overlay.dimensions.content.height,
+            overlay.dimensions.content.y - item.dimensions.content.y
         );
     }
 
