@@ -1697,8 +1697,11 @@ impl Engine {
     /// size, and the page hears one `resize`, as in a browser (at most one
     /// per frame).
     pub fn set_view_bounds(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
-        // RED: what the app did until now, a full resize for every size.
-        self.resize_view(id, bounds)
+        self.apply_view_bounds(id, bounds)?;
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pending_resize = Some(bounds);
+        }
+        Ok(())
     }
 
     /// Lay out a view whose bounds changed since its last layout, and tell
