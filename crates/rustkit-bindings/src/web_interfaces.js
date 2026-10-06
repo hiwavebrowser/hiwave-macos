@@ -164,9 +164,7 @@
     if (Window === undefined) {
         Window = function Window() { illegal(); };
         if (EventTarget) Object.setPrototypeOf(Window.prototype, EventTarget.prototype);
-        // `window` is the global object, not an instance of a constructor we
-        // could build, so `instanceof Window` is answered by identity.
-        Object.defineProperty(Window, Symbol.hasInstance, { value: function (v) { return v === g; } });
+        Object.setPrototypeOf(g, Window.prototype);
         def('Window', Window);
     }
     function tag(obj, Iface) {
