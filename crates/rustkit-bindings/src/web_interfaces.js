@@ -201,6 +201,11 @@
     // and `typeof ShadowRoot` guards must have a right-hand side.
     iface('ShadowRoot', g.DocumentFragment || Node);
     iface('Attr', Node);
+    iface('CDATASection', g.Text || g.CharacterData || Node);
+    var PI = iface('ProcessingInstruction', g.CharacterData || Node);
+    if (PI && PI.prototype) {
+        Object.defineProperty(PI.prototype, 'target', { get: function () { return ''; }, configurable: true, enumerable: true });
+    }
     iface('NamedNodeMap');
     iface('DOMStringMap');
     var StyleSheet = iface('StyleSheet');

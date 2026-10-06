@@ -2049,6 +2049,27 @@ fn fit_content_cross_width(
     available_border_box: f32,
     cross_pb: f32,
 ) -> f32 {
+    // L0 (docs/LAYOUT_CONSTRAINTS_FRAGMENTS_2026-09-30.md §4, call site 2):
+    // a nested flex or grid item that holds an unsized form control is
+    // answered by its fragment. `estimators_can_measure` below still
+    // refuses that subtree, on a premise that stopped being true when the
+    // estimators grew their control arms, and the refusal left the item at
+    // the width a prior pass gave it: the whole container.
+    let constraint = crate::fragment::Constraint::fit_content_inline(
+        available_border_box,
+        layout_box.style.writing_mode,
+        None,
+    );
+    if let Some(fragment) = crate::fragment::intrinsic_fragment(layout_box, &constraint, |_| {}) {
+        crate::fragment::differential::record_inline(crate::fragment::InlineDifferential {
+            selector: layout_box.identity.as_ref().map(|i| i.selector.clone()),
+            old_width_px: get_content_cross_width(layout_box) + cross_pb,
+            fragment_inline: fragment.border_box.inline,
+            unsnapped_inline_px: fragment.unsnapped_inline_px,
+            available_px: available_border_box,
+        });
+        return fragment.border_box.inline.to_px();
+    }
     if !estimators_can_measure(layout_box) {
         return get_content_cross_width(layout_box) + cross_pb;
     }
@@ -3459,6 +3480,213 @@ mod tests {
         assert!(
             (w1 - 100.0).abs() < 0.5,
             "second flex-start column item width {w1}, expected its fit-content 100."
+        );
+    }
+
+    /// A flex row holding a 60px block and a button, as a non-stretching
+    /// item of a 660px column container. `stale` is the width the block
+    /// pre-pass left on the item.
+    fn column_with_a_row_that_holds_a_button(stale: f32) -> (LayoutBox, f32) {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::FlexStart;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut row_style = ComputedStyle::new();
+        row_style.display = rustkit_css::Display::Flex;
+        let mut row = LayoutBox::new(BoxType::Block, row_style);
+        let mut label = ComputedStyle::new();
+        label.width = Length::Px(60.0);
+        label.height = Length::Px(20.0);
+        row.children.push(LayoutBox::new(BoxType::Block, label));
+
+        let mut button_style = ComputedStyle::new();
+        button_style.font_size = Length::Px(13.0);
+        let control = crate::FormControlType::Button {
+            label: "Save changes".to_string(),
+            button_type: "button".to_string(),
+        };
+        let button_width = crate::form_control_intrinsic_size(&button_style, &control).0;
+        row.children
+            .push(LayoutBox::new(BoxType::FormControl(control), button_style));
+        row.dimensions.content = Rect::new(0.0, 0.0, stale, 20.0);
+        container.children.push(row);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 660.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+        (container, button_width)
+    }
+
+    /// L0 call site 2 (docs/LAYOUT_CONSTRAINTS_FRAGMENTS_2026-09-30.md §4):
+    /// a non-stretching column item that is itself a flex row and holds an
+    /// unsized button. `estimators_can_measure` refuses the subtree because
+    /// of the button, so the item keeps the width the block pre-pass left
+    /// on it: the whole container. Its fit-content width is its
+    /// max-content, the 60px block plus the button with its label.
+    /// Chromium 143 on parity-tests/repro/l0-flex-control-fit-content.html:
+    /// `#e-1` is 140.67 wide in a 400px column; it was 400.
+    #[test]
+    fn l0_a_non_stretch_column_item_that_holds_a_button_takes_its_fit_content_width() {
+        let (container, button_width) = column_with_a_row_that_holds_a_button(660.0);
+        assert!(
+            button_width > 40.0,
+            "the button's own width includes its label, got {button_width}"
+        );
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - (60.0 + button_width)).abs() < 0.5,
+            "the row is its 60px block plus its {button_width}px button, got {w} \
+             (660 is the stale fill-available width)"
+        );
+    }
+
+    /// The differential of the same container: the width the item kept
+    /// before, and the fragment that replaces it, in 1/64 px and never
+    /// below the measured content.
+    #[test]
+    fn l0_the_inline_fragment_is_recorded_beside_the_width_it_replaces() {
+        crate::fragment::differential::start();
+        let (container, button_width) = column_with_a_row_that_holds_a_button(660.0);
+        let records = crate::fragment::differential::take_inline();
+        let _ = crate::fragment::differential::take();
+        assert!(!records.is_empty(), "the item is in the slice");
+        let w = container.children[0].dimensions.content.width;
+        for r in &records {
+            assert!(
+                (r.old_width_px - 660.0).abs() < 0.01,
+                "the old answer is the stale width, got {}",
+                r.old_width_px
+            );
+            assert!((r.unsnapped_inline_px - (60.0 + button_width)).abs() < 0.01);
+            assert_eq!(
+                r.fragment_inline,
+                crate::fragment::LayoutUnit::from_px_ceil(r.unsnapped_inline_px)
+            );
+            assert!(r.fragment_inline.to_px() >= r.unsnapped_inline_px);
+            assert!((r.fragment_inline.to_px() - w).abs() < 0.01);
+            assert!((r.available_px - 660.0).abs() < 0.01);
+        }
+    }
+
+    /// Outside the slice, and so answered as before: a subtree with an
+    /// unsized image keeps the previously measured width, because the
+    /// estimators still cannot measure it.
+    #[test]
+    fn l0_a_row_that_holds_an_unsized_image_keeps_the_old_width() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::FlexStart;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut row_style = ComputedStyle::new();
+        row_style.display = rustkit_css::Display::Flex;
+        let mut row = LayoutBox::new(BoxType::Block, row_style);
+        row.children.push(LayoutBox::new(
+            BoxType::FormControl(crate::FormControlType::Button {
+                label: "Go".to_string(),
+                button_type: "button".to_string(),
+            }),
+            ComputedStyle::new(),
+        ));
+        row.children.push(LayoutBox::new(
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 0.0,
+                natural_height: 0.0,
+            },
+            ComputedStyle::new(),
+        ));
+        assert!(!crate::fragment::in_l0_inline_class(&row));
+        // A grid container is not measured by the estimators either.
+        let mut grid_row = row.clone();
+        grid_row.children.pop();
+        assert!(crate::fragment::in_l0_inline_class(&grid_row));
+        grid_row.style.display = rustkit_css::Display::Grid;
+        assert!(!crate::fragment::in_l0_inline_class(&grid_row));
+        // Nor is a box below the item with a width that is definite and not
+        // in px, a min-width floor or a max-width cap (facebook's login
+        // column holds a `width: calc(-104px + 50vw)` box).
+        let mut inner = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        for edit in [
+            (|s: &mut ComputedStyle| s.width = Length::Vw(50.0)) as fn(&mut ComputedStyle),
+            |s| s.width = Length::Em(20.0),
+            |s| s.min_width = Length::Px(446.0),
+            |s| s.max_width = Length::Px(546.0),
+        ] {
+            let mut holder = grid_row.clone();
+            holder.style.display = rustkit_css::Display::Flex;
+            assert!(crate::fragment::in_l0_inline_class(&holder));
+            inner.style = Box::new(ComputedStyle::new());
+            edit(&mut inner.style);
+            holder.children.push(inner.clone());
+            assert!(!crate::fragment::in_l0_inline_class(&holder));
+        }
+        row.dimensions.content = Rect::new(0.0, 0.0, 300.0, 20.0);
+        container.children.push(row);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 660.0, 600.0),
+            ..Default::default()
+        };
+        crate::fragment::differential::start();
+        layout_flex_container(&mut container, &containing);
+        let records = crate::fragment::differential::take_inline();
+        let _ = crate::fragment::differential::take();
+        assert!(records.is_empty(), "not an L0 item, got {records:?}");
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - 300.0).abs() < 0.5,
+            "the previously measured width is kept, got {w}"
+        );
+    }
+
+    /// Fit-content clamps to the available space: a row whose max-content
+    /// passes the container is the container wide, not wider.
+    #[test]
+    fn l0_the_inline_fragment_stops_at_the_available_space() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::FlexStart;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut row_style = ComputedStyle::new();
+        row_style.display = rustkit_css::Display::Flex;
+        let mut row = LayoutBox::new(BoxType::Block, row_style);
+        let text_style = ComputedStyle::new();
+        let mut para = LayoutBox::new(BoxType::Block, text_style.clone());
+        para.children.push(LayoutBox::new(
+            BoxType::Text(
+                "one two three four five six seven eight nine ten eleven twelve thirteen"
+                    .to_string(),
+            ),
+            text_style,
+        ));
+        row.children.push(para);
+        row.children.push(LayoutBox::new(
+            BoxType::FormControl(crate::FormControlType::Button {
+                label: "Go".to_string(),
+                button_type: "button".to_string(),
+            }),
+            ComputedStyle::new(),
+        ));
+        row.dimensions.content = Rect::new(0.0, 0.0, 200.0, 20.0);
+        container.children.push(row);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 200.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - 200.0).abs() < 0.5,
+            "max-content passes 200px of available space, so the row is 200, got {w}"
         );
     }
 

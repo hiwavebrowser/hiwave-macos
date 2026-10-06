@@ -171,6 +171,10 @@ mod script_module_tests;
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_flexible_row_tests;
+#[cfg(all(test, feature = "headless"))]
+mod place_shorthand_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -533,6 +537,10 @@ struct ViewState {
     /// which elements a `:hover` or `:active` rule can match, so which
     /// changes of the two chains are a restyle.
     rule_reads: std::cell::RefCell<Option<Rc<RuleIndex>>>,
+    /// Whether `html` had a non-visible `overflow` at the last build. The
+    /// viewport then takes html's, and a body with its own is a scroller
+    /// that clips what it holds (see `scrollable_bottom`).
+    html_clips: std::cell::Cell<bool>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
     /// Where the pointer was at its last move, in viewport coordinates.
@@ -1440,6 +1448,7 @@ impl Engine {
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
             rule_reads: std::cell::RefCell::new(None),
+            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
@@ -1515,6 +1524,7 @@ impl Engine {
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
             rule_reads: std::cell::RefCell::new(None),
+            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
@@ -1599,6 +1609,7 @@ impl Engine {
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
             rule_reads: std::cell::RefCell::new(None),
+            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             pointer_at: None,
             primary_button_down: false,
@@ -2021,7 +2032,8 @@ impl Engine {
 
     /// Deliver a primary-button press at VIEWPORT coordinates to the page:
     /// `pointerdown` then `mousedown` at the element under the point (no
-    /// `mousedown` when a listener cancelled the `pointerdown`), then the
+    /// `mousedown` when a listener cancelled the `pointerdown`, or the
+    /// point is on a disabled form control), then the
     /// press's default action: the focus moves to the control under the
     /// point, or away from the focused one (UI Events §3.4.5.1). A
     /// listener that cancels either event keeps the focus where it is.
@@ -2043,7 +2055,11 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.compat_mouse_suppressed = suppressed;
         }
-        let not_cancelled = suppressed || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
+        // A disabled form control hears the pointer events and no mouse
+        // event (the oracle's Chrome; tools/parity_oracle/disabled_press_log.mjs).
+        let not_cancelled = suppressed
+            || self.disabled_control_at_point(id, viewport_x, viewport_y)
+            || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
         if !suppressed && not_cancelled {
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
         }
@@ -2327,7 +2343,7 @@ impl Engine {
             .views
             .get_mut(&id)
             .is_some_and(|view| std::mem::take(&mut view.compat_mouse_suppressed));
-        if !suppressed {
+        if !suppressed && !self.disabled_control_at_point(id, viewport_x, viewport_y) {
             self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
         }
         // The focus moved at the press. What is left for the release is a
@@ -4621,7 +4637,8 @@ impl Engine {
         }
 
         // Update max scroll offset based on content size
-        let content_height = root_box.dimensions.margin_box().height;
+        let html_clips = self.views.get(&id).is_some_and(|v| v.html_clips.get());
+        let content_height = scrollable_bottom(&root_box, html_clips);
         let viewport_height = bounds.height as f32;
         let max_scroll_y = (content_height - viewport_height).max(0.0);
 
@@ -5128,6 +5145,13 @@ impl Engine {
                 None
             }
         });
+
+        if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
+            view.html_clips.set(html_style.as_ref().is_some_and(|s| {
+                s.overflow_x != rustkit_css::Overflow::Visible
+                    || s.overflow_y != rustkit_css::Overflow::Visible
+            }));
+        }
 
         // Get the body element and build layout from it
         if let Some(body) = document.body() {
@@ -8416,6 +8440,25 @@ impl Engine {
                     "stretch" => rustkit_css::AlignItems::Stretch,
                     _ => rustkit_css::AlignItems::Stretch,
                 };
+            }
+            // css-align-3 shorthands: `<block-axis value> <inline-axis value>?`,
+            // one value setting both. None of the three was parsed, so
+            // `display: grid; place-items: center`, the usual way to centre
+            // a box, left its items stretched at the cell's top left.
+            "place-items" => {
+                let (block, inline) = place_pair(value);
+                self.apply_style_property(style, "align-items", block);
+                self.apply_style_property(style, "justify-items", inline);
+            }
+            "place-self" => {
+                let (block, inline) = place_pair(value);
+                self.apply_style_property(style, "align-self", block);
+                self.apply_style_property(style, "justify-self", inline);
+            }
+            "place-content" => {
+                let (block, inline) = place_pair(value);
+                self.apply_style_property(style, "align-content", block);
+                self.apply_style_property(style, "justify-content", inline);
             }
             // Grid's inline-axis alignment. Neither property was parsed, so
             // every grid item stretched across its cell whatever the page
@@ -15310,6 +15353,26 @@ fn justify_keyword(value: &str) -> &str {
         .unwrap_or("")
 }
 
+/// The two halves of a `place-*` shorthand: the block-axis value, then the
+/// inline-axis value, which repeats the first when only one is given. A
+/// value can be two or three words (`first baseline`, `safe center`,
+/// `unsafe last baseline`), so the split is after the first whole value.
+fn place_pair(value: &str) -> (&str, &str) {
+    let value = value.trim();
+    let mut end = 0;
+    let mut words = value.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        end = word.as_ptr() as usize - value.as_ptr() as usize + word.len();
+        let more = matches!(word, "safe" | "unsafe")
+            || (matches!(word, "first" | "last") && words.peek() == Some(&"baseline"));
+        if !more {
+            break;
+        }
+    }
+    let (block, inline) = (value[..end].trim(), value[end..].trim());
+    (block, if inline.is_empty() { block } else { inline })
+}
+
 /// Parse a CSS timing function.
 /// `flex-basis` value: `auto`, `content`, a length, or a percentage.
 fn parse_flex_basis(value: &str) -> rustkit_css::FlexBasis {
@@ -16161,6 +16224,43 @@ fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32,
     let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
     let max_y = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
     (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+/// How far down the viewport can scroll: the bottom of the root box, or of
+/// the lowest box under it if that is lower. Content that overflows a box of
+/// fixed height (a `height: 100%` body), an absolutely positioned box, a
+/// float and a relatively shifted box all extend the page, as in Chrome.
+///
+/// Not counted: a fixed box and what it holds (it does not move with the
+/// page), and what is inside a box that clips or scrolls its own overflow.
+/// `body` is such a box only when `html` keeps a non-visible overflow for
+/// itself (`html_clips`); otherwise body's overflow belongs to the viewport.
+/// Transforms are not applied.
+fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
+    fn clips(b: &LayoutBox) -> bool {
+        b.style.overflow_x != rustkit_css::Overflow::Visible
+            || b.style.overflow_y != rustkit_css::Overflow::Visible
+    }
+    fn walk(b: &LayoutBox, descend: bool, bottom: &mut f32) {
+        if b.style.position == rustkit_css::Position::Fixed {
+            return;
+        }
+        let bb = b.dimensions.border_box();
+        let edge = bb.y + bb.height;
+        if edge.is_finite() {
+            *bottom = bottom.max(edge);
+        }
+        if descend {
+            for child in &b.children {
+                walk(child, !clips(child), bottom);
+            }
+        }
+    }
+    let mut bottom = root.dimensions.margin_box().height;
+    for body in &root.children {
+        walk(body, !(html_clips && clips(body)), &mut bottom);
+    }
+    bottom
 }
 
 /// Where the layout put every element, by DOM node, for script geometry reads
@@ -23662,13 +23762,14 @@ mod node_identity_tests {
     // A click on a disabled button still fired `click` at it and bubbled,
     // so a page's handler ran for a control the page had switched off (a
     // greyed-out "Pay" button paid). A disabled form control takes no
-    // click from the user (HTML §4.10.18.5); the release is still heard.
+    // click from the user (HTML §4.10.18.5), and no `mouseup` either.
 
     const DISABLED_PAGE: &str = concat!(
         r#"<html><body style="margin:0">"#,
         r#"<div style="height:40px;overflow:hidden"><button id="off" disabled style="display:block;width:100px;height:30px">off</button></div>"#,
         r#"<div style="height:40px;overflow:hidden"><button id="on" style="display:block;width:100px;height:30px">on</button></div>"#,
         r#"<div style="height:40px;overflow:hidden"><input id="cb" type="checkbox" disabled style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button disabled style="display:block;width:100px;height:30px;padding:0;border:0"><span id="in" style="display:block;width:100px;height:30px">in</span></button></div>"#,
         r#"<fieldset disabled style="margin:0;padding:0;border:0">"#,
         r#"<legend style="padding:0"><button id="lg" style="display:block;width:100px;height:30px;margin:0 0 10px">legend</button></legend>"#,
         r#"<div style="height:40px;overflow:hidden"><button id="fs" style="display:block;width:100px;height:30px">set</button></div>"#,
@@ -23705,16 +23806,68 @@ mod node_identity_tests {
         };
 
         assert_eq!(click(&mut engine, "on"), js_string("up:on click:on"), "precondition");
-        assert_eq!(click(&mut engine, "off"), js_string("up:off"));
-        assert_eq!(click(&mut engine, "cb"), js_string("up:cb"));
+        assert_eq!(click(&mut engine, "off"), js_string(""));
+        assert_eq!(click(&mut engine, "cb"), js_string(""));
         // Disabled by its fieldset; the fieldset's own legend is not, and
         // neither is content that is not a form control.
-        assert_eq!(click(&mut engine, "fs"), js_string("up:fs"));
+        assert_eq!(click(&mut engine, "fs"), js_string(""));
         assert_eq!(click(&mut engine, "lg"), js_string("up:lg click:lg"));
         assert_eq!(click(&mut engine, "plain"), js_string("up:plain click:plain"));
         // Script enables it again.
         js(&mut engine, id, "$('off').disabled = false");
         assert_eq!(click(&mut engine, "off"), js_string("up:off click:off"));
+    }
+
+    // A press and release on a disabled control sent it `mousedown` and
+    // `mouseup`, so a page's "press" handler ran on a greyed-out button.
+    // The oracle's Chrome sends such a control `pointerdown` and `pointerup`
+    // and no mouse event at all, also when the point is on an element
+    // inside it or it is disabled by its fieldset
+    // (tools/parity_oracle/disabled_press_log.mjs, Chromium 143).
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_disabled_control_hears_pointer_events_and_no_mouse_events() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DISABLED_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { log.push(e.type + ':' + e.target.id); }, true); });",
+        );
+        let top = |engine: &Engine, name: &str| {
+            let view = &engine.views[&id];
+            let node = view.document.as_ref().unwrap().get_element_by_id(name).unwrap().id.raw();
+            Engine::box_top(view.layout.as_ref().unwrap(), node).unwrap()
+        };
+        let mut press_release = |engine: &mut Engine, name: &str| {
+            js(engine, id, "log.length = 0");
+            let y = top(engine, name) + 10.0;
+            engine.mouse_down_at_point(id, 8.0, y);
+            engine.click_at_point(id, 8.0, y);
+            js(engine, id, "log.join(' ')")
+        };
+        let all = |n: &str| js_string(&format!("pointerdown:{n} mousedown:{n} pointerup:{n} mouseup:{n} click:{n}"));
+        let pointer_only = |n: &str| js_string(&format!("pointerdown:{n} pointerup:{n}"));
+
+        assert_eq!(press_release(&mut engine, "on"), all("on"), "precondition");
+        assert_eq!(press_release(&mut engine, "off"), pointer_only("off"));
+        assert_eq!(press_release(&mut engine, "cb"), pointer_only("cb"));
+        // On an element inside a disabled button.
+        assert_eq!(press_release(&mut engine, "in"), pointer_only("in"));
+        // Disabled by its fieldset; the fieldset's own legend is not, and
+        // neither is content that is not a form control.
+        assert_eq!(press_release(&mut engine, "fs"), pointer_only("fs"));
+        assert_eq!(press_release(&mut engine, "lg"), all("lg"));
+        assert_eq!(press_release(&mut engine, "plain"), all("plain"));
+        // Script enables it again.
+        js(&mut engine, id, "document.getElementById('off').disabled = false");
+        assert_eq!(press_release(&mut engine, "off"), all("off"));
     }
 
     // A click on a label's text did not focus the field it labels, so the
@@ -34471,5 +34624,80 @@ mod error_response_tests {
 
         engine.load_html(view, "<p>local</p>").expect("load_html");
         assert_eq!(engine.http_status(view), None, "a document that came from no response has no status");
+    }
+}
+
+#[cfg(test)]
+mod scroll_extent_tests {
+    use super::*;
+
+    // How far a page scrolls, against the pinned Chromium (Z lane I0, H6,
+    // 2026-10-05). The pages and Chrome's answers are in
+    // tools/parity_oracle/scroll_extent_cases.json, written by
+    // scroll_extent_log.mjs: `chrome_script_y` is where window.scrollTo to a
+    // very large y ends, `chrome_wheel_y` where a very large wheel turn ends.
+
+    /// Transforms do not move a box in the layout tree, and the offsets of
+    /// a relative box are not applied (`positioning_of`), so neither box
+    /// extends the page yet. `html` has no box of its own, so with
+    /// `html { height: 100% }` the body's bottom margin still counts (16
+    /// where Chrome has 8).
+    const SCRIPT_GAPS: &[&str] = &["translate-down", "relative-top", "html-body-overflow-x-hidden"];
+    /// Chrome's wheel does not scroll a viewport whose overflow is hidden
+    /// (script still does). The engine's wheel is not locked yet.
+    /// And a body that scrolls takes the wheel itself: the 8px of its
+    /// margin are left to the viewport, which only script moves.
+    const WHEEL_GAPS: &[&str] = &[
+        "translate-down",
+        "relative-top",
+        "body-overflow-hidden",
+        "html-overflow-hidden",
+        "html-body-overflow-x-hidden",
+    ];
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_page_scrolls_as_far_as_it_does_in_chrome() {
+        let data: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tools/parity_oracle/scroll_extent_cases.json"))
+                .expect("case file");
+        let (w, h) = (data["viewport"][0].as_u64().unwrap(), data["viewport"][1].as_u64().unwrap());
+        let mut wrong = Vec::new();
+        let mut gaps_that_pass = Vec::new();
+        for case in data["cases"].as_array().expect("cases") {
+            let name = case["name"].as_str().unwrap();
+            let chrome_script = case["chrome_script_y"].as_f64().expect("run scroll_extent_log.mjs --write") as f32;
+            let chrome_wheel = case["chrome_wheel_y"].as_f64().unwrap() as f32;
+
+            let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+            let id = engine
+                .create_headless_view(Bounds::new(0, 0, w as u32, h as u32))
+                .expect("headless view");
+            engine.load_html(id, case["html"].as_str().unwrap()).expect("load_html");
+
+            engine.set_scroll_offset(id, 0.0, 1.0e7).unwrap();
+            let script = engine.get_scroll_offset(id).unwrap().1;
+            engine.set_scroll_offset(id, 0.0, 0.0).unwrap();
+            // A wheel turned down arrives as a negative delta.
+            engine.scroll_view(id, 0.0, -1.0e7).unwrap();
+            let wheel = engine.get_scroll_offset(id).unwrap().1;
+
+            for (what, got, chrome, gaps) in [
+                ("script", script, chrome_script, SCRIPT_GAPS),
+                ("wheel", wheel, chrome_wheel, WHEEL_GAPS),
+            ] {
+                let same = (got - chrome).abs() <= 1.0;
+                match (same, gaps.contains(&name)) {
+                    (false, false) => wrong.push(format!("{name}: {what} reaches {got}, Chrome {chrome}")),
+                    (true, true) if chrome > 0.0 => gaps_that_pass.push(format!("{name} ({what})")),
+                    _ => {}
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong:\n{}", wrong.len(), wrong.join("\n"));
+        assert!(
+            gaps_that_pass.is_empty(),
+            "listed as a gap but matches Chrome now, take it off the list: {gaps_that_pass:?}"
+        );
     }
 }

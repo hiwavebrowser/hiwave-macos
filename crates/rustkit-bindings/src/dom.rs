@@ -1075,7 +1075,10 @@ const WRAPPERS_JS: &str = r#"
     // a shadow boundary: `shadowParent(root, event)` is the host a composed
     // event goes on to from a shadow root, `retarget(target, against)` the
     // target as seen from another node's tree, `hostOf(root)` a shadow
-    // root's host (or null for any other node).
+    // root's host (or null for any other node). `mutation` is the
+    // MutationObserver's (web_mutation_observer.js): set from the first
+    // observe(), it sees every write below before it happens and gets back
+    // what to record once it has.
     var HOOKS = {};
     Object.defineProperty(g, '__rkDomHooks', { value: HOOKS, configurable: true, enumerable: false });
     var gen = 0;
@@ -1217,10 +1220,12 @@ const WRAPPERS_JS: &str = r#"
     // throw; an old-document wrapper names no node (-1) and throws NotFoundError.
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
+        var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
         var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
         if (typeof r === 'string') {
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
+        if (m) m();
         return r;
     }
     function create(kind, data, method) {
@@ -1271,8 +1276,10 @@ const WRAPPERS_JS: &str = r#"
         function here(s) { return s.gen === gen ? s.id : -1; }
         var p = slotOf(parent), n = nodeArg(node, method);
         var c = child == null ? null : here(nodeArg(child, method));
+        var m = HOOKS.mutation && HOOKS.mutation.tree(op, parent, node, child);
         var err = N.mutate(gen, op, here(p), here(n), c);
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
+        if (m) m();
         return node;
     }
     Node.prototype.appendChild = function (node) {
@@ -1308,8 +1315,11 @@ const WRAPPERS_JS: &str = r#"
             }
             return child;
         }
-        write('insert', this, node, child, 'replaceChild');
-        return write('remove', this, child, null, 'replaceChild');
+        var self = this;
+        return batch(function () {
+            write('insert', self, node, child, 'replaceChild');
+            return write('remove', self, child, null, 'replaceChild');
+        });
     };
 
     // ParentNode.append/prepend and ChildNode.before/after/replaceWith
@@ -1328,6 +1338,14 @@ const WRAPPERS_JS: &str = r#"
     function insertAll(parent, nodes, ref, method) {
         nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
     }
+    // DOM queues one record per call of these; they make several writes,
+    // which an observer merges into one while `fn` runs.
+    function batch(fn) {
+        var m = HOOKS.mutation;
+        if (!m) return fn();
+        m.batch(1);
+        try { return fn(); } finally { m.batch(-1); }
+    }
     function viableSibling(node, field, nodes) {
         var s = node[field];
         while (s && nodes.indexOf(s) >= 0) s = s[field];
@@ -1335,16 +1353,19 @@ const WRAPPERS_JS: &str = r#"
     }
     [Element, DocumentFragment].forEach(function (C) {
         C.prototype.append = function () {
-            insertAll(this, toNodes(arguments), null, 'append');
+            var self = this, nodes = toNodes(arguments);
+            batch(function () { insertAll(self, nodes, null, 'append'); });
         };
         C.prototype.prepend = function () {
-            var nodes = toNodes(arguments);
-            insertAll(this, nodes, this.firstChild, 'prepend');
+            var self = this, nodes = toNodes(arguments);
+            batch(function () { insertAll(self, nodes, self.firstChild, 'prepend'); });
         };
         C.prototype.replaceChildren = function () {
-            var nodes = toNodes(arguments);
-            while (this.firstChild) this.removeChild(this.firstChild);
-            insertAll(this, nodes, null, 'replaceChildren');
+            var self = this, nodes = toNodes(arguments);
+            batch(function () {
+                while (self.firstChild) self.removeChild(self.firstChild);
+                insertAll(self, nodes, null, 'replaceChildren');
+            });
         };
     });
     [Element, CharacterData].forEach(function (C) {
@@ -1354,27 +1375,30 @@ const WRAPPERS_JS: &str = r#"
             var args = Array.prototype.slice.call(arguments);
             var prev = viableSibling(this, 'previousSibling', args);
             var nodes = toNodes(args);
-            insertAll(p, nodes, prev ? prev.nextSibling : p.firstChild, 'before');
+            batch(function () { insertAll(p, nodes, prev ? prev.nextSibling : p.firstChild, 'before'); });
         };
         C.prototype.after = function () {
             var p = this.parentNode;
             if (!p) return;
             var args = Array.prototype.slice.call(arguments);
             var next = viableSibling(this, 'nextSibling', args);
-            insertAll(p, toNodes(args), next, 'after');
+            var nodes = toNodes(args);
+            batch(function () { insertAll(p, nodes, next, 'after'); });
         };
         C.prototype.replaceWith = function () {
             var p = this.parentNode;
             if (!p) return;
             var args = Array.prototype.slice.call(arguments);
             var next = viableSibling(this, 'nextSibling', args);
-            var nodes = toNodes(args);
-            if (this.parentNode === p) {
-                insertAll(p, nodes, this, 'replaceWith');
-                p.removeChild(this);
-            } else {
-                insertAll(p, nodes, next, 'replaceWith');
-            }
+            var self = this, nodes = toNodes(args);
+            batch(function () {
+                if (self.parentNode === p) {
+                    insertAll(p, nodes, self, 'replaceWith');
+                    p.removeChild(self);
+                } else {
+                    insertAll(p, nodes, next, 'replaceWith');
+                }
+            });
         };
     });
     Node.prototype.contains = function (other) {
