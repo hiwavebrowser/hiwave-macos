@@ -1911,6 +1911,26 @@ pub fn layout_grid_container(
                 {
                     child.dimensions.content.height = area_height;
                 }
+            } else if item_children_flow_inline(child) {
+                // An inline formatting context: the item's children are
+                // inline boxes and text, which share lines. The block arm
+                // below stacks an item's children one under the other, so
+                // `<div>Label: <b>value</b> tail</div>` came out three lines
+                // tall (Chrome: one). Flow them as the item's own lines; the
+                // item's auto height is written back and is its real height.
+                let area_height = child.dimensions.content.height;
+                let mut margins = crate::MarginCollapseContext::new();
+                let mut floats = crate::FloatContext::new();
+                child.layout_block_children_with_collapse(&mut margins, &mut floats, None);
+                let content_height = child.dimensions.content.height;
+                if let Some(slot) = real_heights.get_mut(item_idx) {
+                    *slot = Some(content_height);
+                }
+                if area_height > content_height
+                    && stretches_to_its_row(child, &container_align_items)
+                {
+                    child.dimensions.content.height = area_height;
+                }
             } else {
                 // Block container: re-layout children with correct positioning and height resolution.
                 // The grid item's dimensions.content.height is the grid-assigned height.
@@ -4010,6 +4030,27 @@ fn apply_justify_self(
 
 /// Whether a grid item fills its area on the block axis: `align-self`
 /// resolves to `stretch` and its height is `auto` (css-align-3 §4.2).
+/// True for a grid item with more than one in-flow child, all of them inline
+/// boxes or text. A lone text child is left to the block arm of Phase 9,
+/// which has always placed it.
+fn item_children_flow_inline(item: &LayoutBox) -> bool {
+    let mut in_flow = item.children.iter().filter(|c| {
+        !matches!(
+            c.style.position,
+            rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+        ) && c.float == crate::Float::None
+    });
+    let all_inline = in_flow
+        .clone()
+        .all(|c| {
+            matches!(
+                c.box_type,
+                crate::BoxType::Inline | crate::BoxType::Text(_) | crate::BoxType::LineBreak
+            )
+        });
+    all_inline && in_flow.nth(1).is_some()
+}
+
 fn stretches_to_its_row(child: &LayoutBox, items_align: &AlignItems) -> bool {
     let stretch = match child.style.align_self {
         AlignSelf::Auto => *items_align == AlignItems::Stretch,
