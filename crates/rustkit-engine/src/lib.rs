@@ -173,6 +173,8 @@ mod script_fresh_layout_tests;
 mod script_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
+#[cfg(all(test, feature = "headless"))]
+mod place_shorthand_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -8439,6 +8441,25 @@ impl Engine {
                     _ => rustkit_css::AlignItems::Stretch,
                 };
             }
+            // css-align-3 shorthands: `<block-axis value> <inline-axis value>?`,
+            // one value setting both. None of the three was parsed, so
+            // `display: grid; place-items: center`, the usual way to centre
+            // a box, left its items stretched at the cell's top left.
+            "place-items" => {
+                let (block, inline) = place_pair(value);
+                self.apply_style_property(style, "align-items", block);
+                self.apply_style_property(style, "justify-items", inline);
+            }
+            "place-self" => {
+                let (block, inline) = place_pair(value);
+                self.apply_style_property(style, "align-self", block);
+                self.apply_style_property(style, "justify-self", inline);
+            }
+            "place-content" => {
+                let (block, inline) = place_pair(value);
+                self.apply_style_property(style, "align-content", block);
+                self.apply_style_property(style, "justify-content", inline);
+            }
             // Grid's inline-axis alignment. Neither property was parsed, so
             // every grid item stretched across its cell whatever the page
             // asked for (google's centred logo sat at the cell's left edge).
@@ -15330,6 +15351,26 @@ fn justify_keyword(value: &str) -> &str {
         .filter(|t| !matches!(*t, "safe" | "unsafe" | "legacy"))
         .last()
         .unwrap_or("")
+}
+
+/// The two halves of a `place-*` shorthand: the block-axis value, then the
+/// inline-axis value, which repeats the first when only one is given. A
+/// value can be two or three words (`first baseline`, `safe center`,
+/// `unsafe last baseline`), so the split is after the first whole value.
+fn place_pair(value: &str) -> (&str, &str) {
+    let value = value.trim();
+    let mut end = 0;
+    let mut words = value.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        end = word.as_ptr() as usize - value.as_ptr() as usize + word.len();
+        let more = matches!(word, "safe" | "unsafe")
+            || (matches!(word, "first" | "last") && words.peek() == Some(&"baseline"));
+        if !more {
+            break;
+        }
+    }
+    let (block, inline) = (value[..end].trim(), value[end..].trim());
+    (block, if inline.is_empty() { block } else { inline })
 }
 
 /// Parse a CSS timing function.
