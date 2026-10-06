@@ -4050,9 +4050,13 @@ fn apply_justify_self(
     }
 }
 
-/// True for a grid item with more than one in-flow child, all of them inline
-/// boxes or text. A lone text child is left to the block arm of Phase 9,
-/// which has always placed it.
+/// True for a grid item that holds inline-level content: an in-flow child
+/// that is an inline box, text, an image, a form control, a forced break or
+/// an atomic inline (the same test the block children pass makes). Such an
+/// item is flowed by that pass, which builds line boxes and wraps the
+/// inline runs around any block children. An item with only block children
+/// keeps the block arm of Phase 9, and so does a lone text child, which
+/// that arm has always placed.
 fn item_children_flow_inline(item: &LayoutBox) -> bool {
     let mut in_flow = item.children.iter().filter(|c| {
         !matches!(
@@ -4060,15 +4064,24 @@ fn item_children_flow_inline(item: &LayoutBox) -> bool {
             rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
         ) && c.float == crate::Float::None
     });
-    let all_inline = in_flow
-        .clone()
-        .all(|c| {
-            matches!(
+    let inline_level = |c: &LayoutBox| {
+        c.style.display.is_atomic_inline()
+            || matches!(
                 c.box_type,
-                crate::BoxType::Inline | crate::BoxType::Text(_) | crate::BoxType::LineBreak
+                crate::BoxType::Inline
+                    | crate::BoxType::Text(_)
+                    | crate::BoxType::Image { .. }
+                    | crate::BoxType::FormControl(_)
+                    | crate::BoxType::LineBreak
             )
-        });
-    all_inline && in_flow.nth(1).is_some()
+    };
+    if !in_flow.clone().any(inline_level) {
+        return false;
+    }
+    let first = in_flow.next();
+    let lone_text = in_flow.next().is_none()
+        && first.is_some_and(|c| matches!(c.box_type, crate::BoxType::Text(_)));
+    !lone_text
 }
 
 /// Whether a grid item fills its area on the block axis: `align-self`
