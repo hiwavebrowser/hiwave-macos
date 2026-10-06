@@ -1,0 +1,49 @@
+{
+ "viewport": [
+  1280,
+  800
+ ],
+ "cases": [
+  {
+   "name": "one-line-of-many-text-nodes",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{grid-template-rows:min-content 1fr}</style></head><body><div class=g id=g><div id=a>t</div><div id=b><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:40 a:0:20 b:20:20 after:40:20"
+  },
+  {
+   "name": "three-blocks",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{grid-template-rows:min-content 1fr}</style></head><body><div class=g id=g><div id=a>t</div><div id=b><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:80 a:0:20 b:20:60 after:80:20"
+  },
+  {
+   "name": "minmax-0-1fr",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{grid-template-rows:min-content minmax(0,1fr)}</style></head><body><div class=g id=g><div id=a>t</div><div id=b><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:80 a:0:20 b:20:60 after:80:20"
+  },
+  {
+   "name": "two-flexible-rows",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{grid-template-rows:1fr 2fr}</style></head><body><div class=g id=g><div id=a><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div></div><div id=b><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:180 a:0:60 b:60:120 after:180:20"
+  },
+  {
+   "name": "min-height-on-the-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{grid-template-rows:min-content 1fr;min-height:300px}</style></head><body><div class=g id=g><div id=a>t</div><div id=b><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:300 a:0:20 b:20:280 after:300:20"
+  },
+  {
+   "name": "short-item-spans-into-the-flexible-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{grid-template:'t e' min-content 'u e' min-content 'c e' 1fr / minmax(0,1fr) min-content}#a{grid-area:t}#u{grid-area:u}#b{grid-area:c}#e{grid-area:e;width:100px}</style></head><body><div class=g id=g><div id=a>t</div><div id=u>u</div><div id=e><div style='height:30px'></div></div><div id=b><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:100 a:0:20 u:20:20 e:0:100 b:40:60 after:100:20"
+  },
+  {
+   "name": "tall-item-spans-into-the-flexible-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{grid-template:'t e' min-content 'u e' min-content 'c e' 1fr / minmax(0,1fr) min-content}#a{grid-area:t}#u{grid-area:u}#b{grid-area:c}#e{grid-area:e;width:100px}</style></head><body><div class=g id=g><div id=a>t</div><div id=u>u</div><div id=e><div style='height:400px'></div></div><div id=b><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:400 a:0:20 u:20:20 e:0:400 b:40:360 after:400:20"
+  },
+  {
+   "name": "fixed-height-item",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{grid-template-rows:min-content 1fr}#b{height:50px;overflow:hidden}</style></head><body><div class=g id=g><div id=a>t</div><div id=b><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div><div><span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> <span>a</span> </div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:70 a:0:20 b:20:50 after:70:20"
+  }
+ ],
+ "chrome": "143.0.7499.4"
+}
