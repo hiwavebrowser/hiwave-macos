@@ -218,6 +218,38 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 let _: () = msg_send![area, release];
             }
         }
+        extern "C" fn scroll_wheel(this: &Object, _sel: Sel, event: id) {
+            unsafe {
+                let wpt: cocoa::foundation::NSPoint = msg_send![event, locationInWindow];
+                let lpt: cocoa::foundation::NSPoint =
+                    msg_send![this, convertPoint: wpt fromView: nil];
+                let frame: cocoa::foundation::NSRect = msg_send![this, frame];
+                let raw_dx: f64 = msg_send![event, scrollingDeltaX];
+                let raw_dy: f64 = msg_send![event, scrollingDeltaY];
+                let precise: bool = msg_send![event, hasPreciseScrollingDeltas];
+                // Lines (an external wheel) at 40px a line; a trackpad
+                // reports pixels. AppKit's horizontal sign is the inverse
+                // of tao's, which is the sign the app's scroll code speaks.
+                let scale = if precise { 1.0 } else { 40.0 };
+                let scroll = PendingScroll {
+                    x: lpt.x,
+                    y: frame.size.height - lpt.y,
+                    dx: -raw_dx * scale,
+                    dy: raw_dy * scale,
+                };
+                if let Ok(mut q) = PENDING_SCROLLS.lock() {
+                    match q.last_mut() {
+                        Some(last) => {
+                            last.dx += scroll.dx;
+                            last.dy += scroll.dy;
+                            last.x = scroll.x;
+                            last.y = scroll.y;
+                        }
+                        None => q.push(scroll),
+                    }
+                }
+            }
+        }
         extern "C" fn accepts_first_responder(_this: &Object, _sel: Sel) -> bool {
             // Without this, makeFirstResponder: refuses the view and macOS
             // keeps routing keys to whoever held focus before — observed
@@ -291,6 +323,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             decl.add_method(sel!(mouseMoved:), mouse_moved as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(mouseDragged:), mouse_moved as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(mouseExited:), mouse_exited as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(scrollWheel:), scroll_wheel as extern "C" fn(&Object, Sel, id));
             decl.add_method(
                 sel!(updateTrackingAreas),
                 update_tracking_areas as extern "C" fn(&Object, Sel),

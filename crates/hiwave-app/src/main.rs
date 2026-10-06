@@ -518,6 +518,25 @@ fn load_report_page(content: &impl ContentWebViewOps) {
     let _ = content.load_html(&report_with_chartjs);
 }
 
+/// True for the first wheel event after a quiet gap, so a flick is visible in
+/// a default-level session log without flooding it (a trackpad flick emits
+/// ~50 events/s; the rest stay trace). One clock for both wheel paths, the
+/// window loop's and the content view's. Restores the diagnosability #100
+/// accidentally removed when the #95 diagnostic line was replaced with wiring.
+#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+fn wheel_burst_started() -> bool {
+    thread_local! {
+        static LAST_WHEEL: std::cell::Cell<std::time::Instant> =
+            std::cell::Cell::new(std::time::Instant::now());
+    }
+    LAST_WHEEL.with(|t| {
+        let now = std::time::Instant::now();
+        let gap = now.duration_since(t.get());
+        t.set(now);
+        gap > std::time::Duration::from_millis(500)
+    })
+}
+
 fn is_new_tab_url(url: &str) -> bool {
     url == "about:blank" || url == NEW_TAB_URL || url.starts_with("data:text/html")
 }
@@ -2016,23 +2035,7 @@ fn main() {
                 // MainEventsCleared, which this event wakes.
                 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
-                    // First wheel event after a quiet gap logs at info, so a
-                    // flick is visible in a default-level session log without
-                    // flooding it (a trackpad flick emits ~50 events/s; the
-                    // rest stay trace). Restores the diagnosability #100
-                    // accidentally removed when the #95 diagnostic line was
-                    // replaced with wiring.
-                    thread_local! {
-                        static LAST_WHEEL: std::cell::Cell<std::time::Instant> =
-                            std::cell::Cell::new(std::time::Instant::now());
-                    }
-                    let quiet = LAST_WHEEL.with(|t| {
-                        let now = std::time::Instant::now();
-                        let gap = now.duration_since(t.get());
-                        t.set(now);
-                        gap > std::time::Duration::from_millis(500)
-                    });
-                    if quiet {
+                    if wheel_burst_started() {
                         info!(?delta, "wheel burst started (window loop)");
                     }
                     let (dx, dy) = match delta {
@@ -2349,6 +2352,19 @@ fn main() {
                         if let Some(url) = outcome.navigate {
                             info!(%url, "Link clicked");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        }
+                    }
+                    // The wheel, from the content view's own `scrollWheel:`.
+                    // The window-loop MouseWheel arm above stays as it was;
+                    // the view consumes the wheel, so only one of the two
+                    // fires for an event. Until 2026-10-06 the wheel reached
+                    // neither in the built app (hand-test item H6).
+                    for scroll in rustkit_viewhost::drain_pending_scrolls() {
+                        if wheel_burst_started() {
+                            info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
+                        }
+                        if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
+                            trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
                         }
                     }
                     for key in rustkit_viewhost::drain_pending_keys() {
