@@ -179,6 +179,8 @@ mod place_shorthand_tests;
 mod grid_block_axis_align_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_lone_text_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_min_max_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
