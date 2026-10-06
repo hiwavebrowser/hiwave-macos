@@ -68,6 +68,46 @@
    "name": "a-forced-break-between-inline-children",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b>one<br><b>two</b> <i>three</i></div></div><div id=after>x</div></body></html>",
    "chrome_boxes": "g:0:40 b:0:40 after:40:20"
+  },
+  {
+   "name": "label-and-value-with-a-px-height",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}#b{height:48px}</style></head><body><div class=g id=g><div id=b>Label: <b>value</b> tail</div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:48 b:0:48 after:48:20"
+  },
+  {
+   "name": "label-and-value-start-aligned-with-a-min-height",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}#b{align-self:start;min-height:48px}</style></head><body><div class=g id=g><div id=b>Label: <b>value</b> tail</div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:48 b:0:48 after:48:20"
+  },
+  {
+   "name": "label-and-value-stretched-with-a-min-height",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}#b{min-height:48px}</style></head><body><div class=g id=g><div id=b>Label: <b>value</b> tail</div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:48 b:0:48 after:48:20"
+  },
+  {
+   "name": "two-lines-in-a-shorter-px-height",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}#b{height:10px}</style></head><body><div class=g id=g><div id=b>one<br><b>two</b> <i>three</i></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:10 b:0:10 after:10:20"
+  },
+  {
+   "name": "two-lines-under-a-max-height",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}#b{max-height:30px}</style></head><body><div class=g id=g><div id=b>one<br><b>two</b> <i>three</i></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:30 b:0:30 after:30:20"
+  },
+  {
+   "name": "label-and-value-with-a-percent-height",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{height:100px}#b{height:50%}</style></head><body><div class=g id=g><div id=b>Label: <b>value</b> tail</div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:100 b:0:50 after:100:20"
+  },
+  {
+   "name": "label-and-value-start-aligned",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{grid-template-rows:100px}#b{align-self:start}</style></head><body><div class=g id=g><div id=b>Label: <b>value</b> tail</div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:100 b:0:20 after:100:20"
+  },
+  {
+   "name": "label-and-value-with-padding-and-a-px-height",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}#b{height:48px;padding:4px;border:1px solid}</style></head><body><div class=g id=g><div id=b>Label: <b>value</b> tail</div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:58 b:0:58 after:58:20"
   }
  ],
  "chrome": "143.0.7499.4"
