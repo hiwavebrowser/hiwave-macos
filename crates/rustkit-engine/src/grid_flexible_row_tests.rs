@@ -25,14 +25,6 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
     return e.id + ':' + Math.round(r.top) + ':' + Math.round(r.height);\
     }).join(' ')";
 
-/// A grid item with a percentage height in an `auto` row of a grid with a
-/// px height is half as tall as in Chrome (25 for 50): the row is sized from
-/// the percentage and the item then takes the percentage of that row. The
-/// same with a lone text child or with inline children, so it is Phase 8's
-/// box and not the flow of the item's children. These two wait for it.
-const PERCENT_HEIGHT_GAPS: &[&str] =
-    &["label-and-value-with-a-percent-height", "lone-text-with-a-percent-height"];
-
 /// A line that holds a button, a text input or a checkbox is 21px tall in
 /// Chrome and 20 here, in a grid item and in a plain block alike (each of
 /// these pages has both). It is the line box of a form control, not the grid
@@ -72,8 +64,7 @@ fn a_flexible_row_of_an_auto_height_grid_is_as_tall_as_in_chrome() {
             .and_then(|v| v.strip_suffix("\")"))
             .unwrap_or(&value);
 
-        let gap = PERCENT_HEIGHT_GAPS.contains(&name)
-            || CONTROL_LINE_GAPS.contains(&name)
+        let gap = CONTROL_LINE_GAPS.contains(&name)
             || LONE_IMAGE_GAPS.contains(&name);
         match (got == chrome, gap) {
             (false, false) => wrong.push(format!("{name}\n   engine {got}\n   chrome {chrome}")),

@@ -175,6 +175,8 @@ mod script_scroll_tests;
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_block_axis_align_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -8489,6 +8491,7 @@ impl Engine {
                     "center" => rustkit_css::AlignContent::Center,
                     "space-between" => rustkit_css::AlignContent::SpaceBetween,
                     "space-around" => rustkit_css::AlignContent::SpaceAround,
+                    "space-evenly" => rustkit_css::AlignContent::SpaceEvenly,
                     "stretch" => rustkit_css::AlignContent::Stretch,
                     _ => rustkit_css::AlignContent::Stretch,
                 };
