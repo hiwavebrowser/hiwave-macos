@@ -2429,6 +2429,14 @@ pub fn layout_grid_container(
                             // overflows a fixed height does not size the row.
                             wanted = Some(border_box);
                         }
+                        // A px `max-height` caps what the item asks of its
+                        // row (three lines under `max-height: 24px` make a
+                        // 24px row, and overflow it); `min-height` then
+                        // floors it.
+                        if let Length::Px(max_h) = child.style.max_height {
+                            let cap = if is_border_box { max_h } else { max_h + pb };
+                            wanted = wanted.map(|w| w.min(cap));
+                        }
                         if let Length::Px(min_h) = child.style.min_height {
                             let floor = if is_border_box { min_h } else { min_h + pb };
                             wanted = Some(floor.max(wanted.unwrap_or(0.0)));
@@ -4250,19 +4258,44 @@ fn apply_justify_self(
         Length::Percent(p) => cell_width * p / 100.0,
         _ => cell_width,
     };
+    let stretched = align == JustifySelf::Stretch && !has_explicit_width;
+    let child_width = if stretched { cell_width } else { child_width };
+
+    // A px `min-width` and `max-width` bound the item whatever its alignment
+    // (max first, then min, CSS 2.1 §10.4): a `max-width: 100px` item
+    // stretched over a 300px column is 100 wide, and a `min-width: 100px`
+    // item holding one letter is 100 wide where it is start-aligned or
+    // centred. The size handled here is the SPECIFIED width for an explicit
+    // `width` (box-sizing decides what it covers) and a border box for
+    // `auto`, so a content-box bound on an auto width gets the item's px
+    // padding and border added.
+    let own = {
+        let px = |l: &Length| match l {
+            Length::Px(v) => *v,
+            _ => 0.0,
+        };
+        let pb = px(&child.style.padding_left)
+            + px(&child.style.padding_right)
+            + px(&child.style.border_left_width)
+            + px(&child.style.border_right_width);
+        if !has_explicit_width && child.style.box_sizing != BoxSizing::BorderBox {
+            pb
+        } else {
+            0.0
+        }
+    };
+    let mut child_width = child_width;
+    if let Length::Px(max_w) = child.style.max_width {
+        child_width = child_width.min(max_w + own);
+    }
+    if let Length::Px(min_w) = child.style.min_width {
+        child_width = child_width.max(min_w + own);
+    }
 
     match align {
-        JustifySelf::Start | JustifySelf::Auto => (cell_x, child_width),
         JustifySelf::End => (cell_x + cell_width - child_width, child_width),
         JustifySelf::Center => (cell_x + (cell_width - child_width) / 2.0, child_width),
-        // Per CSS spec: stretch only applies when width is auto
-        JustifySelf::Stretch => {
-            if has_explicit_width {
-                (cell_x, child_width)
-            } else {
-                (cell_x, cell_width)
-            }
-        },
+        JustifySelf::Start | JustifySelf::Auto | JustifySelf::Stretch => (cell_x, child_width),
     }
 }
 
