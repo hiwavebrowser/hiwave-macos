@@ -22,7 +22,13 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[];
+///
+/// `a-lone-svg-in-a-start-aligned-item`: Chromium puts the svg on a line (29
+/// tall: the image above the baseline, the strut's descent below); a grid
+/// item with a single image child is still on the block arm of Phase 9 and
+/// is as tall as the image (24). The same gap as `a-lone-image` in
+/// `grid_flexible_row_tests`.
+const GAPS: &[&str] = &["a-lone-svg-in-a-start-aligned-item"];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
