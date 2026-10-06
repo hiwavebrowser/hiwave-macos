@@ -113,6 +113,66 @@
    "name": "lone-text-with-a-percent-height",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{height:100px}#b{height:50%}</style></head><body><div class=g id=g><div id=b>Label</div></div><div id=after>x</div></body></html>",
    "chrome_boxes": "g:0:100 b:0:50 after:100:20"
+  },
+  {
+   "name": "text-then-a-block-then-text",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b>Label <div>block</div> tail</div></div><div id=p style='width:600px'>Label <div>block</div> tail</div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:60 b:0:60 p:60:60 after:120:20"
+  },
+  {
+   "name": "inline-run-then-a-block",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b>Label: <b>value</b> <div>block</div></div></div><div id=p style='width:600px'>Label: <b>value</b> <div>block</div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:40 b:0:40 p:40:40 after:80:20"
+  },
+  {
+   "name": "a-block-between-two-inline-runs",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b><b>a</b> <i>b</i> <div>c</div> <b>d</b> <i>e</i></div></div><div id=p style='width:600px'><b>a</b> <i>b</i> <div>c</div> <b>d</b> <i>e</i></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:60 b:0:60 p:60:60 after:120:20"
+  },
+  {
+   "name": "text-and-an-image",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b>Label <img src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7' style='width:50px;height:50px'> tail</div></div><div id=p style='width:600px'>Label <img src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7' style='width:50px;height:50px'> tail</div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:55 b:0:55 p:55:55 after:110:20"
+  },
+  {
+   "name": "text-and-a-text-input",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b>Name: <input></div></div><div id=p style='width:600px'>Name: <input></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:21 b:0:21 p:21:21 after:42:20"
+  },
+  {
+   "name": "text-and-a-button",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b>Go: <button>Press</button> now</div></div><div id=p style='width:600px'>Go: <button>Press</button> now</div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:21 b:0:21 p:21:21 after:42:20"
+  },
+  {
+   "name": "text-and-an-inline-block",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b>a <span style='display:inline-block;width:50px;height:30px'></span> b</div></div><div id=p style='width:600px'>a <span style='display:inline-block;width:50px;height:30px'></span> b</div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:35 b:0:35 p:35:35 after:70:20"
+  },
+  {
+   "name": "text-and-a-checkbox",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b><input type=checkbox> Remember me</div></div><div id=p style='width:600px'><input type=checkbox> Remember me</div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:21 b:0:21 p:21:21 after:42:20"
+  },
+  {
+   "name": "a-lone-image",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b><img src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7' style='width:50px;height:50px'></div></div><div id=p style='width:600px'><img src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7' style='width:50px;height:50px'></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:55 b:0:55 p:55:55 after:110:20"
+  },
+  {
+   "name": "two-inline-blocks",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b><span style='display:inline-block;width:50px;height:30px'></span> <span style='display:inline-block;width:50px;height:30px'></span></div></div><div id=p style='width:600px'><span style='display:inline-block;width:50px;height:30px'></span> <span style='display:inline-block;width:50px;height:30px'></span></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:35 b:0:35 p:35:35 after:70:20"
+  },
+  {
+   "name": "two-buttons",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b><button>One</button> <button>Two</button></div></div><div id=p style='width:600px'><button>One</button> <button>Two</button></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:21 b:0:21 p:21:21 after:42:20"
+  },
+  {
+   "name": "text-and-a-select",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}</style></head><body><div class=g id=g><div id=b>Pick: <select><option>one</option></select></div></div><div id=p style='width:600px'>Pick: <select><option>one</option></select></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:20 b:0:20 p:20:20 after:40:20"
   }
  ],
  "chrome": "143.0.7499.4"
