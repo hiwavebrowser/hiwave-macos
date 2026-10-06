@@ -8,6 +8,10 @@
 //! `1fr` and holds the article. The row kept track sizing's estimate (one
 //! line per text node), so the page was 73554px tall around 12338px of
 //! content.
+//!
+//! The same file holds the shapes for a grid item whose children are inline
+//! (`Label: <b>value</b> tail`): they share lines, where Phase 9 of the grid
+//! pass used to stack them one per line.
 
 use super::*;
 
@@ -17,11 +21,13 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
     return e.id + ':' + Math.round(r.top) + ':' + Math.round(r.height);\
     }).join(' ')";
 
-/// A grid item whose children are inline (`<span>a</span> <span>a</span>`)
-/// gets one line per child: Phase 9 of the grid pass stacks an item's
-/// children as blocks. Not a row-sizing fault, so these two wait for it.
-const INLINE_CHILDREN_GAPS: &[&str] =
-    &["one-line-of-many-text-nodes", "one-line-of-many-text-nodes-in-an-auto-row"];
+/// A grid item with a percentage height in an `auto` row of a grid with a
+/// px height is half as tall as in Chrome (25 for 50): the row is sized from
+/// the percentage and the item then takes the percentage of that row. The
+/// same with a lone text child or with inline children, so it is Phase 8's
+/// box and not the flow of the item's children. These two wait for it.
+const PERCENT_HEIGHT_GAPS: &[&str] =
+    &["label-and-value-with-a-percent-height", "lone-text-with-a-percent-height"];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
@@ -47,7 +53,7 @@ fn a_flexible_row_of_an_auto_height_grid_is_as_tall_as_in_chrome() {
             .and_then(|v| v.strip_suffix("\")"))
             .unwrap_or(&value);
 
-        match (got == chrome, INLINE_CHILDREN_GAPS.contains(&name)) {
+        match (got == chrome, PERCENT_HEIGHT_GAPS.contains(&name)) {
             (false, false) => wrong.push(format!("{name}\n   engine {got}\n   chrome {chrome}")),
             (true, true) => gaps_that_pass.push(name),
             _ => {}
