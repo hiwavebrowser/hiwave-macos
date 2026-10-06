@@ -6491,6 +6491,12 @@ impl Engine {
                                 });
                             if after_a_space && next.starts_with(' ') {
                                 next.remove(0);
+                                // Nothing left: no box, or the next space
+                                // would find this one instead of the space
+                                // that swallowed it.
+                                if next.is_empty() {
+                                    continue;
+                                }
                             }
                         }
                         joined.push(child);
