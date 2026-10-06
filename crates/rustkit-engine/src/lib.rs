@@ -4764,6 +4764,11 @@ impl Engine {
             || rustkit_layout::establishes_bfc(s, child.float)
     }
 
+    /// An absolutely positioned or fixed box: not in the flow of its parent.
+    fn is_out_of_flow_box(b: &LayoutBox) -> bool {
+        matches!(b.position, Position::Absolute | Position::Fixed)
+    }
+
     /// Whether a box participates in inline flow (shares line boxes with
     /// adjacent inline-level siblings). Mirrors the layout-side flows_inline
     /// gate in rustkit-layout's block child loop.
@@ -4940,7 +4945,14 @@ impl Engine {
         }
         layout_box.float = positioning.float;
         layout_box.clear = positioning.clear;
-        if layout_box.float != rustkit_css::Float::None {
+        // CSS 2.1 §9.7: a float is blockified, and so is an absolutely
+        // positioned or fixed box. An out-of-flow `<a>` or `<span>` kept its
+        // inline box: with no content it got no box at all (a whole-card
+        // `position: absolute; inset: 0` link was nowhere, issue #560), and
+        // with text it was the inline's font box, not a block of its lines.
+        if layout_box.float != rustkit_css::Float::None
+            || matches!(layout_box.position, Position::Absolute | Position::Fixed)
+        {
             if matches!(layout_box.box_type, BoxType::Inline) {
                 layout_box.box_type = BoxType::Block;
             }
@@ -6455,6 +6467,32 @@ impl Engine {
                     let joins_previous = matches!(child.box_type, BoxType::Text(_))
                         && matches!(joined.last().map(|b| &b.box_type), Some(BoxType::Text(_)));
                     if !joins_previous {
+                        // An out-of-flow box between two text nodes does not
+                        // separate their spaces: `a <abs></abs> b` has one
+                        // space, as `a  b` has.
+                        let mut child = child;
+                        if let BoxType::Text(ref mut next) = child.box_type {
+                            let after_a_space = joined
+                                .iter()
+                                .rev()
+                                .find(|b| !Self::is_out_of_flow_box(b))
+                                .filter(|_| {
+                                    joined.last().is_some_and(Self::is_out_of_flow_box)
+                                })
+                                .is_some_and(|b| {
+                                    matches!(&b.box_type, BoxType::Text(run) if run.ends_with(' '))
+                                        && !matches!(
+                                            b.style.white_space,
+                                            rustkit_css::WhiteSpace::Pre
+                                                | rustkit_css::WhiteSpace::PreWrap
+                                                | rustkit_css::WhiteSpace::PreLine
+                                                | rustkit_css::WhiteSpace::BreakSpaces
+                                        )
+                                });
+                            if after_a_space && next.starts_with(' ') {
+                                next.remove(0);
+                            }
+                        }
                         joined.push(child);
                         continue;
                     }
@@ -6487,10 +6525,17 @@ impl Engine {
                 // are removed entirely.
                 let n = layout_box.children.len();
                 for i in 0..n {
-                    let prev_inline =
-                        i > 0 && Self::is_inline_level_box(&layout_box.children[i - 1]);
-                    let next_inline =
-                        i + 1 < n && Self::is_inline_level_box(&layout_box.children[i + 1]);
+                    // The neighbours in flow: an out-of-flow box is not on
+                    // the line and is no segment boundary.
+                    let prev_inline = layout_box.children[..i]
+                        .iter()
+                        .rev()
+                        .find(|b| !Self::is_out_of_flow_box(b))
+                        .is_some_and(Self::is_inline_level_box);
+                    let next_inline = layout_box.children[i + 1..]
+                        .iter()
+                        .find(|b| !Self::is_out_of_flow_box(b))
+                        .is_some_and(Self::is_inline_level_box);
                     // Phase 2 only applies to COLLAPSIBLE spaces. Under
                     // pre/pre-wrap/break-spaces every space is preserved
                     // and renders (css-text §4.1.1): " XX" in a pre-wrap

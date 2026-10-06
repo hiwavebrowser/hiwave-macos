@@ -2059,6 +2059,18 @@ impl LayoutBox {
         let mut seam: Option<SeamEdge> = None;
 
         for child in &mut self.children {
+            // An out-of-flow child takes no room on the line: it is laid out
+            // at its static position and the inline is no wider for it. An
+            // `inset: 0` span inside a link made the link as wide as the
+            // container.
+            if matches!(child.position, Position::Absolute | Position::Fixed) {
+                let mut cb = self.dimensions.clone();
+                cb.content.x = self.dimensions.content.x + cursor_x;
+                cb.content.width = available_width;
+                cb.content.height = 0.0;
+                child.layout(&cb);
+                continue;
+            }
             // Cross-node shaping inside the inline (`seam_kern`).
             cursor_x += Self::seam_kern(seam.as_ref(), Self::seam_edge(child, false).as_ref());
             seam = Self::seam_edge(child, true);

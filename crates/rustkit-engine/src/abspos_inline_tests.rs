@@ -22,7 +22,22 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[];
+///
+/// `a-span-with-no-offsets`: with no offsets the box sits at its static
+/// position, after the text before it on the line (x 48). Layout puts it at
+/// the start of the line (x 0).
+///
+/// `an-empty-link-with-inset-0-in-a-static-parent-of-text`,
+/// `a-span-inside-a-span`, `an-empty-span-inside-a-link`: the containing
+/// block is not the parent (a static `<p>`, an inline `<span>` or `<a>`) but
+/// the positioned box above it. Layout anchors an abspos box to its parent
+/// only. The inline parent is no longer widened by the box.
+const GAPS: &[&str] = &[
+    "a-span-with-no-offsets",
+    "an-empty-link-with-inset-0-in-a-static-parent-of-text",
+    "a-span-inside-a-span",
+    "an-empty-span-inside-a-link",
+];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
