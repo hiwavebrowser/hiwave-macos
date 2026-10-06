@@ -118,3 +118,33 @@ fn existing_singletons_get_their_interfaces_and_the_rest_are_interface_only() {
         "undefined,undefined,undefined,undefined,undefined,undefined"
     );
 }
+
+#[test]
+fn cdatasection_and_processinginstruction_interfaces_exist() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "[typeof CDATASection, typeof ProcessingInstruction].join()"),
+        "function,function"
+    );
+    assert_eq!(
+        ev(&b, "[CDATASection.prototype instanceof Text, CDATASection.prototype instanceof CharacterData, CDATASection.prototype instanceof Node].join()"),
+        "true,true,true"
+    );
+    assert_eq!(
+        ev(&b, "[ProcessingInstruction.prototype instanceof CharacterData, ProcessingInstruction.prototype instanceof Node].join()"),
+        "true,true"
+    );
+    assert_eq!(
+        ev(&b, "var t1; try { new CDATASection(); t1 = 'no throw'; } catch (e) { t1 = e.name; } t1"),
+        "TypeError"
+    );
+    assert_eq!(
+        ev(&b, "var t2; try { new ProcessingInstruction(); t2 = 'no throw'; } catch (e) { t2 = e.name; } t2"),
+        "TypeError"
+    );
+    // YouTube webcomponents-sd Tag 878 iteration
+    assert_eq!(
+        ev(&b, "['Document','DocumentFragment','Element','Text','Comment','CDATASection','ProcessingInstruction'].every(function(a){ return typeof Object.create(window[a].prototype) === 'object'; })"),
+        "true"
+    );
+}

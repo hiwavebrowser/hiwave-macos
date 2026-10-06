@@ -13,6 +13,9 @@ const PAGE: &str = "<!DOCTYPE html><html><body>\
 fn bound() -> DomBindings {
     let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
     b.set_document(Rc::new(Document::parse_html(PAGE).unwrap())).unwrap();
+    b.set_selector_matcher(Rc::new(|node, selector, _| {
+        Some(selector.split(',').any(|s| node.tag_name() == Some(s.trim())))
+    }));
     b.set_location(&url::Url::parse("https://example.test/a/b?x=1#h").unwrap()).unwrap();
     b
 }
@@ -140,5 +143,30 @@ fn a_matrix_read_back_from_a_computed_transform() {
     // apple.com's gallery: new DOMMatrix(getComputedStyle(el).transform).m41
     let b = bound();
     assert_eq!(ev(&b, "new DOMMatrix('matrix(1, 0, 0, 1, -320, 0)').m41"), "-320");
+}
+
+#[test]
+fn document_implementation_creates_html_document() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "[document.implementation instanceof DOMImplementation, document.implementation === document.implementation, document.implementation.hasFeature()].join()"),
+        "true,true,true"
+    );
+    assert_eq!(
+        ev(&b, "var doc = document.implementation.createHTMLDocument('inert'); [doc instanceof Document, doc.title, doc.body !== null, doc.head !== null, doc.documentElement !== null, doc.doctype.name].join()"),
+        "true,inert,true,true,true,html"
+    );
+    assert_eq!(
+        ev(&b, "var div = doc.createElement('div'); doc.body.appendChild(div); [doc.body.children.length, div.parentNode === doc.body].join()"),
+        "1,true"
+    );
+    assert_eq!(
+        ev(&b, "var plain = document.implementation.createHTMLDocument(); [plain.title, plain.body !== null].join()"),
+        ",true"
+    );
+    assert_eq!(
+        ev(&b, "var dt = document.implementation.createDocumentType('html', 'pub', 'sys'); [dt.nodeType, dt.name, dt.publicId, dt.systemId, dt instanceof DocumentType].join()"),
+        "10,html,pub,sys,true"
+    );
 }
 
