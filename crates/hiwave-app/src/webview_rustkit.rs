@@ -9,14 +9,24 @@ use super::webview::IWebContent;
 use hiwave_core::{HiWaveError, HiWaveResult};
 use rustkit_engine::{Engine, EngineBuilder, EngineEvent, EngineViewId};
 use rustkit_viewhost::Bounds;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tao::window::Window;
 use tao::rwh_06::HasWindowHandle;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use url::Url;
+
+/// Shortest gap between two turns of the live loop that a page's timers can
+/// ask for (an animation loop asks for 16ms; a `setTimeout(f, 0)` chain
+/// asks for none).
+const MIN_LIVE_TURN: Duration = Duration::from_millis(4);
+
+/// How soon the loop turns again while a page's request is out. Nothing
+/// wakes the loop when the answer comes, so it looks.
+const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
 
 /// A RustKit-based WebView that implements IWebContent.
 ///
@@ -47,6 +57,12 @@ pub struct RustKitView {
     history: RefCell<Vec<Url>>,
     /// Current position in navigation history.
     history_index: RefCell<usize>,
+    /// The page clock: the instant the live loop has run the page's timers
+    /// up to. Reset when a page finishes loading.
+    live_clock: Cell<Instant>,
+    /// Runtime the live loop's network turns block on. `None` if it could
+    /// not be built: the page then gets no timers or late fetches, as before.
+    live_runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl RustKitView {
@@ -113,15 +129,49 @@ impl RustKitView {
             blocked_counter: counter_clone,
             history: RefCell::new(Vec::new()),
             history_index: RefCell::new(0),
+            live_clock: Cell::new(Instant::now()),
+            live_runtime: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| warn!(error = %e, "No runtime for the live loop; page timers will not run"))
+                .ok(),
         })
     }
 
-    /// Process pending engine events (call this in the event loop).
-    /// Note: This requires a tokio runtime to be available.
-    pub fn process_events(&self) {
-        // For now, event processing is handled by the engine's internal event loop
-        // We'll implement proper event handling when we have a tokio runtime in the event loop
-        // TODO: Integrate with main event loop's tokio runtime
+    /// One turn of the live loop for the page (call this in the event
+    /// loop): run the timers that came due since the last turn, answer the
+    /// page's network requests, and lay out what they changed.
+    ///
+    /// Returns how long the event loop may sleep before the next turn;
+    /// `None` when the page has no timer set and only input needs to wake it.
+    ///
+    /// Until 2026-10-03 this was an empty function: after the load nothing
+    /// ran a page's timers or delivered a fetch, so late content never
+    /// showed and a `setTimeout` set by a click never fired (Z lane I0).
+    pub fn process_events(&self) -> Option<Duration> {
+        let view_id = self.view_id?;
+        let runtime = self.live_runtime.as_ref()?;
+        let started = Instant::now();
+        // Whole milliseconds only; the remainder stays on the clock for the
+        // next turn, so frequent turns do not slow the page's time.
+        let elapsed_ms = started.duration_since(self.live_clock.get()).as_millis() as u64;
+        self.live_clock
+            .set(self.live_clock.get() + Duration::from_millis(elapsed_ms));
+
+        let mut engine = self.engine.borrow_mut();
+        let turn = runtime.block_on(engine.pump_live(view_id, elapsed_ms));
+        if turn.timers_ran > 0 || turn.requests > 0 {
+            debug!(?turn, "Live turn");
+        }
+        // A page that keeps the loop busy gets at most half of it: the next
+        // turn waits at least as long as this one took.
+        let timer = turn.next_timer_ms.map(Duration::from_millis);
+        let next = if turn.in_flight > 0 {
+            Some(timer.map_or(LIVE_REQUEST_POLL, |t| t.min(LIVE_REQUEST_POLL)))
+        } else {
+            timer
+        };
+        next.map(|wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN))
     }
 
     /// Render the view (call this in the event loop).
@@ -205,14 +255,22 @@ impl RustKitView {
             .unwrap_or(false)
     }
 
-    /// URL to navigate to if the focused field's form were submitted.
-    /// `None` when there is no form, no fields, or the form is not a GET.
+    /// A key was released: the page hears `keyup`.
+    pub fn handle_key_up(&self, key_code: u32, key: &str, ctrl: bool, shift: bool, alt: bool) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            engine.handle_key_up(view_id, key_code, key, ctrl, shift, alt);
+        }
+    }
+
+    /// Enter in the focused field: the page hears `keydown` and `submit`,
+    /// and this is the URL to navigate to when its form submits. `None`
+    /// when there is no form, a listener cancelled, or the form is not a
+    /// GET.
     pub fn form_submit_url(&self) -> Option<String> {
-        let engine = self.engine.borrow();
+        let mut engine = self.engine.borrow_mut();
         self.view_id
-            .and_then(|view_id| engine.form_submission_for_focus(view_id))
-            .filter(|sub| sub.is_self_target())
-            .map(|sub| sub.url)
+            .and_then(|view_id| engine.submit_focused_form(view_id))
     }
 
     /// Whether a content element currently holds focus.
@@ -240,6 +298,43 @@ impl RustKitView {
         let mut engine = self.engine.borrow_mut();
         self.view_id
             .and_then(|view_id| engine.focus_at_point(view_id, x, y))
+    }
+
+    /// Deliver a mouse press at viewport coordinates to the page
+    /// (`mousedown`).
+    pub fn mouse_down_at_point(&self, x: f32, y: f32) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            engine.mouse_down_at_point(view_id, x, y);
+        }
+    }
+
+    /// Deliver a pointer move to viewport coordinates to the page (the
+    /// over/out/enter/leave events when the element under it changed, then
+    /// `pointermove` and `mousemove`).
+    pub fn mouse_move_at_point(&self, x: f32, y: f32) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            engine.mouse_move_at_point(view_id, x, y);
+        }
+    }
+
+    /// Tell the page the pointer left the view.
+    pub fn mouse_leave(&self) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            engine.mouse_leave(view_id);
+        }
+    }
+
+    /// Deliver a mouse release at viewport coordinates to the page
+    /// (`mouseup`, `click`), then report the click's default actions: what
+    /// it focused and the link to follow unless a listener cancelled it.
+    pub fn click_at_point(&self, x: f32, y: f32) -> rustkit_engine::ClickOutcome {
+        let mut engine = self.engine.borrow_mut();
+        self.view_id
+            .map(|view_id| engine.click_at_point(view_id, x, y))
+            .unwrap_or_default()
     }
 
     /// Resolve a click at viewport coordinates to a link URL, if any.
@@ -277,6 +372,7 @@ impl RustKitView {
                 .load_html(view_id, html)
                 .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
         }
+        self.live_clock.set(Instant::now());
         Ok(())
     }
 
@@ -383,6 +479,9 @@ impl RustKitView {
                 }
             });
         }
+        // The new page's clock starts now: the time the load took is not
+        // time its timers have waited.
+        self.live_clock.set(Instant::now());
     }
 
     /// Execute JavaScript synchronously.

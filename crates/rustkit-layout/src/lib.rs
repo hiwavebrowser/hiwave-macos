@@ -16,6 +16,7 @@
 
 pub mod flex;
 pub mod forms;
+pub mod fragment;
 pub mod grid;
 pub mod images;
 pub mod intrinsic_cache;
@@ -60,7 +61,8 @@ pub use scroll::{
 pub use text::{
     apply_text_transform, collapse_whitespace, FontCache, FontCacheKey, FontDisplay, FontFaceRule,
     FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
-    TextMetrics, TextShaper, TopLevelSite, TEXT_METRICS_ARE_FONT_DERIVED, TEXT_SHAPER_BACKEND,
+    TextMetrics, TextShaper, TopLevelSite, TARGET_FONT_BACKEND, TEXT_METRICS_ARE_FONT_DERIVED,
+    TEXT_SHAPER_BACKEND,
 };
 pub use text::{FaceIdentity, FaceSynthesis, GlyphRun, RunGlyph};
 
@@ -5780,6 +5782,13 @@ impl LayoutBox {
                 // closer box already supplied one.
                 if result.link_href.is_none() {
                     result.link_href = self.link_href.clone();
+                }
+                // Same for the node: an anonymous box (a line, a text run
+                // laid out without one) is hit on behalf of its nearest
+                // ancestor that has a DOM node, or a click on it reaches no
+                // element at all.
+                if result.node_id.is_none() {
+                    result.node_id = self.node_id;
                 }
                 return Some(result);
             }

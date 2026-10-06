@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H1 late content</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  .band { height: 30px; margin: 6px 20px; }
+  #first { background: #ff0000; }
+  .tick { background: #00ff00; }
+  .fetched { background: #0000ff; }
+  img { display: block; width: 120px; height: 60px; margin: 6px 20px; }
+</style>
+<!-- Red at first paint. Then one green band a second for eight seconds, so
+     most of them land after the load has finished, however long the load
+     waits. The fourth tick starts a fetch the server holds for two seconds
+     (a blue band); the sixth adds an image (cyan). A window that never
+     changes after its first frame has neither blue nor cyan. -->
+<div id="first" class="band"></div>
+<script>
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  function add(tag, cls) {
+    var el = document.createElement(tag);
+    el.className = cls;
+    document.body.appendChild(el);
+    return el;
+  }
+  beacon('h1-script');
+  var n = 0;
+  var timer = setInterval(function () {
+    n += 1;
+    add('div', 'band tick');
+    beacon('h1-tick-' + n);
+    if (n === 4) {
+      fetch('/slow?ms=2000').then(function (r) { return r.text(); }).then(function () {
+        add('div', 'band fetched');
+        beacon('h1-fetch');
+      });
+    }
+    if (n === 6) { add('img', '').src = '/img/00ffff.png'; }
+    if (n === 8) { clearInterval(timer); }
+  }, 1000);
+</script>

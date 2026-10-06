@@ -1992,10 +1992,16 @@ fn main() {
     // so the current state has to be carried between them.
     let modifiers = std::rc::Rc::new(std::cell::Cell::new(tao::keyboard::ModifiersState::empty()));
     let click_proxy = proxy.clone();
+    // When the content page's next timer is due. The loop sleeps until
+    // input otherwise, and a sleeping loop runs no timers.
+    let live_wake = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        *control_flow = match live_wake.get() {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        };
 
         match event {
             Event::WindowEvent {
@@ -2178,6 +2184,38 @@ fn main() {
                             return;
                         }
 
+                        // Nothing focused: the page hears the key first
+                        // (its own shortcuts). A cancelled keydown is the
+                        // page's key, not a scroll.
+                        let mods = modifiers.get();
+                        if !mods.super_key() {
+                            let (vk, text) = match &key_event.logical_key {
+                                Key::Escape => (0x1Bu32, String::new()),
+                                Key::Enter => (0x0D, String::new()),
+                                Key::PageUp => (0x21, String::new()),
+                                Key::PageDown => (0x22, String::new()),
+                                Key::End => (0x23, String::new()),
+                                Key::Home => (0x24, String::new()),
+                                Key::ArrowUp => (0x26, String::new()),
+                                Key::ArrowDown => (0x28, String::new()),
+                                Key::Space => (0, " ".to_string()),
+                                Key::Character(c) => (0, c.to_string()),
+                                _ => (0, String::new()),
+                            };
+                            if (vk != 0 || !text.is_empty())
+                                && view.handle_text_key(
+                                    vk,
+                                    &text,
+                                    mods.control_key(),
+                                    mods.shift_key(),
+                                    mods.alt_key(),
+                                )
+                            {
+                                view.relayout();
+                                return;
+                            }
+                        }
+
                         // scroll_by uses wheel sign convention: negative dy
                         // advances the page (natural scrolling).
                         let dy: Option<f32> = match key_event.logical_key {
@@ -2259,6 +2297,10 @@ fn main() {
             Event::MainEventsCleared => {
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    // The page's clock catches up before it hears any input:
+                    // a timer a click sets counts from the click, not from
+                    // the last time the loop woke.
+                    view.process_events();
                     // Clicks come from the content NSView's own handlers in
                     // VIEW-LOCAL coordinates — already viewport space, no
                     // chrome-height/sidebar math and none of its staleness
@@ -2267,23 +2309,44 @@ fn main() {
                     // tao window events (measured with a synthetic
                     // sendEvent:, 2026-08-07).
                     for click in rustkit_viewhost::drain_pending_clicks() {
+                        // The page hears the click before the browser
+                        // acts on it: mousedown on press; mouseup and click
+                        // on release, and only then focus and the link,
+                        // which a listener's preventDefault() cancels. Until
+                        // 2026-10-03 no event reached the page at all, so
+                        // every script-driven control was dead (Z lane I0).
+                        // Where the pointer is, and when it goes: what a
+                        // hover menu or a drag listens for.
+                        match click.input {
+                            rustkit_viewhost::PointerInput::Move => {
+                                view.mouse_move_at_point(click.x as f32, click.y as f32);
+                                continue;
+                            }
+                            rustkit_viewhost::PointerInput::Leave => {
+                                view.mouse_leave();
+                                continue;
+                            }
+                            rustkit_viewhost::PointerInput::Button => {}
+                        }
                         if click.down {
+                            view.mouse_down_at_point(click.x as f32, click.y as f32);
                             continue;
                         }
                         info!(x = click.x, y = click.y, "content click (view-local)");
-                        if let Some(tag) = view.focus_at_point(click.x as f32, click.y as f32) {
+                        let outcome = view.click_at_point(click.x as f32, click.y as f32);
+                        // ENGINE focus is not APPKIT focus: without making
+                        // the content view the window's first responder,
+                        // macOS keeps delivering keys to the chrome WebView
+                        // — observed live as "text entry goes back up to
+                        // the URL bar". Any click on the page takes the
+                        // keyboard, focused element or not: the page's own
+                        // shortcuts are keys with nothing focused.
+                        view.grab_keyboard();
+                        if let Some(tag) = outcome.focused {
                             info!(%tag, "Focused content element");
-                            // ENGINE focus is not APPKIT focus: without
-                            // making the content view the window's first
-                            // responder, macOS keeps delivering keys to the
-                            // chrome WebView — observed live as "text entry
-                            // goes back up to the URL bar". First real
-                            // caller of ViewHost::focus, whose deadlock was
-                            // fixed preemptively in #116.
-                            view.grab_keyboard();
                             view.relayout();
                         }
-                        if let Some(url) = view.link_at_point(click.x as f32, click.y as f32) {
+                        if let Some(url) = outcome.navigate {
                             info!(%url, "Link clicked");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
@@ -2304,8 +2367,19 @@ fn main() {
                             36 | 76 => (0x0D, ""), // return / keypad enter
                             48 => (0x09, ""),   // tab
                             53 => (0x1B, ""),   // escape
+                            116 => (0x21, ""),  // page up
+                            121 => (0x22, ""),  // page down
+                            126 => (0x26, ""),  // up
+                            125 => (0x28, ""),  // down
                             _ => (0, key.text.as_str()),
                         };
+                        if vk == 0 && text.is_empty() {
+                            continue;
+                        }
+                        if key.up {
+                            view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
+                            continue;
+                        }
                         if vk == 0x0D {
                             if let Some(url) = view.form_submit_url() {
                                 info!(%url, "Form submitted");
@@ -2313,13 +2387,31 @@ fn main() {
                                 continue;
                             }
                         }
-                        if (vk != 0 || !text.is_empty())
-                            && view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt)
-                        {
+                        let focused = view.has_focused_element();
+                        if view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt) {
                             view.relayout();
+                        } else if !focused {
+                            // Nothing focused and the page did not take
+                            // the key: the keys that scroll, as in the
+                            // window-level arm (wheel sign convention).
+                            let dy: Option<f32> = match (vk, text) {
+                                (0x28, _) => Some(-40.0),
+                                (0x26, _) => Some(40.0),
+                                (0x22, _) | (0, " ") => Some(-600.0),
+                                (0x21, _) => Some(600.0),
+                                (0x23, _) => Some(-f32::MAX),
+                                (0x24, _) => Some(f32::MAX),
+                                _ => None,
+                            };
+                            if let Some(dy) = dy {
+                                view.scroll_by(0.0, dy);
+                            }
                         }
                     }
-                    view.process_events();
+                    // Timers that came due, late fetches, and what the
+                    // input above started; then sleep until the next timer.
+                    let sleep = view.process_events();
+                    live_wake.set(sleep.map(|d| std::time::Instant::now() + d));
                     view.render();
                 }
             }

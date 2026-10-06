@@ -135,22 +135,57 @@ pub fn default_user_agent() -> String {
 /// #355 already removed the second (per-connection) load site.
 #[cfg(not(feature = "native-tls"))]
 fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
-    static ROOTS: std::sync::OnceLock<Arc<tokio_rustls::rustls::RootCertStore>> =
-        std::sync::OnceLock::new();
-    let roots = ROOTS.get_or_init(|| {
+    static ROOTS: RootsCache = std::sync::Mutex::new(None);
+    roots_cached(&ROOTS, || {
         let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs().certs {
+        let loaded = rustls_native_certs::load_native_certs();
+        let mut rejected = 0usize;
+        for cert in loaded.certs {
             // A single unparseable platform cert must not kill the store.
-            let _ = roots.add(cert);
+            if roots.add(cert).is_err() {
+                rejected += 1;
+            }
         }
-        Arc::new(roots)
-    });
-    if roots.is_empty() {
-        return Err(HttpError::TlsError(
-            "no usable platform root certificates".into(),
-        ));
+        let mut diagnostics = String::new();
+        if !loaded.errors.is_empty() || rejected > 0 {
+            diagnostics = format!(
+                "{} load errors, {} rejected certs, accepted {}",
+                loaded.errors.len(),
+                rejected,
+                roots.len()
+            );
+            if let Some(first) = loaded.errors.first() {
+                diagnostics.push_str(&format!(", first error: {first}"));
+            }
+            warn!(target: "rustkit_http::roots", "platform root load: {diagnostics}");
+        }
+        (roots, diagnostics)
+    })
+}
+
+type RootsCache = std::sync::Mutex<Option<Arc<tokio_rustls::rustls::RootCertStore>>>;
+
+fn roots_cached(
+    cache: &RootsCache,
+    load: impl FnOnce() -> (tokio_rustls::rustls::RootCertStore, String),
+) -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
+    let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(roots) = slot.as_ref() {
+        return Ok(roots.clone());
     }
-    Ok(roots.clone())
+    // Only a usable store is cached: a transient platform failure (keychain
+    // busy under load) must not turn every later handshake into an error.
+    let (roots, diagnostics) = load();
+    let roots = Arc::new(roots);
+    if roots.is_empty() {
+        return Err(HttpError::TlsError(if diagnostics.is_empty() {
+            "no usable platform root certificates".into()
+        } else {
+            format!("no usable platform root certificates ({diagnostics})")
+        }));
+    }
+    *slot = Some(roots.clone());
+    Ok(roots)
 }
 
 /// ALPN outcome of a TLS handshake.
@@ -599,7 +634,8 @@ impl Client {
         // first, remaining caller headers after, all in canonical casing.
         let mut request = Vec::new();
         writeln!(request, "{} {} HTTP/1.1\r", method, path)?;
-        writeln!(request, "Host: {}\r", host)?;
+        let host_header = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or(host);
+        writeln!(request, "Host: {}\r", host_header)?;
         writeln!(request, "Connection: keep-alive\r")?;
         writeln!(request, "User-Agent: {}\r", self.config.user_agent)?;
 
@@ -653,7 +689,7 @@ image/avif,image/webp,*/*;q=0.8",
 
         // Remaining caller headers, canonical casing, after the known set.
         for (name, value) in headers.iter() {
-            if written.contains(&name.as_str()) {
+            if name.as_str() == "host" || written.contains(&name.as_str()) {
                 continue;
             }
             if let Ok(v) = value.to_str() {
@@ -1309,6 +1345,56 @@ mod tests {
         let (version, status) = parse_status_line("HTTP/1.0 404 Not Found").unwrap();
         assert_eq!(version, Version::HTTP_10);
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn an_empty_platform_root_load_is_not_cached_for_the_life_of_the_process() {
+        use tokio_rustls::rustls::pki_types::{Der, TrustAnchor};
+        use tokio_rustls::rustls::RootCertStore;
+        let one_anchor = || RootCertStore {
+            roots: vec![TrustAnchor {
+                subject: Der::from_slice(b"subject"),
+                subject_public_key_info: Der::from_slice(b"spki"),
+                name_constraints: None,
+            }],
+        };
+        let cache: RootsCache = std::sync::Mutex::new(None);
+        let mut loads = 0;
+        assert!(
+            roots_cached(&cache, || {
+                loads += 1;
+                (RootCertStore::empty(), String::new())
+            })
+            .is_err(),
+            "an empty load is an error"
+        );
+        let got = roots_cached(&cache, || {
+            loads += 1;
+            (one_anchor(), String::new())
+        });
+        assert!(got.is_ok(), "a later successful load must be used, not the earlier empty one");
+        assert_eq!(loads, 2);
+        assert!(
+            roots_cached(&cache, || {
+                loads += 1;
+                (RootCertStore::empty(), String::new())
+            })
+            .is_ok()
+        );
+        assert_eq!(loads, 2, "a good store is cached and not reloaded");
+    }
+
+    #[test]
+    fn an_empty_platform_root_error_says_why() {
+        use tokio_rustls::rustls::RootCertStore;
+        let cache: RootsCache = std::sync::Mutex::new(None);
+        let err = roots_cached(&cache, || {
+            (RootCertStore::empty(), "2 load errors, first: keychain busy".to_string())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("keychain busy"), "the platform's reason must reach the caller: {err}");
+        assert!(err.contains("no usable platform root certificates"), "{err}");
     }
 
     #[test]

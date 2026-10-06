@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>L0 call site 2: fit-content width of a nested flex or grid item that holds a control</title>
+<!--
+  docs/LAYOUT_CONSTRAINTS_FRAGMENTS_2026-09-30.md §4, call site 2.
+
+  A column flex container with align-items: flex-start sizes each item to
+  its fit-content width. The item is itself a flex row or a grid, and it
+  holds a form control with no specified width.
+
+  #e-1  label + button
+  #e-2  text input + button
+  #e-3  a grid of text + button
+  #e-4  text long enough that max-content passes the 400px available
+  #e-5  a checkbox and its label
+  #e-6  control-free neighbour (already measured by the estimators)
+  #f    the same items centred (align-items: center)
+-->
+<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { font: 14px/20px Arial, sans-serif; padding: 10px; }
+.col { display: flex; flex-direction: column; align-items: flex-start; width: 400px; margin-bottom: 16px; background: #f4f4f4; }
+.row { display: flex; gap: 6px; margin-bottom: 4px; background: #dde; }
+.g { display: grid; grid-template-columns: auto auto; gap: 6px; margin-bottom: 4px; background: #fee; }
+button { font: 13px/16px Arial, sans-serif; padding: 2px 8px; border: 1px solid #333; background: #eee; margin: 0; }
+input[type=text] { font: 13px/16px Arial, sans-serif; padding: 2px 4px; border: 1px solid #333; margin: 0; }
+input[type=checkbox] { margin: 3px 0; width: 13px; height: 13px; }
+</style>
+</head>
+<body>
+
+<div id="e" class="col">
+  <div id="e-1" class="row"><span id="e-1-l">Label</span><button id="e-1-btn">Save changes</button></div>
+  <div id="e-2" class="row"><input id="e-2-in" type="text"><button id="e-2-btn">Go</button></div>
+  <div id="e-3" class="g"><span id="e-3-l">Grid label</span><button id="e-3-btn">Open</button></div>
+  <div id="e-4" class="row"><span id="e-4-l">one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen</span><button id="e-4-btn">Go</button></div>
+  <div id="e-5" class="row"><input id="e-5-cb" type="checkbox"><span id="e-5-l">Remember me</span></div>
+  <div id="e-6" class="row"><span id="e-6-l">No control here</span></div>
+</div>
+
+<div id="f" class="col" style="align-items: center;">
+  <div id="f-1" class="row"><span id="f-1-l">Label</span><button id="f-1-btn">Save changes</button></div>
+  <div id="f-2" class="row"><input id="f-2-in" type="text"><button id="f-2-btn">Go</button></div>
+</div>
+
+</body>
+</html>

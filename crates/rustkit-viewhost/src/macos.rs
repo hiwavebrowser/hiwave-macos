@@ -41,6 +41,18 @@ pub struct PendingClick {
     pub x: f64,
     pub y: f64,
     pub down: bool,
+    pub input: PointerInput,
+}
+
+/// What a [`PendingClick`] records: a press or release of the primary
+/// button (`down` says which), the pointer moving over the view, or the
+/// pointer leaving it.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerInput {
+    Button,
+    Move,
+    Leave,
 }
 
 /// Clicks captured by the RustKit NSView, drained by the app each loop turn.
@@ -59,12 +71,14 @@ pub fn drain_pending_clicks() -> Vec<PendingClick> {
 /// A key event captured by the content view while it is first responder.
 ///
 /// `text` carries the typed characters (empty for pure control keys);
-/// `mac_keycode` is the hardware-independent macOS keyCode for specials.
+/// `mac_keycode` is the hardware-independent macOS keyCode for specials;
+/// `up` is a release.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 pub struct PendingKey {
     pub text: String,
     pub mac_keycode: u16,
+    pub up: bool,
     pub ctrl: bool,
     pub cmd: bool,
     pub shift: bool,
@@ -97,8 +111,10 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
         let mut decl =
             ClassDecl::new("RustKitContentView", superclass).expect("register RustKitContentView");
 
-        extern "C" fn record(this: &Object, event: id, down: bool) {
-            tracing::info!(down, "RustKitContentView mouse event handler entered");
+        extern "C" fn record(this: &Object, event: id, down: bool, input: PointerInput) {
+            if input == PointerInput::Button {
+                tracing::info!(down, "RustKitContentView mouse event handler entered");
+            }
             unsafe {
                 // locationInWindow is window coords (bottom-left origin);
                 // convertPoint gives view-local, then flip to top-left.
@@ -110,17 +126,63 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                     x: lpt.x,
                     y: frame.size.height - lpt.y,
                     down,
+                    input,
                 };
                 if let Ok(mut q) = PENDING_CLICKS.lock() {
+                    // The page needs where the pointer is, not every point
+                    // it crossed since the last turn of the loop.
+                    if input == PointerInput::Move
+                        && q.last().is_some_and(|last| last.input == PointerInput::Move)
+                    {
+                        q.pop();
+                    }
                     q.push(click);
                 }
             }
         }
         extern "C" fn mouse_down(this: &Object, _sel: Sel, event: id) {
-            record(this, event, true);
+            record(this, event, true, PointerInput::Button);
         }
         extern "C" fn mouse_up(this: &Object, _sel: Sel, event: id) {
-            record(this, event, false);
+            record(this, event, false, PointerInput::Button);
+        }
+        // `mouseMoved:` with no button held, `mouseDragged:` with the
+        // primary button held: both are a move to the page.
+        extern "C" fn mouse_moved(this: &Object, _sel: Sel, event: id) {
+            record(this, event, false, PointerInput::Move);
+        }
+        extern "C" fn mouse_exited(this: &Object, _sel: Sel, event: id) {
+            record(this, event, false, PointerInput::Leave);
+        }
+        // AppKit sends `mouseMoved:` and `mouseExited:` only to a view with
+        // a tracking area that asks for them. `InVisibleRect` keeps the
+        // area on the view's visible rect through every resize.
+        extern "C" fn update_tracking_areas(this: &Object, _sel: Sel) {
+            const MOUSE_ENTERED_AND_EXITED: u64 = 0x01;
+            const MOUSE_MOVED: u64 = 0x02;
+            const ACTIVE_ALWAYS: u64 = 0x80;
+            const IN_VISIBLE_RECT: u64 = 0x200;
+            unsafe {
+                let superclass = Class::get("NSView").expect("NSView class");
+                let _: () = msg_send![super(this, superclass), updateTrackingAreas];
+                let areas: id = msg_send![this, trackingAreas];
+                let count: usize = msg_send![areas, count];
+                if count > 0 {
+                    return;
+                }
+                let zero = cocoa::foundation::NSRect::new(
+                    cocoa::foundation::NSPoint::new(0.0, 0.0),
+                    cocoa::foundation::NSSize::new(0.0, 0.0),
+                );
+                let area: id = msg_send![Class::get("NSTrackingArea").expect("NSTrackingArea class"), alloc];
+                let area: id = msg_send![area,
+                    initWithRect: zero
+                    options: MOUSE_ENTERED_AND_EXITED | MOUSE_MOVED | ACTIVE_ALWAYS | IN_VISIBLE_RECT
+                    owner: this as *const Object as id
+                    userInfo: nil];
+                let _: () = msg_send![this, addTrackingArea: area];
+                let _: () = msg_send![area, release];
+            }
         }
         extern "C" fn accepts_first_responder(_this: &Object, _sel: Sel) -> bool {
             // Without this, makeFirstResponder: refuses the view and macOS
@@ -131,7 +193,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             // and only one was wired.
             true
         }
-        extern "C" fn key_down(this: &Object, _sel: Sel, event: id) {
+        extern "C" fn record_key(event: id, up: bool) {
             unsafe {
                 let chars: id = msg_send![event, characters];
                 let text = if chars != nil {
@@ -149,6 +211,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 let key = PendingKey {
                     text,
                     mac_keycode: keycode,
+                    up,
                     ctrl: flags & (1 << 18) != 0,   // NSEventModifierFlagControl
                     cmd: flags & (1 << 20) != 0,    // NSEventModifierFlagCommand
                     shift: flags & (1 << 17) != 0,  // NSEventModifierFlagShift
@@ -158,11 +221,16 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                     q.push(key);
                 }
             }
-            let _ = this;
+        }
+        extern "C" fn key_down(_this: &Object, _sel: Sel, event: id) {
+            record_key(event, false);
             // Deliberately NOT calling super: consuming here is what keeps a
             // keystroke from ALSO reaching whatever else might interpret it.
             // Cmd-shortcuts still work: the menu system sees key equivalents
             // before the responder chain does.
+        }
+        extern "C" fn key_up(_this: &Object, _sel: Sel, event: id) {
+            record_key(event, true);
         }
         extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> bool {
             // A click on an inactive window should reach the page (this is
@@ -180,11 +248,19 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 accepts_first_responder as extern "C" fn(&Object, Sel) -> bool,
             );
             decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(keyUp:), key_up as extern "C" fn(&Object, Sel, id));
             decl.add_method(
                 sel!(mouseDown:),
                 mouse_down as extern "C" fn(&Object, Sel, id),
             );
             decl.add_method(sel!(mouseUp:), mouse_up as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(mouseMoved:), mouse_moved as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(mouseDragged:), mouse_moved as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(mouseExited:), mouse_exited as extern "C" fn(&Object, Sel, id));
+            decl.add_method(
+                sel!(updateTrackingAreas),
+                update_tracking_areas as extern "C" fn(&Object, Sel),
+            );
         }
         decl.register();
     });
