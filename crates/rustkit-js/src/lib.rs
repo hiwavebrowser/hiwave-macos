@@ -224,7 +224,7 @@ impl JsRuntime {
             // Promise reactions (`.then`, `await`) are jobs Boa queues but
             // does not run on its own; a page's async code never resumes
             // without this.
-            self.context.run_jobs();
+            let _ = self.context.run_jobs();
 
             match result {
                 Ok(value) => {

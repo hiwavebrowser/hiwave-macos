@@ -229,7 +229,7 @@ impl JsRuntime {
             .borrow_mut()
             .insert(url.to_string(), module.clone());
         let load = module.load(&mut self.context);
-        self.context.run_jobs();
+        let _ = self.context.run_jobs();
         self.modules.entries.insert(
             url.to_string(),
             ModuleEntry {
@@ -304,13 +304,13 @@ impl JsRuntime {
                 }
             }
         }
-        self.context.run_jobs();
+        let _ = self.context.run_jobs();
     }
 
     /// Advance a started module as far as it can go and say where it is:
     /// once its graph is loaded it is linked and evaluated.
     pub fn poll_module(&mut self, handle: &ModuleHandle) -> ModuleState {
-        self.context.run_jobs();
+        let _ = self.context.run_jobs();
         let Some(entry) = self.modules.entries.get_mut(&handle.0) else {
             return ModuleState::Failed("unknown module".into());
         };
@@ -347,7 +347,7 @@ impl JsRuntime {
                     return ModuleState::Failed(message);
                 }
             };
-            self.context.run_jobs();
+            let _ = self.context.run_jobs();
             if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                 entry.evaluation = Some(evaluation);
             }
