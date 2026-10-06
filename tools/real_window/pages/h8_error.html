@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H8 error page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  img { display: block; width: 400px; height: 200px; margin: 10px; }
+</style>
+<!-- The fixture server answers this page with 403. A browser shows an error
+     response's body like any page: its script runs and its image loads. -->
+<p>403: the server refused, and said so with this page.</p>
+<img src="/img/00ff00.png" alt="">
+<script>
+  fetch('/beacon?h8-ran');
+</script>

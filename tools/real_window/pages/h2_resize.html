@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H2 resize</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  /* 200 x 100 CSS px whatever the window is: its area in the frame must not
+     change when the window does. */
+  #fixed { position: absolute; left: 40px; top: 40px; width: 200px; height: 100px; background: #ff00ff; }
+  /* Half the viewport wide: its area must follow the window. */
+  #half { position: absolute; left: 0; top: 200px; width: 50%; height: 50px; background: #00ffff; }
+</style>
+<div id="fixed"></div>
+<div id="half"></div>
+<script>
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  beacon('h2-width-' + window.innerWidth);
+  window.addEventListener('resize', function () { beacon('h2-resize-' + window.innerWidth); });
+</script>

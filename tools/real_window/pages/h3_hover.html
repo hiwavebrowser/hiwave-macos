@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H3 hover and press</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; }
+  /* The target covers the whole viewport, so any point in the content area
+     is over it and the driver needs no page coordinates. */
+  #t { position: fixed; left: 0; top: 0; right: 0; bottom: 0; background: #ff0000; }
+  #t:hover { background: #00ff00; }
+  #t:active { background: #0000ff; }
+</style>
+<div id="t"></div>
+<script>
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  var t = document.getElementById('t');
+  t.addEventListener('mouseover', function () { beacon('h3-mouseover'); });
+  t.addEventListener('mousedown', function () { beacon('h3-mousedown'); });
+  t.addEventListener('click', function () { beacon('h3-click'); });
+</script>
