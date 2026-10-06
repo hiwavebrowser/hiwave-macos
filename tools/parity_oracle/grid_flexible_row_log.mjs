@@ -35,6 +35,12 @@ for (const c of data.cases) {
   await page.setContent(c.html);
   c.chrome_boxes = await page.evaluate(data.boxes === 'xywh' ? BOXES_XYWH : BOXES);
   console.log(c.name + '  ' + c.chrome_boxes);
+  if (c.html_longhand) {
+    // The same page with the shorthand written out as its longhands.
+    await page.setContent(c.html_longhand);
+    c.chrome_boxes_longhand = await page.evaluate(data.boxes === 'xywh' ? BOXES_XYWH : BOXES);
+    console.log('  longhands ' + (c.chrome_boxes_longhand === c.chrome_boxes ? 'the same' : c.chrome_boxes_longhand));
+  }
   await page.close();
 }
 if (process.argv.includes('--write')) {
