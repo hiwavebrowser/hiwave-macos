@@ -40,6 +40,14 @@ const PERCENT_HEIGHT_GAPS: &[&str] =
 const CONTROL_LINE_GAPS: &[&str] =
     &["text-and-a-text-input", "text-and-a-button", "text-and-a-checkbox", "two-buttons"];
 
+/// A grid item whose only child is an image is as tall as the image (50),
+/// where Chrome and a plain block put it on a line (55, the image above the
+/// baseline and the strut's descent below). A single child is left on the
+/// block arm of Phase 9: flowing a lone image exposed a column that is too
+/// narrow on bing and shrank its search icon to a dot. This one waits for
+/// the column.
+const LONE_IMAGE_GAPS: &[&str] = &["a-lone-image"];
+
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
 fn a_flexible_row_of_an_auto_height_grid_is_as_tall_as_in_chrome() {
@@ -64,7 +72,9 @@ fn a_flexible_row_of_an_auto_height_grid_is_as_tall_as_in_chrome() {
             .and_then(|v| v.strip_suffix("\")"))
             .unwrap_or(&value);
 
-        let gap = PERCENT_HEIGHT_GAPS.contains(&name) || CONTROL_LINE_GAPS.contains(&name);
+        let gap = PERCENT_HEIGHT_GAPS.contains(&name)
+            || CONTROL_LINE_GAPS.contains(&name)
+            || LONE_IMAGE_GAPS.contains(&name);
         match (got == chrome, gap) {
             (false, false) => wrong.push(format!("{name}\n   engine {got}\n   chrome {chrome}")),
             (true, true) => gaps_that_pass.push(name),
