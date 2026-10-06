@@ -524,7 +524,7 @@
       "rustkit_status": "ok",
       "chrome_error": null,
       "rustkit_error": null,
-      "first_script_error": "nomodule (skipped, as in module-capable browsers)",
+      "first_script_error": "JS engine panic",
       "chrome_action_delta": 20.8396484375,
       "rustkit_action_delta": 0,
       "step_diffs": [
@@ -730,7 +730,7 @@
       "rustkit_status": "ok",
       "chrome_error": null,
       "rustkit_error": null,
-      "first_script_error": "nomodule (skipped, as in module-capable browsers)",
+      "first_script_error": null,
       "chrome_action_delta": 0.38994140625,
       "rustkit_action_delta": 0,
       "step_diffs": [
@@ -936,7 +936,7 @@
       "rustkit_status": "ok",
       "chrome_error": null,
       "rustkit_error": null,
-      "first_script_error": "nomodule (skipped, as in module-capable browsers)",
+      "first_script_error": null,
       "chrome_action_delta": 20.2048828125,
       "rustkit_action_delta": 0,
       "step_diffs": [
@@ -1907,7 +1907,7 @@
       "rustkit_status": "ok",
       "chrome_error": null,
       "rustkit_error": null,
-      "first_script_error": "nomodule (skipped, as in module-capable browsers)",
+      "first_script_error": null,
       "chrome_action_delta": 7.9302734375,
       "rustkit_action_delta": 0,
       "step_diffs": [

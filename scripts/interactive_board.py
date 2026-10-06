@@ -195,6 +195,11 @@ def run_rustkit_actions(
     out_dir.mkdir(parents=True, exist_ok=True)
     actions_json = json.dumps(actions)
     dump_scripts_path = out_dir / "rustkit-scripts.json"
+    if dump_scripts_path.exists():
+        try:
+            dump_scripts_path.unlink()
+        except OSError:
+            pass
     cmd = [
         str(capture_bin),
         "--url",
@@ -233,10 +238,8 @@ def run_rustkit_actions(
             s_data = json.loads(dump_scripts_path.read_text(encoding="utf-8", errors="replace"))
             scripts_list = s_data.get("scripts", []) if isinstance(s_data, dict) else s_data
             for rec in scripts_list:
-                outcome = rec.get("outcome")
-                detail = rec.get("detail")
-                if outcome == "threw" or detail:
-                    first_error = detail or outcome
+                if rec.get("outcome") == "threw":
+                    first_error = rec.get("detail") or rec.get("outcome")
                     break
         except Exception:
             pass
@@ -390,19 +393,21 @@ def main():
         print(json.dumps(summary, indent=2))
     else:
         print(f"\nInteractive Board Run Complete. Saved to {run_dir}")
-        print(f"{'Site':<15} {'Chrome':<8} {'RustKit':<8} {'Outcome':<10} {'C-Delta':<10} {'R-Delta':<10} {'First Script Error'}")
-        print("-" * 105)
+        print(f"{'Site':<14} {'Chrome':<7} {'RustKit':<8} {'Outcome':<8} {'C-Delta':<9} {'R-Delta':<9} {'BeforeDiff':<11} {'AfterDiff':<11} {'First Script Error'}")
+        print("-" * 120)
         for s_id, s_data in summary["sites"].items():
             b_diff = next((d["diff_percent"] for d in s_data["step_diffs"] if d.get("label") == "before"), None)
             a_diff = next((d["diff_percent"] for d in s_data["step_diffs"] if d.get("label") == "after"), None)
             c_d = f"{s_data['chrome_action_delta']:.2f}%" if s_data['chrome_action_delta'] is not None else "N/A"
             r_d = f"{s_data['rustkit_action_delta']:.2f}%" if s_data['rustkit_action_delta'] is not None else "N/A"
+            b_d = f"{b_diff:.2f}%" if b_diff is not None else "N/A"
+            a_d = f"{a_diff:.2f}%" if a_diff is not None else "N/A"
             outcome = s_data.get("outcome", "unknown")
             err = s_data.get("first_script_error") or s_data.get("rustkit_error") or "none"
             err_str = str(err).replace("\n", " ")
-            if len(err_str) > 45:
-                err_str = err_str[:42] + "..."
-            print(f"{s_id:<15} {s_data['chrome_status']:<8} {s_data['rustkit_status']:<8} {outcome:<10} {c_d:<10} {r_d:<10} {err_str}")
+            if len(err_str) > 40:
+                err_str = err_str[:37] + "..."
+            print(f"{s_id:<14} {s_data['chrome_status']:<7} {s_data['rustkit_status']:<8} {outcome:<8} {c_d:<9} {r_d:<9} {b_d:<11} {a_d:<11} {err_str}")
 
 
 if __name__ == "__main__":
