@@ -194,6 +194,12 @@ def run_rustkit_actions(
     """Execute action sequence in RustKit via parity-capture --actions."""
     out_dir.mkdir(parents=True, exist_ok=True)
     actions_json = json.dumps(actions)
+    dump_scripts_path = out_dir / "rustkit-scripts.json"
+    if dump_scripts_path.exists():
+        try:
+            dump_scripts_path.unlink()
+        except OSError:
+            pass
     cmd = [
         str(capture_bin),
         "--url",
@@ -202,6 +208,8 @@ def run_rustkit_actions(
         actions_json,
         "--actions-out-dir",
         str(out_dir),
+        "--dump-scripts",
+        str(dump_scripts_path),
         "--width",
         str(width),
         "--height",
@@ -209,6 +217,7 @@ def run_rustkit_actions(
         "--timeout-ms",
         str(timeout_ms),
     ]
+    res = {}
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         stdout = proc.stdout.strip()
@@ -216,10 +225,26 @@ def run_rustkit_actions(
         for line in reversed(lines):
             line = line.strip()
             if line.startswith("{") and line.endswith("}"):
-                return json.loads(line)
-        return {"status": "error", "error": proc.stderr or stdout}
+                res = json.loads(line)
+                break
+        if not res:
+            res = {"status": "error", "error": proc.stderr or stdout}
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        res = {"status": "error", "error": str(e)}
+
+    first_error = None
+    if dump_scripts_path.exists():
+        try:
+            s_data = json.loads(dump_scripts_path.read_text(encoding="utf-8", errors="replace"))
+            scripts_list = s_data.get("scripts", []) if isinstance(s_data, dict) else s_data
+            for rec in scripts_list:
+                if rec.get("outcome") == "threw":
+                    first_error = rec.get("detail") or rec.get("outcome")
+                    break
+        except Exception:
+            pass
+    res["first_script_error"] = first_error
+    return res
 
 
 def diff_frames(frame_a: Path, frame_b: Path, diff_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -351,6 +376,7 @@ def main():
             "rustkit_status": rk_res.get("status"),
             "chrome_error": chrome_res.get("error"),
             "rustkit_error": rk_res.get("error"),
+            "first_script_error": rk_res.get("first_script_error"),
             "chrome_action_delta": c_delta,
             "rustkit_action_delta": r_delta,
             "step_diffs": step_diffs,
@@ -367,8 +393,8 @@ def main():
         print(json.dumps(summary, indent=2))
     else:
         print(f"\nInteractive Board Run Complete. Saved to {run_dir}")
-        print(f"{'Site':<15} {'Chrome':<8} {'RustKit':<8} {'Outcome':<10} {'C-Delta':<10} {'R-Delta':<10} {'BeforeDiff':<12} {'AfterDiff':<12}")
-        print("-" * 92)
+        print(f"{'Site':<14} {'Chrome':<7} {'RustKit':<8} {'Outcome':<8} {'C-Delta':<9} {'R-Delta':<9} {'BeforeDiff':<11} {'AfterDiff':<11} {'First Script Error'}")
+        print("-" * 120)
         for s_id, s_data in summary["sites"].items():
             b_diff = next((d["diff_percent"] for d in s_data["step_diffs"] if d.get("label") == "before"), None)
             a_diff = next((d["diff_percent"] for d in s_data["step_diffs"] if d.get("label") == "after"), None)
@@ -377,7 +403,11 @@ def main():
             b_d = f"{b_diff:.2f}%" if b_diff is not None else "N/A"
             a_d = f"{a_diff:.2f}%" if a_diff is not None else "N/A"
             outcome = s_data.get("outcome", "unknown")
-            print(f"{s_id:<15} {s_data['chrome_status']:<8} {s_data['rustkit_status']:<8} {outcome:<10} {c_d:<10} {r_d:<10} {b_d:<12} {a_d:<12}")
+            err = s_data.get("first_script_error") or s_data.get("rustkit_error") or "none"
+            err_str = str(err).replace("\n", " ")
+            if len(err_str) > 40:
+                err_str = err_str[:37] + "..."
+            print(f"{s_id:<14} {s_data['chrome_status']:<7} {s_data['rustkit_status']:<8} {outcome:<8} {c_d:<9} {r_d:<9} {b_d:<11} {a_d:<11} {err_str}")
 
 
 if __name__ == "__main__":
