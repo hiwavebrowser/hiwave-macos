@@ -4050,9 +4050,16 @@ fn apply_justify_self(
     }
 }
 
-/// True for a grid item with more than one in-flow child, all of them inline
-/// boxes or text. A lone text child is left to the block arm of Phase 9,
-/// which has always placed it.
+/// True for a grid item with more than one in-flow child, at least one of
+/// them inline-level: an inline box, text, an image, a form control, a
+/// forced break or an atomic inline (the same test the block children pass
+/// makes). Such an item is flowed by that pass, which builds line boxes and
+/// wraps the inline runs around any block children. An item with only block
+/// children keeps the block arm of Phase 9, and so does an item with a
+/// single child: a lone text child has always been placed by that arm, and
+/// a lone image is drawn by it at its own size even where the item's column
+/// came out too narrow (bing's search icon: an svg in a label whose column
+/// is 1.6px wide; flowed, the icon shrank to a dot).
 fn item_children_flow_inline(item: &LayoutBox) -> bool {
     let mut in_flow = item.children.iter().filter(|c| {
         !matches!(
@@ -4060,15 +4067,18 @@ fn item_children_flow_inline(item: &LayoutBox) -> bool {
             rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
         ) && c.float == crate::Float::None
     });
-    let all_inline = in_flow
-        .clone()
-        .all(|c| {
-            matches!(
+    let inline_level = |c: &LayoutBox| {
+        c.style.display.is_atomic_inline()
+            || matches!(
                 c.box_type,
-                crate::BoxType::Inline | crate::BoxType::Text(_) | crate::BoxType::LineBreak
+                crate::BoxType::Inline
+                    | crate::BoxType::Text(_)
+                    | crate::BoxType::Image { .. }
+                    | crate::BoxType::FormControl(_)
+                    | crate::BoxType::LineBreak
             )
-        });
-    all_inline && in_flow.nth(1).is_some()
+    };
+    in_flow.clone().any(inline_level) && in_flow.nth(1).is_some()
 }
 
 /// Whether a grid item fills its area on the block axis: `align-self`
