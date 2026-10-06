@@ -2293,6 +2293,10 @@ pub fn layout_grid_container(
             .collect();
         // Items spanning a flexible row: (rows, outer height needed).
         let mut flex_spanners: Vec<(std::ops::Range<usize>, f32)> = Vec::new();
+        // False once a flexible row holds (or is crossed by) an item whose
+        // real height is not known: the flexible rows then keep the
+        // grow-only repair.
+        let mut flexible_rows_known = true;
         {
             let mut idx = 0usize;
             for child in container.children.iter() {
@@ -2322,6 +2326,8 @@ pub fn layout_grid_container(
                                     rows_spanned,
                                     real_h + pb + vertical_margins(&child.style),
                                 ));
+                            } else if !child.children.is_empty() {
+                                flexible_rows_known = false;
                             }
                         } else {
                             for r in rows_spanned {
@@ -2352,7 +2358,9 @@ pub fn layout_grid_container(
                         let is_border_box = child.style.box_sizing == BoxSizing::BorderBox;
                         if let Length::Px(h) = child.style.height {
                             let border_box = if is_border_box { h } else { h + pb };
-                            wanted = Some(border_box.max(wanted.unwrap_or(0.0)));
+                            // Not the taller of the two: content that
+                            // overflows a fixed height does not size the row.
+                            wanted = Some(border_box);
                         }
                         if let Length::Px(min_h) = child.style.min_height {
                             let floor = if is_border_box { min_h } else { min_h + pb };
@@ -2365,6 +2373,9 @@ pub fn layout_grid_container(
                             // estimate and the flow disagree on what it
                             // resolves against; do not shrink under it.
                             row_shrinkable[r0] = false;
+                            if grid.rows[r0].is_flexible {
+                                flexible_rows_known = false;
+                            }
                         }
 
                         // css-sizing-4 §4: an `aspect-ratio` item whose block
@@ -2409,7 +2420,12 @@ pub fn layout_grid_container(
                                 row_real[r0] =
                                     Some(row_real[r0].map_or(outer, |r: f32| r.max(outer)));
                             }
-                            None => row_shrinkable[r0] = false,
+                            None => {
+                                row_shrinkable[r0] = false;
+                                if grid.rows[r0].is_flexible {
+                                    flexible_rows_known = false;
+                                }
+                            }
                         }
                     }
                 }
@@ -2439,6 +2455,81 @@ pub fn layout_grid_container(
                 None => 0.0,
             })
             .collect();
+        // Flexible rows. With an auto height there is no free space to
+        // share, so css-grid-1 12.7.1 sizes an `fr` from the items: the
+        // largest of each flexible row's content over its flex factor, and
+        // of each crossing item's height (less the other rows it crosses)
+        // over the factors it crosses. That content is the items' REAL
+        // height, like an `auto` row's, and track sizing only had the
+        // estimate. A Wikipedia article sits in the `1fr` last row of
+        // `main.mw-body`: charged a line per text node, the row was 73554px
+        // around 12338px of article. So a flexible row shrinks to the real
+        // figure too, and a `min-height` on the grid is shared out by the
+        // same `fr` (Chrome: `min-height: 300px` over a 20px row and a
+        // `1fr` row of 60px content gives the flexible row 280).
+        if flexible_rows_known && grid.rows.iter().any(|t| t.is_flexible) {
+            let factor = |t: &GridTrack| t.flex_factor.max(0.0);
+            // Rows after the repair above, flexible rows as their content.
+            let content: Vec<f32> = grid
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    if t.is_flexible {
+                        row_real[i].unwrap_or(0.0)
+                    } else {
+                        (t.size + row_delta[i]).max(0.0)
+                    }
+                })
+                .collect();
+            let mut fr = 0.0f32;
+            for (i, t) in grid.rows.iter().enumerate() {
+                if t.is_flexible {
+                    fr = fr.max(content[i] / factor(t).max(1.0));
+                }
+            }
+            let fr_to_fill = |space: f32, rows: std::ops::Range<usize>| -> f32 {
+                let fixed: f32 = rows
+                    .clone()
+                    .filter(|&r| !grid.rows[r].is_flexible)
+                    .map(|r| content[r])
+                    .sum();
+                let factors: f32 = rows
+                    .clone()
+                    .filter(|&r| grid.rows[r].is_flexible)
+                    .map(|r| factor(&grid.rows[r]))
+                    .sum();
+                let gaps = row_gap * rows.len().saturating_sub(1) as f32;
+                (space - fixed - gaps) / factors.max(1.0)
+            };
+            for (rows_spanned, needed) in &flex_spanners {
+                fr = fr.max(fr_to_fill(*needed, rows_spanned.clone()));
+            }
+            let min_height = match &style.min_height {
+                Length::Px(h) => *h,
+                l if is_font_or_viewport_relative(l) => container.length_to_px(l, 0.0),
+                _ => 0.0,
+            };
+            if min_height > 0.0 {
+                let own = if style.box_sizing == BoxSizing::BorderBox {
+                    container.dimensions.padding.top
+                        + container.dimensions.padding.bottom
+                        + container.dimensions.border.top
+                        + container.dimensions.border.bottom
+                } else {
+                    0.0
+                };
+                fr = fr.max(fr_to_fill(min_height - own, 0..grid.rows.len()));
+            }
+            for (i, t) in grid.rows.iter().enumerate() {
+                if t.is_flexible {
+                    // Never under the row's own content (a factor below 1).
+                    let size = (fr * factor(t)).max(content[i]);
+                    let delta = size - t.size;
+                    row_delta[i] = if delta.abs() > 0.5 { delta } else { 0.0 };
+                }
+            }
+        }
         // A flexible-row spanner still gets its full height: whatever the
         // re-sized rows leave short goes to its first flexible row.
         for (rows_spanned, needed) in &flex_spanners {
