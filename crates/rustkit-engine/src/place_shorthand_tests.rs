@@ -26,21 +26,9 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// longhand does, not in the shorthand. A page listed here that starts to
 /// match Chromium fails the test, so the list cannot go stale.
 ///
-/// All nine are the block axis of a grid: an item with `align-items` or
-/// `align-self` of `start`, `center` or `end` in a px row stays at the top
-/// of the row and as tall as it (seven pages), and `align-content` does not
-/// move the rows of a grid with a px height (two pages).
-const LONGHAND_GAPS: &[&str] = &[
-    "place-items-center",
-    "place-items-start",
-    "place-items-end",
-    "place-items-start-end",
-    "place-items-center-stretch",
-    "place-self-center",
-    "place-self-end-start",
-    "place-content-center",
-    "place-content-end-space-between",
-];
+/// Empty since the block axis of grid alignment was implemented
+/// (`grid_block_axis_align_tests`); nine pages were listed until then.
+const LONGHAND_GAPS: &[&str] = &[];
 
 fn boxes(html: &str, w: u64, h: u64) -> String {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");

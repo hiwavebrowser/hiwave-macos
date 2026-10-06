@@ -10,6 +10,9 @@
 //! sits at the start, centre or end of its area. The engine gave every
 //! auto-height item the whole area whatever its alignment, so `display:
 //! grid; place-items: center` centred nothing on the block axis.
+//! `align-content` moves or spreads the rows in the space a `height` or a
+//! `min-height` leaves; a grid with a px height was laid out as if it were as
+//! tall as its children stacked, so there was never any space.
 
 use super::*;
 
@@ -22,7 +25,28 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Pages the engine does not give Chromium's boxes. A page listed here that
 /// starts to match Chromium fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[];
+///
+/// - `baseline`: baseline alignment is not implemented; the item sits at the
+///   start of its row, at its content height.
+/// - the two `-of-wrapped-text` pages: a grid item whose only child is text
+///   that wraps is one line tall, with `stretch` as well. Not alignment.
+/// - `content-center-auto-rows-of-wrapped-paragraphs`: in a grid with a px
+///   height the auto rows keep the track-sizing estimate (one line for the
+///   paragraph that wraps to five); the repair by real heights only runs
+///   for an auto-height grid.
+/// - `hero-height-place-content-center`: the block axis is right; on the
+///   inline axis `justify-content: center` does not shrink the auto column
+///   to its content.
+/// - `percent-height-content-center`: a percentage height reaches the grid
+///   pass as the height of its children stacked, so there is no free space.
+const GAPS: &[&str] = &[
+    "baseline",
+    "center-in-an-auto-row-of-wrapped-text",
+    "stretch-in-an-auto-row-of-wrapped-text",
+    "content-center-auto-rows-of-wrapped-paragraphs",
+    "hero-height-place-content-center",
+    "percent-height-content-center",
+];
 
 fn boxes(html: &str, w: u64, h: u64) -> String {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");

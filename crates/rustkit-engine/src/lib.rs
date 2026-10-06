@@ -8491,6 +8491,7 @@ impl Engine {
                     "center" => rustkit_css::AlignContent::Center,
                     "space-between" => rustkit_css::AlignContent::SpaceBetween,
                     "space-around" => rustkit_css::AlignContent::SpaceAround,
+                    "space-evenly" => rustkit_css::AlignContent::SpaceEvenly,
                     "stretch" => rustkit_css::AlignContent::Stretch,
                     _ => rustkit_css::AlignContent::Stretch,
                 };
