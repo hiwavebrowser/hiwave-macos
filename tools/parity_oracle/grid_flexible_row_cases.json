@@ -108,6 +108,11 @@
    "name": "label-and-value-with-padding-and-a-px-height",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}#b{height:48px;padding:4px;border:1px solid}</style></head><body><div class=g id=g><div id=b>Label: <b>value</b> tail</div></div><div id=after>x</div></body></html>",
    "chrome_boxes": "g:0:58 b:0:58 after:58:20"
+  },
+  {
+   "name": "lone-text-with-a-percent-height",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}.g{display:grid;width:600px}.g{height:100px}#b{height:50%}</style></head><body><div class=g id=g><div id=b>Label</div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:100 b:0:50 after:100:20"
   }
  ],
  "chrome": "143.0.7499.4"

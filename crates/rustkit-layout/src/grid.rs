@@ -1916,21 +1916,43 @@ pub fn layout_grid_container(
                 // inline boxes and text, which share lines. The block arm
                 // below stacks an item's children one under the other, so
                 // `<div>Label: <b>value</b> tail</div>` came out three lines
-                // tall (Chrome: one). Flow them as the item's own lines; the
-                // item's auto height is written back and is its real height.
+                // tall (Chrome: one). Flow them as the item's own lines.
+                //
+                // The flow writes the line extent over the item's height
+                // whatever its style says, so the box Phase 8 gave it is put
+                // back unless the height is `auto`: with `height: 48px` (or
+                // a percentage) around one line the item is 48px tall, and
+                // with `height: 10px` around two lines it is 10 and they
+                // overflow. An auto height is the line extent, capped by a
+                // px `max-height`.
                 let area_height = child.dimensions.content.height;
                 let mut margins = crate::MarginCollapseContext::new();
                 let mut floats = crate::FloatContext::new();
                 child.layout_block_children_with_collapse(&mut margins, &mut floats, None);
-                let content_height = child.dimensions.content.height;
+                let cap = match child.style.max_height {
+                    Length::Px(max_h) if child.style.box_sizing == BoxSizing::BorderBox => {
+                        let pb = child.dimensions.padding.top
+                            + child.dimensions.padding.bottom
+                            + child.dimensions.border.top
+                            + child.dimensions.border.bottom;
+                        (max_h - pb).max(0.0)
+                    }
+                    Length::Px(max_h) => max_h,
+                    _ => f32::INFINITY,
+                };
+                let content_height = child.dimensions.content.height.min(cap);
                 if let Some(slot) = real_heights.get_mut(item_idx) {
                     *slot = Some(content_height);
                 }
-                if area_height > content_height
+                child.dimensions.content.height = if !matches!(child.style.height, Length::Auto) {
+                    area_height
+                } else if area_height > content_height
                     && stretches_to_its_row(child, &container_align_items)
                 {
-                    child.dimensions.content.height = area_height;
-                }
+                    area_height.min(cap)
+                } else {
+                    content_height
+                };
             } else {
                 // Block container: re-layout children with correct positioning and height resolution.
                 // The grid item's dimensions.content.height is the grid-assigned height.
@@ -4028,8 +4050,6 @@ fn apply_justify_self(
     }
 }
 
-/// Whether a grid item fills its area on the block axis: `align-self`
-/// resolves to `stretch` and its height is `auto` (css-align-3 §4.2).
 /// True for a grid item with more than one in-flow child, all of them inline
 /// boxes or text. A lone text child is left to the block arm of Phase 9,
 /// which has always placed it.
@@ -4051,6 +4071,8 @@ fn item_children_flow_inline(item: &LayoutBox) -> bool {
     all_inline && in_flow.nth(1).is_some()
 }
 
+/// Whether a grid item fills its area on the block axis: `align-self`
+/// resolves to `stretch` and its height is `auto` (css-align-3 §4.2).
 fn stretches_to_its_row(child: &LayoutBox, items_align: &AlignItems) -> bool {
     let stretch = match child.style.align_self {
         AlignSelf::Auto => *items_align == AlignItems::Stretch,
