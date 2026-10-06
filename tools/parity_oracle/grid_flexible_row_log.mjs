@@ -11,11 +11,19 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { chromium } from 'playwright';
 import { getDeterministicLaunchOptions } from './deterministic.mjs';
 
-const FILE = new URL('./grid_flexible_row_cases.json', import.meta.url);
+// A second case file can be named: --file grid_item_min_max_cases.json. A
+// file with "boxes": "xywh" gets "id:x:y:width:height" (BOXES_XYWH).
+const named = process.argv.indexOf('--file');
+const FILE = new URL('./' + (named > 0 ? process.argv[named + 1] : 'grid_flexible_row_cases.json'), import.meta.url);
 // The same expression the engine test evaluates.
 export const BOXES = `Array.prototype.map.call(document.querySelectorAll('[id]'), function (e) {
   var r = e.getBoundingClientRect();
   return e.id + ':' + Math.round(r.top) + ':' + Math.round(r.height);
+}).join(' ')`;
+
+export const BOXES_XYWH = `Array.prototype.map.call(document.querySelectorAll('[id]'), function (e) {
+  var r = e.getBoundingClientRect();
+  return e.id + ':' + Math.round(r.left) + ':' + Math.round(r.top) + ':' + Math.round(r.width) + ':' + Math.round(r.height);
 }).join(' ')`;
 
 const data = JSON.parse(readFileSync(FILE, 'utf8'));
@@ -25,7 +33,7 @@ console.log('chrome ' + browser.version());
 for (const c of data.cases) {
   const page = await browser.newPage({ viewport: { width, height } });
   await page.setContent(c.html);
-  c.chrome_boxes = await page.evaluate(BOXES);
+  c.chrome_boxes = await page.evaluate(data.boxes === 'xywh' ? BOXES_XYWH : BOXES);
   console.log(c.name + '  ' + c.chrome_boxes);
   await page.close();
 }
