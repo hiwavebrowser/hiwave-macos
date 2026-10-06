@@ -26,7 +26,10 @@ pub use traits::{ViewHostTrait, WindowHandle};
 #[cfg(target_os = "macos")]
 pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
-pub use macos::{drain_pending_clicks, drain_pending_keys, PendingClick, PendingKey, PointerInput};
+pub use macos::{
+    drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, PendingClick, PendingKey,
+    PendingScroll, PointerInput,
+};
 
 // Screenshot capture (Windows: GPU readback of a hosted view)
 #[cfg(windows)]
