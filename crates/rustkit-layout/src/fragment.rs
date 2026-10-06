@@ -645,4 +645,85 @@ mod tests {
         empty.children.clear();
         assert!(!in_l0_class(&empty));
     }
+
+    /// Membership that the first L0 slice pins in prose but not yet in a
+    /// test: a form control counts; whitespace-only text, a `display:none`
+    /// subtree, an image, and out-of-flow items do not. Nested queries also
+    /// refuse to re-enter, so a queried subtree is not laid out once per level.
+    #[test]
+    fn l0_class_membership_and_nested_queries() {
+        let flex = || {
+            let mut s = rustkit_css::ComputedStyle::new();
+            s.display = rustkit_css::Display::Flex;
+            LayoutBox::new(BoxType::Block, s)
+        };
+        let mut with_control = flex();
+        with_control.children.push(LayoutBox::new(
+            BoxType::FormControl(crate::FormControlType::Button {
+                label: "Go".into(),
+                button_type: "button".into(),
+            }),
+            rustkit_css::ComputedStyle::new(),
+        ));
+        assert!(in_l0_class(&with_control), "a form control puts the item in L0");
+
+        let mut grid = flex();
+        grid.style.display = rustkit_css::Display::Grid;
+        grid.children.push(LayoutBox::new(
+            BoxType::Text("cell".into()),
+            rustkit_css::ComputedStyle::new(),
+        ));
+        assert!(in_l0_class(&grid), "a grid holding text is in L0");
+
+        let mut spaces = flex();
+        spaces.children.push(LayoutBox::new(
+            BoxType::Text(" \t\n".into()),
+            rustkit_css::ComputedStyle::new(),
+        ));
+        assert!(!in_l0_class(&spaces), "whitespace-only text is not content");
+
+        let mut hidden = flex();
+        let mut none = rustkit_css::ComputedStyle::new();
+        none.display = rustkit_css::Display::None;
+        hidden.children.push(LayoutBox::new(BoxType::Text("x".into()), none));
+        assert!(!in_l0_class(&hidden), "display:none children do not count");
+
+        let mut image = flex();
+        image.children.push(LayoutBox::new(
+            BoxType::Image {
+                url: "x.png".into(),
+                natural_width: 10.0,
+                natural_height: 10.0,
+            },
+            rustkit_css::ComputedStyle::new(),
+        ));
+        assert!(!in_l0_class(&image), "a replaced image alone is out of L0");
+
+        let mut absolute = flex();
+        absolute.style.position = rustkit_css::Position::Absolute;
+        absolute.children.push(LayoutBox::new(
+            BoxType::Text("x".into()),
+            rustkit_css::ComputedStyle::new(),
+        ));
+        assert!(!in_l0_class(&absolute));
+        absolute.style.position = rustkit_css::Position::Fixed;
+        assert!(!in_l0_class(&absolute));
+
+        let mut item = flex();
+        item.children.push(LayoutBox::new(
+            BoxType::Text("x".into()),
+            rustkit_css::ComputedStyle::new(),
+        ));
+        let constraint = Constraint::definite_inline(100.0, WritingMode::HorizontalTb, None);
+        QUERY_DEPTH.with(|d| d.set(1));
+        assert!(
+            intrinsic_fragment(&item, &constraint, |_| {}).is_none(),
+            "a query already in flight must not re-enter"
+        );
+        QUERY_DEPTH.with(|d| d.set(0));
+        assert!(
+            intrinsic_fragment(&item, &constraint, |_| {}).is_some(),
+            "precondition: the same item is queryable at depth 0"
+        );
+    }
 }

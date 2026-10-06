@@ -138,3 +138,36 @@ fn create_event_makes_uninitialised_events_for_init_and_dispatch() {
          NotSupportedError,ping:true:false::ping:false:true:7"
     );
 }
+
+/// `initEvent` / `initCustomEvent` must not rewrite a live event. Before the
+/// `eventPhase !== 0` guard, a listener that re-inited its event changed the
+/// type mid-dispatch and broke later listeners on the same path.
+#[test]
+fn init_event_during_dispatch_does_nothing() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var r = [], d = document.getElementById('main'); \
+             d.addEventListener('keep', function (e) { \
+               e.initEvent('mutated', false, true); \
+               r.push(e.type, e.bubbles, e.cancelable, e.eventPhase !== 0); \
+             }); \
+             var e = document.createEvent('Event'); e.initEvent('keep', true, false); \
+             d.dispatchEvent(e); \
+             d.addEventListener('cust', function (e) { \
+               e.initCustomEvent('nope', false, true, 99); \
+               r.push(e.type, e.bubbles, e.cancelable, e.detail); \
+             }); \
+             var c = document.createEvent('CustomEvent'); \
+             c.initCustomEvent('cust', true, false, 3); \
+             d.dispatchEvent(c); \
+             c.initCustomEvent('after', false, true); \
+             r.push(c.type, c.cancelable, String(c.detail)); \
+             r.join('|')"
+        ),
+        // During dispatch the inits are ignored; after dispatch they apply,
+        // and a missing detail argument becomes null.
+        "keep|true|false|true|cust|true|false|3|after|true|null"
+    );
+}
