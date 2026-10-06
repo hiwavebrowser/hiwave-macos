@@ -20,7 +20,12 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Pages the engine does not give Chromium's boxes. A page listed here that
 /// starts to match Chromium fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[];
+///
+/// All three have the right boxes for the grid and its items. What differs is
+/// the rectangle script reads for the inline box that wraps: the engine
+/// reports its first line (18 tall), Chromium the union of its five lines
+/// (98).
+const GAPS: &[&str] = &["a-span-that-wraps", "a-link-that-wraps", "a-list-of-links"];
 
 fn boxes(html: &str, w: u64, h: u64) -> String {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");

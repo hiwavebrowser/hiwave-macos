@@ -28,8 +28,6 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 ///
 /// - `baseline`: baseline alignment is not implemented; the item sits at the
 ///   start of its row, at its content height.
-/// - the two `-of-wrapped-text` pages: a grid item whose only child is text
-///   that wraps is one line tall, with `stretch` as well. Not alignment.
 /// - `content-center-auto-rows-of-wrapped-paragraphs`: in a grid with a px
 ///   height the auto rows keep the track-sizing estimate (one line for the
 ///   paragraph that wraps to five); the repair by real heights only runs
@@ -41,8 +39,6 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 ///   pass as the height of its children stacked, so there is no free space.
 const GAPS: &[&str] = &[
     "baseline",
-    "center-in-an-auto-row-of-wrapped-text",
-    "stretch-in-an-auto-row-of-wrapped-text",
     "content-center-auto-rows-of-wrapped-paragraphs",
     "hero-height-place-content-center",
     "percent-height-content-center",
