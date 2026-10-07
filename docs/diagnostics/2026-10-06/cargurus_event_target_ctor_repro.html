@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<!-- Reduced repro: `new EventTarget()` throws "Illegal constructor" (cargurus.com homepage bundle). Notes: missing_text_cargurus_autotrader_bat.md. Needs --url (serve over loopback HTTP); --html-file does not run scripts -->
+<html><body style="margin: 0">
+<div id="out" style="width: 100px; height: 100px; background: rgb(255, 0, 0)"></div>
+<script>
+  // route-EpHdiROt.js: class wE { constructor() { ...; o0(this, "stateUpdateEmitter", new EventTarget) } }; o0(wE, "instance", new wE)
+  const hub = new EventTarget();
+  hub.addEventListener("update", () => { document.getElementById("out").style.background = "rgb(0, 128, 0)"; });
+  hub.dispatchEvent(new Event("update"));
+</script>
+</body></html>
