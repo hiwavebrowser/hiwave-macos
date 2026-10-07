@@ -5919,7 +5919,7 @@ impl Engine {
                             .get(name)
                             .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
                     };
-                    let key = Self::inline_svg_key(&Self::serialize_svg_subtree(node));
+                    let key = Self::inline_svg_key(&Self::inline_svg_markup(node));
                     let cached = self.svg_cache.get(&key);
                     // A viewBox gives the SVG a ratio but no natural size.
                     // Such a replaced element is not 300×150: with both
@@ -9704,6 +9704,72 @@ impl Engine {
         out
     }
 
+    /// The markup rustkit-svg parses for one inline `<svg>`: its own subtree,
+    /// then, inside a trailing `<defs>` (never painted on its own), every
+    /// element its `<use>`s name by `#id` that lives elsewhere in the page.
+    /// Sprite sheets sit in a separate hidden `<svg>`, so without these the
+    /// references could not resolve. Being part of the markup, the
+    /// referenced content is part of the cache key: a sprite sheet inserted
+    /// or changed later re-parses the icon.
+    fn inline_svg_markup(svg: &Rc<Node>) -> String {
+        fn walk(node: &Rc<Node>, f: &mut impl FnMut(&Rc<Node>)) {
+            f(node);
+            for child in node.children() {
+                walk(&child, f);
+            }
+        }
+        fn references(node: &Rc<Node>, defined: &mut std::collections::HashSet<String>, wanted: &mut Vec<String>) {
+            walk(node, &mut |n| {
+                if let Some(id) = n.get_attribute("id") {
+                    defined.insert(id.to_string());
+                }
+                if n.tag_name().is_some_and(|t| t.eq_ignore_ascii_case("use")) {
+                    let href = n.get_attribute("href").or_else(|| n.get_attribute("xlink:href"));
+                    if let Some(id) = href.and_then(|h| h.trim().strip_prefix('#')) {
+                        wanted.push(id.to_string());
+                    }
+                }
+            });
+        }
+
+        let mut out = Self::serialize_svg_subtree(svg);
+        let mut defined = std::collections::HashSet::new();
+        let mut wanted = Vec::new();
+        references(svg, &mut defined, &mut wanted);
+        wanted.retain(|id| !defined.contains(id));
+        if wanted.is_empty() {
+            return out;
+        }
+
+        let mut root = svg.clone();
+        while let Some(parent) = root.parent() {
+            root = parent;
+        }
+        let mut by_id: HashMap<String, Rc<Node>> = HashMap::new();
+        walk(&root, &mut |n| {
+            if let Some(id) = n.get_attribute("id") {
+                by_id.entry(id.to_string()).or_insert_with(|| n.clone());
+            }
+        });
+
+        // A referenced symbol may itself `<use>` another one: follow those
+        // too, each id once.
+        out.push_str("<defs>");
+        while let Some(id) = wanted.pop() {
+            if !defined.insert(id.clone()) {
+                continue;
+            }
+            if let Some(target) = by_id.get(&id) {
+                out.push_str(&Self::serialize_svg_subtree(target));
+                let mut nested = Vec::new();
+                references(target, &mut defined, &mut nested);
+                wanted.extend(nested.into_iter().filter(|n| !defined.contains(n)));
+            }
+        }
+        out.push_str("</defs>");
+        out
+    }
+
     /// Cache key for an inline SVG: content-addressed so identical icons
     /// (repeated list markers, nav glyphs) share one parsed document, and
     /// deterministic across the two serializations of one layout pass.
@@ -9726,7 +9792,7 @@ impl Engine {
     /// keys are skipped, so steady-state cost is one serialize per svg.
     fn cache_inline_svgs(&mut self, document: &Document) {
         for svg_el in document.get_elements_by_tag_name("svg") {
-            let xml = Self::serialize_svg_subtree(&svg_el);
+            let xml = Self::inline_svg_markup(&svg_el);
             let key = Self::inline_svg_key(&xml);
             if self.svg_cache.contains_key(&key) {
                 continue;
@@ -9752,7 +9818,7 @@ impl Engine {
     fn inline_svg_shape_index(&self, document: &Document) -> HashMap<String, InlineSvgShapes> {
         let mut index = HashMap::new();
         for svg_el in document.get_elements_by_tag_name("svg") {
-            let key = Self::inline_svg_key(&Self::serialize_svg_subtree(&svg_el));
+            let key = Self::inline_svg_key(&Self::inline_svg_markup(&svg_el));
             if index.contains_key(&key) {
                 continue;
             }
@@ -16719,8 +16785,9 @@ fn svg_shape_user_bbox(
             straight_path_bbox(&commands)
         }
         // Everything else is UNMODELLED and stays unmeasured, deliberately:
-        // `text`/`tspan` need shaped glyph extents, `use` is unresolved in
-        // rustkit-svg's renderer (`SvgElement::Use(_) => {}`), and
+        // `text`/`tspan` need shaped glyph extents, a `use`'s box is its
+        // instantiated target's (rustkit-svg resolves it at parse time; this
+        // exporter does not walk the instance), and
         // `image`/`foreignObject` are their own replaced lanes. Non-rendered
         // elements (`defs`, `title`, gradients, `clipPath`) never reach the
         // baseline at all: the capture skips any rect that is 0x0.
@@ -17453,6 +17520,47 @@ mod tests {
             }
         }
         assert_no_empty_key(&hit);
+    }
+
+    /// `<svg><use href="#icon">` whose target lives in ANOTHER, hidden
+    /// `<svg>` (the sprite-sheet idiom; the 2026-10-06 diagnostics repro).
+    /// The icon's parse markup must carry the referenced element so the use
+    /// resolves, and the sprite sheet must paint nothing by itself. Pure
+    /// markup + rustkit-svg: no GPU engine needed.
+    #[test]
+    fn inline_svg_use_resolves_a_target_in_another_svg() {
+        let html = r##"<!DOCTYPE html><html><body>
+            <svg style="display:none">
+              <defs><g id="icon"><circle cx="25" cy="25" r="20" fill="green"/></g></defs>
+            </svg>
+            <svg width="50" height="50">
+              <use href="#icon"/>
+            </svg>
+        </body></html>"##;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let svgs = document.get_elements_by_tag_name("svg");
+        assert_eq!(svgs.len(), 2);
+
+        let green = |markup: &str| {
+            let svg = rustkit_svg::SvgDocument::parse(markup).expect("svg parses");
+            svg.render(0.0, 0.0, 50.0, 50.0)
+                .iter()
+                .filter(|c| match c {
+                    rustkit_layout::DisplayCommand::FillPolygon { color, .. }
+                    | rustkit_layout::DisplayCommand::FillCircle { color, .. } => {
+                        (color.r, color.g, color.b) == (0, 128, 0)
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+
+        let sheet = Engine::inline_svg_markup(&svgs[0]);
+        assert_eq!(green(&sheet), 0, "the sprite sheet's <defs> must not paint: {sheet}");
+
+        let icon = Engine::inline_svg_markup(&svgs[1]);
+        assert!(icon.contains(r#"id="icon""#), "the referenced <g> must be appended: {icon}");
+        assert!(green(&icon) > 0, "the circle must paint through the <use>: {icon}");
     }
 
     /// An inline `<svg>`'s SHAPE elements reach Chrome's baseline — the
