@@ -27453,7 +27453,7 @@ again();
 </head><body><p>alive</p></body></html>"#;
         let port = serve(vec![("/", "text/html", page.to_string())]);
         let config = EngineConfig {
-            script_budget_ms: 1_000,
+            script_budget_ms: 200,
             ..EngineConfig::default()
         };
         let (mut engine, view, took) = load_timed(config, port);
@@ -27462,7 +27462,7 @@ again();
 
         let log = engine.script_log(view).unwrap();
         assert!(
-            matches!(&log[0].outcome, ScriptOutcome::Threw(m) if m.contains("timeout") || m.contains("Job queue")),
+            matches!(&log[0].outcome, ScriptOutcome::Threw(m) if m.contains("timeout")),
             "{log:#?}"
         );
         assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
@@ -27492,7 +27492,7 @@ again();
         assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
         let log = engine.script_log(view).unwrap();
         assert!(
-            matches!(&log[0].outcome, ScriptOutcome::Threw(m) if m.contains("limit") || m.contains("Job queue")),
+            matches!(&log[0].outcome, ScriptOutcome::Threw(m) if m.contains("limit")),
             "{log:#?}"
         );
         // Because the runaway microtask was bounded and aborted promptly by iteration limit,

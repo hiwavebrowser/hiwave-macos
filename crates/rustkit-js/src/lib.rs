@@ -288,15 +288,21 @@ impl JsRuntime {
 
             match result {
                 Ok(value) => {
+                    self.flush_console_logs();
                     if let Err(job_err) = job_result {
                         let msg = job_err.to_string();
-                        return Err(JsError::ExecutionError(msg));
+                        // Only promote job queue limit or timeout breaches (runaway RangeError policy)
+                        // to script failure; ordinary microtask rejections are handled by Promise rejection events
+                        // and do not fail the synchronous script value that already completed successfully.
+                        if msg.contains("Job queue") || msg.contains("limit") || msg.contains("timeout") {
+                            return Err(JsError::ExecutionError(msg));
+                        }
                     }
                     let js_value = self.convert_boa_value(&value);
-                    self.flush_console_logs();
                     Ok(js_value)
                 }
                 Err(err) => {
+                    self.flush_console_logs();
                     let msg = err.to_string();
                     Err(JsError::ExecutionError(msg))
                 }

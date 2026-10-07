@@ -125,6 +125,9 @@ impl HostJobExecutor {
         self.timeout.get()
     }
 
+    /// Purge all queued jobs and running futures. On a runaway loop/timeout breach,
+    /// dropping in-flight futures and queues contains the runaway and prevents
+    /// further recursive job scheduling.
     pub fn clear(&self) {
         self.promise_jobs.borrow_mut().clear();
         self.generic_jobs.borrow_mut().clear();
