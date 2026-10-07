@@ -51,6 +51,8 @@ mod shadow_tests;
 #[cfg(test)]
 mod rejection_event_tests;
 #[cfg(test)]
+mod event_target_ctor_tests;
+#[cfg(test)]
 mod legacy_tests;
 #[cfg(test)]
 mod reflect_tests;
