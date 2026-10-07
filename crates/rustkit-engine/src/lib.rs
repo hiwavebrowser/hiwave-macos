@@ -9745,10 +9745,18 @@ impl Engine {
         while let Some(parent) = root.parent() {
             root = parent;
         }
+        // Only the elements rustkit-svg can instantiate are targets: an id
+        // naming an HTML container would serialize its whole subtree into
+        // the markup (and the key) to paint nothing.
+        const REFERABLE: &[&str] = &[
+            "symbol", "g", "svg", "use", "rect", "circle", "ellipse", "line", "path", "polyline", "polygon", "text",
+        ];
         let mut by_id: HashMap<String, Rc<Node>> = HashMap::new();
         walk(&root, &mut |n| {
             if let Some(id) = n.get_attribute("id") {
-                by_id.entry(id.to_string()).or_insert_with(|| n.clone());
+                if n.tag_name().is_some_and(|t| REFERABLE.iter().any(|r| t.eq_ignore_ascii_case(r))) {
+                    by_id.entry(id.to_string()).or_insert_with(|| n.clone());
+                }
             }
         });
 
@@ -17561,6 +17569,34 @@ mod tests {
         let icon = Engine::inline_svg_markup(&svgs[1]);
         assert!(icon.contains(r#"id="icon""#), "the referenced <g> must be appended: {icon}");
         assert!(green(&icon) > 0, "the circle must paint through the <use>: {icon}");
+    }
+
+    /// The same cross-svg reference spelled `xlink:href` (older sprite
+    /// markup), and an id that names an HTML element: only SVG elements are
+    /// appended as reference targets.
+    #[test]
+    fn inline_svg_use_by_xlink_href_appends_only_svg_targets() {
+        let html = r##"<!DOCTYPE html><html><body>
+            <div id="box"><p>not svg</p></div>
+            <svg style="display:none"><symbol id="s" viewBox="0 0 10 10"><rect width="10" height="10" fill="#00ff00"/></symbol></svg>
+            <svg width="20" height="20"><use xlink:href="#s" width="20" height="20"/><use href="#box"/></svg>
+        </body></html>"##;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let svgs = document.get_elements_by_tag_name("svg");
+        let icon = Engine::inline_svg_markup(&svgs[1]);
+        assert!(icon.contains(r#"id="s""#), "the xlink:href target must be appended: {icon}");
+        assert!(!icon.contains("not svg"), "an HTML element is never a <use> target: {icon}");
+
+        let svg = rustkit_svg::SvgDocument::parse(&icon).expect("svg parses");
+        let rects: Vec<_> = svg
+            .render(0.0, 0.0, 20.0, 20.0)
+            .into_iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::FillRect { rect, .. } => Some((rect.x, rect.y, rect.width, rect.height)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rects, vec![(0.0, 0.0, 20.0, 20.0)], "{icon}");
     }
 
     /// An inline `<svg>`'s SHAPE elements reach Chrome's baseline — the
