@@ -1,9 +1,12 @@
 <!DOCTYPE html>
-<html><body>
-<svg style="display:none">
-  <defs><g id="icon"><circle cx="25" cy="25" r="20" fill="green"/></g></defs>
-</svg>
-<svg width="50" height="50">
-  <use href="#icon"/>
+<!-- Reduced repro: svg <use> renders nothing. Notes: repro_svg_use.md -->
+<html><body style="margin:0"><style>svg { position: absolute; left: 0; }</style>
+<!-- A (Pollux draft, Census "svg use local"): sprite in a display:none defs block. Probe (25,25). -->
+<svg style="display:none"><defs><g id="icon"><circle cx="25" cy="25" r="20" fill="green"/></g></defs></svg>
+<svg style="top:0" width="50" height="50"><use href="#icon"/></svg>
+<!-- B (youtube.com player buttons): xlink:href to a SIBLING path; the use paints the stroke. Probe (18,86). -->
+<svg style="top:50px" xmlns:xlink="http://www.w3.org/1999/xlink" width="72" height="72" viewBox="0 0 36 36">
+  <use xlink:href="#p" fill="none" stroke="#000" stroke-width="4"/>
+  <path id="p" d="M10 10h16v16H10z" fill="#fff"/>
 </svg>
 </body></html>
