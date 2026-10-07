@@ -1,5 +1,5 @@
 // technique_classifier.js — runs inside the page (page.evaluate). Pure DOM/CSSOM reads, no mutation.
-// Returns per-site technique records for the TECHNIQUE CENSUS (icons, lazy-load, stacking contexts, object-fit).
+// Returns per-site technique records for the TECHNIQUE CENSUS (icons, lazy-load, stacking, object-fit, frameworks).
 () => {
   const MAX_EL = 20000;
   const all = Array.from(document.querySelectorAll('*')).slice(0, MAX_EL);
@@ -80,7 +80,7 @@
     }
   }
 
-  // ---------- LAZY LOAD ----------
+  // ---------- LAZY LOAD / IMAGE SIZING ----------
   const imgs = Array.from(document.querySelectorAll('img'));
   const lazy = {
     img_total: imgs.length,
@@ -98,10 +98,10 @@
     intersection_observer: (window.__censusIO || { ctor: 0, observe: 0 }),
   };
 
-  // ---------- STACKING CONTEXTS (header / nav / menus) ----------
-  const REGION_RE = /(^|[\s_-])(header|masthead|topbar|top-bar|navbar|nav|navigation|menu|menubar|dropdown|flyout|megamenu|mega-menu|banner)([\s_-]|$)/i;
+  // ---------- STACKING CONTEXTS (header / nav / menus / overlays) ----------
+  const REGION_RE = /(^|[\s_-])(header|masthead|topbar|top-bar|navbar|nav|navigation|menu|menubar|dropdown|flyout|megamenu|mega-menu|banner|overlay|modal|dialog|popover|popup|drawer)([\s_-]|$)/i;
   const roots = new Set();
-  for (const e of document.querySelectorAll('header,nav,[role=banner],[role=navigation],[role=menu],[role=menubar],[aria-haspopup]')) roots.add(e);
+  for (const e of document.querySelectorAll('header,nav,dialog,[role=banner],[role=navigation],[role=menu],[role=menubar],[role=dialog],[aria-haspopup],[aria-modal]')) roots.add(e);
   for (const e of all) {
     const id = e.id || ''; const cl = typeof e.className === 'string' ? e.className : '';
     if (REGION_RE.test(id) || REGION_RE.test(cl)) roots.add(e);
@@ -115,6 +115,8 @@
     const flexGridItem = pcs && /flex|grid/.test(pcs.display);
     if (pos === 'fixed') out.push('position:fixed');
     if (pos === 'sticky') out.push('position:sticky');
+    if (pos === 'absolute') out.push('position:absolute');
+    if (pos === 'relative') out.push('position:relative');
     if ((pos === 'absolute' || pos === 'relative') && z !== 'auto') out.push('positioned+z-index');
     if (flexGridItem && pos === 'static' && z !== 'auto') out.push('flex/grid-item+z-index');
     if (parseFloat(cs.opacity) < 1) out.push('opacity<1');
@@ -130,16 +132,26 @@
     if (/opacity|transform|translate|rotate|scale|filter|perspective|clip-path|mask|isolation|mix-blend-mode|z-index/.test(cs.willChange)) out.push('will-change');
     if (/layout|paint|strict|content/.test(cs.contain)) out.push('contain');
     if (cs.containerType === 'size' || cs.containerType === 'inline-size') out.push('container-type');
-    return { out, z };
+    return { out, z, pos };
   };
-  const stacking = { region_roots: roots.size, region_elements: region.size, creators: 0, by_reason: {}, z_index_max: null, z_index_values: {}, examples: [] };
+  const stacking = {
+    region_roots: roots.size,
+    region_elements: region.size,
+    creators: 0,
+    by_reason: {},
+    by_position: { static: 0, relative: 0, absolute: 0, fixed: 0, sticky: 0 },
+    z_index_max: null,
+    z_index_values: {},
+    examples: [],
+  };
   for (const el of region) {
-    const { out, z } = reasonsOf(el);
+    const { out, z, pos } = reasonsOf(el);
+    if (pos && stacking.by_position[pos] !== undefined) stacking.by_position[pos]++;
     if (!out.length) continue;
     stacking.creators++;
     for (const r of out) stacking.by_reason[r] = (stacking.by_reason[r] || 0) + 1;
     if (z !== 'auto') { const zi = parseInt(z, 10); if (!isNaN(zi)) { stacking.z_index_max = stacking.z_index_max === null ? zi : Math.max(stacking.z_index_max, zi); stacking.z_index_values[zi] = (stacking.z_index_values[zi] || 0) + 1; } }
-    if (stacking.examples.length < 5) stacking.examples.push({ sel: sel(el), reasons: out, z, rect: rectOf(el) });
+    if (stacking.examples.length < 5) stacking.examples.push({ sel: sel(el), reasons: out, z, pos, rect: rectOf(el) });
   }
 
   // ---------- OBJECT-FIT ----------
@@ -153,5 +165,57 @@
     if (cs.objectPosition && cs.objectPosition !== '50% 50%') objectFit.non_default_position++;
   }
 
-  return { url: location.href, title: document.title.slice(0, 120), elements_scanned: all.length, icons, lazy, stacking, objectFit };
+  // ---------- FRAMEWORKS (DOM + globals; network/script heuristics filled by runner) ----------
+  const frameworks = { detected: [], signals: {} };
+  const addFw = (name, signal) => {
+    if (!frameworks.detected.includes(name)) frameworks.detected.push(name);
+    if (!frameworks.signals[name]) frameworks.signals[name] = [];
+    if (frameworks.signals[name].length < 5) frameworks.signals[name].push(signal);
+  };
+  try {
+    if (window.React || window.ReactDOM || document.querySelector('[data-reactroot],[data-reactid],#__next,[data-react-helmet]')) addFw('React', 'dom/global');
+    if (document.querySelector('#__next') || document.querySelector('script[src*="/_next/"]') || window.__NEXT_DATA__) addFw('Next.js', '__NEXT_DATA__/_next');
+    if (window.__NUXT__ || document.querySelector('#__nuxt') || document.querySelector('script[src*="/_nuxt/"]')) addFw('Nuxt', '__NUXT__/_nuxt');
+    if (window.Vue || document.querySelector('[data-v-]')) addFw('Vue', 'Vue/data-v');
+    if (window.ng || document.querySelector('[ng-version],app-root')) addFw('Angular', 'ng-version/app-root');
+    if (window.Svelte || document.querySelector('[class*="svelte-"]')) addFw('Svelte', 'svelte-class');
+    if (window.__remixContext || document.querySelector('script[src*="entry.client"]')) addFw('Remix', 'remix');
+    if (window.gatsbyRequire || document.querySelector('#___gatsby')) addFw('Gatsby', '#___gatsby');
+    if (window.__SAPPER__ || document.querySelector('#sapper')) addFw('Sapper', 'sapper');
+    if (document.querySelector('script[src*="wp-includes"],link[href*="wp-content"]') || document.querySelector('meta[name="generator"][content*="WordPress"]')) addFw('WordPress', 'wp-content');
+    if (document.querySelector('script[src*="cdn.shopify.com"],link[href*="cdn.shopify"]')) addFw('Shopify', 'cdn.shopify');
+    if (window.Shopify) addFw('Shopify', 'window.Shopify');
+    if (document.querySelector('meta[name="generator"][content*="Webflow"]') || document.querySelector('html[data-wf-page]')) addFw('Webflow', 'data-wf');
+    if (window.__SQUARESPACE_CONTEXT__ || document.querySelector('link[href*="squarespace"]')) addFw('Squarespace', 'squarespace');
+    if (window.Drupal || document.querySelector('[data-drupal-selector],script[src*="drupal"]')) addFw('Drupal', 'drupal');
+    if (window.jQuery || window.$) addFw('jQuery', 'window.jQuery');
+    if (window.Backbone) addFw('Backbone', 'window.Backbone');
+    if (window.Ember || window.EmberENV) addFw('Ember', 'Ember');
+    if (document.querySelector('script[src*="static.parastorage.com"],script[src*="wixstatic"]') || window.wixBiSession) addFw('Wix', 'wix');
+    const gen = document.querySelector('meta[name="generator"]');
+    if (gen && gen.content) frameworks.signals.generator = [gen.content.slice(0, 80)];
+  } catch (_) { /* ignore */ }
+
+  // ---------- BOT WALL HINTS (body text / challenge DOM; HTTP status filled by runner) ----------
+  const bodyText = (document.body && document.body.innerText || '').slice(0, 4000).toLowerCase();
+  const htmlSnippet = (document.documentElement && document.documentElement.innerHTML || '').slice(0, 8000).toLowerCase();
+  const botWall = { vendors: [], signals: [] };
+  const addBw = (v, sig) => { if (!botWall.vendors.includes(v)) botWall.vendors.push(v); botWall.signals.push(sig); };
+  if (/cf-browser-verification|cf-challenge|__cf_chl|challenges.cloudflare.com|cdn-cgi\/challenge|just a moment|attention required! \| cloudflare|cf-ray/i.test(htmlSnippet) || /cloudflare/i.test(bodyText) && /checking your browser|just a moment/i.test(bodyText)) addBw('cloudflare', 'dom');
+  if (/_abck|akamai|ak_bmsc|edgesuite|akamai\.net/i.test(htmlSnippet) && (/access denied|reference number|akamai/i.test(bodyText) || /akamai/i.test(htmlSnippet))) addBw('akamai', 'dom');
+  if (/datadome|dd\.js|captcha-delivery\.com/i.test(htmlSnippet)) addBw('datadome', 'dom');
+  if (/perimeterx|px-captcha|_px\d|humansecurity|human challenge/i.test(htmlSnippet)) addBw('perimeterx', 'dom');
+  if (/recaptcha|hcaptcha|funcaptcha|arkose/i.test(htmlSnippet) && /challenge|captcha|verify you are human/i.test(bodyText)) addBw('captcha', 'dom');
+
+  return {
+    url: location.href,
+    title: document.title.slice(0, 120),
+    elements_scanned: all.length,
+    icons,
+    lazy,
+    stacking,
+    objectFit,
+    frameworks,
+    botWall,
+  };
 }

@@ -2,11 +2,12 @@
 // run_technique_census.mjs — TECHNIQUE CENSUS runner (docs-only tooling; no engine code).
 // One Chromium instance, one load per site, sequential. Universe: websuite/realsite-top80.json.
 // Usage: node docs/census/tools/run_technique_census.mjs [--sites google,ebay] [--out path.json]
-// Chromium: PARITY_CHROME_PATH if set, else the Playwright-bundled Chromium from tools/parity_oracle.
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+// Chromium: PARITY_CHROME_PATH if set, else Playwright-bundled Chromium.
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { homedir } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '../../..');
@@ -26,29 +27,158 @@ const IO_HOOK = `(() => { const O = window.IntersectionObserver; if (!O) return;
   window.IntersectionObserver = function (cb, o) { c.ctor++; const io = new O(cb, o); const ob = io.observe.bind(io); io.observe = (t) => { c.observe++; return ob(t); }; return io; };
   window.IntersectionObserver.prototype = O.prototype; })();`;
 
-const executablePath = process.env.PARITY_CHROME_PATH || undefined;
-const browser = await chromium.launch({ headless: true, executablePath });
-const meta = { date: today, started_utc: new Date().toISOString(), chromium: browser.version(), executablePath: executablePath || 'playwright-bundled', viewport: list.viewport, universe: 'websuite/realsite-top80.json', n_sites: sites.length };
+function resolveChrome() {
+  if (process.env.PARITY_CHROME_PATH && existsSync(process.env.PARITY_CHROME_PATH)) {
+    return { executablePath: process.env.PARITY_CHROME_PATH, source: 'PARITY_CHROME_PATH' };
+  }
+  // Prefer Playwright's bundled Chromium from cache (headless-friendly)
+  const cache = join(homedir(), 'Library/Caches/ms-playwright');
+  if (existsSync(cache)) {
+    const dirs = readdirSync(cache).filter(d => d.startsWith('chromium-') && !d.includes('headless_shell')).sort().reverse();
+    for (const d of dirs) {
+      const mac = join(cache, d, 'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing');
+      const mac2 = join(cache, d, 'chrome-mac/Chromium.app/Contents/MacOS/Chromium');
+      if (existsSync(mac)) return { executablePath: mac, source: `playwright-bundled:${d}` };
+      if (existsSync(mac2)) return { executablePath: mac2, source: `playwright-bundled:${d}` };
+    }
+    const shells = readdirSync(cache).filter(d => d.startsWith('chromium_headless_shell-')).sort().reverse();
+    for (const d of shells) {
+      const sh = join(cache, d, 'chrome-headless-shell-mac-arm64/chrome-headless-shell');
+      if (existsSync(sh)) return { executablePath: sh, source: `playwright-headless-shell:${d}` };
+    }
+  }
+  return { executablePath: undefined, source: 'playwright-default' };
+}
+
+function classifyBotWallFromHeaders(headers, status) {
+  const h = {};
+  for (const [k, v] of Object.entries(headers || {})) h[k.toLowerCase()] = String(v);
+  const vendors = [];
+  const signals = [];
+  const server = (h['server'] || '').toLowerCase();
+  const via = (h['via'] || '').toLowerCase();
+  if (h['cf-ray'] || server.includes('cloudflare') || h['cf-mitigated']) { vendors.push('cloudflare'); signals.push('header'); }
+  if (server.includes('akamai') || via.includes('akamai') || h['x-akamai-transformed'] || h['akamai-grn']) { vendors.push('akamai'); signals.push('header'); }
+  if (h['x-datadome'] || h['x-dd-b'] || (h['set-cookie'] || '').toLowerCase().includes('datadome')) { vendors.push('datadome'); signals.push('header'); }
+  if (h['x-px'] || (h['set-cookie'] || '').toLowerCase().includes('_px') || server.includes('perimeterx')) { vendors.push('perimeterx'); signals.push('header'); }
+  return { vendors: [...new Set(vendors)], signals, status };
+}
+
+function isJsResource(url, headers) {
+  const u = (url || '').split('?')[0].toLowerCase();
+  const ct = ((headers && (headers['content-type'] || headers['Content-Type'])) || '').toLowerCase();
+  if (/\.m?js$/.test(u) || /\.mjs$/.test(u)) return true;
+  if (ct.includes('javascript') || ct.includes('ecmascript')) return true;
+  return false;
+}
+
+const chrome = resolveChrome();
+const launchOpts = { headless: true };
+if (chrome.executablePath) launchOpts.executablePath = chrome.executablePath;
+const browser = await chromium.launch(launchOpts);
+const meta = {
+  date: today,
+  started_utc: new Date().toISOString(),
+  chromium: browser.version(),
+  executablePath: chrome.executablePath || 'playwright-bundled-default',
+  chrome_source: chrome.source,
+  viewport: list.viewport,
+  universe: 'websuite/realsite-top80.json',
+  n_sites: sites.length,
+};
 const results = [];
 for (const s of sites) {
   const ctx = await browser.newContext({ viewport: list.viewport, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'America/New_York' });
   await ctx.addInitScript(IO_HOOK);
   const page = await ctx.newPage();
+  const jsBundles = []; // { url, bytes }
+  const responseHeaders = [];
+  page.on('response', async (resp) => {
+    try {
+      const req = resp.request();
+      if (req.resourceType() === 'script' || isJsResource(resp.url(), resp.headers())) {
+        let bytes = 0;
+        const cl = resp.headers()['content-length'];
+        if (cl && !isNaN(parseInt(cl, 10))) bytes = parseInt(cl, 10);
+        else {
+          try {
+            const buf = await resp.body();
+            bytes = buf ? buf.length : 0;
+          } catch { /* body may be unavailable */ }
+        }
+        jsBundles.push({ url: resp.url().slice(0, 200), bytes });
+      }
+      if (resp.request().isNavigationRequest() || resp.url() === s.url || resp.url().startsWith(s.url)) {
+        responseHeaders.push({ url: resp.url().slice(0, 200), status: resp.status(), headers: resp.headers() });
+      }
+    } catch { /* ignore */ }
+  });
   const rec = { id: s.id, url: s.url, status: 'NOT RUN', reason: null };
   const t0 = Date.now();
   try {
     const resp = await page.goto(s.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     rec.http_status = resp ? resp.status() : null;
+    const mainHeaders = resp ? resp.headers() : {};
     await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(1500);
     rec.data = await page.evaluate(`(${classifier})()`);
-    rec.status = 'OK';
+
+    // JS bundle summary
+    const byUrl = new Map();
+    for (const b of jsBundles) {
+      const prev = byUrl.get(b.url);
+      if (!prev || b.bytes > prev.bytes) byUrl.set(b.url, b);
+    }
+    const bundles = [...byUrl.values()];
+    const totalBytes = bundles.reduce((a, b) => a + (b.bytes || 0), 0);
+    const over1mb = bundles.filter(b => b.bytes >= 1024 * 1024);
+    rec.data.bundles = {
+      count: bundles.length,
+      total_bytes: totalBytes,
+      total_mb: Math.round(totalBytes / 1024 / 1024 * 100) / 100,
+      over_1mb_count: over1mb.length,
+      over_1mb: over1mb.slice(0, 10).map(b => ({ url: b.url, mb: Math.round(b.bytes / 1024 / 1024 * 100) / 100 })),
+    };
+
+    // Framework extras from script URLs
+    const scriptUrls = bundles.map(b => b.url).join(' ');
+    const fw = rec.data.frameworks || { detected: [], signals: {} };
+    const addFw = (name, signal) => {
+      if (!fw.detected.includes(name)) fw.detected.push(name);
+      if (!fw.signals[name]) fw.signals[name] = [];
+      if (fw.signals[name].length < 5) fw.signals[name].push(signal);
+    };
+    if (/\/_next\//.test(scriptUrls)) addFw('Next.js', 'script:/_next/');
+    if (/react(-dom)?(\.min)?\.js|react\.production/i.test(scriptUrls)) addFw('React', 'script:react');
+    if (/vue(\.runtime)?(\.min)?\.js|vue\.global/i.test(scriptUrls)) addFw('Vue', 'script:vue');
+    if (/angular/i.test(scriptUrls)) addFw('Angular', 'script:angular');
+    if (/cdn\.shopify\.com/i.test(scriptUrls)) addFw('Shopify', 'script:shopify');
+    rec.data.frameworks = fw;
+
+    // Bot wall merge
+    const hdrBw = classifyBotWallFromHeaders(mainHeaders, rec.http_status);
+    const pageBw = rec.data.botWall || { vendors: [], signals: [] };
+    const vendors = [...new Set([...(pageBw.vendors || []), ...hdrBw.vendors])];
+    const challenge = rec.http_status === 403 || rec.http_status === 503 || vendors.length > 0 && /just a moment|access denied|attention required|captcha|challenge/i.test((rec.data.title || '') + ' ' + (pageBw.signals || []).join(' '));
+    // Stronger: 403/503 with vendor, or DOM detected challenge
+    const isChallenge = (rec.http_status === 403 || rec.http_status === 503) || (pageBw.vendors && pageBw.vendors.length > 0 && /challenge|captcha|just a moment|attention required|access denied/i.test(rec.data.title || ''));
+    rec.data.botWall = {
+      vendors,
+      signals: [...new Set([...(pageBw.signals || []), ...hdrBw.signals])],
+      http_status: rec.http_status,
+      is_challenge: !!isChallenge || (rec.http_status === 403),
+    };
+    if (rec.http_status === 403) rec.status = 'BOTWALL';
+    else rec.status = 'OK';
   } catch (e) {
     rec.reason = String(e && e.message || e).split('\n')[0].slice(0, 200);
   }
   rec.ms = Date.now() - t0;
   results.push(rec);
-  console.error(`${rec.status.padEnd(7)} ${s.id} ${rec.ms}ms ${rec.reason || ''}`);
+  const tag = rec.status.padEnd(8);
+  const bw = rec.data && rec.data.botWall && rec.data.botWall.vendors.length ? ` bw=${rec.data.botWall.vendors.join('+')}` : '';
+  const bun = rec.data && rec.data.bundles ? ` js=${rec.data.bundles.count}/${rec.data.bundles.total_mb}MB/>1MB=${rec.data.bundles.over_1mb_count}` : '';
+  console.error(`${tag} ${s.id} ${rec.ms}ms http=${rec.http_status || '-'}${bw}${bun} ${rec.reason || ''}`);
   await ctx.close();
 }
 await browser.close();
