@@ -550,7 +550,7 @@ class Driver:
         mark, log_from = self.fixture.mark(), len(self.app.log_text())
         for _ in range(8):
             self.hw("scroll", pid, x, y, 0, -250)
-        self.expect(c, "the app's window loop got the wheel",
+        self.expect(c, "the app got the wheel",
                     bool(self.app.wait_log(r"wheel burst started", 3, log_from)))
         self.expect(c, "script heard scroll", self.fixture.wait("beacon?h6-scroll", 4, mark))
         time.sleep(0.8)
@@ -578,7 +578,9 @@ class Driver:
         frame = self.frame(c, "end", [RED, GREEN, BLUE])
         if frame is None:
             return self.not_run(c, "the window shows the last band", self.why_not("Screen Recording"))
-        self.expect(c, "the window shows the last band", frame[BLUE] > 1000 and frame[RED] == 0, str(frame))
+        # The chrome has red pixels of its own (the Shield icon, the close
+        # button: 53 in the 2026-10-06 run), so "no red" means "no red band".
+        self.expect(c, "the window shows the last band", frame[BLUE] > 1000 and frame[RED] < 500, str(frame))
 
     def h8(self):
         """H8: a server's error page (a 403 with a body) is shown as the page."""

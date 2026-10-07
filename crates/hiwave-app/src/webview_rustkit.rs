@@ -177,6 +177,13 @@ impl RustKitView {
     /// Render the view (call this in the event loop).
     pub fn render(&self) {
         let mut engine = self.engine.borrow_mut();
+        // The live turn lays out a resized view; without a live runtime
+        // there is no turn, so the frame does it.
+        if let Some(view_id) = self.view_id {
+            if let Err(e) = engine.flush_pending_resize(view_id) {
+                debug!(error = %e, "layout after a resize failed");
+            }
+        }
         engine.render_all_views();
     }
 
@@ -377,11 +384,16 @@ impl RustKitView {
     }
 
     /// Set the bounds of the view.
+    ///
+    /// The view and its surface take the size now; the layout and the
+    /// page's `resize` event come once, on this turn's live step, however
+    /// many sizes a drag delivered since the last one (H9: every size laid
+    /// the page out in full before the next was read).
     pub fn set_bounds_internal(&self, bounds: Bounds) -> HiWaveResult<()> {
         let mut engine = self.engine.borrow_mut();
         if let Some(view_id) = self.view_id {
             engine
-                .resize_view(view_id, bounds)
+                .set_view_bounds(view_id, bounds)
                 .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
         }
         Ok(())

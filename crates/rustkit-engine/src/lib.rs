@@ -172,6 +172,8 @@ mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
+mod resize_coalesce_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -575,6 +577,9 @@ struct ViewState {
     initial_layout_deferred: bool,
     /// Headless bounds (only set for headless views, None for window-based views).
     headless_bounds: Option<Bounds>,
+    /// Bounds the view was given since its last layout (`set_view_bounds`):
+    /// the next live turn lays out once, at these, and fires `resize`.
+    pending_resize: Option<Bounds>,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
     script_log: Vec<ScriptRecord>,
     /// The document response's `Referrer-Policy` header, if it had a valid one.
@@ -1468,6 +1473,7 @@ impl Engine {
             external_stylesheets: Vec::new(),
             initial_layout_deferred: false,
             headless_bounds: None,
+            pending_resize: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
@@ -1544,6 +1550,7 @@ impl Engine {
             external_stylesheets: Vec::new(),
             initial_layout_deferred: false,
             headless_bounds: None,
+            pending_resize: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
@@ -1629,6 +1636,7 @@ impl Engine {
             external_stylesheets: Vec::new(),
             initial_layout_deferred: false,
             headless_bounds: Some(bounds),
+            pending_resize: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
@@ -1666,8 +1674,50 @@ impl Engine {
         Ok(())
     }
 
-    /// Resize a view.
+    /// Resize a view: its surface, its layout and the page's `resize` event,
+    /// all now. The app's live loop uses [`Engine::set_view_bounds`] and
+    /// lays out once per turn instead.
     pub fn resize_view(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
+        self.apply_view_bounds(id, bounds)?;
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pending_resize = None;
+        }
+        self.layout_after_resize(id, bounds)
+    }
+
+    /// Give a view its new bounds now (the NSView frame and the GPU surface
+    /// follow the window at once) and its layout at the next
+    /// [`Engine::flush_pending_resize`], which the live turn runs.
+    ///
+    /// A live window resize is dozens of `Resized` events a second, and
+    /// until 2026-10-06 each one laid the page out in full and fired
+    /// `resize` at `window` before the next was read, so the content lagged
+    /// the drag by as many layouts as events had queued (hand-test item
+    /// H9). The events of one loop turn now cost one layout, at the last
+    /// size, and the page hears one `resize`, as in a browser (at most one
+    /// per frame).
+    pub fn set_view_bounds(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
+        self.apply_view_bounds(id, bounds)?;
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pending_resize = Some(bounds);
+        }
+        Ok(())
+    }
+
+    /// Lay out a view whose bounds changed since its last layout, and tell
+    /// the page. Returns whether there was anything to do.
+    pub fn flush_pending_resize(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let Some(bounds) = view.pending_resize.take() else {
+            return Ok(false);
+        };
+        self.layout_after_resize(id, bounds)?;
+        Ok(true)
+    }
+
+    /// The surface half of a resize: the viewhost's bounds and the GPU
+    /// surface (or the headless texture) take the new size.
+    fn apply_view_bounds(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let viewhost_id = view.viewhost_id;
         let is_headless = view.headless_bounds.is_some();
@@ -1700,7 +1750,14 @@ impl Engine {
                 .resize_surface(viewhost_id, bounds.width, bounds.height)
                 .map_err(|e| EngineError::RenderError(e.to_string()))?;
         }
+        Ok(())
+    }
 
+    /// The layout half of a resize: lay the document out at the new size,
+    /// let the page's scripts see it and hear `resize` at `window`, as a
+    /// browser window resize does. Listener exceptions go to the script log
+    /// like the lifecycle events' do.
+    fn layout_after_resize(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
         // Re-layout if we have content
         if self
             .views
@@ -1712,9 +1769,6 @@ impl Engine {
             self.relayout(id)?;
         }
 
-        // The page's scripts see the new size, then get `resize` at
-        // `window`, as a browser window resize does. Listener exceptions go
-        // to the script log like the lifecycle events' do.
         if let Some(view) = self.views.get_mut(&id) {
             if let Some(bindings) = view.bindings.as_ref() {
                 let fired = bindings
@@ -2688,6 +2742,12 @@ impl Engine {
     /// load; a page with none (`load_html`) has no network.
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
         let mut out = LivePump::default();
+        // The window's size as of this turn, laid out once, before the
+        // page's timers run and see it.
+        match self.flush_pending_resize(id) {
+            Ok(resized) => out.relaid_out = resized,
+            Err(e) => debug!(?id, error = %e, "layout after a resize failed"),
+        }
         let loader = self.loader.clone();
         let Some(view) = self.views.get_mut(&id) else {
             return out;
@@ -2771,7 +2831,8 @@ impl Engine {
         }
 
         match self.flush_script_dom_writes(id) {
-            Ok(relaid_out) => out.relaid_out = relaid_out,
+            // Or the resize above already did.
+            Ok(relaid_out) => out.relaid_out |= relaid_out,
             Err(e) => debug!(?id, error = %e, "relayout after a live turn failed"),
         }
         // What the callbacks added may show images the load never saw. Their

@@ -93,14 +93,48 @@ pub fn drain_pending_keys() -> Vec<PendingKey> {
     PENDING_KEYS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
 }
 
+/// A wheel turn or trackpad swipe over the content view.
+///
+/// `dx`, `dy` are in CSS pixels with the sign hiwave-app's window-loop arm
+/// always used (tao's): `dy < 0` moves the page down, `dx > 0` moves it
+/// right. A wheel that reports lines is counted at 40px a line, as the
+/// window-loop arm counts it. `x`, `y` are where the pointer was, view-local
+/// top-left, for an inner scroller one day; a page scroll does not read them.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PendingScroll {
+    pub x: f64,
+    pub y: f64,
+    pub dx: f64,
+    pub dy: f64,
+}
+
+/// Wheel events captured by the content view since the last turn of the
+/// loop, summed: a trackpad flick is ~50 events a second and the page needs
+/// where it ends up, not every step.
+#[cfg(target_os = "macos")]
+static PENDING_SCROLLS: Mutex<Vec<PendingScroll>> = Mutex::new(Vec::new());
+
+#[cfg(target_os = "macos")]
+pub fn drain_pending_scrolls() -> Vec<PendingScroll> {
+    PENDING_SCROLLS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+}
+
 /// The NSView subclass that hosts RustKit content.
 ///
 /// A stock NSView was measured to be a dead end for input: hitTest correctly
 /// routes clicks to it, but events delivered to it NEVER surface as tao
 /// window events — a synthetic mouseDown through `window sendEvent:` produced
-/// nothing at the event loop (2026-08-07 probe). So the view records clicks
-/// itself. Wheel is left alone: scroll DOES reach the window loop (verified
-/// live 2026-08-05) via a different AppKit forwarding path.
+/// nothing at the event loop (2026-08-07 probe). So the view records clicks,
+/// moves, keys and, since 2026-10-06, the wheel itself. The wheel was left to
+/// the responder chain on a 2026-08-05 reading that it reached tao's
+/// `WindowEvent::MouseWheel`; in the app as built since the view took a
+/// tracking area and first-responder status (#515, #523) it no longer does:
+/// a real-window run on 2026-10-06 posted eight wheel events at the content
+/// view's centre and the app logged none, while hover, press and keys from
+/// the same tool arrived (Z lane I0, hand-test item H6). The wheel is
+/// consumed here, not passed to super, so the window loop cannot scroll the
+/// page a second time if the chain ever carries it again.
 #[cfg(target_os = "macos")]
 pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
     use objc::declare::ClassDecl;
@@ -184,6 +218,38 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 let _: () = msg_send![area, release];
             }
         }
+        extern "C" fn scroll_wheel(this: &Object, _sel: Sel, event: id) {
+            unsafe {
+                let wpt: cocoa::foundation::NSPoint = msg_send![event, locationInWindow];
+                let lpt: cocoa::foundation::NSPoint =
+                    msg_send![this, convertPoint: wpt fromView: nil];
+                let frame: cocoa::foundation::NSRect = msg_send![this, frame];
+                let raw_dx: f64 = msg_send![event, scrollingDeltaX];
+                let raw_dy: f64 = msg_send![event, scrollingDeltaY];
+                let precise: bool = msg_send![event, hasPreciseScrollingDeltas];
+                // Lines (an external wheel) at 40px a line; a trackpad
+                // reports pixels. AppKit's horizontal sign is the inverse
+                // of tao's, which is the sign the app's scroll code speaks.
+                let scale = if precise { 1.0 } else { 40.0 };
+                let scroll = PendingScroll {
+                    x: lpt.x,
+                    y: frame.size.height - lpt.y,
+                    dx: -raw_dx * scale,
+                    dy: raw_dy * scale,
+                };
+                if let Ok(mut q) = PENDING_SCROLLS.lock() {
+                    match q.last_mut() {
+                        Some(last) => {
+                            last.dx += scroll.dx;
+                            last.dy += scroll.dy;
+                            last.x = scroll.x;
+                            last.y = scroll.y;
+                        }
+                        None => q.push(scroll),
+                    }
+                }
+            }
+        }
         extern "C" fn accepts_first_responder(_this: &Object, _sel: Sel) -> bool {
             // Without this, makeFirstResponder: refuses the view and macOS
             // keeps routing keys to whoever held focus before — observed
@@ -257,6 +323,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             decl.add_method(sel!(mouseMoved:), mouse_moved as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(mouseDragged:), mouse_moved as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(mouseExited:), mouse_exited as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(scrollWheel:), scroll_wheel as extern "C" fn(&Object, Sel, id));
             decl.add_method(
                 sel!(updateTrackingAreas),
                 update_tracking_areas as extern "C" fn(&Object, Sel),
