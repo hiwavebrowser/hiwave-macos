@@ -40,6 +40,10 @@ SITES_FILE = REPO / "websuite" / "realsite-top20.json"
 BOARDS = {
     "top20": (SITES_FILE, "trend.csv"),
     "wide": (REPO / "websuite" / "realsite-top80.json", "trend-wide.csv"),
+    # --board top25 (Pete, 2026-10-06): the top 20 plus five more, out of 75,
+    # own trend file. A full run also writes the top-20 subset to trend.csv as
+    # the /60 board, so one run keeps both numbers.
+    "top25": (REPO / "websuite" / "realsite-top25.json", "trend-top25.csv"),
 }
 ORACLE = REPO / "tools" / "parity_oracle" / "realsite.mjs"
 DEFAULT_CHROME = (
@@ -416,7 +420,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--site", action="append", help="only these site ids")
     ap.add_argument("--board", choices=sorted(BOARDS), default="top20",
-                    help="top20 (the trench metric, /60) or wide (80 sites, /240, separate trend)")
+                    help="top20 (the trench metric, /60), top25 (top20 + five, /75, also writes "
+                         "the /60 row) or wide (80 sites, /240, separate trend)")
     ap.add_argument("--capture-bin", default=str(REPO / "target/release/parity-capture"))
     ap.add_argument("--out", help="run directory (default trench/realsite/runs/<ts>)")
     ap.add_argument("--summarize", action="store_true",
@@ -488,8 +493,19 @@ def main():
 
     summary = summarize(rows, ts, width, height, all_ids)
     (outdir / "summary.json").write_text(json.dumps(summary, indent=2))
+    top20 = None
+    if args.board == "top25":
+        top20_ids = [x["id"] for x in json.loads(SITES_FILE.read_text())["sites"]]
+        top20 = summarize([r for r in rows if r["id"] in set(top20_ids)],
+                          ts, width, height, top20_ids)
+        summary["top20"] = {k: top20[k] for k in (
+            "points", "max_points", "loads", "readable", "looks_right",
+            "scorable_points", "scorable_max", "full_run")}
+    (outdir / "summary.json").write_text(json.dumps(summary, indent=2))
     if summary["full_run"]:
         append_trend(summary, outdir.name, trend_name)
+        if top20 and not size_suffix:
+            append_trend(top20, outdir.name, "trend.csv")
     if args.summarize:
         for r in rows:
             print(fmt_row(r))
@@ -501,6 +517,10 @@ def main():
     print("BLOCKED %s" % (", ".join("%s (%s)" % kv for kv in summary["blocked"].items()) or "none"))
     print("ORACLE BLOCKED %s" % (
         ", ".join("%s (%s)" % kv for kv in summary["oracle_blocked"].items()) or "none"))
+    if top20:
+        print("TOP20 %d/%d   loads %d  readable %d  looks-right %d   (scorable %d/%d)" % (
+            top20["points"], top20["max_points"], top20["loads"], top20["readable"],
+            top20["looks_right"], top20["scorable_points"], top20["scorable_max"]))
     print("SCORABLE %d/%d on %d sites" % (
         summary["scorable_points"], summary["scorable_max"], summary["scorable_sites"]))
     print("run: %s" % outdir.relative_to(REPO) if outdir.is_relative_to(REPO) else outdir)
