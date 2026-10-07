@@ -21234,6 +21234,40 @@ img { display: block; width: 10px; height: 10px; }
         );
     }
 
+    /// `mask` is not inherited (css-masking-1 §6): a masked parent's child
+    /// paints its own background unmasked, not through the parent's icon.
+    #[test]
+    fn a_mask_is_not_inherited_by_a_child() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+.p { width: 40px; height: 40px; background-color: rgb(255, 0, 0); mask-image: url(icon.svg); }
+.c { width: 20px; height: 20px; background-color: rgb(0, 0, 255); }
+</style></head><body><div class="p"><div class="c"></div></div></body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 100, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let masked: Vec<(u8, u8, u8)> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::MaskedColor { color, .. } => Some((color.r, color.g, color.b)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(masked, vec![(255, 0, 0)], "only the parent is masked: {:?}", dl.commands);
+        assert!(
+            dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::SolidColor(color, r)
+                    if (color.r, color.g, color.b) == (0, 0, 255)
+                        && (r.x, r.y, r.width, r.height) == (0.0, 0.0, 20.0, 20.0))),
+            "the child paints its own background unmasked: {:?}",
+            dl.commands
+        );
+    }
+
     /// Both mask lanes reach the frame: the vector one (a data: SVG,
     /// spliced as recoloured commands) and the raster one (a PNG whose
     /// alpha is uploaded as a white mask texture and drawn tinted). The
