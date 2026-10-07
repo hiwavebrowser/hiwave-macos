@@ -1,4 +1,10 @@
 <!DOCTYPE html>
-<html><body>
-<div style="width: 50px; height: 50px; background-color: rgb(255, 0, 0); -webkit-mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>'); mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>');"></div>
+<!-- Reduced repro: CSS mask-image url() is ignored. Notes: repro_mask_image.md -->
+<html><body style="margin:0"><style>
+  div { position: absolute; top: 0; mask-repeat: no-repeat; mask-position: 50% 50%; }
+</style>
+<!-- A (Pollux draft): data: SVG circle, -webkit- + unprefixed. Probe (1,1), outside the circle. -->
+<div style="left: 0; width: 50px; height: 50px; background-color: rgb(255, 0, 0); -webkit-mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>'); mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>');"></div>
+<!-- B (en.wikipedia.org span.vector-icon.mw-ui-icon-menu): 20px hamburger mask on rgb(64,66,68). Probe (70,7) between bars; (70,4) is on a bar. -->
+<div style="left: 60px; width: 20px; height: 20px; background-color: rgb(64, 66, 68); mask-size: 20px; mask-image: url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22><path d=%22M1 3h18v2H1zm0 6h18v2H1zm0 6h18v2H1z%22/></svg>');"></div>
 </body></html>
