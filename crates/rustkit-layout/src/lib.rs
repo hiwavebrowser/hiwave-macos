@@ -132,7 +132,7 @@ pub fn normal_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     let key = (
         style.font_family.clone(),
         font_size.to_bits(),
-        style.font_weight.0 as u16,
+        style.font_weight.0,
         style.font_style as u8,
     );
     if let Some(px) = NORMAL_LINE_HEIGHT_CACHE.with(|c| c.borrow().get(&key).copied()) {
@@ -230,10 +230,10 @@ pub(crate) fn button_border_box_width(
 /// Intrinsic BORDER-box size of a form control: the bare-control calibration,
 /// or the control's content line composed with author padding/border. Block
 /// flow (`layout_form_control`) and flex items (`flex::get_intrinsic_*`) both
-/// size from here — the flex path carried its own older blobs (button = label
-/// + 24 wide, 1.5em + 12 tall, author padding ignored), so flex-positioning's
-/// `.btn { padding: 8px 16px }` row built 55.9x33 for Chrome's 63.9x34 and
-/// everything below it sat a pixel high.
+/// size from here — the flex path carried its own older blobs (button =
+/// label + 24 wide, 1.5em + 12 tall, author padding ignored), so
+/// flex-positioning's `.btn { padding: 8px 16px }` row built 55.9x33 for
+/// Chrome's 63.9x34 and everything below it sat a pixel high.
 pub(crate) fn form_control_intrinsic_size(
     style: &ComputedStyle,
     control: &FormControlType,
@@ -2084,9 +2084,7 @@ impl LayoutBox {
         } else {
             // Inline box with no children and no explicit width:
             // Use horizontal padding + border as minimum (inline-block behavior)
-            let horizontal_box =
-                self.dimensions.padding.horizontal() + self.dimensions.border.horizontal();
-            horizontal_box
+            self.dimensions.padding.horizontal() + self.dimensions.border.horizontal()
         };
         self.dimensions.content.width = computed_width;
 
@@ -2232,7 +2230,7 @@ impl LayoutBox {
                 | rustkit_css::WhiteSpace::PreWrap
                 | rustkit_css::WhiteSpace::PreLine
                 | rustkit_css::WhiteSpace::BreakSpaces
-        ) && text.contains(|c| c == '\n' || c == '\r');
+        ) && text.contains(['\n', '\r']);
         if overflows || has_segment_breaks {
             // Soft wrapping off (`pre`) or no resolved width: each segment
             // is one line however wide it is — only the forced breaks split.
@@ -2530,6 +2528,7 @@ impl LayoutBox {
 
     /// Layout a replaced element (image), resolving percentage heights
     /// against `containing_block.content.height`.
+    #[cfg(test)]
     fn layout_image(
         &mut self,
         natural_width: f32,
@@ -3014,19 +3013,6 @@ impl LayoutBox {
                 _ => crate::flex::translate_subtree(sub, 0.0, half_leading),
             }
         }
-    }
-
-    /// Above/below-baseline extents of a line of text in `s`, half-leading
-    /// included — the strut when `s` is the container's style (CSS2 §10.8.1).
-    fn text_baseline_extents(s: &ComputedStyle) -> (f32, f32) {
-        let fs = match s.font_size {
-            Length::Px(px) => px,
-            _ => 16.0,
-        };
-        let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
-        let line_h = resolve_line_height(s, fs);
-        let half_leading = half_leading(line_h, m.ascent, m.descent);
-        (half_leading + m.ascent, half_leading + m.descent)
     }
 
     /// The same split for sizing a line box: the two parts sum to the
@@ -3648,34 +3634,6 @@ impl LayoutBox {
         }
     }
 
-    /// This box's content height when it is definite BEFORE its children
-    /// lay out (an absolute `height`), else `None`. Percentages are left
-    /// out: they need the grandparent's definite height, which this box
-    /// does not hold. Mirrors the absolute arms of calculate_block_height.
-    fn definite_content_height(&self) -> Option<f32> {
-        let padding_border = self.dimensions.padding.top
-            + self.dimensions.padding.bottom
-            + self.dimensions.border.top
-            + self.dimensions.border.bottom;
-        let specified = match self.style.height {
-            Length::Px(h) => h,
-            Length::Em(em) => {
-                em * match self.style.font_size {
-                    Length::Px(px) => px,
-                    _ => 16.0,
-                }
-            }
-            Length::Rem(rem) => rem * 16.0,
-            Length::Vh(vh) if self.viewport.1 > 0.0 => vh / 100.0 * self.viewport.1,
-            _ => return None,
-        };
-        Some(if self.style.box_sizing == BoxSizing::BorderBox {
-            (specified - padding_border).max(0.0)
-        } else {
-            specified
-        })
-    }
-
     /// This box's inner (content-box) height when `height: auto` is made
     /// DEFINITE by opposite insets on an out-of-flow box, else `None`.
     ///
@@ -3687,7 +3645,7 @@ impl LayoutBox {
     /// asks *style* whether the main size is definite answers "no" and falls
     /// back to sizing by content.
     ///
-    /// It lives here, beside `definite_content_height`, because the flex
+    /// It lives here, on `LayoutBox`, because the flex
     /// container path and `apply_position_offsets_absolute` must agree on
     /// the number to the last bit — two copies of this subtraction that
     /// drift apart are the defect class night 8 recorded.
@@ -5725,7 +5683,7 @@ impl LayoutBox {
         }
 
         // Sort positioned elements by z-index
-        positioned.sort_by(|a, b| a.1.cmp(&b.1));
+        positioned.sort_by_key(|a| a.1);
 
         // Combine: negative z-index, normal flow, positive z-index
         let mut result: Vec<&LayoutBox> = Vec::new();
@@ -13751,7 +13709,7 @@ mod tests {
         // Width so the line has content and flushes; inline width is not
         // spec-honored but the advance mechanism under test does not care.
         a_style.width = Length::Px(50.0);
-        let mut a = LayoutBox::new(BoxType::Inline, a_style);
+        let a = LayoutBox::new(BoxType::Inline, a_style);
         let (content, half) = a.inline_content_area();
         assert!(
             content < 24.0 * 0.9,

@@ -1843,7 +1843,7 @@ pub fn layout_grid_container(
 
     // Phase 7: Collect final positions (drops immutable borrow of children)
     let item_count = items.len();
-    let positions: Vec<Rect> = items.iter().map(|item| item.rect.clone()).collect();
+    let positions: Vec<Rect> = items.iter().map(|item| item.rect).collect();
     // Row spans for Phase 9.5 (real-height row growth): (row_start, row_end)
     // as 0-based track indices, in the same order as `positions`.
     let row_spans: Vec<(usize, usize)> = items
@@ -6588,7 +6588,7 @@ mod tests {
         assert_eq!(item3.order(), 0, "Item3 should have order 0");
 
         // Create a vector and sort by order
-        let mut items = vec![item1, item2, item3];
+        let mut items = [item1, item2, item3];
         items.sort_by_key(|item| item.order());
 
         // Verify order after sorting: -1, 0, 2
@@ -6619,7 +6619,7 @@ mod tests {
         let item_b = GridItem::new(&layout_box_b);
         let item_c = GridItem::new(&layout_box_c);
 
-        let mut items = vec![item_a, item_b, item_c];
+        let mut items = [item_a, item_b, item_c];
 
         // Store original positions by pointer comparison
         let ptr_a = items[0].layout_box as *const _;
@@ -7098,7 +7098,7 @@ mod tests {
         // Single-span items should be processed first, then multi-span
 
         // Create tracks: [auto, auto, auto]
-        let mut tracks = vec![
+        let mut tracks = [
             GridTrack::new(&TrackSize::Auto),
             GridTrack::new(&TrackSize::Auto),
             GridTrack::new(&TrackSize::Auto),
@@ -7159,7 +7159,7 @@ mod tests {
         // Fixed tracks should not grow if there are growable alternatives
 
         // Create tracks: [100px (fixed), auto (growable)]
-        let mut tracks = vec![
+        let mut tracks = [
             GridTrack::new(&TrackSize::Px(100.0)),
             GridTrack::new(&TrackSize::Auto),
         ];

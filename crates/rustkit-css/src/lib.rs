@@ -922,9 +922,10 @@ pub enum Gradient {
 // ==================== Background Layer Types ====================
 
 /// The image source for a background layer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum BackgroundImage {
     /// No image (transparent).
+    #[default]
     None,
     /// A gradient.
     Gradient(Gradient),
@@ -932,14 +933,8 @@ pub enum BackgroundImage {
     Url(String),
 }
 
-impl Default for BackgroundImage {
-    fn default() -> Self {
-        BackgroundImage::None
-    }
-}
-
 /// Background size specification.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum BackgroundSize {
     /// Stretch to cover the entire area.
     Cover,
@@ -951,19 +946,15 @@ pub enum BackgroundSize {
         height: Option<f32>,
     },
     /// Auto sizing (use intrinsic dimensions).
+    #[default]
     Auto,
 }
 
-impl Default for BackgroundSize {
-    fn default() -> Self {
-        BackgroundSize::Auto
-    }
-}
-
 /// Background repeat specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackgroundRepeat {
     /// Repeat in both directions.
+    #[default]
     Repeat,
     /// Repeat horizontally only.
     RepeatX,
@@ -975,12 +966,6 @@ pub enum BackgroundRepeat {
     Space,
     /// Round to fill without clipping.
     Round,
-}
-
-impl Default for BackgroundRepeat {
-    fn default() -> Self {
-        BackgroundRepeat::Repeat
-    }
 }
 
 /// Background position specification.
@@ -1257,7 +1242,7 @@ pub enum FlexBasis {
 // ==================== Grid Types ====================
 
 /// A grid track size.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum TrackSize {
     /// Fixed length in pixels.
     Px(f32),
@@ -1270,17 +1255,12 @@ pub enum TrackSize {
     /// Size based on content maximum.
     MaxContent,
     /// Auto sizing.
+    #[default]
     Auto,
     /// Minimum/maximum constraint.
     MinMax(Box<TrackSize>, Box<TrackSize>),
     /// Fit content with maximum.
     FitContent(f32),
-}
-
-impl Default for TrackSize {
-    fn default() -> Self {
-        TrackSize::Auto
-    }
 }
 
 impl TrackSize {
@@ -1619,9 +1599,10 @@ impl GridAutoFlow {
 }
 
 /// Grid line reference (for grid-column-start, etc.).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum GridLine {
     /// Auto placement.
+    #[default]
     Auto,
     /// Specific line number (1-based, can be negative).
     Number(i32),
@@ -1631,12 +1612,6 @@ pub enum GridLine {
     Span(u32),
     /// Span to a named line.
     SpanName(String),
-}
-
-impl Default for GridLine {
-    fn default() -> Self {
-        GridLine::Auto
-    }
 }
 
 /// Grid placement for an item.
@@ -1756,20 +1731,15 @@ pub enum FontStyle {
 /// - a number (unitless multiplier of font-size)
 /// - a length (absolute value like `24px`)
 /// - a percentage (of font-size)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LineHeight {
     /// Normal line height (use font metrics, typically ~1.2).
+    #[default]
     Normal,
     /// Unitless number (multiplier of font-size).
     Number(f32),
     /// Absolute length in pixels.
     Px(f32),
-}
-
-impl Default for LineHeight {
-    fn default() -> Self {
-        LineHeight::Normal
-    }
 }
 
 /// Fallback ratio for `line-height: normal` when no font metrics are available.
@@ -4050,7 +4020,7 @@ mod tests {
             final_line_names: vec![],
         };
 
-        let (expanded, auto_repeat) = template.expand_tracks();
+        let (expanded, _auto_repeat) = template.expand_tracks();
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].size, TrackSize::Px(100.0));
         assert_eq!(expanded[1].size, TrackSize::Fr(1.0));
@@ -4073,7 +4043,7 @@ mod tests {
             final_line_names: vec![],
         };
 
-        let (expanded, auto_repeat) = template.expand_tracks();
+        let (expanded, _auto_repeat) = template.expand_tracks();
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].size, TrackSize::Px(100.0));
         assert_eq!(expanded[1].size, TrackSize::Fr(1.0));

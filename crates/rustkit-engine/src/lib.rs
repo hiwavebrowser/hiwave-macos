@@ -313,12 +313,8 @@ struct SubresourceReferrer {
 }
 
 impl SubresourceReferrer {
-    /// A GET for `url` that carries this referrer and policy.
-    fn get(&self, url: Url) -> Request {
-        self.get_for(url, RequestDestination::Other)
-    }
-
-    /// Same, with the fetch destination the shield classifies by.
+    /// A GET for `url` that carries this referrer and policy, with the fetch
+    /// destination the shield classifies by.
     fn get_for(&self, url: Url, destination: RequestDestination) -> Request {
         let mut request = Request::get(url)
             .referrer_policy(self.policy)
@@ -4949,8 +4945,6 @@ impl Engine {
         false
     }
 
-    /// Build a layout tree from a DOM document.
-
     /// Transfer position + offsets from a computed style onto a layout box.
     /// Percent offsets resolve later (apply time) from the style itself.
     fn transfer_positioning(layout_box: &mut LayoutBox, style: &ComputedStyle) {
@@ -5844,7 +5838,7 @@ impl Engine {
                     if matches!(style.line_height, rustkit_css::LineHeight::Normal)
                         && !matches!(parent.line_height, rustkit_css::LineHeight::Normal)
                     {
-                        style.line_height = parent.line_height.clone();
+                        style.line_height = parent.line_height;
                     }
                 }
 
@@ -6678,7 +6672,7 @@ impl Engine {
                         s.font_weight = parent.font_weight;
                         s.font_style = parent.font_style;
                         s.color = parent.color;
-                        s.line_height = parent.line_height.clone();
+                        s.line_height = parent.line_height;
                         s.text_align = parent.text_align;
                         s.text_decoration_line = parent.text_decoration_line;
                         s.text_decoration_color = parent.text_decoration_color;
@@ -6886,7 +6880,7 @@ impl Engine {
             pseudo_style.font_style = parent.font_style;
             pseudo_style.font_stretch = parent.font_stretch;
             pseudo_style.color = parent.color;
-            pseudo_style.line_height = parent.line_height.clone();
+            pseudo_style.line_height = parent.line_height;
             pseudo_style.letter_spacing = parent.letter_spacing.clone();
             pseudo_style.word_spacing = parent.word_spacing.clone();
             pseudo_style.text_align = parent.text_align;
@@ -7945,14 +7939,14 @@ impl Engine {
             "font-weight" => style.font_weight = parent.font_weight,
             "font-style" => style.font_style = parent.font_style,
             "font-stretch" => style.font_stretch = parent.font_stretch,
-            "line-height" => style.line_height = parent.line_height.clone(),
+            "line-height" => style.line_height = parent.line_height,
             "font" => {
                 style.font_family = parent.font_family.clone();
                 style.font_size = parent.font_size.clone();
                 style.font_weight = parent.font_weight;
                 style.font_style = parent.font_style;
                 style.font_stretch = parent.font_stretch;
-                style.line_height = parent.line_height.clone();
+                style.line_height = parent.line_height;
             }
             "letter-spacing" => style.letter_spacing = parent.letter_spacing.clone(),
             "word-spacing" => style.word_spacing = parent.word_spacing.clone(),
@@ -10354,7 +10348,7 @@ impl Engine {
                     }
                     _ => None,
                 })
-                .last()
+                .next_back()
         });
         SubresourceReferrer {
             url: view.url.clone(),
@@ -10944,18 +10938,18 @@ impl Engine {
     /// wikipedia's cascade went to those repeated attribute lookups).
     fn keys_may_match_keyed(keys: &[SubjectKey], element: &KeyedElement) -> bool {
         keys.iter().any(|k| {
-            k.id.as_deref().map_or(true, |id| element.id == Some(id))
+            k.id.as_deref().is_none_or(|id| element.id == Some(id))
                 && k.tag
                     .as_deref()
-                    .map_or(true, |t| t.eq_ignore_ascii_case(element.tag_name))
-                && k.class.as_deref().map_or(true, |c| {
+                    .is_none_or(|t| t.eq_ignore_ascii_case(element.tag_name))
+                && k.class.as_deref().is_none_or(|c| {
                     element
                         .class
                         .is_some_and(|cl| cl.split_whitespace().any(|x| x == c))
                 })
                 && k.attr
                     .as_deref()
-                    .map_or(true, |a| element.attributes.contains_key(a))
+                    .is_none_or(|a| element.attributes.contains_key(a))
         })
     }
 
@@ -10988,7 +10982,7 @@ impl Engine {
                 });
             }
             if compound.starts_with('.')
-                && !compound.contains(|c| c == '#' || c == '[' || c == ':')
+                && !compound.contains(['#', '[', ':'])
             {
                 // Every listed class is required; the first one suffices.
                 return out.push(SubjectKey {
@@ -11591,7 +11585,7 @@ impl SelectorMatcher {
         }
 
         // Class selector: .class (can be chained: .a.b)
-        if selector.starts_with('.') && !selector.contains(|c| c == '#' || c == '[' || c == ':') {
+        if selector.starts_with('.') && !selector.contains(['#', '[', ':']) {
             if let Some(el_class) = attributes.get("class") {
                 let el_classes: Vec<&str> = el_class.split_whitespace().collect();
                 return selector[1..]
@@ -11608,7 +11602,7 @@ impl SelectorMatcher {
 
         // Extract tag part
         let tag_end = remaining
-            .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+            .find(['.', '#', ':', '['])
             .unwrap_or(remaining.len());
         let tag_part = &remaining[..tag_end];
         remaining = &remaining[tag_end..];
@@ -11623,7 +11617,7 @@ impl SelectorMatcher {
             if let Some(rest) = remaining.strip_prefix('.') {
                 // Class
                 let class_end = rest
-                    .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+                    .find(['.', '#', ':', '['])
                     .unwrap_or(rest.len());
                 let class_name = css_ident(&rest[..class_end]);
                 remaining = &rest[class_end..];
@@ -11638,7 +11632,7 @@ impl SelectorMatcher {
             } else if let Some(rest) = remaining.strip_prefix('#') {
                 // ID
                 let id_end = rest
-                    .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+                    .find(['.', '#', ':', '['])
                     .unwrap_or(rest.len());
                 let id_name = css_ident(&rest[..id_end]);
                 remaining = &rest[id_end..];
@@ -12046,7 +12040,7 @@ impl SelectorMatcher {
         };
         let tag = tag.as_ref();
         let is_control = SelectorMatcher::is_form_control_tag(tag);
-        let value_is_empty = attributes.get("value").map_or(true, |v| v.is_empty());
+        let value_is_empty = attributes.get("value").is_none_or(|v| v.is_empty());
         match name {
             "first-child" => sib.index == 0,
             "last-child" => sib.index == sib.count.saturating_sub(1),
@@ -12065,7 +12059,7 @@ impl SelectorMatcher {
                 arg.is_some_and(|a| SelectorMatcher.match_nth(a, sib.type_count - sib.type_index))
             }
             // :not() takes a selector list; none of the members may match.
-            "not" => arg.map_or(true, |a| {
+            "not" => arg.is_none_or(|a| {
                 !SelectorMatcher.any_compound_in_list_matches(a, tag_name, attributes, sib)
             }),
             // :is()/:where() select exactly their arguments. They used to
@@ -14403,8 +14397,7 @@ fn parse_conic_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gra
     let first = parts[0].trim().to_lowercase();
     if first.starts_with("from ") || first.contains(" at ") {
         // Parse "from Xdeg"
-        if first.starts_with("from ") {
-            let rest = &first[5..];
+        if let Some(rest) = first.strip_prefix("from ") {
             if let Some(deg_end) = rest.find("deg") {
                 if let Ok(deg) = rest[..deg_end].trim().parse::<f32>() {
                     from_angle = deg;
@@ -15566,8 +15559,7 @@ fn parse_time(value: &str) -> Option<f32> {
 fn justify_keyword(value: &str) -> &str {
     value
         .split_whitespace()
-        .filter(|t| !matches!(*t, "safe" | "unsafe" | "legacy"))
-        .last()
+        .rfind(|t| !matches!(*t, "safe" | "unsafe" | "legacy"))
         .unwrap_or("")
 }
 
@@ -19531,7 +19523,7 @@ mod tests {
 
         fn collect(b: &LayoutBox, out: &mut Vec<(String, rustkit_css::LineHeight)>) {
             if let BoxType::Text(t) = &b.box_type {
-                out.push((t.clone(), b.style.line_height.clone()));
+                out.push((t.clone(), b.style.line_height));
             }
             for c in &b.children {
                 collect(c, out);
@@ -19542,7 +19534,7 @@ mod tests {
         let get = |needle: &str| {
             lhs.iter()
                 .find(|(t, _)| t.contains(needle))
-                .map(|(_, s)| s.clone())
+                .map(|(_, s)| *s)
                 .unwrap_or_else(|| panic!("no text box containing {:?}", needle))
         };
         // html -> body -> h1 (unitless factor inherits as the number, re-resolved per font-size)
@@ -27074,19 +27066,19 @@ mod history_traversal_tests {
     #[tokio::test]
     async fn back_on_a_fresh_view_is_a_quiet_no_op() {
         let (mut e, id) = engine_with_view();
-        assert_eq!(e.go_back(id).await.unwrap(), false);
+        assert!(!e.go_back(id).await.unwrap());
     }
 
     #[tokio::test]
     async fn forward_on_a_fresh_view_is_a_quiet_no_op() {
         let (mut e, id) = engine_with_view();
-        assert_eq!(e.go_forward(id).await.unwrap(), false);
+        assert!(!e.go_forward(id).await.unwrap());
     }
 
     #[tokio::test]
     async fn reload_with_no_history_is_a_quiet_no_op() {
         let (mut e, id) = engine_with_view();
-        assert_eq!(e.reload(id).await.unwrap(), false);
+        assert!(!e.reload(id).await.unwrap());
     }
 
     #[tokio::test]
@@ -27938,7 +27930,7 @@ impl SubjectCompound {
                 SubjectPart::Class(_) | SubjectPart::Id(_) | SubjectPart::Attr(_) => true,
                 SubjectPart::Pseudo(..) => false,
                 SubjectPart::List { members, .. } => {
-                    members.iter().all(|m| m.as_ref().map_or(true, |m| m.is_context_free()))
+                    members.iter().all(|m| m.as_ref().is_none_or(|m| m.is_context_free()))
                 }
             }),
         }
@@ -27954,7 +27946,7 @@ impl SubjectCompound {
         if let Some(id) = selector.strip_prefix('#').filter(|id| is_bare_id(id)) {
             return Self::IdOnly(css_ident(id).into_owned());
         }
-        if selector.starts_with('.') && !selector.contains(|c| c == '#' || c == '[' || c == ':') {
+        if selector.starts_with('.') && !selector.contains(['#', '[', ':']) {
             return Self::ClassesOnly(
                 selector[1..]
                     .split('.')
@@ -28275,9 +28267,9 @@ impl AncestorCompound {
 
     fn matches(&self, tag_name: &str, classes: &[String], id: Option<&String>) -> bool {
         !self.never
-            && self.tag.as_deref().map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
+            && self.tag.as_deref().is_none_or(|t| t.eq_ignore_ascii_case(tag_name))
             && self.classes.iter().all(|req| classes.iter().any(|c| c == req))
-            && self.id.as_deref().map_or(true, |req| id.is_some_and(|el| el == req))
+            && self.id.as_deref().is_none_or(|req| id.is_some_and(|el| el == req))
             && self
                 .any_of
                 .iter()
@@ -30143,7 +30135,7 @@ mod style_share_tests {
             let _chain = MatchShareChain::enter(&sheets, &[], ancestors);
             // Another slice than the scope's, equal or not, is not keyed.
             assert!(matches!(
-                match_share_lookup(&ix, "li", &none, &ancestors.to_vec()),
+                match_share_lookup(&ix, "li", &none, ancestors),
                 MatchShared::Untracked
             ));
             match match_share_lookup(&ix, "li", &none, ancestors) {

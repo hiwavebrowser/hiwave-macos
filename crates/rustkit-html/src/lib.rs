@@ -155,7 +155,7 @@ pub trait TreeSink {
 
     /// Check if an element is a template element.
     fn is_template_element(&self, node: Self::NodeId) -> bool {
-        self.get_tag_name(node).map_or(false, |n| n == "template")
+        self.get_tag_name(node).is_some_and(|n| n == "template")
     }
 
     /// Mark a script element as "already started" per HTML5 spec.

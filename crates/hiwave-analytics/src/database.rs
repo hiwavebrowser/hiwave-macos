@@ -406,7 +406,7 @@ pub fn get_top_domains(conn: &Connection, limit: usize) -> HiWaveResult<Vec<Doma
                 total_time: row.get(2)?,
                 trackers_blocked: row.get(3)?,
                 last_visit: DateTime::from_timestamp(row.get::<_, i64>(4)?, 0)
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
             })
         })
         .map_err(|e| HiWaveError::analytics(e.to_string()))?

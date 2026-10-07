@@ -1325,7 +1325,7 @@ impl SvgRect {
         if let Some(color) = style.fill_color() {
             let alpha = (color.a * style.fill_opacity * style.opacity).clamp(0.0, 1.0);
             let fill_color = Color { a: alpha, ..color };
-            commands.push(DisplayCommand::FillRect { rect: rect.clone(), color: fill_color });
+            commands.push(DisplayCommand::FillRect { rect, color: fill_color });
         }
         let (right, bottom) = (self.x + self.width, self.y + self.height);
         fill_outline_with_gradient(
@@ -1340,7 +1340,7 @@ impl SvgRect {
             let alpha = (color.a * style.stroke_opacity * style.opacity).clamp(0.0, 1.0);
             let stroke_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::StrokeRect {
-                rect: rect.clone(),
+                rect,
                 color: stroke_color,
                 width: style.stroke_width,
             });
@@ -1464,7 +1464,7 @@ impl SvgEllipse {
             let alpha = (color.a * style.fill_opacity * style.opacity).clamp(0.0, 1.0);
             let fill_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::FillEllipse {
-                rect: rect.clone(),
+                rect,
                 color: fill_color,
             });
         }
@@ -2596,8 +2596,7 @@ fn parse_svg_color(s: &str) -> Option<Color> {
     let s = s.trim().to_lowercase();
 
     // Hex colors
-    if s.starts_with('#') {
-        let hex = &s[1..];
+    if let Some(hex) = s.strip_prefix('#') {
         return match hex.len() {
             3 => {
                 let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
@@ -2620,7 +2619,7 @@ fn parse_svg_color(s: &str) -> Option<Color> {
         let inner = s.trim_start_matches("rgba(")
             .trim_start_matches("rgb(")
             .trim_end_matches(')');
-        let parts: Vec<&str> = inner.split(|c| c == ',' || c == '/').collect();
+        let parts: Vec<&str> = inner.split([',', '/']).collect();
         
         if parts.len() >= 3 {
             let r: u8 = parts[0].trim().parse().ok()?;
@@ -2768,7 +2767,7 @@ struct GradientDef {
 /// of an inline `style` laid over them.
 fn tag_attributes(tag: &str) -> HashMap<String, String> {
     let tag = tag.trim_start_matches('<').trim_end_matches('>').trim_end_matches('/');
-    let mut attr_str = tag.splitn(2, char::is_whitespace).nth(1).unwrap_or("");
+    let mut attr_str = tag.split_once(char::is_whitespace).map(|x| x.1).unwrap_or("");
     let mut attrs = HashMap::new();
     while let Some((key, value, rest)) = parse_attr(attr_str) {
         attrs.insert(key.to_lowercase(), value);
@@ -2991,8 +2990,8 @@ fn parse_text_element(tag: &str, content: &str, base_style: &SvgStyle) -> Option
     let attrs_str = tag
         .trim_start_matches('<')
         .trim_end_matches('>')
-        .splitn(2, char::is_whitespace)
-        .nth(1)
+        .split_once(char::is_whitespace)
+        .map(|x| x.1)
         .unwrap_or("");
 
     let mut attrs = HashMap::new();
