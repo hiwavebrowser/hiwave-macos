@@ -70,6 +70,20 @@ class TestHoldoutBoard(unittest.TestCase):
             f"Holdout set must not contain any top20 sites. Overlap found: {overlap}",
         )
 
+    def test_top25_extends_top20_and_stays_out_of_holdout(self):
+        """realsite-top25.json is the pinned top 20, same order, plus five; none of the 25 is held out."""
+        top20 = json.loads((REPO / "websuite" / "realsite-top20.json").read_text(encoding="utf-8"))
+        top25 = json.loads((REPO / "websuite" / "realsite-top25.json").read_text(encoding="utf-8"))
+        holdout = json.loads((REPO / "websuite" / "realsite-holdout20.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(top25["viewport"], top20["viewport"])
+        self.assertEqual(len(top25["sites"]), 25)
+        self.assertEqual(top25["sites"][:20], top20["sites"])
+        ids = [s["id"] for s in top25["sites"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        overlap = set(ids) & {s["id"] for s in holdout["sites"]}
+        self.assertEqual(overlap, set(), f"top25 sites must not be in the holdout: {overlap}")
+
     def test_holdout_subset_of_top80(self):
         """All 20 holdout sites must be drawn from realsite-top80.json."""
         top80_path = REPO / "websuite" / "realsite-top80.json"
