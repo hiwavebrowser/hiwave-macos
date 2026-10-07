@@ -1117,7 +1117,19 @@ const WRAPPERS_JS: &str = r#"
         g[name] = ctor;
         return ctor;
     }
-    var EventTarget = iface('EventTarget');
+    // EventTarget is the one interface of this family script may construct
+    // (DOM §2.7), on its own or as the base of a class. PLAIN holds the
+    // objects made that way: they have no on<type> handler attributes.
+    var PLAIN = new WeakSet();
+    var EventTarget = function EventTarget() {
+        if (!new.target) {
+            throw new TypeError("Failed to construct 'EventTarget': Please use the 'new' operator, " +
+                "this DOM object constructor cannot be called as a function.");
+        }
+        PLAIN.add(this);
+    };
+    Object.defineProperty(EventTarget.prototype, Symbol.toStringTag, { value: 'EventTarget' });
+    g.EventTarget = EventTarget;
     var Node = iface('Node', EventTarget);
     var Document = iface('Document', Node);
     var CharacterData = iface('CharacterData', Node);
@@ -2458,10 +2470,17 @@ const WRAPPERS_JS: &str = r#"
         if (!all) { all = {}; LISTENERS.set(t, all); }
         type = String(type);
         var list = all[type] || (all[type] = []), capture = flag(opts, 'capture');
+        // The `signal` option: an aborted signal adds nothing, and a later
+        // abort removes the listener.
+        var signal = opts && typeof opts === 'object' ? opts.signal : undefined;
+        if (signal != null && signal.aborted) return;
         for (var i = 0; i < list.length; i++) {
             if (list[i].cb === cb && list[i].capture === capture) return;
         }
         list.push({ cb: cb, capture: capture, once: flag(opts, 'once'), removed: false });
+        if (signal != null && typeof signal.addEventListener === 'function') {
+            signal.addEventListener('abort', function () { t.removeEventListener(type, cb, capture); }, { once: true });
+        }
     };
     EventTarget.prototype.removeEventListener = function (type, cb, opts) {
         var all = LISTENERS.get(thisTarget(this)), list = all && all[String(type)];
@@ -2494,6 +2513,7 @@ const WRAPPERS_JS: &str = r#"
     // does not compile is logged once and is no handler.
     var INLINE = new WeakMap();
     function handlerOf(t, type) {
+        if (PLAIN.has(t)) return undefined;
         var h = t['on' + type];
         if (h !== undefined || !t[SLOT] || t.nodeType !== 1) return h;
         var src = t.getAttribute('on' + type);
