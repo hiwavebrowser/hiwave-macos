@@ -150,6 +150,10 @@ pub(crate) mod test_gpu {
     }
 }
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
+use rustkit_css::background::{
+    parse_background_origin, parse_background_position,
+    parse_background_repeat, parse_background_size, split_top_level_whitespace,
+};
 use rustkit_css::{css_ident, parse_display, ComputedStyle, CustomProperties, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
@@ -8081,6 +8085,11 @@ impl Engine {
                     }
                 }
             }
+            // `mask-*` and the `-webkit-mask-*` aliases (css-masking-1 §6).
+            // A value that does not parse leaves the earlier one.
+            _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
+                style.mask.apply(property, value, &parse_gradient);
+            }
             "background-size" => {
                 // Can be comma-separated for multiple layers
                 // CSS order: first size applies to first (topmost) layer
@@ -9361,6 +9370,9 @@ impl Engine {
                 style.background_color = rustkit_css::Color::TRANSPARENT;
                 style.background_layers.clear();
                 style.background_gradient = None;
+            }
+            _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
+                style.mask.reset(property)
             }
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
@@ -14455,178 +14467,6 @@ fn selects_the_root(selector: &str) -> bool {
 
 // ==================== Background Layer Parsing ====================
 
-/// Parse a background-size value.
-fn parse_background_size(value: &str) -> rustkit_css::BackgroundSize {
-    let value = value.trim().to_lowercase();
-    match value.as_str() {
-        "cover" => rustkit_css::BackgroundSize::Cover,
-        "contain" => rustkit_css::BackgroundSize::Contain,
-        "auto" => rustkit_css::BackgroundSize::Auto,
-        _ => {
-            // Parse explicit size (e.g., "100px 50px" or "50% auto")
-            let parts: Vec<&str> = value.split_whitespace().collect();
-            let width = parts
-                .first()
-                .and_then(|s| parse_background_size_dimension(s));
-            let height = parts
-                .get(1)
-                .and_then(|s| parse_background_size_dimension(s));
-            rustkit_css::BackgroundSize::Explicit { width, height }
-        }
-    }
-}
-
-/// Parse a single dimension for background-size (px, %, or auto).
-fn parse_background_size_dimension(value: &str) -> Option<f32> {
-    let value = value.trim();
-    if value == "auto" {
-        return None;
-    }
-    if value.ends_with("px") {
-        return value.strip_suffix("px").and_then(|s| s.parse().ok());
-    }
-    if value.ends_with('%') {
-        // Return percentage as negative value to indicate it's a percentage
-        // (will be resolved during layout)
-        return value
-            .strip_suffix('%')
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(|p| -p);
-    }
-    value.parse().ok()
-}
-
-/// Parse a background-repeat value.
-fn parse_background_repeat(value: &str) -> rustkit_css::BackgroundRepeat {
-    match value.trim().to_lowercase().as_str() {
-        "repeat" => rustkit_css::BackgroundRepeat::Repeat,
-        "repeat-x" => rustkit_css::BackgroundRepeat::RepeatX,
-        "repeat-y" => rustkit_css::BackgroundRepeat::RepeatY,
-        "no-repeat" => rustkit_css::BackgroundRepeat::NoRepeat,
-        "space" => rustkit_css::BackgroundRepeat::Space,
-        "round" => rustkit_css::BackgroundRepeat::Round,
-        _ => rustkit_css::BackgroundRepeat::default(),
-    }
-}
-
-/// Parse a background-position value (css-backgrounds-3 §3.6).
-///
-/// One value: the other axis is `center`, and `top` / `bottom` name the
-/// vertical axis. Two values: horizontal then vertical, unless the keywords
-/// say otherwise (`top right`). Three or four: `<edge> <offset>?` pairs; an
-/// offset from `right` / `bottom` is measured back from that edge.
-fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
-    use rustkit_css::BackgroundPositionValue::{Calc, Percent, Px};
-    let value = value.trim().to_lowercase();
-    // A `calc()` has spaces of its own.
-    let parts: Vec<&str> = split_top_level_whitespace(&value);
-    let from_far_edge = |offset: rustkit_css::BackgroundPositionValue| match offset {
-        Percent(p) => Percent(1.0 - p),
-        Px(px) => Calc { percent: 1.0, px: -px },
-        Calc { percent, px } => Calc { percent: 1.0 - percent, px: -px },
-    };
-    let vertical = |s: &str| matches!(s, "top" | "bottom");
-    let horizontal = |s: &str| matches!(s, "left" | "right");
-
-    let (x, y) = match parts.as_slice() {
-        [] => (Percent(0.0), Percent(0.0)),
-        [one] if vertical(one) => (Percent(0.5), parse_background_position_value(one)),
-        [one] => (parse_background_position_value(one), Percent(0.5)),
-        [a, b] if vertical(a) || horizontal(b) => (
-            parse_background_position_value(b),
-            parse_background_position_value(a),
-        ),
-        [a, b] => (
-            parse_background_position_value(a),
-            parse_background_position_value(b),
-        ),
-        many => {
-            let (mut x, mut y) = (Percent(0.5), Percent(0.5));
-            let mut i = 0;
-            while i < many.len() {
-                let edge = many[i];
-                let offset = many
-                    .get(i + 1)
-                    .copied()
-                    .filter(|next| !vertical(next) && !horizontal(next) && *next != "center");
-                let at = match (edge, offset) {
-                    ("left" | "top", Some(offset)) => parse_background_position_value(offset),
-                    ("right" | "bottom", Some(offset)) => {
-                        from_far_edge(parse_background_position_value(offset))
-                    }
-                    _ => parse_background_position_value(edge),
-                };
-                if vertical(edge) {
-                    y = at;
-                } else if horizontal(edge) {
-                    x = at;
-                }
-                i += if offset.is_some() { 2 } else { 1 };
-            }
-            (x, y)
-        }
-    };
-
-    rustkit_css::BackgroundPosition { x, y }
-}
-
-/// Parse a single background-position dimension.
-fn parse_background_position_value(value: &str) -> rustkit_css::BackgroundPositionValue {
-    let value = value.trim().to_lowercase();
-    match value.as_str() {
-        "left" | "top" => rustkit_css::BackgroundPositionValue::Percent(0.0),
-        "center" => rustkit_css::BackgroundPositionValue::Percent(0.5),
-        "right" | "bottom" => rustkit_css::BackgroundPositionValue::Percent(1.0),
-        // A sum of a percentage and px; one in font or viewport units has
-        // nothing to resolve against here and is the start edge.
-        _ if value.starts_with("calc(") => match rustkit_css::parse_length(&value) {
-            Some(rustkit_css::Length::Px(px)) => rustkit_css::BackgroundPositionValue::Px(px),
-            Some(rustkit_css::Length::Zero) => rustkit_css::BackgroundPositionValue::Px(0.0),
-            Some(rustkit_css::Length::Percent(p)) => {
-                rustkit_css::BackgroundPositionValue::Percent(p / 100.0)
-            }
-            Some(rustkit_css::Length::Calc(sum))
-                if [sum.em, sum.rem, sum.vw, sum.vh, sum.vmin, sum.vmax]
-                    .iter()
-                    .all(|c| *c == 0.0) =>
-            {
-                rustkit_css::BackgroundPositionValue::Calc {
-                    percent: sum.percent / 100.0,
-                    px: sum.px,
-                }
-            }
-            _ => rustkit_css::BackgroundPositionValue::Percent(0.0),
-        },
-        _ if value.ends_with('%') => value
-            .strip_suffix('%')
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(|p| rustkit_css::BackgroundPositionValue::Percent(p / 100.0))
-            .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0)),
-        _ if value.ends_with("px") => value
-            .strip_suffix("px")
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(rustkit_css::BackgroundPositionValue::Px)
-            .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0)),
-        _ => {
-            // Try parsing as a number (assumed px)
-            value
-                .parse::<f32>()
-                .ok()
-                .map(rustkit_css::BackgroundPositionValue::Px)
-                .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0))
-        }
-    }
-}
-
-/// Parse a background-origin value.
-fn parse_background_origin(value: &str) -> rustkit_css::BackgroundOrigin {
-    match value.trim().to_lowercase().as_str() {
-        "border-box" => rustkit_css::BackgroundOrigin::BorderBox,
-        "padding-box" => rustkit_css::BackgroundOrigin::PaddingBox,
-        "content-box" => rustkit_css::BackgroundOrigin::ContentBox,
-        _ => rustkit_css::BackgroundOrigin::default(),
-    }
-}
 
 /// Parse a single background layer from CSS (may contain image, position, size, repeat).
 fn parse_background_layer(value: &str) -> Option<rustkit_css::BackgroundLayer> {
@@ -15102,30 +14942,6 @@ enum LogicalMapping {
     Both(&'static str, &'static str),
 }
 
-/// `value` split at whitespace outside parentheses.
-fn split_top_level_whitespace(value: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = None;
-    for (i, ch) in value.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        if depth == 0 && ch.is_whitespace() {
-            if let Some(from) = start.take() {
-                parts.push(&value[from..i]);
-            }
-        } else if start.is_none() {
-            start = Some(i);
-        }
-    }
-    if let Some(from) = start {
-        parts.push(&value[from..]);
-    }
-    parts
-}
 
 /// css-logical-1 flow-relative margin / padding / inset / border names,
 /// mapped for horizontal-tb, ltr: inline-start = left, block-start = top.
