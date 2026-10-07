@@ -249,6 +249,9 @@ fn min_inner_main_size(container: &LayoutBox) -> f32 {
     match container.style.min_height {
         Length::Px(px) => inner_main_from_spec(container, px),
         Length::Vh(vh) => inner_main_from_spec(container, vh / 100.0 * container.viewport.1),
+        ref l if crate::grid::is_font_or_viewport_relative(l) => {
+            inner_main_from_spec(container, container.length_to_px(l, 0.0))
+        }
         _ => 0.0,
     }
 }
@@ -1251,6 +1254,9 @@ fn layout_flex_container_at(
                     let min = match container.style.min_height {
                         Length::Px(px) => inner_from_spec(px),
                         Length::Vh(vh) => inner_from_spec(vh / 100.0 * container.viewport.1),
+                        ref l if crate::grid::is_font_or_viewport_relative(l) => {
+                            inner_from_spec(container.length_to_px(l, 0.0))
+                        }
                         _ => 0.0,
                     };
                     // Step 12 has already written the flowed extent here; the
@@ -2552,6 +2558,9 @@ fn content_border_height(b: &LayoutBox) -> f32 {
     };
     let min = match b.style.min_height {
         Length::Px(h) => spec_height_to_border_box(b, h),
+        ref l if crate::grid::is_font_or_viewport_relative(l) => {
+            spec_height_to_border_box(b, b.length_to_px(l, 0.0))
+        }
         _ => 0.0,
     };
     let in_flow = |c: &&LayoutBox| {

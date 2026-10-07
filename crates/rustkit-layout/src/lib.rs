@@ -5620,6 +5620,19 @@ impl LayoutBox {
             // a pre-existing inconsistency with the height arm, left as it is
             // so this change carries one rule and not two.)
             Length::Calc(_) => self.length_to_px(&self.style.min_height, self.viewport.1),
+            // Font-relative and viewport units, and the comparison functions:
+            // lengths like any other. They fell through to "no minimum", so
+            // `min-height: 2rem` did nothing on any box (GitHub's small
+            // buttons, 22 tall for 32). Same basis as the arms above for a
+            // percentage inside `max()` or `clamp()`.
+            Length::Em(_)
+            | Length::Rem(_)
+            | Length::Vw(_)
+            | Length::Vmin(_)
+            | Length::Vmax(_)
+            | Length::Min(_)
+            | Length::Max(_)
+            | Length::Clamp(_) => self.length_to_px(&self.style.min_height, self.viewport.1),
             _ => 0.0,
         };
         let min_height = if is_border_box && min_height_raw > 0.0 {
@@ -5637,6 +5650,15 @@ impl LayoutBox {
             Length::Vh(vh) => vh / 100.0 * self.viewport.1,
             Length::Percent(pct) => pct / 100.0 * self.viewport.1,
             Length::Calc(_) => self.length_to_px(&self.style.max_height, self.viewport.1),
+            // As for `min-height` above: these were "no maximum".
+            Length::Em(_)
+            | Length::Rem(_)
+            | Length::Vw(_)
+            | Length::Vmin(_)
+            | Length::Vmax(_)
+            | Length::Min(_)
+            | Length::Max(_)
+            | Length::Clamp(_) => self.length_to_px(&self.style.max_height, self.viewport.1),
             _ => f32::INFINITY,
         };
         let max_height = if is_border_box && max_height_raw < f32::INFINITY {
