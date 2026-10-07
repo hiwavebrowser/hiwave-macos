@@ -126,7 +126,17 @@ Region = `header`, `nav`, `dialog`, ARIA banner/navigation/menu/menubar/dialog/h
 | youtube | 1 | 2.99 | 2.08MB |
 
 ## Bot walls (403 / challenge)
-### Bot-wall vendor prevalence
+### Walls by vendor (sites that walled us)
+
+| Technique | Sites | Site ids |
+|---|:---:|---|
+| akamai | 11/23 (48%) | ebay, edmunds, kbb, carmax, oracle, sap, salesforce, ford, chevy, gmc, honda |
+| cloudflare | 9/23 (39%) | linkedin, chatgpt, cars, carvana, topps, indeed, glassdoor, doordash, chrono24 |
+| datadome | 3/23 (13%) | nytimes, yelp, tripadvisor |
+
+Denominator is the 23 walled sites (HTTP 403 or challenge page). Note: glassdoor (http=401) served a challenge page but is still counted in Loaded OK above.
+
+### Edge / CDN vendor seen (any observed response; not walls)
 
 | Technique | Sites | Site ids |
 |---|:---:|---|
@@ -135,6 +145,8 @@ Region = `header`, `nav`, `dialog`, ARIA banner/navigation/menu/menubar/dialog/h
 | cloudflare | 14/79 (18%) | linkedin, chatgpt, cars, carvana, topps, indeed, glassdoor, ziprecruiter, uber, doordash, chrono24, cloudflare, digitalocean, shopify |
 | datadome | 4/79 (5%) | yahoo, nytimes, yelp, tripadvisor |
 | captcha | 1/79 (1%) | netflix |
+
+Vendor fingerprints seen on any response, including sites that loaded fine behind that vendor. Use the table above for wall counts.
 
 ### Challenge / 403 sites
 - **linkedin**: http=403 vendors=cloudflare title=Attention Required! | Cloudflare

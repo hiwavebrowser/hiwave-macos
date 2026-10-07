@@ -84,6 +84,14 @@ allForWall.forEach(r => (W(r.data).vendors || []).forEach(v => wallVendors.add(v
 const botwalls = [...wallVendors].map(v => row(v, d => (W(d).vendors || []).includes(v), '', allForWall));
 botwalls.push(row('HTTP 403', d => W(d).http_status === 403 || false, '', results.filter(r => r.http_status != null || r.data)));
 const wallSites = results.filter(r => r.status === 'BOTWALL' || (r.data && W(r.data).is_challenge) || r.http_status === 403);
+// Walls by vendor: only sites that actually walled us (403 / challenge), attributed to the vendor seen on that response.
+const wallsByVendorMap = new Map();
+wallSites.forEach(r => {
+  const vs = (W(r.data || {}).vendors || []);
+  (vs.length ? vs : ['unknown']).forEach(v => { if (!wallsByVendorMap.has(v)) wallsByVendorMap.set(v, []); wallsByVendorMap.get(v).push(r.id); });
+});
+const wallsByVendor = [...wallsByVendorMap].map(([name, s]) => ({ name, n: s.length, s, note: '' }));
+const okButChallenged = wallSites.filter(r => r.status === 'OK').map(r => `${r.id} (http=${r.http_status})`);
 
 const notrun = results.filter(r => r.status !== 'OK' && r.status !== 'BOTWALL');
 
@@ -121,7 +129,12 @@ ${table('Framework / platform prevalence', frameworks)}
 ${table('JS bundle size prevalence', bundles)}
 ${heavyTable}
 ## Bot walls (403 / challenge)
-${table('Bot-wall vendor prevalence', botwalls, allForWall.length || results.length)}
+${table('Walls by vendor (sites that walled us)', wallsByVendor, wallSites.length)}
+Denominator is the ${wallSites.length} walled sites (HTTP 403 or challenge page).${okButChallenged.length ? ` Note: ${okButChallenged.join(', ')} served a challenge page but is still counted in Loaded OK above.` : ''}
+
+${table('Edge / CDN vendor seen (any observed response; not walls)', botwalls, allForWall.length || results.length)}
+Vendor fingerprints seen on any response, including sites that loaded fine behind that vendor. Use the table above for wall counts.
+
 ### Challenge / 403 sites
 ${wallDetail}
 
