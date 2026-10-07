@@ -32,6 +32,9 @@ mod flex_item_relayout_tests;
 mod flex_resolve_tests;
 
 #[cfg(test)]
+mod percent_height_definite_tests;
+
+#[cfg(test)]
 mod shaped_run_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
@@ -1964,7 +1967,7 @@ impl LayoutBox {
             }
             BoxType::FormControl(ref control) => {
                 // Form controls are replaced elements with intrinsic sizing
-                self.layout_form_control(control.clone(), containing_block);
+                self.layout_form_control(control.clone(), containing_block, definite_height);
             }
             BoxType::LineBreak => {
                 // Zero-size marker; the parent's inline flow closes the line.
@@ -2710,7 +2713,15 @@ impl LayoutBox {
     }
 
     /// Layout a form control (input, button, textarea, etc.)
-    fn layout_form_control(&mut self, control: FormControlType, containing_block: &Dimensions) {
+    /// Layout a form control. `percent_height_base` is the containing block's
+    /// definite content height, as for `layout_image_in`: the height of
+    /// `containing_block` itself is the parent's flow cursor on the flow path.
+    fn layout_form_control(
+        &mut self,
+        control: FormControlType,
+        containing_block: &Dimensions,
+        percent_height_base: Option<f32>,
+    ) {
         let font_size = match self.style.font_size {
             Length::Px(px) => px,
             _ => 16.0,
@@ -2736,8 +2747,16 @@ impl LayoutBox {
 
         let height = match self.style.height {
             Length::Px(px) if px > 0.0 => px,
+            // CSS 2.1 §10.5: `auto` under a content-sized parent.
+            Length::Percent(_) if self.percent_height_computes_to_auto() => intrinsic_height,
             Length::Percent(pct) => {
-                let resolved = pct / 100.0 * containing_block.content.height;
+                // The parent's definite height where the caller knows one. The
+                // containing block's own height is the flow cursor (zero on a
+                // line), so until 2026-10-07 `height: 100%` on a control was
+                // its intrinsic height: ebay's search input sat 22.8px tall in
+                // a 40px slot.
+                let base = percent_height_base.unwrap_or(containing_block.content.height);
+                let resolved = pct / 100.0 * base;
                 // CRITICAL: Fall back to intrinsic height if percent resolves to 0
                 // This fixes form controls in flex containers before flex layout runs
                 if resolved > 0.0 {
@@ -3178,7 +3197,7 @@ impl LayoutBox {
                 );
             }
             BoxType::FormControl(ref control) => {
-                self.layout_form_control(control.clone(), containing_block);
+                self.layout_form_control(control.clone(), containing_block, percent_height_base);
             }
             BoxType::LineBreak => {
                 self.dimensions.content = Rect::new(
