@@ -27,7 +27,7 @@ fn bound() -> DomBindings {
                 node.get_attribute("class")
                     .is_some_and(|v| v.split_whitespace().any(|t| t == c))
             } else if let Some(i) = s.strip_prefix('#') {
-                node.get_attribute("id").as_deref() == Some(i)
+                node.get_attribute("id") == Some(i)
             } else {
                 node.tag_name() == Some(s)
             }

@@ -1916,7 +1916,7 @@ mod tests {
     #[test]
     fn test_bounds_clone() {
         let b1 = Bounds::new(10, 20, 800, 600);
-        let b2 = b1.clone();
+        let b2 = b1;
 
         assert_eq!(b1, b2);
         assert_eq!(b1.x, b2.x);
@@ -1928,7 +1928,7 @@ mod tests {
     #[test]
     fn test_view_id_clone() {
         let id1 = ViewId::new();
-        let id2 = id1.clone();
+        let id2 = id1;
 
         // Cloned IDs should be equal
         assert_eq!(id1, id2);

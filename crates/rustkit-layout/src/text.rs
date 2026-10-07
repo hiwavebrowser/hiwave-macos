@@ -3383,7 +3383,7 @@ mod tests {
             .collect();
         assert_eq!(texts.first().map(String::as_str), Some("XXXX"), "{texts:?}");
         assert!(
-            texts.get(1).map_or(false, |t| t.starts_with('\u{a0}')),
+            texts.get(1).is_some_and(|t| t.starts_with('\u{a0}')),
             "the nbsp must start line 2, not vanish at the break: {texts:?}"
         );
     }

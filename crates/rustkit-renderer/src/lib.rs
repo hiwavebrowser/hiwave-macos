@@ -6659,7 +6659,7 @@ fn clip_quad_to_rounded(
     }
 
     let mut out = Vec::new();
-    let mut emit_rows = |out: &mut Vec<(Rect, f32)>, from: f32, to: f32| {
+    let emit_rows = |out: &mut Vec<(Rect, f32)>, from: f32, to: f32| {
         let mut y = from;
         while y < to {
             let height = 1.0_f32.min(to - y);
@@ -6975,7 +6975,7 @@ mod tests {
     #[test]
     fn an_oversized_image_is_downscaled_to_the_limit_keeping_its_aspect() {
         // 20x10 solid red, limit 8: longest side becomes 8, the other 4.
-        let data = vec![255u8, 0, 0, 255].repeat(20 * 10);
+        let data = [255u8, 0, 0, 255].repeat(20 * 10);
         let (w, h, px) = super::downscale_rgba_to_fit(20, 10, &data, 8);
         assert_eq!((w, h), (8, 4));
         assert_eq!(px.len(), 8 * 4 * 4);

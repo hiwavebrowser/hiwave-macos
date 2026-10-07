@@ -1792,7 +1792,7 @@ fn resolve_flexible_lengths(line: &mut FlexLine, container_main: f32, main_gap: 
             .items
             .iter()
             .filter(|i| !i.frozen)
-            .map(|i| factor(i))
+            .map(&factor)
             .sum();
         if factor_sum < 1.0 {
             let scaled = initial_free_space * factor_sum;

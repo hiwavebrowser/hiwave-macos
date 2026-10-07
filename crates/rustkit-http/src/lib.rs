@@ -1250,7 +1250,7 @@ pub mod blocking {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|e| HttpError::IoError(io::Error::new(io::ErrorKind::Other, e)))?;
+                .map_err(|e| HttpError::IoError(io::Error::other(e)))?;
 
             let inner = super::Client::with_config(self.config)?;
 
