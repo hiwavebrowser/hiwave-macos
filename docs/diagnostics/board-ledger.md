@@ -25,6 +25,7 @@ Seeded 2026-10-06 ET. The 27 and 26 below are that night's record of the github 
 | [`50e77c83`](#50e77c83--2026-10-06-2036-et) | 2026-10-06 20:36 | not measured (no board ran on this tip) | not measured (no board ran on this tip) | TBD | No board rerun on this tip. |
 | [`481db9cb`](#481db9cb--2026-10-06-1300-et) | 2026-10-06 13:00 | 26 | — | — | Same as `e3b833fc`. No drop. /75 not measured (before #568). |
 | [`a7564057`](#a7564057--2026-10-07-0430-et) | 2026-10-07 04:30 | 24 | 26 | github 1→0, wikipedia 2→1 | No engine regression PR. github timing race; wikipedia Chrome oracle drift. |
+| [`a181da05`](#a181da05--2026-10-07-1300-et) | 2026-10-07 13:00 | 26 | 29 | github 0→1, wikipedia 1→2, autotrader 1→2 | Rise. github is #598. wikipedia and autotrader are Chrome oracle drift. |
 | _next_ | | TBD | TBD | | |
 
 ## Entries
@@ -159,6 +160,37 @@ First-parent merges on `develop` after `481db9cb` through this tip (oldest first
 | `f95eb9c8` | 2026-10-06 23:34 | #580 | fix(engine,app): follow a navigation the page's own script starts (H14/H16 check h16_click_nav) |
 | `a456ccac` | 2026-10-06 23:40 | #571 | chore: compile-warnings audit (W5-E) and mechanical (B) fixes |
 | `a7564057` | 2026-10-07 00:35 | #588 | docs(census): walls-by-vendor table for technique census top80 (follow-up to #572) |
+
+### `a181da05` — 2026-10-07 13:00 ET
+
+`a7564057` → `a181da05` → **/60** **24 → 26** (scorable 23/57 → 25/57), **/75** **26 → 29** (scorable 25/66 → 28/66) → #583, #569, #584, #585, #597, #586, #598, #599, #600.
+
+- Full sha: `a181da0525c355ea65fec05cb33938ad56be3860`
+- This tip is the merge of [#600](https://github.com/hiwavebrowser/hiwave-macos/pull/600) (`docs(census): cleanup top100 after #597 (exclusive walls, 429s, retry)`), merged 2026-10-07 11:40 ET (15:40:38Z).
+- Full 25-site board at 20261007T170045Z (2026-10-07 13:00 ET). Chrome 148.0.7778.216.
+- /60: **24 → 26** (scorable 23/57 → 25/57). /75: **26 → 29** (scorable 25/66 → 28/66). This is a rise, not a drop.
+- Per-site: github 0 → 1, wikipedia 1 → 2, autotrader 1 → 2. Everything else unchanged.
+- Localisation: github is #598. wikipedia and autotrader are Chrome oracle drift. No other PR credited.
+
+**github 0 → 1.** The blank page at `a7564057` is gone. rustkit now loads (43 rustkit words vs 60 Chrome words, readable ratio 0.7167, loads pass, script_stats threw 0, over_budget 0). This is the expected effect of #598 (atlas/z-github-hydration, merge `7877dd6f`, the `class extends EventTarget` Illegal constructor fix), which is in this window. Post-fix recheck: confirmed on this board.
+
+**wikipedia 1 → 2** is Chrome oracle drift reversing. rustkit words unchanged at 190; Chrome oracle words back from 152 to 178 (the Wiki Loves Monuments CentralNotice banner is no longer in chrome-a), readable ratio 0.7434 → 0.8146, over the 0.80 line. No PR credited.
+
+**autotrader 1 → 2** is Chrome oracle drift. rustkit.png is byte-identical between the two tips (rustkit words 41 both); Chrome words 54 → 51 moved the readable ratio 0.7593 → 0.8039 over the 0.80 line. No PR credited.
+
+First-parent merges on `develop` after `a7564057` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `9cdf547e` | 2026-10-07 07:39 | #583 | fix(js,engine): bounded run_jobs drain and config propagation (#574 item 2) |
+| `6287b6f9` | 2026-10-07 07:51 | #569 | feat: CSS mask-image (parse + paint) — W5-C |
+| `4de8d7cd` | 2026-10-07 08:20 | #584 | fix(js): resolve executor context aliasing with per-executor owned state (#574 item 1) |
+| `20e5ceb7` | 2026-10-07 09:31 | #585 | fix(js): resolve console flush recursion via direct Boa evaluation (#574 item 3) |
+| `8a12d560` | 2026-10-07 10:03 | #597 | docs(census): proposed top100 pin + prevalence tables (#593) |
+| `3307cc64` | 2026-10-07 10:06 | #586 | fix(bindings): reject consuming or cloning Request and Response with locked body stream (#574 item 4) |
+| `7877dd6f` | 2026-10-07 10:32 | #598 | fix(bindings): EventTarget is constructible (github.com's landing page ended in its error boundary) |
+| `3b5224e0` | 2026-10-07 10:53 | #599 | fix(layout): a border-box flex item with a zero basis grows from its padding and border (H15, ebay's search box) |
+| `a181da05` | 2026-10-07 11:40 | #600 | docs(census): cleanup top100 after #597 (exclusive walls, 429s, retry) |
 
 ## Append a tip
 
