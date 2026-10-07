@@ -223,7 +223,10 @@ fn assigning_location_asks_for_a_navigation() {
 
     for (script, want) in [
         ("location.assign('/a')", "https://site.test/a"),
-        ("location.replace('https://other.test/b')", "https://other.test/b"),
+        (
+            "location.replace('https://other.test/b')",
+            "https://other.test/b",
+        ),
         ("window.location = '/c'", "https://site.test/c"),
         ("document.location = '/d'", "https://site.test/d"),
     ] {
@@ -232,7 +235,10 @@ fn assigning_location_asks_for_a_navigation() {
         assert_eq!(b.take_navigation_requests(), [want], "{script}");
     }
     // `window.location = url` used to replace the object with a string.
-    assert_eq!(ev(&b, "typeof location + ',' + typeof location.assign"), "object,function");
+    assert_eq!(
+        ev(&b, "typeof location + ',' + typeof location.assign"),
+        "object,function"
+    );
 }
 
 #[test]
@@ -248,13 +254,17 @@ fn what_is_not_a_navigation_asks_for_none() {
     );
     assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
     // The fragment was a navigation inside the document.
-    assert_eq!(ev(&b, "log.join()"), "https://site.test/dir/index.html?a=1#other");
+    assert_eq!(
+        ev(&b, "log.join()"),
+        "https://site.test/dir/index.html?a=1#other"
+    );
     // `location` reads the document's URL, not what script assigned.
     ev(&b, "location.href = '/away'; 0");
     assert_eq!(ev(&b, "location.href"), "https://site.test/replaced");
     assert_eq!(b.take_navigation_requests(), ["https://site.test/away"]);
     // A new document's URL, written by the engine.
-    b.set_location(&Url::parse("https://site.test/elsewhere").unwrap()).unwrap();
+    b.set_location(&Url::parse("https://site.test/elsewhere").unwrap())
+        .unwrap();
     assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
     assert_eq!(ev(&b, "location.href"), "https://site.test/elsewhere");
 }
@@ -263,14 +273,20 @@ fn what_is_not_a_navigation_asks_for_none() {
 fn a_script_click_on_a_link_follows_it() {
     let b = bound();
     ev(&b, "document.getElementById('abs').click(); 0");
-    assert_eq!(b.take_navigation_requests(), ["http://other.test:8080/p/q?s#h"]);
+    assert_eq!(
+        b.take_navigation_requests(),
+        ["http://other.test:8080/p/q?s#h"]
+    );
 
     // From a descendant of the link, resolved against the document.
     ev(
         &b,
         "var a = document.getElementById('rel'), s = document.createElement('span'); a.appendChild(s); s.click(); 0",
     );
-    assert_eq!(b.take_navigation_requests(), ["https://site.test/page?x=1#frag"]);
+    assert_eq!(
+        b.take_navigation_requests(),
+        ["https://site.test/page?x=1#frag"]
+    );
 
     // A cancelled click, a link with no href, one that does not parse, one
     // that opens elsewhere and a download follow nothing.
@@ -294,7 +310,10 @@ fn a_script_click_on_a_fragment_link_stays_in_the_document() {
     );
     assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
     assert_eq!(
-        ev(&b, "log.join() + ' ' + location.hash + ' ' + history.length"),
+        ev(
+            &b,
+            "log.join() + ' ' + location.hash + ' ' + history.length"
+        ),
         "https://site.test/dir/index.html?a=1#sec #sec 2"
     );
 }
