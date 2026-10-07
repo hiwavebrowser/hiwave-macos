@@ -148,3 +148,34 @@ fn cdatasection_and_processinginstruction_interfaces_exist() {
         "true"
     );
 }
+
+#[test]
+fn window_inherits_from_window_prototype_and_event_target_prototype() {
+    let b = bound();
+    // 1. Object.getPrototypeOf(window) === Window.prototype
+    assert_eq!(
+        ev(&b, "String(Object.getPrototypeOf(window) === Window.prototype)"),
+        "true"
+    );
+    // 2. window instanceof Window
+    assert_eq!(
+        ev(&b, "String(window instanceof Window)"),
+        "true"
+    );
+    // 3. window instanceof EventTarget
+    assert_eq!(
+        ev(&b, "String(window instanceof EventTarget)"),
+        "true"
+    );
+    // 4. a property defined on EventTarget.prototype is visible on window
+    assert_eq!(
+        ev(&b, "EventTarget.prototype.__custom_test_prop = 'from_event_target'; window.__custom_test_prop"),
+        "from_event_target"
+    );
+    // 5. webcomponents-sd __shady_native_addEventListener pattern works on window
+    assert_eq!(
+        ev(&b, "var called = false; EventTarget.prototype.__shady_native_addEventListener = function() { called = true; }; window.__shady_native_addEventListener('test', function(){}, true); String(called)"),
+        "true"
+    );
+}
+
