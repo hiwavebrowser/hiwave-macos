@@ -90,7 +90,11 @@ const meta = {
   n_sites: sites.length,
 };
 const results = [];
+const MAX_ATTEMPTS = 2; // one retry on goto/load failure before recording NOT RUN
 for (const s of sites) {
+  let rec = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+
   const ctx = await browser.newContext({ viewport: list.viewport, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'America/New_York' });
   await ctx.addInitScript(IO_HOOK);
   const page = await ctx.newPage();
@@ -116,7 +120,7 @@ for (const s of sites) {
       }
     } catch { /* ignore */ }
   });
-  const rec = { id: s.id, url: s.url, status: 'NOT RUN', reason: null };
+  rec = { id: s.id, url: s.url, status: 'NOT RUN', reason: null };
   const t0 = Date.now();
   try {
     const resp = await page.goto(s.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -158,31 +162,36 @@ for (const s of sites) {
     if (/cdn\.shopify\.com/i.test(scriptUrls)) addFw('Shopify', 'script:shopify');
     rec.data.frameworks = fw;
 
-    // Bot wall merge
+    // Bot wall merge — exclusive status: HTTP client/error challenge codes are BOTWALL, not OK.
     const hdrBw = classifyBotWallFromHeaders(mainHeaders, rec.http_status);
     const pageBw = rec.data.botWall || { vendors: [], signals: [] };
     const vendors = [...new Set([...(pageBw.vendors || []), ...hdrBw.vendors])];
-    const challenge = rec.http_status === 403 || rec.http_status === 503 || vendors.length > 0 && /just a moment|access denied|attention required|captcha|challenge/i.test((rec.data.title || '') + ' ' + (pageBw.signals || []).join(' '));
-    // Stronger: 403/503 with vendor, or DOM detected challenge
-    const isChallenge = (rec.http_status === 403 || rec.http_status === 503) || (pageBw.vendors && pageBw.vendors.length > 0 && /challenge|captcha|just a moment|attention required|access denied/i.test(rec.data.title || ''));
+    const titleBlob = `${rec.data.title || ''} ${(pageBw.signals || []).join(' ')}`;
+    const titleChallenge = /just a moment|access denied|attention required|captcha|challenge|bot or not|security checkpoint|are you a human|verify you are/i.test(titleBlob);
+    const httpWall = [401, 403, 429, 503].includes(rec.http_status);
+    const isChallenge = httpWall || titleChallenge || (pageBw.vendors && pageBw.vendors.length > 0 && titleChallenge);
     rec.data.botWall = {
       vendors,
-      signals: [...new Set([...(pageBw.signals || []), ...hdrBw.signals])],
+      signals: [...new Set([...(pageBw.signals || []), ...hdrBw.signals, ...(httpWall ? [`http-${rec.http_status}`] : []), ...(titleChallenge ? ['title-challenge'] : [])])],
       http_status: rec.http_status,
-      is_challenge: !!isChallenge || (rec.http_status === 403),
+      is_challenge: !!isChallenge,
     };
-    if (rec.http_status === 403) rec.status = 'BOTWALL';
+    if (isChallenge) rec.status = 'BOTWALL';
     else rec.status = 'OK';
   } catch (e) {
     rec.reason = String(e && e.message || e).split('\n')[0].slice(0, 200);
   }
   rec.ms = Date.now() - t0;
-  results.push(rec);
   const tag = rec.status.padEnd(8);
   const bw = rec.data && rec.data.botWall && rec.data.botWall.vendors.length ? ` bw=${rec.data.botWall.vendors.join('+')}` : '';
   const bun = rec.data && rec.data.bundles ? ` js=${rec.data.bundles.count}/${rec.data.bundles.total_mb}MB/>1MB=${rec.data.bundles.over_1mb_count}` : '';
-  console.error(`${tag} ${s.id} ${rec.ms}ms http=${rec.http_status || '-'}${bw}${bun} ${rec.reason || ''}`);
+  console.error(`${tag} ${s.id} ${rec.ms}ms http=${rec.http_status || '-'}${bw}${bun} attempt=${attempt} ${rec.reason || ''}`);
   await ctx.close();
+    // One retry only when the load never produced a page record (timeout / net error).
+    if (rec.status !== 'NOT RUN' || attempt === MAX_ATTEMPTS) break;
+    console.error(`RETRY    ${s.id} after fail: ${rec.reason}`);
+  }
+  results.push(rec);
 }
 await browser.close();
 meta.finished_utc = new Date().toISOString();

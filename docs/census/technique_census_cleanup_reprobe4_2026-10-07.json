@@ -1,0 +1,265 @@
+{
+ "meta": {
+  "date": "2026-10-07",
+  "started_utc": "2026-10-07T14:44:19.415Z",
+  "chromium": "143.0.7499.4",
+  "executablePath": "/Users/petecopeland/Library/Caches/ms-playwright/chromium-1200/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+  "chrome_source": "playwright-bundled:chromium-1200",
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "universe": "websuite/realsite-cleanup-reprobe4.json",
+  "n_sites": 4,
+  "finished_utc": "2026-10-07T14:45:35.574Z"
+ },
+ "results": [
+  {
+   "id": "bestbuy",
+   "url": "https://www.bestbuy.com/",
+   "status": "NOT RUN",
+   "reason": "page.goto: Timeout 30000ms exceeded.",
+   "ms": 30000
+  },
+  {
+   "id": "expedia",
+   "url": "https://www.expedia.com/",
+   "status": "BOTWALL",
+   "reason": null,
+   "http_status": 429,
+   "data": {
+    "url": "https://www.expedia.com/",
+    "title": "Bot or Not?",
+    "elements_scanned": 62,
+    "icons": {
+     "inline_svg": {
+      "count": 0,
+      "icon_sized": 0,
+      "examples": []
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 1,
+      "examples": [
+       {
+        "sel": "img",
+        "rect": {
+         "x": 571,
+         "y": 22,
+         "w": 126,
+         "h": 28
+        },
+        "src": "https://www.expedia.com/_dms/header/logo.svg?locale=en_US&siteid=1"
+       }
+      ]
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 1,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 0,
+      "observe": 0
+     }
+    },
+    "stacking": {
+     "region_roots": 5,
+     "region_elements": 7,
+     "creators": 0,
+     "by_reason": {},
+     "by_position": {
+      "static": 7,
+      "relative": 0,
+      "absolute": 0,
+      "fixed": 0,
+      "sticky": 0
+     },
+     "z_index_max": null,
+     "z_index_values": {},
+     "examples": []
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [
+      "http-429",
+      "title-challenge"
+     ],
+     "http_status": 429,
+     "is_challenge": true
+    },
+    "bundles": {
+     "count": 14,
+     "total_bytes": 338470,
+     "total_mb": 0.32,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 4355
+  },
+  {
+   "id": "washingtonpost",
+   "url": "https://www.washingtonpost.com/",
+   "status": "NOT RUN",
+   "reason": "page.goto: net::ERR_HTTP2_PROTOCOL_ERROR at https://www.washingtonpost.com/",
+   "ms": 211
+  },
+  {
+   "id": "wayfair",
+   "url": "https://www.wayfair.com/",
+   "status": "BOTWALL",
+   "reason": null,
+   "http_status": 429,
+   "data": {
+    "url": "https://www.wayfair.com/",
+    "title": "Access to this page has been denied",
+    "elements_scanned": 23,
+    "icons": {
+     "inline_svg": {
+      "count": 0,
+      "icon_sized": 0,
+      "examples": []
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 0,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 0,
+      "observe": 0
+     }
+    },
+    "stacking": {
+     "region_roots": 1,
+     "region_elements": 1,
+     "creators": 0,
+     "by_reason": {},
+     "by_position": {
+      "static": 1,
+      "relative": 0,
+      "absolute": 0,
+      "fixed": 0,
+      "sticky": 0
+     },
+     "z_index_max": null,
+     "z_index_values": {},
+     "examples": []
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [
+      "perimeterx",
+      "cloudflare"
+     ],
+     "signals": [
+      "dom",
+      "header",
+      "http-429"
+     ],
+     "http_status": 429,
+     "is_challenge": true
+    },
+    "bundles": {
+     "count": 10,
+     "total_bytes": 917985,
+     "total_mb": 0.88,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 10319
+  }
+ ]
+}

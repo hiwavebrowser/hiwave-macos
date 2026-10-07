@@ -11,7 +11,7 @@
   },
   "universe": "websuite/realsite-top100.json",
   "n_sites": 100,
-  "finished_utc": "2026-10-07T13:36:09.031Z",
+  "finished_utc": "2026-10-07T14:45:47Z",
   "proposed_pin": true,
   "proposed_pin_date": "2026-10-07",
   "proposed_pin_issue": 593,
@@ -27,6 +27,22 @@
    "ok": 71,
    "botwall": 26,
    "fail": 3
+  },
+  "cleanup": {
+   "issue": "petec4244/hiwave-ops#3",
+   "after_pr": 597,
+   "finished_utc": "2026-10-07T14:45:47Z",
+   "reprobe_sites": [
+    "bestbuy",
+    "expedia",
+    "washingtonpost",
+    "wayfair"
+   ],
+   "reclassified_from_existing": [
+    "glassdoor",
+    "weather"
+   ],
+   "notes": "Exclusive BOTWALL for http 401/403/429/503 + challenge titles; one retry on goto fail; single canonical JSON under docs/diagnostics/"
   }
  },
  "results": [
@@ -4207,7 +4223,7 @@
   {
    "id": "weather",
    "url": "https://weather.com/",
-   "status": "OK",
+   "status": "BOTWALL",
    "reason": null,
    "http_status": 429,
    "data": {
@@ -4299,10 +4315,13 @@
       "akamai"
      ],
      "signals": [
-      "header"
+      "header",
+      "http-429",
+      "title-challenge",
+      "cleanup-reclassify"
      ],
      "http_status": 429,
-     "is_challenge": false
+     "is_challenge": true
     },
     "bundles": {
      "count": 1,
@@ -8365,7 +8384,7 @@
   {
    "id": "glassdoor",
    "url": "https://www.glassdoor.com/",
-   "status": "OK",
+   "status": "BOTWALL",
    "reason": null,
    "http_status": 401,
    "data": {
@@ -8468,7 +8487,10 @@
      ],
      "signals": [
       "dom",
-      "header"
+      "header",
+      "http-401",
+      "title-challenge",
+      "cleanup-reclassify"
      ],
      "http_status": 401,
      "is_challenge": true
@@ -19621,7 +19643,7 @@
    "url": "https://www.bestbuy.com/",
    "status": "NOT RUN",
    "reason": "page.goto: Timeout 30000ms exceeded.",
-   "ms": 30002
+   "ms": 30000
   },
   {
    "id": "costco",
@@ -21879,7 +21901,7 @@
   {
    "id": "expedia",
    "url": "https://www.expedia.com/",
-   "status": "OK",
+   "status": "BOTWALL",
    "reason": null,
    "http_status": 429,
    "data": {
@@ -21979,9 +22001,12 @@
     },
     "botWall": {
      "vendors": [],
-     "signals": [],
+     "signals": [
+      "http-429",
+      "title-challenge"
+     ],
      "http_status": 429,
-     "is_challenge": false
+     "is_challenge": true
     },
     "bundles": {
      "count": 14,
@@ -21991,14 +22016,14 @@
      "over_1mb": []
     }
    },
-   "ms": 5260
+   "ms": 4355
   },
   {
    "id": "washingtonpost",
    "url": "https://www.washingtonpost.com/",
    "status": "NOT RUN",
    "reason": "page.goto: net::ERR_HTTP2_PROTOCOL_ERROR at https://www.washingtonpost.com/",
-   "ms": 239
+   "ms": 211
   },
   {
    "id": "imdb",
@@ -22843,7 +22868,7 @@
   {
    "id": "wayfair",
    "url": "https://www.wayfair.com/",
-   "status": "OK",
+   "status": "BOTWALL",
    "reason": null,
    "http_status": 429,
    "data": {
@@ -22937,20 +22962,21 @@
      ],
      "signals": [
       "dom",
-      "header"
+      "header",
+      "http-429"
      ],
      "http_status": 429,
-     "is_challenge": false
+     "is_challenge": true
     },
     "bundles": {
      "count": 10,
-     "total_bytes": 767832,
-     "total_mb": 0.73,
+     "total_bytes": 917985,
+     "total_mb": 0.88,
      "over_1mb_count": 0,
      "over_1mb": []
     }
    },
-   "ms": 10424
+   "ms": 10319
   }
  ]
 }
