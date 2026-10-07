@@ -18,40 +18,24 @@ fn dummy_waker() -> Waker {
     unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
 }
 
-use std::sync::atomic::{AtomicPtr, Ordering};
-
-static DUMMY_PTR: AtomicPtr<Context> = AtomicPtr::new(std::ptr::null_mut());
-
-/// A lazily-initialized static default `Context` used as a safe, non-dangling placeholder
-/// in `HostJobExecutor::context_ref` whenever `run_jobs` is not actively executing.
-fn dummy_context() -> &'static mut Context {
-    let mut ptr = DUMMY_PTR.load(Ordering::Acquire);
-    if ptr.is_null() {
-        let new_ptr = Box::into_raw(Box::new(Context::default()));
-        match DUMMY_PTR.compare_exchange(
-            std::ptr::null_mut(),
-            new_ptr,
-            Ordering::Release,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => ptr = new_ptr,
-            Err(actual) => {
-                // Lost race, reclaim newly allocated box
-                unsafe { drop(Box::from_raw(new_ptr)); }
-                ptr = actual;
-            }
-        }
-    }
-    unsafe { &mut *ptr }
+/// RAII guard that resets the executor's `context_cell` slot back to its owned
+/// placeholder upon exit from `run_jobs`, ensuring caller stack references never
+/// outlive the call and that in-flight futures do not hold active borrows.
+struct ContextResetGuard {
+    cell: *mut RefCell<&'static mut Context>,
+    placeholder: *mut Context,
 }
 
-/// RAII guard that resets the executor's `context_ref` slot back to `dummy_context()`
-/// upon exit from `run_jobs`, ensuring caller stack references never outlive the call.
-struct ContextResetGuard<'a>(&'a RefCell<&'static mut Context>);
-
-impl<'a> Drop for ContextResetGuard<'a> {
+impl Drop for ContextResetGuard {
     fn drop(&mut self) {
-        *self.0.borrow_mut() = dummy_context();
+        match unsafe { &*self.cell }.try_borrow_mut() {
+            Ok(mut slot) => {
+                *slot = unsafe { &mut *self.placeholder };
+            }
+            Err(_) => {
+                panic!("ContextResetGuard invariant violated: a future or callback still holds an active borrow on the executor context cell");
+            }
+        }
     }
 }
 
@@ -59,7 +43,8 @@ impl<'a> Drop for ContextResetGuard<'a> {
 pub const DEFAULT_MAX_JOB_ITERATIONS: u64 = 10_000;
 
 pub(crate) struct HostJobExecutor {
-    context_ref: &'static RefCell<&'static mut Context>,
+    placeholder_context: *mut Context,
+    context_cell: *mut RefCell<&'static mut Context>,
     promise_jobs: RefCell<VecDeque<PromiseJob>>,
     generic_jobs: RefCell<VecDeque<GenericJob>>,
     async_jobs: RefCell<VecDeque<NativeAsyncJob>>,
@@ -72,11 +57,12 @@ pub(crate) struct HostJobExecutor {
 
 impl Drop for HostJobExecutor {
     fn drop(&mut self) {
-        // 1. Clear queued jobs and drop running futures before reclaiming the context cell
+        // 1. Clear queued jobs and drop running futures before reclaiming cells
         self.clear();
-        // 2. Reclaim the heap-allocated cell so it is freed with the executor (zero per-runtime leak)
+        // 2. Reclaim the heap-allocated cell and placeholder context (zero per-runtime leak)
         unsafe {
-            drop(Box::from_raw(self.context_ref as *const _ as *mut RefCell<&'static mut Context>));
+            drop(Box::from_raw(self.context_cell));
+            drop(Box::from_raw(self.placeholder_context));
         }
     }
 }
@@ -93,9 +79,11 @@ impl HostJobExecutor {
     }
 
     pub fn with_limits(max_job_iterations: u64, timeout: Option<Duration>) -> Self {
-        let cell = Box::leak(Box::new(RefCell::new(dummy_context())));
+        let placeholder = Box::into_raw(Box::new(Context::default()));
+        let cell = Box::into_raw(Box::new(RefCell::new(unsafe { &mut *placeholder })));
         Self {
-            context_ref: cell,
+            placeholder_context: placeholder,
+            context_cell: cell,
             promise_jobs: RefCell::default(),
             generic_jobs: RefCell::default(),
             async_jobs: RefCell::default(),
@@ -105,6 +93,11 @@ impl HostJobExecutor {
             max_job_iterations: Cell::new(max_job_iterations),
             timeout: Cell::new(timeout),
         }
+    }
+
+    #[inline]
+    fn context_ref(&self) -> &'static RefCell<&'static mut Context> {
+        unsafe { &*self.context_cell }
     }
 
     pub fn set_max_job_iterations(&self, max: u64) {
@@ -157,16 +150,24 @@ impl JobExecutor for HostJobExecutor {
     }
 
     fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
-        // SAFETY: We temporarily stash a mutable reference to `context` into `context_ref`
+        let context_cell = self.context_cell;
+        let placeholder = self.placeholder_context;
+
+        // SAFETY: We temporarily stash a mutable reference to `context` into `context_cell`
         // so that async module-load jobs can access it via Boa's job callback API.
         // Aliasing is prevented because ALL accesses to Context in run_jobs (including
         // draining promise jobs, generic jobs, and timeouts) are routed exclusively through
-        // `self.context_ref.borrow_mut()`, ensuring at most one active `&mut Context` at a time.
-        // The `ContextResetGuard` guarantees that `context_ref` is reset back to `dummy_context()`
-        // when `run_jobs` returns (whether normally or via error), ensuring the reference to
-        // `context` never outlives this stack frame.
-        *self.context_ref.borrow_mut() = unsafe { std::mem::transmute(&mut *context) };
-        let _guard = ContextResetGuard(self.context_ref);
+        // `self.context_ref().borrow_mut()`, ensuring at most one active `&mut Context` at a time.
+        // Each `HostJobExecutor` owns its own dedicated heap placeholder and cell, so multiple
+        // runtimes/executors never share context state.
+        // The `ContextResetGuard` guarantees that `context_cell` is reset back to this executor's
+        // owned placeholder when `run_jobs` returns (whether normally or via error/panic),
+        // and asserts via `try_borrow_mut()` that no in-flight future holds an active borrow.
+        *unsafe { &*context_cell }.borrow_mut() = unsafe { std::mem::transmute(&mut *context) };
+        let _guard = ContextResetGuard {
+            cell: context_cell,
+            placeholder,
+        };
 
         let waker = dummy_waker();
         let mut cx = TaskContext::from_waker(&waker);
@@ -180,7 +181,7 @@ impl JobExecutor for HostJobExecutor {
             iterations += 1;
             if iterations > max_jobs {
                 self.clear();
-                self.context_ref.borrow_mut().clear_kept_objects();
+                self.context_ref().borrow_mut().clear_kept_objects();
                 return Err(JsError::from(
                     JsNativeError::range().with_message(format!(
                         "Job queue iteration limit ({max_jobs}) exceeded (runaway promise/microtask recursion)"
@@ -191,7 +192,7 @@ impl JobExecutor for HostJobExecutor {
             if let Some(timeout) = self.timeout.get() {
                 if started.elapsed() >= timeout {
                     self.clear();
-                    self.context_ref.borrow_mut().clear_kept_objects();
+                    self.context_ref().borrow_mut().clear_kept_objects();
                     return Err(JsError::from(
                         JsNativeError::range().with_message(format!(
                             "Job queue execution timeout ({timeout:?}) exceeded"
@@ -208,14 +209,14 @@ impl JobExecutor for HostJobExecutor {
                 total_jobs += 1;
                 if total_jobs > max_jobs {
                     self.clear();
-                    self.context_ref.borrow_mut().clear_kept_objects();
+                    self.context_ref().borrow_mut().clear_kept_objects();
                     return Err(JsError::from(
                         JsNativeError::range().with_message(format!(
                             "Job queue total job limit ({max_jobs}) exceeded"
                         )),
                     ));
                 }
-                let fut = job.call(self.context_ref);
+                let fut = job.call(self.context_ref());
                 self.running_futures.borrow_mut().push(Box::pin(fut));
                 progress = true;
             }
@@ -250,14 +251,14 @@ impl JobExecutor for HostJobExecutor {
                 total_jobs += 1;
                 if total_jobs > max_jobs {
                     self.clear();
-                    self.context_ref.borrow_mut().clear_kept_objects();
+                    self.context_ref().borrow_mut().clear_kept_objects();
                     return Err(JsError::from(
                         JsNativeError::range().with_message(format!(
                             "Job queue total job limit ({max_jobs}) exceeded"
                         )),
                     ));
                 }
-                if let Err(e) = job.call(&mut *self.context_ref.borrow_mut()) {
+                if let Err(e) = job.call(&mut *self.context_ref().borrow_mut()) {
                     if first_error.is_none() {
                         first_error = Some(e);
                     }
@@ -271,14 +272,14 @@ impl JobExecutor for HostJobExecutor {
                 total_jobs += 1;
                 if total_jobs > max_jobs {
                     self.clear();
-                    self.context_ref.borrow_mut().clear_kept_objects();
+                    self.context_ref().borrow_mut().clear_kept_objects();
                     return Err(JsError::from(
                         JsNativeError::range().with_message(format!(
                             "Job queue total job limit ({max_jobs}) exceeded"
                         )),
                     ));
                 }
-                if let Err(e) = job.call(&mut *self.context_ref.borrow_mut()) {
+                if let Err(e) = job.call(&mut *self.context_ref().borrow_mut()) {
                     if first_error.is_none() {
                         first_error = Some(e);
                     }
@@ -293,14 +294,14 @@ impl JobExecutor for HostJobExecutor {
                     total_jobs += 1;
                     if total_jobs > max_jobs {
                         self.clear();
-                        self.context_ref.borrow_mut().clear_kept_objects();
+                        self.context_ref().borrow_mut().clear_kept_objects();
                         return Err(JsError::from(
                             JsNativeError::range().with_message(format!(
                                 "Job queue total job limit ({max_jobs}) exceeded"
                             )),
                         ));
                     }
-                    if let Err(e) = job.call(&mut *self.context_ref.borrow_mut()) {
+                    if let Err(e) = job.call(&mut *self.context_ref().borrow_mut()) {
                         if first_error.is_none() {
                             first_error = Some(e);
                         }
@@ -314,7 +315,7 @@ impl JobExecutor for HostJobExecutor {
             }
         }
 
-        self.context_ref.borrow_mut().clear_kept_objects();
+        self.context_ref().borrow_mut().clear_kept_objects();
         if let Some(err) = first_error {
             Err(err)
         } else {
