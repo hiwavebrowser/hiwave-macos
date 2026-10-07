@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// summarize_technique_census.mjs — technique_census_<date>.json -> TECHNIQUE_CENSUS_<date>.md prevalence tables.
-// Usage: node docs/census/tools/summarize_technique_census.mjs docs/census/technique_census_2026-10-07.json [out.md] [out2.md ...]
+// summarize_technique_census.mjs — technique census JSON -> prevalence markdown.
+// Usage: node docs/census/tools/summarize_technique_census.mjs <census.json> [out.md ...]
+// Canonical top100 sidecar: docs/diagnostics/census-top100.json (do not dual-commit a docs/census/ twin).
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { dirname } from 'path';
+import { dirname, basename } from 'path';
 const [inp, ...outArgs] = process.argv.slice(2);
 const { meta, results } = JSON.parse(readFileSync(inp, 'utf8'));
 const universeNote = (() => {
@@ -15,10 +16,16 @@ const universeNote = (() => {
   }
   return '';
 })();
-const defaultOut = inp.replace(/technique_census_(.*)\.json$/, 'TECHNIQUE_CENSUS_$1.md');
+const isProposedPin = !!(meta.proposed_pin || String(meta.universe || '').includes('top100') || String(meta.universe || '').includes('plus20'));
+const proposedPinBanner = `> **Proposed pin (issue #593):** sites 81–100 are a Census draft in \`websuite/realsite-top100.json\`, not yet BASELINE-dated. Top80 universe + \`docs/diagnostics/census-top80.md\` remain the landed pin until Atlas/ZeuzGb confirm. Reviewers may drop/swap extension sites on this PR.
+
+`;
+const defaultOut = inp.replace(/technique_census_(.*)\.json$/, 'TECHNIQUE_CENSUS_$1.md')
+  .replace(/census-top100\.json$/, 'census-top100.md');
 const outs = outArgs.length ? outArgs : [defaultOut];
-const ok = results.filter(r => r.status === 'OK' || r.status === 'BOTWALL');
 const loaded = results.filter(r => r.status === 'OK');
+const wallSites = results.filter(r => r.status === 'BOTWALL');
+const notrun = results.filter(r => r.status !== 'OK' && r.status !== 'BOTWALL');
 const N = loaded.length;
 const pct = (n, den = N) => `${n}/${den} (${den ? Math.round(100 * n / den) : 0}%)`;
 const row = (name, pred, note = '', pool = loaded) => {
@@ -92,18 +99,19 @@ const allForWall = results.filter(r => r.data);
 const wallVendors = new Set();
 allForWall.forEach(r => (W(r.data).vendors || []).forEach(v => wallVendors.add(v)));
 const botwalls = [...wallVendors].map(v => row(v, d => (W(d).vendors || []).includes(v), '', allForWall));
-botwalls.push(row('HTTP 403', d => W(d).http_status === 403 || false, '', results.filter(r => r.http_status != null || r.data)));
-const wallSites = results.filter(r => r.status === 'BOTWALL' || (r.data && W(r.data).is_challenge) || r.http_status === 403);
-// Walls by vendor: only sites that actually walled us (403 / challenge), attributed to the vendor seen on that response.
+botwalls.push(row('HTTP 403', d => false, '', [])); // filled below with http_status filter
+{
+  const http403 = results.filter(r => r.http_status === 403);
+  botwalls[botwalls.length - 1] = { name: 'HTTP 403', n: http403.length, s: http403.map(r => r.id), note: '' };
+}
+
+// Walls by vendor: exclusive BOTWALL status only (no double-count of challenge-OK).
 const wallsByVendorMap = new Map();
 wallSites.forEach(r => {
   const vs = (W(r.data || {}).vendors || []);
   (vs.length ? vs : ['unknown']).forEach(v => { if (!wallsByVendorMap.has(v)) wallsByVendorMap.set(v, []); wallsByVendorMap.get(v).push(r.id); });
 });
 const wallsByVendor = [...wallsByVendorMap].map(([name, s]) => ({ name, n: s.length, s, note: '' }));
-const okButChallenged = wallSites.filter(r => r.status === 'OK').map(r => `${r.id} (http=${r.http_status})`);
-
-const notrun = results.filter(r => r.status !== 'OK' && r.status !== 'BOTWALL');
 
 const heavyTable = heavy.length
   ? `### Sites with JS bundles >1MB\n\n| Site | Bundles >1MB | Total JS MB | Top bundle sizes |\n|---|:---:|:---:|---|\n` +
@@ -114,11 +122,16 @@ const wallDetail = wallSites.length
   ? wallSites.map(r => `- **${r.id}**: http=${r.http_status} vendors=${(W(r.data || {}).vendors || []).join(',') || 'unknown'} title=${(r.data && r.data.title || '').slice(0, 60)}`).join('\n')
   : 'None.';
 
-const md = `# Technique census — ${meta.date}
+const rawName = basename(inp);
+const canonicalNote = rawName === 'census-top100.json' || rawName.includes('top100')
+  ? ' Canonical per-site sidecar: `docs/diagnostics/census-top100.json` (no twin under `docs/census/`)。'.replace('。', '.')
+  : '';
+
+const mdBody = `# Technique census — ${meta.date}
 
 Universe: \`${meta.universe}\` (${meta.n_sites} sites${universeNote}). Chromium ${meta.chromium} (\`${meta.chrome_source || meta.executablePath}\`), viewport ${meta.viewport.width}x${meta.viewport.height}, logged-out, one load per site, first viewport + full DOM after networkidle (≤8s) + 1.5s settle. Run ${meta.started_utc} → ${meta.finished_utc}.
 
-Loaded OK: **${N}/${meta.n_sites}**. Bot-wall / 403: **${wallSites.length}**. Failed: **${notrun.length}**. Counts below are sites using the technique at least once, out of the ${N} that loaded OK (bot-wall section uses all observed responses). Generated by \`docs/census/tools/run_technique_census.mjs\` + \`summarize_technique_census.mjs\`; raw per-site data with example selectors in \`${inp.split('/').pop()}\`.
+Loaded OK: **${N}/${meta.n_sites}**. Bot-wall / challenge: **${wallSites.length}**. Failed: **${notrun.length}**. Status buckets are exclusive (OK + BOTWALL + NOT RUN = ${meta.n_sites}). Counts below are sites using the technique at least once, out of the ${N} that loaded OK. Generated by \`docs/census/tools/run_technique_census.mjs\` + \`summarize_technique_census.mjs\`; raw per-site data with example selectors in \`${rawName}\`.${canonicalNote}
 
 Icon taxonomy aligned with Pollux top-20 diagnostics (PR #565): inline SVG, \`<svg><use>\`, CSS background-image SVG, CSS mask-image, \`<img>\` SVG, icon-font PUA.
 
@@ -140,12 +153,12 @@ ${table('JS bundle size prevalence', bundles)}
 ${heavyTable}
 ## Bot walls (403 / challenge)
 ${table('Walls by vendor (sites that walled us)', wallsByVendor, wallSites.length)}
-Denominator is the ${wallSites.length} walled sites (HTTP 403 or challenge page).${okButChallenged.length ? ` Note: ${okButChallenged.join(', ')} served a challenge page but is still counted in Loaded OK above.` : ''}
+Denominator is the ${wallSites.length} walled sites (\`status=BOTWALL\` only — HTTP 401/403/429/503 and/or challenge page). Exclusive with Loaded OK; no double-count.
 
 ${table('Edge / CDN vendor seen (any observed response; not walls)', botwalls, allForWall.length || results.length)}
 Vendor fingerprints seen on any response, including sites that loaded fine behind that vendor. Use the table above for wall counts.
 
-### Challenge / 403 sites
+### Challenge / wall sites
 ${wallDetail}
 
 ## NOT RUN / failed
@@ -153,7 +166,8 @@ ${notrun.length ? notrun.map(r => `- ${r.id}: ${r.reason}`).join('\n') : 'None.'
 `;
 
 for (const out of outs) {
+  const withBanner = isProposedPin ? proposedPinBanner + mdBody : mdBody;
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, md);
-  console.error(`wrote ${out}`);
+  writeFileSync(out, withBanner);
+  console.error(`wrote ${out}${isProposedPin ? ' (proposed-pin banner)' : ''}`);
 }

@@ -1,5 +1,7 @@
 # Receipt — technique census top100 (proposed pin) 2026-10-07
 
+> **Cleanup:** see `technique-census-top100-cleanup-2026-10-07.md` (hiwave-ops#3) — exclusive wall counts, 429 reclass, retry, proposed-pin banner on dated copy, single canonical JSON.
+
 - Issue: #593
 - Universe: `websuite/realsite-top100.json` (**PROPOSED PIN** — not BASELINE-dated)
 - Method: keep prior top80 JSON (`docs/census/technique_census_2026-10-07.json`); measure only `websuite/realsite-top80-plus20.json` (20 new); merge + re-summarize
