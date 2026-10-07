@@ -11,7 +11,7 @@ A score is entered only when a board run measured it on that sha. Anything unmea
 **Denominators**
 
 - **/60** is the original 20 sites (`websuite/realsite-top20.json`).
-- **/75** is all 25 sites. [PR #568](https://github.com/hiwavebrowser/hiwave-macos/pull/568) (Atlas, open at this seed, not an ancestor of `50e77c83`) grows the list to 25. The original 20 stay comparable on /60, and the full list is scored on /75. Both denominators are recorded together starting with the 4:30 AM run. No /75 number exists in this file yet.
+- **/75** is all 25 sites. [PR #568](https://github.com/hiwavebrowser/hiwave-macos/pull/568) (Atlas, open at this seed, not an ancestor of `50e77c83`) grows the list to 25. The original 20 stay comparable on /60, and the full list is scored on /75. Both denominators are recorded together starting with the 4:30 AM run (`a7564057`, **26/75**).
 - #568's body also records a one-load reading of the five new sites on `481db9cb` (3/15). That reading is not a board score and is not a row below.
 
 Seeded 2026-10-06 ET. The 27 and 26 below are that night's record of the github drop. They are not restated in a commit message on these shas.
@@ -22,9 +22,9 @@ Seeded 2026-10-06 ET. The 27 and 26 below are that night's record of the github 
 |---|---|---:|---:|---|---|
 | [`24185512`](#24185512--2026-10-05-1233-et) | 2026-10-05 12:33 | 27 | — | — | Before-side of the github drop. |
 | [`e3b833fc`](#e3b833fc--2026-10-06-0418-et) | 2026-10-06 04:18 | 26 | — | github | Oracle drift. Do not blame #550. |
-| [`50e77c83`](#50e77c83--2026-10-06-2036-et) | 2026-10-06 20:36 | TBD | TBD | TBD | No board rerun on this tip. |
-| _next_ | | TBD | TBD | | |
-| _next_ | | TBD | TBD | | |
+| [`50e77c83`](#50e77c83--2026-10-06-2036-et) | 2026-10-06 20:36 | not measured (no board ran on this tip) | not measured (no board ran on this tip) | TBD | No board rerun on this tip. |
+| [`481db9cb`](#481db9cb--2026-10-06-1300-et) | 2026-10-06 13:00 | 26 | — | — | Same as `e3b833fc`. No drop. /75 not measured (before #568). |
+| [`a7564057`](#a7564057--2026-10-07-0430-et) | 2026-10-07 04:30 | 24 | 26 | github 1→0, wikipedia 2→1 | No engine regression PR. github timing race; wikipedia Chrome oracle drift. |
 | _next_ | | TBD | TBD | | |
 
 ## Entries
@@ -67,12 +67,12 @@ First-parent merges on `develop` after `24185512` through this tip (oldest first
 
 ### `50e77c83` — 2026-10-06 20:36 ET
 
-`e3b833fc` → `50e77c83` → **/60 TBD, /75 TBD** → #551, #552, #543, #528, #553, #555, #557, #556, #562, #564, #561, #559, #477.
+`e3b833fc` → `50e77c83` → **/60 not measured (no board ran on this tip), /75 not measured (no board ran on this tip)** → #551, #552, #543, #528, #553, #555, #557, #556, #562, #564, #561, #559, #477.
 
 - Full sha: `50e77c838e5dbf87070a54562d2924926256d1af`
 - Develop tip as of the 2026-10-06 ET seed. This tip is the merge of [#477](https://github.com/hiwavebrowser/hiwave-macos/pull/477) (`test: cover image loader, h2 header strip, calc shorthand, and subresource budget survivors`).
 - Earlier that evening, [#564](https://github.com/hiwavebrowser/hiwave-macos/pull/564), [#561](https://github.com/hiwavebrowser/hiwave-macos/pull/561), and [#559](https://github.com/hiwavebrowser/hiwave-macos/pull/559) landed. The Mac was free again after those. No board rerun has been entered for this tip, including none after the 25-site change.
-- /60: **TBD**. /75: **TBD** (the 4:30 AM run is the first one that records both, and only once #568's list is what the board runs).
+- /60: **not measured (no board ran on this tip)**. /75: **not measured (no board ran on this tip)**. The 4:30 AM run on `a7564057` is the first one that records both, and only once #568's list is what the board runs.
 - Per-site notes: **TBD**.
 - Localisation: none. There is no measured delta to localise.
 
@@ -93,6 +93,72 @@ First-parent merges on `develop` after `e3b833fc` through this tip (oldest first
 | `c0667111` | 2026-10-06 20:07 | #561 | fix(bindings): inherit window from Window.prototype -> EventTarget.prototype |
 | `27111418` | 2026-10-06 20:27 | #559 | fix(js): bump Boa from 0.20 to 0.22 |
 | `50e77c83` | 2026-10-06 20:36 | #477 | test: cover image loader, h2 header strip, calc shorthand, and subresource budget survivors |
+
+### `481db9cb` — 2026-10-06 13:00 ET
+
+`e3b833fc` → `481db9cb` → **26/60 → 26/60** (scorable 25/57, no drop), **/75** not measured (before #568) → #551, #552, #543, #528, #553, #555, #557.
+
+- Full sha: `481db9cb03192f526d00945fedd666a7a8f81ff4`
+- This tip is the merge of [#557](https://github.com/hiwavebrowser/hiwave-macos/pull/557) (`fix(layout): a grid item is bounded by min-width, max-width and max-height`), merged 2026-10-06 11:12 ET. The sha is an ancestor of the `50e77c83` seed. It is appended under that seed.
+- Full 20-site quiet board at 2026-10-06 17:00Z (13:00 ET). Run dir: `trench/realsite/runs/20261006T1700Z-quiet-dev481db9cb`.
+- /60: **26** (scorable 25/57), same as `e3b833fc`, so no drop. /75: not measured (before #568).
+- Per-site notes: none. The score did not move.
+- Localisation: none. There is no measured delta.
+
+First-parent merges on `develop` after `e3b833fc` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `9563fe5a` | 2026-10-06 04:51 | #551 | fix(css): parse place-items, place-self and place-content |
+| `146ca8ad` | 2026-10-06 10:14 | #552 | fix(layout): the block axis of grid alignment (align-items, align-self, align-content) |
+| `84e11ff3` | 2026-10-06 10:38 | #543 | test: pin L0 class membership, initEvent dispatch, and wrapper clones |
+| `07c2c9bb` | 2026-10-06 10:39 | #528 | test: cover privacy-pin destinations and escaped :is() selectors |
+| `99c3bcfe` | 2026-10-06 11:11 | #553 | fix(layout): a grid item whose only child is text is flowed as lines |
+| `8e91bb3d` | 2026-10-06 11:11 | #555 | fix(scorer_v2): support run_dir root JSON paths for live runs |
+| `481db9cb` | 2026-10-06 11:12 | #557 | fix(layout): a grid item is bounded by min-width, max-width and max-height |
+
+### `a7564057` — 2026-10-07 04:30 ET
+
+`481db9cb` → `a7564057` → **26/60 → 24/60**, **/75** 26 (first 25-site board after #568) → #556, #562, #564, #561, #559, #477, #565, #573, #576, #577, #578, #568, #581, #566, #572, #579, #582, #567, #580, #571, #588.
+
+- Full sha: `a75640577e096e66b18446b8392b37c0a10a2a7c`
+- This tip is the merge of [#588](https://github.com/hiwavebrowser/hiwave-macos/pull/588) (`docs(census): walls-by-vendor table for technique census top80 (follow-up to #572)`), merged 2026-10-07 00:35 ET.
+- Board 2026-10-07 04:30 ET. Run dir: `trench/realsite/runs/20261007T0831Z-quiet-deva7564057`.
+- /60: **24** (drop 26 → 24). /75: **26**. This is the first 25-site board after #568.
+- Per-site: github 1 → 0, wikipedia 2 → 1.
+- Localisation: no engine regression PR.
+
+**github 1 → 0** is a timing race. GitHub's landing-pages bundle sometimes finishes inside parity-capture's 5000 ms script budget. React hydration then throws on a missing Boa API, and the ErrorBoundary replaces the page with `Looks like something went wrong!`. Per-sha script_stats (Pollux): `481db9cb`, `908634c8`, and `a456ccac` over_budget = PASS; `f95eb9c8` (#580 merge) threw = PASS; `a7564057` ran 3.1 s = FAIL. `a456ccac`..`a7564057` is docs-only. #580 was first named by Trace, then retracted. Atlas ruled no revert.
+
+**wikipedia 2 → 1** is Chrome oracle drift. rustkit is identical (190 words, non-background 0.0997 vs 0.0999). Chrome oracle words 178 → 152 because the chrome-a capture at `a7564057` had Wikipedia's `Wiki Loves Monuments` CentralNotice banner (chrome-a and chrome-b disagree within each run, 335 vs 271 words), so the readable ratio 0.8146 → 0.7434 fell under the 0.80 line.
+
+#573 is the 60 s script budget in the live app, not parity-capture. #566 is object-fit. #567 is svg `<use>`. #568 is the 25-site list. #571 is the warnings cleanup. #580 is script-started navigation. Docs in this window: #565, #572, #576, #577, #578, #579, #581, #582, #588. #556, #562, #564, #561, #559, and #477 also sit on the unmeasured `50e77c83` row, between these two boards.
+
+First-parent merges on `develop` after `481db9cb` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `442815e6` | 2026-10-06 15:28 | #556 | record(interactive): Windows rerun at 5744c7ce with script error rankings |
+| `03718a7c` | 2026-10-06 15:56 | #562 | fix(layout): anchor a positioned grid item's abspos children to its final box (#560) |
+| `dcd46e39` | 2026-10-06 20:06 | #564 | fix(viewhost): the content view records the wheel (H6); a live resize lays out once per turn (H9) |
+| `c0667111` | 2026-10-06 20:07 | #561 | fix(bindings): inherit window from Window.prototype -> EventTarget.prototype |
+| `27111418` | 2026-10-06 20:27 | #559 | fix(js): bump Boa from 0.20 to 0.22 |
+| `50e77c83` | 2026-10-06 20:36 | #477 | test: cover image loader, h2 header strip, calc shorthand, and subresource budget survivors |
+| `3c1f48ee` | 2026-10-06 21:38 | #565 | docs(diagnostics): Pete hand-test diagnostics (eBay images, top-20 icons, menus behind images) |
+| `5f6a36f2` | 2026-10-06 22:31 | #573 | feat(app): 60 s script budget for pages in the live app (Z I0, approved) |
+| `94742deb` | 2026-10-06 22:32 | #576 | docs(diagnostics): reduced repro — svg use (#565 extend) |
+| `2cd07c34` | 2026-10-06 22:48 | #577 | docs(diagnostics): reduced repro — mask-image (#565 extend) |
+| `9d3af3a9` | 2026-10-06 22:48 | #578 | docs(diagnostics): reduced repro — icon font PUA (#565 extend) |
+| `0952a061` | 2026-10-06 22:49 | #568 | test: 25-site real-site list (top 20 + five), holdout swap |
+| `1e129237` | 2026-10-06 23:08 | #581 | docs(diagnostics): reduced repros — H13 google logo block + H15 ebay search input |
+| `5913252f` | 2026-10-06 23:08 | #566 | fix(renderer): honour object-fit and object-position for images |
+| `f117d467` | 2026-10-06 23:15 | #572 | docs(census): technique census top80 (icons/lazy/stacking/bundles/frameworks/bot walls) — no engine code |
+| `e14f7f0e` | 2026-10-06 23:16 | #579 | docs(diagnostics): reduced repro — ebay menu behind content, trimmed (#565 extend, H10) |
+| `283db90f` | 2026-10-06 23:21 | #582 | docs(diagnostics): missing-text classes — cargurus / autotrader / bringatrailer |
+| `908634c8` | 2026-10-06 23:23 | #567 | feat: implement same-document svg use references (W5-D) |
+| `f95eb9c8` | 2026-10-06 23:34 | #580 | fix(engine,app): follow a navigation the page's own script starts (H14/H16 check h16_click_nav) |
+| `a456ccac` | 2026-10-06 23:40 | #571 | chore: compile-warnings audit (W5-E) and mechanical (B) fixes |
+| `a7564057` | 2026-10-07 00:35 | #588 | docs(census): walls-by-vendor table for technique census top80 (follow-up to #572) |
 
 ## Append a tip
 
