@@ -29,6 +29,9 @@ pub mod text;
 mod flex_item_relayout_tests;
 
 #[cfg(test)]
+mod flex_item_cross_floor_tests;
+
+#[cfg(test)]
 mod flex_resolve_tests;
 
 #[cfg(test)]
