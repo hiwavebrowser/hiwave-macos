@@ -4647,7 +4647,8 @@ impl Engine {
             for mut cmd in dl.commands.drain(..) {
                 match &mut cmd {
                     rustkit_layout::DisplayCommand::Image { url, .. }
-                    | rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => {
+                    | rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+                    | rustkit_layout::DisplayCommand::MaskedColor { url, .. } => {
                         if let Some(abs) = self.resolve_resource_url_in(id, url) {
                             *url = abs.to_string();
                         }
@@ -4687,6 +4688,27 @@ impl Engine {
                     } => {
                         if let Some(svg) = self.svg_cache.get(url) {
                             expanded.extend(svg_background_commands(svg, *rect, size, *position, *offset, *repeat));
+                            continue;
+                        }
+                    }
+                    // A vector mask is spliced like a vector background,
+                    // its paint recoloured to the masked colour with its
+                    // alpha kept (`mask-mode: alpha`). A raster mask stays
+                    // a `MaskedColor` for the renderer.
+                    rustkit_layout::DisplayCommand::MaskedColor {
+                        color,
+                        url,
+                        rect,
+                        size,
+                        position,
+                        offset,
+                        repeat,
+                    } => {
+                        if let Some(svg) = self.svg_cache.get(url) {
+                            let mut cmds =
+                                svg_background_commands(svg, *rect, size, *position, *offset, *repeat);
+                            rustkit_layout::tint_mask_commands(&mut cmds, *color);
+                            expanded.extend(cmds);
                             continue;
                         }
                     }
@@ -9986,7 +10008,10 @@ impl Engine {
         let mut seen = std::collections::HashSet::new();
         let mut images = Vec::new();
         for cmd in display_list.map(|dl| dl.commands.as_slice()).unwrap_or(&[]) {
-            let rustkit_layout::DisplayCommand::BackgroundImage { url, .. } = cmd else {
+            // A mask image (`MaskedColor`) is fetched like a background.
+            let (rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+            | rustkit_layout::DisplayCommand::MaskedColor { url, .. }) = cmd
+            else {
                 continue;
             };
             if !seen.insert(url.as_str()) {
@@ -12676,6 +12701,24 @@ impl Engine {
                     "offset": { "x": offset.0, "y": offset.1 },
                     "repeat": format!("{:?}", repeat)
                 }),
+                Cmd::MaskedColor {
+                    color: c,
+                    url,
+                    rect: r,
+                    size,
+                    position,
+                    offset,
+                    repeat,
+                } => serde_json::json!({
+                    "op": "masked_color",
+                    "color": color(c),
+                    "url": url,
+                    "rect": rect(r),
+                    "size": format!("{:?}", size),
+                    "position": { "x": position.0, "y": position.1 },
+                    "offset": { "x": offset.0, "y": offset.1 },
+                    "repeat": format!("{:?}", repeat)
+                }),
                 Cmd::BoxShadow {
                     offset_x,
                     offset_y,
@@ -13237,24 +13280,26 @@ impl Engine {
         };
 
         // Collect unique image URLs from display list
-        let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>)> =
+        // (url, image, whether it is uploaded as a mask texture)
+        let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>, bool)> =
             Vec::new();
         let mut urls_seen = HashSet::new();
 
         for cmd in commands {
-            // Extract URL from both BackgroundImage and Image commands
-            let url = match cmd {
-                rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => url,
-                rustkit_layout::DisplayCommand::Image { url, .. } => url,
+            // Extract URL from BackgroundImage, Image and MaskedColor commands
+            let (url, mask) = match cmd {
+                rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => (url, false),
+                rustkit_layout::DisplayCommand::Image { url, .. } => (url, false),
+                rustkit_layout::DisplayCommand::MaskedColor { url, .. } => (url, true),
                 _ => continue,
             };
 
-            if !urls_seen.insert(url.clone()) {
+            if !urls_seen.insert((url.clone(), mask)) {
                 continue; // Already processed
             }
 
             // Skip if already in renderer
-            if renderer.has_image(url) {
+            if if mask { renderer.has_mask_image(url) } else { renderer.has_image(url) } {
                 continue;
             }
 
@@ -13282,16 +13327,19 @@ impl Engine {
             };
 
             if let Some(img) = image {
-                urls_to_upload.push((url.clone(), img));
+                urls_to_upload.push((url.clone(), img, mask));
             }
         }
 
         // Now upload all collected images
-        for (url_str, image) in urls_to_upload {
+        for (url_str, image, mask) in urls_to_upload {
             let frame = image.current_frame(Duration::ZERO);
-            if let Err(e) =
+            let uploaded = if mask {
+                renderer.upload_mask_image(&url_str, frame.width(), frame.height(), frame.data())
+            } else {
                 renderer.upload_image(&url_str, frame.width(), frame.height(), frame.data())
-            {
+            };
+            if let Err(e) = uploaded {
                 tracing::warn!(?e, %url_str, "Failed to upload image to renderer");
             } else {
                 tracing::debug!(%url_str, "Uploaded image to renderer");
@@ -21133,6 +21181,111 @@ img { display: block; width: 10px; height: 10px; }
             "the url-encoded background tiles across its 30px box"
         );
         assert_eq!(fills(0, 0, 255), vec![(0.0, 10.0, 10.0, 10.0)], "the base64 <img> paints in its box");
+    }
+
+    /// The board's mask-image repro (docs/diagnostics/2026-10-06): a 50x50
+    /// red box at (8, 8) masked by a data: SVG circle. Chrome paints a red
+    /// circle; RustKit painted the 50x50 red square, `mask-image` being
+    /// unparsed. The mask is spliced as the SVG's own commands, recoloured
+    /// red and clipped to the box.
+    #[test]
+    fn the_mask_image_repro_paints_a_red_circle_not_a_square() {
+        let html = r#"<!DOCTYPE html>
+<html><body>
+<div style="width: 50px; height: 50px; background-color: rgb(255, 0, 0); -webkit-mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>'); mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>');"></div>
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let red = |c: &rustkit_css::Color| (c.r, c.g, c.b) == (255, 0, 0);
+        assert!(
+            !dl.commands.iter().any(|c| match c {
+                rustkit_layout::DisplayCommand::SolidColor(color, _)
+                | rustkit_layout::DisplayCommand::RoundedRect { color, .. } => red(color),
+                _ => false,
+            }),
+            "the unmasked red square still paints: {:?}",
+            dl.commands
+        );
+        assert!(
+            !dl.commands.iter().any(|c| matches!(c, rustkit_layout::DisplayCommand::MaskedColor { .. })),
+            "a data: SVG mask is spliced as vector commands"
+        );
+        let circles: Vec<(f32, f32, f32)> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::FillCircle { cx, cy, radius, color } if red(color) => {
+                    Some((*cx, *cy, *radius))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(circles, vec![(33.0, 33.0, 25.0)], "{:?}", dl.commands);
+        assert!(
+            dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::PushClip(r)
+                    if (r.x, r.y, r.width, r.height) == (8.0, 8.0, 50.0, 50.0))),
+            "the mask paints inside the box"
+        );
+    }
+
+    /// Both mask lanes reach the frame: the vector one (a data: SVG,
+    /// spliced as recoloured commands) and the raster one (a PNG whose
+    /// alpha is uploaded as a white mask texture and drawn tinted). The
+    /// PNG is 2x1, its left pixel opaque and its right transparent,
+    /// stretched over a 40x20 blue box: the left half is blue, the right
+    /// half shows the white page (sampled away from the seam, where the
+    /// texture filter blends the two). The PNG mask sits in a style sheet:
+    /// the inline `style` parser splits at every `;`, `;base64` included.
+    #[test]
+    fn vector_and_raster_masks_reach_the_frame() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+.png { width: 40px; height: 20px; background-color: rgb(0, 0, 255); -webkit-mask: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAD0lEQVR4nGNgYGD4D8QMAAUEAQCwBUiSAAAAAElFTkSuQmCC) 0 0 / 100% 100% no-repeat; }
+</style></head><body>
+<div style="width: 50px; height: 50px; background-color: rgb(255, 0, 0); mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>')"></div>
+<div class="png"></div>
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 100, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        engine.render_view(view).expect("render");
+        let path = std::env::temp_dir().join(format!("rustkit-mask-frame-{}.ppm", std::process::id()));
+        engine.capture_frame(view, path.to_str().unwrap()).expect("capture");
+        let ppm = std::fs::read(&path).expect("frame");
+        let _ = std::fs::remove_file(&path);
+
+        // The pixel at `(x, y)` of a binary PPM.
+        let pixel = |x: usize, y: usize| -> [u8; 3] {
+            let mut fields = Vec::new();
+            let mut pos = 0;
+            while fields.len() < 4 {
+                let start = pos;
+                while !ppm[pos].is_ascii_whitespace() {
+                    pos += 1;
+                }
+                fields.push(std::str::from_utf8(&ppm[start..pos]).unwrap().to_string());
+                pos += 1;
+            }
+            assert_eq!(fields[0], "P6");
+            let width: usize = fields[1].parse().unwrap();
+            let p = &ppm[pos + (y * width + x) * 3..][..3];
+            [p[0], p[1], p[2]]
+        };
+
+        const WHITE: [u8; 3] = [255, 255, 255];
+        assert_eq!(pixel(25, 25), [255, 0, 0], "inside the circle");
+        assert_eq!(pixel(2, 2), WHITE, "the box's corner, outside the circle");
+        assert_eq!(pixel(47, 47), WHITE, "the opposite corner");
+        assert_eq!(pixel(5, 60), [0, 0, 255], "under the opaque half of the PNG mask");
+        assert_eq!(pixel(35, 60), WHITE, "under the transparent half");
     }
 
     /// An SVG image with `width`/`height` and no `viewBox` scales to its

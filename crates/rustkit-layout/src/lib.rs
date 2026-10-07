@@ -6241,6 +6241,28 @@ pub enum DisplayCommand {
         /// Background repeat
         repeat: BackgroundRepeat,
     },
+    /// Paint `color` through the alpha of a mask image (CSS Masking 1 §6):
+    /// the icon idiom `background-color: currentColor; mask-image:
+    /// url(icon.svg)`. The mask image is sized, positioned and repeated in
+    /// `rect` exactly as a `BackgroundImage` is (see [`background_tiles`]),
+    /// and nothing paints outside `rect`. Where the mask is transparent
+    /// nothing paints; where it is opaque, `color` does.
+    MaskedColor {
+        /// The colour seen through the mask (the box's background colour).
+        color: Color,
+        /// URL or cache key of the mask image.
+        url: String,
+        /// The mask positioning area (the `mask-origin` box).
+        rect: Rect,
+        /// `mask-size`, resolved as `BackgroundImage::size` is.
+        size: BackgroundSize,
+        /// `mask-position` fractions (0-1).
+        position: (f32, f32),
+        /// `mask-position` px offsets.
+        offset: (f32, f32),
+        /// `mask-repeat`.
+        repeat: BackgroundRepeat,
+    },
     /// Draw a box shadow.
     BoxShadow {
         /// Shadow offset X
@@ -6718,6 +6740,41 @@ impl BackgroundRepeat {
                 | BackgroundRepeat::Space
                 | BackgroundRepeat::Round
         )
+    }
+}
+
+/// A vector mask image's paint (an SVG mask spliced in as commands),
+/// recoloured for `MaskedColor`: every colour becomes `color`, and the
+/// command's own alpha stays as coverage, so what paints is `color` times
+/// the mask's alpha (CSS Masking 1 §6.2, `mask-mode: alpha`). Commands
+/// that carry no colour (clips, transforms, raster images) are left.
+pub fn tint_mask_commands(commands: &mut [DisplayCommand], color: Color) {
+    let tint = |c: &mut Color| *c = Color { a: color.a * c.a, ..color };
+    let tint_stops = |stops: &mut Vec<rustkit_css::ColorStop>| {
+        for stop in stops {
+            tint(&mut stop.color);
+        }
+    };
+    for cmd in commands {
+        match cmd {
+            DisplayCommand::SolidColor(c, _)
+            | DisplayCommand::RoundedRect { color: c, .. }
+            | DisplayCommand::Text { color: c, .. }
+            | DisplayCommand::FillRect { color: c, .. }
+            | DisplayCommand::StrokeRect { color: c, .. }
+            | DisplayCommand::FillCircle { color: c, .. }
+            | DisplayCommand::StrokeCircle { color: c, .. }
+            | DisplayCommand::FillEllipse { color: c, .. }
+            | DisplayCommand::Line { color: c, .. }
+            | DisplayCommand::Polyline { color: c, .. }
+            | DisplayCommand::FillPolygon { color: c, .. }
+            | DisplayCommand::StrokePolygon { color: c, .. }
+            | DisplayCommand::MaskedColor { color: c, .. } => tint(c),
+            DisplayCommand::LinearGradient { stops, .. }
+            | DisplayCommand::RadialGradient { stops, .. }
+            | DisplayCommand::ConicGradient { stops, .. } => tint_stops(stops),
+            _ => {}
+        }
     }
 }
 
@@ -7480,6 +7537,9 @@ impl DisplayList {
     }
 
     fn render_background(&mut self, layout_box: &LayoutBox) {
+        if self.render_masked_background(layout_box) {
+            return;
+        }
         let d = &layout_box.dimensions;
         let border_rect = d.border_box();
         let s = &layout_box.style;
@@ -7590,6 +7650,83 @@ impl DisplayList {
         if needs_clip {
             self.commands.push(DisplayCommand::PopClip);
         }
+    }
+
+    /// CSS Masking 1 §6: a box with a mask image paints its background
+    /// colour through each `url()` mask layer, one `MaskedColor` per layer,
+    /// bottom layer first. Painting the same colour through each layer in
+    /// turn, source-over, is the `add` composite of the layers' alphas, the
+    /// initial `mask-composite`.
+    ///
+    /// Returns false, painting nothing, when the box has no `url()` mask
+    /// layer; the ordinary background then paints, unmasked, as before.
+    /// Also false when the box has a background image: only a colour is
+    /// painted through a mask so far, and an image would otherwise vanish.
+    ///
+    /// Not masked yet (stated, not hidden): borders, shadows, text and
+    /// descendants of a masked box, gradient mask layers and `url(#id)`
+    /// references to an SVG `<mask>` element; `mask-mode: luminance`.
+    fn render_masked_background(&mut self, layout_box: &LayoutBox) -> bool {
+        let s = &layout_box.style;
+        if !s.mask.has_image() || s.background_layers.iter().any(|l| l.has_image()) {
+            return false;
+        }
+        let layers: Vec<rustkit_css::BackgroundLayer> = s
+            .mask
+            .layers()
+            .into_iter()
+            .filter(|l| matches!(&l.image, rustkit_css::BackgroundImage::Url(u) if !u.starts_with('#')))
+            .collect();
+        if layers.is_empty() {
+            return false;
+        }
+        let color = s.background_color;
+        if color.a <= 0.0 {
+            return true;
+        }
+        let d = &layout_box.dimensions;
+        let content = d.content;
+        let padding = d.padding_box();
+        let border = d.border_box();
+        for layer in &layers {
+            let rustkit_css::BackgroundImage::Url(url) = &layer.image else {
+                continue;
+            };
+            let origin = match layer.origin {
+                rustkit_css::BackgroundOrigin::BorderBox => border,
+                rustkit_css::BackgroundOrigin::PaddingBox => padding,
+                rustkit_css::BackgroundOrigin::ContentBox => content,
+            };
+            let clip = match layer.clip {
+                rustkit_css::BackgroundClip::PaddingBox => padding,
+                rustkit_css::BackgroundClip::ContentBox => content,
+                _ => border,
+            };
+            if clip.width <= 0.0 || clip.height <= 0.0 || origin.width <= 0.0 || origin.height <= 0.0 {
+                continue;
+            }
+            let clipped = (clip.x, clip.y, clip.width, clip.height)
+                != (origin.x, origin.y, origin.width, origin.height);
+            if clipped {
+                self.commands.push(DisplayCommand::PushClip(clip));
+            }
+            let size = self.convert_background_size(&layer.size, origin);
+            let (position, offset) = self.convert_background_position(&layer.position);
+            let repeat = self.convert_background_repeat(layer.repeat);
+            self.commands.push(DisplayCommand::MaskedColor {
+                color,
+                url: url.clone(),
+                rect: origin,
+                size,
+                position,
+                offset,
+                repeat,
+            });
+            if clipped {
+                self.commands.push(DisplayCommand::PopClip);
+            }
+        }
+        true
     }
 
     /// Render a single background layer.
@@ -16813,5 +16950,194 @@ mod seam_kern_tests {
             span.dimensions.margin_box().x,
             abc_w
         );
+    }
+}
+
+#[cfg(test)]
+mod mask_paint_tests {
+    //! CSS Masking 1 §6 at the display-list boundary: the board repro is a
+    //! 50x50 red box at (8, 8) masked by a data: SVG circle, which Chrome
+    //! paints as a red circle and RustKit painted as a red square.
+    use super::*;
+    use rustkit_css::{BackgroundImage, BackgroundLayer, Mask};
+
+    const CIRCLE: &str = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>";
+
+    fn xywh(r: Rect) -> (f32, f32, f32, f32) {
+        (r.x, r.y, r.width, r.height)
+    }
+
+    fn red() -> Color {
+        Color { r: 255, g: 0, b: 0, a: 1.0 }
+    }
+
+    fn masked_box(mask: Mask) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        style.background_color = red();
+        style.mask = mask;
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.dimensions.content = Rect::new(8.0, 8.0, 50.0, 50.0);
+        b
+    }
+
+    fn mask_of(images: Vec<BackgroundImage>) -> Mask {
+        Mask { images, ..Default::default() }
+    }
+
+    fn masked_commands(list: &DisplayList) -> Vec<&DisplayCommand> {
+        list.commands
+            .iter()
+            .filter(|c| matches!(c, DisplayCommand::MaskedColor { .. }))
+            .collect()
+    }
+
+    fn paints_red_square(list: &DisplayList) -> bool {
+        list.commands.iter().any(|c| match c {
+            DisplayCommand::SolidColor(color, _) | DisplayCommand::RoundedRect { color, .. } => {
+                *color == red()
+            }
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn a_masked_box_paints_its_background_colour_through_the_mask() {
+        let b = masked_box(mask_of(vec![BackgroundImage::Url(CIRCLE.to_string())]));
+        let list = DisplayList::build(&b);
+        let masked = masked_commands(&list);
+        assert_eq!(masked.len(), 1, "{:?}", list.commands);
+        match masked[0] {
+            DisplayCommand::MaskedColor { color, url, rect, size, position, offset, repeat } => {
+                assert_eq!(*color, red());
+                assert_eq!(url, CIRCLE);
+                assert_eq!(xywh(*rect), (8.0, 8.0, 50.0, 50.0), "border box: mask-origin's initial");
+                assert_eq!(*size, BackgroundSize::Auto);
+                assert_eq!((*position, *offset), ((0.0, 0.0), (0.0, 0.0)));
+                assert_eq!(*repeat, BackgroundRepeat::Repeat);
+            }
+            _ => unreachable!(),
+        }
+        assert!(!paints_red_square(&list), "the unmasked square must not paint: {:?}", list.commands);
+    }
+
+    #[test]
+    fn the_mask_rect_is_the_origin_box_and_its_size_and_position_resolve_there() {
+        let mut mask = mask_of(vec![BackgroundImage::Url("i.svg".into())]);
+        mask.origins = vec![rustkit_css::BackgroundOrigin::ContentBox];
+        mask.clips = vec![rustkit_css::BackgroundClip::ContentBox];
+        mask.sizes = vec![rustkit_css::BackgroundSize::Explicit { width: Some(-50.0), height: None }];
+        mask.positions = vec![rustkit_css::BackgroundPosition {
+            x: rustkit_css::BackgroundPositionValue::Percent(0.5),
+            y: rustkit_css::BackgroundPositionValue::Px(3.0),
+        }];
+        mask.repeats = vec![rustkit_css::BackgroundRepeat::NoRepeat];
+        let mut b = masked_box(mask);
+        b.dimensions.padding = EdgeSizes { top: 4.0, right: 4.0, bottom: 4.0, left: 4.0 };
+        b.dimensions.border = EdgeSizes { top: 1.0, right: 1.0, bottom: 1.0, left: 1.0 };
+        let list = DisplayList::build(&b);
+        let masked = masked_commands(&list);
+        assert_eq!(masked.len(), 1, "{:?}", list.commands);
+        let DisplayCommand::MaskedColor { rect, size, position, offset, repeat, .. } = masked[0] else {
+            unreachable!()
+        };
+        assert_eq!(xywh(*rect), (8.0, 8.0, 50.0, 50.0), "the content box");
+        let tiles = background_tiles(*rect, size, *position, *offset, *repeat, 10.0, 10.0);
+        let tiles: Vec<_> = tiles.into_iter().map(xywh).collect();
+        assert_eq!(tiles, vec![(20.5, 11.0, 25.0, 25.0)], "50% wide, centred, 3px down");
+    }
+
+    #[test]
+    fn a_clip_other_than_the_origin_box_is_pushed_around_the_mask() {
+        let mut mask = mask_of(vec![BackgroundImage::Url("i.svg".into())]);
+        mask.clips = vec![rustkit_css::BackgroundClip::ContentBox];
+        let mut b = masked_box(mask);
+        b.dimensions.padding = EdgeSizes { top: 5.0, right: 5.0, bottom: 5.0, left: 5.0 };
+        let list = DisplayList::build(&b);
+        let at = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::MaskedColor { .. }))
+            .expect("a MaskedColor");
+        assert!(matches!(list.commands[at - 1], DisplayCommand::PushClip(r) if xywh(r) == (8.0, 8.0, 50.0, 50.0)));
+        assert!(matches!(list.commands[at + 1], DisplayCommand::PopClip));
+    }
+
+    #[test]
+    fn mask_layers_paint_bottom_first_and_none_layers_paint_nothing() {
+        let b = masked_box(mask_of(vec![
+            BackgroundImage::Url("top.svg".into()),
+            BackgroundImage::None,
+            BackgroundImage::Url("bottom.svg".into()),
+        ]));
+        let list = DisplayList::build(&b);
+        let urls: Vec<&str> = masked_commands(&list)
+            .into_iter()
+            .map(|c| match c {
+                DisplayCommand::MaskedColor { url, .. } => url.as_str(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(urls, ["bottom.svg", "top.svg"]);
+    }
+
+    #[test]
+    fn an_unmasked_box_paints_as_before() {
+        for mask in [Mask::default(), mask_of(vec![BackgroundImage::None])] {
+            let list = DisplayList::build(&masked_box(mask));
+            assert!(masked_commands(&list).is_empty());
+            assert!(paints_red_square(&list));
+        }
+    }
+
+    #[test]
+    fn a_box_with_a_background_image_is_not_masked_yet() {
+        // Only a colour paints through a mask so far: an image under the
+        // mask keeps painting unmasked rather than vanishing.
+        let mut b = masked_box(mask_of(vec![BackgroundImage::Url("i.svg".into())]));
+        b.style.background_layers = vec![BackgroundLayer::from_url("sprite.png".into())];
+        let list = DisplayList::build(&b);
+        assert!(masked_commands(&list).is_empty());
+        assert!(list.commands.iter().any(|c| matches!(c, DisplayCommand::BackgroundImage { .. })));
+    }
+
+    #[test]
+    fn a_transparent_masked_box_paints_nothing() {
+        let mut b = masked_box(mask_of(vec![BackgroundImage::Url("i.svg".into())]));
+        b.style.background_color = Color::TRANSPARENT;
+        let list = DisplayList::build(&b);
+        assert!(masked_commands(&list).is_empty());
+        assert!(!paints_red_square(&list));
+    }
+
+    #[test]
+    fn tinting_recolours_a_vector_mask_and_keeps_its_alpha_as_coverage() {
+        let half_black = Color { r: 0, g: 0, b: 0, a: 0.5 };
+        let mut cmds = vec![
+            DisplayCommand::PushClip(Rect::new(0.0, 0.0, 10.0, 10.0)),
+            DisplayCommand::FillCircle { cx: 5.0, cy: 5.0, radius: 5.0, color: Color::BLACK },
+            DisplayCommand::FillPolygon { points: vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)], color: half_black },
+            DisplayCommand::StrokeRect { rect: Rect::new(0.0, 0.0, 2.0, 2.0), color: Color::WHITE, width: 1.0 },
+            DisplayCommand::PopClip,
+        ];
+        let colour = Color { r: 10, g: 20, b: 30, a: 0.8 };
+        tint_mask_commands(&mut cmds, colour);
+        let colours: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::FillCircle { color, .. }
+                | DisplayCommand::FillPolygon { color, .. }
+                | DisplayCommand::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            colours,
+            vec![
+                colour,
+                Color { a: 0.4, ..colour },
+                colour,
+            ]
+        );
+        assert!(matches!(cmds[0], DisplayCommand::PushClip(_)));
     }
 }
