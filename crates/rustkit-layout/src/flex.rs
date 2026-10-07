@@ -256,6 +256,27 @@ fn min_inner_main_size(container: &LayoutBox) -> f32 {
     }
 }
 
+/// Whether an in-flow child of `b` has a percentage `height`.
+fn has_percent_height_child(b: &LayoutBox) -> bool {
+    b.children.iter().any(|c| {
+        !matches!(c.position, crate::Position::Absolute | crate::Position::Fixed)
+            && match &c.style.height {
+                Length::Percent(_) => true,
+                Length::Calc(sum) => sum.percent != 0.0,
+                _ => false,
+            }
+    })
+}
+
+/// The block pre-pass marks the children of a content-sized box so their
+/// percentage heights compute to `auto` (`mark_percent_height_bases`). Once
+/// the flex algorithm has made the item's height definite the mark is wrong.
+fn clear_percent_height_marks(b: &mut LayoutBox) {
+    for child in &mut b.children {
+        child.percent_height_is_auto = false;
+    }
+}
+
 /// Layout a flex container and its children.
 pub fn layout_flex_container(container: &mut LayoutBox, container_box: &Dimensions) {
     layout_flex_container_in(container, container_box, None)
@@ -665,7 +686,18 @@ fn layout_flex_container_at(
                         && !item.main_size_from_content
                         && (style_definite_inner_main.or(inset_inner_main).is_some()
                             || style_min_inner_main > 0.0);
-                    let used_inner_height = (stretched || flexed)
+                    // A percentage height this pass resolved (step 3, against
+                    // the definite inner cross size) is a used height as well.
+                    // The inner pass cannot resolve it again: it is handed the
+                    // item's own box as its containing block, read the content
+                    // height off it and took the item's border and padding out
+                    // a second time (ebay's search field: a `height: 100%`
+                    // flex container with a 2px border in a 44px row gave its
+                    // items 36, Chromium 40).
+                    let resolved_percent = cross_axis == Axis::Vertical
+                        && item.explicit_cross_size.is_some()
+                        && matches!(item.layout_box.style.height, Length::Percent(_));
+                    let used_inner_height = (stretched || flexed || resolved_percent)
                         .then_some(item.layout_box.dimensions.content.height);
                     let child_containing = item.layout_box.dimensions.clone();
                     layout_flex_container_at(
@@ -740,13 +772,56 @@ fn layout_flex_container_at(
                     let definite_cross_height = (cross_axis == Axis::Vertical
                         && item.has_explicit_cross_size)
                         .then_some(item.layout_box.dimensions.content.height);
+                    // css-flexbox-1 §9.4.11 and §9.8, the two cases the nested
+                    // flex arm above already names: an item stretched in a
+                    // definite single line, or flexed along a definite column,
+                    // has a DEFINITE height, and its children's percentages
+                    // resolve against it. The block pre-pass could not know
+                    // that and marked them `auto`; Chromium 143 has the
+                    // `height: 100%` child of a `flex: 1` item in a 44px row
+                    // at 44, and ebay's search input with it.
+                    //
+                    // Only an item that HAS such a child takes this path: the
+                    // item then keeps the height the flex algorithm gave it
+                    // and its content overflows (Chromium: a 60px block and a
+                    // `height: 100%` block in a stretched item of a 44px row
+                    // leave the item at 44), where every other item still
+                    // grows to its flow as it did.
+                    let percent_child = has_percent_height_child(item.layout_box);
+                    let stretched = cross_axis == Axis::Vertical
+                        && wrap == FlexWrap::NoWrap
+                        && !item.has_explicit_cross_size
+                        && resolved_align(item.align_self, style.align_items)
+                            == AlignItems::Stretch;
+                    let stretch_target = definite_inner_cross
+                        .filter(|_| percent_child && stretched)
+                        .map(|cross| {
+                            let outer = (cross - item.cross_margin_start - item.cross_margin_end)
+                                .max(item.min_cross_size)
+                                .min(item.max_cross_size);
+                            (outer - item.cross_pb()).max(0.0)
+                        });
+                    let flexed = percent_child
+                        && main_axis == Axis::Vertical
+                        && !item.main_size_from_content
+                        && style_definite_inner_main.or(inset_inner_main).is_some();
+                    let fixed_by_flex = stretch_target
+                        .or(flexed.then_some(item.layout_box.dimensions.content.height));
+                    // A percentage cross size that step 3 resolved is definite
+                    // in the same way, and the pre-pass marked its children
+                    // `auto` for the same reason.
+                    let resolved_cross = cross_axis == Axis::Vertical
+                        && item.explicit_cross_size.is_some();
+                    if fixed_by_flex.is_some() || resolved_cross {
+                        clear_percent_height_marks(item.layout_box);
+                    }
                     item.layout_box.layout_block_children_with_collapse(
                         &mut item_margin_context,
                         &mut item_float_context,
                         // Same definite height, same rule: a percentage-height
                         // child resolves against the item's used cross size
                         // (CSS 2.1 §10.5), not against the item's flow cursor.
-                        definite_cross_height,
+                        definite_cross_height.or(fixed_by_flex),
                     );
                     // A flex item is a formatting-context root, so its last
                     // in-flow child's bottom margin never collapses through
@@ -763,6 +838,12 @@ fn layout_flex_container_at(
                     // pending margin (§9.4), so the restore goes last.
                     if let Some(height) = definite_cross_height {
                         item.layout_box.dimensions.content.height = height;
+                    }
+                    // So does the size a stretch fixed, for an item whose
+                    // children resolved percentages against it.
+                    if let Some(height) = stretch_target {
+                        item.layout_box.dimensions.content.height = height;
+                        item.cross_size = height + item.cross_pb();
                     }
                     // A column item's definite MAIN size survives its
                     // children's flow for the same reason (n54): the two
@@ -929,6 +1010,19 @@ fn layout_flex_container_at(
                             None,
                             Some(content_height),
                         );
+                    } else if has_percent_height_child(item.layout_box) {
+                        // The same for a block item: its children's
+                        // percentages resolve against the stretched height,
+                        // which in an auto-height row is first known here
+                        // (Chromium: the `height: 100%` child of an item
+                        // beside a 44px sibling is 44).
+                        clear_percent_height_marks(item.layout_box);
+                        item.layout_box.layout_block_children_with_collapse(
+                            &mut crate::MarginCollapseContext::new(),
+                            &mut crate::FloatContext::new(),
+                            Some(content_height),
+                        );
+                        item.layout_box.dimensions.content.height = content_height;
                     }
                     item.layout_box.reanchor_absolute_children();
                 }
