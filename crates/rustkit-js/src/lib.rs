@@ -328,15 +328,102 @@ impl JsRuntime {
         let _ = max_iterations;
     }
 
-    /// Flush console logs and call handler.
-    fn flush_console_logs(&mut self) {
-        if self.console_handler.is_none() {
-            return;
+    #[cfg(feature = "boa")]
+    fn drain_console(&mut self) -> Vec<(LogLevel, String)> {
+        use boa_engine::Source;
+
+        // Evaluate console._flush() directly on the context without calling
+        // evaluate_script, preventing infinite recursion.
+        let Ok(logs_val) = self.context.eval(Source::from_bytes("console._flush()")) else {
+            return Vec::new();
+        };
+
+        let Some(logs_obj) = logs_val.as_object() else {
+            return Vec::new();
+        };
+
+        let Ok(len_val) = logs_obj.get(boa_engine::js_string!("length"), &mut self.context) else {
+            return Vec::new();
+        };
+
+        let Some(len) = len_val.as_number() else {
+            return Vec::new();
+        };
+
+        if len < 0.0 || !len.is_finite() {
+            return Vec::new();
         }
 
-        let _flush_result = self.evaluate_script("console._flush()");
-        // Note: In a real implementation, we'd parse the returned array
-        // and call the console handler for each log entry
+        const MAX_FLUSH_ENTRIES: u32 = 10_000;
+        const MAX_FLUSH_ARGS: u32 = 256;
+
+        let count = (len as u32).min(MAX_FLUSH_ENTRIES);
+        let mut entries = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            let Ok(entry_val) = logs_obj.get(i, &mut self.context) else {
+                continue;
+            };
+            let Some(entry_obj) = entry_val.as_object() else {
+                continue;
+            };
+
+            let level_str = entry_obj
+                .get(boa_engine::js_string!("level"), &mut self.context)
+                .ok()
+                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+                .unwrap_or_else(|| "log".to_string());
+
+            let level = match level_str.as_str() {
+                "info" => LogLevel::Info,
+                "warn" => LogLevel::Warn,
+                "error" => LogLevel::Error,
+                "debug" => LogLevel::Debug,
+                _ => LogLevel::Log,
+            };
+
+            let mut msg_parts = Vec::new();
+            if let Ok(args_val) = entry_obj.get(boa_engine::js_string!("args"), &mut self.context) {
+                if let Some(args_obj) = args_val.as_object() {
+                    if let Ok(args_len_val) = args_obj.get(boa_engine::js_string!("length"), &mut self.context) {
+                        let args_count = (args_len_val.as_number().unwrap_or(0.0).max(0.0) as u32).min(MAX_FLUSH_ARGS);
+                        for arg_idx in 0..args_count {
+                            if let Ok(arg) = args_obj.get(arg_idx, &mut self.context) {
+                                let s = arg
+                                    .to_string(&mut self.context)
+                                    .map(|js_s| js_s.to_std_string_escaped())
+                                    .unwrap_or_else(|_| "[object]".to_string());
+                                msg_parts.push(s);
+                            }
+                        }
+                    }
+                }
+            }
+
+            entries.push((level, msg_parts.join(" ")));
+        }
+
+        entries
+    }
+
+    /// Flush console logs and call handler.
+    fn flush_console_logs(&mut self) {
+        let Some(handler) = self.console_handler.clone() else {
+            return;
+        };
+
+        #[cfg(feature = "boa")]
+        {
+            let logs = self.drain_console();
+            for (level, msg) in logs {
+                handler(level, &msg);
+            }
+        }
+
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = handler;
+        }
     }
 
     /// Define a global function `name` that calls `function`.
@@ -710,5 +797,65 @@ mod tests {
 
         let result = runtime.evaluate_script("nonexistent.property");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn console_handler_receives_flushed_logs_without_recursion() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |level, msg| {
+            recv_clone.lock().unwrap().push((format!("{level:?}"), msg.to_string()));
+        }));
+
+        runtime.evaluate_script("console.log('hello', 'world'); console.warn('caution');").unwrap();
+
+        let logs = received.lock().unwrap().clone();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0], ("Log".to_string(), "hello world".to_string()));
+        assert_eq!(logs[1], ("Warn".to_string(), "caution".to_string()));
+
+        // Subsequent script evaluation only delivers new logs (buffer was flushed)
+        runtime.evaluate_script("console.error('oops');").unwrap();
+        let logs2 = received.lock().unwrap().clone();
+        assert_eq!(logs2.len(), 3);
+        assert_eq!(logs2[2], ("Error".to_string(), "oops".to_string()));
+    }
+
+    #[test]
+    fn console_flush_handles_throwing_tostring_gracefully() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg| {
+            recv_clone.lock().unwrap().push(msg.to_string());
+        }));
+
+        runtime
+            .evaluate_script("console.log('val:', { toString() { throw new Error('boom'); } });")
+            .unwrap();
+
+        let logs = received.lock().unwrap().clone();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0], "val: [object]");
+    }
+
+    #[test]
+    fn console_flush_bounded_against_hostile_length() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg| {
+            recv_clone.lock().unwrap().push(msg.to_string());
+        }));
+
+        // Hostile script overwriting console._flush with huge length
+        runtime
+            .evaluate_script("console._flush = () => ({ length: 4294967295 });")
+            .unwrap();
+
+        // Evaluation completes without hanging or OOM
+        let result = runtime.evaluate_script("1 + 1");
+        assert!(result.is_ok());
     }
 }
