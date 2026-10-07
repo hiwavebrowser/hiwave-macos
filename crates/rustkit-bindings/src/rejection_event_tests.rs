@@ -37,3 +37,15 @@ fn core_js_keeps_the_native_promise_when_the_rejection_event_exists() {
     // without unhandled-rejection events); its polyfill spun lyft's _app until the loop limit.
     assert_eq!(ev("[typeof PromiseRejectionEvent === 'function', typeof SubmitEvent === 'function'].join()"), "true,true");
 }
+
+#[test]
+fn a_runaway_promise_microtask_chain_throws_and_recovers_in_bindings() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_max_job_iterations(200);
+    let result = b.evaluate("function again() { Promise.resolve().then(again); } again();");
+    assert!(result.is_err(), "runaway promise chain must fail: {result:?}");
+    // DomBindings remains usable
+    let after = b.evaluate("1 + 2").unwrap();
+    assert!(matches!(after, JsValue::Number(n) if (n - 3.0).abs() < f64::EPSILON));
+}
+

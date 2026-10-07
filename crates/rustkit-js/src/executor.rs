@@ -1,12 +1,13 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker};
+use std::time::{Duration, Instant};
 
 use boa_engine::job::{GenericJob, IntervalJob, Job, JobExecutor, NativeAsyncJob, PromiseJob, TimeoutJob};
-use boa_engine::{Context, JsError, JsResult, JsValue};
+use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue};
 
 fn dummy_waker() -> Waker {
     fn noop(_: *const ()) {}
@@ -54,6 +55,9 @@ impl<'a> Drop for ContextResetGuard<'a> {
     }
 }
 
+/// Default maximum number of loop iterations/pumps per `run_jobs` call.
+pub const DEFAULT_MAX_JOB_ITERATIONS: u64 = 10_000;
+
 pub(crate) struct HostJobExecutor {
     context_ref: &'static RefCell<&'static mut Context>,
     promise_jobs: RefCell<VecDeque<PromiseJob>>,
@@ -62,12 +66,14 @@ pub(crate) struct HostJobExecutor {
     timeout_jobs: RefCell<Vec<TimeoutJob>>,
     interval_jobs: RefCell<Vec<IntervalJob>>,
     running_futures: RefCell<Vec<Pin<Box<dyn Future<Output = JsResult<JsValue>>>>>>,
+    max_job_iterations: Cell<u64>,
+    timeout: Cell<Option<Duration>>,
 }
 
 impl Drop for HostJobExecutor {
     fn drop(&mut self) {
-        // 1. Drop any running futures before reclaiming the context cell
-        self.running_futures.borrow_mut().clear();
+        // 1. Clear queued jobs and drop running futures before reclaiming the context cell
+        self.clear();
         // 2. Reclaim the heap-allocated cell so it is freed with the executor (zero per-runtime leak)
         unsafe {
             drop(Box::from_raw(self.context_ref as *const _ as *mut RefCell<&'static mut Context>));
@@ -83,6 +89,10 @@ impl Default for HostJobExecutor {
 
 impl HostJobExecutor {
     pub fn new() -> Self {
+        Self::with_limits(DEFAULT_MAX_JOB_ITERATIONS, None)
+    }
+
+    pub fn with_limits(max_job_iterations: u64, timeout: Option<Duration>) -> Self {
         let cell = Box::leak(Box::new(RefCell::new(dummy_context())));
         Self {
             context_ref: cell,
@@ -92,7 +102,39 @@ impl HostJobExecutor {
             timeout_jobs: RefCell::default(),
             interval_jobs: RefCell::default(),
             running_futures: RefCell::default(),
+            max_job_iterations: Cell::new(max_job_iterations),
+            timeout: Cell::new(timeout),
         }
+    }
+
+    pub fn set_max_job_iterations(&self, max: u64) {
+        self.max_job_iterations.set(max);
+    }
+
+    #[allow(dead_code)]
+    pub fn max_job_iterations(&self) -> u64 {
+        self.max_job_iterations.get()
+    }
+
+    pub fn set_timeout(&self, timeout: Option<Duration>) {
+        self.timeout.set(timeout);
+    }
+
+    #[allow(dead_code)]
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout.get()
+    }
+
+    /// Purge all queued jobs and running futures. On a runaway loop/timeout breach,
+    /// dropping in-flight futures and queues contains the runaway and prevents
+    /// further recursive job scheduling.
+    pub fn clear(&self) {
+        self.promise_jobs.borrow_mut().clear();
+        self.generic_jobs.borrow_mut().clear();
+        self.async_jobs.borrow_mut().clear();
+        self.timeout_jobs.borrow_mut().clear();
+        self.interval_jobs.borrow_mut().clear();
+        self.running_futures.borrow_mut().clear();
     }
 }
 
@@ -129,13 +171,50 @@ impl JobExecutor for HostJobExecutor {
         let waker = dummy_waker();
         let mut cx = TaskContext::from_waker(&waker);
         let mut first_error: Option<JsError> = None;
+        let started = Instant::now();
+        let mut iterations: u64 = 0;
+        let mut total_jobs: u64 = 0;
+        let max_jobs = self.max_job_iterations.get();
 
         loop {
+            iterations += 1;
+            if iterations > max_jobs {
+                self.clear();
+                self.context_ref.borrow_mut().clear_kept_objects();
+                return Err(JsError::from(
+                    JsNativeError::range().with_message(format!(
+                        "Job queue iteration limit ({max_jobs}) exceeded (runaway promise/microtask recursion)"
+                    )),
+                ));
+            }
+
+            if let Some(timeout) = self.timeout.get() {
+                if started.elapsed() >= timeout {
+                    self.clear();
+                    self.context_ref.borrow_mut().clear_kept_objects();
+                    return Err(JsError::from(
+                        JsNativeError::range().with_message(format!(
+                            "Job queue execution timeout ({timeout:?}) exceeded"
+                        )),
+                    ));
+                }
+            }
+
             let mut progress = false;
 
             // 1. Take any newly queued async jobs and start them
             let new_async = std::mem::take(&mut *self.async_jobs.borrow_mut());
             for job in new_async {
+                total_jobs += 1;
+                if total_jobs > max_jobs {
+                    self.clear();
+                    self.context_ref.borrow_mut().clear_kept_objects();
+                    return Err(JsError::from(
+                        JsNativeError::range().with_message(format!(
+                            "Job queue total job limit ({max_jobs}) exceeded"
+                        )),
+                    ));
+                }
                 let fut = job.call(self.context_ref);
                 self.running_futures.borrow_mut().push(Box::pin(fut));
                 progress = true;
@@ -168,6 +247,16 @@ impl JobExecutor for HostJobExecutor {
             // 3. Drain promise jobs through the context slot to avoid aliasing
             let promise_jobs = std::mem::take(&mut *self.promise_jobs.borrow_mut());
             for job in promise_jobs {
+                total_jobs += 1;
+                if total_jobs > max_jobs {
+                    self.clear();
+                    self.context_ref.borrow_mut().clear_kept_objects();
+                    return Err(JsError::from(
+                        JsNativeError::range().with_message(format!(
+                            "Job queue total job limit ({max_jobs}) exceeded"
+                        )),
+                    ));
+                }
                 if let Err(e) = job.call(&mut *self.context_ref.borrow_mut()) {
                     if first_error.is_none() {
                         first_error = Some(e);
@@ -179,6 +268,16 @@ impl JobExecutor for HostJobExecutor {
             // 4. Drain generic jobs through the context slot
             let generic_jobs = std::mem::take(&mut *self.generic_jobs.borrow_mut());
             for job in generic_jobs {
+                total_jobs += 1;
+                if total_jobs > max_jobs {
+                    self.clear();
+                    self.context_ref.borrow_mut().clear_kept_objects();
+                    return Err(JsError::from(
+                        JsNativeError::range().with_message(format!(
+                            "Job queue total job limit ({max_jobs}) exceeded"
+                        )),
+                    ));
+                }
                 if let Err(e) = job.call(&mut *self.context_ref.borrow_mut()) {
                     if first_error.is_none() {
                         first_error = Some(e);
@@ -191,6 +290,16 @@ impl JobExecutor for HostJobExecutor {
             let timeouts = std::mem::take(&mut *self.timeout_jobs.borrow_mut());
             for job in timeouts {
                 if !job.cancelled() {
+                    total_jobs += 1;
+                    if total_jobs > max_jobs {
+                        self.clear();
+                        self.context_ref.borrow_mut().clear_kept_objects();
+                        return Err(JsError::from(
+                            JsNativeError::range().with_message(format!(
+                                "Job queue total job limit ({max_jobs}) exceeded"
+                            )),
+                        ));
+                    }
                     if let Err(e) = job.call(&mut *self.context_ref.borrow_mut()) {
                         if first_error.is_none() {
                             first_error = Some(e);
