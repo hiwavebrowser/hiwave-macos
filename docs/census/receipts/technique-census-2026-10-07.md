@@ -16,3 +16,8 @@
 - **Tools**: `docs/census/tools/{run_technique_census.mjs,summarize_technique_census.mjs,technique_classifier.js}`
 - **Handtest**: No Handtest GUI in flight during run; finished before ~9:05pm ET Z slot
 - **Commit / PR**: filled after git push
+
+## Git
+- **SHA**: `296bfe2942919171416e5b41211cacbd9bdf2e7b` (results commit; scaffold was `131d20b8` after rebase onto `50e77c83`)
+- **PR**: https://github.com/hiwavebrowser/hiwave-macos/pull/572
+- **Compare**: https://github.com/hiwavebrowser/hiwave-macos/compare/develop...census/technique-census-2026-10-07
