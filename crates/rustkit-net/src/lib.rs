@@ -714,16 +714,12 @@ impl ResourceLoader {
         // URL, and never a caller-set header that could say more). Redirects
         // are safe: rustkit-http follows them with fresh headers, so this
         // value never reaches a redirect target.
-        headers.remove(HeaderName::from_static("referer"));
-        if let Some(value) = request
-            .referrer
-            .as_ref()
-            .and_then(|referrer| request.referrer_policy.compute_referrer(referrer, &request.url))
-        {
-            if let Ok(val) = HeaderValue::try_from(value) {
-                headers.insert(HeaderName::from_static("referer"), val);
-            }
-        }
+        apply_policy_referer(
+            &mut headers,
+            request.referrer.as_ref(),
+            request.referrer_policy,
+            &request.url,
+        );
 
         // Execute request using rustkit-http
         let http_response = client
@@ -953,6 +949,45 @@ mod tests {
     }
 
     #[test]
+    fn apply_policy_referer_strips_a_forged_header_and_writes_the_policy_value() {
+        let doc = Url::parse("https://news.example/story?q=1#frag").unwrap();
+        let target = Url::parse("https://cdn.example/a.js").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("referer"),
+            HeaderValue::from_static("https://attacker.example/full/path?secret=1"),
+        );
+
+        apply_policy_referer(
+            &mut headers,
+            Some(&doc),
+            ReferrerPolicy::StrictOriginWhenCrossOrigin,
+            &target,
+        );
+        assert_eq!(
+            headers.get("referer").and_then(|v| v.to_str().ok()),
+            Some("https://news.example/"),
+            "cross-origin gets the origin-only Referer, never the forged path"
+        );
+
+        // No-referrer clears even a forged value.
+        headers.insert(
+            HeaderName::from_static("referer"),
+            HeaderValue::from_static("https://attacker.example/again"),
+        );
+        apply_policy_referer(&mut headers, Some(&doc), ReferrerPolicy::NoReferrer, &target);
+        assert!(!headers.contains_key("referer"));
+
+        // No document referrer: strip and send nothing.
+        headers.insert(
+            HeaderName::from_static("referer"),
+            HeaderValue::from_static("https://attacker.example/again"),
+        );
+        apply_policy_referer(&mut headers, None, ReferrerPolicy::UnsafeUrl, &target);
+        assert!(!headers.contains_key("referer"));
+    }
+
+    #[test]
     fn test_credentials_mode_default() {
         assert_eq!(CredentialsMode::default(), CredentialsMode::SameOrigin);
     }
@@ -971,6 +1006,23 @@ mod tests {
 }
 
 /// Largest `data:` payload the loader will decode (bytes, after decoding).
+/// Replace any caller-supplied `Referer` with the value the request's
+/// referrer policy allows (or omit it). A forged header must never ride
+/// through to the network.
+fn apply_policy_referer(
+    headers: &mut HeaderMap,
+    referrer: Option<&Url>,
+    policy: ReferrerPolicy,
+    request_url: &Url,
+) {
+    headers.remove(HeaderName::from_static("referer"));
+    if let Some(value) = referrer.and_then(|r| policy.compute_referrer(r, request_url)) {
+        if let Ok(val) = HeaderValue::try_from(value) {
+            headers.insert(HeaderName::from_static("referer"), val);
+        }
+    }
+}
+
 pub const MAX_DATA_URL_BYTES: usize = 32 * 1024 * 1024;
 
 /// Decode an RFC 2397 `data:[<mediatype>][;base64],<data>` URL into its media
