@@ -205,3 +205,96 @@ fn anchor_setters_write_the_href_attribute() {
          http://other.test:81/new?k=v#h,http://other.test:81,https://site.test/moved/z"
     );
 }
+
+// ---- navigations script starts (the live app follows them) ----
+
+const DOC: &str = "https://site.test/dir/index.html?a=1#top";
+
+#[test]
+fn assigning_location_asks_for_a_navigation() {
+    let b = bound();
+    // Binding the document and writing its URL are not requests.
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+
+    ev(&b, "location.href = '../next?x=1'; 0");
+    assert_eq!(b.take_navigation_requests(), ["https://site.test/next?x=1"]);
+    // Taken once.
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+
+    for (script, want) in [
+        ("location.assign('/a')", "https://site.test/a"),
+        ("location.replace('https://other.test/b')", "https://other.test/b"),
+        ("window.location = '/c'", "https://site.test/c"),
+        ("document.location = '/d'", "https://site.test/d"),
+    ] {
+        b.set_location(&Url::parse(DOC).unwrap()).unwrap();
+        ev(&b, &format!("{script}; 0"));
+        assert_eq!(b.take_navigation_requests(), [want], "{script}");
+    }
+    // `window.location = url` used to replace the object with a string.
+    assert_eq!(ev(&b, "typeof location + ',' + typeof location.assign"), "object,function");
+}
+
+#[test]
+fn what_is_not_a_navigation_asks_for_none() {
+    let b = bound();
+    // The same document with another fragment, a script URL, a URL that
+    // does not parse, and the history API's own rewrites of `location`.
+    ev(
+        &b,
+        "window.log = []; addEventListener('hashchange', function (e) { log.push(e.newURL); }); \
+         location.href = '#other'; location.href = 'javascript:void 0'; location.href = 'http://[bad'; \
+         history.pushState(null, '', '/pushed'); history.replaceState(null, '', '/replaced'); 0",
+    );
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+    // The fragment was a navigation inside the document.
+    assert_eq!(ev(&b, "log.join()"), "https://site.test/dir/index.html?a=1#other");
+    // `location` reads the document's URL, not what script assigned.
+    ev(&b, "location.href = '/away'; 0");
+    assert_eq!(ev(&b, "location.href"), "https://site.test/replaced");
+    assert_eq!(b.take_navigation_requests(), ["https://site.test/away"]);
+    // A new document's URL, written by the engine.
+    b.set_location(&Url::parse("https://site.test/elsewhere").unwrap()).unwrap();
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+    assert_eq!(ev(&b, "location.href"), "https://site.test/elsewhere");
+}
+
+#[test]
+fn a_script_click_on_a_link_follows_it() {
+    let b = bound();
+    ev(&b, "document.getElementById('abs').click(); 0");
+    assert_eq!(b.take_navigation_requests(), ["http://other.test:8080/p/q?s#h"]);
+
+    // From a descendant of the link, resolved against the document.
+    ev(
+        &b,
+        "var a = document.getElementById('rel'), s = document.createElement('span'); a.appendChild(s); s.click(); 0",
+    );
+    assert_eq!(b.take_navigation_requests(), ["https://site.test/page?x=1#frag"]);
+
+    // A cancelled click, a link with no href, one that does not parse, one
+    // that opens elsewhere and a download follow nothing.
+    ev(
+        &b,
+        "a.addEventListener('click', function (e) { e.preventDefault(); }); a.click(); \
+         document.getElementById('none').click(); document.getElementById('bad').click(); \
+         var abs = document.getElementById('abs'); abs.setAttribute('target', '_blank'); abs.click(); \
+         abs.removeAttribute('target'); abs.setAttribute('download', ''); abs.click(); 0",
+    );
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+}
+
+#[test]
+fn a_script_click_on_a_fragment_link_stays_in_the_document() {
+    let b = bound();
+    ev(
+        &b,
+        "window.log = []; addEventListener('hashchange', function (e) { log.push(e.newURL); }); \
+         var f = document.createElement('a'); f.setAttribute('href', '#sec'); document.body.appendChild(f); f.click(); 0",
+    );
+    assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
+    assert_eq!(
+        ev(&b, "log.join() + ' ' + location.hash + ' ' + history.length"),
+        "https://site.test/dir/index.html?a=1#sec #sec 2"
+    );
+}

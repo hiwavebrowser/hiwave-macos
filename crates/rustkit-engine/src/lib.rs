@@ -2636,6 +2636,35 @@ impl Engine {
         }
     }
 
+    /// Where the page's own script asked this view to go since the last
+    /// call: `location.href = url` (and `assign`, `replace`,
+    /// `window.location = url`), `link.click()`, `form.submit()`, or a
+    /// submit made outside the user's click (a timer's `button.click()` or
+    /// `requestSubmit()`). The engine does not navigate; the embedder that
+    /// owns the view loads the URL. The live app asks every turn. A capture
+    /// never asks, so a page that redirects itself is captured as it was.
+    ///
+    /// When script asked more than once, the last request of each kind is
+    /// kept, and a URL wins over a form.
+    pub fn take_script_navigation(&mut self, id: EngineViewId) -> Option<String> {
+        let bindings = self.views.get(&id)?.bindings.as_ref()?;
+        let requested = bindings.take_navigation_requests().pop();
+        let submit = bindings.take_submit_requests().pop();
+        if requested.is_some() {
+            return requested;
+        }
+        let (form, submitter) = submit?;
+        let form = self
+            .views
+            .get(&id)?
+            .document
+            .as_ref()?
+            .get_node(rustkit_dom::NodeId::new(form))?;
+        self.form_submission(id, &form, submitter)
+            .filter(|sub| sub.is_self_target())
+            .map(|sub| sub.url)
+    }
+
     /// The last form script asked to submit since the previous call, with
     /// its submitter (raw NodeIds).
     fn take_submit_request(&self, id: EngineViewId) -> Option<(usize, Option<usize>)> {
@@ -23650,6 +23679,54 @@ mod node_identity_tests {
 
     fn click_row(engine: &mut Engine, id: EngineViewId, row: usize) -> ClickOutcome {
         engine.click_at_point(id, 12.0, 40.0 * row as f32 + 12.0)
+    }
+
+    // Pete's hand tests H14 and H16: a navigation the page starts itself
+    // went nowhere in the live app. The engine does not navigate; it hands
+    // the URL to whoever asks (`take_script_navigation`), once.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_navigation_script_starts_is_handed_to_the_embedder() {
+        let (mut engine, id) = submit_page();
+        let doc = Url::parse("https://example.com/page").unwrap();
+        engine.views.get(&id).unwrap().bindings.as_ref().unwrap().set_location(&doc).unwrap();
+        assert_eq!(engine.take_script_navigation(id), None);
+
+        // A submit button clicked by script, as a timer or a handler would.
+        js(&mut engine, id, "$('go').click()");
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("click:go submit:go:true"));
+        assert_eq!(
+            engine.take_script_navigation(id).as_deref(),
+            Some("https://example.com/search?q=rust&via=button")
+        );
+        assert_eq!(engine.take_script_navigation(id), None, "taken once");
+
+        // requestSubmit() fires `submit`; submit() does not, and sends no
+        // button's pair.
+        js(&mut engine, id, "log.length = 0; $('f').requestSubmit()");
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("submit:null:true"));
+        assert_eq!(engine.take_script_navigation(id).as_deref(), Some("https://example.com/search?q=rust"));
+        js(&mut engine, id, "log.length = 0; $('f').submit()");
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string(""));
+        assert_eq!(engine.take_script_navigation(id).as_deref(), Some("https://example.com/search?q=rust"));
+
+        // A cancelled submit asks for nothing.
+        js(&mut engine, id, "window.block = true; $('go').click()");
+        assert_eq!(engine.take_script_navigation(id), None);
+        js(&mut engine, id, "window.block = false");
+
+        // A URL script assigned.
+        js(&mut engine, id, "location.href = '/next?x=1'");
+        assert_eq!(engine.take_script_navigation(id).as_deref(), Some("https://example.com/next?x=1"));
+
+        // The user's own click on the button is the click's outcome, not a
+        // second navigation waiting for the next turn.
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(
+            outcome.navigate.as_deref(),
+            Some("https://example.com/search?q=rust&via=button")
+        );
+        assert_eq!(engine.take_script_navigation(id), None);
     }
 
     #[test]

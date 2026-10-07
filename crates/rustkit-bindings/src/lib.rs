@@ -636,6 +636,13 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_submit_requests()
     }
 
+    /// The absolute URLs script asked to navigate to since the last call
+    /// (`location.href = url`, `location.assign/replace`, `link.click()`),
+    /// oldest first. Nothing navigates until the embedder does.
+    pub fn take_navigation_requests(&self) -> Vec<String> {
+        self.dom_host.borrow_mut().take_navigation_requests()
+    }
+
     /// Tell script what the user typed into a control, so its `value`
     /// reads the edit state's text rather than the default.
     pub fn sync_control_value(&self, node: usize, value: String) {
@@ -1193,7 +1200,8 @@ impl DomBindings {
         let mut runtime = self.runtime.borrow_mut();
         runtime.evaluate_script(&format!(
             r#"
-            window.location.href = {:?};
+            if (window.__rustkit_location_sync) window.__rustkit_location_sync({:?});
+            else window.location.href = {:?};
             window.location.protocol = {:?};
             window.location.host = {:?};
             window.location.hostname = {:?};
@@ -1205,6 +1213,7 @@ impl DomBindings {
             document.URL = {:?};
             if (window.__rustkit_history_reset) window.__rustkit_history_reset();
             "#,
+            location.href,
             location.href,
             location.protocol,
             location.host,
