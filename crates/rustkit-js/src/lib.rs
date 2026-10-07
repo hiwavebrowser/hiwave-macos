@@ -14,6 +14,8 @@ mod import_map;
 mod module;
 #[cfg(feature = "boa")]
 pub use module::{FetchedModule, ModuleHandle, ModuleState};
+#[cfg(feature = "boa")]
+mod executor;
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
 
@@ -146,8 +148,11 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         let modules = module::ModuleHost::default();
         #[cfg(feature = "boa")]
+        let executor = std::rc::Rc::new(executor::HostJobExecutor::new());
+        #[cfg(feature = "boa")]
         let context = boa_engine::Context::builder()
             .module_loader(modules.loader())
+            .job_executor(executor)
             .build()
             .map_err(|e| JsError::ExecutionError(e.to_string()))?;
 
@@ -219,7 +224,7 @@ impl JsRuntime {
             // Promise reactions (`.then`, `await`) are jobs Boa queues but
             // does not run on its own; a page's async code never resumes
             // without this.
-            self.context.run_jobs();
+            let _ = self.context.run_jobs();
 
             match result {
                 Ok(value) => {
@@ -410,25 +415,26 @@ fn to_boa_value(value: JsValue) -> boa_engine::JsValue {
 
 #[cfg(feature = "boa")]
 fn from_boa_value(value: &boa_engine::JsValue) -> JsValue {
-    use boa_engine::JsValue as BoaValue;
-
-    match value {
-        BoaValue::Undefined => JsValue::Undefined,
-        BoaValue::Null => JsValue::Null,
-        BoaValue::Boolean(b) => JsValue::Boolean(*b),
-        BoaValue::Integer(n) => JsValue::Number(*n as f64),
-        BoaValue::Rational(n) => JsValue::Number(*n),
-        BoaValue::String(s) => JsValue::String(s.to_std_string_escaped()),
-        BoaValue::Object(obj) => {
-            if obj.is_array() {
-                JsValue::Array
-            } else if obj.is_callable() {
-                JsValue::Function
-            } else {
-                JsValue::Object
-            }
+    if value.is_undefined() {
+        JsValue::Undefined
+    } else if value.is_null() {
+        JsValue::Null
+    } else if let Some(b) = value.as_boolean() {
+        JsValue::Boolean(b)
+    } else if let Some(n) = value.as_number() {
+        JsValue::Number(n)
+    } else if let Some(s) = value.as_string() {
+        JsValue::String(s.to_std_string_escaped())
+    } else if let Some(obj) = value.as_object() {
+        if obj.is_array() {
+            JsValue::Array
+        } else if obj.is_callable() {
+            JsValue::Function
+        } else {
+            JsValue::Object
         }
-        _ => JsValue::Undefined,
+    } else {
+        JsValue::Undefined
     }
 }
 

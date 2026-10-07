@@ -456,3 +456,38 @@ fn a_dynamic_import_inside_a_module_resolves_against_it() {
     assert_eq!(site.asked, vec!["https://site.test/app/lazy.js"]);
     assert_eq!(log(&mut rt), "lazy:L");
 }
+
+/// A dynamic import that stays pending across multiple intermediate turns / run_jobs calls
+/// resumes cleanly and resolves once the host supplies the module.
+#[test]
+fn dynamic_import_pending_across_multiple_run_jobs_resolves() {
+    let mut rt = runtime();
+    // 1. Initiate dynamic import - enters pending state waiting for network fetch
+    rt.evaluate_script(
+        "import('./delayed.js').then(function (m) { log.push('resolved:' + m.val); });",
+    )
+    .unwrap();
+    assert_eq!(
+        rt.take_module_requests(),
+        vec!["https://site.test/page/delayed.js"]
+    );
+    assert_eq!(log(&mut rt), ""); // Not resolved yet
+
+    // 2. Multiple intermediate script evaluations and run_jobs calls while fetch is in-flight
+    rt.evaluate_script("log.push('intermediate turn 1');").unwrap();
+    rt.evaluate_script("log.push('intermediate turn 2');").unwrap();
+    assert_eq!(log(&mut rt), "intermediate turn 1,intermediate turn 2");
+
+    // 3. Now supply the fetched module and let jobs run to resolve
+    rt.supply_module(
+        "https://site.test/page/delayed.js",
+        Ok(FetchedModule {
+            final_url: "https://site.test/page/delayed.js".into(),
+            source: "export const val = 42;".into(),
+        }),
+    );
+    assert_eq!(
+        log(&mut rt),
+        "intermediate turn 1,intermediate turn 2,resolved:42"
+    );
+}

@@ -2593,7 +2593,10 @@ pub struct ComputedStyle {
     // Image/replaced element
     pub image_url: Option<String>,
     pub object_fit: String, // "fill", "contain", "cover", "none", "scale-down"
+    /// `object-position` as a fraction of the free space per axis…
     pub object_position: (f32, f32),
+    /// …plus a pixel offset per axis (`right 10px` is 100% and -10px).
+    pub object_position_offset: (f32, f32),
 
     // Flexbox Container
     pub flex_direction: FlexDirection,
@@ -2727,6 +2730,7 @@ impl ComputedStyle {
             // gaps (Wikipedia globe, live session 2026-08-07).
             object_fit: "fill".to_string(),
             object_position: (0.5, 0.5), // center center
+            object_position_offset: (0.0, 0.0),
             ..Default::default()
         }
     }
