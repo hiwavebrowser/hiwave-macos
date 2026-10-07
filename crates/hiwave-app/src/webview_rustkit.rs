@@ -65,6 +65,26 @@ pub struct RustKitView {
     live_runtime: Option<tokio::runtime::Runtime>,
 }
 
+/// Script budget for pages in the live app. The engine default (5 s) is
+/// what parity-capture and the board keep; a person waits longer than a
+/// capture does, and YouTube's 10.8 MB base module alone ran past 5 s and
+/// left the page white (Pete, 2026-10-06).
+const LIVE_SCRIPT_BUDGET_MS: u64 = 60_000;
+
+/// The engine builder for content views, before the shield is attached.
+fn content_engine_builder() -> EngineBuilder {
+    // Browser-plausible UA. "HiWave/1.0 RustKit/1.0" alone got us
+    // instantly rate-limited as a scraper even by Wikimedia (HTTP 429 on
+    // every thumbnail, 2026-08-05 live session) — servers gate on the
+    // Mozilla/AppleWebKit shape. Platform is reported honestly; HiWave
+    // stays visible as the product token.
+    EngineBuilder::new()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0")
+        .javascript_enabled(true)
+        .cookies_enabled(true)
+        .script_budget_ms(LIVE_SCRIPT_BUDGET_MS)
+}
+
 impl RustKitView {
     /// Create a new RustKit view.
     pub fn new(window: &Window, bounds: Bounds) -> HiWaveResult<Self> {
@@ -85,15 +105,7 @@ impl RustKitView {
             .as_raw();
 
         // Create engine builder with shield interceptor if counter provided
-        // Browser-plausible UA. "HiWave/1.0 RustKit/1.0" alone got us
-        // instantly rate-limited as a scraper even by Wikimedia (HTTP 429 on
-        // every thumbnail, 2026-08-05 live session) — servers gate on the
-        // Mozilla/AppleWebKit shape. Platform is reported honestly; HiWave
-        // stays visible as the product token.
-        let mut builder = EngineBuilder::new()
-            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0")
-            .javascript_enabled(true)
-            .cookies_enabled(true);
+        let mut builder = content_engine_builder();
 
         // Add shield interceptor if counter is provided
         let counter_clone = blocked_counter.clone();
@@ -616,3 +628,17 @@ impl IWebContent for RustKitView {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_views_get_the_live_script_budget() {
+        let builder = content_engine_builder();
+        assert_eq!(builder.config().script_budget_ms, 60_000);
+        // Only the script budget is raised: the virtual timer clock and
+        // the engine's own default (parity-capture, the board) stay at 5 s.
+        assert_eq!(builder.config().timer_horizon_ms, 5_000);
+        assert_eq!(rustkit_engine::EngineConfig::default().script_budget_ms, 5_000);
+    }
+}
