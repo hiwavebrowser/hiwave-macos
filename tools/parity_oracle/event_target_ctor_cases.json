@@ -84,6 +84,16 @@
    "chrome": "1"
   },
   {
+   "name": "the signal option: abort removes only the listener it was given with",
+   "js": "var t = new EventTarget(), c = new AbortController(), n = 0; function f() { n++; } t.addEventListener('x', f, { signal: c.signal }); t.removeEventListener('x', f); t.addEventListener('x', f); c.abort(); t.dispatchEvent(new Event('x')); n",
+   "chrome": "0"
+  },
+  {
+   "name": "the signal option: a listener added again with a signal keeps its first registration",
+   "js": "var t = new EventTarget(), c = new AbortController(), n = 0; function f() { n++; } t.addEventListener('x', f); t.addEventListener('x', f, { signal: c.signal }); c.abort(); t.dispatchEvent(new Event('x')); n",
+   "chrome": "1"
+  },
+  {
    "name": "two targets do not share listeners",
    "js": "var a = new EventTarget(), b = new EventTarget(), n = 0; a.addEventListener('x', function () { n++; }); b.dispatchEvent(new Event('x')); n",
    "chrome": "0"
