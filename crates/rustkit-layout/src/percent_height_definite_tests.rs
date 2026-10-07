@@ -142,7 +142,10 @@ fn a_controls_percentage_height_is_auto_in_a_content_sized_block() {
         1,
     );
     for collapse in [false, true] {
-        let alone = laid_out(boxed(block(), vec![input(Length::Percent(100.0))]), collapse);
+        let alone = laid_out(
+            boxed(block(), vec![input(Length::Percent(100.0))]),
+            collapse,
+        );
         let got = alone.children[0].dimensions.content.height;
         assert!(
             (got - auto).abs() < 0.01,
@@ -453,5 +456,10 @@ fn a_percentage_height_resolves_against_the_stretched_items_content_box() {
             vec![boxed(item, vec![fill()])],
         )
     };
-    assert_height("div 100% in a stretched item with margins", margined, 2, 36.0);
+    assert_height(
+        "div 100% in a stretched item with margins",
+        margined,
+        2,
+        36.0,
+    );
 }
