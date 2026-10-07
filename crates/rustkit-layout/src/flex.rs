@@ -1617,8 +1617,16 @@ fn create_flex_item<'a>(
         max_cross
     };
 
-    // Hypothetical main size (clamped)
-    let hypothetical_main_size = flex_basis.max(min_main).min(max_main);
+    // Hypothetical main size: the flex base size clamped by min and max.
+    // These are border-box figures and the content box cannot go negative,
+    // so the result is never below the item's own padding and border. A
+    // `box-sizing: border-box` item with a 0 basis (`flex: 1`) and no
+    // automatic minimum (`overflow: hidden`, `min-width: 0`) came out at 0
+    // here while `resolve_flexible_lengths` measures from a base floored the
+    // same way: the base was then "past the hypothetical size", the item
+    // froze before it could grow, and its siblings were placed as if it
+    // were 0 wide.
+    let hypothetical_main_size = flex_basis.max(min_main).min(max_main).max(main_pb);
 
     FlexItem {
         layout_box,
