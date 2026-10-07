@@ -9606,6 +9606,25 @@ impl Engine {
         view.nav_generation
     }
 
+    /// Whether a `<style>` or `<link>` found in the tree is one the page
+    /// has. With scripting on, the contents of `<noscript>` are text (HTML
+    /// 13.2.6.4.4, 13.2.6.4.7) and so hold no sheet; our parser builds the
+    /// elements regardless, so the collectors leave them out here. Google's
+    /// results page hides everything from such a sheet.
+    fn sheet_element_counts(&self, element: &Rc<Node>) -> bool {
+        if !self.config.javascript_enabled {
+            return true;
+        }
+        let mut ancestor = element.parent();
+        while let Some(node) = ancestor {
+            if node.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("noscript")) {
+                return false;
+            }
+            ancestor = node.parent();
+        }
+        true
+    }
+
     /// Extract CSS text from <style> elements in the document.
     fn extract_stylesheets(&self, document: &Document) -> Vec<Stylesheet> {
         let mut stylesheets = Vec::new();
@@ -9614,6 +9633,10 @@ impl Engine {
         let style_elements = document.get_elements_by_tag_name("style");
 
         for style_el in style_elements {
+            if !self.sheet_element_counts(&style_el) {
+                continue;
+            }
+
             // Get text content
             let mut css_text = String::new();
             for child in style_el.children() {
@@ -9650,6 +9673,9 @@ impl Engine {
         let link_elements = document.get_elements_by_tag_name("link");
 
         for link_el in link_elements {
+            if !self.sheet_element_counts(&link_el) {
+                continue;
+            }
             if let NodeType::Element { attributes, .. } = &link_el.node_type {
                 // Check if this is a stylesheet link
                 let rel = attributes.get("rel").map(|s| s.to_lowercase());
