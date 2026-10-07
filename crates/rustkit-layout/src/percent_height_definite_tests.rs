@@ -293,3 +293,165 @@ fn a_percentage_height_stays_auto_in_an_item_the_flex_algorithm_did_not_fix() {
         0.0,
     );
 }
+
+// ---- the same, where the first tests would not see it -------------------
+
+fn bordered(mut style: ComputedStyle, px: f32) -> ComputedStyle {
+    style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+    style.border_top_width = Length::Px(px);
+    style.border_bottom_width = Length::Px(px);
+    style.border_top_style = rustkit_css::BorderStyle::Solid;
+    style.border_bottom_style = rustkit_css::BorderStyle::Solid;
+    style
+}
+
+#[test]
+fn a_percentage_height_flex_container_takes_its_border_out_once() {
+    // P28: row 44 > flex (flex:1; height:100%; border:2px) > flex:1 > div
+    // 100%. The inner pass read the item's own content height as its
+    // containing block and took the border out again: 36.
+    let build = || {
+        let mut inner = bordered(grow(), 2.0);
+        inner.display = Display::Flex;
+        inner.height = Length::Percent(100.0);
+        boxed(
+            flex(FlexDirection::Row, Length::Px(44.0)),
+            vec![boxed(inner, vec![boxed(grow(), vec![fill()])])],
+        )
+    };
+    assert_height("the item of a bordered 100% flex container", build, 2, 40.0);
+    assert_height("its 100% child", build, 3, 40.0);
+}
+
+#[test]
+fn ebays_search_field() {
+    // P27: row 44 > flex (flex:1) > flex (flex:1; height:100%; border:2px)
+    // > item (flex:1; height:100%) > input 100%.
+    let build = || {
+        let mut outer = grow();
+        outer.display = Display::Flex;
+        let mut wrap = bordered(grow(), 2.0);
+        wrap.display = Display::Flex;
+        wrap.height = Length::Percent(100.0);
+        let mut iw = grow();
+        iw.height = Length::Percent(100.0);
+        boxed(
+            flex(FlexDirection::Row, Length::Px(44.0)),
+            vec![boxed(
+                outer,
+                vec![boxed(
+                    wrap,
+                    vec![boxed(iw, vec![input(Length::Percent(100.0))])],
+                )],
+            )],
+        )
+    };
+    assert_height("the input's wrapper", build, 3, 40.0);
+    assert_height("the input", build, 4, 40.0);
+}
+
+#[test]
+fn a_percentage_height_resolves_in_a_column_container_with_a_resolved_percentage_height() {
+    // P29: row 44 > column flex (flex:1; height:100%) > flex:1 > div 100%.
+    let build = || {
+        let mut column = grow();
+        column.display = Display::Flex;
+        column.flex_direction = FlexDirection::Column;
+        column.height = Length::Percent(100.0);
+        boxed(
+            flex(FlexDirection::Row, Length::Px(44.0)),
+            vec![boxed(column, vec![boxed(grow(), vec![fill()])])],
+        )
+    };
+    assert_height("the flexed item", build, 2, 44.0);
+    assert_height("its 100% child", build, 3, 44.0);
+}
+
+/// The heights of a row's first item and of that item's second child.
+fn item_and_second_child(build: impl Fn() -> LayoutBox, collapse: bool) -> (f32, f32) {
+    let row = laid_out(build(), collapse);
+    let item = &row.children[0];
+    (
+        item.dimensions.content.height,
+        item.children[1].dimensions.content.height,
+    )
+}
+
+#[test]
+fn a_percentage_height_resolves_against_an_item_stretched_to_its_sibling() {
+    // P30: an auto-height row; the item is stretched to a 44px sibling and
+    // holds a 10px block and a 100% block, which overflows it.
+    let build = || {
+        let mut sibling = sized(Length::Px(44.0));
+        sibling.width = Length::Px(50.0);
+        boxed(
+            flex(FlexDirection::Row, Length::Auto),
+            vec![
+                boxed(
+                    grow(),
+                    vec![boxed(sized(Length::Px(10.0)), Vec::new()), fill()],
+                ),
+                boxed(sibling, Vec::new()),
+            ],
+        )
+    };
+    for collapse in [false, true] {
+        let (h, k) = item_and_second_child(build, collapse);
+        assert!(
+            (h - 44.0).abs() < 0.5 && (k - 44.0).abs() < 0.5,
+            "collapse = {collapse}: item {h}, its 100% child {k}; Chromium has 44 and 44"
+        );
+    }
+}
+
+#[test]
+fn a_stretched_item_with_a_percentage_child_keeps_its_height_when_content_overflows() {
+    // P21: row 44 > flex:1 > a 60px block and a 100% block. Chromium leaves
+    // the item at 44 with 104px of content.
+    let build = || {
+        boxed(
+            flex(FlexDirection::Row, Length::Px(44.0)),
+            vec![boxed(
+                grow(),
+                vec![boxed(sized(Length::Px(60.0)), Vec::new()), fill()],
+            )],
+        )
+    };
+    for collapse in [false, true] {
+        let (h, k) = item_and_second_child(build, collapse);
+        assert!(
+            (h - 44.0).abs() < 0.5 && (k - 44.0).abs() < 0.5,
+            "collapse = {collapse}: item {h}, its 100% child {k}; Chromium has 44 and 44"
+        );
+    }
+}
+
+#[test]
+fn a_percentage_height_resolves_against_the_stretched_items_content_box() {
+    // P31: row 44 > flex:1 with 5px of padding > div 50%: half of 34.
+    let padded = || {
+        let mut item = grow();
+        item.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        item.padding_top = Length::Px(5.0);
+        item.padding_bottom = Length::Px(5.0);
+        boxed(
+            flex(FlexDirection::Row, Length::Px(44.0)),
+            vec![boxed(
+                item,
+                vec![boxed(sized(Length::Percent(50.0)), Vec::new())],
+            )],
+        )
+    };
+    assert_height("div 50% in a padded stretched item", padded, 2, 17.0);
+    // P32: row 44 > flex:1 with a 4px margin > div 100%: 36.
+    let margined = || {
+        let mut item = grow();
+        item.margin_top = Length::Px(4.0);
+        item.margin_bottom = Length::Px(4.0);
+        boxed(
+            flex(FlexDirection::Row, Length::Px(44.0)),
+            vec![boxed(item, vec![fill()])],
+        )
+    };
+    assert_height("div 100% in a stretched item with margins", margined, 2, 36.0);
+}
