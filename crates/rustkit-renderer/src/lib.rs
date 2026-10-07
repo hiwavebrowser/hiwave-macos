@@ -2159,6 +2159,18 @@ impl Renderer {
                 self.draw_background_image(url, *rect, size, *position, *offset, repeat);
             }
 
+            DisplayCommand::MaskedColor {
+                color,
+                url,
+                rect,
+                size,
+                position,
+                offset,
+                repeat,
+            } => {
+                self.draw_masked_color(url, *color, *rect, size, *position, *offset, *repeat);
+            }
+
             DisplayCommand::BoxShadow {
                 offset_x,
                 offset_y,
@@ -5610,45 +5622,79 @@ impl Renderer {
             return;
         }
 
-        for tile in rustkit_layout::background_tiles(container, size, position, offset, *repeat, image_width, image_height) {
-            self.draw_background_image_tile(url, tile, container);
+        for (draw_rect, tex) in background_tile_quads(
+            container,
+            size,
+            position,
+            offset,
+            *repeat,
+            image_width,
+            image_height,
+        ) {
+            self.draw_background_image_tile(url, draw_rect, tex, [1.0, 1.0, 1.0, 1.0]);
         }
     }
 
-    /// Draw a single tile of a background image, clipped to the container bounds.
-    fn draw_background_image_tile(&mut self, url: &str, tile_rect: Rect, container: Rect) {
+    /// Paint `color` through the alpha of the mask image at `url`, tiled in
+    /// `container` like a background (CSS Masking 1 §6). The mask texture
+    /// is the image with its colour channels made white (see
+    /// [`mask_alpha_rgba`]): the image pipeline multiplies texel by vertex
+    /// colour, so a white texel of alpha `m` paints `color` at alpha
+    /// `color.a * m`. A vector (SVG) mask never reaches here: the engine
+    /// splices it as recoloured commands.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_masked_color(
+        &mut self,
+        url: &str,
+        color: Color,
+        container: Rect,
+        size: &BackgroundSize,
+        position: (f32, f32),
+        offset: (f32, f32),
+        repeat: BackgroundRepeat,
+    ) {
+        let key = mask_texture_key(url);
+        let (image_width, image_height) = match self.texture_cache.get(&key) {
+            Some(cached) => (cached.width as f32, cached.height as f32),
+            // Not loaded (or not decodable): nothing paints, as Chrome
+            // paints nothing through a mask image that has not loaded.
+            None => return,
+        };
+        if image_width == 0.0 || image_height == 0.0 {
+            return;
+        }
+        let tint = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a,
+        ];
+        for (draw_rect, tex) in background_tile_quads(
+            container,
+            size,
+            position,
+            offset,
+            repeat,
+            image_width,
+            image_height,
+        ) {
+            self.draw_background_image_tile(&key, draw_rect, tex, tint);
+        }
+    }
+
+    /// Draw one tile of a background (or mask) image, already cut to its
+    /// container: `draw_rect` with texture coordinates `tex`, every texel
+    /// multiplied by `tint`.
+    fn draw_background_image_tile(&mut self, url: &str, draw_rect: Rect, tex: [f32; 4], tint: [f32; 4]) {
         if !self.texture_cache.contains(url) {
             return;
         }
 
-        // Clip tile to container bounds
-        let clip_left = (container.x - tile_rect.x).max(0.0);
-        let clip_top = (container.y - tile_rect.y).max(0.0);
-        let clip_right = (tile_rect.x + tile_rect.width - container.x - container.width).max(0.0);
-        let clip_bottom = (tile_rect.y + tile_rect.height - container.y - container.height).max(0.0);
-
-        let draw_rect = Rect {
-            x: tile_rect.x + clip_left,
-            y: tile_rect.y + clip_top,
-            width: tile_rect.width - clip_left - clip_right,
-            height: tile_rect.height - clip_top - clip_bottom,
-        };
-
-        if draw_rect.width <= 0.0 || draw_rect.height <= 0.0 {
-            return;
-        }
-
-        // Calculate texture coordinates for the clipped portion
-        let tex_left = clip_left / tile_rect.width;
-        let tex_top = clip_top / tile_rect.height;
-        let tex_right = 1.0 - clip_right / tile_rect.width;
-        let tex_bottom = 1.0 - clip_bottom / tile_rect.height;
-
         // Then the overflow clip on top of the container clip.
         for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], [tex_left, tex_top, tex_right, tex_bottom], coverage) in
-            self.textured_pieces(draw_rect, [tex_left, tex_top, tex_right, tex_bottom])
+            self.textured_pieces(draw_rect, tex)
         {
-            let color = [1.0, 1.0, 1.0, coverage];
+            let color = [tint[0], tint[1], tint[2], tint[3] * coverage];
             self.push_image_quad(
                 url,
                 [
@@ -5708,6 +5754,24 @@ impl Renderer {
         Ok(())
     }
     
+    /// Upload a decoded raster image (RGBA) for use as a mask image: it is
+    /// stored under [`mask_texture_key`] with its colour made white and its
+    /// alpha kept (`mask-mode: alpha`, the initial for an image).
+    pub fn upload_mask_image(
+        &mut self,
+        url: &str,
+        width: u32,
+        height: u32,
+        rgba_data: &[u8],
+    ) -> Result<(), RendererError> {
+        self.upload_image(&mask_texture_key(url), width, height, &mask_alpha_rgba(rgba_data))
+    }
+
+    /// Whether the mask texture for `url` is uploaded.
+    pub fn has_mask_image(&self, url: &str) -> bool {
+        self.texture_cache.contains(&mask_texture_key(url))
+    }
+
     /// Check if an image is already uploaded.
     pub fn has_image(&self, url: &str) -> bool {
         self.texture_cache.contains(url)
@@ -6256,6 +6320,61 @@ fn invert_matrix_2d(m: [f32; 6]) -> Option<[f32; 6]> {
     let c = -m[2] * inv_det;
     let d = m[0] * inv_det;
     Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
+}
+
+/// The texture-cache key a mask image is stored under: the same image
+/// used as a mask and as an ordinary image needs two textures, the mask
+/// one white.
+pub fn mask_texture_key(url: &str) -> String {
+    format!("mask-alpha:{url}")
+}
+
+/// `rgba` (straight alpha, 4 bytes a pixel) as a mask texture: every
+/// colour channel 255, alpha kept. Drawn through the image pipeline
+/// (texel times vertex colour) it paints the vertex colour at the mask's
+/// alpha, which is CSS `mask-mode: alpha`.
+pub fn mask_alpha_rgba(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4).flat_map(|px| [255, 255, 255, px[3]]).collect()
+}
+
+/// The quads a background or mask image paints in `container`: each tile
+/// from [`rustkit_layout::background_tiles`] cut to the container, with
+/// the texture coordinates `[left, top, right, bottom]` of the part kept.
+/// Tiles wholly outside the container are dropped.
+pub fn background_tile_quads(
+    container: Rect,
+    size: &BackgroundSize,
+    position: (f32, f32),
+    offset: (f32, f32),
+    repeat: BackgroundRepeat,
+    image_width: f32,
+    image_height: f32,
+) -> Vec<(Rect, [f32; 4])> {
+    rustkit_layout::background_tiles(container, size, position, offset, repeat, image_width, image_height)
+        .into_iter()
+        .filter_map(|tile| {
+            let clip_left = (container.x - tile.x).max(0.0);
+            let clip_top = (container.y - tile.y).max(0.0);
+            let clip_right = (tile.x + tile.width - container.x - container.width).max(0.0);
+            let clip_bottom = (tile.y + tile.height - container.y - container.height).max(0.0);
+            let draw_rect = Rect {
+                x: tile.x + clip_left,
+                y: tile.y + clip_top,
+                width: tile.width - clip_left - clip_right,
+                height: tile.height - clip_top - clip_bottom,
+            };
+            if draw_rect.width <= 0.0 || draw_rect.height <= 0.0 {
+                return None;
+            }
+            let tex = [
+                clip_left / tile.width,
+                clip_top / tile.height,
+                1.0 - clip_right / tile.width,
+                1.0 - clip_bottom / tile.height,
+            ];
+            Some((draw_rect, tex))
+        })
+        .collect()
 }
 
 /// The clip entry a `PushClip`/`PushClipRounded` issued under transform `m`
@@ -9199,5 +9318,87 @@ mod shaped_run_windows_paint_tests {
         let mut unknown = key(&run, run.glyphs[0].glyph_id);
         unknown.face ^= 0x5a5a;
         assert!(rasterize_run_glyph(&unknown, 24.0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod mask_layer_tests {
+    //! The GPU-free half of `DisplayCommand::MaskedColor`: which texels the
+    //! mask texture holds and where its tiles land. The draw itself needs
+    //! a device and is covered by reading.
+    use super::*;
+
+    fn xywh(r: Rect) -> (f32, f32, f32, f32) {
+        (r.x, r.y, r.width, r.height)
+    }
+
+    #[test]
+    fn a_mask_texture_is_white_with_the_images_alpha() {
+        let rgba = [0, 0, 0, 255, 10, 200, 30, 128, 255, 0, 0, 0];
+        assert_eq!(
+            mask_alpha_rgba(&rgba),
+            vec![255, 255, 255, 255, 255, 255, 255, 128, 255, 255, 255, 0]
+        );
+    }
+
+    #[test]
+    fn the_mask_texture_has_its_own_key() {
+        assert_ne!(mask_texture_key("a.png"), "a.png");
+        assert_eq!(mask_texture_key("a.png"), mask_texture_key("a.png"));
+    }
+
+    #[test]
+    fn the_repro_mask_contained_in_its_box_is_one_full_quad() {
+        // 10x10 mask, `mask-size: contain` in the repro's 50x50 box at (8, 8).
+        let quads = background_tile_quads(
+            Rect::new(8.0, 8.0, 50.0, 50.0),
+            &BackgroundSize::Contain,
+            (0.0, 0.0),
+            (0.0, 0.0),
+            BackgroundRepeat::NoRepeat,
+            10.0,
+            10.0,
+        );
+        let quads: Vec<_> = quads.into_iter().map(|(r, t)| (xywh(r), t)).collect();
+        assert_eq!(quads, vec![((8.0, 8.0, 50.0, 50.0), [0.0, 0.0, 1.0, 1.0])]);
+    }
+
+    #[test]
+    fn a_repeated_mask_tiles_and_the_last_tile_is_cut_to_the_box() {
+        // A 20x20 mask tiled across 50x20: tiles at 0, 20, and half a tile at 40.
+        let quads = background_tile_quads(
+            Rect::new(0.0, 0.0, 50.0, 20.0),
+            &BackgroundSize::Auto,
+            (0.0, 0.0),
+            (0.0, 0.0),
+            BackgroundRepeat::RepeatX,
+            20.0,
+            20.0,
+        );
+        let quads: Vec<_> = quads.into_iter().map(|(r, t)| (xywh(r), t)).collect();
+        assert_eq!(
+            quads,
+            vec![
+                ((0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0, 1.0]),
+                ((20.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0, 1.0]),
+                ((40.0, 0.0, 10.0, 20.0), [0.0, 0.0, 0.5, 1.0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mask_offset_past_the_box_edge_keeps_only_the_inside_part() {
+        // 16x16 at -4px, -8px: the top-left is cut away.
+        let quads = background_tile_quads(
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            &BackgroundSize::Auto,
+            (0.0, 0.0),
+            (-4.0, -8.0),
+            BackgroundRepeat::NoRepeat,
+            16.0,
+            16.0,
+        );
+        let quads: Vec<_> = quads.into_iter().map(|(r, t)| (xywh(r), t)).collect();
+        assert_eq!(quads, vec![((0.0, 0.0, 12.0, 8.0), [0.25, 0.5, 1.0, 1.0])]);
     }
 }

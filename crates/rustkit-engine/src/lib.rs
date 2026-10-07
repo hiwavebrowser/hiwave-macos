@@ -150,6 +150,10 @@ pub(crate) mod test_gpu {
     }
 }
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
+use rustkit_css::background::{
+    parse_background_origin, parse_background_position,
+    parse_background_repeat, parse_background_size, split_top_level_whitespace,
+};
 use rustkit_css::{css_ident, parse_display, ComputedStyle, CustomProperties, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
@@ -4687,7 +4691,8 @@ impl Engine {
             for mut cmd in dl.commands.drain(..) {
                 match &mut cmd {
                     rustkit_layout::DisplayCommand::Image { url, .. }
-                    | rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => {
+                    | rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+                    | rustkit_layout::DisplayCommand::MaskedColor { url, .. } => {
                         if let Some(abs) = self.resolve_resource_url_in(id, url) {
                             *url = abs.to_string();
                         }
@@ -4727,6 +4732,27 @@ impl Engine {
                     } => {
                         if let Some(svg) = self.svg_cache.get(url) {
                             expanded.extend(svg_background_commands(svg, *rect, size, *position, *offset, *repeat));
+                            continue;
+                        }
+                    }
+                    // A vector mask is spliced like a vector background,
+                    // its paint recoloured to the masked colour with its
+                    // alpha kept (`mask-mode: alpha`). A raster mask stays
+                    // a `MaskedColor` for the renderer.
+                    rustkit_layout::DisplayCommand::MaskedColor {
+                        color,
+                        url,
+                        rect,
+                        size,
+                        position,
+                        offset,
+                        repeat,
+                    } => {
+                        if let Some(svg) = self.svg_cache.get(url) {
+                            let mut cmds =
+                                svg_background_commands(svg, *rect, size, *position, *offset, *repeat);
+                            rustkit_layout::tint_mask_commands(&mut cmds, *color);
+                            expanded.extend(cmds);
                             continue;
                         }
                     }
@@ -8123,6 +8149,11 @@ impl Engine {
                     }
                 }
             }
+            // `mask-*` and the `-webkit-mask-*` aliases (css-masking-1 §6).
+            // A value that does not parse leaves the earlier one.
+            _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
+                style.mask.apply(property, value, &parse_gradient);
+            }
             "background-size" => {
                 // Can be comma-separated for multiple layers
                 // CSS order: first size applies to first (topmost) layer
@@ -9408,6 +9439,9 @@ impl Engine {
                 style.background_layers.clear();
                 style.background_gradient = None;
             }
+            _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
+                style.mask.reset(property)
+            }
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
@@ -10098,7 +10132,10 @@ impl Engine {
         let mut seen = std::collections::HashSet::new();
         let mut images = Vec::new();
         for cmd in display_list.map(|dl| dl.commands.as_slice()).unwrap_or(&[]) {
-            let rustkit_layout::DisplayCommand::BackgroundImage { url, .. } = cmd else {
+            // A mask image (`MaskedColor`) is fetched like a background.
+            let (rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+            | rustkit_layout::DisplayCommand::MaskedColor { url, .. }) = cmd
+            else {
                 continue;
             };
             if !seen.insert(url.as_str()) {
@@ -12789,6 +12826,24 @@ impl Engine {
                     "offset": { "x": offset.0, "y": offset.1 },
                     "repeat": format!("{:?}", repeat)
                 }),
+                Cmd::MaskedColor {
+                    color: c,
+                    url,
+                    rect: r,
+                    size,
+                    position,
+                    offset,
+                    repeat,
+                } => serde_json::json!({
+                    "op": "masked_color",
+                    "color": color(c),
+                    "url": url,
+                    "rect": rect(r),
+                    "size": format!("{:?}", size),
+                    "position": { "x": position.0, "y": position.1 },
+                    "offset": { "x": offset.0, "y": offset.1 },
+                    "repeat": format!("{:?}", repeat)
+                }),
                 Cmd::BoxShadow {
                     offset_x,
                     offset_y,
@@ -13350,24 +13405,26 @@ impl Engine {
         };
 
         // Collect unique image URLs from display list
-        let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>)> =
+        // (url, image, whether it is uploaded as a mask texture)
+        let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>, bool)> =
             Vec::new();
         let mut urls_seen = HashSet::new();
 
         for cmd in commands {
-            // Extract URL from both BackgroundImage and Image commands
-            let url = match cmd {
-                rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => url,
-                rustkit_layout::DisplayCommand::Image { url, .. } => url,
+            // Extract URL from BackgroundImage, Image and MaskedColor commands
+            let (url, mask) = match cmd {
+                rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => (url, false),
+                rustkit_layout::DisplayCommand::Image { url, .. } => (url, false),
+                rustkit_layout::DisplayCommand::MaskedColor { url, .. } => (url, true),
                 _ => continue,
             };
 
-            if !urls_seen.insert(url.clone()) {
+            if !urls_seen.insert((url.clone(), mask)) {
                 continue; // Already processed
             }
 
             // Skip if already in renderer
-            if renderer.has_image(url) {
+            if if mask { renderer.has_mask_image(url) } else { renderer.has_image(url) } {
                 continue;
             }
 
@@ -13395,16 +13452,19 @@ impl Engine {
             };
 
             if let Some(img) = image {
-                urls_to_upload.push((url.clone(), img));
+                urls_to_upload.push((url.clone(), img, mask));
             }
         }
 
         // Now upload all collected images
-        for (url_str, image) in urls_to_upload {
+        for (url_str, image, mask) in urls_to_upload {
             let frame = image.current_frame(Duration::ZERO);
-            if let Err(e) =
+            let uploaded = if mask {
+                renderer.upload_mask_image(&url_str, frame.width(), frame.height(), frame.data())
+            } else {
                 renderer.upload_image(&url_str, frame.width(), frame.height(), frame.data())
-            {
+            };
+            if let Err(e) = uploaded {
                 tracing::warn!(?e, %url_str, "Failed to upload image to renderer");
             } else {
                 tracing::debug!(%url_str, "Uploaded image to renderer");
@@ -14591,121 +14651,6 @@ fn selects_the_root(selector: &str) -> bool {
 
 // ==================== Background Layer Parsing ====================
 
-/// Parse a background-size value.
-fn parse_background_size(value: &str) -> rustkit_css::BackgroundSize {
-    let value = value.trim().to_lowercase();
-    match value.as_str() {
-        "cover" => rustkit_css::BackgroundSize::Cover,
-        "contain" => rustkit_css::BackgroundSize::Contain,
-        "auto" => rustkit_css::BackgroundSize::Auto,
-        _ => {
-            // Parse explicit size (e.g., "100px 50px" or "50% auto")
-            let parts: Vec<&str> = value.split_whitespace().collect();
-            let width = parts
-                .first()
-                .and_then(|s| parse_background_size_dimension(s));
-            let height = parts
-                .get(1)
-                .and_then(|s| parse_background_size_dimension(s));
-            rustkit_css::BackgroundSize::Explicit { width, height }
-        }
-    }
-}
-
-/// Parse a single dimension for background-size (px, %, or auto).
-fn parse_background_size_dimension(value: &str) -> Option<f32> {
-    let value = value.trim();
-    if value == "auto" {
-        return None;
-    }
-    if value.ends_with("px") {
-        return value.strip_suffix("px").and_then(|s| s.parse().ok());
-    }
-    if value.ends_with('%') {
-        // Return percentage as negative value to indicate it's a percentage
-        // (will be resolved during layout)
-        return value
-            .strip_suffix('%')
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(|p| -p);
-    }
-    value.parse().ok()
-}
-
-/// Parse a background-repeat value.
-fn parse_background_repeat(value: &str) -> rustkit_css::BackgroundRepeat {
-    match value.trim().to_lowercase().as_str() {
-        "repeat" => rustkit_css::BackgroundRepeat::Repeat,
-        "repeat-x" => rustkit_css::BackgroundRepeat::RepeatX,
-        "repeat-y" => rustkit_css::BackgroundRepeat::RepeatY,
-        "no-repeat" => rustkit_css::BackgroundRepeat::NoRepeat,
-        "space" => rustkit_css::BackgroundRepeat::Space,
-        "round" => rustkit_css::BackgroundRepeat::Round,
-        _ => rustkit_css::BackgroundRepeat::default(),
-    }
-}
-
-/// Parse a background-position value (css-backgrounds-3 §3.6).
-///
-/// One value: the other axis is `center`, and `top` / `bottom` name the
-/// vertical axis. Two values: horizontal then vertical, unless the keywords
-/// say otherwise (`top right`). Three or four: `<edge> <offset>?` pairs; an
-/// offset from `right` / `bottom` is measured back from that edge.
-fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
-    use rustkit_css::BackgroundPositionValue::{Calc, Percent, Px};
-    let value = value.trim().to_lowercase();
-    // A `calc()` has spaces of its own.
-    let parts: Vec<&str> = split_top_level_whitespace(&value);
-    let from_far_edge = |offset: rustkit_css::BackgroundPositionValue| match offset {
-        Percent(p) => Percent(1.0 - p),
-        Px(px) => Calc { percent: 1.0, px: -px },
-        Calc { percent, px } => Calc { percent: 1.0 - percent, px: -px },
-    };
-    let vertical = |s: &str| matches!(s, "top" | "bottom");
-    let horizontal = |s: &str| matches!(s, "left" | "right");
-
-    let (x, y) = match parts.as_slice() {
-        [] => (Percent(0.0), Percent(0.0)),
-        [one] if vertical(one) => (Percent(0.5), parse_background_position_value(one)),
-        [one] => (parse_background_position_value(one), Percent(0.5)),
-        [a, b] if vertical(a) || horizontal(b) => (
-            parse_background_position_value(b),
-            parse_background_position_value(a),
-        ),
-        [a, b] => (
-            parse_background_position_value(a),
-            parse_background_position_value(b),
-        ),
-        many => {
-            let (mut x, mut y) = (Percent(0.5), Percent(0.5));
-            let mut i = 0;
-            while i < many.len() {
-                let edge = many[i];
-                let offset = many
-                    .get(i + 1)
-                    .copied()
-                    .filter(|next| !vertical(next) && !horizontal(next) && *next != "center");
-                let at = match (edge, offset) {
-                    ("left" | "top", Some(offset)) => parse_background_position_value(offset),
-                    ("right" | "bottom", Some(offset)) => {
-                        from_far_edge(parse_background_position_value(offset))
-                    }
-                    _ => parse_background_position_value(edge),
-                };
-                if vertical(edge) {
-                    y = at;
-                } else if horizontal(edge) {
-                    x = at;
-                }
-                i += if offset.is_some() { 2 } else { 1 };
-            }
-            (x, y)
-        }
-    };
-
-    rustkit_css::BackgroundPosition { x, y }
-}
-
 /// Parse `object-position` (CSS Images 3 §5.6; the `<position>` grammar
 /// background-position uses) into a fraction of the free space per axis
 /// and a pixel offset per axis: `right 10px top` is (1, 0) and (-10, 0).
@@ -14720,64 +14665,6 @@ fn parse_object_position(value: &str) -> ((f32, f32), (f32, f32)) {
     let (fx, ox) = split(position.x);
     let (fy, oy) = split(position.y);
     ((fx, fy), (ox, oy))
-}
-
-/// Parse a single background-position dimension.
-fn parse_background_position_value(value: &str) -> rustkit_css::BackgroundPositionValue {
-    let value = value.trim().to_lowercase();
-    match value.as_str() {
-        "left" | "top" => rustkit_css::BackgroundPositionValue::Percent(0.0),
-        "center" => rustkit_css::BackgroundPositionValue::Percent(0.5),
-        "right" | "bottom" => rustkit_css::BackgroundPositionValue::Percent(1.0),
-        // A sum of a percentage and px; one in font or viewport units has
-        // nothing to resolve against here and is the start edge.
-        _ if value.starts_with("calc(") => match rustkit_css::parse_length(&value) {
-            Some(rustkit_css::Length::Px(px)) => rustkit_css::BackgroundPositionValue::Px(px),
-            Some(rustkit_css::Length::Zero) => rustkit_css::BackgroundPositionValue::Px(0.0),
-            Some(rustkit_css::Length::Percent(p)) => {
-                rustkit_css::BackgroundPositionValue::Percent(p / 100.0)
-            }
-            Some(rustkit_css::Length::Calc(sum))
-                if [sum.em, sum.rem, sum.vw, sum.vh, sum.vmin, sum.vmax]
-                    .iter()
-                    .all(|c| *c == 0.0) =>
-            {
-                rustkit_css::BackgroundPositionValue::Calc {
-                    percent: sum.percent / 100.0,
-                    px: sum.px,
-                }
-            }
-            _ => rustkit_css::BackgroundPositionValue::Percent(0.0),
-        },
-        _ if value.ends_with('%') => value
-            .strip_suffix('%')
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(|p| rustkit_css::BackgroundPositionValue::Percent(p / 100.0))
-            .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0)),
-        _ if value.ends_with("px") => value
-            .strip_suffix("px")
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(rustkit_css::BackgroundPositionValue::Px)
-            .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0)),
-        _ => {
-            // Try parsing as a number (assumed px)
-            value
-                .parse::<f32>()
-                .ok()
-                .map(rustkit_css::BackgroundPositionValue::Px)
-                .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0))
-        }
-    }
-}
-
-/// Parse a background-origin value.
-fn parse_background_origin(value: &str) -> rustkit_css::BackgroundOrigin {
-    match value.trim().to_lowercase().as_str() {
-        "border-box" => rustkit_css::BackgroundOrigin::BorderBox,
-        "padding-box" => rustkit_css::BackgroundOrigin::PaddingBox,
-        "content-box" => rustkit_css::BackgroundOrigin::ContentBox,
-        _ => rustkit_css::BackgroundOrigin::default(),
-    }
 }
 
 /// Parse a single background layer from CSS (may contain image, position, size, repeat).
@@ -15254,30 +15141,6 @@ enum LogicalMapping {
     Both(&'static str, &'static str),
 }
 
-/// `value` split at whitespace outside parentheses.
-fn split_top_level_whitespace(value: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = None;
-    for (i, ch) in value.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        if depth == 0 && ch.is_whitespace() {
-            if let Some(from) = start.take() {
-                parts.push(&value[from..i]);
-            }
-        } else if start.is_none() {
-            start = Some(i);
-        }
-    }
-    if let Some(from) = start {
-        parts.push(&value[from..]);
-    }
-    parts
-}
 
 /// css-logical-1 flow-relative margin / padding / inset / border names,
 /// mapped for horizontal-tb, ltr: inline-start = left, block-start = top.
@@ -21538,6 +21401,145 @@ img { display: block; width: 10px; height: 10px; }
             "the url-encoded background tiles across its 30px box"
         );
         assert_eq!(fills(0, 0, 255), vec![(0.0, 10.0, 10.0, 10.0)], "the base64 <img> paints in its box");
+    }
+
+    /// The board's mask-image repro (docs/diagnostics/2026-10-06): a 50x50
+    /// red box at (8, 8) masked by a data: SVG circle. Chrome paints a red
+    /// circle; RustKit painted the 50x50 red square, `mask-image` being
+    /// unparsed. The mask is spliced as the SVG's own commands, recoloured
+    /// red and clipped to the box.
+    #[test]
+    fn the_mask_image_repro_paints_a_red_circle_not_a_square() {
+        let html = r#"<!DOCTYPE html>
+<html><body>
+<div style="width: 50px; height: 50px; background-color: rgb(255, 0, 0); -webkit-mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>'); mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>');"></div>
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let red = |c: &rustkit_css::Color| (c.r, c.g, c.b) == (255, 0, 0);
+        assert!(
+            !dl.commands.iter().any(|c| match c {
+                rustkit_layout::DisplayCommand::SolidColor(color, _)
+                | rustkit_layout::DisplayCommand::RoundedRect { color, .. } => red(color),
+                _ => false,
+            }),
+            "the unmasked red square still paints: {:?}",
+            dl.commands
+        );
+        assert!(
+            !dl.commands.iter().any(|c| matches!(c, rustkit_layout::DisplayCommand::MaskedColor { .. })),
+            "a data: SVG mask is spliced as vector commands"
+        );
+        let circles: Vec<(f32, f32, f32)> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::FillCircle { cx, cy, radius, color } if red(color) => {
+                    Some((*cx, *cy, *radius))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(circles, vec![(33.0, 33.0, 25.0)], "{:?}", dl.commands);
+        assert!(
+            dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::PushClip(r)
+                    if (r.x, r.y, r.width, r.height) == (8.0, 8.0, 50.0, 50.0))),
+            "the mask paints inside the box"
+        );
+    }
+
+    /// `mask` is not inherited (css-masking-1 §6): a masked parent's child
+    /// paints its own background unmasked, not through the parent's icon.
+    #[test]
+    fn a_mask_is_not_inherited_by_a_child() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+.p { width: 40px; height: 40px; background-color: rgb(255, 0, 0); mask-image: url(icon.svg); }
+.c { width: 20px; height: 20px; background-color: rgb(0, 0, 255); }
+</style></head><body><div class="p"><div class="c"></div></div></body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 100, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let masked: Vec<(u8, u8, u8)> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::MaskedColor { color, .. } => Some((color.r, color.g, color.b)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(masked, vec![(255, 0, 0)], "only the parent is masked: {:?}", dl.commands);
+        assert!(
+            dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::SolidColor(color, r)
+                    if (color.r, color.g, color.b) == (0, 0, 255)
+                        && (r.x, r.y, r.width, r.height) == (0.0, 0.0, 20.0, 20.0))),
+            "the child paints its own background unmasked: {:?}",
+            dl.commands
+        );
+    }
+
+    /// Both mask lanes reach the frame: the vector one (a data: SVG,
+    /// spliced as recoloured commands) and the raster one (a PNG whose
+    /// alpha is uploaded as a white mask texture and drawn tinted). The
+    /// PNG is 2x1, its left pixel opaque and its right transparent,
+    /// stretched over a 40x20 blue box: the left half is blue, the right
+    /// half shows the white page (sampled away from the seam, where the
+    /// texture filter blends the two). The PNG mask sits in a style sheet:
+    /// the inline `style` parser splits at every `;`, `;base64` included.
+    #[test]
+    fn vector_and_raster_masks_reach_the_frame() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+.png { width: 40px; height: 20px; background-color: rgb(0, 0, 255); -webkit-mask: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAD0lEQVR4nGNgYGD4D8QMAAUEAQCwBUiSAAAAAElFTkSuQmCC) 0 0 / 100% 100% no-repeat; }
+</style></head><body>
+<div style="width: 50px; height: 50px; background-color: rgb(255, 0, 0); mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>')"></div>
+<div class="png"></div>
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 100, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        engine.render_view(view).expect("render");
+        let path = std::env::temp_dir().join(format!("rustkit-mask-frame-{}.ppm", std::process::id()));
+        engine.capture_frame(view, path.to_str().unwrap()).expect("capture");
+        let ppm = std::fs::read(&path).expect("frame");
+        let _ = std::fs::remove_file(&path);
+
+        // The pixel at `(x, y)` of a binary PPM.
+        let pixel = |x: usize, y: usize| -> [u8; 3] {
+            let mut fields = Vec::new();
+            let mut pos = 0;
+            while fields.len() < 4 {
+                let start = pos;
+                while !ppm[pos].is_ascii_whitespace() {
+                    pos += 1;
+                }
+                fields.push(std::str::from_utf8(&ppm[start..pos]).unwrap().to_string());
+                pos += 1;
+            }
+            assert_eq!(fields[0], "P6");
+            let width: usize = fields[1].parse().unwrap();
+            let p = &ppm[pos + (y * width + x) * 3..][..3];
+            [p[0], p[1], p[2]]
+        };
+
+        const WHITE: [u8; 3] = [255, 255, 255];
+        assert_eq!(pixel(25, 25), [255, 0, 0], "inside the circle");
+        assert_eq!(pixel(2, 2), WHITE, "the box's corner, outside the circle");
+        assert_eq!(pixel(47, 47), WHITE, "the opposite corner");
+        assert_eq!(pixel(5, 60), [0, 0, 255], "under the opaque half of the PNG mask");
+        assert_eq!(pixel(35, 60), WHITE, "under the transparent half");
     }
 
     /// An SVG image with `width`/`height` and no `viewBox` scales to its

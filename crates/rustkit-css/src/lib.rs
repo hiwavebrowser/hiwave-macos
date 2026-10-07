@@ -2481,6 +2481,8 @@ pub struct ComputedStyle {
     /// Legacy single gradient field - prefer using background_layers.
     /// This is kept for backwards compatibility during migration.
     pub background_gradient: Option<Gradient>,
+    /// `mask-*` layers (CSS Masking 1 §6). Not inherited.
+    pub mask: Mask,
 
     // Typography - Basic
     pub font_size: Length,
@@ -2949,6 +2951,10 @@ impl Stylesheet {
         self.rules.len()
     }
 }
+
+pub mod background;
+pub mod mask;
+pub use mask::Mask;
 
 pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
