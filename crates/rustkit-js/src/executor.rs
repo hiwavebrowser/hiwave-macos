@@ -28,6 +28,13 @@ struct ContextResetGuard {
 
 impl Drop for ContextResetGuard {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Avoid double panic / process abort during stack unwinding
+            if let Ok(mut slot) = unsafe { &*self.cell }.try_borrow_mut() {
+                *slot = unsafe { &mut *self.placeholder };
+            }
+            return;
+        }
         match unsafe { &*self.cell }.try_borrow_mut() {
             Ok(mut slot) => {
                 *slot = unsafe { &mut *self.placeholder };
@@ -155,14 +162,18 @@ impl JobExecutor for HostJobExecutor {
 
         // SAFETY: We temporarily stash a mutable reference to `context` into `context_cell`
         // so that async module-load jobs can access it via Boa's job callback API.
-        // Aliasing is prevented because ALL accesses to Context in run_jobs (including
-        // draining promise jobs, generic jobs, and timeouts) are routed exclusively through
-        // `self.context_ref().borrow_mut()`, ensuring at most one active `&mut Context` at a time.
-        // Each `HostJobExecutor` owns its own dedicated heap placeholder and cell, so multiple
-        // runtimes/executors never share context state.
-        // The `ContextResetGuard` guarantees that `context_cell` is reset back to this executor's
-        // owned placeholder when `run_jobs` returns (whether normally or via error/panic),
-        // and asserts via `try_borrow_mut()` that no in-flight future holds an active borrow.
+        // Aliasing and lifetime safety depend on the following invariants:
+        // 1. ALL accesses to Context in run_jobs (including draining promise jobs, generic
+        //    jobs, and timeouts) are routed exclusively through `self.context_ref().borrow_mut()`,
+        //    ensuring at most one active `&mut Context` at a time.
+        // 2. Each `HostJobExecutor` owns its own dedicated heap placeholder Context and cell,
+        //    so multiple runtimes/executors never share placeholder or context state.
+        // 3. Soundness across intermediate turns relies on `running_futures` being polled strictly
+        //    inside `run_jobs` while the caller's stack context is installed in `context_cell`.
+        //    Between `run_jobs` calls, futures remain dormant and do not poll or borrow.
+        // 4. `ContextResetGuard` verifies via `try_borrow_mut()` that no future or callback holds
+        //    an active borrow when `run_jobs` exits, and resets `context_cell` back to this
+        //    executor's owned placeholder so the caller's stack borrow never outlives the call.
         *unsafe { &*context_cell }.borrow_mut() = unsafe { std::mem::transmute(&mut *context) };
         let _guard = ContextResetGuard {
             cell: context_cell,

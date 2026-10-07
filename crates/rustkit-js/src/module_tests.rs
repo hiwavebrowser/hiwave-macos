@@ -556,7 +556,7 @@ fn cancellation_and_teardown_during_pending_import_cleans_up_safely() {
         )
         .unwrap();
         assert_eq!(rt.take_module_requests(), vec!["https://site.test/page/cancel.js"]);
-        
+
         // Supply error to reject the pending fetch
         rt.supply_module(
             "https://site.test/page/cancel.js",
