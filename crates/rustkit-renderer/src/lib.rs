@@ -43,7 +43,7 @@
 use bytemuck::{Pod, Zeroable};
 use hashbrown::HashMap;
 use rustkit_css::Color;
-use rustkit_layout::{BackgroundRepeat, BackgroundSize, DisplayCommand, Rect};
+use rustkit_layout::{BackgroundRepeat, BackgroundSize, DisplayCommand, ObjectFit, Rect};
 use std::sync::Arc;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -168,6 +168,27 @@ pub struct CachedTexture {
     pub bind_group: wgpu::BindGroup,
     pub width: u32,
     pub height: u32,
+}
+
+/// The screen rect and texture coordinates `[u0, v0, u1, v1]` a replaced
+/// image paints with: `object-fit`/`object-position` (CSS Images 3 §5.5,
+/// §5.6) resolved against the texture's intrinsic size, clipped to the
+/// content box. `cover` therefore crops by UV instead of squashing the
+/// whole texture into the box.
+pub(crate) fn image_paint_quad(
+    content_box: Rect,
+    natural: (u32, u32),
+    object_fit: ObjectFit,
+    object_position: (f32, f32),
+    object_position_offset: (f32, f32),
+) -> Option<(Rect, [f32; 4])> {
+    object_fit.paint_quad(
+        content_box,
+        natural.0 as f32,
+        natural.1 as f32,
+        object_position,
+        object_position_offset,
+    )
 }
 
 /// Shrink an RGBA image so neither side exceeds `limit`, keeping its aspect.
@@ -2110,12 +2131,21 @@ impl Renderer {
             DisplayCommand::Image {
                 url,
                 src_rect: _,
-                dest_rect,
-                object_fit: _,
+                dest_rect: _,
+                object_fit,
+                content_box,
+                object_position,
+                object_position_offset,
                 opacity: _,
                 current_color: _,
             } => {
-                self.draw_image(url, *dest_rect);
+                self.draw_image(
+                    url,
+                    *content_box,
+                    *object_fit,
+                    *object_position,
+                    *object_position_offset,
+                );
             }
 
             DisplayCommand::BackgroundImage {
@@ -5481,41 +5511,65 @@ impl Renderer {
     }
 
     /// Draw an image.
-    fn draw_image(&mut self, url: &str, rect: Rect) {
-        if self.texture_cache.contains(url) {
-            // `overflow: hidden` clips replaced content like everything else.
-            for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in
-                self.textured_pieces(rect, [0.0, 0.0, 1.0, 1.0])
-            {
-                let color = [1.0, 1.0, 1.0, coverage];
-                self.push_image_quad(
-                    url,
-                    [
-                        TextureVertex {
-                            position: [x0, y0],
-                            tex_coords: [tex[0], tex[1]],
-                            color,
-                        },
-                        TextureVertex {
-                            position: [x1, y1],
-                            tex_coords: [tex[2], tex[1]],
-                            color,
-                        },
-                        TextureVertex {
-                            position: [x2, y2],
-                            tex_coords: [tex[2], tex[3]],
-                            color,
-                        },
-                        TextureVertex {
-                            position: [x3, y3],
-                            tex_coords: [tex[0], tex[3]],
-                            color,
-                        },
-                    ],
-                );
-            }
+    /// Draw an `<img>`-style replaced image into its content box, fitted
+    /// per `object-fit`/`object-position` against the texture's intrinsic
+    /// size (layout may only have had a placeholder size).
+    fn draw_image(
+        &mut self,
+        url: &str,
+        content_box: Rect,
+        object_fit: ObjectFit,
+        object_position: (f32, f32),
+        object_position_offset: (f32, f32),
+    ) {
+        let Some(natural) = self
+            .texture_cache
+            .get(url)
+            .map(|cached| (cached.width, cached.height))
+        else {
+            // If image not loaded, skip (async loading handled elsewhere)
+            return;
+        };
+        let Some((rect, uv)) = image_paint_quad(
+            content_box,
+            natural,
+            object_fit,
+            object_position,
+            object_position_offset,
+        ) else {
+            return;
+        };
+        // `overflow: hidden` clips replaced content like everything else.
+        for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in
+            self.textured_pieces(rect, uv)
+        {
+            let color = [1.0, 1.0, 1.0, coverage];
+            self.push_image_quad(
+                url,
+                [
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [tex[0], tex[1]],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [tex[2], tex[1]],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [tex[2], tex[3]],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [tex[0], tex[3]],
+                        color,
+                    },
+                ],
+            );
         }
-        // If image not loaded, skip (async loading handled elsewhere)
     }
 
     /// Append a quad to the image batch, extending the current run when the
@@ -6989,6 +7043,44 @@ mod tests {
         let (w, h, px) = super::downscale_rgba_to_fit(2, 1, &data, 1);
         assert_eq!((w, h), (1, 1));
         assert_eq!(px, vec![128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn a_cover_image_is_cropped_by_uv_not_squashed_into_its_box() {
+        // eBay's hero: a 2.9:1 texture in a 1.4:1 box. Painting the whole
+        // texture ([0, 0, 1, 1]) into the box squashed it.
+        let (rect, uv) = super::image_paint_quad(
+            super::Rect::new(0.0, 0.0, 140.0, 100.0),
+            (290, 100),
+            super::ObjectFit::Cover,
+            (0.5, 0.5),
+            (0.0, 0.0),
+        )
+        .expect("a visible quad");
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (0.0, 0.0, 140.0, 100.0)
+        );
+        let shown = ((uv[2] - uv[0]) * 290.0) / ((uv[3] - uv[1]) * 100.0);
+        assert!((shown - 1.4).abs() < 1e-3, "shown aspect {shown}, uv {uv:?}");
+        assert!((uv[0] - 75.0 / 290.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_fill_image_still_paints_the_whole_texture_over_the_box() {
+        let (rect, uv) = super::image_paint_quad(
+            super::Rect::new(5.0, 6.0, 140.0, 100.0),
+            (290, 100),
+            super::ObjectFit::Fill,
+            (0.5, 0.5),
+            (0.0, 0.0),
+        )
+        .expect("a visible quad");
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (5.0, 6.0, 140.0, 100.0)
+        );
+        assert_eq!(uv, [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]

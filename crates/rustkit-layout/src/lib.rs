@@ -6217,6 +6217,15 @@ pub enum DisplayCommand {
         dest_rect: Rect,
         /// Object-fit mode
         object_fit: ObjectFit,
+        /// The element's content box: the object-fit container. The painter
+        /// re-fits the decoded texture into it, because `dest_rect` was
+        /// computed from whatever natural size layout knew (a placeholder
+        /// when the image had not loaded yet) and is not clipped.
+        content_box: Rect,
+        /// `object-position` as a fraction of the free space per axis…
+        object_position: (f32, f32),
+        /// …plus a pixel offset (`right 10px` is 100% and -10px).
+        object_position_offset: (f32, f32),
         /// Opacity (0.0 - 1.0)
         opacity: f32,
         /// The box's computed CSS `color` — what `currentColor` resolves to
@@ -6582,6 +6591,56 @@ impl ObjectFit {
             },
             src: None,
         }
+    }
+}
+
+impl ObjectFit {
+    /// Where an image paints and which part of it shows (CSS Images 3
+    /// §5.5 `object-fit`, §5.6 `object-position`): the fitted object box,
+    /// clipped to the content box, as a screen rect plus the matching
+    /// normalized texture coordinates `[u0, v0, u1, v1]`.
+    ///
+    /// `cover` and an oversized `none` overflow the box; replaced content
+    /// is clipped to it, so the overflow becomes a UV crop rather than
+    /// paint outside the element. `None` when nothing is visible.
+    pub fn paint_quad(
+        &self,
+        container: Rect,
+        image_width: f32,
+        image_height: f32,
+        position: (f32, f32),
+        offset: (f32, f32),
+    ) -> Option<(Rect, [f32; 4])> {
+        let positive = |v: f32| v.is_finite() && v > 0.0;
+        if !(positive(container.width)
+            && positive(container.height)
+            && positive(image_width)
+            && positive(image_height))
+        {
+            return None;
+        }
+
+        let mut object = self
+            .compute_rect(container, image_width, image_height, position)
+            .dest;
+        object.x += offset.0;
+        object.y += offset.1;
+
+        let x0 = object.x.max(container.x);
+        let y0 = object.y.max(container.y);
+        let x1 = (object.x + object.width).min(container.x + container.width);
+        let y1 = (object.y + object.height).min(container.y + container.height);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+
+        let uv = [
+            (x0 - object.x) / object.width,
+            (y0 - object.y) / object.height,
+            (x1 - object.x) / object.width,
+            (y1 - object.y) / object.height,
+        ];
+        Some((Rect::new(x0, y0, x1 - x0, y1 - y0), uv))
     }
 }
 
@@ -8385,8 +8444,6 @@ impl DisplayList {
                     _ => ObjectFit::Fill,
                 };
 
-                let (pos_x, pos_y) = layout_box.style.object_position;
-
                 // Generate image display command
                 let cmd = crate::images::render_image(
                     url,
@@ -8394,7 +8451,8 @@ impl DisplayList {
                     *natural_width,
                     *natural_height,
                     object_fit,
-                    (pos_x, pos_y),
+                    layout_box.style.object_position,
+                    layout_box.style.object_position_offset,
                     layout_box.style.opacity,
                     layout_box.style.color,
                 );
@@ -15882,6 +15940,204 @@ mod object_fit_default_tests {
     #[test]
     fn object_fit_derived_default_is_fill_not_contain() {
         assert_eq!(ObjectFit::default(), ObjectFit::Fill);
+    }
+}
+
+#[cfg(test)]
+mod object_fit_paint_quad_tests {
+    //! CSS Images 3 §5.5/§5.6: the fitted object box, clipped to the
+    //! content box, and the texture coordinates of the part that shows.
+    use super::*;
+
+    const CENTER: (f32, f32) = (0.5, 0.5);
+    const NO_OFFSET: (f32, f32) = (0.0, 0.0);
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    fn assert_quad(got: Option<(Rect, [f32; 4])>, rect: [f32; 4], uv: [f32; 4]) {
+        let (r, t) = got.expect("a visible quad");
+        let got_rect = [r.x, r.y, r.width, r.height];
+        assert!(
+            got_rect.iter().zip(rect).all(|(a, b)| close(*a, b)),
+            "rect {got_rect:?} != {rect:?}"
+        );
+        assert!(t.iter().zip(uv).all(|(a, b)| close(*a, b)), "uv {t:?} != {uv:?}");
+    }
+
+    /// A 1.4:1 box at (10, 20), the shape of eBay's hero slot.
+    fn box_1_4() -> Rect {
+        Rect::new(10.0, 20.0, 140.0, 100.0)
+    }
+
+    #[test]
+    fn fill_stretches_the_whole_image_over_the_box() {
+        assert_quad(
+            ObjectFit::Fill.paint_quad(box_1_4(), 290.0, 100.0, CENTER, NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn contain_letterboxes_a_2_9_to_1_image_in_a_1_4_to_1_box() {
+        let h = 140.0 / 2.9;
+        assert_quad(
+            ObjectFit::Contain.paint_quad(box_1_4(), 290.0, 100.0, CENTER, NO_OFFSET),
+            [10.0, 20.0 + (100.0 - h) / 2.0, 140.0, h],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn cover_crops_a_2_9_to_1_image_into_a_1_4_to_1_box() {
+        // Scaled to 290x100, centred: 75px fall off each side.
+        assert_quad(
+            ObjectFit::Cover.paint_quad(box_1_4(), 290.0, 100.0, CENTER, NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [75.0 / 290.0, 0.0, 215.0 / 290.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn cover_keeps_the_aspect_ratio_at_the_natural_size_of_the_ebay_hero() {
+        // 1600x552 into 1395x392: the scale is set by the height.
+        let (rect, uv) = ObjectFit::Cover
+            .paint_quad(Rect::new(0.0, 0.0, 1395.0, 392.0), 1600.0, 552.0, CENTER, NO_OFFSET)
+            .expect("a visible quad");
+        assert!(close(rect.width, 1395.0) && close(rect.height, 392.0));
+        let shown_w = (uv[2] - uv[0]) * 1600.0;
+        let shown_h = (uv[3] - uv[1]) * 552.0;
+        assert!(close(shown_w / shown_h, 1395.0 / 392.0), "{shown_w}x{shown_h}");
+    }
+
+    #[test]
+    fn cover_follows_object_position() {
+        assert_quad(
+            ObjectFit::Cover.paint_quad(box_1_4(), 290.0, 100.0, (0.0, 0.0), NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [0.0, 0.0, 140.0 / 290.0, 1.0],
+        );
+        assert_quad(
+            ObjectFit::Cover.paint_quad(box_1_4(), 290.0, 100.0, (1.0, 0.0), NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [150.0 / 290.0, 0.0, 1.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn cover_of_a_tall_image_into_a_taller_box_crops_the_sides() {
+        // 640x960 (0.667:1) into 245x375 (0.653:1), eBay's video cards:
+        // scaled to 250x375, so 2.5px fall off each side.
+        assert_quad(
+            ObjectFit::Cover.paint_quad(Rect::new(0.0, 0.0, 245.0, 375.0), 640.0, 960.0, CENTER, NO_OFFSET),
+            [0.0, 0.0, 245.0, 375.0],
+            [2.5 / 250.0, 0.0, 247.5 / 250.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn cover_of_a_tall_image_into_a_wide_box_crops_top_and_bottom() {
+        // 100x200 into 140x100: scaled to 140x280, 90px off top and bottom.
+        assert_quad(
+            ObjectFit::Cover.paint_quad(box_1_4(), 100.0, 200.0, CENTER, NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [0.0, 90.0 / 280.0, 1.0, 190.0 / 280.0],
+        );
+    }
+
+    #[test]
+    fn none_paints_at_natural_size_and_crops_what_overflows() {
+        assert_quad(
+            ObjectFit::None.paint_quad(box_1_4(), 40.0, 20.0, CENTER, NO_OFFSET),
+            [10.0 + 50.0, 20.0 + 40.0, 40.0, 20.0],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+        assert_quad(
+            ObjectFit::None.paint_quad(box_1_4(), 280.0, 200.0, CENTER, NO_OFFSET),
+            [10.0, 20.0, 140.0, 100.0],
+            [0.25, 0.25, 0.75, 0.75],
+        );
+    }
+
+    #[test]
+    fn scale_down_is_none_when_smaller_and_contain_when_larger() {
+        assert_quad(
+            ObjectFit::ScaleDown.paint_quad(box_1_4(), 40.0, 20.0, CENTER, NO_OFFSET),
+            [60.0, 60.0, 40.0, 20.0],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+        let h = 140.0 / 2.9;
+        assert_quad(
+            ObjectFit::ScaleDown.paint_quad(box_1_4(), 290.0, 100.0, CENTER, NO_OFFSET),
+            [10.0, 20.0 + (100.0 - h) / 2.0, 140.0, h],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn object_position_offset_moves_the_object_and_clips_it() {
+        // `object-position: 10px 5px` on a natural-size 40x20 image.
+        assert_quad(
+            ObjectFit::None.paint_quad(box_1_4(), 40.0, 20.0, (0.0, 0.0), (10.0, 5.0)),
+            [20.0, 25.0, 40.0, 20.0],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+        // `right -20px`: half of a 40px-wide image hangs out of the box.
+        assert_quad(
+            ObjectFit::None.paint_quad(box_1_4(), 40.0, 20.0, (1.0, 0.0), (20.0, 0.0)),
+            [130.0, 20.0, 20.0, 20.0],
+            [0.0, 0.0, 0.5, 1.0],
+        );
+    }
+
+    #[test]
+    fn nothing_paints_for_an_empty_box_or_image() {
+        let fit = ObjectFit::Cover;
+        assert!(fit.paint_quad(Rect::new(0.0, 0.0, 0.0, 10.0), 10.0, 10.0, CENTER, NO_OFFSET).is_none());
+        assert!(fit.paint_quad(box_1_4(), 0.0, 10.0, CENTER, NO_OFFSET).is_none());
+        // Pushed entirely out of the box.
+        assert!(ObjectFit::None
+            .paint_quad(box_1_4(), 40.0, 20.0, (0.0, 0.0), (500.0, 0.0))
+            .is_none());
+    }
+
+    #[test]
+    fn the_image_command_carries_the_box_and_the_position_to_the_painter() {
+        // Layout's natural size can be a placeholder (the image had not
+        // decoded); the painter re-fits against the texture, so it needs
+        // the content box and position, not just the pre-fitted rect.
+        let cmd = crate::images::render_image(
+            "a.webp",
+            box_1_4(),
+            150.0,
+            150.0,
+            ObjectFit::Cover,
+            (0.25, 1.0),
+            (3.0, -4.0),
+            1.0,
+            Color::BLACK,
+        );
+        match cmd {
+            DisplayCommand::Image {
+                content_box,
+                object_fit,
+                object_position,
+                object_position_offset,
+                ..
+            } => {
+                let b = box_1_4();
+                assert_eq!(
+                    (content_box.x, content_box.y, content_box.width, content_box.height),
+                    (b.x, b.y, b.width, b.height)
+                );
+                assert_eq!(object_fit, ObjectFit::Cover);
+                assert_eq!(object_position, (0.25, 1.0));
+                assert_eq!(object_position_offset, (3.0, -4.0));
+            }
+            other => panic!("expected an Image command, got {other:?}"),
+        }
     }
 }
 

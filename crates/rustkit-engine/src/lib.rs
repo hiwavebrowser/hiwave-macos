@@ -8746,6 +8746,10 @@ impl Engine {
                     style.object_fit = keyword;
                 }
             }
+            "object-position" => {
+                (style.object_position, style.object_position_offset) =
+                    parse_object_position(value);
+            }
             "position" => {
                 style.position = match value.trim() {
                     "static" => rustkit_css::Position::Static,
@@ -9387,6 +9391,10 @@ impl Engine {
             "display" => style.display = rustkit_css::Display::Block,
             "opacity" => style.opacity = 1.0,
             "object-fit" => style.object_fit = "fill".to_string(),
+            "object-position" => {
+                style.object_position = (0.5, 0.5);
+                style.object_position_offset = (0.0, 0.0);
+            }
             "float" => style.float = rustkit_css::Float::None,
             "clear" => style.clear = rustkit_css::Clear::None,
             _ => {
@@ -12639,6 +12647,7 @@ impl Engine {
                     object_fit,
                     opacity,
                     current_color,
+                    ..
                 } => serde_json::json!({
                     "op": "image",
                     "url": url,
@@ -14580,6 +14589,22 @@ fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
     };
 
     rustkit_css::BackgroundPosition { x, y }
+}
+
+/// Parse `object-position` (CSS Images 3 §5.6; the `<position>` grammar
+/// background-position uses) into a fraction of the free space per axis
+/// and a pixel offset per axis: `right 10px top` is (1, 0) and (-10, 0).
+fn parse_object_position(value: &str) -> ((f32, f32), (f32, f32)) {
+    use rustkit_css::BackgroundPositionValue::{Calc, Percent, Px};
+    let split = |v| match v {
+        Percent(p) => (p, 0.0),
+        Px(px) => (0.0, px),
+        Calc { percent, px } => (percent, px),
+    };
+    let position = parse_background_position(value);
+    let (fx, ox) = split(position.x);
+    let (fy, oy) = split(position.y);
+    ((fx, fy), (ox, oy))
 }
 
 /// Parse a single background-position dimension.
@@ -21962,6 +21987,20 @@ mod web_font_tests {
             "a br breaks under white-space: pre too: p@{} q@{}",
             y("p"),
             y("q")
+        );
+    }
+
+    #[test]
+    fn object_position_parses_keywords_percentages_and_lengths() {
+        assert_eq!(parse_object_position("center"), ((0.5, 0.5), (0.0, 0.0)));
+        assert_eq!(parse_object_position("left top"), ((0.0, 0.0), (0.0, 0.0)));
+        assert_eq!(parse_object_position("top"), ((0.5, 0.0), (0.0, 0.0)));
+        assert_eq!(parse_object_position("RIGHT bottom"), ((1.0, 1.0), (0.0, 0.0)));
+        assert_eq!(parse_object_position("25% 75%"), ((0.25, 0.75), (0.0, 0.0)));
+        assert_eq!(parse_object_position("10px 20px"), ((0.0, 0.0), (10.0, 20.0)));
+        assert_eq!(
+            parse_object_position("right 10px top 5px"),
+            ((1.0, 0.0), (-10.0, 5.0))
         );
     }
 
