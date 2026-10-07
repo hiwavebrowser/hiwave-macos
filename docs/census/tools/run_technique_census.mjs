@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // run_technique_census.mjs — TECHNIQUE CENSUS runner (docs-only tooling; no engine code).
-// One Chromium instance, one load per site, sequential. Universe: websuite/realsite-top80.json.
-// Usage: node docs/census/tools/run_technique_census.mjs [--sites google,ebay] [--out path.json]
+// One Chromium instance, one load per site, sequential. Universe: websuite list JSON (default realsite-top80.json).
+// Usage: node docs/census/tools/run_technique_census.mjs [--list websuite/realsite-top100.json] [--sites google,ebay] [--out path.json]
 // Chromium: PARITY_CHROME_PATH if set, else Playwright-bundled Chromium.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
@@ -18,9 +18,12 @@ const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const today = new Date().toISOString().slice(0, 10);
 const outPath = resolve(opt('--out', join(REPO, `docs/census/technique_census_${today}.json`)));
-const list = JSON.parse(readFileSync(join(REPO, 'websuite/realsite-top80.json'), 'utf8'));
+const listRel = opt('--list', 'websuite/realsite-top80.json');
+const listPath = resolve(REPO, listRel);
+const list = JSON.parse(readFileSync(listPath, 'utf8'));
 const only = opt('--sites', '');
 const sites = only ? list.sites.filter(s => only.split(',').includes(s.id)) : list.sites;
+const universeLabel = listRel.startsWith('/') ? listPath : listRel;
 const classifier = readFileSync(join(__dirname, 'technique_classifier.js'), 'utf8');
 
 const IO_HOOK = `(() => { const O = window.IntersectionObserver; if (!O) return; const c = window.__censusIO = { ctor: 0, observe: 0 };
@@ -83,7 +86,7 @@ const meta = {
   executablePath: chrome.executablePath || 'playwright-bundled-default',
   chrome_source: chrome.source,
   viewport: list.viewport,
-  universe: 'websuite/realsite-top80.json',
+  universe: universeLabel,
   n_sites: sites.length,
 };
 const results = [];
