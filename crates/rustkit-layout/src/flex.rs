@@ -2782,6 +2782,11 @@ fn get_intrinsic_cross_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f
         // an empty `<div style="background:…">` in a row 18.4 tall, and its
         // auto-height row with it.
         _ if layout_box.children.is_empty() => 0.0,
+        // Nor has an item whose in-flow children are all block-level: its
+        // height is theirs, however small. The floor made a row item holding
+        // one 10px block 16 tall, and `align-items: center` then placed the
+        // 10px box as if it were 16 (ebay's search form; Chromium 143).
+        _ if cross_axis == Axis::Vertical && !has_inline_level_child(layout_box) => 0.0,
         _ => {
             // For block/inline boxes, provide a minimum based on line height
             // This ensures flex items have non-zero cross size
@@ -2792,6 +2797,25 @@ fn get_intrinsic_cross_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f
             }
         }
     }
+}
+
+/// Whether `b` has an in-flow child that sits on a line: text, an inline
+/// box, an atomic inline, a control or an image. Floats and out-of-flow
+/// children make no line box.
+fn has_inline_level_child(b: &LayoutBox) -> bool {
+    b.children.iter().any(|c| {
+        if matches!(c.position, crate::Position::Absolute | crate::Position::Fixed)
+            || c.float != crate::Float::None
+        {
+            return false;
+        }
+        match c.box_type {
+            crate::BoxType::Block | crate::BoxType::AnonymousBlock => {
+                c.style.display.is_atomic_inline()
+            }
+            _ => true,
+        }
+    })
 }
 
 /// Resolve one of `b`'s own lengths to pixels: `em` against `b`'s font size
