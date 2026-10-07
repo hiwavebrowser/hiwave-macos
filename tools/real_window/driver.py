@@ -660,6 +660,28 @@ class Driver:
                             frame[GREEN] > 1000 and frame[RED] < 500, str(frame))
             (self.out / ("%s.%s.app.log" % (c, route))).write_text(self.app.log_text())
             self.close_page()
+        # A page that sends itself on while it is being parsed, as a redirect
+        # stub does: the request is made before the load has finished.
+        label = "script: location.replace() in an inline script"
+        if self.open_page(c, "h16_redirect.html"):
+            asked = self.fixture.wait("/h16_b.html?from=inline", 8, self.since)
+            self.expect(c, "%s: the app requested page B" % label, asked,
+                        str(self.fixture.seen("/h16_b.html", self.since)[:1]))
+            ran = self.fixture.wait("beacon?h16-b-ran-from=inline", 5 if asked else 0.5, self.since)
+            self.expect(c, "%s: page B's script ran" % label, ran)
+            again = len(self.fixture.seen("/h16_b.html", self.since))
+            time.sleep(1.0)
+            self.expect(c, "%s: page B was requested once" % label,
+                        again == 1 and len(self.fixture.seen("/h16_b.html", self.since)) == 1,
+                        "%d requests" % len(self.fixture.seen("/h16_b.html", self.since)))
+            frame = self.frame(c, "inline.b", [RED, GREEN])
+            if frame is None:
+                self.not_run(c, "%s: the window shows page B's green" % label, self.why_not("Screen Recording"))
+            else:
+                self.expect(c, "%s: the window shows page B's green" % label,
+                            frame[GREEN] > 1000 and frame[RED] < 500, str(frame))
+            (self.out / ("%s.inline.app.log" % c)).write_text(self.app.log_text())
+        self.close_page()
 
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav"]
 

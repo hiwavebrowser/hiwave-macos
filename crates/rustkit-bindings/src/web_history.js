@@ -141,10 +141,14 @@
     // What script's `link.click()` does once no listener cancelled it: the
     // nearest link up from the target is followed. A fragment of this
     // document is the same navigation the engine makes for the user's
-    // click; anything that opens elsewhere (target, download) is left.
+    // click; anything that opens elsewhere (target, download) is left. A
+    // form control between the target and the link has the click's
+    // activation itself, so the link is not followed.
+    var OWN_ACTIVATION = /^(button|input|select|textarea)$/;
     g.__rustkit_follow_link = function (el) {
         var a = el;
         while (a && !(a.nodeType === 1 && (a.localName === 'a' || a.localName === 'area') && a.hasAttribute('href'))) {
+            if (a.nodeType === 1 && OWN_ACTIVATION.test(a.localName)) return;
             a = a.parentNode;
         }
         if (!a || a.hasAttribute('download')) return;

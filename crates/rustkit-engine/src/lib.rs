@@ -2475,6 +2475,14 @@ impl Engine {
         } else {
             None
         };
+        // The click's own default action comes after its listeners, so it
+        // is the later navigation and the one that happens: a URL a
+        // listener assigned on the way is not left for the next turn.
+        if navigate.is_some() {
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+                bindings.take_navigation_requests();
+            }
+        }
         self.settle_pointer_restyle(id);
         ClickOutcome { focused, navigate }
     }
@@ -23727,6 +23735,24 @@ mod node_identity_tests {
             Some("https://example.com/search?q=rust&via=button")
         );
         assert_eq!(engine.take_script_navigation(id), None);
+
+        // A click listener that assigns a URL and does not cancel: the
+        // click's default action is the later navigation, and the only one.
+        js(&mut engine, id, "$('go').addEventListener('click', function () { location.href = '/from-listener'; })");
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(
+            outcome.navigate.as_deref(),
+            Some("https://example.com/search?q=rust&via=button")
+        );
+        assert_eq!(engine.take_script_navigation(id), None);
+        // The same listener on a click that submits nothing: its URL stands.
+        js(&mut engine, id, "window.block = true");
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(outcome.navigate, None);
+        assert_eq!(
+            engine.take_script_navigation(id).as_deref(),
+            Some("https://example.com/from-listener")
+        );
     }
 
     #[test]

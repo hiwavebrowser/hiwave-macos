@@ -289,13 +289,15 @@ fn a_script_click_on_a_link_follows_it() {
     );
 
     // A cancelled click, a link with no href, one that does not parse, one
-    // that opens elsewhere and a download follow nothing.
+    // that opens elsewhere, a download, and a button inside a link (the
+    // button has the activation) follow nothing.
     ev(
         &b,
         "a.addEventListener('click', function (e) { e.preventDefault(); }); a.click(); \
          document.getElementById('none').click(); document.getElementById('bad').click(); \
          var abs = document.getElementById('abs'); abs.setAttribute('target', '_blank'); abs.click(); \
-         abs.removeAttribute('target'); abs.setAttribute('download', ''); abs.click(); 0",
+         abs.removeAttribute('target'); abs.setAttribute('download', ''); abs.click(); \
+         abs.removeAttribute('download'); var bt = document.createElement('button'); abs.appendChild(bt); bt.click(); 0",
     );
     assert_eq!(b.take_navigation_requests(), Vec::<String>::new());
 }
