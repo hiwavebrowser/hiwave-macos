@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<!-- Reduced repro: text ours DOES paint, but as `button` / `gradient_text` display-list ops that
+     scripts/realsite_board.py rustkit_viewport_text() does not count (cargurus.com). Notes: missing_text_cargurus_autotrader_bat.md -->
+<html><body style="margin: 0; font-family: Arial, sans-serif">
+<!-- div._pillsContainer_pyopq_1 > button._pill_pyopq_1 (Chrome: display:flex, 14px/18px, 500). Probe (12,30). -->
+<button type="button" style="position: absolute; left: 0; top: 0; height: 60px; padding: 0 4px; border: 0; background: #fff; color: #000; font-weight: 700; font-size: 60px">I</button>
+<!-- span._askText_199d2_18: background-image gradient + background-clip:text + -webkit-text-fill-color:transparent. Probe (110,30). -->
+<span style="position: absolute; left: 100px; top: 0; display: block; font-weight: 700; font-size: 60px; line-height: 60px; background-image: linear-gradient(96deg, rgb(245, 51, 63) -4.59%, rgb(5, 49, 123) 62.03%, rgb(7, 99, 211) 103.42%); background-clip: text; -webkit-text-fill-color: transparent">I</span>
+</body></html>
