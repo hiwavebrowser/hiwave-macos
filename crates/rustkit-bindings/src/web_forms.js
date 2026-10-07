@@ -326,8 +326,9 @@
         return (el.localName === 'button' || el.localName === 'input') && el.type === 'reset';
     }
     // HTML §4.10.21.3 from validation on: the `submit` event, and when no
-    // listener cancels it the engine is told. It navigates for a submit
-    // made by a click; one made from a timer or a callback goes no further.
+    // listener cancels it the engine is told. A click's own submit is in
+    // its outcome; one made from a timer or a callback waits for the
+    // embedder to take it (`Engine::take_script_navigation`).
     var noteSubmit = internals.noteSubmit || function () {};
     function submit(form, submitter) {
         if (!form.isConnected) return;
@@ -361,6 +362,11 @@
             submitter = null;
         }
         submit(this, submitter);
+    };
+    // submit() goes straight to the submission: no validation and no
+    // `submit` event (HTML §4.10.3).
+    Form.submit = function () {
+        if (this.isConnected) noteSubmit(this, null);
     };
     // Reset also restores checkedness and selectedness. The dom.rs reset
     // fires the cancelable `reset` event; its answer decides.

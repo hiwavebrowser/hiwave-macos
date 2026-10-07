@@ -2428,6 +2428,15 @@ fn main() {
                     // input above started; then sleep until the next timer.
                     let sleep = view.process_events();
                     live_wake.set(sleep.map(|d| std::time::Instant::now() + d));
+                    // A navigation the page started itself: `location.href
+                    // = url`, a script's `link.click()` or `form.submit()`,
+                    // a submit from a timer. Until 2026-10-06 these were
+                    // dropped: only the user's own click on a link or a
+                    // submit button went anywhere (hand tests H14, H16).
+                    if let Some(url) = view.take_script_navigation() {
+                        info!(%url, "Script navigation");
+                        let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                    }
                     view.render();
                 }
             }

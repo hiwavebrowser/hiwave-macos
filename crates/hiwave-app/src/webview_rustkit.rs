@@ -292,6 +292,15 @@ impl RustKitView {
             .and_then(|view_id| engine.submit_focused_form(view_id))
     }
 
+    /// Where the page's own script asked to go since the last call
+    /// (`location.href = url`, `link.click()`, `form.submit()`, a submit
+    /// from a timer). The caller navigates.
+    pub fn take_script_navigation(&self) -> Option<String> {
+        let mut engine = self.engine.borrow_mut();
+        self.view_id
+            .and_then(|view_id| engine.take_script_navigation(view_id))
+    }
+
     /// Whether a content element currently holds focus.
     pub fn has_focused_element(&self) -> bool {
         let engine = self.engine.borrow();

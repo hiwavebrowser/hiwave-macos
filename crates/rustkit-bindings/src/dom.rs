@@ -88,6 +88,10 @@ pub(crate) struct DomHost {
     /// Forms whose `submit` event was not cancelled, with the button that
     /// submitted each, by NodeId (`DomBindings::take_submit_requests`).
     submit_requests: Vec<(usize, Option<usize>)>,
+    /// URLs script asked this document to navigate to (`location.href =`,
+    /// `link.click()`, `form.submit()`), oldest first
+    /// (`DomBindings::take_navigation_requests`).
+    navigation_requests: Vec<String>,
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
@@ -108,6 +112,7 @@ impl DomHost {
         self.checked_writes.clear();
         self.checked.clear();
         self.submit_requests.clear();
+        self.navigation_requests.clear();
         self.generation
     }
 
@@ -126,6 +131,10 @@ impl DomHost {
 
     pub(crate) fn take_submit_requests(&mut self) -> Vec<(usize, Option<usize>)> {
         std::mem::take(&mut self.submit_requests)
+    }
+
+    pub(crate) fn take_navigation_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.navigation_requests)
     }
 
     fn document_for(&self, generation: &JsValue) -> Option<&Rc<Document>> {
@@ -1038,6 +1047,20 @@ pub(crate) fn install(
         }),
     )?;
 
+    // `navigate(url)`: script asked for another document at this absolute
+    // URL. Nothing navigates here; the embedder takes the request.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_navigate",
+        1,
+        Box::new(move |args| {
+            if let Some(JsValue::String(url)) = args.first() {
+                h.borrow_mut().navigation_requests.push(url.clone());
+            }
+            JsValue::Null
+        }),
+    )?;
+
     runtime.evaluate_script(WRAPPERS_JS)?;
     node_apis::install(runtime, host)
 }
@@ -1052,9 +1075,10 @@ const WRAPPERS_JS: &str = r#"
         attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate,
         write: __rustkit_dom_write, matches: __rustkit_dom_matches,
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
-        checked: __rustkit_dom_checked, submit: __rustkit_dom_submit
+        checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
+        navigate: __rustkit_dom_navigate
     };
-    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit'].forEach(function (n) {
+    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -2643,7 +2667,9 @@ const WRAPPERS_JS: &str = r#"
     HTMLElement.prototype.click = function () {
         var e = new Event('click', { bubbles: true, cancelable: true });
         e[SYNTHETIC_CLICK] = true;
-        this.dispatchEvent(e);
+        // A link's activation behaviour (HTML §4.6.4): the user's click is
+        // followed by the engine, script's own click() here.
+        if (this.dispatchEvent(e) && g.__rustkit_follow_link) g.__rustkit_follow_link(this);
     };
 
     // The global `document` becomes the Document wrapper.
@@ -2674,6 +2700,8 @@ const WRAPPERS_JS: &str = r#"
         setActivation: function (f) { activation = f; },
         setImplicitSubmit: function (f) { implicitSubmit = f; }
     };
+    // For web_history.js, which deletes it: script asks for a navigation.
+    g.__rkNavInternals = { navigate: function (url) { N.navigate(String(url)); } };
 
     // For node_apis.js, which runs next and deletes it.
     g.__rkNodeInternals = {

@@ -599,7 +599,91 @@ class Driver:
             return self.not_run(c, "the window shows the error page's green image", self.why_not("Screen Recording"))
         self.expect(c, "the window shows the error page's green image", frame[GREEN] > 2000, str(frame))
 
-    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8"]
+    def h16_click_nav(self):
+        """H14/H16: a navigation that starts on a loaded page (a click, or the page's own script) shows the next page."""
+        c = "h16_click_nav"
+        # (route, how the driver says it, what a person would call it)
+        routes = [("link", None, "a click on a link"),
+                  ("click", b"click", "script: link.click()"),
+                  ("assign", b"assign", "script: location.href = url"),
+                  ("button", b"button", "script: submit button .click()"),
+                  ("submit", b"submit", "script: form.submit()")]
+        for (route, command, label) in routes:
+            if not self.open_page(c, "h16_a.html"):
+                self.close_page()
+                continue
+            self.app.wait_log(r"Navigation finished", 20)
+            self.fixture.wait("beacon?h16-a-tick-", 5, self.since)
+            time.sleep(0.5)
+            first = self.frame(c, route + ".a", [RED, GREEN])
+            mark, log_from = self.fixture.mark(), len(self.app.log_text())
+            if command is None:
+                if not self.can_input:
+                    self.not_run(c, "%s: request, load, layout, script and frame of page B" % label,
+                                 self.why_not("Accessibility"))
+                    self.close_page()
+                    continue
+                x, y = self.centre()
+                self.hw("move", self.app.proc.pid, x, y)
+                self.hw("press", self.app.proc.pid, x, y)
+                self.hw("release", self.app.proc.pid, x, y)
+                self.expect(c, "%s: the app logged the click as a link" % label,
+                            bool(self.app.wait_log(r"Link clicked", 3, log_from)))
+            else:
+                self.fixture.reply = command
+                started = self.fixture.wait("beacon?h16-a-start-" + route, 4, mark)
+                self.fixture.reply = b"ok"
+                if not self.expect(c, "%s: page A started it" % label, started):
+                    self.close_page()
+                    continue
+            # The four stages, in order; the first missing one is the finding.
+            asked = self.fixture.wait("/h16_b.html", 6, mark)
+            self.expect(c, "%s: the app requested page B" % label, asked,
+                        str(self.fixture.seen("/h16_b.html", mark)[:1]))
+            loading = self.app.wait_log(r"Loading URL[^\n]*h16_b\.html", 3 if asked else 0.5, log_from)
+            self.expect(c, "%s: the engine logged Loading URL for page B" % label, bool(loading))
+            built = self.app.wait_log(r"Root box built total_children=(\d+)", 5 if loading else 0.5,
+                                      log_from + (loading.end() if loading else 0))
+            self.expect(c, "%s: page B was laid out with boxes" % label,
+                        bool(loading) and bool(built) and int(built.group(1)) > 0,
+                        built.group(0) if built else "no layout after the load began")
+            ran = self.fixture.wait("beacon?h16-b-ran", 5 if asked else 0.5, mark)
+            self.expect(c, "%s: page B's script ran" % label, ran,
+                        str(self.fixture.seen("beacon?h16-b-ran", mark)[:1]))
+            time.sleep(1.0)
+            frame = self.frame(c, route + ".b", [RED, GREEN])
+            if first is None or frame is None:
+                self.not_run(c, "%s: the window shows page B's green" % label, self.why_not("Screen Recording"))
+            else:
+                self.expect(c, "%s: the window showed page A's red before" % label, first[RED] > 1000, str(first))
+                self.expect(c, "%s: the window shows page B's green" % label,
+                            frame[GREEN] > 1000 and frame[RED] < 500, str(frame))
+            (self.out / ("%s.%s.app.log" % (c, route))).write_text(self.app.log_text())
+            self.close_page()
+        # A page that sends itself on while it is being parsed, as a redirect
+        # stub does: the request is made before the load has finished.
+        label = "script: location.replace() in an inline script"
+        if self.open_page(c, "h16_redirect.html"):
+            asked = self.fixture.wait("/h16_b.html?from=inline", 8, self.since)
+            self.expect(c, "%s: the app requested page B" % label, asked,
+                        str(self.fixture.seen("/h16_b.html", self.since)[:1]))
+            ran = self.fixture.wait("beacon?h16-b-ran-from=inline", 5 if asked else 0.5, self.since)
+            self.expect(c, "%s: page B's script ran" % label, ran)
+            again = len(self.fixture.seen("/h16_b.html", self.since))
+            time.sleep(1.0)
+            self.expect(c, "%s: page B was requested once" % label,
+                        again == 1 and len(self.fixture.seen("/h16_b.html", self.since)) == 1,
+                        "%d requests" % len(self.fixture.seen("/h16_b.html", self.since)))
+            frame = self.frame(c, "inline.b", [RED, GREEN])
+            if frame is None:
+                self.not_run(c, "%s: the window shows page B's green" % label, self.why_not("Screen Recording"))
+            else:
+                self.expect(c, "%s: the window shows page B's green" % label,
+                            frame[GREEN] > 1000 and frame[RED] < 500, str(frame))
+            (self.out / ("%s.inline.app.log" % c)).write_text(self.app.log_text())
+        self.close_page()
+
+    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
