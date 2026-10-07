@@ -113,13 +113,28 @@ struct PendingTimer {
     repeat: bool,
 }
 
+/// Default maximum number of loop iterations/pumps per `run_jobs` call.
+pub const DEFAULT_MAX_JOB_ITERATIONS: u64 = 10_000;
+
 /// JavaScript runtime configuration.
-#[derive(Default)]
+#[derive(Clone, Debug)]
 pub struct JsRuntimeConfig {
     /// Enable strict mode.
     pub strict_mode: bool,
-    /// Maximum execution time.
+    /// Maximum execution time for script evaluation and job processing.
     pub timeout: Option<Duration>,
+    /// Maximum number of job iterations per `run_jobs` call before halting runaway recursion.
+    pub max_job_iterations: u64,
+}
+
+impl Default for JsRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            strict_mode: false,
+            timeout: None,
+            max_job_iterations: DEFAULT_MAX_JOB_ITERATIONS,
+        }
+    }
 }
 
 /// JavaScript runtime that wraps the underlying engine.
@@ -130,6 +145,9 @@ pub struct JsRuntime {
     /// recorded here for the embedder to fetch.
     #[cfg(feature = "boa")]
     modules: module::ModuleHost,
+    #[cfg(feature = "boa")]
+    executor: std::rc::Rc<executor::HostJobExecutor>,
+    config: JsRuntimeConfig,
     console_handler: Option<Arc<ConsoleHandler>>,
     timers: Arc<Mutex<HashMap<TimerId, PendingTimer>>>,
     globals: HashMap<String, JsValue>,
@@ -142,25 +160,34 @@ impl JsRuntime {
     }
 
     /// Create a new JavaScript runtime with configuration.
-    pub fn with_config(_config: JsRuntimeConfig) -> Result<Self, JsError> {
+    pub fn with_config(config: JsRuntimeConfig) -> Result<Self, JsError> {
         info!("Initializing JavaScript runtime");
 
         #[cfg(feature = "boa")]
         let modules = module::ModuleHost::default();
         #[cfg(feature = "boa")]
-        let executor = std::rc::Rc::new(executor::HostJobExecutor::new());
+        let executor = std::rc::Rc::new(executor::HostJobExecutor::with_limits(
+            config.max_job_iterations,
+            config.timeout,
+        ));
         #[cfg(feature = "boa")]
-        let context = boa_engine::Context::builder()
+        let mut context = boa_engine::Context::builder()
             .module_loader(modules.loader())
-            .job_executor(executor)
+            .job_executor(executor.clone())
             .build()
             .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+
+        #[cfg(feature = "boa")]
+        context.strict(config.strict_mode);
 
         let mut runtime = Self {
             #[cfg(feature = "boa")]
             context,
             #[cfg(feature = "boa")]
             modules,
+            #[cfg(feature = "boa")]
+            executor,
+            config,
             console_handler: None,
             timers: Arc::new(Mutex::new(HashMap::new())),
             globals: HashMap::new(),
@@ -171,6 +198,39 @@ impl JsRuntime {
 
         debug!("JavaScript runtime initialized");
         Ok(runtime)
+    }
+
+    /// Get the runtime configuration.
+    pub fn config(&self) -> &JsRuntimeConfig {
+        &self.config
+    }
+
+    /// Set the microtask job iteration limit per `run_jobs` turn.
+    pub fn set_max_job_iterations(&mut self, limit: u64) {
+        self.config.max_job_iterations = limit;
+        #[cfg(feature = "boa")]
+        self.executor.set_max_job_iterations(limit);
+    }
+
+    /// Set the timeout for job execution.
+    pub fn set_job_timeout(&mut self, timeout: Option<Duration>) {
+        self.config.timeout = timeout;
+        #[cfg(feature = "boa")]
+        self.executor.set_timeout(timeout);
+    }
+
+    /// Run all currently pending jobs (microtasks and async completions).
+    pub fn run_jobs(&mut self) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            self.context
+                .run_jobs()
+                .map_err(|e| JsError::ExecutionError(e.to_string()))
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            Ok(())
+        }
     }
 
     /// Set the console output handler.
@@ -224,10 +284,14 @@ impl JsRuntime {
             // Promise reactions (`.then`, `await`) are jobs Boa queues but
             // does not run on its own; a page's async code never resumes
             // without this.
-            let _ = self.context.run_jobs();
+            let job_result = self.context.run_jobs();
 
             match result {
                 Ok(value) => {
+                    if let Err(job_err) = job_result {
+                        let msg = job_err.to_string();
+                        return Err(JsError::ExecutionError(msg));
+                    }
                     let js_value = self.convert_boa_value(&value);
                     self.flush_console_logs();
                     Ok(js_value)
@@ -560,6 +624,53 @@ mod tests {
             .unwrap();
         let done = runtime.evaluate_script("done").unwrap();
         assert!(matches!(done, JsValue::Boolean(true)));
+    }
+
+    #[test]
+    fn a_runaway_microtask_chain_throws_instead_of_hanging() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_max_job_iterations(500);
+        let result = runtime.evaluate_script("function again() { Promise.resolve().then(again); } again();");
+        assert!(result.is_err(), "runaway microtask chain must error instead of hanging: {result:?}");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Job queue") || err_msg.contains("limit"), "error must mention limit: {err_msg}");
+        // The runtime is still usable afterwards.
+        let after = runtime.evaluate_script("1 + 1").unwrap();
+        assert!(matches!(after, JsValue::Number(n) if n == 2.0));
+    }
+
+    #[test]
+    fn strict_mode_in_config_is_respected() {
+        let mut strict_rt = JsRuntime::with_config(JsRuntimeConfig {
+            strict_mode: true,
+            ..Default::default()
+        }).unwrap();
+        let result = strict_rt.evaluate_script("undeclaredVar = 42;");
+        assert!(result.is_err(), "assignment to undeclared variable must fail in strict mode");
+
+        let mut non_strict_rt = JsRuntime::with_config(JsRuntimeConfig {
+            strict_mode: false,
+            ..Default::default()
+        }).unwrap();
+        let result2 = non_strict_rt.evaluate_script("undeclaredVar = 42;");
+        assert!(result2.is_ok(), "assignment to undeclared variable succeeds in non-strict mode");
+    }
+
+    #[test]
+    fn job_timeout_in_config_is_respected() {
+        let mut runtime = JsRuntime::with_config(JsRuntimeConfig {
+            timeout: Some(Duration::from_millis(20)),
+            max_job_iterations: 1_000_000,
+            ..Default::default()
+        }).unwrap();
+        // Infinite recursion with timeout
+        let result = runtime.evaluate_script("function loop() { Promise.resolve().then(loop); } loop();");
+        assert!(result.is_err(), "must timeout rather than hanging");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("timeout") || err.contains("limit"), "must report timeout or limit: {err}");
+        // Runtime remains usable
+        let after = runtime.evaluate_script("40 + 2").unwrap();
+        assert!(matches!(after, JsValue::Number(n) if n == 42.0));
     }
 
     #[test]

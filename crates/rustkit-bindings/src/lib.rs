@@ -1255,6 +1255,22 @@ impl DomBindings {
             .set_loop_iteration_limit(max_iterations);
     }
 
+    /// Bound the number of microtask job iterations allowed per turn (see
+    /// [`JsRuntime::set_max_job_iterations`]).
+    pub fn set_max_job_iterations(&self, max_iterations: u64) {
+        self.runtime
+            .borrow_mut()
+            .set_max_job_iterations(max_iterations);
+    }
+
+    /// Run any pending jobs (microtasks and async completions).
+    pub fn run_jobs(&self) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .run_jobs()
+            .map_err(Into::into)
+    }
+
     /// Name the `<script>` element being run, as `document.currentScript`
     /// sees it; `None` between scripts. `node` is the element's raw NodeId.
     pub fn set_current_script(&self, node: Option<usize>) -> Result<(), BindingError> {

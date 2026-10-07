@@ -3553,6 +3553,7 @@ impl Engine {
         let view_document = view.document.clone();
         bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         bindings.set_loop_iteration_limit(loop_limit);
+        bindings.set_max_job_iterations(loop_limit.min(100_000));
 
         // Execution order: classic, defer (module scripts run here, in
         // document order with them), async (stable within each). A module
@@ -4092,7 +4093,12 @@ impl Engine {
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
         if self.config.javascript_enabled {
-            let js_runtime = JsRuntime::new().map_err(|e| EngineError::JsError(e.to_string()))?;
+            let js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
+                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
+                ..Default::default()
+            })
+            .map_err(|e| EngineError::JsError(e.to_string()))?;
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
@@ -4405,7 +4411,12 @@ impl Engine {
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
-            let js_runtime = JsRuntime::new().map_err(|e| EngineError::JsError(e.to_string()))?;
+            let js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
+                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
+                ..Default::default()
+            })
+            .map_err(|e| EngineError::JsError(e.to_string()))?;
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
@@ -27429,6 +27440,67 @@ document.currentScript.remove();
                 && matches!(&r.outcome, ScriptOutcome::Threw(m) if m.contains("in load"))),
             "{log:#?}"
         );
+    }
+
+    #[test]
+    fn runaway_promise_microtask_does_not_hang_navigation_or_tab_close() {
+        let page = r#"<html><head>
+<script>
+function again() { Promise.resolve().then(again); }
+again();
+</script>
+<script>var after = true;</script>
+</head><body><p>alive</p></body></html>"#;
+        let port = serve(vec![("/", "text/html", page.to_string())]);
+        let config = EngineConfig {
+            script_budget_ms: 1_000,
+            ..EngineConfig::default()
+        };
+        let (mut engine, view, took) = load_timed(config, port);
+        // Navigation completed promptly without hanging on runaway promise microtasks
+        assert!(took < std::time::Duration::from_secs(5), "navigation hung: {took:?}");
+
+        let log = engine.script_log(view).unwrap();
+        assert!(
+            matches!(&log[0].outcome, ScriptOutcome::Threw(m) if m.contains("timeout") || m.contains("Job queue")),
+            "{log:#?}"
+        );
+        assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+
+        // Tab close / destroy_view stays completely responsive
+        engine.destroy_view(view).expect("destroy_view / tab close must succeed promptly");
+    }
+
+    #[test]
+    fn runaway_promise_microtask_hits_iteration_limit_and_allows_subsequent_scripts() {
+        let page = r#"<html><head>
+<script>
+function again() { Promise.resolve().then(again); }
+again();
+</script>
+<script>var after = true;</script>
+</head><body><p>alive</p></body></html>"#;
+        let port = serve(vec![("/", "text/html", page.to_string())]);
+        let config = EngineConfig {
+            script_budget_ms: 5_000,
+            script_loop_iteration_limit: 500,
+            ..EngineConfig::default()
+        };
+        let (mut engine, view, took) = load_timed(config, port);
+        assert!(took < std::time::Duration::from_secs(5), "navigation hung: {took:?}");
+
+        assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
+        let log = engine.script_log(view).unwrap();
+        assert!(
+            matches!(&log[0].outcome, ScriptOutcome::Threw(m) if m.contains("limit") || m.contains("Job queue")),
+            "{log:#?}"
+        );
+        // Because the runaway microtask was bounded and aborted promptly by iteration limit,
+        // the engine had plenty of budget left to run inline#2:
+        assert_eq!(log[1].outcome, ScriptOutcome::Ran);
+
+        // Tab close / destroy_view stays completely responsive
+        engine.destroy_view(view).expect("destroy_view / tab close must succeed promptly");
     }
 }
 
