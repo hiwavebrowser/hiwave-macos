@@ -13990,6 +13990,18 @@ impl EngineBuilder {
         self
     }
 
+    /// Set the wall-clock budget for a page's scripts on the load path
+    /// (`EngineConfig::script_budget_ms`).
+    pub fn script_budget_ms(mut self, ms: u64) -> Self {
+        self.config.script_budget_ms = ms;
+        self
+    }
+
+    /// The configuration the engine will be built with.
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
     /// Set an optional replay proxy URL for deterministic testing (test-only).
     pub fn replay_proxy(mut self, proxy: Option<Url>) -> Self {
         self.config.replay_proxy = proxy;
