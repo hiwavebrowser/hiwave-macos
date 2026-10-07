@@ -1,0 +1,4320 @@
+{
+ "meta": {
+  "date": "2026-10-07",
+  "started_utc": "2026-10-07T13:32:52.373Z",
+  "chromium": "143.0.7499.4",
+  "executablePath": "/Users/petecopeland/Library/Caches/ms-playwright/chromium-1200/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+  "chrome_source": "playwright-bundled:chromium-1200",
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "universe": "websuite/realsite-top80-plus20.json",
+  "n_sites": 20,
+  "finished_utc": "2026-10-07T13:36:09.031Z"
+ },
+ "results": [
+  {
+   "id": "cargurus",
+   "url": "https://www.cargurus.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://www.cargurus.com/",
+    "title": "Buy & Sell Cars | Millions Listed, Prices & Deal Ratings | CarGurus",
+    "elements_scanned": 2309,
+    "icons": {
+     "inline_svg": {
+      "count": 94,
+      "icon_sized": 61,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 16,
+         "y": 22,
+         "w": 130,
+         "h": 21
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 231,
+         "y": 31,
+         "w": 12,
+         "h": 7
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 3,
+      "examples": [
+       {
+        "sel": "img._logo_1de07_1",
+        "rect": {
+         "x": 483,
+         "y": 4818,
+         "w": 314,
+         "h": 49
+        },
+        "src": "https://static-assets.cargurus.com/images/site-homepage/why-choose-cargurus/new/why-choose-cargurus-lsection-logo-deskto"
+       },
+       {
+        "sel": "img",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        },
+        "src": "https://static-assets.cargurus.com/images/site-landing-pages/dealership-mode/cg-short-logo-2026_85e2b55a3740d35d3bf8f09d"
+       },
+       {
+        "sel": "img",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        },
+        "src": "https://cdn.cookielaw.org/logos/static/powered_by_logo.svg"
+       }
+      ]
+     },
+     "css_bg_svg": {
+      "count": 3,
+      "examples": [
+       {
+        "sel": "span._flagIcon_1lgkj_30._flagUS_1lgkj_49",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       },
+       {
+        "sel": "span._flagIcon_1lgkj_30._flagUS_1lgkj_49",
+        "rect": {
+         "x": 478,
+         "y": 7913,
+         "w": 19,
+         "h": 19
+        }
+       },
+       {
+        "sel": "button#close-pc-btn-handler",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       }
+      ]
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 52,
+     "native_loading_lazy_img": 37,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 15,
+     "decoding_async": 0,
+     "fetchpriority_high": 3,
+     "content_visibility_auto": 0,
+     "noscript_img": 3,
+     "intersection_observer": {
+      "ctor": 5,
+      "observe": 12
+     }
+    },
+    "stacking": {
+     "region_roots": 39,
+     "region_elements": 718,
+     "creators": 108,
+     "by_reason": {
+      "position:absolute": 38,
+      "position:relative": 63,
+      "positioned+z-index": 18,
+      "clip-path": 3,
+      "opacity<1": 10,
+      "position:sticky": 1,
+      "transform": 8
+     },
+     "by_position": {
+      "static": 616,
+      "relative": 63,
+      "absolute": 38,
+      "fixed": 0,
+      "sticky": 1
+     },
+     "z_index_max": 2147483647,
+     "z_index_values": {
+      "1": 13,
+      "3": 1,
+      "10000": 3,
+      "2147483646": 1,
+      "2147483647": 1
+     },
+     "examples": [
+      {
+       "sel": "button._skipLink_7w7v1_164",
+       "reasons": [
+        "position:absolute"
+       ],
+       "z": "auto",
+       "pos": "absolute",
+       "rect": {
+        "x": 0,
+        "y": -160,
+        "w": 164,
+        "h": 62
+       }
+      },
+      {
+       "sel": "li._dropdownContainer_1hbl3_152",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 182,
+        "y": 6,
+        "w": 61,
+        "h": 53
+       }
+      },
+      {
+       "sel": "div._dropdownPanel_1hbl3_43",
+       "reasons": [
+        "position:absolute",
+        "positioned+z-index"
+       ],
+       "z": "10000",
+       "pos": "absolute",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "li._dropdownContainer_1hbl3_152",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 279,
+        "y": 6,
+        "w": 49,
+        "h": 53
+       }
+      },
+      {
+       "sel": "div._dropdownPanel_1hbl3_43",
+       "reasons": [
+        "position:absolute",
+        "positioned+z-index"
+       ],
+       "z": "10000",
+       "pos": "absolute",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {
+      "contain": 4,
+      "cover": 23
+     },
+     "non_default_position": 2,
+     "examples": [
+      {
+       "sel": "img.qzKjJ._carImage_tzuxc_1",
+       "rect": {
+        "x": -402,
+        "y": 353,
+        "w": 721,
+        "h": 255
+       },
+       "fit": "contain"
+      },
+      {
+       "sel": "img.qzKjJ._carImage_tzuxc_1",
+       "rect": {
+        "x": 363,
+        "y": 353,
+        "w": 638,
+        "h": 255
+       },
+       "fit": "contain"
+      },
+      {
+       "sel": "img.qzKjJ._carImage_tzuxc_1",
+       "rect": {
+        "x": 1045,
+        "y": 353,
+        "w": 638,
+        "h": 255
+       },
+       "fit": "contain"
+      }
+     ]
+    },
+    "frameworks": {
+     "detected": [
+      "Remix"
+     ],
+     "signals": {
+      "Remix": [
+       "remix"
+      ]
+     }
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 120,
+     "total_bytes": 5802548,
+     "total_mb": 5.53,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 11998
+  },
+  {
+   "id": "bringatrailer",
+   "url": "https://bringatrailer.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://bringatrailer.com/",
+    "title": "The best vintage and classic cars for sale online | Bring a Trailer",
+    "elements_scanned": 8203,
+    "icons": {
+     "inline_svg": {
+      "count": 1,
+      "icon_sized": 1,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 874,
+         "y": 2766,
+         "w": 8,
+         "h": 10
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 195,
+      "examples": [
+       {
+        "sel": "img.countries-flags",
+        "rect": {
+         "x": -1288,
+         "y": 368,
+         "w": 16,
+         "h": 12
+        },
+        "src": "https://bringatrailer.com/wp-content/themes/bringatrailer/assets/img/countries/us.svg"
+       },
+       {
+        "sel": "img.countries-flags",
+        "rect": {
+         "x": -348,
+         "y": 368,
+         "w": 16,
+         "h": 12
+        },
+        "src": "https://bringatrailer.com/wp-content/themes/bringatrailer/assets/img/countries/us.svg"
+       },
+       {
+        "sel": "img.countries-flags",
+        "rect": {
+         "x": 592,
+         "y": 368,
+         "w": 16,
+         "h": 12
+        },
+        "src": "https://bringatrailer.com/wp-content/themes/bringatrailer/assets/img/countries/us.svg"
+       }
+      ]
+     },
+     "css_bg_svg": {
+      "count": 747,
+      "examples": [
+       {
+        "sel": "a.site-header-logo.close-modal",
+        "rect": {
+         "x": 28,
+         "y": 12,
+         "w": 180,
+         "h": 50
+        }
+       },
+       {
+        "sel": "div.icon-item-watch",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       },
+       {
+        "sel": "div.icon-live",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       }
+      ]
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 21,
+      "families": {
+       "FontAwesome": 21
+      },
+      "examples": [
+       {
+        "sel": "i.fa.fa-search",
+        "rect": {
+         "x": 640,
+         "y": 25,
+         "w": 22,
+         "h": 24
+        },
+        "via": "::before",
+        "family": "FontAwesome"
+       },
+       {
+        "sel": "button.bat-language-switcher.bat-language-switcher-header",
+        "rect": {
+         "x": 1073,
+         "y": 27,
+         "w": 53,
+         "h": 21
+        },
+        "via": "::after",
+        "family": "FontAwesome"
+       },
+       {
+        "sel": "i.fa.fa-star",
+        "rect": {
+         "x": 1158,
+         "y": 26,
+         "w": 19,
+         "h": 20
+        },
+        "via": "::before",
+        "family": "FontAwesome"
+       }
+      ]
+     }
+    },
+    "lazy": {
+     "img_total": 648,
+     "native_loading_lazy_img": 270,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 228,
+     "picture_el": 0,
+     "decoding_async": 277,
+     "fetchpriority_high": 2,
+     "content_visibility_auto": 0,
+     "noscript_img": 1,
+     "intersection_observer": {
+      "ctor": 3,
+      "observe": 3
+     }
+    },
+    "stacking": {
+     "region_roots": 469,
+     "region_elements": 759,
+     "creators": 543,
+     "by_reason": {
+      "position:relative": 334,
+      "positioned+z-index": 202,
+      "position:absolute": 206,
+      "opacity<1": 195,
+      "position:fixed": 2
+     },
+     "by_position": {
+      "static": 217,
+      "relative": 334,
+      "absolute": 206,
+      "fixed": 2,
+      "sticky": 0
+     },
+     "z_index_max": 9999999,
+     "z_index_values": {
+      "5": 194,
+      "54": 4,
+      "100": 3,
+      "1000": 1,
+      "999999": 1,
+      "9999999": 1
+     },
+     "examples": [
+      {
+       "sel": "header#site-header",
+       "reasons": [
+        "position:relative",
+        "positioned+z-index"
+       ],
+       "z": "1000",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 115
+       }
+      },
+      {
+       "sel": "div#site-header-bar-main",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 74
+       }
+      },
+      {
+       "sel": "a#site-header-menu-mobile-toggle",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "div.toggle-icon",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "span",
+       "reasons": [
+        "position:absolute"
+       ],
+       "z": "auto",
+       "pos": "absolute",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [
+      "WordPress",
+      "jQuery"
+     ],
+     "signals": {
+      "WordPress": [
+       "wp-content"
+      ],
+      "jQuery": [
+       "window.jQuery"
+      ],
+      "generator": [
+       "WordPress 7.1.3"
+      ]
+     }
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 52,
+     "total_bytes": 7459787,
+     "total_mb": 7.11,
+     "over_1mb_count": 1,
+     "over_1mb": [
+      {
+       "url": "https://bringatrailer.com/_static/??-eJyllN1u2zAMhV9oipJ2QLGLYc9Cy0zMWH8lJafd05f2kDTI0iJKbgzB4vnEAx3RHrKh6HztUexe7N83N3VxFSiu9vLD6q5LsWAsNvu6oyi2Y4o7KAzkkS2jpMpOxVteCnvbQTGepGiZGClMGW9jhdRXr6Sj+Br8uHd",
+       "mb": 2.86
+      }
+     ]
+    }
+   },
+   "ms": 15220
+  },
+  {
+   "id": "target",
+   "url": "https://www.target.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://www.target.com/",
+    "title": "Target : Expect More. Pay Less.",
+    "elements_scanned": 1533,
+    "icons": {
+     "inline_svg": {
+      "count": 33,
+      "icon_sized": 26,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 26,
+         "y": 18,
+         "w": 15,
+         "h": 15
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 173,
+         "y": 17,
+         "w": 16,
+         "h": 16
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 20,
+         "y": 66,
+         "w": 48,
+         "h": 48
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 15,
+      "examples": [
+       {
+        "sel": "use",
+        "rect": {
+         "x": 29,
+         "y": 19,
+         "w": 10,
+         "h": 13
+        },
+        "href": "/icons-illustrations/v2/location.svg#location"
+       },
+       {
+        "sel": "use",
+        "rect": {
+         "x": 175,
+         "y": 19,
+         "w": 12,
+         "h": 12
+        },
+        "href": "/icons-illustrations/v2/store.svg#store"
+       },
+       {
+        "sel": "use",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        },
+        "href": "/icons-illustrations/v2/menu.svg#menu"
+       }
+      ]
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 1,
+      "examples": [
+       {
+        "sel": "button.styles_micButton__qOyg3",
+        "rect": {
+         "x": 985,
+         "y": 74,
+         "w": 28,
+         "h": 32
+        }
+       }
+      ]
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 15,
+      "families": {
+       "Helvetica for Target": 15
+      },
+      "examples": [
+       {
+        "sel": "span",
+        "rect": {
+         "x": 715,
+         "y": 1241,
+         "w": 54,
+         "h": 112
+        },
+        "via": "text",
+        "family": "Helvetica for Target"
+       },
+       {
+        "sel": "span",
+        "rect": {
+         "x": 72,
+         "y": 1955,
+         "w": 93,
+         "h": 68
+        },
+        "via": "text",
+        "family": "Helvetica for Target"
+       },
+       {
+        "sel": "span",
+        "rect": {
+         "x": 370,
+         "y": 1955,
+         "w": 93,
+         "h": 68
+        },
+        "via": "text",
+        "family": "Helvetica for Target"
+       }
+      ]
+     }
+    },
+    "lazy": {
+     "img_total": 62,
+     "native_loading_lazy_img": 38,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 19,
+     "decoding_async": 0,
+     "fetchpriority_high": 1,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 55,
+      "observe": 275
+     }
+    },
+    "stacking": {
+     "region_roots": 7,
+     "region_elements": 102,
+     "creators": 40,
+     "by_reason": {
+      "position:relative": 23,
+      "position:absolute": 14,
+      "opacity<1": 4,
+      "transform": 7,
+      "positioned+z-index": 7,
+      "clip-path": 3,
+      "position:sticky": 1,
+      "position:fixed": 1
+     },
+     "by_position": {
+      "static": 63,
+      "relative": 23,
+      "absolute": 14,
+      "fixed": 1,
+      "sticky": 1
+     },
+     "z_index_max": 2147483647,
+     "z_index_values": {
+      "0": 3,
+      "1": 2,
+      "20": 1,
+      "1049": 1,
+      "1070": 1,
+      "2147483647": 1
+     },
+     "examples": [
+      {
+       "sel": "div.styles_primaryHeader__JSgSy",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 50,
+        "w": 1280,
+        "h": 80
+       }
+      },
+      {
+       "sel": "a.styles_ndsLink__WPjeX.styles_logoLinkDesktop__wkzz5",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 20,
+        "y": 66,
+        "w": 48,
+        "h": 48
+       }
+      },
+      {
+       "sel": "div.styles_burgerMenuContainer__CH4MQ",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "a.styles_ndsLink__WPjeX.styles_spacedPrimaryHeaderLink__F8MNV",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "a.styles_ndsLink__WPjeX.styles_neverDecorate__P_tPc",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 96,
+        "y": 68,
+        "w": 125,
+        "h": 44
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {
+      "contain": 2
+     },
+     "non_default_position": 0,
+     "examples": [
+      {
+       "sel": "video.styles_video__6TVXy",
+       "rect": {
+        "x": 40,
+        "y": 130,
+        "w": 1200,
+        "h": 500
+       },
+       "fit": "contain"
+      },
+      {
+       "sel": "video.styles_video__6TVXy",
+       "rect": {
+        "x": 40,
+        "y": 2909,
+        "w": 1200,
+        "h": 300
+       },
+       "fit": "contain"
+      }
+     ]
+    },
+    "frameworks": {
+     "detected": [
+      "React",
+      "Next.js"
+     ],
+     "signals": {
+      "React": [
+       "dom/global"
+      ],
+      "Next.js": [
+       "__NEXT_DATA__/_next",
+       "script:/_next/"
+      ]
+     }
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 106,
+     "total_bytes": 3317459,
+     "total_mb": 3.16,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 11476
+  },
+  {
+   "id": "bestbuy",
+   "url": "https://www.bestbuy.com/",
+   "status": "NOT RUN",
+   "reason": "page.goto: Timeout 30000ms exceeded.",
+   "ms": 30002
+  },
+  {
+   "id": "costco",
+   "url": "https://www.costco.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://www.costco.com/",
+    "title": "Welcome to Costco Wholesale",
+    "elements_scanned": 15721,
+    "icons": {
+     "inline_svg": {
+      "count": 2681,
+      "icon_sized": 2607,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 1221,
+         "y": 55,
+         "w": 24,
+         "h": 16
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 44,
+      "svg": 0,
+      "examples": [
+       {
+        "sel": "path",
+        "rect": {
+         "x": 605,
+         "y": 457,
+         "w": 15,
+         "h": 15
+        },
+        "mask": "url(\"#dotSelected\")"
+       },
+       {
+        "sel": "path",
+        "rect": {
+         "x": 634,
+         "y": 459,
+         "w": 12,
+         "h": 12
+        },
+        "mask": "url(\"#dotUnselected\")"
+       },
+       {
+        "sel": "path",
+        "rect": {
+         "x": 662,
+         "y": 459,
+         "w": 12,
+         "h": 12
+        },
+        "mask": "url(\"#dotUnselected\")"
+       }
+      ]
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 242,
+     "native_loading_lazy_img": 164,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 234,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 267,
+      "observe": 472
+     }
+    },
+    "stacking": {
+     "region_roots": 18,
+     "region_elements": 622,
+     "creators": 156,
+     "by_reason": {
+      "position:absolute": 22,
+      "position:relative": 132,
+      "positioned+z-index": 6,
+      "clip-path": 13,
+      "position:fixed": 2,
+      "opacity<1": 2
+     },
+     "by_position": {
+      "static": 466,
+      "relative": 132,
+      "absolute": 22,
+      "fixed": 2,
+      "sticky": 0
+     },
+     "z_index_max": 101,
+     "z_index_values": {
+      "98": 2,
+      "99": 2,
+      "101": 4
+     },
+     "examples": [
+      {
+       "sel": "a.MuiTypography-root.MuiTypography-inherit",
+       "reasons": [
+        "position:absolute"
+       ],
+       "z": "auto",
+       "pos": "absolute",
+       "rect": {
+        "x": -999,
+        "y": 0,
+        "w": 170,
+        "h": 23
+       }
+      },
+      {
+       "sel": "button#Button_button-default",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 1192,
+        "y": 43,
+        "w": 64,
+        "h": 40
+       }
+      },
+      {
+       "sel": "button#Button_button-default",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "button#Button_icon-links-member-links-desktop-signin-mobile",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "button#Button_icon-links-member-links-desktop-signin-desktop",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {
+      "contain": 70
+     },
+     "non_default_position": 0,
+     "examples": [
+      {
+       "sel": "img.MuiBox-root.mui-gy3nzp",
+       "rect": {
+        "x": 24,
+        "y": 330,
+        "w": 233,
+        "h": 98
+       },
+       "fit": "contain"
+      },
+      {
+       "sel": "img.MuiBox-root.mui-gy3nzp",
+       "rect": {
+        "x": 275,
+        "y": 330,
+        "w": 233,
+        "h": 98
+       },
+       "fit": "contain"
+      },
+      {
+       "sel": "img.MuiBox-root.mui-gy3nzp",
+       "rect": {
+        "x": 526,
+        "y": 330,
+        "w": 233,
+        "h": 98
+       },
+       "fit": "contain"
+      }
+     ]
+    },
+    "frameworks": {
+     "detected": [
+      "Next.js"
+     ],
+     "signals": {
+      "Next.js": [
+       "__NEXT_DATA__/_next",
+       "script:/_next/"
+      ]
+     }
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 91,
+     "total_bytes": 4858878,
+     "total_mb": 4.63,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 10086
+  },
+  {
+   "id": "homedepot",
+   "url": "https://www.homedepot.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://www.homedepot.com/",
+    "title": "The Home Depot",
+    "elements_scanned": 1764,
+    "icons": {
+     "inline_svg": {
+      "count": 42,
+      "icon_sized": 35,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 909,
+         "y": 48,
+         "w": 16,
+         "h": 16
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 1069,
+         "y": 48,
+         "w": 16,
+         "h": 16
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 16,
+         "y": 84,
+         "w": 64,
+         "h": 64
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 26,
+      "examples": [
+       {
+        "sel": "img.sui-object-cover.sui-w-full",
+        "rect": {
+         "x": 1152,
+         "y": 1271,
+         "w": 80,
+         "h": 70
+        },
+        "src": "https://assets.thdstatic.com/images/v1/Value-Pricing-Daily-Deals.svg"
+       },
+       {
+        "sel": "img.sui-aspect-square",
+        "rect": {
+         "x": 1047,
+         "y": 5002,
+         "w": 24,
+         "h": 24
+        },
+        "src": "https://dam.thdstatic.com/contentful/heroflattenimage/Garage.svg"
+       },
+       {
+        "sel": "img.sui-aspect-square",
+        "rect": {
+         "x": 299,
+         "y": 5116,
+         "w": 24,
+         "h": 24
+        },
+        "src": "https://dam.thdstatic.com/contentful/heroflattenimage/17JUL24_Stencil-Icon_Pumpkin_Orange.svg"
+       }
+      ]
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 52,
+     "native_loading_lazy_img": 25,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 8,
+     "picture_el": 10,
+     "decoding_async": 0,
+     "fetchpriority_high": 10,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 29,
+      "observe": 69
+     }
+    },
+    "stacking": {
+     "region_roots": 15,
+     "region_elements": 461,
+     "creators": 39,
+     "by_reason": {
+      "position:absolute": 8,
+      "position:relative": 30,
+      "positioned+z-index": 3,
+      "position:sticky": 1,
+      "opacity<1": 3,
+      "transform": 2,
+      "clip-path": 1
+     },
+     "by_position": {
+      "static": 422,
+      "relative": 30,
+      "absolute": 8,
+      "fixed": 0,
+      "sticky": 1
+     },
+     "z_index_max": 1300,
+     "z_index_values": {
+      "99": 1,
+      "900": 1,
+      "1000": 1,
+      "1300": 1
+     },
+     "examples": [
+      {
+       "sel": "div.sui-flex.sui-h-8",
+       "reasons": [
+        "position:absolute"
+       ],
+       "z": "auto",
+       "pos": "absolute",
+       "rect": {
+        "x": 247,
+        "y": 197,
+        "w": 1621,
+        "h": 32
+       }
+      },
+      {
+       "sel": "div#header-tophat",
+       "reasons": [
+        "position:relative",
+        "positioned+z-index"
+       ],
+       "z": "99",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 32
+       }
+      },
+      {
+       "sel": "div#header-root",
+       "reasons": [
+        "position:sticky"
+       ],
+       "z": "900",
+       "pos": "sticky",
+       "rect": {
+        "x": 0,
+        "y": 32,
+        "w": 1280,
+        "h": 133
+       }
+      },
+      {
+       "sel": "button.sui-lab-btn-base.sui-font-regular",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 900,
+        "y": 44,
+        "w": 145,
+        "h": 24
+       }
+      },
+      {
+       "sel": "div.sui-opacity-0.sui-invisible",
+       "reasons": [
+        "position:absolute",
+        "opacity<1"
+       ],
+       "z": "auto",
+       "pos": "absolute",
+       "rect": {
+        "x": 16,
+        "y": 148,
+        "w": 32,
+        "h": 32
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {
+      "cover": 10,
+      "scale-down": 18
+     },
+     "non_default_position": 0,
+     "examples": [
+      {
+       "sel": "img.sui-object-cover.sui-w-full",
+       "rect": {
+        "x": 1152,
+        "y": 1271,
+        "w": 80,
+        "h": 70
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img.sui-object-cover.sui-aspect-square",
+       "rect": {
+        "x": 32,
+        "y": 2475,
+        "w": 280,
+        "h": 280
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img.sui-object-cover.sui-aspect-square",
+       "rect": {
+        "x": 344,
+        "y": 2475,
+        "w": 280,
+        "h": 280
+       },
+       "fit": "cover"
+      }
+     ]
+    },
+    "frameworks": {
+     "detected": [
+      "React"
+     ],
+     "signals": {
+      "React": [
+       "dom/global",
+       "script:react"
+      ]
+     }
+    },
+    "botWall": {
+     "vendors": [
+      "akamai"
+     ],
+     "signals": [
+      "header"
+     ],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 94,
+     "total_bytes": 5261280,
+     "total_mb": 5.02,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 12756
+  },
+  {
+   "id": "etsy",
+   "url": "https://www.etsy.com/",
+   "status": "BOTWALL",
+   "reason": null,
+   "http_status": 403,
+   "data": {
+    "url": "https://www.etsy.com/",
+    "title": "etsy.com",
+    "elements_scanned": 9,
+    "icons": {
+     "inline_svg": {
+      "count": 0,
+      "icon_sized": 0,
+      "examples": []
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 0,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 0,
+      "observe": 0
+     }
+    },
+    "stacking": {
+     "region_roots": 0,
+     "region_elements": 0,
+     "creators": 0,
+     "by_reason": {},
+     "by_position": {
+      "static": 0,
+      "relative": 0,
+      "absolute": 0,
+      "fixed": 0,
+      "sticky": 0
+     },
+     "z_index_max": null,
+     "z_index_values": {},
+     "examples": []
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [
+      "datadome"
+     ],
+     "signals": [
+      "dom",
+      "header"
+     ],
+     "http_status": 403,
+     "is_challenge": true
+    },
+    "bundles": {
+     "count": 3,
+     "total_bytes": 564934,
+     "total_mb": 0.54,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 3970
+  },
+  {
+   "id": "nike",
+   "url": "https://www.nike.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://www.nike.com/",
+    "title": "Nike. Just Do It. Nike.com",
+    "elements_scanned": 4056,
+    "icons": {
+     "inline_svg": {
+      "count": 122,
+      "icon_sized": 22,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 48,
+         "y": 6,
+         "w": 24,
+         "h": 24
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 96,
+         "y": 6,
+         "w": 24,
+         "h": 24
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 1094,
+         "y": 6,
+         "w": 12,
+         "h": 24
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 86,
+      "examples": [
+       {
+        "sel": "use",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        },
+        "href": "#LocationPin"
+       },
+       {
+        "sel": "use",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        },
+        "href": "#LocationPin"
+       },
+       {
+        "sel": "use",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        },
+        "href": "#LocationPin"
+       }
+      ]
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 12,
+      "examples": [
+       {
+        "sel": "button.vjs-play-control.vjs-control",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       },
+       {
+        "sel": "button.nrvp-mute-control.nrvp-control",
+        "rect": {
+         "x": 24,
+         "y": 795,
+         "w": 24,
+         "h": 24
+        }
+       },
+       {
+        "sel": "button.nrvp-control.nrvp-captions",
+        "rect": {
+         "x": 1232,
+         "y": 795,
+         "w": 24,
+         "h": 24
+        }
+       }
+      ]
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 30,
+      "families": {
+       "VideoJS": 30
+      },
+      "examples": [
+       {
+        "sel": "span.vjs-icon-placeholder",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        },
+        "via": "::before",
+        "family": "VideoJS"
+       },
+       {
+        "sel": "div.vjs-volume-level",
+        "rect": {
+         "x": 34,
+         "y": 779,
+         "w": 4,
+         "h": 0
+        },
+        "via": "::before",
+        "family": "VideoJS"
+       },
+       {
+        "sel": "div.vjs-play-progress.vjs-slider-bar",
+        "rect": {
+         "x": 68,
+         "y": 805,
+         "w": 283,
+         "h": 4
+        },
+        "via": "::before",
+        "family": "VideoJS"
+       }
+      ]
+     }
+    },
+    "lazy": {
+     "img_total": 96,
+     "native_loading_lazy_img": 91,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 1,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 35,
+      "observe": 128
+     }
+    },
+    "stacking": {
+     "region_roots": 558,
+     "region_elements": 2535,
+     "creators": 386,
+     "by_reason": {
+      "position:fixed": 3,
+      "position:absolute": 215,
+      "positioned+z-index": 30,
+      "transform": 63,
+      "position:relative": 100,
+      "opacity<1": 80,
+      "flex/grid-item+z-index": 2,
+      "backdrop-filter": 15
+     },
+     "by_position": {
+      "static": 2217,
+      "relative": 100,
+      "absolute": 215,
+      "fixed": 3,
+      "sticky": 0
+     },
+     "z_index_max": 100,
+     "z_index_values": {
+      "1": 10,
+      "2": 19,
+      "3": 2,
+      "10": 2,
+      "20": 1,
+      "100": 1
+     },
+     "examples": [
+      {
+       "sel": "nav.no-peekaboo.pre-l-header-container",
+       "reasons": [
+        "position:fixed"
+       ],
+       "z": "3",
+       "pos": "fixed",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 96
+       }
+      },
+      {
+       "sel": "a.nav-css-1iigv7v",
+       "reasons": [
+        "position:absolute",
+        "positioned+z-index",
+        "transform"
+       ],
+       "z": "10",
+       "pos": "absolute",
+       "rect": {
+        "x": -15531,
+        "y": 5,
+        "w": 155,
+        "h": 26
+       }
+      },
+      {
+       "sel": "a.nav-css-1iigv7v",
+       "reasons": [
+        "position:absolute",
+        "positioned+z-index",
+        "transform"
+       ],
+       "z": "10",
+       "pos": "absolute",
+       "rect": {
+        "x": -15263,
+        "y": 5,
+        "w": 153,
+        "h": 26
+       }
+      },
+      {
+       "sel": "div.nav-css-1j2tzxk",
+       "reasons": [
+        "position:relative",
+        "positioned+z-index"
+       ],
+       "z": "3",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 36
+       }
+      },
+      {
+       "sel": "li.link-item.nav-css-bsejbh",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 975,
+        "y": 0,
+        "w": 93,
+        "h": 36
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {
+      "cover": 64,
+      "contain": 1
+     },
+     "non_default_position": 0,
+     "examples": [
+      {
+       "sel": "img._32IPZERI._3jm9Bm_E",
+       "rect": {
+        "x": 0,
+        "y": 96,
+        "w": 1280,
+        "h": 124
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img._32IPZERI._3jm9Bm_E",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img._32IPZERI._3jm9Bm_E",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       },
+       "fit": "cover"
+      }
+     ]
+    },
+    "frameworks": {
+     "detected": [
+      "React",
+      "Next.js"
+     ],
+     "signals": {
+      "React": [
+       "dom/global",
+       "script:react"
+      ],
+      "Next.js": [
+       "__NEXT_DATA__/_next",
+       "script:/_next/"
+      ]
+     }
+    },
+    "botWall": {
+     "vendors": [
+      "akamai"
+     ],
+     "signals": [
+      "header"
+     ],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 117,
+     "total_bytes": 7327590,
+     "total_mb": 6.99,
+     "over_1mb_count": 1,
+     "over_1mb": [
+      {
+       "url": "https://nikeconsumerservices.my.site.com/ESWWebEnglishUSGuest1712823616920/webruntime/view/49c4a2b1484a4017631afd717149b162/prod/en-US/home_view",
+       "mb": 1.64
+      }
+     ]
+    }
+   },
+   "ms": 11085
+  },
+  {
+   "id": "tiktok",
+   "url": "https://www.tiktok.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://www.tiktok.com/",
+    "title": "TikTok - Make Your Day",
+    "elements_scanned": 296,
+    "icons": {
+     "inline_svg": {
+      "count": 8,
+      "icon_sized": 3,
+      "examples": [
+       {
+        "sel": "svg#svg-sprite-container",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 1209,
+         "y": 717,
+         "w": 24,
+         "h": 24
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 862,
+         "y": 718,
+         "w": 22,
+         "h": 22
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 0,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 0,
+      "observe": 0
+     }
+    },
+    "stacking": {
+     "region_roots": 3,
+     "region_elements": 30,
+     "creators": 10,
+     "by_reason": {
+      "position:fixed": 1,
+      "position:absolute": 2,
+      "positioned+z-index": 3,
+      "position:relative": 7
+     },
+     "by_position": {
+      "static": 20,
+      "relative": 7,
+      "absolute": 2,
+      "fixed": 1,
+      "sticky": 0
+     },
+     "z_index_max": 99999,
+     "z_index_values": {
+      "1": 1,
+      "3000": 1,
+      "99999": 1,
+      "-1": 1
+     },
+     "examples": [
+      {
+       "sel": "div#app-header",
+       "reasons": [
+        "position:fixed"
+       ],
+       "z": "3000",
+       "pos": "fixed",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "button.e3ajq9v0.css-1pnybuk-7937d88b--Button-7937d88b--StyledButton",
+       "reasons": [
+        "position:absolute",
+        "positioned+z-index"
+       ],
+       "z": "99999",
+       "pos": "absolute",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "a.css-8zqku6-7937d88b--StyledLinkLogo.e9dpctf0",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "div.css-d4voy2-7937d88b--DivHeaderCenterContainer.ehs3vh70",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "div.css-6v2cgm-7937d88b--DivSearchFormContainer.e17qpoe50",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 113,
+     "total_bytes": 3106233,
+     "total_mb": 2.96,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 9228
+  },
+  {
+   "id": "pinterest",
+   "url": "https://www.pinterest.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://www.pinterest.com/",
+    "title": "Pinterest",
+    "elements_scanned": 710,
+    "icons": {
+     "inline_svg": {
+      "count": 18,
+      "icon_sized": 15,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 28,
+         "y": 30,
+         "w": 98,
+         "h": 18
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 330,
+         "y": 32,
+         "w": 16,
+         "h": 16
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 652,
+         "y": 175,
+         "w": 24,
+         "h": 24
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 2,
+      "svg": 0,
+      "examples": [
+       {
+        "sel": "g",
+        "rect": {
+         "x": 49,
+         "y": 31,
+         "w": 77,
+         "h": 15
+        },
+        "mask": "url(\"#mask0_3863_439699\")"
+       },
+       {
+        "sel": "g",
+        "rect": {
+         "x": 776,
+         "y": 3448,
+         "w": 20,
+         "h": 20
+        },
+        "mask": "url(\"#mask0_99_4234\")"
+       }
+      ]
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 5,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 4,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 57,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 2,
+      "observe": 6
+     }
+    },
+    "stacking": {
+     "region_roots": 2,
+     "region_elements": 82,
+     "creators": 13,
+     "by_reason": {
+      "position:absolute": 5,
+      "position:fixed": 1,
+      "clip-path": 5,
+      "mask": 1,
+      "position:relative": 5
+     },
+     "by_position": {
+      "static": 71,
+      "relative": 5,
+      "absolute": 5,
+      "fixed": 1,
+      "sticky": 0
+     },
+     "z_index_max": 671,
+     "z_index_values": {
+      "671": 1
+     },
+     "examples": [
+      {
+       "sel": "div.ADXRXN.R6_ngo",
+       "reasons": [
+        "position:absolute"
+       ],
+       "z": "auto",
+       "pos": "absolute",
+       "rect": {
+        "x": -4,
+        "y": -4,
+        "w": 1,
+        "h": 1
+       }
+      },
+      {
+       "sel": "div.ADXRXN.bnBtRO",
+       "reasons": [
+        "position:fixed"
+       ],
+       "z": "671",
+       "pos": "fixed",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 80
+       }
+      },
+      {
+       "sel": "g",
+       "reasons": [
+        "clip-path"
+       ],
+       "z": "auto",
+       "pos": "static",
+       "rect": {
+        "x": 28,
+        "y": 30,
+        "w": 98,
+        "h": 18
+       }
+      },
+      {
+       "sel": "g",
+       "reasons": [
+        "mask"
+       ],
+       "z": "auto",
+       "pos": "static",
+       "rect": {
+        "x": 49,
+        "y": 31,
+        "w": 77,
+        "h": 15
+       }
+      },
+      {
+       "sel": "div.ADXRXN.gEQpi5",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 314,
+        "y": 16,
+        "w": 387,
+        "h": 48
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {
+      "cover": 4,
+      "contain": 1
+     },
+     "non_default_position": 0,
+     "examples": [
+      {
+       "sel": "img.iFOUS5.ALBw9Q",
+       "rect": {
+        "x": 688,
+        "y": 80,
+        "w": 522,
+        "h": 450
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img.iFOUS5.ALBw9Q",
+       "rect": {
+        "x": 58,
+        "y": 926,
+        "w": 550,
+        "h": 550
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img.iFOUS5.ALBw9Q",
+       "rect": {
+        "x": 685,
+        "y": 1576,
+        "w": 550,
+        "h": 550
+       },
+       "fit": "cover"
+      }
+     ]
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 78,
+     "total_bytes": 3074875,
+     "total_mb": 2.93,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 9986
+  },
+  {
+   "id": "spotify",
+   "url": "https://www.spotify.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://open.spotify.com/",
+    "title": "Spotify - Web Player: Music for everyone",
+    "elements_scanned": 2968,
+    "icons": {
+     "inline_svg": {
+      "count": 91,
+      "icon_sized": 83,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 28,
+         "y": 16,
+         "w": 32,
+         "h": 32
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 100,
+         "y": 20,
+         "w": 24,
+         "h": 24
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 156,
+         "y": 20,
+         "w": 24,
+         "h": 24
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 1,
+      "examples": [
+       {
+        "sel": "img",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        },
+        "src": "https://cdn.cookielaw.org/logos/static/powered_by_logo.svg"
+       }
+      ]
+     },
+     "css_bg_svg": {
+      "count": 2,
+      "examples": [
+       {
+        "sel": "div.dqwQhIudKoD98eWJzj5E",
+        "rect": {
+         "x": 310,
+         "y": 64,
+         "w": 922,
+         "h": 256
+        }
+       },
+       {
+        "sel": "button#close-pc-btn-handler",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       }
+      ]
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 56,
+     "native_loading_lazy_img": 54,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 5,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 13,
+      "observe": 68
+     }
+    },
+    "stacking": {
+     "region_roots": 42,
+     "region_elements": 2811,
+     "creators": 881,
+     "by_reason": {
+      "position:relative": 537,
+      "positioned+z-index": 322,
+      "transform": 84,
+      "will-change": 148,
+      "container-type": 13,
+      "contain": 9,
+      "position:absolute": 292,
+      "opacity<1": 148,
+      "isolation:isolate": 9,
+      "position:sticky": 1,
+      "clip-path": 61,
+      "flex/grid-item+z-index": 13,
+      "translate/rotate/scale": 10,
+      "position:fixed": 2
+     },
+     "by_position": {
+      "static": 1979,
+      "relative": 537,
+      "absolute": 292,
+      "fixed": 2,
+      "sticky": 1
+     },
+     "z_index_max": 2147483647,
+     "z_index_values": {
+      "0": 116,
+      "1": 129,
+      "2": 65,
+      "3": 11,
+      "4": 5,
+      "5": 3,
+      "6": 2,
+      "7": 1,
+      "100": 2,
+      "9999": 1,
+      "2147483646": 1,
+      "2147483647": 1,
+      "-1": 1
+     },
+     "examples": [
+      {
+       "sel": "div.xRfCAvFW8cYm6at0bIng.bbnZAUOa3NQHoL3gTSPA",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 8,
+        "y": 64,
+        "w": 294,
+        "h": 654
+       }
+      },
+      {
+       "sel": "header.zp4sQi3GjiBGds7TWwKc",
+       "reasons": [
+        "position:relative",
+        "positioned+z-index"
+       ],
+       "z": "1",
+       "pos": "relative",
+       "rect": {
+        "x": 8,
+        "y": 64,
+        "w": 294,
+        "h": 59
+       }
+      },
+      {
+       "sel": "svg",
+       "reasons": [
+        "transform"
+       ],
+       "z": "auto",
+       "pos": "static",
+       "rect": {
+        "x": 261,
+        "y": 90,
+        "w": 16,
+        "h": 16
+       }
+      },
+      {
+       "sel": "div.FVAgdnoi1N7NbxKG9ooA.WiwnWsPYbL585uUaVMp3",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 8,
+        "y": 139,
+        "w": 294,
+        "h": 332
+       }
+      },
+      {
+       "sel": "div",
+       "reasons": [
+        "position:relative",
+        "positioned+z-index",
+        "will-change"
+       ],
+       "z": "0",
+       "pos": "relative",
+       "rect": {
+        "x": 8,
+        "y": 139,
+        "w": 294,
+        "h": 332
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {
+      "cover": 54
+     },
+     "non_default_position": 0,
+     "examples": [
+      {
+       "sel": "img.FwkSRC8nZx0oFeY2HJi2.LwhcudULaBeptw_Hhqql",
+       "rect": {
+        "x": 350,
+        "y": 136,
+        "w": 154,
+        "h": 154
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img.FwkSRC8nZx0oFeY2HJi2.LwhcudULaBeptw_Hhqql",
+       "rect": {
+        "x": 528,
+        "y": 136,
+        "w": 154,
+        "h": 154
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img.FwkSRC8nZx0oFeY2HJi2.LwhcudULaBeptw_Hhqql",
+       "rect": {
+        "x": 705,
+        "y": 136,
+        "w": 154,
+        "h": 154
+       },
+       "fit": "cover"
+      }
+     ]
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 64,
+     "total_bytes": 3145943,
+     "total_mb": 3,
+     "over_1mb_count": 1,
+     "over_1mb": [
+      {
+       "url": "https://open.spotifycdn.com/cdn/build/web-player/web-player.336cb440.js",
+       "mb": 1.01
+      }
+     ]
+    }
+   },
+   "ms": 8521
+  },
+  {
+   "id": "twitch",
+   "url": "https://www.twitch.tv/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://www.twitch.tv/",
+    "title": "Twitch",
+    "elements_scanned": 1699,
+    "icons": {
+     "inline_svg": {
+      "count": 37,
+      "icon_sized": 22,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": -9943,
+         "y": 163,
+         "w": 20,
+         "h": 20
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 4,
+         "y": 177,
+         "w": 40,
+         "h": 40
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 1,
+      "svg": 1,
+      "examples": [
+       {
+        "sel": "div.Layout-sc-1xcs6mc-0.hype-train-icon",
+        "rect": {
+         "x": 50,
+         "y": 634,
+         "w": 15,
+         "h": 15
+        },
+        "mask": "url(\"https://static-cdn.jtvnw.net/c3-vg/leftnav/hype-train.svg\")"
+       }
+      ]
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 45,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 13,
+      "observe": 13
+     }
+    },
+    "stacking": {
+     "region_roots": 118,
+     "region_elements": 604,
+     "creators": 162,
+     "by_reason": {
+      "flex/grid-item+z-index": 1,
+      "position:absolute": 57,
+      "position:relative": 84,
+      "will-change": 1,
+      "positioned+z-index": 13,
+      "transform": 15,
+      "mask": 1,
+      "opacity<1": 6
+     },
+     "by_position": {
+      "static": 463,
+      "relative": 84,
+      "absolute": 57,
+      "fixed": 0,
+      "sticky": 0
+     },
+     "z_index_max": 5010,
+     "z_index_values": {
+      "0": 1,
+      "1": 2,
+      "10": 6,
+      "1000": 1,
+      "4000": 1,
+      "5010": 1,
+      "-1": 2
+     },
+     "examples": [
+      {
+       "sel": "nav.InjectLayout-sc-1i43xsx-0.UAQUH",
+       "reasons": [
+        "flex/grid-item+z-index"
+       ],
+       "z": "1000",
+       "pos": "static",
+       "rect": {
+        "x": 0,
+        "y": 172,
+        "w": 1280,
+        "h": 50
+       }
+      },
+      {
+       "sel": "div.Layout-sc-1xcs6mc-0.bPLZqY",
+       "reasons": [
+        "position:absolute"
+       ],
+       "z": "auto",
+       "pos": "absolute",
+       "rect": {
+        "x": -10000,
+        "y": 172,
+        "w": 1,
+        "h": 1
+       }
+      },
+      {
+       "sel": "button.ScCoreButton-sc-ocjdkq-0.jRpFkX",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": -10000,
+        "y": 157,
+        "w": 1,
+        "h": 32
+       }
+      },
+      {
+       "sel": "g",
+       "reasons": [
+        "will-change"
+       ],
+       "z": "auto",
+       "pos": "static",
+       "rect": {
+        "x": 24,
+        "y": 191,
+        "w": 7,
+        "h": 6
+       }
+      },
+      {
+       "sel": "div.Layout-sc-1xcs6mc-0.iSRtqO",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 195,
+        "y": 181,
+        "w": 32,
+        "h": 32
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {
+      "cover": 18,
+      "contain": 1
+     },
+     "non_default_position": 0,
+     "examples": [
+      {
+       "sel": "img.InjectLayout-sc-1i43xsx-0.ceDQrC",
+       "rect": {
+        "x": 12,
+        "y": 281,
+        "w": 30,
+        "h": 30
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img.InjectLayout-sc-1i43xsx-0.ceDQrC",
+       "rect": {
+        "x": 12,
+        "y": 374,
+        "w": 30,
+        "h": 30
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img.InjectLayout-sc-1i43xsx-0.ceDQrC",
+       "rect": {
+        "x": 12,
+        "y": 419,
+        "w": 30,
+        "h": 30
+       },
+       "fit": "cover"
+      }
+     ]
+    },
+    "frameworks": {
+     "detected": [
+      "React"
+     ],
+     "signals": {
+      "React": [
+       "dom/global"
+      ]
+     }
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 148,
+     "total_bytes": 2568823,
+     "total_mb": 2.45,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 10831
+  },
+  {
+   "id": "zillow",
+   "url": "https://www.zillow.com/",
+   "status": "BOTWALL",
+   "reason": null,
+   "http_status": 403,
+   "data": {
+    "url": "https://www.zillow.com/",
+    "title": "Access to this page has been denied",
+    "elements_scanned": 22,
+    "icons": {
+     "inline_svg": {
+      "count": 0,
+      "icon_sized": 0,
+      "examples": []
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 1,
+      "examples": [
+       {
+        "sel": "img.px-captcha-logo",
+        "rect": {
+         "x": 548,
+         "y": 230,
+         "w": 183,
+         "h": 124
+        },
+        "src": "https://www.zillowstatic.com/s3/pfs/static/z-logo-default.svg"
+       }
+      ]
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 1,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 0,
+      "observe": 0
+     }
+    },
+    "stacking": {
+     "region_roots": 0,
+     "region_elements": 0,
+     "creators": 0,
+     "by_reason": {},
+     "by_position": {
+      "static": 0,
+      "relative": 0,
+      "absolute": 0,
+      "fixed": 0,
+      "sticky": 0
+     },
+     "z_index_max": null,
+     "z_index_values": {},
+     "examples": []
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [
+      "perimeterx"
+     ],
+     "signals": [
+      "dom"
+     ],
+     "http_status": 403,
+     "is_challenge": true
+    },
+    "bundles": {
+     "count": 9,
+     "total_bytes": 630634,
+     "total_mb": 0.6,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 9836
+  },
+  {
+   "id": "expedia",
+   "url": "https://www.expedia.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 429,
+   "data": {
+    "url": "https://www.expedia.com/",
+    "title": "Bot or Not?",
+    "elements_scanned": 62,
+    "icons": {
+     "inline_svg": {
+      "count": 0,
+      "icon_sized": 0,
+      "examples": []
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 1,
+      "examples": [
+       {
+        "sel": "img",
+        "rect": {
+         "x": 571,
+         "y": 22,
+         "w": 126,
+         "h": 28
+        },
+        "src": "https://www.expedia.com/_dms/header/logo.svg?locale=en_US&siteid=1"
+       }
+      ]
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 1,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 0,
+      "observe": 0
+     }
+    },
+    "stacking": {
+     "region_roots": 5,
+     "region_elements": 7,
+     "creators": 0,
+     "by_reason": {},
+     "by_position": {
+      "static": 7,
+      "relative": 0,
+      "absolute": 0,
+      "fixed": 0,
+      "sticky": 0
+     },
+     "z_index_max": null,
+     "z_index_values": {},
+     "examples": []
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 429,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 14,
+     "total_bytes": 338470,
+     "total_mb": 0.32,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 5260
+  },
+  {
+   "id": "washingtonpost",
+   "url": "https://www.washingtonpost.com/",
+   "status": "NOT RUN",
+   "reason": "page.goto: net::ERR_HTTP2_PROTOCOL_ERROR at https://www.washingtonpost.com/",
+   "ms": 239
+  },
+  {
+   "id": "imdb",
+   "url": "https://www.imdb.com/",
+   "status": "BOTWALL",
+   "reason": null,
+   "http_status": 403,
+   "data": {
+    "url": "https://www.imdb.com/",
+    "title": "403 Forbidden",
+    "elements_scanned": 6,
+    "icons": {
+     "inline_svg": {
+      "count": 0,
+      "icon_sized": 0,
+      "examples": []
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 0,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 0,
+      "observe": 0
+     }
+    },
+    "stacking": {
+     "region_roots": 0,
+     "region_elements": 0,
+     "creators": 0,
+     "by_reason": {},
+     "by_position": {
+      "static": 0,
+      "relative": 0,
+      "absolute": 0,
+      "fixed": 0,
+      "sticky": 0
+     },
+     "z_index_max": null,
+     "z_index_values": {},
+     "examples": []
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 403,
+     "is_challenge": true
+    },
+    "bundles": {
+     "count": 0,
+     "total_bytes": 0,
+     "total_mb": 0,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 2215
+  },
+  {
+   "id": "duckduckgo",
+   "url": "https://duckduckgo.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://duckduckgo.com/",
+    "title": "DuckDuckGo - Protection. Privacy. Peace of mind.",
+    "elements_scanned": 1744,
+    "icons": {
+     "inline_svg": {
+      "count": 146,
+      "icon_sized": 101,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 776,
+         "y": 51,
+         "w": 16,
+         "h": 16
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 872,
+         "y": 51,
+         "w": 16,
+         "h": 16
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 29,
+      "examples": [
+       {
+        "sel": "img",
+        "rect": {
+         "x": 64,
+         "y": 32,
+         "w": 209,
+         "h": 54
+        },
+        "src": "https://duckduckgo.com/static-pages/home-desktop/_next/static/media/logo-horizontal-light.3qzrowso1kqon.svg"
+       },
+       {
+        "sel": "img.desktop-headline-module-scss-module__nJ_X3G__illustration",
+        "rect": {
+         "x": 615,
+         "y": 206,
+         "w": 80,
+         "h": 80
+        },
+        "src": "https://duckduckgo.com/static-pages/home-desktop/_next/static/media/shield-burst-light.1zhpr5kk_0pks.svg"
+       },
+       {
+        "sel": "img.cta-cards-module-scss-module__XCwFQG__icon",
+        "rect": {
+         "x": 444,
+         "y": 354,
+         "w": 96,
+         "h": 96
+        },
+        "src": "https://duckduckgo.com/static-pages/home-desktop/_next/static/media/set-as-default.3yrkl8i2_rdq0.svg"
+       }
+      ]
+     },
+     "css_bg_svg": {
+      "count": 1,
+      "examples": [
+       {
+        "sel": "div.footer-module-scss-module__1lqrta__footerImgContainer",
+        "rect": {
+         "x": 0,
+         "y": 9944,
+         "w": 1280,
+         "h": 500
+        }
+       }
+      ]
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 48,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 1,
+     "picture_el": 19,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 5,
+      "observe": 14
+     }
+    },
+    "stacking": {
+     "region_roots": 67,
+     "region_elements": 243,
+     "creators": 20,
+     "by_reason": {
+      "opacity<1": 3,
+      "position:relative": 10,
+      "position:absolute": 6,
+      "positioned+z-index": 5,
+      "clip-path": 1,
+      "transform": 3,
+      "position:fixed": 1
+     },
+     "by_position": {
+      "static": 226,
+      "relative": 10,
+      "absolute": 6,
+      "fixed": 1,
+      "sticky": 0
+     },
+     "z_index_max": 999,
+     "z_index_values": {
+      "1": 3,
+      "100": 1,
+      "101": 1,
+      "999": 1
+     },
+     "examples": [
+      {
+       "sel": "g",
+       "reasons": [
+        "opacity<1"
+       ],
+       "z": "auto",
+       "pos": "static",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       }
+      },
+      {
+       "sel": "section.search-header-module-scss-module__mATWYa__searchSection.search-header-module-scss-module__mATWYa__headerSection",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 318,
+        "y": 32,
+        "w": 643,
+        "h": 54
+       }
+      },
+      {
+       "sel": "div.duckai-drawer-promotion-module-scss-module__RqBISG__root",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 318,
+        "y": 35,
+        "w": 643,
+        "h": 48
+       }
+      },
+      {
+       "sel": "div.search-toggle-box-module-scss-module__ul1rLa__wrap.inline-ai-search-box-module-scss-module__eJ3y5G__wrap",
+       "reasons": [
+        "position:relative"
+       ],
+       "z": "auto",
+       "pos": "relative",
+       "rect": {
+        "x": 318,
+        "y": 35,
+        "w": 643,
+        "h": 48
+       }
+      },
+      {
+       "sel": "input",
+       "reasons": [
+        "position:absolute",
+        "opacity<1"
+       ],
+       "z": "auto",
+       "pos": "absolute",
+       "rect": {
+        "x": 318,
+        "y": 35,
+        "w": 4,
+        "h": 4
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [
+      "React",
+      "Next.js"
+     ],
+     "signals": {
+      "React": [
+       "dom/global"
+      ],
+      "Next.js": [
+       "__NEXT_DATA__/_next",
+       "script:/_next/"
+      ]
+     }
+    },
+    "botWall": {
+     "vendors": [],
+     "signals": [],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 27,
+     "total_bytes": 451544,
+     "total_mb": 0.43,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 3323
+  },
+  {
+   "id": "adobe",
+   "url": "https://www.adobe.com/",
+   "status": "BOTWALL",
+   "reason": null,
+   "http_status": 403,
+   "data": {
+    "url": "https://www.adobe.com/",
+    "title": "Access Denied",
+    "elements_scanned": 7,
+    "icons": {
+     "inline_svg": {
+      "count": 0,
+      "icon_sized": 0,
+      "examples": []
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 0,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 0,
+      "observe": 0
+     }
+    },
+    "stacking": {
+     "region_roots": 0,
+     "region_elements": 0,
+     "creators": 0,
+     "by_reason": {},
+     "by_position": {
+      "static": 0,
+      "relative": 0,
+      "absolute": 0,
+      "fixed": 0,
+      "sticky": 0
+     },
+     "z_index_max": null,
+     "z_index_values": {},
+     "examples": []
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [
+      "akamai"
+     ],
+     "signals": [
+      "dom",
+      "header"
+     ],
+     "http_status": 403,
+     "is_challenge": true
+    },
+    "bundles": {
+     "count": 0,
+     "total_bytes": 0,
+     "total_mb": 0,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 4506
+  },
+  {
+   "id": "discord",
+   "url": "https://discord.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 200,
+   "data": {
+    "url": "https://discord.com/",
+    "title": "Discord - Group Chat That’s All Fun & Games",
+    "elements_scanned": 1196,
+    "icons": {
+     "inline_svg": {
+      "count": 31,
+      "icon_sized": 7,
+      "examples": [
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 432,
+         "y": 52,
+         "w": 16,
+         "h": 16
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        }
+       },
+       {
+        "sel": "svg",
+        "rect": {
+         "x": 532,
+         "y": 52,
+         "w": 16,
+         "h": 16
+        }
+       }
+      ]
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 110,
+      "examples": [
+       {
+        "sel": "img.nav_brand_main-logo",
+        "rect": {
+         "x": 40,
+         "y": 40,
+         "w": 146,
+         "h": 40
+        },
+        "src": "https://cdn.prod.website-files.com/6257adef93867e50d84d30e2/66e90ab9506850e8a5dd48e3_Discrod_MainLogo.svg"
+       },
+       {
+        "sel": "img.nav_brand_main-black-icon",
+        "rect": {
+         "x": 32,
+         "y": 48,
+         "w": 146,
+         "h": 24
+        },
+        "src": "https://cdn.prod.website-files.com/6257adef93867e50d84d30e2/67ed8194f41d7d8eade32c90_Logo.svg"
+       },
+       {
+        "sel": "img.nav_brand_main-logo-2",
+        "rect": {
+         "x": 40,
+         "y": 40,
+         "w": 146,
+         "h": 40
+        },
+        "src": "https://cdn.prod.website-files.com/6257adef93867e50d84d30e2/67ece93be2524af5cf14dc1c_Logo-black-bg.svg"
+       }
+      ]
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 3,
+      "svg": 0,
+      "examples": [
+       {
+        "sel": "path",
+        "rect": {
+         "x": 0,
+         "y": 0,
+         "w": 0,
+         "h": 0
+        },
+        "mask": "url(\"#__lottie_element_21\")"
+       },
+       {
+        "sel": "path",
+        "rect": {
+         "x": 284,
+         "y": 3762,
+         "w": 0,
+         "h": 0
+        },
+        "mask": "url(\"#__lottie_element_8\")"
+       },
+       {
+        "sel": "path",
+        "rect": {
+         "x": 284,
+         "y": 3762,
+         "w": 0,
+         "h": 0
+        },
+        "mask": "url(\"#__lottie_element_15\")"
+       }
+      ]
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 171,
+     "native_loading_lazy_img": 152,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 1,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 17,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 2,
+      "observe": 2
+     }
+    },
+    "stacking": {
+     "region_roots": 375,
+     "region_elements": 637,
+     "creators": 212,
+     "by_reason": {
+      "position:absolute": 98,
+      "positioned+z-index": 61,
+      "position:relative": 83,
+      "opacity<1": 48,
+      "transform": 11,
+      "position:fixed": 4,
+      "will-change": 5,
+      "backdrop-filter": 2,
+      "filter": 8
+     },
+     "by_position": {
+      "static": 452,
+      "relative": 83,
+      "absolute": 98,
+      "fixed": 4,
+      "sticky": 0
+     },
+     "z_index_max": 900,
+     "z_index_values": {
+      "1": 20,
+      "2": 21,
+      "3": 4,
+      "4": 3,
+      "5": 1,
+      "6": 1,
+      "7": 1,
+      "10": 1,
+      "50": 2,
+      "99": 1,
+      "100": 3,
+      "900": 4
+     },
+     "examples": [
+      {
+       "sel": "header.nav",
+       "reasons": [
+        "position:absolute",
+        "positioned+z-index"
+       ],
+       "z": "99",
+       "pos": "absolute",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 80
+       }
+      },
+      {
+       "sel": "div.nav_padding",
+       "reasons": [
+        "position:relative",
+        "positioned+z-index"
+       ],
+       "z": "2",
+       "pos": "relative",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 80
+       }
+      },
+      {
+       "sel": "a.skip-link.w-inline-block",
+       "reasons": [
+        "position:absolute",
+        "positioned+z-index",
+        "opacity<1",
+        "transform"
+       ],
+       "z": "100",
+       "pos": "absolute",
+       "rect": {
+        "x": 12,
+        "y": -8,
+        "w": 203,
+        "h": 48
+       }
+      },
+      {
+       "sel": "a.nav_brand.w-nav-brand",
+       "reasons": [
+        "position:fixed"
+       ],
+       "z": "auto",
+       "pos": "fixed",
+       "rect": {
+        "x": 40,
+        "y": 40,
+        "w": 146,
+        "h": 40
+       }
+      },
+      {
+       "sel": "img.nav_brand_main-logo",
+       "reasons": [
+        "position:absolute",
+        "will-change"
+       ],
+       "z": "auto",
+       "pos": "absolute",
+       "rect": {
+        "x": 40,
+        "y": 40,
+        "w": 146,
+        "h": 40
+       }
+      }
+     ]
+    },
+    "objectFit": {
+     "by_value": {
+      "cover": 7
+     },
+     "non_default_position": 0,
+     "examples": [
+      {
+       "sel": "video#c00f7e63-fd3f-ca6d-eda3-a89c4777b6ba-video",
+       "rect": {
+        "x": 60,
+        "y": 917,
+        "w": 701,
+        "h": 561
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "img.section3-image.image",
+       "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+       },
+       "fit": "cover"
+      },
+      {
+       "sel": "video#c00f7e63-fd3f-ca6d-eda3-a89c4777b6de-video",
+       "rect": {
+        "x": 503,
+        "y": 1741,
+        "w": 717,
+        "h": 574
+       },
+       "fit": "cover"
+      }
+     ]
+    },
+    "frameworks": {
+     "detected": [
+      "Webflow",
+      "jQuery"
+     ],
+     "signals": {
+      "Webflow": [
+       "data-wf"
+      ],
+      "jQuery": [
+       "window.jQuery"
+      ]
+     }
+    },
+    "botWall": {
+     "vendors": [
+      "cloudflare"
+     ],
+     "signals": [
+      "header"
+     ],
+     "http_status": 200,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 27,
+     "total_bytes": 10072527,
+     "total_mb": 9.61,
+     "over_1mb_count": 2,
+     "over_1mb": [
+      {
+       "url": "https://discord.com/w/assets/037fd0eb0d1e6f664d0d8c7618740ab66e45b1f2/index-consolidated.js",
+       "mb": 1.5
+      },
+      {
+       "url": "https://cdn.prod.website-files.com/6257adef93867e50d84d30e2/js/discord-2022.schunk.4d7dc2267f36bfa3.js",
+       "mb": 5.62
+      }
+     ]
+    }
+   },
+   "ms": 12205
+  },
+  {
+   "id": "wayfair",
+   "url": "https://www.wayfair.com/",
+   "status": "OK",
+   "reason": null,
+   "http_status": 429,
+   "data": {
+    "url": "https://www.wayfair.com/",
+    "title": "Access to this page has been denied",
+    "elements_scanned": 23,
+    "icons": {
+     "inline_svg": {
+      "count": 0,
+      "icon_sized": 0,
+      "examples": []
+     },
+     "svg_use_local": {
+      "count": 0,
+      "examples": []
+     },
+     "svg_use_external": {
+      "count": 0,
+      "examples": []
+     },
+     "img_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "css_bg_svg": {
+      "count": 0,
+      "examples": []
+     },
+     "mask_image_url": {
+      "count": 0,
+      "svg": 0,
+      "examples": []
+     },
+     "mask_image_gradient": {
+      "count": 0,
+      "examples": []
+     },
+     "icon_font_pua": {
+      "count": 0,
+      "families": {},
+      "examples": []
+     }
+    },
+    "lazy": {
+     "img_total": 0,
+     "native_loading_lazy_img": 0,
+     "native_loading_lazy_iframe": 0,
+     "data_src_attr": 0,
+     "lazy_class": 0,
+     "placeholder_src": 0,
+     "srcset_img": 0,
+     "picture_el": 0,
+     "decoding_async": 0,
+     "fetchpriority_high": 0,
+     "content_visibility_auto": 0,
+     "noscript_img": 0,
+     "intersection_observer": {
+      "ctor": 0,
+      "observe": 0
+     }
+    },
+    "stacking": {
+     "region_roots": 1,
+     "region_elements": 1,
+     "creators": 0,
+     "by_reason": {},
+     "by_position": {
+      "static": 1,
+      "relative": 0,
+      "absolute": 0,
+      "fixed": 0,
+      "sticky": 0
+     },
+     "z_index_max": null,
+     "z_index_values": {},
+     "examples": []
+    },
+    "objectFit": {
+     "by_value": {},
+     "non_default_position": 0,
+     "examples": []
+    },
+    "frameworks": {
+     "detected": [],
+     "signals": {}
+    },
+    "botWall": {
+     "vendors": [
+      "perimeterx",
+      "cloudflare"
+     ],
+     "signals": [
+      "dom",
+      "header"
+     ],
+     "http_status": 429,
+     "is_challenge": false
+    },
+    "bundles": {
+     "count": 10,
+     "total_bytes": 767832,
+     "total_mb": 0.73,
+     "over_1mb_count": 0,
+     "over_1mb": []
+    }
+   },
+   "ms": 10424
+  }
+ ]
+}
