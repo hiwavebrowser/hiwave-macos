@@ -384,10 +384,132 @@ fn svg_background_commands(
     let mut commands = vec![rustkit_layout::DisplayCommand::PushClip(rect)];
     for tile in tiles {
         // A standalone SVG document: `currentColor` is the initial black.
-        commands.extend(svg.render(tile.x, tile.y, tile.width, tile.height));
+        commands.extend(
+            svg.render(tile.x, tile.y, tile.width, tile.height)
+                .into_iter()
+                .filter_map(|command| clip_vector_command(command, rect)),
+        );
     }
     commands.push(rustkit_layout::DisplayCommand::PopClip);
     commands
+}
+
+/// `command` cut to `clip` (both in document space); `None` when none of it
+/// is inside.
+///
+/// The renderer clips quads against its clip stack, not polygons or
+/// circles, so the `PushClip` around a vector background held nothing in:
+/// a box showing one icon of a sprite sheet painted the whole sheet, and
+/// carried every command of it into every frame (wikipedia.org's portal:
+/// 21 boxes, 1.67 million commands). Fills are cut exactly; a stroke is
+/// kept whole when any of it may be inside.
+fn clip_vector_command(
+    command: rustkit_layout::DisplayCommand,
+    clip: rustkit_layout::Rect,
+) -> Option<rustkit_layout::DisplayCommand> {
+    use rustkit_layout::DisplayCommand as C;
+
+    let (left, top, right, bottom) = (clip.x, clip.y, clip.x + clip.width, clip.y + clip.height);
+    let misses = |x0: f32, y0: f32, x1: f32, y1: f32| x1 <= left || x0 >= right || y1 <= top || y0 >= bottom;
+    let within = |x0: f32, y0: f32, x1: f32, y1: f32| x0 >= left && x1 <= right && y0 >= top && y1 <= bottom;
+    let bounds = |points: &[(f32, f32)]| {
+        points.iter().fold(
+            (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY),
+            |(x0, y0, x1, y1), &(x, y)| (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+        )
+    };
+    let cut = |points: Vec<(f32, f32)>, color| {
+        let (x0, y0, x1, y1) = bounds(&points);
+        if points.is_empty() || misses(x0, y0, x1, y1) {
+            return None;
+        }
+        let points = if within(x0, y0, x1, y1) { points } else { clip_polygon(points, clip) };
+        (points.len() >= 3).then_some(C::FillPolygon { points, color })
+    };
+    match command {
+        C::FillPolygon { points, color } => cut(points, color),
+        C::FillRect { rect, color } => {
+            let (x0, y0) = (rect.x.max(left), rect.y.max(top));
+            let (x1, y1) = ((rect.x + rect.width).min(right), (rect.y + rect.height).min(bottom));
+            (x1 > x0 && y1 > y0).then(|| C::FillRect {
+                rect: rustkit_layout::Rect::new(x0, y0, x1 - x0, y1 - y0),
+                color,
+            })
+        }
+        C::FillCircle { cx, cy, radius, color } => {
+            let (x0, y0, x1, y1) = (cx - radius, cy - radius, cx + radius, cy + radius);
+            if misses(x0, y0, x1, y1) {
+                None
+            } else if within(x0, y0, x1, y1) {
+                Some(C::FillCircle { cx, cy, radius, color })
+            } else {
+                const SIDES: usize = 48;
+                let points = (0..SIDES)
+                    .map(|i| {
+                        let angle = i as f32 / SIDES as f32 * std::f32::consts::TAU;
+                        (cx + radius * angle.cos(), cy + radius * angle.sin())
+                    })
+                    .collect();
+                cut(points, color)
+            }
+        }
+        C::StrokeCircle { cx, cy, radius, width, .. } => {
+            let reach = radius + width * 0.5;
+            (!misses(cx - reach, cy - reach, cx + reach, cy + reach)).then_some(command)
+        }
+        C::FillEllipse { rect, .. } => {
+            (!misses(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height)).then_some(command)
+        }
+        C::StrokeRect { rect, width, .. } => {
+            let half = width * 0.5;
+            (!misses(rect.x - half, rect.y - half, rect.x + rect.width + half, rect.y + rect.height + half))
+                .then_some(command)
+        }
+        C::Line { x1, y1, x2, y2, width, .. } => {
+            let half = width * 0.5;
+            (!misses(x1.min(x2) - half, y1.min(y2) - half, x1.max(x2) + half, y1.max(y2) + half)).then_some(command)
+        }
+        C::Polyline { ref points, width, .. } | C::StrokePolygon { ref points, width, .. } => {
+            let (x0, y0, x1, y1) = bounds(points);
+            let half = width * 0.5;
+            (!points.is_empty() && !misses(x0 - half, y0 - half, x1 + half, y1 + half)).then_some(command)
+        }
+        other => Some(other),
+    }
+}
+
+/// The part of the polygon `points` inside `clip` (Sutherland-Hodgman, one
+/// pass per edge of the rectangle). A convex polygon stays convex.
+fn clip_polygon(points: Vec<(f32, f32)>, clip: rustkit_layout::Rect) -> Vec<(f32, f32)> {
+    let edges = [
+        (true, clip.x, true),
+        (true, clip.x + clip.width, false),
+        (false, clip.y, true),
+        (false, clip.y + clip.height, false),
+    ];
+    let mut output = points;
+    for (vertical, bound, keep_from) in edges {
+        let input = std::mem::take(&mut output);
+        let Some(&last) = input.last() else {
+            break;
+        };
+        let along = |p: (f32, f32)| if vertical { p.0 } else { p.1 };
+        let inside = |p: (f32, f32)| if keep_from { along(p) >= bound } else { along(p) <= bound };
+        let mut previous = last;
+        for &current in &input {
+            if inside(current) != inside(previous) {
+                let t = (bound - along(previous)) / (along(current) - along(previous));
+                let x = previous.0 + (current.0 - previous.0) * t;
+                let y = previous.1 + (current.1 - previous.1) * t;
+                output.push(if vertical { (bound, y) } else { (x, bound) });
+            }
+            if inside(current) {
+                output.push(current);
+            }
+            previous = current;
+        }
+    }
+    output
 }
 
 /// `svg` as an image document (`<img>`, CSS background): with no `viewBox`,
