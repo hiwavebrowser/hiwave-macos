@@ -1272,6 +1272,10 @@ pub struct SvgGroup {
     pub style: SvgStyle,
     /// ID.
     pub id: Option<String>,
+    /// A nested `<svg>`'s viewport `(x, y, width, height)` in its parent's
+    /// user units, when its content is clipped to it (`overflow` other
+    /// than `visible`).
+    pub viewport: Option<(f32, f32, f32, f32)>,
 }
 
 impl SvgGroup {
@@ -1286,8 +1290,27 @@ impl SvgGroup {
         let mut style = self.style.clone();
         style.inherit_from(parent_style);
 
+        // An upright viewport clips what it holds; under a rotation or a
+        // skew it is no rectangle here, and its content is left whole.
+        let clip = self.viewport.filter(|_| parent_transform.b == 0.0 && parent_transform.c == 0.0).map(
+            |(x, y, width, height)| {
+                let (x0, y0) = parent_transform.apply(x, y);
+                let (x1, y1) = parent_transform.apply(x + width, y + height);
+                Rect::new(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+            },
+        );
+        let Some(clip) = clip else {
+            for child in &self.children {
+                child.render(&transform, &style, commands);
+            }
+            return;
+        };
+        let mut content = Vec::new();
         for child in &self.children {
-            child.render(&transform, &style, commands);
+            child.render(&transform, &style, &mut content);
+        }
+        for command in content {
+            rustkit_layout::clip_vector_command(command, clip, commands);
         }
     }
 }
@@ -2748,7 +2771,7 @@ fn parse_svg_content(
                 // §8.2): their children are read with the container's style
                 // as the inherited one and drawn under its transform. A
                 // nested `<svg>` is a viewport at (x, y) with its viewBox
-                // mapped in; it is not clipped to it yet. Until 2026-10-08
+                // mapped in, and clips to it. Until 2026-10-08
                 // both tags were dropped and their children read as the
                 // root's: no group transform, no inherited fill, and every
                 // icon of a sprite sheet at its viewBox's own units.
@@ -2763,6 +2786,7 @@ fn parse_svg_content(
                         .map_or_else(Transform2D::identity, |t| Transform2D::parse(t));
                     let mut inner_viewport = viewport;
                     let mut renders = true;
+                    let mut clip = None;
                     if tag_name == "svg" {
                         let length = |name: &str, full: f32, default: f32| {
                             attrs
@@ -2772,7 +2796,14 @@ fn parse_svg_content(
                         };
                         let width = length("width", viewport.0, viewport.0);
                         let height = length("height", viewport.1, viewport.1);
-                        transform = transform.translate(length("x", viewport.0, 0.0), length("y", viewport.1, 0.0));
+                        let (x, y) = (length("x", viewport.0, 0.0), length("y", viewport.1, 0.0));
+                        // `overflow: hidden` by the UA sheet; a viewport
+                        // under its own `transform` is left unclipped.
+                        let visible = attrs.get("overflow").is_some_and(|v| v.trim().eq_ignore_ascii_case("visible"));
+                        if !visible && !attrs.contains_key("transform") {
+                            clip = Some((x, y, width, height));
+                        }
+                        transform = transform.translate(x, y);
                         inner_viewport = (width, height);
                         if let Some(vb) = attrs.get("viewbox").and_then(|v| ViewBox::parse(v)) {
                             let par = attrs.get("preserveaspectratio").map(String::as_str);
@@ -2791,6 +2822,7 @@ fn parse_svg_content(
                         container.transform = transform;
                         container.style = style;
                         container.id = attrs.get("id").cloned();
+                        container.viewport = clip;
                         group.children.push(SvgElement::Group(container));
                     }
                     pos = after_close;
