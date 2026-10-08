@@ -141,6 +141,31 @@ fn a_text_run_does_not_apply_the_opacity_it_copied_from_its_parent() {
     assert_eq!(pushes, 1, "{:?}", list.commands);
 }
 
+/// Keyframe animations are parsed and not run. The fade-in idiom, `opacity:
+/// 0; animation: appear 1s forwards`, would leave its content invisible for
+/// good, so a box that names an animation paints at full opacity (as every
+/// box did before opacity was painted at all) until animations run.
+#[test]
+fn a_box_with_a_keyframe_animation_is_not_faded_while_animations_do_not_run() {
+    for opacity in [0.0, 0.5] {
+        let mut root = page(opacity);
+        root.children[0].style.animation_name = "appear".into();
+        let list = DisplayList::build(&root);
+        assert_eq!(fills(&list, red()), 1, "at {opacity}: {:?}", list.commands);
+        assert_eq!(fade_of(&list, red()), 1.0, "at {opacity}");
+    }
+}
+
+#[test]
+fn animation_name_none_is_no_animation() {
+    for name in ["", "none", "NONE"] {
+        let mut root = page(0.0);
+        root.children[0].style.animation_name = name.into();
+        let list = DisplayList::build(&root);
+        assert_eq!(fills(&list, red()), 0, "animation-name {name:?}");
+    }
+}
+
 #[test]
 fn the_scope_opens_before_the_boxs_clip_and_closes_after_it() {
     // Pushes and pops stay nested.
