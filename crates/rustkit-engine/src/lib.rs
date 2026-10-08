@@ -5138,8 +5138,8 @@ impl Engine {
             fonts: self.web_font_count(),
         };
 
-        // RUSTKIT_TREE_REUSE=1: the images relayout takes the box tree the
-        // sheets relayout built instead of walking the DOM again.
+        // Unless RUSTKIT_TREE_REUSE=0: the images relayout takes the box tree
+        // the sheets relayout built instead of walking the DOM again.
         let traced = self.style_trace.borrow().is_some();
         if !traced && !self.building_view_has_edits() {
             if let Some(tree) = self.reused_tree(&memo_key) {
@@ -28701,11 +28701,12 @@ fn incremental_restyle_mode() -> RestyleMode {
     })
 }
 
-/// `RUSTKIT_TREE_REUSE`: off by default. `1` or `on` makes the images
-/// relayout take the box tree the sheets relayout built (with image sizes
-/// resolved again) instead of walking the DOM a second time; `verify` walks
-/// anyway and counts the boxes that differ from that tree. It rides the
-/// style memo, so it does nothing under `RUSTKIT_INCREMENTAL_RESTYLE=0`.
+/// `RUSTKIT_TREE_REUSE`: on by default, so the images relayout takes the
+/// box tree the sheets relayout built (with image sizes resolved again)
+/// instead of walking the DOM a second time. `0` or `off` turns it off;
+/// `verify` walks anyway and counts the boxes that differ from that tree. It
+/// rides the style memo, so it does nothing under
+/// `RUSTKIT_INCREMENTAL_RESTYLE=0`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TreeReuse {
     Off,
@@ -28715,9 +28716,9 @@ enum TreeReuse {
 
 fn tree_reuse_from(value: Option<&str>) -> TreeReuse {
     match value {
-        Some("1") | Some("on") => TreeReuse::Reuse,
+        Some("0") | Some("off") => TreeReuse::Off,
         Some("verify") => TreeReuse::Verify,
-        _ => TreeReuse::Off,
+        _ => TreeReuse::Reuse,
     }
 }
 
@@ -30516,9 +30517,11 @@ mod incremental_restyle_tests {
     }
 
     #[test]
-    fn tree_reuse_reads_its_flag() {
-        assert_eq!(tree_reuse_from(None), TreeReuse::Off);
+    fn tree_reuse_is_the_default_and_0_or_off_turns_it_off() {
+        assert_eq!(tree_reuse_from(None), TreeReuse::Reuse);
+        assert_eq!(tree_reuse_from(Some("")), TreeReuse::Reuse);
         assert_eq!(tree_reuse_from(Some("0")), TreeReuse::Off);
+        assert_eq!(tree_reuse_from(Some("off")), TreeReuse::Off);
         assert_eq!(tree_reuse_from(Some("1")), TreeReuse::Reuse);
         assert_eq!(tree_reuse_from(Some("on")), TreeReuse::Reuse);
         assert_eq!(tree_reuse_from(Some("verify")), TreeReuse::Verify);
