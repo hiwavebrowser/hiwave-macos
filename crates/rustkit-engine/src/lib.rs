@@ -647,6 +647,13 @@ pub struct EngineConfig {
     pub script_network_rounds: u32,
     /// Optional replay proxy URL (test-only, for deterministic HAR replay).
     pub replay_proxy: Option<Url>,
+    /// Stop a page script that is still running when `script_budget_ms` is
+    /// spent, at its next call into the host (any DOM or window API), with
+    /// an error the script cannot catch. Off by default: the board is
+    /// measured with scripts that run to their end, and a script cut at
+    /// the budget is a different frame. The live app turns it on, where a
+    /// script that does not end is a window that does not answer.
+    pub interrupt_scripts_at_budget: bool,
 }
 
 impl Default for EngineConfig {
@@ -664,6 +671,7 @@ impl Default for EngineConfig {
             script_network_enabled: true,
             script_network_rounds: 8,
             replay_proxy: None,
+            interrupt_scripts_at_budget: false,
         }
     }
 }
@@ -27786,6 +27794,72 @@ again();
 
         // Tab close / destroy_view stays completely responsive
         engine.destroy_view(view).expect("destroy_view / tab close must succeed promptly");
+    }
+
+    // ebay.com, 2026-10-08: a module graph ran inside nested
+    // `Array.prototype.forEach` callbacks for more than two minutes. No loop
+    // statement, so the loop-iteration limit never counted it, and the
+    // budget was only read between scripts: the live app stopped answering.
+    const SPIN: &str = "var spun = 0; var row = new Array(1500).fill(0);
+row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 0) { document.title; } }); });";
+
+    #[test]
+    fn a_script_still_running_at_the_budget_is_stopped_at_its_next_host_call() {
+        let page = format!(
+            "<html><head><script>{SPIN}</script><script>var after = true;</script></head><body><p>alive</p></body></html>"
+        );
+        let port = serve(vec![("/", "text/html", page)]);
+        let config = EngineConfig {
+            script_budget_ms: 200,
+            interrupt_scripts_at_budget: true,
+            ..EngineConfig::default()
+        };
+        let (mut engine, view, took) = load_timed(config, port);
+        assert!(took < std::time::Duration::from_secs(3), "the script ran on past its budget: {took:?}");
+        let log = engine.script_log(view).unwrap();
+        assert_eq!(log[0].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+        assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+        // The page is still a page: script runs in it again once the load is over.
+        assert_eq!(engine.execute_script(view, "typeof after").unwrap(), r#"String("undefined")"#);
+        assert_eq!(engine.execute_script(view, "document.title = 'x'; spun > 0").unwrap(), "Boolean(true)");
+    }
+
+    #[test]
+    fn a_module_still_running_at_the_budget_is_stopped_at_its_next_host_call() {
+        let page = format!(
+            "<html><head><script type=\"module\">{SPIN}</script><script type=\"module\">window.after = true;</script></head><body><p>alive</p></body></html>"
+        );
+        let port = serve(vec![("/", "text/html", page)]);
+        let config = EngineConfig {
+            script_budget_ms: 200,
+            interrupt_scripts_at_budget: true,
+            ..EngineConfig::default()
+        };
+        let (mut engine, view, took) = load_timed(config, port);
+        assert!(took < std::time::Duration::from_secs(3), "the module ran on past its budget: {took:?}");
+        let log = engine.script_log(view).unwrap();
+        assert_eq!(log[0].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+        assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+        assert_eq!(engine.execute_script(view, "typeof after").unwrap(), r#"String("undefined")"#);
+        assert_eq!(engine.execute_script(view, "document.title = 'x'; 1 + 1").unwrap(), "Number(2.0)");
+    }
+
+    // The board's frames are taken with scripts that run to their end.
+    #[test]
+    fn without_the_switch_a_script_runs_on_past_the_budget() {
+        let page = "<html><head><script>var spun = 0; var row = new Array(700).fill(0);
+row.forEach(function () { row.forEach(function () { spun++; document.title; }); });</script>
+<script>var after = true;</script></head><body><p>alive</p></body></html>";
+        let port = serve(vec![("/", "text/html", page.to_string())]);
+        let config = EngineConfig {
+            script_budget_ms: 1,
+            ..EngineConfig::default()
+        };
+        assert!(!config.interrupt_scripts_at_budget);
+        let (mut engine, view, _) = load_timed(config, port);
+        let log = engine.script_log(view).unwrap();
+        assert_eq!(log[0].outcome, ScriptOutcome::Ran, "{log:#?}");
+        assert_eq!(engine.execute_script(view, "spun").unwrap(), "Number(490000.0)");
     }
 
     #[test]
