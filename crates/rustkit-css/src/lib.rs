@@ -2962,6 +2962,7 @@ pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 pub mod media;
 pub use media::media_query_list_matches;
 
+pub mod content;
 pub mod selector_escape;
 pub use selector_escape::{css_ident, encode_selector_escapes};
 
