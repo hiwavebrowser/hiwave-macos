@@ -173,6 +173,8 @@ mod script_net_engine_tests;
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
+#[cfg(test)]
+mod content_string_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -9394,15 +9396,12 @@ impl Engine {
                 let v = value.trim();
                 if v == "none" || v == "normal" {
                     style.content = None;
-                } else if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
-                    // Quoted string content
-                    style.content = Some(v[1..v.len() - 1].to_string());
-                } else if v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2 {
-                    // Single-quoted string content
-                    style.content = Some(v[1..v.len() - 1].to_string());
-                } else if v == "''" || v == "\"\"" {
-                    // Empty string
-                    style.content = Some(String::new());
+                } else if let Some(text) = rustkit_css::content::content_string(v) {
+                    // The value's strings, escapes resolved and joined. It
+                    // was the text between the first and last quote as
+                    // written, so an icon font's `"\f007"` was five
+                    // characters of the fallback font.
+                    style.content = Some(text);
                 }
             }
             // ==================== Background clip (for gradient text) ====================
