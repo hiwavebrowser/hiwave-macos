@@ -3492,6 +3492,46 @@ mod tests {
     }
 
     #[test]
+    fn test_group_transform_and_fill_reach_its_children() {
+        // A <g> is a container: its transform and its presentation
+        // attributes are its children's, at any depth, and end with it.
+        let doc = SvgDocument::parse(
+            r##"<svg width="100" height="100">
+                <g transform="translate(50,10)" fill="#ff0000">
+                    <g transform="scale(2)"><rect x="1" y="1" width="3" height="3"/></g>
+                </g>
+                <rect width="2" height="2" fill="#0000ff"/>
+            </svg>"##,
+        )
+        .expect("parse");
+        let rects = fill_rects(&doc.render(0.0, 0.0, 100.0, 100.0));
+        assert_eq!(
+            rects,
+            vec![(52.0, 12.0, 6.0, 6.0, (255, 0, 0)), (0.0, 0.0, 2.0, 2.0, (0, 0, 255))]
+        );
+    }
+
+    #[test]
+    fn test_nested_svg_is_a_viewport() {
+        // A sprite sheet as wikipedia.org's portal ships it: one <svg> per
+        // icon inside the root, each with its own size and viewBox. SVG 2
+        // §8.2: a nested <svg> is a viewport at (x, y) with its viewBox
+        // mapped in. Drawn flat, a 47px icon in a 612-unit viewBox was 612px.
+        let doc = SvgDocument::parse(
+            r##"<svg width="176" height="811" viewBox="0 0 176 811">
+                <svg width="40" height="40" viewBox="-100 -100 200 200"><rect x="-100" y="-100" width="200" height="200" fill="#990000"/></svg>
+                <svg x="10" y="50" width="20" height="10" viewBox="0 0 10 10"><rect width="10" height="10" fill="#006699"/></svg>
+            </svg>"##,
+        )
+        .expect("parse");
+        let rects = fill_rects(&doc.render(0.0, 0.0, 176.0, 811.0));
+        assert_eq!(
+            rects,
+            vec![(0.0, 0.0, 40.0, 40.0, (153, 0, 0)), (15.0, 50.0, 10.0, 10.0, (0, 102, 153))]
+        );
+    }
+
+    #[test]
     fn test_use_instantiates_a_symbol_into_the_use_viewport() {
         // The sprite-sheet idiom (cnn, reddit, shopify, youtube): a <symbol>
         // with its own viewBox, drawn by a <use> that sets x/y/width/height.
