@@ -182,6 +182,8 @@ mod script_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod resize_coalesce_tests;
 #[cfg(all(test, feature = "headless"))]
+mod render_on_change_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -12607,6 +12609,13 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Render the views whose frame would differ from the one they last
+    /// presented. Returns how many were drawn.
+    pub fn render_changed_views(&mut self) -> usize {
+        self.render_all_views();
+        self.views.len()
     }
 
     /// Capture a frame from a view to a PPM file.
