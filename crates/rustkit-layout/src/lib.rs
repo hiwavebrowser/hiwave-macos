@@ -32,6 +32,9 @@ mod flex_item_relayout_tests;
 mod flex_resolve_tests;
 
 #[cfg(test)]
+mod flex_item_min_height_tests;
+
+#[cfg(test)]
 mod min_max_height_unit_tests;
 
 #[cfg(test)]
