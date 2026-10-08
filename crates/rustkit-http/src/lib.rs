@@ -24,6 +24,9 @@ use tokio_rustls::TlsConnector;
 use tracing::{debug, trace, warn};
 use url::Url;
 
+mod addr;
+pub use addr::{is_local_name, is_public_ip, AddressPolicy, Resolve, ResolveFuture, SystemResolver};
+
 /// HTTP client errors.
 #[derive(Error, Debug)]
 pub enum HttpError {
@@ -50,6 +53,12 @@ pub enum HttpError {
 
     #[error("Unsupported scheme: {0}")]
     UnsupportedScheme(String),
+
+    #[error("Address not permitted: {0}")]
+    AddressDenied(String),
+
+    #[error("Response body exceeds {0} bytes")]
+    BodyTooLarge(usize),
 }
 
 /// HTTP response.
@@ -126,22 +135,57 @@ pub fn default_user_agent() -> String {
 /// #355 already removed the second (per-connection) load site.
 #[cfg(not(feature = "native-tls"))]
 fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
-    static ROOTS: std::sync::OnceLock<Arc<tokio_rustls::rustls::RootCertStore>> =
-        std::sync::OnceLock::new();
-    let roots = ROOTS.get_or_init(|| {
+    static ROOTS: RootsCache = std::sync::Mutex::new(None);
+    roots_cached(&ROOTS, || {
         let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs().certs {
+        let loaded = rustls_native_certs::load_native_certs();
+        let mut rejected = 0usize;
+        for cert in loaded.certs {
             // A single unparseable platform cert must not kill the store.
-            let _ = roots.add(cert);
+            if roots.add(cert).is_err() {
+                rejected += 1;
+            }
         }
-        Arc::new(roots)
-    });
-    if roots.is_empty() {
-        return Err(HttpError::TlsError(
-            "no usable platform root certificates".into(),
-        ));
+        let mut diagnostics = String::new();
+        if !loaded.errors.is_empty() || rejected > 0 {
+            diagnostics = format!(
+                "{} load errors, {} rejected certs, accepted {}",
+                loaded.errors.len(),
+                rejected,
+                roots.len()
+            );
+            if let Some(first) = loaded.errors.first() {
+                diagnostics.push_str(&format!(", first error: {first}"));
+            }
+            warn!(target: "rustkit_http::roots", "platform root load: {diagnostics}");
+        }
+        (roots, diagnostics)
+    })
+}
+
+type RootsCache = std::sync::Mutex<Option<Arc<tokio_rustls::rustls::RootCertStore>>>;
+
+fn roots_cached(
+    cache: &RootsCache,
+    load: impl FnOnce() -> (tokio_rustls::rustls::RootCertStore, String),
+) -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
+    let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(roots) = slot.as_ref() {
+        return Ok(roots.clone());
     }
-    Ok(roots.clone())
+    // Only a usable store is cached: a transient platform failure (keychain
+    // busy under load) must not turn every later handshake into an error.
+    let (roots, diagnostics) = load();
+    let roots = Arc::new(roots);
+    if roots.is_empty() {
+        return Err(HttpError::TlsError(if diagnostics.is_empty() {
+            "no usable platform root certificates".into()
+        } else {
+            format!("no usable platform root certificates ({diagnostics})")
+        }));
+    }
+    *slot = Some(roots.clone());
+    Ok(roots)
 }
 
 /// ALPN outcome of a TLS handshake.
@@ -176,8 +220,12 @@ impl Default for ClientConfig2 {
 }
 
 /// HTTP client.
+#[derive(Clone)]
 pub struct Client {
     config: ClientConfig2,
+    address_policy: AddressPolicy,
+    resolver: Arc<dyn Resolve>,
+    max_body: Option<usize>,
     #[cfg(not(feature = "native-tls"))]
     tls_connector: TlsConnector,
     #[cfg(feature = "native-tls")]
@@ -200,6 +248,9 @@ impl Client {
         let tls_connector = tokio_native_tls::TlsConnector::from(native_connector);
         Ok(Self {
             config,
+            address_policy: AddressPolicy::default(),
+            resolver: Arc::new(SystemResolver),
+            max_body: None,
             tls_connector,
         })
     }
@@ -242,6 +293,11 @@ impl Client {
         // caller can refuse mismatches loudly instead of desyncing.
         let roots = platform_roots()?;
 
+        // When multiple crypto providers (e.g. aws-lc-rs from rustkit-http and ring from
+        // reqwest in the workspace) are active, rustls requires an explicit default provider
+        // installed to avoid panicking on ClientConfig::builder().
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let mut tls_config = tokio_rustls::rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
@@ -256,6 +312,9 @@ impl Client {
 
         Ok(Self {
             config,
+            address_policy: AddressPolicy::default(),
+            resolver: Arc::new(SystemResolver),
+            max_body: None,
             tls_connector,
         })
     }
@@ -293,6 +352,38 @@ impl Client {
     /// Create a client builder.
     pub fn builder() -> ClientBuilder {
         ClientBuilder::new()
+    }
+
+    /// The same client restricted to the given resolved-address policy.
+    pub fn with_address_policy(mut self, policy: AddressPolicy) -> Self {
+        self.address_policy = policy;
+        self
+    }
+
+    /// The same client with a different name resolver (tests, DoH later).
+    pub fn with_resolver(mut self, resolver: Arc<dyn Resolve>) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
+    /// The same client, following redirects or not. With `false` a 3xx comes
+    /// back as the response (status, `Location` and all) for the caller to
+    /// vet and follow itself, hop by hop.
+    pub fn with_follow_redirects(mut self, follow: bool) -> Self {
+        self.config.follow_redirects = follow;
+        self
+    }
+
+    /// The same client, refusing any response body (after decoding) larger
+    /// than `max` bytes with [`HttpError::BodyTooLarge`].
+    pub fn with_max_body(mut self, max: usize) -> Self {
+        self.max_body = Some(max);
+        self
+    }
+
+    /// Resolve `host`, vet every address, connect to a vetted one.
+    async fn connect(&self, host: &str, port: u16) -> Result<TcpStream, HttpError> {
+        addr::connect_vetted(&*self.resolver, &self.address_policy, host, port).await
     }
 
     /// Perform a GET request.
@@ -386,9 +477,7 @@ impl Client {
         body: &Option<Bytes>,
     ) -> Result<RawResponse, HttpError> {
         let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(&addr)
-            .await
-            .map_err(|e| HttpError::ConnectionFailed(e.to_string()))?;
+        let stream = self.connect(host, port).await?;
 
         let (tls_stream, negotiated) = self.connect_tls(host, &addr, stream).await?;
 
@@ -443,45 +532,7 @@ impl Client {
             .version(http::Version::HTTP_2);
 
         // Browser-shaped known set, minus h2-illegal connection headers.
-        const ORDERED_H2: &[(&str, Option<&str>)] = &[
-            (
-                "accept",
-                Some(
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,\
-image/avif,image/webp,*/*;q=0.8",
-                ),
-            ),
-            ("accept-language", None),
-            ("accept-encoding", Some(ACCEPT_ENCODING)),
-            ("upgrade-insecure-requests", Some("1")),
-            ("sec-fetch-dest", Some("document")),
-            ("sec-fetch-mode", Some("navigate")),
-            ("sec-fetch-site", Some("none")),
-            ("sec-fetch-user", Some("?1")),
-            ("referer", None),
-            ("cookie", None),
-        ];
-        const H2_ILLEGAL: &[&str] =
-            &["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host"];
-
-        request = request.header("user-agent", &self.config.user_agent);
-        let mut written: Vec<&str> = vec![];
-        for (name, default) in ORDERED_H2 {
-            let value = headers
-                .get(*name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
-                .or_else(|| default.map(str::to_string));
-            if let Some(v) = value {
-                request = request.header(*name, v);
-                written.push(name);
-            }
-        }
-        for (name, value) in headers.iter() {
-            let n = name.as_str();
-            if written.contains(&n) || H2_ILLEGAL.contains(&n) || n == "user-agent" {
-                continue;
-            }
+        for (name, value) in h2_request_headers(&self.config.user_agent, headers) {
             request = request.header(name, value);
         }
 
@@ -513,11 +564,14 @@ image/avif,image/webp,*/*;q=0.8",
         while let Some(chunk) = recv.data().await {
             let chunk = chunk.map_err(|e| HttpError::InvalidResponse(format!("h2 body read: {e}")))?;
             collected.extend_from_slice(&chunk);
+            if self.max_body.is_some_and(|max| collected.len() > max) {
+                return Err(HttpError::BodyTooLarge(self.max_body.unwrap_or(0)));
+            }
             // Flow control: hand the window back or the peer stalls at 64KB.
             let _ = recv.flow_control().release_capacity(chunk.len());
         }
 
-        let body = decode_content_encoding(Bytes::from(collected), &mut response_headers)?;
+        let body = decode_content_encoding_capped(Bytes::from(collected), &mut response_headers, self.max_body)?;
 
         Ok(RawResponse {
             status,
@@ -537,10 +591,7 @@ image/avif,image/webp,*/*;q=0.8",
         headers: &HeaderMap,
         body: &Option<Bytes>,
     ) -> Result<RawResponse, HttpError> {
-        let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(&addr)
-            .await
-            .map_err(|e| HttpError::ConnectionFailed(e.to_string()))?;
+        let stream = self.connect(host, port).await?;
 
         self.send_request(stream, host, method, url, headers, body)
             .await
@@ -583,7 +634,8 @@ image/avif,image/webp,*/*;q=0.8",
         // first, remaining caller headers after, all in canonical casing.
         let mut request = Vec::new();
         writeln!(request, "{} {} HTTP/1.1\r", method, path)?;
-        writeln!(request, "Host: {}\r", host)?;
+        let host_header = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or(host);
+        writeln!(request, "Host: {}\r", host_header)?;
         writeln!(request, "Connection: keep-alive\r")?;
         writeln!(request, "User-Agent: {}\r", self.config.user_agent)?;
 
@@ -637,7 +689,7 @@ image/avif,image/webp,*/*;q=0.8",
 
         // Remaining caller headers, canonical casing, after the known set.
         for (name, value) in headers.iter() {
-            if written.contains(&name.as_str()) {
+            if name.as_str() == "host" || written.contains(&name.as_str()) {
                 continue;
             }
             if let Ok(v) = value.to_str() {
@@ -689,8 +741,8 @@ image/avif,image/webp,*/*;q=0.8",
         }
 
         // Read body
-        let body = read_body(&mut reader, &response_headers).await?;
-        let body = decode_content_encoding(body, &mut response_headers)?;
+        let body = read_body(&mut reader, &response_headers, self.max_body).await?;
+        let body = decode_content_encoding_capped(body, &mut response_headers, self.max_body)?;
 
         trace!(status = %status, body_len = body.len(), "Response received");
 
@@ -802,14 +854,95 @@ fn parse_status_line(line: &str) -> Result<(Version, StatusCode), HttpError> {
 /// can undo.
 const ACCEPT_ENCODING: &str = "gzip, deflate";
 
+/// Connection-specific header fields (RFC 9113 §8.1.2) plus `host`
+/// (carried by `:authority`). Must not appear on an HTTP/2 request.
+fn is_h2_illegal_request_header(name: &str) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "keep-alive"
+            | "proxy-connection"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+    )
+}
+
+/// Header pairs `send_request_h2` writes onto the request, in emission order.
+/// Caller headers that are connection-specific, already emitted, or the
+/// user-agent (set from config) are dropped.
+fn h2_request_headers(user_agent: &str, headers: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
+    const ORDERED_H2: &[(&str, Option<&str>)] = &[
+        (
+            "accept",
+            Some(
+                "text/html,application/xhtml+xml,application/xml;q=0.9,\
+image/avif,image/webp,*/*;q=0.8",
+            ),
+        ),
+        ("accept-language", None),
+        ("accept-encoding", Some(ACCEPT_ENCODING)),
+        ("upgrade-insecure-requests", Some("1")),
+        ("sec-fetch-dest", Some("document")),
+        ("sec-fetch-mode", Some("navigate")),
+        ("sec-fetch-site", Some("none")),
+        ("sec-fetch-user", Some("?1")),
+        ("referer", None),
+        ("cookie", None),
+    ];
+
+    let mut out = Vec::new();
+    out.push((
+        HeaderName::from_static("user-agent"),
+        HeaderValue::from_str(user_agent).unwrap_or_else(|_| HeaderValue::from_static("")),
+    ));
+    let mut written: Vec<&str> = vec![];
+    for (name, default) in ORDERED_H2 {
+        // Same as before the extract: a non-UTF-8 caller value falls through
+        // to the default (or is omitted when there is none).
+        let value = headers
+            .get(*name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .or_else(|| default.map(str::to_string));
+        if let Some(v) = value {
+            out.push((
+                HeaderName::from_static(*name),
+                HeaderValue::from_str(&v).unwrap_or_else(|_| HeaderValue::from_static("")),
+            ));
+            written.push(name);
+        }
+    }
+    for (name, value) in headers.iter() {
+        let n = name.as_str();
+        if written.contains(&n) || is_h2_illegal_request_header(n) || n == "user-agent" {
+            continue;
+        }
+        out.push((name.clone(), value.clone()));
+    }
+    out
+}
+
 /// Undo the response's `Content-Encoding`, so callers always see the
 /// resource's bytes. A decoded body drops `Content-Encoding` and
 /// `Content-Length` (which described the encoded bytes).
 ///
 /// A body cut off mid-stream keeps what decoded, as a truncated chunked
 /// body does. An encoding we never advertised is passed through untouched.
+#[cfg(test)]
 fn decode_content_encoding(body: Bytes, headers: &mut HeaderMap) -> Result<Bytes, HttpError> {
+    decode_content_encoding_capped(body, headers, None)
+}
+
+/// As [`decode_content_encoding`], refusing to inflate past `max` bytes (a
+/// small compressed body must not become an unbounded allocation).
+fn decode_content_encoding_capped(
+    body: Bytes,
+    headers: &mut HeaderMap,
+    max: Option<usize>,
+) -> Result<Bytes, HttpError> {
     use std::io::Read;
+    let limit = max.map_or(u64::MAX, |m| m as u64 + 1);
 
     let Some(encoding) = headers
         .get("content-encoding")
@@ -824,13 +957,13 @@ fn decode_content_encoding(body: Bytes, headers: &mut HeaderMap) -> Result<Bytes
 
     let mut out = Vec::new();
     let result = match encoding.as_str() {
-        "gzip" | "x-gzip" => flate2::read::MultiGzDecoder::new(&body[..]).read_to_end(&mut out),
+        "gzip" | "x-gzip" => flate2::read::MultiGzDecoder::new(&body[..]).take(limit).read_to_end(&mut out),
         // "deflate" is zlib-wrapped per RFC 9110, but some servers send raw
         // deflate; browsers accept both.
-        "deflate" => match flate2::read::ZlibDecoder::new(&body[..]).read_to_end(&mut out) {
+        "deflate" => match flate2::read::ZlibDecoder::new(&body[..]).take(limit).read_to_end(&mut out) {
             Ok(n) => Ok(n),
             Err(_) if out.is_empty() => {
-                flate2::read::DeflateDecoder::new(&body[..]).read_to_end(&mut out)
+                flate2::read::DeflateDecoder::new(&body[..]).take(limit).read_to_end(&mut out)
             }
             Err(e) => Err(e),
         },
@@ -839,6 +972,11 @@ fn decode_content_encoding(body: Bytes, headers: &mut HeaderMap) -> Result<Bytes
             return Ok(body);
         }
     };
+    if let Some(max) = max {
+        if out.len() > max {
+            return Err(HttpError::BodyTooLarge(max));
+        }
+    }
     if let Err(e) = result {
         if out.is_empty() {
             return Err(HttpError::InvalidResponse(format!(
@@ -856,6 +994,7 @@ fn decode_content_encoding(body: Bytes, headers: &mut HeaderMap) -> Result<Bytes
 async fn read_body<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     headers: &HeaderMap,
+    max: Option<usize>,
 ) -> Result<Bytes, HttpError> {
     // Check for Content-Length
     if let Some(len) = headers
@@ -863,6 +1002,11 @@ async fn read_body<R: tokio::io::AsyncBufRead + Unpin>(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<usize>().ok())
     {
+        if let Some(max) = max {
+            if len > max {
+                return Err(HttpError::BodyTooLarge(max));
+            }
+        }
         let mut buf = vec![0u8; len];
         reader.read_exact(&mut buf).await?;
         return Ok(Bytes::from(buf));
@@ -871,19 +1015,30 @@ async fn read_body<R: tokio::io::AsyncBufRead + Unpin>(
     // Check for chunked transfer encoding
     if let Some(te) = headers.get("transfer-encoding").and_then(|v| v.to_str().ok()) {
         if te.to_lowercase().contains("chunked") {
-            return read_chunked_body(reader).await;
+            return read_chunked_body(reader, max).await;
         }
     }
 
     // Read until EOF
     let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).await?;
+    match max {
+        Some(max) => {
+            (&mut *reader).take(max as u64 + 1).read_to_end(&mut buf).await?;
+            if buf.len() > max {
+                return Err(HttpError::BodyTooLarge(max));
+            }
+        }
+        None => {
+            reader.read_to_end(&mut buf).await?;
+        }
+    }
     Ok(Bytes::from(buf))
 }
 
 /// Read chunked transfer encoding body.
 async fn read_chunked_body<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
+    max: Option<usize>,
 ) -> Result<Bytes, HttpError> {
     let mut body = Vec::new();
 
@@ -910,6 +1065,9 @@ async fn read_chunked_body<R: tokio::io::AsyncBufRead + Unpin>(
             break;
         }
 
+        if max.is_some_and(|max| body.len().saturating_add(size) > max) {
+            return Err(HttpError::BodyTooLarge(max.unwrap_or(0)));
+        }
         let mut chunk = Vec::with_capacity(size);
         (&mut *reader).take(size as u64).read_to_end(&mut chunk).await?;
         let complete = chunk.len() == size;
@@ -978,9 +1136,7 @@ impl Client {
         url: &Url,
     ) -> Result<StreamingResponse, HttpError> {
         let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(&addr)
-            .await
-            .map_err(|e| HttpError::ConnectionFailed(e.to_string()))?;
+        let stream = self.connect(host, port).await?;
 
         // Streaming stays HTTP/1.1 in this PR: the streaming reader is a
         // BufRead line/chunk parser. When h2 is negotiated we buffer via the
@@ -1009,10 +1165,7 @@ impl Client {
         port: u16,
         url: &Url,
     ) -> Result<StreamingResponse, HttpError> {
-        let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(&addr)
-            .await
-            .map_err(|e| HttpError::ConnectionFailed(e.to_string()))?;
+        let stream = self.connect(host, port).await?;
 
         self.send_streaming_request(stream, host, url).await
     }
@@ -1128,7 +1281,7 @@ pub mod blocking {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|e| HttpError::IoError(io::Error::new(io::ErrorKind::Other, e)))?;
+                .map_err(|e| HttpError::IoError(io::Error::other(e)))?;
 
             let inner = super::Client::with_config(self.config)?;
 
@@ -1142,6 +1295,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn h2_request_headers_strip_connection_specific_fields() {
+        // RFC 9113 §8.1.2: these are illegal on h2. Before the extract they
+        // lived only inside `send_request_h2`, so a regression could only be
+        // caught by a live h2 negotiation.
+        let mut headers = HeaderMap::new();
+        headers.insert("connection", HeaderValue::from_static("keep-alive"));
+        headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+        headers.insert("proxy-connection", HeaderValue::from_static("close"));
+        headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+        headers.insert("upgrade", HeaderValue::from_static("h2c"));
+        headers.insert("host", HeaderValue::from_static("evil.example"));
+        headers.insert("x-custom", HeaderValue::from_static("ok"));
+        headers.insert("referer", HeaderValue::from_static("https://doc.example/p"));
+
+        let pairs = h2_request_headers("HiWave/test", &headers);
+        let names: Vec<&str> = pairs.iter().map(|(n, _)| n.as_str()).collect();
+
+        for illegal in [
+            "connection",
+            "keep-alive",
+            "proxy-connection",
+            "transfer-encoding",
+            "upgrade",
+            "host",
+        ] {
+            assert!(
+                !names.contains(&illegal),
+                "{illegal} must not appear on an h2 request: {names:?}"
+            );
+            assert!(is_h2_illegal_request_header(illegal));
+        }
+
+        assert_eq!(names[0], "user-agent");
+        assert_eq!(pairs[0].1.to_str().unwrap(), "HiWave/test");
+        assert!(names.contains(&"referer"));
+        assert!(names.contains(&"x-custom"));
+        assert!(names.contains(&"accept-encoding"));
+        assert!(!is_h2_illegal_request_header("referer"));
+        assert!(!is_h2_illegal_request_header("x-custom"));
+    }
+
+    #[test]
     fn test_parse_status_line() {
         let (version, status) = parse_status_line("HTTP/1.1 200 OK\r\n").unwrap();
         assert_eq!(version, Version::HTTP_11);
@@ -1150,6 +1345,56 @@ mod tests {
         let (version, status) = parse_status_line("HTTP/1.0 404 Not Found").unwrap();
         assert_eq!(version, Version::HTTP_10);
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn an_empty_platform_root_load_is_not_cached_for_the_life_of_the_process() {
+        use tokio_rustls::rustls::pki_types::{Der, TrustAnchor};
+        use tokio_rustls::rustls::RootCertStore;
+        let one_anchor = || RootCertStore {
+            roots: vec![TrustAnchor {
+                subject: Der::from_slice(b"subject"),
+                subject_public_key_info: Der::from_slice(b"spki"),
+                name_constraints: None,
+            }],
+        };
+        let cache: RootsCache = std::sync::Mutex::new(None);
+        let mut loads = 0;
+        assert!(
+            roots_cached(&cache, || {
+                loads += 1;
+                (RootCertStore::empty(), String::new())
+            })
+            .is_err(),
+            "an empty load is an error"
+        );
+        let got = roots_cached(&cache, || {
+            loads += 1;
+            (one_anchor(), String::new())
+        });
+        assert!(got.is_ok(), "a later successful load must be used, not the earlier empty one");
+        assert_eq!(loads, 2);
+        assert!(
+            roots_cached(&cache, || {
+                loads += 1;
+                (RootCertStore::empty(), String::new())
+            })
+            .is_ok()
+        );
+        assert_eq!(loads, 2, "a good store is cached and not reloaded");
+    }
+
+    #[test]
+    fn an_empty_platform_root_error_says_why() {
+        use tokio_rustls::rustls::RootCertStore;
+        let cache: RootsCache = std::sync::Mutex::new(None);
+        let err = roots_cached(&cache, || {
+            (RootCertStore::empty(), "2 load errors, first: keychain busy".to_string())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("keychain busy"), "the platform's reason must reach the caller: {err}");
+        assert!(err.contains("no usable platform root certificates"), "{err}");
     }
 
     #[test]
@@ -1191,7 +1436,7 @@ mod tests {
             .build()
             .unwrap();
         let mut reader = BufReader::new(raw);
-        rt.block_on(read_chunked_body(&mut reader))
+        rt.block_on(read_chunked_body(&mut reader, None))
     }
 
     #[test]
@@ -1369,3 +1614,124 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod governed_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Serve `reply` to each connection until the listener is dropped; count accepts.
+    async fn serve(reply: Vec<u8>) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let reply = reply.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = s.read(&mut buf).await;
+                    let _ = s.write_all(&reply).await;
+                    let _ = s.shutdown().await;
+                });
+            }
+        });
+        (port, hits)
+    }
+
+    fn client() -> Client {
+        Client::new().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_public_only_client_never_connects_to_loopback_on_any_site() {
+        let (port, hits) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi".to_vec()).await;
+        let c = client().with_address_policy(AddressPolicy::PublicOnly);
+        for url in [
+            format!("http://127.0.0.1:{port}/"),
+            format!("http://localhost:{port}/"),
+            format!("http://[::1]:{port}/"),
+        ] {
+            let r = c.get(&url).await;
+            assert!(matches!(r, Err(HttpError::AddressDenied(_))), "{url}: {r:?}");
+            let r = c.get_streaming(&url).await;
+            assert!(matches!(r, Err(HttpError::AddressDenied(_))), "streaming {url}");
+        }
+        // https goes through the same connect: refused before the handshake.
+        let r = c.get(&format!("https://127.0.0.1:{port}/")).await;
+        assert!(matches!(r, Err(HttpError::AddressDenied(_))), "https: {r:?}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "a socket was opened");
+    }
+
+    #[tokio::test]
+    async fn the_default_client_still_reaches_loopback() {
+        let (port, hits) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi".to_vec()).await;
+        let r = client().get(&format!("http://127.0.0.1:{port}/")).await.unwrap();
+        assert_eq!(r.text().unwrap(), "hi");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn without_following_a_redirect_comes_back_as_the_response() {
+        let (target_port, target_hits) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi".to_vec()).await;
+        let reply = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/x\r\nContent-Length: 0\r\n\r\n"
+        );
+        let (port, _) = serve(reply.into_bytes()).await;
+        let r = client()
+            .with_follow_redirects(false)
+            .get(&format!("http://127.0.0.1:{port}/"))
+            .await
+            .unwrap();
+        assert_eq!(r.status.as_u16(), 302);
+        assert_eq!(r.header("location"), Some(&format!("http://127.0.0.1:{target_port}/x")[..]));
+        assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_body_cap_refuses_content_length_chunked_eof_and_gzip_bombs() {
+        let small = client().with_max_body(10);
+        let cl = format!("HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{}", "x".repeat(20));
+        let (p, _) = serve(cl.into_bytes()).await;
+        let r = small.get(&format!("http://127.0.0.1:{p}/")).await;
+        assert!(matches!(r, Err(HttpError::BodyTooLarge(10))), "content-length: {r:?}");
+
+        let chunked = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            20,
+            "x".repeat(20)
+        );
+        let (p, _) = serve(chunked.into_bytes()).await;
+        let r = small.get(&format!("http://127.0.0.1:{p}/")).await;
+        assert!(matches!(r, Err(HttpError::BodyTooLarge(10))), "chunked: {r:?}");
+
+        let eof = format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{}", "x".repeat(20));
+        let (p, _) = serve(eof.into_bytes()).await;
+        let r = small.get(&format!("http://127.0.0.1:{p}/")).await;
+        assert!(matches!(r, Err(HttpError::BodyTooLarge(10))), "eof: {r:?}");
+
+        // 1 MiB of zeros gzips to about a kilobyte: small on the wire, large decoded.
+        use flate2::write::GzEncoder;
+        let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&vec![0u8; 1 << 20]).unwrap();
+        let gz = enc.finish().unwrap();
+        let mut reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            gz.len()
+        )
+        .into_bytes();
+        reply.extend_from_slice(&gz);
+        let (p, _) = serve(reply).await;
+        let r = small.get(&format!("http://127.0.0.1:{p}/")).await;
+        assert!(matches!(r, Err(HttpError::BodyTooLarge(10))), "gzip bomb: {r:?}");
+
+        // Under the cap is untouched.
+        let ok = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let (p, _) = serve(ok.as_bytes().to_vec()).await;
+        let r = small.get(&format!("http://127.0.0.1:{p}/")).await.unwrap();
+        assert_eq!(r.text().unwrap(), "hello");
+    }
+}

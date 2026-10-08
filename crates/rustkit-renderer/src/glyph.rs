@@ -56,6 +56,65 @@ impl GlyphKey {
     }
 }
 
+/// Key for a glyph of a SHAPED RUN (`rustkit_layout::GlyphRun`): the face
+/// layout selected and the glyph id it shaped. No character and no family
+/// name: which face draws a character is layout's decision, made once, and
+/// a cache keyed by family name would be keyed by a question, not an answer.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct RunGlyphKey {
+    /// `rustkit_layout::FaceIdentity::id`.
+    pub face: u64,
+    pub glyph_id: u16,
+    pub font_size: u32, // Fixed-point (size * 10), as `GlyphKey`
+    /// As `GlyphKey::subpixel_phase`, and frozen at 0 for the same reason.
+    pub subpixel_phase: u8,
+}
+
+impl RunGlyphKey {
+    /// The size this key's bitmap is rasterized at.
+    pub fn raster_size(&self) -> f32 {
+        self.font_size as f32 / 10.0
+    }
+}
+
+/// Rasterize one glyph of a shaped run: glyph `key.glyph_id` of the face
+/// layout shaped with, at the key's size. `shaped_size` is the size layout
+/// shaped at, which is how the face's font is found. Returns `None` when
+/// the face is not held any more (or on a platform with no face table);
+/// the caller then paints the command through the family-list path.
+///
+/// No CSS family list is resolved here.
+pub fn rasterize_run_glyph(
+    key: &RunGlyphKey,
+    shaped_size: f32,
+) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+    #[cfg(target_os = "macos")]
+    {
+        let font = rustkit_text::macos::face_font(key.face, shaped_size)?;
+        rustkit_text::macos::GlyphRasterizer::for_face(font, key.raster_size())
+            .rasterize_glyph_id(key.glyph_id, 0.0)
+    }
+    #[cfg(windows)]
+    {
+        // DirectWrite faces are size-independent: the face recorded for the
+        // run is drawn at the key's size.
+        let _ = shaped_size;
+        let Some(face) = rustkit_text::face_by_id(key.face) else {
+            // Loud, not silent: layout recorded this id when it shaped the run, so a
+            // miss means the table was bounded out or an id was made up. The caller
+            // still paints the command through the family-list path (no crash).
+            tracing::error!(face = key.face, glyph = key.glyph_id, "shaped run names a face the rasterizer does not hold");
+            return None;
+        };
+        rasterize_face_glyph(face.raw(), key.glyph_id, key.raster_size(), false, true)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (key, shaped_size);
+        None
+    }
+}
+
 /// Number of horizontal subpixel phases a glyph may be rasterized at.
 ///
 /// 4 (quarter-pixel) is the industry default: it is the point where added
@@ -93,6 +152,8 @@ pub struct GlyphCache {
     bind_group: wgpu::BindGroup,
     atlas_size: u32,
     entries: HashMap<GlyphKey, GlyphEntry>,
+    /// Glyphs of shaped runs, in the same atlas as `entries`.
+    run_entries: HashMap<RunGlyphKey, GlyphEntry>,
     next_x: u32,
     next_y: u32,
     row_height: u32,
@@ -244,6 +305,7 @@ impl GlyphCache {
             bind_group,
             atlas_size,
             entries: HashMap::new(),
+            run_entries: HashMap::new(),
             next_x: 1, // Start at 1 to avoid edge artifacts
             next_y: 1,
             row_height: 0,
@@ -557,6 +619,65 @@ impl GlyphCache {
         Some(entry)
     }
 
+    /// Get or rasterize a glyph of a shaped run (see [`RunGlyphKey`]).
+    /// `shaped_size` is the run's size as layout shaped it. `None` when the
+    /// run's face is not available to the rasterizer; nothing is cached
+    /// then, so the caller can paint the command the old way.
+    pub fn get_or_rasterize_run_glyph(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: &RunGlyphKey,
+        shaped_size: f32,
+    ) -> Option<GlyphEntry> {
+        if let Some(entry) = self.run_entries.get(key) {
+            return Some(entry.clone());
+        }
+
+        let (bitmap, glyph_width, glyph_height, advance, bearing_x, bearing_y) =
+            rasterize_run_glyph(key, shaped_size)?;
+        let glyph_width = glyph_width.max(1).min(256);
+        let glyph_height = glyph_height.max(1).min(256);
+
+        let (atlas_x, atlas_y) = self.allocate_space(glyph_width + 2, glyph_height + 2)?;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: atlas_x + 1,
+                    y: atlas_y + 1,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bitmap,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(glyph_width),
+                rows_per_image: Some(glyph_height),
+            },
+            wgpu::Extent3d {
+                width: glyph_width,
+                height: glyph_height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let u0 = (atlas_x + 1) as f32 / self.atlas_size as f32;
+        let v0 = (atlas_y + 1) as f32 / self.atlas_size as f32;
+        let u1 = (atlas_x + 1 + glyph_width) as f32 / self.atlas_size as f32;
+        let v1 = (atlas_y + 1 + glyph_height) as f32 / self.atlas_size as f32;
+
+        // Baseline-relative, as the character entries are.
+        let entry = GlyphEntry {
+            tex_coords: [u0, v0, u1, v1],
+            offset: [bearing_x, -bearing_y],
+            advance,
+        };
+        self.run_entries.insert(key.clone(), entry.clone());
+        Some(entry)
+    }
+
     /// Allocate space in the atlas.
     fn allocate_space(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
         // Check if we need a new row
@@ -570,6 +691,7 @@ impl GlyphCache {
         if self.next_y + height > self.atlas_size {
             tracing::warn!("Glyph atlas full, clearing cache");
             self.entries.clear();
+            self.run_entries.clear();
             self.next_x = 1;
             self.next_y = 1;
             self.row_height = 0;
@@ -587,6 +709,7 @@ impl GlyphCache {
     /// Clear the cache.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.run_entries.clear();
         self.next_x = 1;
         self.next_y = 1;
         self.row_height = 0;
@@ -716,6 +839,58 @@ fn rasterize_glyph_directwrite(
             return None;
         }
 
+        // Whitespace has an advance but no ink.
+        rasterize_face_glyph(&face, glyph_index, font_size, key.codepoint.is_whitespace(), false)
+    }
+}
+
+/// The character path's bitmap for `c`, for tests that compare it with the
+/// run path's.
+#[cfg(all(test, windows))]
+pub(crate) fn rasterize_char_for_test(
+    c: char,
+    family: &str,
+    size: f32,
+    weight: u16,
+) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+    let key = GlyphKey {
+        codepoint: c,
+        font_family: family.to_string(),
+        font_size: (size * 10.0) as u32,
+        font_weight: weight,
+        font_style: 0,
+        subpixel_phase: 0,
+        web_face: 0,
+    };
+    rasterize_glyph_directwrite(&key, size)
+}
+
+/// Rasterize glyph `glyph_index` of `face` at `font_size`, into the contract
+/// `rasterize_glyph_directwrite` documents.
+///
+/// `blank` says the glyph is known to have no ink (whitespace by character):
+/// it returns a 1x1 empty bitmap with the advance. `blank_if_no_ink` makes a
+/// glyph that turns out to have no ink the same (a shaped run names glyphs,
+/// not characters, so a space reaches here as an id): the character path
+/// leaves that case `None`, so its callers skip the glyph.
+#[cfg(windows)]
+fn rasterize_face_glyph(
+    face: &IDWriteFontFace,
+    glyph_index: u16,
+    font_size: f32,
+    blank: bool,
+    blank_if_no_ink: bool,
+) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+    unsafe {
+        let factory: IDWriteFactory =
+            match DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("Failed to create DWrite factory: {:?}", e);
+                    return None;
+                }
+            };
+
         let mut font_metrics = DWRITE_FONT_METRICS::default();
         face.GetMetrics(&mut font_metrics);
         let design_units_per_em = font_metrics.designUnitsPerEm as f32;
@@ -732,9 +907,9 @@ fn rasterize_glyph_directwrite(
         }
         let advance_width = glyph_metrics[0].advanceWidth as f32 * font_size / design_units_per_em;
 
-        // Whitespace has an advance but no ink: a 1x1 empty bitmap keeps the
-        // shared upload path happy and paints nothing.
-        if key.codepoint.is_whitespace() {
+        // A 1x1 empty bitmap keeps the shared upload path happy and paints
+        // nothing.
+        if blank {
             return Some((vec![0u8; 1], 1, 1, advance_width, 0.0, 0.0));
         }
 
@@ -778,7 +953,11 @@ fn rasterize_glyph_directwrite(
                     Ok(b) if non_empty(&b) => (b, true),
                     _ => {
                         release(glyph_run);
-                        return None;
+                        return if blank_if_no_ink {
+                            Some((vec![0u8; 1], 1, 1, advance_width, 0.0, 0.0))
+                        } else {
+                            None
+                        };
                     }
                 },
             };

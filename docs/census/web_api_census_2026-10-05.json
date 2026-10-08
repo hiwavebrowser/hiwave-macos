@@ -1,0 +1,4226 @@
+[
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window",
+    "path": "window",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "self",
+    "path": "self",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "globalThis",
+    "path": "globalThis",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.top",
+    "path": "top",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.parent",
+    "path": "parent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.frames",
+    "path": "frames",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.innerWidth",
+    "path": "innerWidth",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.innerHeight",
+    "path": "innerHeight",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.devicePixelRatio",
+    "path": "devicePixelRatio",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.scrollX/scrollY",
+    "path": "scrollY",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.pageYOffset",
+    "path": "pageYOffset",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.scrollTo",
+    "path": "scrollTo",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.scrollBy",
+    "path": "scrollBy",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.screen",
+    "path": "screen",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.open",
+    "path": "open",
+    "shallow": true,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.alert",
+    "path": "alert",
+    "shallow": true,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.confirm",
+    "path": "confirm",
+    "shallow": true,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.postMessage",
+    "path": "postMessage",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.addEventListener",
+    "path": "addEventListener",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.onerror (property)",
+    "path": "onerror",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.getSelection",
+    "path": "getSelection",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.name",
+    "path": "name",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.origin",
+    "path": "origin",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.isSecureContext",
+    "path": "isSecureContext",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.frameElement",
+    "path": "frameElement",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.visualViewport",
+    "path": "visualViewport",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "atob",
+    "path": "atob",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "btoa",
+    "path": "btoa",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "reportError",
+    "path": "reportError",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "setTimeout",
+    "path": "setTimeout",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "clearTimeout",
+    "path": "clearTimeout",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "setInterval",
+    "path": "setInterval",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "clearInterval",
+    "path": "clearInterval",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "requestAnimationFrame",
+    "path": "requestAnimationFrame",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "cancelAnimationFrame",
+    "path": "cancelAnimationFrame",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "requestIdleCallback",
+    "path": "requestIdleCallback",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "cancelIdleCallback",
+    "path": "cancelIdleCallback",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "queueMicrotask",
+    "path": "queueMicrotask",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "scheduler.postTask",
+    "path": "scheduler.postTask",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Timers & scheduling",
+    "detail": "",
+    "name": "MessageChannel",
+    "path": "MessageChannel",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Promise",
+    "path": "Promise",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Promise.all",
+    "path": "Promise.all",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Promise.allSettled",
+    "path": "Promise.allSettled",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Promise.any",
+    "path": "Promise.any",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Promise.withResolvers",
+    "path": "Promise.withResolvers",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "async/await",
+    "path": "Promise",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Map",
+    "path": "Map",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Set",
+    "path": "Set",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "WeakMap",
+    "path": "WeakMap",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "WeakSet",
+    "path": "WeakSet",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "WeakRef",
+    "path": "WeakRef",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "FinalizationRegistry",
+    "path": "FinalizationRegistry",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Symbol",
+    "path": "Symbol",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Proxy",
+    "path": "Proxy",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Reflect",
+    "path": "Reflect",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "JSON",
+    "path": "JSON",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "BigInt",
+    "path": "BigInt",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "ArrayBuffer",
+    "path": "ArrayBuffer",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Uint8Array",
+    "path": "Uint8Array",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Float64Array",
+    "path": "Float64Array",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "DataView",
+    "path": "DataView",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "SharedArrayBuffer",
+    "path": "SharedArrayBuffer",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Atomics",
+    "path": "Atomics",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Array.prototype.flat",
+    "path": "Array.prototype.flat",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Array.prototype.at",
+    "path": "Array.prototype.at",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Array.prototype.findLast",
+    "path": "Array.prototype.findLast",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Array.prototype.toSorted",
+    "path": "Array.prototype.toSorted",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Array.from",
+    "path": "Array.from",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Object.fromEntries",
+    "path": "Object.fromEntries",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Object.hasOwn",
+    "path": "Object.hasOwn",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Object.groupBy",
+    "path": "Object.groupBy",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "String.prototype.replaceAll",
+    "path": "String.prototype.replaceAll",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "String.prototype.padStart",
+    "path": "String.prototype.padStart",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "String.prototype.normalize",
+    "path": "String.prototype.normalize",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "String.prototype.localeCompare",
+    "path": "String.prototype.localeCompare",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "RegExp named groups",
+    "path": "RegExp",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "RegExp lookbehind",
+    "path": "RegExp",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "RegExp unicode property escapes",
+    "path": "RegExp",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Date",
+    "path": "Date",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Date.prototype.toLocaleDateString",
+    "path": "Date.prototype.toLocaleDateString",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Number.prototype.toLocaleString",
+    "path": "Number.prototype.toLocaleString",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Math",
+    "path": "Math",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "globalThis.eval",
+    "path": "eval",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Function constructor",
+    "path": "Function",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Generators",
+    "path": "Function",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Async iteration (for await)",
+    "path": "Promise",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Optional chaining / nullish",
+    "path": "Object",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Classes with private fields",
+    "path": "Object",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Error.cause",
+    "path": "Error",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "AggregateError",
+    "path": "AggregateError",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "Array.prototype.includes",
+    "path": "Array.prototype.includes",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "JavaScript builtins",
+    "detail": "",
+    "name": "structured string escape (encodeURIComponent)",
+    "path": "encodeURIComponent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl",
+    "path": "Intl",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.DateTimeFormat",
+    "path": "Intl.DateTimeFormat",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.NumberFormat",
+    "path": "Intl.NumberFormat",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.Collator",
+    "path": "Intl.Collator",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.PluralRules",
+    "path": "Intl.PluralRules",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.RelativeTimeFormat",
+    "path": "Intl.RelativeTimeFormat",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.ListFormat",
+    "path": "Intl.ListFormat",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.Segmenter",
+    "path": "Intl.Segmenter",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.Locale",
+    "path": "Intl.Locale",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.getCanonicalLocales",
+    "path": "Intl.getCanonicalLocales",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document",
+    "path": "document",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.documentElement",
+    "path": "document.documentElement",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.head",
+    "path": "document.head",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.body",
+    "path": "document.body",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.title",
+    "path": "document.title",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.readyState",
+    "path": "document.readyState",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.URL",
+    "path": "document.URL",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.location",
+    "path": "document.location",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.referrer",
+    "path": "document.referrer",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "result check failed (got false)",
+    "name": "document.domain",
+    "path": "document.domain",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.cookie",
+    "path": "document.cookie",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.characterSet",
+    "path": "document.characterSet",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.compatMode",
+    "path": "document.compatMode",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.contentType",
+    "path": "document.contentType",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.doctype",
+    "path": "document.doctype",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.visibilityState",
+    "path": "document.visibilityState",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.hidden",
+    "path": "document.hidden",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.hasFocus",
+    "path": "document.hasFocus",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.activeElement",
+    "path": "document.activeElement",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.currentScript",
+    "path": "document.currentScript",
+    "shallow": true,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.scripts",
+    "path": "document.scripts",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.forms",
+    "path": "document.forms",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.images",
+    "path": "document.images",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.links",
+    "path": "document.links",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.getElementById",
+    "path": "document.getElementById",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.getElementsByClassName",
+    "path": "document.getElementsByClassName",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.getElementsByTagName",
+    "path": "document.getElementsByTagName",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.getElementsByName",
+    "path": "document.getElementsByName",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.querySelector",
+    "path": "document.querySelector",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.querySelectorAll",
+    "path": "document.querySelectorAll",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.createElement",
+    "path": "document.createElement",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.createElementNS",
+    "path": "document.createElementNS",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.createTextNode",
+    "path": "document.createTextNode",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.createComment",
+    "path": "document.createComment",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.createDocumentFragment",
+    "path": "document.createDocumentFragment",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.createEvent",
+    "path": "document.createEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.createRange",
+    "path": "document.createRange",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.createTreeWalker",
+    "path": "document.createTreeWalker",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.createNodeIterator",
+    "path": "document.createNodeIterator",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.importNode",
+    "path": "document.importNode",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.adoptNode",
+    "path": "document.adoptNode",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.implementation.createHTMLDocument",
+    "path": "document.implementation.createHTMLDocument",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.elementFromPoint",
+    "path": "document.elementFromPoint",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.write",
+    "path": "document.write",
+    "shallow": true,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.execCommand",
+    "path": "document.execCommand",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.fonts",
+    "path": "document.fonts",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.styleSheets",
+    "path": "document.styleSheets",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.adoptedStyleSheets",
+    "path": "document.adoptedStyleSheets",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.startViewTransition",
+    "path": "document.startViewTransition",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.fullscreenElement",
+    "path": "document.exitFullscreen",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "DOMContentLoaded listener",
+    "path": "document.addEventListener",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "Node (interface)",
+    "path": "Node",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "appendChild",
+    "path": "@div.appendChild",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "insertBefore",
+    "path": "@div.insertBefore",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "removeChild",
+    "path": "@div.removeChild",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "replaceChild",
+    "path": "@div.replaceChild",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "cloneNode(deep)",
+    "path": "@div.cloneNode",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "contains",
+    "path": "@div.contains",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "hasChildNodes",
+    "path": "@div.hasChildNodes",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "isEqualNode",
+    "path": "@div.isEqualNode",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "isSameNode",
+    "path": "@div.isSameNode",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "compareDocumentPosition",
+    "path": "@div.compareDocumentPosition",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "normalize",
+    "path": "@div.normalize",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "getRootNode",
+    "path": "@div.getRootNode",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "textContent",
+    "path": "@div.textContent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "nodeName/nodeType/nodeValue",
+    "path": "document.body.nodeName",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "parentNode/parentElement",
+    "path": "document.body.parentNode",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "childNodes/firstChild/lastChild",
+    "path": "document.body.childNodes",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "nextSibling/previousSibling",
+    "path": "document.body.firstChild",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "isConnected",
+    "path": "document.body.isConnected",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "ownerDocument",
+    "path": "document.body.ownerDocument",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "NodeList.prototype.forEach",
+    "path": "@nodelist.forEach",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "NodeList iterable (for-of)",
+    "path": "NodeList",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "HTMLCollection.item/namedItem",
+    "path": "HTMLCollection",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "Text.splitText",
+    "path": "@text.splitText",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "",
+    "name": "CharacterData.appendData",
+    "path": "@text.appendData",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "threw: TypeError: Illegal constructor",
+    "name": "DocumentFragment (ctor)",
+    "path": "DocumentFragment",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "threw: TypeError: Illegal constructor",
+    "name": "Text (ctor)",
+    "path": "Text",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Node & tree mutation",
+    "detail": "threw: TypeError: Illegal constructor",
+    "name": "Comment (ctor)",
+    "path": "Comment",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "Element (interface)",
+    "path": "Element",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "HTMLElement (interface)",
+    "path": "HTMLElement",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "id/className/tagName",
+    "path": "@div.tagName",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "getAttribute/setAttribute",
+    "path": "@div.setAttribute",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "removeAttribute/hasAttribute",
+    "path": "@div.removeAttribute",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "toggleAttribute",
+    "path": "@div.toggleAttribute",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "getAttributeNames",
+    "path": "@div.getAttributeNames",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "attributes (NamedNodeMap)",
+    "path": "@div.attributes",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "classList.add/remove/contains",
+    "path": "@div.classList",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "classList.toggle/replace",
+    "path": "@div.classList.toggle",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "dataset",
+    "path": "@div.dataset",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "style (inline CSSStyleDeclaration)",
+    "path": "@div.style",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "style.cssText",
+    "path": "@div.style",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "innerHTML (get/set)",
+    "path": "@div.innerHTML",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "outerHTML",
+    "path": "@div.outerHTML",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "innerText",
+    "path": "@div.innerText",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "insertAdjacentHTML",
+    "path": "@div.insertAdjacentHTML",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "insertAdjacentElement",
+    "path": "@div.insertAdjacentElement",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "insertAdjacentText",
+    "path": "@div.insertAdjacentText",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "append/prepend",
+    "path": "@div.append",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "before/after",
+    "path": "@div.before",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "remove",
+    "path": "@div.remove",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "replaceWith",
+    "path": "@div.replaceWith",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "replaceChildren",
+    "path": "@div.replaceChildren",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "children/childElementCount",
+    "path": "@div.children",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "matches",
+    "path": "@div.matches",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "closest",
+    "path": "@div.closest",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "Element.querySelector (scoped)",
+    "path": "@div.querySelector",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "Element.querySelectorAll (scoped)",
+    "path": "@div.querySelectorAll",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "result check failed (got false)",
+    "name": "querySelector complex selector",
+    "path": "document.querySelector",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Element",
+    "detail": "result check failed (got false)",
+    "name": "querySelector attribute selector",
+    "path": "document.querySelector",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "getElementsByClassName (Element)",
+    "path": "@div.getElementsByClassName",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "getBoundingClientRect",
+    "path": "@div.getBoundingClientRect",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "getClientRects",
+    "path": "@div.getClientRects",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "offsetWidth/offsetHeight/offsetTop",
+    "path": "@div.offsetWidth",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "offsetParent",
+    "path": "@div.offsetParent",
+    "shallow": true,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "clientWidth/clientHeight",
+    "path": "@div.clientWidth",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "scrollWidth/scrollHeight/scrollTop",
+    "path": "@div.scrollHeight",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "scrollIntoView",
+    "path": "@div.scrollIntoView",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "Element.scrollTo",
+    "path": "@div.scrollTo",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "focus/blur",
+    "path": "@div.focus",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "click()",
+    "path": "@div.click",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "hidden property",
+    "path": "@div.hidden",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "tabIndex/title/lang/dir",
+    "path": "@div.tabIndex",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "contentEditable/isContentEditable",
+    "path": "@div.contentEditable",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "attachShadow",
+    "path": "@div.attachShadow",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "ShadowRoot (interface)",
+    "path": "@div.attachShadow",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "slot / assignedNodes",
+    "path": "@div.attachShadow",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "animate (Web Animations)",
+    "path": "@div.animate",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "getAnimations",
+    "path": "@div.getAnimations",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "requestFullscreen",
+    "path": "@div.requestFullscreen",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "setPointerCapture",
+    "path": "@div.setPointerCapture",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "checkVisibility",
+    "path": "@div.checkVisibility",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "HTMLElement.prototype.popover",
+    "path": "@div.showPopover",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "Element.prototype.computedStyleMap",
+    "path": "@div.computedStyleMap",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "template.content",
+    "path": "@template.content",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "HTMLAnchorElement.href (resolved)",
+    "path": "@a.href",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "HTMLAnchorElement URL parts",
+    "path": "@a.pathname",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "HTMLImageElement / new Image()",
+    "path": "Image",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "img.complete/naturalWidth",
+    "path": "@img.complete",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "img.decode",
+    "path": "@img.decode",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "input.value",
+    "path": "@input.value",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "input.checked",
+    "path": "@input.checked",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "input.setSelectionRange",
+    "path": "@input.setSelectionRange",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "input.validity/checkValidity",
+    "path": "@input.checkValidity",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "input.files",
+    "path": "@input.files",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "textarea.value",
+    "path": "@textarea.value",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "select.value/options/selectedIndex",
+    "path": "@select.options",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "new Option()",
+    "path": "Option",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "form.elements",
+    "path": "@form.elements",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "form.submit/requestSubmit",
+    "path": "@form.requestSubmit",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "form.reset",
+    "path": "@form.reset",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "button.type/disabled",
+    "path": "@button.type",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "label.htmlFor/control",
+    "path": "@label.htmlFor",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "canvas.getContext(\"2d\")",
+    "path": "@canvas.getContext",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "canvas.toDataURL",
+    "path": "@canvas.toDataURL",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "video/audio play()/paused",
+    "path": "@video.paused",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "dialog.showModal/close",
+    "path": "@dialog.showModal",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "details.open",
+    "path": "@details.open",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "iframe.contentWindow",
+    "path": "@iframe.contentWindow",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "script element (createElement)",
+    "path": "@script.src",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "link rel=stylesheet element",
+    "path": "@link.rel",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "style element .sheet",
+    "path": "@style.sheet",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "table.insertRow/insertCell",
+    "path": "@table.insertRow",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "SVGElement / createElementNS svg",
+    "path": "document.createElementNS",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "threw: TypeError: Illegal constructor",
+    "name": "EventTarget (ctor)",
+    "path": "EventTarget",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "Event (ctor)",
+    "path": "Event",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "CustomEvent",
+    "path": "CustomEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "bubbling + currentTarget",
+    "path": "Event",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "capture phase",
+    "path": "Event",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "stopPropagation",
+    "path": "@event.stopPropagation",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "stopImmediatePropagation",
+    "path": "@event.stopImmediatePropagation",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "preventDefault/defaultPrevented",
+    "path": "@event.preventDefault",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "addEventListener once",
+    "path": "EventTarget",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "result check failed (got false)",
+    "name": "addEventListener signal",
+    "path": "EventTarget",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "handleEvent object listener",
+    "path": "EventTarget",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "on* handler property",
+    "path": "@button.onclick",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "composedPath",
+    "path": "@event.composedPath",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "MouseEvent",
+    "path": "MouseEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "KeyboardEvent",
+    "path": "KeyboardEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "PointerEvent",
+    "path": "PointerEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "TouchEvent",
+    "path": "TouchEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "FocusEvent",
+    "path": "FocusEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "InputEvent",
+    "path": "InputEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "WheelEvent",
+    "path": "WheelEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "MessageEvent",
+    "path": "MessageEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "ErrorEvent",
+    "path": "ErrorEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "SubmitEvent",
+    "path": "SubmitEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "AnimationEvent/TransitionEvent",
+    "path": "TransitionEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "ClipboardEvent",
+    "path": "ClipboardEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "DragEvent",
+    "path": "DragEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "PromiseRejectionEvent",
+    "path": "PromiseRejectionEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Observers",
+    "detail": "never settled: callback not called after draining timers",
+    "name": "MutationObserver (childList)",
+    "path": "MutationObserver",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Observers",
+    "detail": "never settled: callback not called after draining timers",
+    "name": "MutationObserver (attributes)",
+    "path": "MutationObserver",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Observers",
+    "detail": "never settled: callback not called after draining timers",
+    "name": "MutationObserver (subtree characterData)",
+    "path": "MutationObserver",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Observers",
+    "detail": "result check failed (got false)",
+    "name": "MutationObserver.takeRecords",
+    "path": "@mo.takeRecords",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Observers",
+    "detail": "",
+    "name": "IntersectionObserver",
+    "path": "IntersectionObserver",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Observers",
+    "detail": "",
+    "name": "IntersectionObserver callback fires",
+    "path": "IntersectionObserver",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Observers",
+    "detail": "",
+    "name": "ResizeObserver",
+    "path": "ResizeObserver",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Observers",
+    "detail": "never settled: callback not called after draining timers",
+    "name": "ResizeObserver callback fires",
+    "path": "ResizeObserver",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Observers",
+    "detail": "",
+    "name": "PerformanceObserver",
+    "path": "PerformanceObserver",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Observers",
+    "detail": "",
+    "name": "ReportingObserver",
+    "path": "ReportingObserver",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Web Components",
+    "detail": "",
+    "name": "customElements.define",
+    "path": "customElements.define",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Web Components",
+    "detail": "",
+    "name": "customElements.get",
+    "path": "customElements.get",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Web Components",
+    "detail": "",
+    "name": "customElements.whenDefined",
+    "path": "customElements.whenDefined",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Web Components",
+    "detail": "",
+    "name": "attributeChangedCallback",
+    "path": "customElements",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Web Components",
+    "detail": "",
+    "name": "customElements.upgrade",
+    "path": "customElements.upgrade",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Web Components",
+    "detail": "",
+    "name": "ElementInternals (attachInternals)",
+    "path": "@div.attachInternals",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Web Components",
+    "detail": "",
+    "name": "CSSStyleSheet constructable",
+    "path": "CSSStyleSheet",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "fetch (returns Promise)",
+    "path": "fetch",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Request",
+    "path": "Request",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Response",
+    "path": "Response",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Response.text",
+    "path": "@response.text",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Response.json",
+    "path": "@response.json",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Response.json (static)",
+    "path": "Response.json",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Response.arrayBuffer",
+    "path": "@response.arrayBuffer",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Response.blob",
+    "path": "@response.blob",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Headers",
+    "path": "Headers",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "XMLHttpRequest",
+    "path": "XMLHttpRequest",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "AbortController",
+    "path": "AbortController",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "AbortSignal.timeout",
+    "path": "AbortSignal.timeout",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "AbortSignal.any",
+    "path": "AbortSignal.any",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "WebSocket",
+    "path": "WebSocket",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "EventSource",
+    "path": "EventSource",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "navigator.sendBeacon",
+    "path": "navigator.sendBeacon",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "ReadableStream",
+    "path": "ReadableStream",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "WritableStream",
+    "path": "WritableStream",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "TransformStream",
+    "path": "TransformStream",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Response.body (stream)",
+    "path": "Response",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "CompressionStream",
+    "path": "CompressionStream",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "URL",
+    "path": "URL",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "URL setters",
+    "path": "URL",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "URL.canParse",
+    "path": "URL.canParse",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "URL.createObjectURL",
+    "path": "URL.createObjectURL",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "URL IDNA/punycode host",
+    "path": "URL",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "URLSearchParams",
+    "path": "URLSearchParams",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "URLSearchParams iteration/sort",
+    "path": "@usp.sort",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "TextEncoder",
+    "path": "TextEncoder",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "TextDecoder",
+    "path": "TextDecoder",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "result check failed (got false)",
+    "name": "TextDecoder (non-UTF-8 label)",
+    "path": "TextDecoder",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "structuredClone",
+    "path": "structuredClone",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "Blob",
+    "path": "Blob",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "Blob.text",
+    "path": "@blob.text",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "Blob.slice",
+    "path": "@blob.slice",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "Blob.arrayBuffer",
+    "path": "@blob.arrayBuffer",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "File",
+    "path": "File",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "FileReader.readAsText",
+    "path": "FileReader",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "FileReader.readAsDataURL",
+    "path": "FileReader",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "FormData",
+    "path": "FormData",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "FormData(form)",
+    "path": "FormData",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "threw: TypeError: Illegal constructor",
+    "name": "DataTransfer",
+    "path": "DataTransfer",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Storage",
+    "detail": "",
+    "name": "localStorage",
+    "path": "localStorage",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Storage",
+    "detail": "",
+    "name": "localStorage.length/key/clear",
+    "path": "localStorage",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Storage",
+    "detail": "",
+    "name": "sessionStorage",
+    "path": "sessionStorage",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Storage",
+    "detail": "result check failed (got false)",
+    "name": "Storage property access (localStorage.foo)",
+    "path": "localStorage",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Storage",
+    "detail": "",
+    "name": "indexedDB.open",
+    "path": "indexedDB",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Storage",
+    "detail": "",
+    "name": "caches (CacheStorage)",
+    "path": "caches",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Storage",
+    "detail": "",
+    "name": "navigator.storage.estimate",
+    "path": "navigator.storage",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Storage",
+    "detail": "",
+    "name": "cookieStore",
+    "path": "cookieStore",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "location.href",
+    "path": "location.href",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "location parts",
+    "path": "location",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "location.assign/replace/reload",
+    "path": "location.assign",
+    "shallow": true,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "history.length/state",
+    "path": "history.state",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "history.pushState",
+    "path": "history.pushState",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "history.replaceState",
+    "path": "history.replaceState",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "history.back/forward/go",
+    "path": "history.back",
+    "shallow": true,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigation (Navigation API)",
+    "path": "navigation",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.userAgent",
+    "path": "navigator.userAgent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.language(s)",
+    "path": "navigator.language",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.platform/vendor",
+    "path": "navigator.platform",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.onLine",
+    "path": "navigator.onLine",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.cookieEnabled",
+    "path": "navigator.cookieEnabled",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.hardwareConcurrency",
+    "path": "navigator.hardwareConcurrency",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.maxTouchPoints",
+    "path": "navigator.maxTouchPoints",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.webdriver",
+    "path": "navigator",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.userAgentData",
+    "path": "navigator.userAgentData",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.clipboard",
+    "path": "navigator.clipboard",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.serviceWorker",
+    "path": "navigator.serviceWorker",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.permissions.query",
+    "path": "navigator.permissions",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.mediaDevices",
+    "path": "navigator.mediaDevices",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.geolocation",
+    "path": "navigator.geolocation",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.share",
+    "path": "navigator.share",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.vibrate",
+    "path": "navigator.vibrate",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.connection",
+    "path": "navigator.connection",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "getComputedStyle",
+    "path": "getComputedStyle",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "getComputedStyle reflects inline style",
+    "path": "getComputedStyle",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "matchMedia",
+    "path": "matchMedia",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "result check failed (got false)",
+    "name": "matchMedia evaluates width",
+    "path": "matchMedia",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "MediaQueryList.addEventListener",
+    "path": "MediaQueryList",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "CSS.supports",
+    "path": "CSS.supports",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "CSS.escape",
+    "path": "CSS.escape",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "document.styleSheets[i].cssRules",
+    "path": "document.styleSheets",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "CSSStyleSheet.insertRule",
+    "path": "@sheet.insertRule",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "DOMRect",
+    "path": "DOMRect",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "DOMMatrix",
+    "path": "DOMMatrix",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "DOMPoint",
+    "path": "DOMPoint",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Parsing & serialization",
+    "detail": "",
+    "name": "DOMParser text/html",
+    "path": "DOMParser",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Parsing & serialization",
+    "detail": "threw: NotSupportedError: Failed to execute 'parseFromString' on 'DOMParser': XML documents are not supported yet.",
+    "name": "DOMParser image/svg+xml",
+    "path": "DOMParser",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Parsing & serialization",
+    "detail": "threw: NotSupportedError: Failed to execute 'parseFromString' on 'DOMParser': XML documents are not supported yet.",
+    "name": "DOMParser application/xml",
+    "path": "DOMParser",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Parsing & serialization",
+    "detail": "",
+    "name": "XMLSerializer",
+    "path": "XMLSerializer",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Parsing & serialization",
+    "detail": "instance unavailable: not a callable function",
+    "name": "Range.createContextualFragment",
+    "path": "@range.createContextualFragment",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Parsing & serialization",
+    "detail": "",
+    "name": "Element.setHTMLUnsafe",
+    "path": "@div.setHTMLUnsafe",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Range & Selection",
+    "detail": "threw: TypeError: Illegal constructor",
+    "name": "Range (ctor)",
+    "path": "Range",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Range & Selection",
+    "detail": "instance unavailable: not a callable function",
+    "name": "Range.selectNodeContents/toString",
+    "path": "@range.selectNodeContents",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Range & Selection",
+    "detail": "instance unavailable: not a callable function",
+    "name": "Range.setStart/setEnd",
+    "path": "@range.setStart",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Range & Selection",
+    "detail": "instance unavailable: not a callable function",
+    "name": "Range.deleteContents",
+    "path": "@range.deleteContents",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Range & Selection",
+    "detail": "instance unavailable: not a callable function",
+    "name": "Range.extractContents/cloneContents",
+    "path": "@range.cloneContents",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Range & Selection",
+    "detail": "instance unavailable: not a callable function",
+    "name": "Range.insertNode/surroundContents",
+    "path": "@range.insertNode",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Range & Selection",
+    "detail": "instance unavailable: not a callable function",
+    "name": "Range.getBoundingClientRect",
+    "path": "@range.getBoundingClientRect",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Range & Selection",
+    "detail": "",
+    "name": "StaticRange",
+    "path": "StaticRange",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Range & Selection",
+    "detail": "threw: TypeError: not a callable function",
+    "name": "Selection.addRange/toString",
+    "path": "@sel.addRange",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Range & Selection",
+    "detail": "",
+    "name": "Selection.collapse/extend",
+    "path": "@sel.extend",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "crypto.getRandomValues",
+    "path": "crypto.getRandomValues",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "crypto.randomUUID",
+    "path": "crypto.randomUUID",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "crypto.subtle.digest",
+    "path": "crypto.subtle.digest",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "performance.now",
+    "path": "performance.now",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "performance.timeOrigin",
+    "path": "performance.timeOrigin",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "performance.mark/measure",
+    "path": "performance.mark",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "performance.getEntriesByType",
+    "path": "performance.getEntriesByType",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "performance.timing (legacy)",
+    "path": "performance.timing",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "Date.now",
+    "path": "Date.now",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Console",
+    "detail": "",
+    "name": "console.log",
+    "path": "console.log",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Console",
+    "detail": "",
+    "name": "console.error/warn/info/debug",
+    "path": "console.warn",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Console",
+    "detail": "",
+    "name": "console.table/dir",
+    "path": "console.table",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Console",
+    "detail": "",
+    "name": "console.group/groupEnd",
+    "path": "console.group",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Console",
+    "detail": "",
+    "name": "console.time/timeEnd",
+    "path": "console.time",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Console",
+    "detail": "",
+    "name": "console.assert/count/trace",
+    "path": "console.assert",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Workers & messaging",
+    "detail": "",
+    "name": "Worker",
+    "path": "Worker",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Workers & messaging",
+    "detail": "",
+    "name": "SharedWorker",
+    "path": "SharedWorker",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Workers & messaging",
+    "detail": "",
+    "name": "BroadcastChannel",
+    "path": "BroadcastChannel",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Workers & messaging",
+    "detail": "",
+    "name": "window message event via postMessage",
+    "path": "postMessage",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "CanvasRenderingContext2D",
+    "path": "CanvasRenderingContext2D",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "OffscreenCanvas",
+    "path": "OffscreenCanvas",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "ImageData",
+    "path": "ImageData",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "Path2D",
+    "path": "Path2D",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "createImageBitmap",
+    "path": "createImageBitmap",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "WebGLRenderingContext",
+    "path": "WebGLRenderingContext",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "canvas.getContext(\"webgl\")",
+    "path": "@canvas.getContext",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "AudioContext",
+    "path": "AudioContext",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "MediaSource",
+    "path": "MediaSource",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "Notification",
+    "path": "Notification",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "speechSynthesis",
+    "path": "speechSynthesis",
+    "shallow": true,
+    "status": "missing"
+  },
+  {
+    "area": "Graphics & media",
+    "detail": "",
+    "name": "FontFace",
+    "path": "FontFace",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.outerWidth/outerHeight",
+    "path": "outerWidth",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.opener/closed",
+    "path": "closed",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "screen.availWidth/colorDepth",
+    "path": "screen.availWidth",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "screen.orientation",
+    "path": "screen.orientation",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "window.scroll (alias)",
+    "path": "scroll",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "escape/unescape",
+    "path": "escape",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "result check failed (got false)",
+    "name": "DOMException",
+    "path": "DOMException",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Window & globals",
+    "detail": "",
+    "name": "Window/Navigator/Location/History/Screen interfaces",
+    "path": "Navigator",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.NumberFormat currency",
+    "path": "Intl.NumberFormat",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.NumberFormat compact",
+    "path": "Intl.NumberFormat",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.NumberFormat.formatToParts",
+    "path": "Intl.NumberFormat.prototype.formatToParts",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.DateTimeFormat options",
+    "path": "Intl.DateTimeFormat",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.DateTimeFormat.formatToParts",
+    "path": "Intl.DateTimeFormat.prototype.formatToParts",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.DateTimeFormat resolvedOptions().timeZone",
+    "path": "Intl.DateTimeFormat",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.DisplayNames",
+    "path": "Intl.DisplayNames",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Intl.supportedValuesOf",
+    "path": "Intl.supportedValuesOf",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Date.prototype.toLocaleTimeString",
+    "path": "Date.prototype.toLocaleTimeString",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Intl",
+    "detail": "",
+    "name": "Date.prototype.toLocaleString (en-US, UTC)",
+    "path": "Date.prototype.toLocaleString",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.anchors/embeds",
+    "path": "document.anchors",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.fonts.ready resolves",
+    "path": "document.fonts",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.fonts.check/load",
+    "path": "document.fonts.check",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.fullscreenEnabled",
+    "path": "document.fullscreenEnabled",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.scrollingElement",
+    "path": "document.scrollingElement",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Document",
+    "detail": "",
+    "name": "document.implementation (DOMImplementation)",
+    "path": "document.implementation",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "Element.scrollLeft/scrollBy",
+    "path": "@div.scrollBy",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "slot.assignedElements / assignedSlot",
+    "path": "@div.attachShadow",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "closed shadow root hides shadowRoot",
+    "path": "@div.attachShadow",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Element",
+    "detail": "",
+    "name": "event retargeting across shadow boundary",
+    "path": "@div.attachShadow",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "option.selected/defaultSelected",
+    "path": "@select.options",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "input.defaultChecked/indeterminate",
+    "path": "@input.indeterminate",
+    "shallow": false,
+    "status": "missing"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "setCustomValidity/reportValidity",
+    "path": "@input.setCustomValidity",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "result check failed (got false)",
+    "name": "fieldset.elements/disabled",
+    "path": "HTMLFieldSetElement",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "form.length/namedItem",
+    "path": "@form.length",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "SubmitEvent.submitter",
+    "path": "SubmitEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "HTMLAnchorElement.origin",
+    "path": "@a.origin",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "HTML elements",
+    "detail": "",
+    "name": "HTMLDetailsElement / details toggle",
+    "path": "HTMLDetailsElement",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "UIEvent / CompositionEvent",
+    "path": "CompositionEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "HashChangeEvent / PopStateEvent / PageTransitionEvent",
+    "path": "HashChangeEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "StorageEvent / ProgressEvent",
+    "path": "StorageEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "KeyboardEvent.getModifierState",
+    "path": "KeyboardEvent.prototype.getModifierState",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Events",
+    "detail": "",
+    "name": "MediaQueryListEvent",
+    "path": "MediaQueryListEvent",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Observers",
+    "detail": "",
+    "name": "IntersectionObserver rootMargin/thresholds",
+    "path": "IntersectionObserver",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Observers",
+    "detail": "",
+    "name": "IntersectionObserver.takeRecords",
+    "path": "IntersectionObserver.prototype.takeRecords",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Observers",
+    "detail": "",
+    "name": "IntersectionObserverEntry / ResizeObserverEntry / MutationRecord",
+    "path": "IntersectionObserverEntry",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Web Components",
+    "detail": "",
+    "name": "customElements.getName",
+    "path": "customElements.getName",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Web Components",
+    "detail": "result check failed (got false)",
+    "name": "connected/disconnectedCallback",
+    "path": "customElements",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Web Components",
+    "detail": "",
+    "name": "CustomElementRegistry (interface)",
+    "path": "CustomElementRegistry",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "XMLHttpRequest.upload / getAllResponseHeaders",
+    "path": "XMLHttpRequestUpload",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "threw: NotSupportedError: Failed to execute 'open' on 'XMLHttpRequest': synchronous requests are not supported",
+    "name": "XMLHttpRequest synchronous open",
+    "path": "XMLHttpRequest",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Request.clone / Response.clone",
+    "path": "Response.prototype.clone",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Response.error / Response.redirect",
+    "path": "Response.redirect",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "Response.formData (urlencoded)",
+    "path": "Response.prototype.formData",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "ReadableStream.tee / pipeThrough",
+    "path": "ReadableStream.prototype.tee",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "ReadableStream async iteration",
+    "path": "ReadableStream",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "CountQueuingStrategy / ByteLengthQueuingStrategy",
+    "path": "CountQueuingStrategy",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "",
+    "name": "TextEncoderStream / TextDecoderStream",
+    "path": "TextEncoderStream",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Networking",
+    "detail": "threw: NotSupportedError: Failed to execute 'getReader' on 'ReadableStream': BYOB readers are not supported.",
+    "name": "byob reader",
+    "path": "ReadableStream",
+    "shallow": false,
+    "status": "broken"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "URL.revokeObjectURL",
+    "path": "URL.revokeObjectURL",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "URL.parse",
+    "path": "URL.parse",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "webkitURL alias",
+    "path": "webkitURL",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "URLSearchParams.size",
+    "path": "URLSearchParams",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "TextEncoder.encodeInto",
+    "path": "TextEncoder.prototype.encodeInto",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "URL & encoding",
+    "detail": "",
+    "name": "TextDecoder fatal",
+    "path": "TextDecoder",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "Blob.bytes",
+    "path": "Blob.prototype.bytes",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "File.lastModified/name",
+    "path": "File",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "FormData.entries/getAll",
+    "path": "FormData.prototype.getAll",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Blob, File & FormData",
+    "detail": "",
+    "name": "AbortSignal.abort / throwIfAborted",
+    "path": "AbortSignal.abort",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "history.scrollRestoration",
+    "path": "history.scrollRestoration",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "popstate on history.back()",
+    "path": "history.back",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "pushState cross-origin throws SecurityError",
+    "path": "history.pushState",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.plugins/mimeTypes/pdfViewerEnabled",
+    "path": "navigator.plugins",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Location, History & Navigator",
+    "detail": "",
+    "name": "navigator.doNotTrack/javaEnabled",
+    "path": "navigator.javaEnabled",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "CSSStyleSheet.replaceSync + adoptedStyleSheets",
+    "path": "CSSStyleSheet.prototype.replaceSync",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "CSSStyleSheet.replace (Promise)",
+    "path": "CSSStyleSheet.prototype.replace",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "CSSStyleSheet.deleteRule",
+    "path": "CSSStyleSheet.prototype.deleteRule",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "CSSStyleRule.selectorText / style.setProperty",
+    "path": "CSSStyleRule",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "<style>.sheet reflects text",
+    "path": "@style.sheet",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "DOMMatrix from CSS string",
+    "path": "DOMMatrix",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "DOMMatrix.multiply/inverse",
+    "path": "DOMMatrix.prototype.multiply",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "DOMMatrixReadOnly / WebKitCSSMatrix",
+    "path": "DOMMatrixReadOnly",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "CSSOM & view",
+    "detail": "",
+    "name": "DOMRectReadOnly / DOMPointReadOnly",
+    "path": "DOMRectReadOnly",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "crypto.getRandomValues rejects Float32Array",
+    "path": "crypto.getRandomValues",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "performance.getEntriesByName / clearMarks",
+    "path": "performance.getEntriesByName",
+    "shallow": false,
+    "status": "works"
+  },
+  {
+    "area": "Crypto & performance",
+    "detail": "",
+    "name": "performance.toJSON",
+    "path": "performance.toJSON",
+    "shallow": false,
+    "status": "works"
+  }
+]

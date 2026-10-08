@@ -118,6 +118,12 @@ impl ShieldInterceptHandler {
         Arc::clone(&self.blocked_count)
     }
 
+    /// Test-only census snapshot: (attempted, blocked) per destination.
+    #[cfg(test)]
+    fn census_snapshot(&self) -> [(u64, u64); 8] {
+        self.census.snapshot()
+    }
+
     /// Set a callback to be called when a request is blocked.
     pub fn with_on_blocked<F>(mut self, callback: F) -> Self
     where
@@ -359,6 +365,9 @@ fn dest_to_shield(dest: RequestDestination) -> hiwave_shield::ResourceType {
         RequestDestination::Image => R::Image,
         RequestDestination::Font => R::Font,
         RequestDestination::Other => R::Other,
+        // Filter lists key script requests on `$xmlhttprequest`; fetch() is
+        // the same class of request.
+        RequestDestination::Fetch | RequestDestination::Xhr => R::Xhr,
     }
 }
 
@@ -367,8 +376,8 @@ fn dest_to_shield(dest: RequestDestination) -> hiwave_shield::ResourceType {
 /// intended) from "site failed".
 #[derive(Default)]
 pub struct ShieldCensus {
-    attempted: [AtomicU64; 6],
-    blocked: [AtomicU64; 6],
+    attempted: [AtomicU64; 8],
+    blocked: [AtomicU64; 8],
     /// Requests that passed unchecked while the filter engine was still
     /// building at startup (the allow-until-ready window).
     pub engine_pending: AtomicU64,
@@ -383,6 +392,8 @@ impl ShieldCensus {
             RequestDestination::Image => 3,
             RequestDestination::Font => 4,
             RequestDestination::Other => 5,
+            RequestDestination::Fetch => 6,
+            RequestDestination::Xhr => 7,
         }
     }
     fn attempted(&self, d: RequestDestination) {
@@ -392,7 +403,7 @@ impl ShieldCensus {
         self.blocked[Self::idx(d)].fetch_add(1, Ordering::Relaxed);
     }
     /// (attempted, blocked) per destination, in enum order.
-    pub fn snapshot(&self) -> [(u64, u64); 6] {
+    pub fn snapshot(&self) -> [(u64, u64); 8] {
         std::array::from_fn(|i| {
             (
                 self.attempted[i].load(Ordering::Relaxed),
@@ -447,6 +458,14 @@ mod tests {
     use url::Url;
 
     fn test_request(url_str: &str) -> Request {
+        test_request_with(url_str, RequestDestination::Other, None)
+    }
+
+    fn test_request_with(
+        url_str: &str,
+        destination: RequestDestination,
+        referrer: Option<&str>,
+    ) -> Request {
         Request {
             id: RequestId::new(),
             url: Url::parse(url_str).unwrap(),
@@ -455,9 +474,10 @@ mod tests {
             body: None,
             timeout: None,
             credentials: Default::default(),
-            referrer: None,
+            referrer: referrer.map(|r| Url::parse(r).unwrap()),
             referrer_policy: Default::default(),
-            destination: RequestDestination::Other,
+            destination,
+            is_replay_proxied: false,
         }
     }
 
@@ -486,6 +506,117 @@ mod tests {
             ShieldInterceptHandler::guess_resource_type(&track_req),
             ShieldResourceType::Xhr
         ));
+    }
+
+    #[test]
+    fn dest_to_shield_covers_every_fetch_destination() {
+        // A missing arm would fail to compile; pin the adblock strings the
+        // EasyList `$type` options expect — including Fetch/Xhr → xmlhttprequest.
+        assert!(matches!(
+            dest_to_shield(RequestDestination::Document),
+            hiwave_shield::ResourceType::Document
+        ));
+        assert!(matches!(
+            dest_to_shield(RequestDestination::Style),
+            hiwave_shield::ResourceType::Stylesheet
+        ));
+        assert!(matches!(
+            dest_to_shield(RequestDestination::Script),
+            hiwave_shield::ResourceType::Script
+        ));
+        assert!(matches!(
+            dest_to_shield(RequestDestination::Image),
+            hiwave_shield::ResourceType::Image
+        ));
+        assert!(matches!(
+            dest_to_shield(RequestDestination::Font),
+            hiwave_shield::ResourceType::Font
+        ));
+        assert!(matches!(
+            dest_to_shield(RequestDestination::Other),
+            hiwave_shield::ResourceType::Other
+        ));
+        assert!(matches!(
+            dest_to_shield(RequestDestination::Fetch),
+            hiwave_shield::ResourceType::Xhr
+        ));
+        assert!(matches!(
+            dest_to_shield(RequestDestination::Xhr),
+            hiwave_shield::ResourceType::Xhr
+        ));
+    }
+
+    #[test]
+    fn top_level_documents_are_never_blocked() {
+        // EasyList carries host rules that match ad-tech origins a user may
+        // still navigate to. The interceptor must refuse to block Document
+        // even when the host is on the domain floor / EasyList.
+        let handler = ShieldInterceptHandler::new();
+        let action = handler.intercept(&test_request_with(
+            "https://doubleclick.net/",
+            RequestDestination::Document,
+            None,
+        ));
+        assert!(matches!(action, InterceptAction::Allow));
+        assert_eq!(handler.blocked_count(), 0);
+        let census = handler.census_snapshot();
+        assert_eq!(census[0].0, 1, "document attempts are still counted");
+        assert_eq!(census[0].1, 0, "documents must never enter blocked");
+    }
+
+    #[test]
+    fn known_tracker_subresources_are_blocked() {
+        // Deterministic regardless of EasyList readiness: the pending floor
+        // uses BLOCKED_DOMAINS, and the compiled engine includes the same
+        // hosts. Either path must Block before bytes.
+        let handler = ShieldInterceptHandler::new();
+        let action = handler.intercept(&test_request_with(
+            "https://doubleclick.net/pagead.js",
+            RequestDestination::Script,
+            Some("https://news.example/"),
+        ));
+        assert!(matches!(action, InterceptAction::Block));
+        assert_eq!(handler.blocked_count(), 1);
+        let census = handler.census_snapshot();
+        assert_eq!(census[2].0, 1, "script attempted");
+        assert_eq!(census[2].1, 1, "script blocked");
+    }
+
+    #[test]
+    fn subdomain_of_a_blocked_host_is_blocked_by_the_floor() {
+        let handler = ShieldInterceptHandler::new();
+        assert!(handler.should_block_host("secure.adnxs.com"));
+        assert!(handler.should_block_host("ADNXS.COM"));
+        assert!(!handler.should_block_host("not-adnxs.com"));
+        assert!(!handler.should_block_host("example.com"));
+    }
+
+    #[test]
+    fn benign_subresources_are_allowed() {
+        let handler = ShieldInterceptHandler::new();
+        let action = handler.intercept(&test_request_with(
+            "https://example.com/app.js",
+            RequestDestination::Script,
+            Some("https://example.com/"),
+        ));
+        assert!(matches!(action, InterceptAction::Allow));
+        assert_eq!(handler.blocked_count(), 0);
+    }
+
+    #[test]
+    fn disabled_handler_allows_even_known_trackers() {
+        let handler = ShieldInterceptHandler::new();
+        handler.set_enabled(false);
+        let action = handler.intercept(&test_request_with(
+            "https://doubleclick.net/pagead.js",
+            RequestDestination::Script,
+            Some("https://news.example/"),
+        ));
+        assert!(matches!(action, InterceptAction::Allow));
+        assert_eq!(handler.blocked_count(), 0);
+        let census = handler.census_snapshot();
+        assert_eq!(census[2].0, 1, "attempts still counted while disabled");
+        assert_eq!(census[2].1, 0);
     }
 }
 

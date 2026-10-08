@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<!-- Reduced repro: PUA icon-font glyph. Notes and font provenance: repro_icon_font.md -->
+<html><head><style>
+  /* ReduceIcon: generated 644-byte TrueType, one glyph U+E721 = solid 1em square, CC0. */
+  @font-face { font-family: "ReduceIcon"; src: url("data:font/ttf;base64,AAEAAAAKAIAAAwAgT1MvMiwBPKUAAAEoAAAAYGNtYXAADOd0AAABkAAAADRnbHlmA24F4AAAAcwAAAAaaGVhZDDV9/YAAACsAAAANmhoZWEHCgMiAAAA5AAAACRobXR4A+gAAAAAAYgAAAAGbG9jYQANAAAAAAHEAAAABm1heHAABAAGAAABCAAAACBuYW1l1SFR/gAAAegAAABpcG9zdKGgTKwAAAJUAAAALgABAAAAAQAA4WsVOl8PPPUAAwPoAAAAAObrWl8AAAAA5utaXwAA/zgD6AMgAAAAAwACAAAAAAAAAAEAAAMg/zgAAAPoAAAAAAPoAAEAAAAAAAAAAAAAAAAAAAABAAEAAAACAAQAAQAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAwPoAZAABQAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAPz8/PwAA5yHnIQMg/zgAAAMgAMgAAAAAAAAAAAAAAAAAAAAgAAAD6AAAAAAAAAAAAAIAAAADAAAAFAADAAEAAAAUAAQAIAAAAAQABAABAADnIf//AADnIf//GOAAAQAAAAAAAAAAAA0AAAABAAD/OAPoAyAAAwAAFREhEQPoyAPo/BgAAAAAAAAEADYAAQAAAAAAAQAKAAAAAQAAAAAAAgAHAAoAAwABBAkAAQAUABEAAwABBAkAAgAOACVSZWR1Y2VJY29uUmVndWxhcgBSAGUAZAB1AGMAZQBJAGMAbwBuAFIAZQBnAHUAbABhAHIAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAABAgd1bmlFNzIxAAA=") format("truetype"); }
+  body { margin: 0; }
+  i { position: absolute; top: 0; font: normal 16px/1 "ReduceIcon"; color: rgb(38, 38, 38); speak: none; }
+  .ms-Icon--Search::before { content: "\E721"; }
+</style></head><body>
+<!-- A (Pollux draft): PUA char as element text. Probe (8,8). -->
+<i style="left: 0">&#xE721;</i>
+<!-- B (microsoft.com i.ms-Icon.ms-Icon--Search): PUA char from ::before content. Probe (48,8). -->
+<i class="ms-Icon ms-Icon--Search" style="left: 40px"></i>
+</body></html>

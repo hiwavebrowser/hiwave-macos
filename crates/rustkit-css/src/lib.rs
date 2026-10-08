@@ -922,9 +922,10 @@ pub enum Gradient {
 // ==================== Background Layer Types ====================
 
 /// The image source for a background layer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum BackgroundImage {
     /// No image (transparent).
+    #[default]
     None,
     /// A gradient.
     Gradient(Gradient),
@@ -932,14 +933,8 @@ pub enum BackgroundImage {
     Url(String),
 }
 
-impl Default for BackgroundImage {
-    fn default() -> Self {
-        BackgroundImage::None
-    }
-}
-
 /// Background size specification.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum BackgroundSize {
     /// Stretch to cover the entire area.
     Cover,
@@ -951,19 +946,15 @@ pub enum BackgroundSize {
         height: Option<f32>,
     },
     /// Auto sizing (use intrinsic dimensions).
+    #[default]
     Auto,
 }
 
-impl Default for BackgroundSize {
-    fn default() -> Self {
-        BackgroundSize::Auto
-    }
-}
-
 /// Background repeat specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackgroundRepeat {
     /// Repeat in both directions.
+    #[default]
     Repeat,
     /// Repeat horizontally only.
     RepeatX,
@@ -975,12 +966,6 @@ pub enum BackgroundRepeat {
     Space,
     /// Round to fill without clipping.
     Round,
-}
-
-impl Default for BackgroundRepeat {
-    fn default() -> Self {
-        BackgroundRepeat::Repeat
-    }
 }
 
 /// Background position specification.
@@ -1008,6 +993,9 @@ pub enum BackgroundPositionValue {
     Percent(f32),
     /// Pixel offset from the start.
     Px(f32),
+    /// A percentage (0.0 = start, 1.0 = end) plus a pixel offset:
+    /// `right 10px` is 100% - 10px, and `calc(50% + 4px)` is itself.
+    Calc { percent: f32, px: f32 },
 }
 
 impl Default for BackgroundPositionValue {
@@ -1026,6 +1014,9 @@ impl BackgroundPositionValue {
                 (container_size - image_size) * pct
             }
             BackgroundPositionValue::Px(px) => *px,
+            BackgroundPositionValue::Calc { percent, px } => {
+                (container_size - image_size) * percent + px
+            }
         }
     }
 }
@@ -1251,7 +1242,7 @@ pub enum FlexBasis {
 // ==================== Grid Types ====================
 
 /// A grid track size.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum TrackSize {
     /// Fixed length in pixels.
     Px(f32),
@@ -1264,17 +1255,12 @@ pub enum TrackSize {
     /// Size based on content maximum.
     MaxContent,
     /// Auto sizing.
+    #[default]
     Auto,
     /// Minimum/maximum constraint.
     MinMax(Box<TrackSize>, Box<TrackSize>),
     /// Fit content with maximum.
     FitContent(f32),
-}
-
-impl Default for TrackSize {
-    fn default() -> Self {
-        TrackSize::Auto
-    }
 }
 
 impl TrackSize {
@@ -1613,9 +1599,10 @@ impl GridAutoFlow {
 }
 
 /// Grid line reference (for grid-column-start, etc.).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum GridLine {
     /// Auto placement.
+    #[default]
     Auto,
     /// Specific line number (1-based, can be negative).
     Number(i32),
@@ -1625,12 +1612,6 @@ pub enum GridLine {
     Span(u32),
     /// Span to a named line.
     SpanName(String),
-}
-
-impl Default for GridLine {
-    fn default() -> Self {
-        GridLine::Auto
-    }
 }
 
 /// Grid placement for an item.
@@ -1750,20 +1731,15 @@ pub enum FontStyle {
 /// - a number (unitless multiplier of font-size)
 /// - a length (absolute value like `24px`)
 /// - a percentage (of font-size)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LineHeight {
     /// Normal line height (use font metrics, typically ~1.2).
+    #[default]
     Normal,
     /// Unitless number (multiplier of font-size).
     Number(f32),
     /// Absolute length in pixels.
     Px(f32),
-}
-
-impl Default for LineHeight {
-    fn default() -> Self {
-        LineHeight::Normal
-    }
 }
 
 /// Fallback ratio for `line-height: normal` when no font metrics are available.
@@ -2505,6 +2481,8 @@ pub struct ComputedStyle {
     /// Legacy single gradient field - prefer using background_layers.
     /// This is kept for backwards compatibility during migration.
     pub background_gradient: Option<Gradient>,
+    /// `mask-*` layers (CSS Masking 1 §6). Not inherited.
+    pub mask: Mask,
 
     // Typography - Basic
     pub font_size: Length,
@@ -2585,7 +2563,10 @@ pub struct ComputedStyle {
     // Image/replaced element
     pub image_url: Option<String>,
     pub object_fit: String, // "fill", "contain", "cover", "none", "scale-down"
+    /// `object-position` as a fraction of the free space per axis…
     pub object_position: (f32, f32),
+    /// …plus a pixel offset per axis (`right 10px` is 100% and -10px).
+    pub object_position_offset: (f32, f32),
 
     // Flexbox Container
     pub flex_direction: FlexDirection,
@@ -2652,6 +2633,17 @@ pub struct ComputedStyle {
     pub custom_properties: std::sync::Arc<CustomProperties>,
 }
 
+/// The initial value of `font-family`, which CSS leaves to the UA. Chrome's
+/// default font on macOS is Times (`getComputedStyle` of an unstyled element
+/// reports it). `sans-serif` stood here, so every page that sets no font was
+/// laid out in a sans face: a 28-character line at 16px was 220.78px wide
+/// where Chrome 148 has 199.52.
+#[cfg(target_os = "macos")]
+pub const INITIAL_FONT_FAMILY: &str = "Times";
+/// The initial value of `font-family`, which CSS leaves to the UA.
+#[cfg(not(target_os = "macos"))]
+pub const INITIAL_FONT_FAMILY: &str = "sans-serif";
+
 impl ComputedStyle {
     /// The transform actually applied: `translate`, then `rotate`, then
     /// `scale`, then `transform` (css-transforms-2 §6, "the transformation
@@ -2677,7 +2669,7 @@ impl ComputedStyle {
             opacity: 1.0,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
-            font_family: "sans-serif".to_string(),
+            font_family: INITIAL_FONT_FAMILY.to_string(),
             text_decoration_line: TextDecorationLine::NONE,
             text_decoration_color: None,
             text_decoration_thickness: Length::Auto,
@@ -2708,6 +2700,7 @@ impl ComputedStyle {
             // gaps (Wikipedia globe, live session 2026-08-07).
             object_fit: "fill".to_string(),
             object_position: (0.5, 0.5), // center center
+            object_position_offset: (0.0, 0.0),
             ..Default::default()
         }
     }
@@ -2959,12 +2952,17 @@ impl Stylesheet {
     }
 }
 
+pub mod background;
+pub mod mask;
+pub use mask::Mask;
+
 pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
 pub mod media;
 pub use media::media_query_list_matches;
 
+pub mod content;
 pub mod selector_escape;
 pub use selector_escape::{css_ident, encode_selector_escapes};
 
@@ -3118,12 +3116,26 @@ pub fn parse_color(value: &str) -> Option<Color> {
 
     // Hex colors
     if let Some(hex) = value.strip_prefix('#') {
+        // Only hex digits: `from_str_radix` also takes a sign, and the slices
+        // below are by byte.
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
         let (r, g, b, a) = match hex.len() {
             3 => {
                 let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
                 let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
                 let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
                 (r, g, b, 1.0)
+            }
+            // #rgba: each digit doubled, like #rgb (minifiers write
+            // `transparent` as `#0000`)
+            4 => {
+                let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+                let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+                let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+                let a = (u8::from_str_radix(&hex[3..4], 16).ok()? * 17) as f32 / 255.0;
+                (r, g, b, a)
             }
             6 => {
                 let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
@@ -3682,6 +3694,22 @@ mod tests {
     }
 
     #[test]
+    fn a_four_digit_hex_colour_carries_its_alpha() {
+        // What minifiers write for `transparent`.
+        assert_eq!(parse_color("#0000"), Some(Color::new(0, 0, 0, 0.0)));
+        assert_eq!(parse_color("#f00f"), Some(Color::from_rgb(255, 0, 0)));
+        assert_eq!(parse_color("#0f08"), parse_color("#00ff0088"));
+        assert_eq!(parse_color("#FFFA"), parse_color("#ffffffaa"));
+    }
+
+    #[test]
+    fn a_hex_colour_is_hex_digits_only() {
+        for bad in ["#+f+f+f", "#-ff", "#ggg", "#12345", "#", "#\u{e9}1", "#\u{e9}\u{e9}\u{e9}"] {
+            assert_eq!(parse_color(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
     fn test_parse_color_named() {
         assert_eq!(parse_color("red"), Some(Color::from_rgb(255, 0, 0)));
         assert_eq!(parse_color("black"), Some(Color::BLACK));
@@ -3999,7 +4027,7 @@ mod tests {
             final_line_names: vec![],
         };
 
-        let (expanded, auto_repeat) = template.expand_tracks();
+        let (expanded, _auto_repeat) = template.expand_tracks();
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].size, TrackSize::Px(100.0));
         assert_eq!(expanded[1].size, TrackSize::Fr(1.0));
@@ -4022,7 +4050,7 @@ mod tests {
             final_line_names: vec![],
         };
 
-        let (expanded, auto_repeat) = template.expand_tracks();
+        let (expanded, _auto_repeat) = template.expand_tracks();
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].size, TrackSize::Px(100.0));
         assert_eq!(expanded[1].size, TrackSize::Fr(1.0));

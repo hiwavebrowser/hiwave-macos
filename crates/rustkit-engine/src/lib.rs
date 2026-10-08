@@ -150,6 +150,10 @@ pub(crate) mod test_gpu {
     }
 }
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
+use rustkit_css::background::{
+    parse_background_origin, parse_background_position,
+    parse_background_repeat, parse_background_size, split_top_level_whitespace,
+};
 use rustkit_css::{css_ident, parse_display, ComputedStyle, CustomProperties, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
@@ -158,7 +162,36 @@ use rustkit_layout::{
     FontLoader,
     BoxType, Dimensions, DisplayList, ElementIdentity, LayoutBox, Position, Rect,
 };
+use std::borrow::Cow;
 use std::cell::Cell;
+mod script_net;
+#[cfg(test)]
+mod script_net_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_net_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_module_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_fresh_layout_tests;
+#[cfg(test)]
+mod content_string_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_scroll_tests;
+#[cfg(all(test, feature = "headless"))]
+mod resize_coalesce_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_flexible_row_tests;
+#[cfg(all(test, feature = "headless"))]
+mod place_shorthand_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_block_axis_align_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_abspos_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_lone_text_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_min_max_tests;
+use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
 pub use rustkit_renderer::RenderStats;
@@ -267,6 +300,14 @@ pub enum EngineEvent {
     FaviconDetected { view_id: EngineViewId, url: Url },
 }
 
+/// The `Accept` of an image request: Chrome's image header without
+/// `image/avif`, which rustkit-codecs cannot decode. Without a header of
+/// its own an image request carried the transport's navigation default,
+/// which lists AVIF, and the image CDNs answered with it (44 `<img>`s on
+/// microsoft, shopify and walmart failed as "Unknown image format").
+/// Add `image/avif` back when a decoder lands.
+const IMAGE_ACCEPT: &str = "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+
 /// View state.
 #[allow(dead_code)]
 /// The document side of a subresource request (see
@@ -278,16 +319,18 @@ struct SubresourceReferrer {
 }
 
 impl SubresourceReferrer {
-    /// A GET for `url` that carries this referrer and policy.
-    fn get(&self, url: Url) -> Request {
-        self.get_for(url, RequestDestination::Other)
-    }
-
-    /// Same, with the fetch destination the shield classifies by.
+    /// A GET for `url` that carries this referrer and policy, with the fetch
+    /// destination the shield classifies by.
     fn get_for(&self, url: Url, destination: RequestDestination) -> Request {
-        let request = Request::get(url)
+        let mut request = Request::get(url)
             .referrer_policy(self.policy)
             .destination(destination);
+        if destination == RequestDestination::Image {
+            request = request.header(
+                http::header::ACCEPT,
+                http::HeaderValue::from_static(IMAGE_ACCEPT),
+            );
+        }
         match &self.url {
             Some(referrer) => request.referrer(referrer.clone()),
             None => request,
@@ -295,11 +338,147 @@ impl SubresourceReferrer {
     }
 }
 
+/// Tiles one SVG background may paint before the rest are dropped: each
+/// tile is the document's whole command list again, so a 1px pattern
+/// repeated across a page would otherwise multiply into millions. The
+/// gradient lane caps at 50 per axis; this is the same total.
+const MAX_SVG_BACKGROUND_TILES: usize = 2500;
+
+/// The vector commands that paint `svg` as a CSS background of the box
+/// `rect`: the document rendered once per tile the raster lane would draw
+/// ([`rustkit_layout::background_tiles`]), clipped to the box. The
+/// renderer only knows textures, so a `BackgroundImage` naming an SVG is
+/// replaced by these, as an `<img>` of one is.
+///
+/// An SVG with no `width`/`height` has no size of its own: with a
+/// `viewBox` it has a ratio and `auto` sizes it like `contain`; with
+/// neither it fills the box (CSS Images 3, default sizing).
+fn svg_background_commands(
+    svg: &rustkit_svg::SvgDocument,
+    rect: rustkit_layout::Rect,
+    size: &rustkit_layout::BackgroundSize,
+    position: (f32, f32),
+    offset: (f32, f32),
+    repeat: rustkit_layout::BackgroundRepeat,
+) -> Vec<rustkit_layout::DisplayCommand> {
+    let (width, height) = match (&svg.width, &svg.height, &svg.view_box) {
+        (Some(_), Some(_), _) => svg.get_size(rect.width, rect.height),
+        (_, _, Some(vb)) if vb.width > 0.0 && vb.height > 0.0 => {
+            let scale = (rect.width / vb.width).min(rect.height / vb.height);
+            (vb.width * scale, vb.height * scale)
+        }
+        _ => (rect.width, rect.height),
+    };
+    let mut tiles = rustkit_layout::background_tiles(rect, size, position, offset, repeat, width, height);
+    if tiles.is_empty() {
+        return Vec::new();
+    }
+    if tiles.len() > MAX_SVG_BACKGROUND_TILES {
+        warn!(tiles = tiles.len(), "SVG background tile count over the cap; painting the first {MAX_SVG_BACKGROUND_TILES}");
+        tiles.truncate(MAX_SVG_BACKGROUND_TILES);
+    }
+    let mut commands = vec![rustkit_layout::DisplayCommand::PushClip(rect)];
+    for tile in tiles {
+        // A standalone SVG document: `currentColor` is the initial black.
+        commands.extend(svg.render(tile.x, tile.y, tile.width, tile.height));
+    }
+    commands.push(rustkit_layout::DisplayCommand::PopClip);
+    commands
+}
+
+/// `svg` as an image document (`<img>`, CSS background): with no `viewBox`,
+/// one is synthesized from an absolute `width`/`height` with
+/// `preserveAspectRatio="none"`, as Blink does for SVG images, so the
+/// document stretches to the box it is drawn in like a raster. Without
+/// it `render` drew it at its own size: a 100x100 data: square stayed
+/// 100x100 in a 48px `<img>`. An inline `<svg>` gets no such viewBox.
+fn image_svg(mut svg: rustkit_svg::SvgDocument) -> rustkit_svg::SvgDocument {
+    if svg.view_box.is_none() {
+        if let (Some(w), Some(h)) = (&svg.width, &svg.height) {
+            let absolute = |l: &rustkit_svg::SvgLength| !matches!(l, rustkit_svg::SvgLength::Percent(_));
+            let (width, height) = (w.to_px(0.0), h.to_px(0.0));
+            if absolute(w) && absolute(h) && width > 0.0 && height > 0.0 {
+                svg.view_box = Some(rustkit_svg::ViewBox { min_x: 0.0, min_y: 0.0, width, height });
+                svg.stretch = true;
+            }
+        }
+    }
+    svg
+}
+
+/// A raster image for `url`, fetched like every other subresource: through
+/// the resource loader, so the shield sees the request, it carries the
+/// Referer the document's policy allows, and the caller's deadline bounds
+/// it. The image manager only decodes and caches what arrives. A cached
+/// image or a `data:` URL needs no request.
+async fn fetch_raster_image(
+    loader: &ResourceLoader,
+    image_manager: &ImageManager,
+    referrer: &SubresourceReferrer,
+    url: Url,
+) -> Result<Arc<rustkit_image::LoadedImage>, rustkit_image::ImageError> {
+    use rustkit_image::ImageError;
+
+    if url.scheme() == "data" || image_manager.is_cached(&url) {
+        return image_manager.load(url).await;
+    }
+    let response = loader
+        .fetch(referrer.get_for(url.clone(), RequestDestination::Image))
+        .await
+        .map_err(|e| ImageError::FetchError(format!("{e} for {url}")))?;
+    if !response.ok() {
+        return Err(ImageError::FetchError(format!(
+            "HTTP {} for {}",
+            response.status, url
+        )));
+    }
+    let content_type = response.content_type.as_ref().map(|mime| mime.to_string());
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| ImageError::FetchError(format!("{e} for {url}")))?;
+    image_manager.insert_fetched(&url, content_type.as_deref(), &body)
+}
+
+/// What one image pass is to fetch, and everything the fetch needs
+/// ([`Engine::plan_image_loads`]). It owns its parts, so the fetch can
+/// outlive the call that planned it.
+struct ImagePlan {
+    /// Raster images (and anything not named `.svg`).
+    pending: Vec<Url>,
+    svg_urls: Vec<Url>,
+    /// Images already in a cache that the pass counts as loaded.
+    already_loaded: usize,
+    budget: std::time::Duration,
+    deadline: tokio::time::Instant,
+    referrer: SubresourceReferrer,
+    loader: Arc<ResourceLoader>,
+    image_manager: Arc<ImageManager>,
+}
+
+impl ImagePlan {
+    /// Nothing to fetch.
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.svg_urls.is_empty()
+    }
+}
+
+/// What an image pass fetched ([`Engine::fetch_planned_images`]). Raster
+/// images are already in the image manager's cache; the SVG documents wait
+/// here for the engine's.
+struct FetchedImages {
+    loaded: usize,
+    svgs: Vec<(String, rustkit_svg::SvgDocument)>,
+}
+
 struct ViewState {
     id: EngineViewId,
     viewhost_id: ViewId,
     url: Option<Url>,
     title: Option<String>,
+    /// The HTTP status the view's document came with; None for a document
+    /// that came from no response (`load_html`).
+    http_status: Option<u16>,
     document: Option<Rc<Document>>,
     #[allow(dead_code)]
     layout: Option<LayoutBox>,
@@ -349,6 +528,42 @@ struct ViewState {
     /// this is the live value. Mutating the DOM instead would conflate the
     /// two and break form-reset semantics.
     edit_states: std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
+    /// Checkedness of the checkboxes and radio buttons a click or script
+    /// has set, keyed by raw NodeId: the other half of the same side table.
+    /// A control missing here is checked when it has the `checked`
+    /// attribute. Script owns the state (`input.checked`); style
+    /// (`:checked`), paint and form submission read it here.
+    checked_states: std::collections::HashMap<usize, bool>,
+    /// A listener cancelled the `pointerdown` of the press in progress:
+    /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
+    compat_mouse_suppressed: bool,
+    /// The element the pointer was over at its last move (raw NodeId).
+    hovered_node: Option<usize>,
+    /// `hovered_node` and the elements above it (raw NodeIds): what
+    /// `:hover` matches in this view's next build.
+    hover_chain: Vec<usize>,
+    /// The element the press in progress landed on and the elements above
+    /// it: what `:active` matches, from the press to the release.
+    active_chain: Vec<usize>,
+    /// The rule index this view was last built with: its `reads` say
+    /// which elements a `:hover` or `:active` rule can match, so which
+    /// changes of the two chains are a restyle.
+    rule_reads: std::cell::RefCell<Option<Rc<RuleIndex>>>,
+    /// Whether `html` had a non-visible `overflow` at the last build. The
+    /// viewport then takes html's, and a body with its own is a scroller
+    /// that clips what it holds (see `scrollable_bottom`).
+    html_clips: std::cell::Cell<bool>,
+    /// A chain a sheet reads has changed since the last build.
+    pointer_restyle: bool,
+    /// Where the pointer was at its last move, in viewport coordinates.
+    pointer_at: Option<(f32, f32)>,
+    /// The primary button is held: between a press and its release.
+    primary_button_down: bool,
+    /// The element the press in progress landed on (raw NodeId).
+    press_target: Option<usize>,
+    /// The press in progress has had its say on the focus (it moved it, or
+    /// a listener cancelled the press): the release leaves the focus alone.
+    press_settled_focus: bool,
     /// Whether the view itself has focus.
     view_focused: bool,
     /// Current scroll offset (x, y) in pixels.
@@ -364,10 +579,28 @@ struct ViewState {
     initial_layout_deferred: bool,
     /// Headless bounds (only set for headless views, None for window-based views).
     headless_bounds: Option<Bounds>,
+    /// Bounds the view was given since its last layout (`set_view_bounds`):
+    /// the next live turn lays out once, at these, and fires `resize`.
+    pending_resize: Option<Bounds>,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
     script_log: Vec<ScriptRecord>,
     /// The document response's `Referrer-Policy` header, if it had a valid one.
     header_referrer_policy: Option<ReferrerPolicy>,
+    /// Every image URL the last full `load_images` pass and the post-script
+    /// passes after it looked at, loaded or not. The post-script pass
+    /// fetches only what is not in here.
+    images_attempted: std::collections::HashSet<Url>,
+    /// The current document's fetch policy: a URL-loaded page with
+    /// JavaScript on has one, anything else has none. The load's script
+    /// requests and the live loop's go through the same one, so its request
+    /// counters cover both.
+    script_policy: Option<Arc<FetchPolicy>>,
+    /// Script requests the live loop has started for the current document
+    /// and not yet delivered.
+    live_requests: Vec<script_net::LiveRequest>,
+    /// Image fetches the live loop has started for what the current
+    /// document's scripts added, and not yet kept.
+    live_images: Vec<script_net::LiveFuture<FetchedImages>>,
 }
 
 /// Engine configuration.
@@ -402,6 +635,18 @@ pub struct EngineConfig {
     /// network client's own timeout (30s) equals the real-site board's
     /// whole capture budget, so one stalled stylesheet used to blank the page.
     pub subresource_budget_ms: u64,
+    /// Register the script-network bridge on pages loaded from a URL, so
+    /// the page's `XMLHttpRequest`/`fetch` (built on the bridge) can reach
+    /// the network, always under the page's `FetchPolicy`. Off: those
+    /// names do not exist on the page at all.
+    pub script_network_enabled: bool,
+    /// Rounds of take-requests / fetch / deliver the engine runs after the
+    /// page's scripts and after each lifecycle step. A response handler can
+    /// start more requests; whatever is still pending after the last round
+    /// completes with a network error.
+    pub script_network_rounds: u32,
+    /// Optional replay proxy URL (test-only, for deterministic HAR replay).
+    pub replay_proxy: Option<Url>,
 }
 
 impl Default for EngineConfig {
@@ -416,6 +661,9 @@ impl Default for EngineConfig {
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 10_000_000,
             subresource_budget_ms: 8_000,
+            script_network_enabled: true,
+            script_network_rounds: 8,
+            replay_proxy: None,
         }
     }
 }
@@ -423,6 +671,34 @@ impl Default for EngineConfig {
 /// Timer callbacks one load may run (a 16ms `requestAnimationFrame` loop
 /// across the default 5s horizon is ~300).
 const MAX_TIMER_CALLBACKS: u32 = 10_000;
+
+/// Most timer callbacks one turn of the live loop runs (`Engine::pump_live`).
+/// A page that owes more keeps them for the next turn, so input and paint
+/// get a turn in between.
+const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
+
+/// Longest one turn of the live loop waits for the modules a dynamic
+/// `import()` asked for, which are still fetched inside the turn. The loop is
+/// the UI thread, so a module slower than this fails rather than hold the
+/// window longer.
+const LIVE_NETWORK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Longest one turn of the live loop spends on the script requests that are
+/// out (XHR, fetch). The loop is the UI thread: a request is started on the
+/// turn that finds it and delivered on the turn after its answer comes, and
+/// no turn waits for one. Until 2026-10-05 a turn waited up to two seconds
+/// for its requests and then failed them, so one slow request stopped
+/// input, timers and paint for two seconds and never arrived.
+const LIVE_NETWORK_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// How long a request started by the live loop may take before the page gets
+/// a network error for it.
+const LIVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Most records the live loop adds to a view's script log. A timer that
+/// throws on every tick would otherwise grow it for as long as the page is
+/// open.
+const MAX_LIVE_SCRIPT_RECORDS: usize = 2_000;
 
 /// How a page `<script>` is scheduled, per its `type`, `src`, `async`
 /// and `defer` attributes.
@@ -442,7 +718,10 @@ const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
 
 /// One `<script>` after fetching: its log label, then its source text or
 /// the reason it will not run.
-type FetchedScript = (String, Result<(ScriptTiming, String), ScriptOutcome>);
+/// `(label, node id, fetched source or why not, is a module script)`. A
+/// module's label is the URL it was finally served from (`inline#n` for an
+/// inline one).
+type FetchedScript = (String, usize, Result<(ScriptTiming, String), ScriptOutcome>, bool);
 
 /// What happened to one piece of page script on the load path.
 #[derive(Debug, Clone, PartialEq)]
@@ -473,6 +752,48 @@ pub struct ScriptRecord {
     pub outcome: ScriptOutcome,
 }
 
+/// Which part of a click is moving the focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointFocus {
+    /// The press: the control under the point, else nothing is focused.
+    Press,
+    /// The release of a press that already moved the focus: a label's
+    /// control, else the focus stays.
+    Label,
+    /// A click with no press before it: the control under the point or
+    /// the one its label names, else nothing is focused.
+    Click,
+}
+
+/// What a primary-button click did once the page's listeners had run.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClickOutcome {
+    /// Tag of the element the click focused; `None` means focus was cleared.
+    pub focused: Option<String>,
+    /// The link to follow: the click hit an `<a href>` and no `click`
+    /// listener called `preventDefault()`.
+    pub navigate: Option<String>,
+}
+
+/// What one turn of the live loop did for a view (see [`Engine::pump_live`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LivePump {
+    /// Timer callbacks that ran.
+    pub timers_ran: u32,
+    /// Script network requests and module fetches that were answered.
+    pub requests: usize,
+    /// Script network requests and script-added images that are out and
+    /// have not arrived yet. While there are any, the loop has to keep
+    /// turning: nothing else wakes it when one comes.
+    pub in_flight: usize,
+    /// The page was laid out again: a callback wrote to the DOM, or an image
+    /// it added arrived.
+    pub relaid_out: bool,
+    /// Milliseconds until the page's next timer is due. `None`: it has none,
+    /// and the loop can sleep until the next input.
+    pub next_timer_ms: Option<u64>,
+}
+
 /// Classify a `<script>` element. `None` for data blocks
 /// (`application/ld+json`, `text/template`, ...), which are not scripts.
 fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
@@ -486,14 +807,16 @@ fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
     match essence {
         "" | "text/javascript" | "application/javascript" | "application/x-javascript"
         | "text/ecmascript" | "application/ecmascript" | "text/jscript" => {}
-        "module" => return Some(Err("type=module unsupported")),
+        "module" => {}
         _ => return None,
     }
+    let module = essence == "module";
     // `nomodule` scripts are skipped, as Chrome skips them. They are the
     // legacy half of a module/nomodule pair: in practice polyfill bundles
     // (Next.js ships ~110 KB of them) that a modern engine does not need,
-    // and one of them never returns under Boa (yahoo, weather.com).
-    if node.get_attribute("nomodule").is_some() {
+    // and one of them never returns under Boa (yahoo, weather.com). The
+    // attribute is meaningless on a module script.
+    if !module && node.get_attribute("nomodule").is_some() {
         return Some(Err("nomodule (skipped, as in module-capable browsers)"));
     }
     let external = node.get_attribute("src").is_some();
@@ -501,9 +824,20 @@ fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
         ScriptTiming::Async
     } else if external && node.get_attribute("defer").is_some() {
         ScriptTiming::Defer
+    } else if module {
+        // A module script, inline or external, runs after the document is
+        // parsed, in document order with the `defer` scripts.
+        ScriptTiming::Defer
     } else {
         ScriptTiming::Classic
     }))
+}
+
+/// Whether a `<script>` element is `type=module`.
+fn is_module_script(node: &Node) -> bool {
+    node.get_attribute("type")
+        .map(|t| t.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("module"))
+        .unwrap_or(false)
 }
 
 impl EngineConfig {
@@ -1007,6 +1341,7 @@ impl Engine {
         let loader_config = LoaderConfig {
             user_agent: config.user_agent.clone(),
             cookies_enabled: config.cookies_enabled,
+            replay_proxy: config.replay_proxy.clone(),
             ..Default::default()
         };
         let loader = Arc::new(
@@ -1112,6 +1447,7 @@ impl Engine {
             viewhost_id,
             url: None,
             title: None,
+            http_status: None,
             document: None,
             layout: None,
             display_list: None,
@@ -1121,14 +1457,31 @@ impl Engine {
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
+            checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
+            hovered_node: None,
+            hover_chain: Vec::new(),
+            active_chain: Vec::new(),
+            rule_reads: std::cell::RefCell::new(None),
+            html_clips: std::cell::Cell::new(false),
+            pointer_restyle: false,
+            pointer_at: None,
+            primary_button_down: false,
+            press_target: None,
+            press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
             initial_layout_deferred: false,
             headless_bounds: None,
+            pending_resize: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
+            images_attempted: std::collections::HashSet::new(),
+            script_policy: None,
+            live_requests: Vec::new(),
+            live_images: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -1171,6 +1524,7 @@ impl Engine {
             viewhost_id,
             url: None,
             title: None,
+            http_status: None,
             document: None,
             layout: None,
             display_list: None,
@@ -1180,14 +1534,31 @@ impl Engine {
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
+            checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
+            hovered_node: None,
+            hover_chain: Vec::new(),
+            active_chain: Vec::new(),
+            rule_reads: std::cell::RefCell::new(None),
+            html_clips: std::cell::Cell::new(false),
+            pointer_restyle: false,
+            pointer_at: None,
+            primary_button_down: false,
+            press_target: None,
+            press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
             initial_layout_deferred: false,
             headless_bounds: None,
+            pending_resize: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
+            images_attempted: std::collections::HashSet::new(),
+            script_policy: None,
+            live_requests: Vec::new(),
+            live_images: Vec::new(),
         };
 
         let id = view_state.id;
@@ -1239,6 +1610,7 @@ impl Engine {
             viewhost_id,
             url: None,
             title: None,
+            http_status: None,
             document: None,
             layout: None,
             display_list: None,
@@ -1248,14 +1620,31 @@ impl Engine {
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
+            checked_states: std::collections::HashMap::new(),
+            compat_mouse_suppressed: false,
+            hovered_node: None,
+            hover_chain: Vec::new(),
+            active_chain: Vec::new(),
+            rule_reads: std::cell::RefCell::new(None),
+            html_clips: std::cell::Cell::new(false),
+            pointer_restyle: false,
+            pointer_at: None,
+            primary_button_down: false,
+            press_target: None,
+            press_settled_focus: false,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
             initial_layout_deferred: false,
             headless_bounds: Some(bounds),
+            pending_resize: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
+            images_attempted: std::collections::HashSet::new(),
+            script_policy: None,
+            live_requests: Vec::new(),
+            live_images: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -1287,8 +1676,50 @@ impl Engine {
         Ok(())
     }
 
-    /// Resize a view.
+    /// Resize a view: its surface, its layout and the page's `resize` event,
+    /// all now. The app's live loop uses [`Engine::set_view_bounds`] and
+    /// lays out once per turn instead.
     pub fn resize_view(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
+        self.apply_view_bounds(id, bounds)?;
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pending_resize = None;
+        }
+        self.layout_after_resize(id, bounds)
+    }
+
+    /// Give a view its new bounds now (the NSView frame and the GPU surface
+    /// follow the window at once) and its layout at the next
+    /// [`Engine::flush_pending_resize`], which the live turn runs.
+    ///
+    /// A live window resize is dozens of `Resized` events a second, and
+    /// until 2026-10-06 each one laid the page out in full and fired
+    /// `resize` at `window` before the next was read, so the content lagged
+    /// the drag by as many layouts as events had queued (hand-test item
+    /// H9). The events of one loop turn now cost one layout, at the last
+    /// size, and the page hears one `resize`, as in a browser (at most one
+    /// per frame).
+    pub fn set_view_bounds(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
+        self.apply_view_bounds(id, bounds)?;
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pending_resize = Some(bounds);
+        }
+        Ok(())
+    }
+
+    /// Lay out a view whose bounds changed since its last layout, and tell
+    /// the page. Returns whether there was anything to do.
+    pub fn flush_pending_resize(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let Some(bounds) = view.pending_resize.take() else {
+            return Ok(false);
+        };
+        self.layout_after_resize(id, bounds)?;
+        Ok(true)
+    }
+
+    /// The surface half of a resize: the viewhost's bounds and the GPU
+    /// surface (or the headless texture) take the new size.
+    fn apply_view_bounds(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let viewhost_id = view.viewhost_id;
         let is_headless = view.headless_bounds.is_some();
@@ -1321,7 +1752,14 @@ impl Engine {
                 .resize_surface(viewhost_id, bounds.width, bounds.height)
                 .map_err(|e| EngineError::RenderError(e.to_string()))?;
         }
+        Ok(())
+    }
 
+    /// The layout half of a resize: lay the document out at the new size,
+    /// let the page's scripts see it and hear `resize` at `window`, as a
+    /// browser window resize does. Listener exceptions go to the script log
+    /// like the lifecycle events' do.
+    fn layout_after_resize(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
         // Re-layout if we have content
         if self
             .views
@@ -1333,9 +1771,6 @@ impl Engine {
             self.relayout(id)?;
         }
 
-        // The page's scripts see the new size, then get `resize` at
-        // `window`, as a browser window resize does. Listener exceptions go
-        // to the script log like the lifecycle events' do.
         if let Some(view) = self.views.get_mut(&id) {
             if let Some(bindings) = view.bindings.as_ref() {
                 let fired = bindings
@@ -1404,6 +1839,14 @@ impl Engine {
         let changed = view.scroll_offset != old_offset;
         if changed {
             debug!(?id, ?old_offset, new_offset = ?view.scroll_offset, "View scrolled");
+            if let Some(bindings) = view.bindings.as_ref() {
+                bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
+                // The page hears the scroll, and its observers report.
+                bindings.notify_scrolled();
+            }
+        }
+        if changed {
+            self.flush_script_dom_writes(id)?;
         }
 
         Ok(changed)
@@ -1442,12 +1885,27 @@ impl Engine {
     ///
     /// Returns the tag name of the newly focused element, or `None` when the
     /// click landed on nothing focusable — in which case focus is CLEARED,
-    /// matching the behavior of clicking a page's background.
+    /// matching the behavior of clicking a page's background. The page's
+    /// focus moves with it (`document.activeElement`, `change`, `blur`,
+    /// `focus`).
     pub fn focus_at_point(
         &mut self,
         id: EngineViewId,
         viewport_x: f32,
         viewport_y: f32,
+    ) -> Option<String> {
+        self.focus_point(id, viewport_x, viewport_y, PointFocus::Click)
+    }
+
+    /// Move the focus for a press, a release or a whole click at VIEWPORT
+    /// coordinates (see [`PointFocus`]). Returns the tag of the focused
+    /// control afterwards.
+    fn focus_point(
+        &mut self,
+        id: EngineViewId,
+        viewport_x: f32,
+        viewport_y: f32,
+        why: PointFocus,
     ) -> Option<String> {
         let (doc_x, doc_y) = {
             let view = self.views.get(&id)?;
@@ -1464,20 +1922,132 @@ impl Engine {
         // Resolve focusability against the DOM, not the layout box: a
         // FormControl box type would miss `contenteditable` and tabindex
         // later, and the tag name is what callers want reported.
-        let focusable = hit_node.and_then(|raw| {
-            let view = self.views.get(&id)?;
-            let doc = view.document.as_ref()?;
+        let (control, labeled) = hit_node
+            .and_then(|raw| {
+                let view = self.views.get(&id)?;
+                let doc = view.document.as_ref()?;
+                let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+                let control = Self::form_control(&node);
+                // A click on a label is a click for the control it labels.
+                let labeled = match control {
+                    Some(_) => None,
+                    None => Self::labeled_control(doc, &node).as_ref().and_then(Self::form_control),
+                };
+                Some((control, labeled))
+            })
+            .unwrap_or((None, None));
+        let focusable = match why {
+            PointFocus::Press => control,
+            PointFocus::Click => control.or(labeled),
+            // Only a label has anything left to do at the release.
+            PointFocus::Label => match labeled {
+                Some(labeled) => Some(labeled),
+                None => return self.focused_tag(id),
+            },
+        };
+
+        self.set_focus(id, focusable.clone());
+        // The page's focus follows, and has the last word: it refuses a
+        // disabled control, and a `focus` or `blur` listener may move the
+        // focus again.
+        let told = self.views.get(&id).and_then(|v| v.bindings.as_ref()).map(|bindings| {
+            if let Err(e) = bindings.set_focus(focusable.as_ref().map(|(raw, _)| *raw)) {
+                debug!(?id, error = %e, "focus listener threw");
+            }
+        });
+        if told.is_some() {
+            if let Err(e) = self.flush_script_dom_writes(id) {
+                debug!(?id, error = %e, "relayout after focus events failed");
+            }
+        }
+        self.focused_tag(id)
+    }
+
+    /// `node` as a control that takes the engine's focus: its raw NodeId
+    /// and tag.
+    fn form_control(node: &Rc<Node>) -> Option<(usize, String)> {
+        match &node.node_type {
+            NodeType::Element { tag_name, .. } => {
+                let tag = tag_name.to_lowercase();
+                matches!(tag.as_str(), "input" | "textarea" | "select").then_some((node.id.raw(), tag))
+            }
+            _ => None,
+        }
+    }
+
+    /// The control labeled by the `<label>` that `node` is in (HTML
+    /// §4.10.4): the element its `for` names, else the label's first
+    /// field in tree order. `None` outside a label, and for a click on a
+    /// link or a button inside one (that click is theirs).
+    fn labeled_control(doc: &Document, node: &Rc<Node>) -> Option<Rc<Node>> {
+        let mut cur = node.clone();
+        let label = loop {
+            if let NodeType::Element { tag_name, .. } = &cur.node_type {
+                match tag_name.to_lowercase().as_str() {
+                    "label" => break cur,
+                    "a" | "button" => return None,
+                    _ => {}
+                }
+            }
+            cur = cur.parent()?;
+        };
+        if let Some(target) = label.get_attribute("for") {
+            return doc.get_element_by_id(target);
+        }
+        fn first_field(node: &Rc<Node>) -> Option<Rc<Node>> {
+            node.children().into_iter().find_map(|child| {
+                let hidden = child.get_attribute("type").is_some_and(|t| t.eq_ignore_ascii_case("hidden"));
+                match Engine::form_control(&child) {
+                    Some(_) if !hidden => Some(child),
+                    _ => first_field(&child),
+                }
+            })
+        }
+        first_field(&label)
+    }
+
+    /// The tag of the focused form control, if one is focused.
+    fn focused_tag(&self, id: EngineViewId) -> Option<String> {
+        let view = self.views.get(&id)?;
+        let node = view.document.as_ref()?.get_node(view.focused_node?)?;
+        match &node.node_type {
+            NodeType::Element { tag_name, .. } => Some(tag_name.to_lowercase()),
+            _ => None,
+        }
+    }
+
+    /// Follow the page's focus when it moved (script's `focus()`/`blur()`,
+    /// or the page's answer to a click): a form control it focused takes
+    /// the keys; anything else leaves the engine with nothing focused.
+    /// Returns true when the engine's focus changed.
+    fn follow_script_focus(&mut self, id: EngineViewId) -> bool {
+        let Some(moved) = self
+            .views
+            .get(&id)
+            .and_then(|v| v.bindings.as_ref())
+            .and_then(|b| b.take_focus_move())
+        else {
+            return false;
+        };
+        let control = moved.and_then(|raw| {
+            let doc = self.views.get(&id)?.document.as_ref()?;
             let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
             match &node.node_type {
                 NodeType::Element { tag_name, .. } => {
                     let tag = tag_name.to_lowercase();
-                    matches!(tag.as_str(), "input" | "textarea" | "select")
-                        .then_some((raw, tag))
+                    matches!(tag.as_str(), "input" | "textarea" | "select").then_some((raw, tag))
                 }
                 _ => None,
             }
         });
+        let before = self.views.get(&id).and_then(|v| v.focused_node);
+        self.set_focus(id, control);
+        before != self.views.get(&id).and_then(|v| v.focused_node)
+    }
 
+    /// Make a form control (raw NodeId and tag) the focused node, or
+    /// nothing.
+    fn set_focus(&mut self, id: EngineViewId, focusable: Option<(usize, String)>) {
         // Seed edit state from the element's authored value the FIRST time it
         // is focused. Re-focusing must not reset what the user has typed, so
         // the seed is guarded by the entry being absent.
@@ -1512,18 +2082,834 @@ impl Engine {
             }
         }
 
-        let view = self.views.get_mut(&id)?;
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
         match focusable {
             Some((raw, tag)) => {
                 view.focused_node = Some(rustkit_dom::NodeId::new(raw));
                 debug!(?id, %tag, "Focused element");
-                Some(tag)
             }
-            None => {
-                view.focused_node = None;
-                None
+            None => view.focused_node = None,
+        }
+    }
+
+    /// Deliver a primary-button press at VIEWPORT coordinates to the page:
+    /// `pointerdown` then `mousedown` at the element under the point (no
+    /// `mousedown` when a listener cancelled the `pointerdown`, or the
+    /// point is on a disabled form control), then the
+    /// press's default action: the focus moves to the control under the
+    /// point, or away from the focused one (UI Events §3.4.5.1). A
+    /// listener that cancels either event keeps the focus where it is.
+    /// Returns false when a listener cancelled the `mousedown`.
+    pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        let target = self.element_at_point(id, viewport_x, viewport_y);
+        if let Some(view) = self.views.get_mut(&id) {
+            view.primary_button_down = true;
+            view.press_target = target;
+        }
+        // `:active` from here to the release, wherever the pointer goes.
+        let pressed = target.map_or_else(Vec::new, |target| self.element_chain(id, target));
+        if let Some(view) = self.views.get_mut(&id) {
+            let changed = Self::in_one_chain(&view.active_chain, &pressed);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
+            view.active_chain = pressed;
+        }
+        let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
+        if let Some(view) = self.views.get_mut(&id) {
+            view.compat_mouse_suppressed = suppressed;
+        }
+        // A disabled form control hears the pointer events and no mouse
+        // event (the oracle's Chrome; tools/parity_oracle/disabled_press_log.mjs).
+        let not_cancelled = suppressed
+            || self.disabled_control_at_point(id, viewport_x, viewport_y)
+            || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
+        if !suppressed && not_cancelled {
+            self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.press_settled_focus = true;
+        }
+        self.settle_pointer_restyle(id);
+        not_cancelled
+    }
+
+    /// Deliver a pointer move to VIEWPORT coordinates. When the element
+    /// under the pointer changed, the page first hears that: `pointerout`
+    /// and `pointerleave` where it was, `pointerover` and `pointerenter`
+    /// where it is, then the same four as mouse events; the leave and
+    /// enter events go to each element left (innermost first) or entered
+    /// (outermost first) and do not bubble. Then `pointermove` and
+    /// `mousemove` at the element under the pointer. Whatever the
+    /// listeners wrote to the DOM is laid out before this returns.
+    pub fn mouse_move_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
+        self.pointer_moved(id, viewport_x, viewport_y, true);
+    }
+
+    /// The pointer left the view: the page hears the out and leave events
+    /// of everything it was over, with no `relatedTarget`, at the point it
+    /// was last seen.
+    pub fn mouse_leave(&mut self, id: EngineViewId) {
+        let last = self.views.get(&id).and_then(|view| view.pointer_at);
+        if let Some((x, y)) = last {
+            self.pointer_moved(id, x, y, false);
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pointer_at = None;
+        }
+    }
+
+    /// The pointer is at VIEWPORT coordinates, inside the view or (`inside`
+    /// false) just gone from it.
+    fn pointer_moved(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32, inside: bool) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        let doc_x = viewport_x + view.scroll_offset.0;
+        let doc_y = viewport_y + view.scroll_offset.1;
+        let movement = view
+            .pointer_at
+            .map_or((0.0, 0.0), |(x, y)| (viewport_x - x, viewport_y - y));
+        view.pointer_at = Some((viewport_x, viewport_y));
+        let buttons = u16::from(view.primary_button_down);
+        // The compatibility `mousemove` of a press whose `pointerdown` was
+        // cancelled is not fired; the boundary events always are (Pointer
+        // Events §11.3).
+        let mousemove = !(view.primary_button_down && view.compat_mouse_suppressed);
+        // An element and the elements above it, innermost first.
+        let chain = |raw: Option<usize>| -> Vec<usize> {
+            let mut chain = Vec::new();
+            let mut node = raw.and_then(|raw| view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(raw)));
+            while let Some(n) = node {
+                if n.is_element() {
+                    chain.push(n.id.raw());
+                }
+                node = n.parent();
+            }
+            chain
+        };
+        let hit = view
+            .layout
+            .as_ref()
+            .filter(|_| inside)
+            .and_then(|l| l.hit_test(doc_x, doc_y));
+        let now = chain(hit.and_then(|hit| hit.node_id));
+        let before = chain(view.hovered_node);
+        let (over, out) = (now.first().copied(), before.first().copied());
+        view.hovered_node = over;
+        // `:hover` follows the pointer: when a sheet names it, the page is
+        // restyled once the listeners below have run.
+        if over != out {
+            let changed = Self::in_one_chain(&before, &now);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.hover, &changed);
+            view.hover_chain = now.clone();
+        }
+
+        // (target, type, relatedTarget)
+        let mut events: Vec<(usize, &str, Option<usize>)> = Vec::new();
+        if over != out {
+            let left: Vec<usize> = before.iter().copied().filter(|n| !now.contains(n)).collect();
+            let entered: Vec<usize> = now.iter().rev().copied().filter(|n| !before.contains(n)).collect();
+            for [out_type, leave_type, over_type, enter_type] in [
+                ["pointerout", "pointerleave", "pointerover", "pointerenter"],
+                ["mouseout", "mouseleave", "mouseover", "mouseenter"],
+            ] {
+                events.extend(out.map(|n| (n, out_type, over)));
+                events.extend(left.iter().map(|n| (*n, leave_type, over)));
+                events.extend(over.map(|n| (n, over_type, out)));
+                events.extend(entered.iter().map(|n| (*n, enter_type, out)));
             }
         }
+        if let Some(over) = over {
+            events.push((over, "pointermove", None));
+            if mousemove {
+                events.push((over, "mousemove", None));
+            }
+        }
+        if events.is_empty() {
+            return;
+        }
+        for (target, event_type, related_target) in events {
+            // `offsetX/Y` are from the target's own box, as it is now: an
+            // earlier listener may have moved it.
+            let origin = self
+                .views
+                .get(&id)
+                .and_then(|v| Self::box_origin(v.layout.as_ref()?, target))
+                .unwrap_or((0.0, 0.0));
+            let moved = event_type.ends_with("move");
+            let data = rustkit_bindings::MouseEventBindingData {
+                client_x: viewport_x as f64,
+                client_y: viewport_y as f64,
+                screen_x: viewport_x as f64,
+                screen_y: viewport_y as f64,
+                offset_x: (doc_x - origin.0) as f64,
+                offset_y: (doc_y - origin.1) as f64,
+                button: if event_type.starts_with("pointer") { -1 } else { 0 },
+                buttons,
+                movement_x: if moved { movement.0 as f64 } else { 0.0 },
+                movement_y: if moved { movement.1 as f64 } else { 0.0 },
+                related_target,
+                ..Default::default()
+            };
+            self.fire_mouse(id, target, event_type, &data);
+        }
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after a mouse move failed");
+        }
+        self.settle_pointer_restyle(id);
+    }
+
+    /// The elements in exactly one of two chains: the ones a pointer change
+    /// took `:hover` or `:active` from, or gave it to.
+    fn in_one_chain(before: &[usize], now: &[usize]) -> Vec<usize> {
+        let left = before.iter().filter(|n| !now.contains(n));
+        let entered = now.iter().filter(|n| !before.contains(n));
+        left.chain(entered).copied().collect()
+    }
+
+    /// Whether some rule of the view's sheets can match differently now
+    /// that `changed` (raw NodeIds) gained or lost the pseudo-class `reads`
+    /// picks. A restyle is a whole cascade and layout, so a move between
+    /// two elements no `:hover` compound can match must not cost one.
+    fn chain_change_restyles(
+        view: &ViewState,
+        reads: fn(&SelectorReads) -> &PointerReads,
+        changed: &[usize],
+    ) -> bool {
+        let index = view.rule_reads.borrow();
+        let Some(reads) = index.as_ref().map(|index| reads(&index.reads)) else {
+            return false;
+        };
+        if reads.anywhere {
+            return !changed.is_empty();
+        }
+        let Some(document) = view.document.as_ref() else {
+            return false;
+        };
+        !reads.compounds.is_empty()
+            && changed.iter().any(|raw| {
+                let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                    return true;
+                };
+                let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+                    return false;
+                };
+                let classes: Vec<String> = attributes
+                    .get("class")
+                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                reads
+                    .compounds
+                    .iter()
+                    .any(|compound| compound.matches(tag_name, &classes, attributes.get("id")))
+            })
+    }
+
+    /// Restyle the view when the hovered or the pressed chain changed, a
+    /// sheet reads it, and nothing has built the view since (a listener's
+    /// write lays the page out with the new chains already).
+    fn settle_pointer_restyle(&mut self, id: EngineViewId) {
+        if self.views.get(&id).is_some_and(|view| view.pointer_restyle) {
+            if let Err(e) = self.relayout(id) {
+                debug!(?id, error = %e, "restyle after a pointer change failed");
+            }
+        }
+    }
+
+    /// A node of the view's document, by raw NodeId.
+    fn node(&self, id: EngineViewId, raw: usize) -> Option<Rc<Node>> {
+        self.views.get(&id)?.document.as_ref()?.get_node(rustkit_dom::NodeId::new(raw))
+    }
+
+    /// The element under VIEWPORT coordinates (a text run's element), as a
+    /// raw NodeId.
+    fn element_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<usize> {
+        let view = self.views.get(&id)?;
+        let hit = view
+            .layout
+            .as_ref()?
+            .hit_test(viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)?;
+        let mut node = self.node(id, hit.node_id?)?;
+        while !node.is_element() {
+            node = node.parent()?;
+        }
+        Some(node.id.raw())
+    }
+
+    /// An element (raw NodeId) and the elements above it, innermost first.
+    fn element_chain(&self, id: EngineViewId, raw: usize) -> Vec<usize> {
+        let mut chain = Vec::new();
+        let mut node = self.node(id, raw);
+        while let Some(n) = node {
+            if n.is_element() {
+                chain.push(n.id.raw());
+            }
+            node = n.parent();
+        }
+        chain
+    }
+
+    /// Fire `click` at an element (raw NodeId) for a release at VIEWPORT
+    /// coordinates, and lay out what its listeners wrote. Returns false
+    /// when a listener cancelled it.
+    fn click_element(&mut self, id: EngineViewId, target: usize, viewport_x: f32, viewport_y: f32) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return true;
+        };
+        let origin = view
+            .layout
+            .as_ref()
+            .and_then(|l| Self::box_origin(l, target))
+            .unwrap_or((0.0, 0.0));
+        let data = rustkit_bindings::MouseEventBindingData {
+            client_x: viewport_x as f64,
+            client_y: viewport_y as f64,
+            screen_x: viewport_x as f64,
+            screen_y: viewport_y as f64,
+            offset_x: (viewport_x + view.scroll_offset.0 - origin.0) as f64,
+            offset_y: (viewport_y + view.scroll_offset.1 - origin.1) as f64,
+            ..Default::default()
+        };
+        let not_cancelled = self.fire_mouse(id, target, "click", &data);
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after a click failed");
+        }
+        not_cancelled
+    }
+
+    /// The padding-box origin of the first box `node` generated, in
+    /// document coordinates.
+    fn box_origin(b: &LayoutBox, node: usize) -> Option<(f32, f32)> {
+        if b.node_id == Some(node) {
+            let padding_box = b.dimensions.padding_box();
+            return Some((padding_box.x, padding_box.y));
+        }
+        b.children.iter().find_map(|c| Self::box_origin(c, node))
+    }
+
+    /// Deliver a primary-button release at VIEWPORT coordinates: `pointerup`,
+    /// `mouseup`, then `click` at the element under the point, then the click's
+    /// default actions (focus, link navigation) unless a listener called
+    /// `preventDefault()` on the `click`. When the press landed on another
+    /// element, the `click` goes to the nearest element both are in (UI
+    /// Events §3.5) and no link is followed.
+    /// Whatever the listeners wrote to the DOM is laid out before this
+    /// returns.
+    pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
+        if let Some(view) = self.views.get_mut(&id) {
+            view.primary_button_down = false;
+            let changed = std::mem::take(&mut view.active_chain);
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
+        }
+        self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
+        let suppressed = self
+            .views
+            .get_mut(&id)
+            .is_some_and(|view| std::mem::take(&mut view.compat_mouse_suppressed));
+        if !suppressed && !self.disabled_control_at_point(id, viewport_x, viewport_y) {
+            self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+        }
+        // The focus moved at the press. What is left for the release is a
+        // label: its click focuses the control it labels. A release with
+        // no press before it (a caller that only clicks) does both here,
+        // before `click` fires, so a `click` listener that focuses a field
+        // has the last word.
+        let pressed = self
+            .views
+            .get_mut(&id)
+            .is_some_and(|view| std::mem::take(&mut view.press_settled_focus));
+        let focus = if pressed { PointFocus::Label } else { PointFocus::Click };
+        // A press elsewhere: the element the click goes to instead (`None`
+        // inside when the two share no element).
+        let pressed_on = self.views.get_mut(&id).and_then(|view| view.press_target.take());
+        let released_on = self.element_at_point(id, viewport_x, viewport_y);
+        let elsewhere = match (pressed_on, released_on) {
+            (Some(pressed_on), Some(released_on)) if pressed_on != released_on => {
+                let above = self.element_chain(id, released_on);
+                Some(self.element_chain(id, pressed_on).into_iter().find(|n| above.contains(n)))
+            }
+            _ => None,
+        };
+        if elsewhere.is_none() {
+            self.focus_point(id, viewport_x, viewport_y, focus);
+        }
+        // A submit made outside a click (a timer, a callback) has nobody to
+        // navigate for it yet; this click must not pick it up.
+        self.take_submit_request(id);
+        // A disabled form control takes no click from the user: no event,
+        // and no default action for anything around it (HTML §4.10.18.5).
+        let not_cancelled = match elsewhere {
+            None => {
+                !self.disabled_control_at_point(id, viewport_x, viewport_y)
+                    && self.dispatch_mouse_at_point(id, "click", viewport_x, viewport_y)
+            }
+            Some(None) => false,
+            Some(Some(target)) => {
+                !self.node(id, target).is_some_and(Self::in_disabled_control)
+                    && self.click_element(id, target, viewport_x, viewport_y)
+            }
+        };
+        // The click submitted a form (a submit button's activation, or a
+        // listener's `requestSubmit()`) and no `submit` listener cancelled.
+        let submitted = self.take_submit_request(id).and_then(|(form, submitter)| {
+            let form = self
+                .views
+                .get(&id)?
+                .document
+                .as_ref()?
+                .get_node(rustkit_dom::NodeId::new(form))?;
+            self.form_submission(id, &form, submitter)
+                .filter(|sub| sub.is_self_target())
+                .map(|sub| sub.url)
+        });
+        let focused = self.focused_tag(id);
+        // The listeners may have moved or replaced what is under the point;
+        // the default action reads the layout they left behind.
+        let navigate = if submitted.is_some() {
+            submitted
+        } else if not_cancelled && elsewhere.is_none() {
+            // A press that ended on another element follows no link, not
+            // even one both elements are in: Chrome starts a drag of the
+            // link there and sends no click at all (oracle probe,
+            // 2026-10-04).
+            self.follow_link_at_point(id, viewport_x, viewport_y)
+        } else {
+            None
+        };
+        // The click's own default action comes after its listeners, so it
+        // is the later navigation and the one that happens: a URL a
+        // listener assigned on the way is not left for the next turn.
+        if navigate.is_some() {
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+                bindings.take_navigation_requests();
+            }
+        }
+        self.settle_pointer_restyle(id);
+        ClickOutcome { focused, navigate }
+    }
+
+    /// Whether the point is on a disabled form control (HTML §4.10.18.5):
+    /// the nearest control at or above the element hit has `disabled`, or
+    /// sits in a `<fieldset disabled>` outside that fieldset's first
+    /// `<legend>`.
+    fn disabled_control_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        let node = (|| {
+            let view = self.views.get(&id)?;
+            let (doc_x, doc_y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+            let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+            view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))
+        })();
+        node.is_some_and(Self::in_disabled_control)
+    }
+
+    /// Whether `node` is, or is inside, a disabled form control.
+    fn in_disabled_control(node: Rc<Node>) -> bool {
+        let control = (|| {
+            let mut node = node;
+            loop {
+                if let Some(tag) = node.tag_name() {
+                    let tag = tag.to_ascii_lowercase();
+                    if matches!(tag.as_str(), "button" | "input" | "select" | "textarea" | "option" | "optgroup") {
+                        return Some(node);
+                    }
+                }
+                node = node.parent()?;
+            }
+        })();
+        let Some(control) = control else {
+            return false;
+        };
+        if control.get_attribute("disabled").is_some() {
+            return true;
+        }
+        let is = |node: &Rc<Node>, tag: &str| node.tag_name().is_some_and(|t| t.eq_ignore_ascii_case(tag));
+        let mut child = control;
+        while let Some(parent) = child.parent() {
+            if is(&parent, "fieldset") && parent.get_attribute("disabled").is_some() {
+                let first_legend = parent.children().into_iter().find(|c| is(c, "legend"));
+                if first_legend.is_none_or(|legend| legend.id != child.id) {
+                    return true;
+                }
+            }
+            child = parent;
+        }
+        false
+    }
+
+    /// The default action of a click on a link: the URL to load, or `None`
+    /// when there is nothing to load because the link was handled here. A
+    /// URL that differs from the document's only in its fragment scrolls
+    /// this document, and a `javascript:` URL runs its script.
+    fn follow_link_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<String> {
+        if let Some(url) = self.link_at_point(id, viewport_x, viewport_y) {
+            return match self.fragment_of_this_document(id, &url) {
+                Some(target) => {
+                    self.navigate_to_fragment(id, target);
+                    None
+                }
+                None => Some(url),
+            };
+        }
+        if let Some(script) = self.javascript_href_at_point(id, viewport_x, viewport_y) {
+            if let Err(e) = self.execute_script(id, &script) {
+                debug!(?id, ?e, "javascript: link threw");
+            }
+        }
+        None
+    }
+
+    /// `url` parsed, when it has a fragment and is otherwise the view's URL.
+    fn fragment_of_this_document(&self, id: EngineViewId, url: &str) -> Option<Url> {
+        let mut document = self.views.get(&id)?.url.clone()?;
+        let target = Url::parse(url).ok()?;
+        target.fragment()?;
+        let mut bare = target.clone();
+        bare.set_fragment(None);
+        document.set_fragment(None);
+        (bare == document).then_some(target)
+    }
+
+    /// Navigate to a fragment of the current document (HTML §7.4.2.3.3,
+    /// §7.4.6.4): scroll to the element whose id it names (the top of the
+    /// page for an empty fragment or `top`; nowhere when nothing matches),
+    /// make `target` the URL and tell script, which fires `hashchange`.
+    fn navigate_to_fragment(&mut self, id: EngineViewId, target: Url) {
+        let fragment = String::from_utf8_lossy(&percent_decode(target.fragment().unwrap_or_default())).into_owned();
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        let element = (!fragment.is_empty())
+            .then(|| view.document.as_ref()?.get_element_by_id(&fragment))
+            .flatten();
+        let top = match element {
+            Some(el) => view.layout.as_ref().and_then(|l| Self::box_top(l, el.id.raw())),
+            None => (fragment.is_empty() || fragment.eq_ignore_ascii_case("top")).then_some(0.0),
+        };
+        let before = view.scroll_offset;
+        if let Some(top) = top {
+            view.scroll_offset.1 = top.max(0.0).min(view.max_scroll_offset.1);
+        }
+        let scrolled = view.scroll_offset != before;
+        // Script reads the new offset from here on, `hashchange` included.
+        if let (true, Some(bindings)) = (scrolled, view.bindings.as_ref()) {
+            bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
+        }
+        debug!(?id, %target, offset = ?view.scroll_offset, "Navigated to a fragment");
+        let script = format!("__rustkit_fragment_navigation({:?})", target.as_str());
+        view.url = Some(target);
+        if let Err(e) = self.execute_script(id, &script) {
+            debug!(?id, ?e, "hashchange listener threw");
+        }
+        // The page hears the scroll, and its observers report.
+        if scrolled {
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+                bindings.notify_scrolled();
+            }
+            if let Err(e) = self.flush_script_dom_writes(id) {
+                debug!(?id, ?e, "relayout after a fragment scroll failed");
+            }
+        }
+        // The scroll is a translate at render time; nothing was laid out.
+        if let Err(e) = self.render(id) {
+            debug!(?id, ?e, "Render after a fragment navigation failed");
+        }
+    }
+
+    /// The top border edge of the first box `node` generated, in document
+    /// coordinates.
+    fn box_top(b: &LayoutBox, node: usize) -> Option<f32> {
+        if b.node_id == Some(node) {
+            return Some(b.dimensions.border_box().y);
+        }
+        b.children.iter().find_map(|c| Self::box_top(c, node))
+    }
+
+    /// The script of the `javascript:` link under the point, if any. Such
+    /// a link has no `link_href` in the layout, so the DOM is asked.
+    fn javascript_href_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<String> {
+        let view = self.views.get(&id)?;
+        let (doc_x, doc_y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+        let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+        let mut node = view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))?;
+        loop {
+            if let NodeType::Element { tag_name, attributes, .. } = &node.node_type {
+                if tag_name.eq_ignore_ascii_case("a") {
+                    let href = attributes.get("href")?.trim();
+                    let scheme = href.get(.."javascript:".len())?;
+                    return scheme
+                        .eq_ignore_ascii_case("javascript:")
+                        .then(|| String::from_utf8_lossy(&percent_decode(&href[scheme.len()..])).into_owned());
+                }
+            }
+            node = node.parent()?;
+        }
+    }
+
+    /// Where the page's own script asked this view to go since the last
+    /// call: `location.href = url` (and `assign`, `replace`,
+    /// `window.location = url`), `link.click()`, `form.submit()`, or a
+    /// submit made outside the user's click (a timer's `button.click()` or
+    /// `requestSubmit()`). The engine does not navigate; the embedder that
+    /// owns the view loads the URL. The live app asks every turn. A capture
+    /// never asks, so a page that redirects itself is captured as it was.
+    ///
+    /// When script asked more than once, the last request of each kind is
+    /// kept, and a URL wins over a form.
+    pub fn take_script_navigation(&mut self, id: EngineViewId) -> Option<String> {
+        let bindings = self.views.get(&id)?.bindings.as_ref()?;
+        let requested = bindings.take_navigation_requests().pop();
+        let submit = bindings.take_submit_requests().pop();
+        if requested.is_some() {
+            return requested;
+        }
+        let (form, submitter) = submit?;
+        let form = self
+            .views
+            .get(&id)?
+            .document
+            .as_ref()?
+            .get_node(rustkit_dom::NodeId::new(form))?;
+        self.form_submission(id, &form, submitter)
+            .filter(|sub| sub.is_self_target())
+            .map(|sub| sub.url)
+    }
+
+    /// The last form script asked to submit since the previous call, with
+    /// its submitter (raw NodeIds).
+    fn take_submit_request(&self, id: EngineViewId) -> Option<(usize, Option<usize>)> {
+        self.views.get(&id)?.bindings.as_ref()?.take_submit_requests().pop()
+    }
+
+    /// Fire one mouse event at the element hit at VIEWPORT coordinates and
+    /// flush its DOM writes. Returns false when a listener cancelled it.
+    fn dispatch_mouse_at_point(
+        &mut self,
+        id: EngineViewId,
+        event_type: &str,
+        viewport_x: f32,
+        viewport_y: f32,
+    ) -> bool {
+        let Some(view) = self.views.get_mut(&id) else {
+            return true;
+        };
+        let doc_x = viewport_x + view.scroll_offset.0;
+        let doc_y = viewport_y + view.scroll_offset.1;
+        let Some(hit) = view.layout.as_ref().and_then(|l| l.hit_test(doc_x, doc_y)) else {
+            return true;
+        };
+        // A text run is hit, but mouse events target its element.
+        let target = hit.node_id.and_then(|raw| {
+            let doc = view.document.as_ref()?;
+            let mut node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+            while !node.is_element() {
+                node = node.parent()?;
+            }
+            Some(node.id.raw())
+        });
+        let Some(target) = target else {
+            return true;
+        };
+        let data = rustkit_bindings::MouseEventBindingData {
+            client_x: viewport_x as f64,
+            client_y: viewport_y as f64,
+            screen_x: viewport_x as f64,
+            screen_y: viewport_y as f64,
+            offset_x: hit.local_x as f64,
+            offset_y: hit.local_y as f64,
+            button: 0,
+            buttons: if matches!(event_type, "mousedown" | "pointerdown") { 1 } else { 0 },
+            ..Default::default()
+        };
+        let not_cancelled = self.fire_mouse(id, target, event_type, &data);
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after mouse event failed");
+        }
+        not_cancelled
+    }
+
+    /// Fire one mouse event at an element (raw NodeId) and file what its
+    /// listeners threw. Returns false when a listener cancelled it. The
+    /// caller flushes the DOM writes.
+    fn fire_mouse(
+        &mut self,
+        id: EngineViewId,
+        target: usize,
+        event_type: &str,
+        data: &rustkit_bindings::MouseEventBindingData,
+    ) -> bool {
+        let Some(view) = self.views.get_mut(&id) else {
+            return true;
+        };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return true;
+        };
+        let source = format!("event:{event_type}");
+        let not_cancelled = match bindings.fire_mouse_event(target, event_type, data) {
+            Ok(not_cancelled) => not_cancelled,
+            Err(e) => {
+                view.script_log.push(ScriptRecord {
+                    source: source.clone(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(e.to_string()),
+                });
+                true
+            }
+        };
+        for message in bindings.take_reported_errors() {
+            view.script_log.push(ScriptRecord {
+                source: source.clone(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::Threw(message),
+            });
+        }
+        debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
+        not_cancelled
+    }
+
+    /// One turn of the live loop for a loaded page: run the timers that came
+    /// due in the `elapsed_ms` since the last turn, answer what the page
+    /// asked of the network, and lay out what the callbacks wrote.
+    ///
+    /// The load runs a page's timers once, on a virtual clock up to its
+    /// horizon. This is what runs them afterwards: the caller's loop passes
+    /// the real time since its last turn and comes back when
+    /// [`LivePump::next_timer_ms`] says the next timer is due. Requests go
+    /// through the document's own `FetchPolicy`, as they did during the
+    /// load; a page with none (`load_html`) has no network.
+    pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        let mut out = LivePump::default();
+        // The window's size as of this turn, laid out once, before the
+        // page's timers run and see it.
+        match self.flush_pending_resize(id) {
+            Ok(resized) => out.relaid_out = resized,
+            Err(e) => debug!(?id, error = %e, "layout after a resize failed"),
+        }
+        let loader = self.loader.clone();
+        let Some(view) = self.views.get_mut(&id) else {
+            return out;
+        };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return out;
+        };
+        let policy = view.script_policy.clone();
+        let document = view.url.clone();
+        let live_requests = &mut view.live_requests;
+        let mut threw: Vec<(&str, String)> = Vec::new();
+
+        // Timers first: what they ask of the network is answered this turn.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
+        })) {
+            Ok(Ok(ran)) => out.timers_ran = ran,
+            Ok(Err(e)) => threw.push(("timers", e.to_string())),
+            Err(_) => threw.push(("timers", "JS engine panic".into())),
+        }
+        if let Some(policy) = policy {
+            // Start what the page has asked for since the last turn. No turn
+            // waits for an answer: this thread is the window's.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())) {
+                Ok(requests) => {
+                    let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
+                    live_requests.extend(
+                        requests
+                            .into_iter()
+                            .map(|request| script_net::start_live(policy.clone(), loader.clone(), request, deadline)),
+                    );
+                }
+                Err(_) => threw.push(("network", "JS engine panic".into())),
+            }
+            // Delivery only: a timer a response handler sets runs on a later
+            // turn, when its time has passed, and a request it makes starts
+            // on the next.
+            for (request_id, outcome) in script_net::settle_live(live_requests, LIVE_NETWORK_SLICE).await {
+                out.requests += 1;
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings.deliver_net_response(request_id, outcome)
+                })) {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => threw.push(("network", e.to_string())),
+                    Err(_) => threw.push(("network", "JS engine panic".into())),
+                }
+            }
+            out.in_flight = live_requests.len();
+            // The modules a dynamic `import()` asked for are still fetched
+            // inside the turn.
+            if let Some(document) = document.as_ref() {
+                let mut modules_fetched = 0;
+                let found = script_net::pump_modules(
+                    bindings,
+                    &policy,
+                    &loader,
+                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
+                    document,
+                    &mut modules_fetched,
+                )
+                .await;
+                out.requests += found.requests;
+                threw.extend(found.threw.into_iter().map(|message| ("network", message)));
+                if found.poisoned {
+                    threw.push(("network", "JS engine panic".into()));
+                }
+            }
+        }
+        threw.extend(bindings.take_reported_errors().into_iter().map(|message| ("timers", message)));
+        out.next_timer_ms = bindings.next_timer_delay();
+        for (source, message) in threw {
+            if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
+                break;
+            }
+            view.script_log.push(ScriptRecord {
+                source: source.to_string(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::Threw(message),
+            });
+        }
+
+        match self.flush_script_dom_writes(id) {
+            // Or the resize above already did.
+            Ok(relaid_out) => out.relaid_out |= relaid_out,
+            Err(e) => debug!(?id, error = %e, "relayout after a live turn failed"),
+        }
+        // What the callbacks added may show images the load never saw. Their
+        // fetch starts here and no turn waits for it (until 2026-10-05 this
+        // one did, for as long as the slowest image took).
+        if out.relaid_out {
+            match self.plan_image_loads(id, true) {
+                Ok(Some(plan)) if !plan.is_empty() => {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => debug!(?id, error = %e, "Failed to look for images added by live page scripts"),
+            }
+        }
+        let fetched = match self.views.get_mut(&id) {
+            Some(view) => script_net::settle_live(&mut view.live_images, LIVE_NETWORK_SLICE).await,
+            None => Vec::new(),
+        };
+        let mut arrived = 0;
+        for images in fetched {
+            arrived += self.keep_fetched_images(images);
+        }
+        if arrived > 0 {
+            info!(count = arrived, "Loaded images added by live page scripts");
+            match self.relayout(id) {
+                Ok(()) => out.relaid_out = true,
+                Err(e) => debug!(?id, error = %e, "relayout after live images failed"),
+            }
+        }
+        if let Some(view) = self.views.get(&id) {
+            out.in_flight += view.live_images.len();
+        }
+        if out.timers_ran > 0 || out.requests > 0 {
+            debug!(?id, ?out, "Live turn");
+        }
+        out
     }
 
     /// Deliver a key to the focused form control.
@@ -1533,6 +2919,11 @@ impl Engine {
     /// platform wiring); `key` carries the typed character for insertions.
     /// Returns true when the control's value or caret changed, i.e. when the
     /// caller must relayout.
+    ///
+    /// With nothing focused the page still hears `keydown`, at its active
+    /// element (the body unless script focused something). Then true means
+    /// a listener cancelled it: the key was the page's (a shortcut), and
+    /// the caller must not apply its own default (scrolling).
     pub fn handle_text_key(
         &mut self,
         id: EngineViewId,
@@ -1545,8 +2936,16 @@ impl Engine {
         use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
         let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
-            return false;
+            return !self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
         };
+        // The page hears the key first; a cancelled keydown types nothing.
+        // Enter's keydown is `submit_focused_form`'s, which the caller
+        // tries before this.
+        if key_code != 0x0D
+            && !self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt)
+        {
+            return false;
+        }
         let Some(state) = self
             .views
             .get(&id)
@@ -1557,15 +2956,39 @@ impl Engine {
 
         let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
         if matches!(result, KeyHandleResult::ValueChanged) {
-            // Script reads `value` from the bindings; keep it current.
+            // Script reads `value` from the bindings; keep it current,
+            // then tell the page.
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
                 bindings.sync_control_value(focused.raw(), state.value());
+                let typed = (!key.is_empty() && !ctrl).then_some(key);
+                if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
+                    debug!(?id, error = %e, "input listener threw");
+                }
+            }
+            if let Err(e) = self.flush_script_dom_writes(id) {
+                debug!(?id, error = %e, "relayout after input event failed");
             }
         }
         matches!(
             result,
             KeyHandleResult::ValueChanged | KeyHandleResult::SelectionChanged
         )
+    }
+
+    /// The key was released: `keyup` at the focused element, or at the
+    /// page's active element when nothing is focused. Same key arguments
+    /// as [`Self::handle_text_key`]. What its listeners wrote is laid out.
+    pub fn handle_key_up(
+        &mut self,
+        id: EngineViewId,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) {
+        let focused = self.views.get(&id).and_then(|v| v.focused_node).map(|n| n.raw());
+        self.fire_key(id, focused, "keyup", key_code, key, ctrl, shift, alt);
     }
 
     /// Build the submission for the form containing the focused control.
@@ -1584,12 +3007,9 @@ impl Engine {
         &self,
         id: EngineViewId,
     ) -> Option<rustkit_dom::forms::FormSubmission> {
-        use rustkit_dom::forms::{FormDataEntry, FormDataValue, FormState};
-
         let view = self.views.get(&id)?;
         let focused = view.focused_node?;
         let document = view.document.as_ref()?;
-        let base = view.url.as_ref()?.to_string();
 
         // Walk up to the enclosing <form>.
         let form = {
@@ -1603,7 +3023,119 @@ impl Engine {
                 }
             }
         };
+        self.form_submission(id, &form, None)
+    }
 
+    /// Enter in the focused field: the URL to load when that submits its
+    /// form.
+    ///
+    /// The page hears `keydown` first. Unless a listener cancels it, the
+    /// form is submitted the way the page would see a person do it
+    /// (implicit submission, HTML §4.10.21.2): a click on the form's
+    /// default button, validation, then `submit`. `None` when there is no
+    /// form, a listener cancelled, or the form is not a GET to this view.
+    /// A page without script submits as before.
+    pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
+        let focused = self.views.get(&id)?.focused_node?.raw();
+        if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
+            return None;
+        }
+        let Some(bindings) = self.views.get(&id)?.bindings.as_ref() else {
+            return self
+                .form_submission_for_focus(id)
+                .filter(|sub| sub.is_self_target())
+                .map(|sub| sub.url);
+        };
+        // A submit made before this key has nobody to navigate for it.
+        bindings.take_submit_requests();
+        if let Err(e) = bindings.implicit_submit(focused) {
+            debug!(?id, error = %e, "implicit submission threw");
+        }
+        let request = bindings.take_submit_requests().pop();
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after implicit submission failed");
+        }
+        let (form, submitter) = request?;
+        let form = self
+            .views
+            .get(&id)?
+            .document
+            .as_ref()?
+            .get_node(rustkit_dom::NodeId::new(form))?;
+        self.form_submission(id, &form, submitter)
+            .filter(|sub| sub.is_self_target())
+            .map(|sub| sub.url)
+    }
+
+    /// Fire `keydown` or `keyup` for a key at `node` (`None`: the page's
+    /// active element) and lay out what its listeners wrote. `key_code` is
+    /// the Win32 virtual key `handle_text_key` takes; `text` is the typed
+    /// character, empty for a named key. Returns false when a listener
+    /// cancelled it.
+    #[allow(clippy::too_many_arguments)]
+    fn fire_key(
+        &mut self,
+        id: EngineViewId,
+        node: Option<usize>,
+        event_type: &str,
+        key_code: u32,
+        text: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> bool {
+        let key = match key_code {
+            0x08 => "Backspace",
+            0x09 => "Tab",
+            0x0D => "Enter",
+            0x1B => "Escape",
+            0x21 => "PageUp",
+            0x22 => "PageDown",
+            0x23 => "End",
+            0x24 => "Home",
+            0x25 => "ArrowLeft",
+            0x26 => "ArrowUp",
+            0x27 => "ArrowRight",
+            0x28 => "ArrowDown",
+            0x2E => "Delete",
+            _ => text,
+        };
+        let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) else {
+            return true;
+        };
+        let data = rustkit_bindings::KeyboardEventBindingData {
+            key: key.to_string(),
+            // A named key's code is its name; a character's physical key
+            // is not known here.
+            code: if key.chars().count() > 1 { key.to_string() } else { String::new() },
+            ctrl_key: ctrl,
+            alt_key: alt,
+            shift_key: shift,
+            ..Default::default()
+        };
+        let not_cancelled = bindings.fire_key_event(node, event_type, &data).unwrap_or_else(|e| {
+            debug!(?id, event_type, error = %e, "key listener threw");
+            true
+        });
+        if let Err(e) = self.flush_script_dom_writes(id) {
+            debug!(?id, error = %e, "relayout after key event failed");
+        }
+        not_cancelled
+    }
+
+    /// Build the submission of `form`. `submitter` is the button that
+    /// submitted it (by raw NodeId): its own name and value go with the
+    /// form's data, in tree order. The same limits as
+    /// [`Self::form_submission_for_focus`].
+    fn form_submission(
+        &self,
+        id: EngineViewId,
+        form: &Rc<Node>,
+        submitter: Option<usize>,
+    ) -> Option<rustkit_dom::forms::FormSubmission> {
+        use rustkit_dom::forms::{FormDataEntry, FormDataValue, FormState};
+
+        let base = self.views.get(&id)?.url.as_ref()?.to_string();
         let NodeType::Element {
             attributes: form_attrs,
             ..
@@ -1630,6 +3162,7 @@ impl Engine {
             node: &std::rc::Rc<Node>,
             engine: &Engine,
             view_id: EngineViewId,
+            submitter: Option<usize>,
             out: &mut Vec<FormDataEntry>,
         ) {
             if let NodeType::Element {
@@ -1639,7 +3172,17 @@ impl Engine {
             } = &node.node_type
             {
                 let tag = tag_name.to_lowercase();
-                if matches!(tag.as_str(), "input" | "textarea") {
+                let is_submitter = submitter == Some(node.id.raw());
+                if tag == "button" {
+                    // A button is successful only as the submitter.
+                    let name = attributes.get("name").cloned().unwrap_or_default();
+                    if is_submitter && !name.is_empty() && !attributes.contains_key("disabled") {
+                        out.push(FormDataEntry {
+                            name,
+                            value: FormDataValue::String(attributes.get("value").cloned().unwrap_or_default()),
+                        });
+                    }
+                } else if matches!(tag.as_str(), "input" | "textarea") {
                     // A control without a name is not successful (HTML §4.10),
                     // and disabled controls never submit.
                     let name = attributes.get("name").cloned().unwrap_or_default();
@@ -1648,12 +3191,16 @@ impl Engine {
                         .get("type")
                         .map(|t| t.to_lowercase())
                         .unwrap_or_else(|| "text".into());
-                    let skip = matches!(kind.as_str(), "submit" | "button" | "reset" | "file")
+                    let skip = matches!(kind.as_str(), "button" | "reset" | "file")
+                        || (kind == "submit" && !is_submitter)
                         || (matches!(kind.as_str(), "checkbox" | "radio")
-                            && !attributes.contains_key("checked"));
+                            && !engine.checked_in(view_id, node.id.raw(), attributes));
                     if !name.is_empty() && !disabled && !skip {
-                        let value = engine
-                            .edit_value_in(view_id, node.id.raw())
+                        // A button's value is its attribute; edit state
+                        // (seeded on focus) is a text control's.
+                        let value = (kind != "submit")
+                            .then(|| engine.edit_value_in(view_id, node.id.raw()))
+                            .flatten()
                             .map(|(v, _)| v)
                             .unwrap_or_else(|| {
                                 if tag == "textarea" {
@@ -1670,10 +3217,10 @@ impl Engine {
                 }
             }
             for child in node.children() {
-                collect(&child, engine, view_id, out);
+                collect(&child, engine, view_id, submitter, out);
             }
         }
-        collect(&form, self, id, &mut entries);
+        collect(form, self, id, submitter, &mut entries);
 
         if entries.is_empty() {
             return None;
@@ -1727,6 +3274,70 @@ impl Engine {
             Some(base) => base.join(raw).ok(),
             None => Url::parse(raw).ok(),
         }
+    }
+
+    /// Whether a checkbox or radio button in a SPECIFIC view is checked:
+    /// what a click or script last set, else its `checked` attribute.
+    fn checked_in(&self, id: EngineViewId, node_raw: usize, attributes: &HashMap<String, String>) -> bool {
+        self.views
+            .get(&id)
+            .and_then(|v| v.checked_states.get(&node_raw).copied())
+            .unwrap_or_else(|| attributes.contains_key("checked"))
+    }
+
+    /// An element's attributes as the build of the current view reads
+    /// them: an `<input>`'s with `checked` present exactly when the control
+    /// is checked, and the hovered (pressed) element's and its ancestors'
+    /// with [`HOVER_MARK`] ([`ACTIVE_MARK`]). Selector matching (`:checked`,
+    /// `:hover` and `:active`, also on an ancestor or a sibling) and the
+    /// control's box read the attribute map, so this one substitution is
+    /// what makes them follow a click and the pointer.
+    fn live_attributes<'a>(
+        &self,
+        node_raw: usize,
+        tag_lower: &str,
+        attributes: &'a HashMap<String, String>,
+    ) -> std::borrow::Cow<'a, HashMap<String, String>> {
+        let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) else {
+            return std::borrow::Cow::Borrowed(attributes);
+        };
+        let checked = match tag_lower {
+            "input" => view
+                .checked_states
+                .get(&node_raw)
+                .copied()
+                .filter(|checked| *checked != attributes.contains_key("checked")),
+            _ => None,
+        };
+        let hovered = view.hover_chain.contains(&node_raw);
+        let active = view.active_chain.contains(&node_raw);
+        if checked.is_none() && !hovered && !active {
+            return std::borrow::Cow::Borrowed(attributes);
+        }
+        let mut attributes = attributes.clone();
+        match checked {
+            Some(true) => {
+                attributes.insert("checked".to_string(), String::new());
+            }
+            Some(false) => {
+                attributes.remove("checked");
+            }
+            None => {}
+        }
+        if hovered {
+            attributes.insert(HOVER_MARK.to_string(), String::new());
+        }
+        if active {
+            attributes.insert(ACTIVE_MARK.to_string(), String::new());
+        }
+        std::borrow::Cow::Owned(attributes)
+    }
+
+    /// The HTTP status the view's document came with: 200 for an ordinary
+    /// page, 403 or 404 for a server's error page shown as the page. None
+    /// for a document that came from no response.
+    pub fn http_status(&self, id: EngineViewId) -> Option<u16> {
+        self.views.get(&id).and_then(|v| v.http_status)
     }
 
     /// Live value + caret for a control in a SPECIFIC view.
@@ -1824,6 +3435,7 @@ impl Engine {
         &self,
         id: EngineViewId,
         base: &Url,
+        policy: Option<Arc<FetchPolicy>>,
     ) -> Option<futures::future::LocalBoxFuture<'static, Vec<FetchedScript>>> {
         let document = self.views.get(&id).and_then(|v| v.document.clone())?;
 
@@ -1832,7 +3444,7 @@ impl Engine {
             Inline(String),
             External(Url),
         }
-        let mut entries: Vec<(String, Result<(ScriptTiming, Body), &'static str>)> = Vec::new();
+        let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), &'static str>, bool)> = Vec::new();
         let mut index = 0usize;
         document.traverse(|node| {
             if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
@@ -1852,7 +3464,7 @@ impl Engine {
                     .map_err(|_| "unparseable src"),
                 None => Ok((timing, Body::Inline(node.text_content()))),
             });
-            entries.push((label, entry));
+            entries.push((label, node.id.raw(), entry, is_module_script(node)));
         });
         if entries.is_empty() {
             return None;
@@ -1866,14 +3478,36 @@ impl Engine {
         const MAX_CONCURRENT_SCRIPT_LOADS: usize = 8;
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
+        let base = base.clone();
         Some(
-            futures::stream::iter(entries.into_iter().map(move |(label, entry)| {
+            futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module)| {
                 let loader = loader.clone();
                 let referrer = referrer.clone();
+                let policy = policy.clone();
+                let base = base.clone();
                 async move {
+                    let mut label = label;
                     let result = match entry {
                         Err(reason) => Err(ScriptOutcome::Skipped(reason)),
                         Ok((timing, Body::Inline(text))) => Ok((timing, text)),
+                        // A module is fetched through the policy's one
+                        // module entry point (script destination, CORS,
+                        // JavaScript MIME, 2xx, shield, budgets); its
+                        // identity is the URL it ends up at.
+                        Ok((timing, Body::External(url))) if is_module => match &policy {
+                            None => Err(ScriptOutcome::FetchFailed("no network policy for this page".into())),
+                            Some(policy) => {
+                                let fetch = policy.fetch_module(&loader, &url, &base);
+                                match tokio::time::timeout_at(deadline, fetch).await {
+                                    Ok(Ok(module)) => {
+                                        label = module.final_url.to_string();
+                                        Ok((timing, module.source))
+                                    }
+                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(format!("{denial}"))),
+                                    Err(_) => Err(ScriptOutcome::OverBudget),
+                                }
+                            }
+                        },
                         Ok((timing, Body::External(url))) => {
                             let fetch = async {
                                 match loader.fetch(
@@ -1895,7 +3529,7 @@ impl Engine {
                                 .unwrap_or(Err(ScriptOutcome::OverBudget))
                         }
                     };
-                    (label, result)
+                    (label, node_id, result, is_module)
                 }
             }))
             .buffered(MAX_CONCURRENT_SCRIPT_LOADS)
@@ -1912,25 +3546,71 @@ impl Engine {
     ///
     /// The document is fully parsed before any script runs, so a script
     /// sees the whole tree rather than the part above it.
-    fn run_page_scripts(
+    async fn run_page_scripts(
         &mut self,
         id: EngineViewId,
         fetched: Vec<FetchedScript>,
         budget: std::time::Duration,
+        policy: Option<Arc<FetchPolicy>>,
+    ) {
+        // The page's scripts run on the view's bindings and log, taken out of
+        // the view for the run so that the engine can lay the page out again
+        // between the lifecycle steps (`refresh_layout_for_script`), which
+        // needs the view. `&mut self` is held for the whole run, so nothing
+        // else can look for them meanwhile.
+        let (bindings, mut log) = match self.views.get_mut(&id) {
+            Some(view) => match view.bindings.take() {
+                Some(bindings) => (bindings, std::mem::take(&mut view.script_log)),
+                None => return,
+            },
+            None => return,
+        };
+        self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log).await;
+        if let Some(view) = self.views.get_mut(&id) {
+            log.append(&mut view.script_log);
+            view.script_log = log;
+            view.bindings = Some(bindings);
+        }
+    }
+
+    async fn run_page_scripts_with(
+        &mut self,
+        id: EngineViewId,
+        fetched: Vec<FetchedScript>,
+        budget: std::time::Duration,
+        policy: Option<Arc<FetchPolicy>>,
+        bindings: &DomBindings,
+        log: &mut Vec<ScriptRecord>,
     ) {
         let started = std::time::Instant::now();
         let horizon_ms = self.config.timer_horizon_ms;
         let loop_limit = self.config.script_loop_iteration_limit;
-        let Some(view) = self.views.get_mut(&id) else { return };
-        let Some(bindings) = view.bindings.as_ref() else { return };
-        let log = &mut view.script_log;
+        let net_rounds = self.config.script_network_rounds;
+        let loader = self.loader.clone();
+        let Some(view) = self.views.get(&id) else { return };
+        let document_url = view.url.clone();
+        let view_document = view.document.clone();
+        bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         bindings.set_loop_iteration_limit(loop_limit);
+        bindings.set_max_job_iterations(loop_limit.min(100_000));
 
-        // Execution order: classic, defer, async (stable within each).
-        let mut runnable: Vec<(String, ScriptTiming, String)> = Vec::new();
-        for (label, result) in fetched {
+        // Execution order: classic, defer (module scripts run here, in
+        // document order with them), async (stable within each). A module
+        // whose fetch failed keeps its place so its `error` event fires in
+        // order; a classic script failure is only logged.
+        type Job = (String, u8, Result<String, ScriptOutcome>, usize, bool);
+        let mut runnable: Vec<Job> = Vec::new();
+        for (label, node_id, result, is_module) in fetched {
             match result {
-                Ok((timing, text)) => runnable.push((label, timing, text)),
+                Ok((timing, text)) => {
+                    let key = match timing {
+                        ScriptTiming::Classic => 0,
+                        ScriptTiming::Defer => 1,
+                        ScriptTiming::Async => 2,
+                    };
+                    runnable.push((label, key, Ok(text), node_id, is_module));
+                }
+                Err(outcome) if is_module => runnable.push((label, 1, Err(outcome), node_id, true)),
                 Err(outcome) => log.push(ScriptRecord {
                     source: label,
                     bytes: 0,
@@ -1939,11 +3619,7 @@ impl Engine {
                 }),
             }
         }
-        runnable.sort_by_key(|(_, timing, _)| match timing {
-            ScriptTiming::Classic => 0,
-            ScriptTiming::Defer => 1,
-            ScriptTiming::Async => 2,
-        });
+        runnable.sort_by_key(|(_, key, _, _, _)| *key);
 
         // A panic inside the JS engine leaves its state unknowable: record
         // it and run nothing more on this page.
@@ -1973,8 +3649,52 @@ impl Engine {
                 .unwrap_or(message)
         };
 
+        // Import maps (inline only, as the spec has it) are read before any
+        // module is resolved. A map that is not usable is reported and
+        // changes nothing.
+        if let Some(document) = view_document {
+            let mut maps: Vec<String> = Vec::new();
+            document.traverse(|node| {
+                if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) == Some(true)
+                    && node.get_attribute("src").is_none()
+                    && node
+                        .get_attribute("type")
+                        .map(|t| t.trim().eq_ignore_ascii_case("importmap"))
+                        .unwrap_or(false)
+                {
+                    maps.push(node.text_content());
+                }
+            });
+            for text in maps {
+                if let Err(message) = bindings.add_import_map(&text) {
+                    log.push(ScriptRecord {
+                        source: "importmap".into(),
+                        bytes: text.len(),
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(format!("import map: {message}")),
+                    });
+                }
+            }
+        }
         let _ = bindings.set_ready_state("loading");
-        for (label, _, text) in runnable {
+        let scripts_started = std::time::Instant::now();
+        let modules_fetched = Cell::new(0usize);
+        for (label, _, source, node_id, is_module) in runnable {
+            let text = match source {
+                Ok(text) => text,
+                Err(outcome) => {
+                    // A module script that could not be fetched: logged, and
+                    // its element hears `error`.
+                    log.push(ScriptRecord {
+                        source: label,
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome,
+                    });
+                    let _ = bindings.fire_script_event(node_id, "error");
+                    continue;
+                }
+            };
             if poisoned.get() || started.elapsed() >= budget {
                 log.push(ScriptRecord {
                     source: label,
@@ -2001,9 +3721,91 @@ impl Engine {
                 });
                 continue;
             }
+            if is_module {
+                // The identity of a module is the URL it was served from; an
+                // inline module is the document plus its position.
+                let module_url = match (label.strip_prefix("inline#"), &document_url) {
+                    (Some(position), Some(document)) => format!("{document}#inline-module-{position}"),
+                    _ => label.clone(),
+                };
+                info!(source = %label, bytes = text.len(), "Running module script");
+                let module_started = std::time::Instant::now();
+                let begun = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings.begin_module(&module_url, &text)
+                }));
+                let (outcome, event) = match begun {
+                    Err(_) => {
+                        poisoned.set(true);
+                        (ScriptOutcome::Threw("JS engine panic".into()), None)
+                    }
+                    // A syntax error: the module graph was never built.
+                    Ok(Err(message)) => (ScriptOutcome::Threw(message), Some("error")),
+                    Ok(Ok(handle)) => {
+                        if let (Some(policy), Some(document)) = (&policy, &document_url) {
+                            let remaining = budget.saturating_sub(started.elapsed());
+                            let mut count = modules_fetched.get();
+                            let found = script_net::pump_modules(
+                                bindings,
+                                policy,
+                                &loader,
+                                tokio::time::Instant::now() + remaining,
+                                document,
+                                &mut count,
+                            )
+                            .await;
+                            modules_fetched.set(count);
+                            if found.poisoned {
+                                poisoned.set(true);
+                            }
+                        }
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            bindings.poll_module(&handle)
+                        })) {
+                            Err(_) => {
+                                poisoned.set(true);
+                                (ScriptOutcome::Threw("JS engine panic".into()), None)
+                            }
+                            // Loaded and run (a pending top-level `await` is
+                            // still running): the element hears `load`.
+                            Ok(rustkit_bindings::ModuleState::Done)
+                            | Ok(rustkit_bindings::ModuleState::Evaluating) => {
+                                (ScriptOutcome::Ran, Some("load"))
+                            }
+                            // The graph loaded and ran, and threw: reported,
+                            // and the fetch itself succeeded.
+                            Ok(rustkit_bindings::ModuleState::Threw(message)) => {
+                                (ScriptOutcome::Threw(message), Some("load"))
+                            }
+                            // The graph could not be loaded or linked.
+                            Ok(rustkit_bindings::ModuleState::Failed(message)) => (
+                                ScriptOutcome::Threw(format!("module graph failed: {message}")),
+                                Some("error"),
+                            ),
+                            Ok(rustkit_bindings::ModuleState::Loading) => (
+                                ScriptOutcome::Threw("module imports were not loaded".into()),
+                                Some("error"),
+                            ),
+                        }
+                    }
+                };
+                log.push(ScriptRecord {
+                    source: label,
+                    bytes: text.len(),
+                    elapsed_ms: module_started.elapsed().as_millis() as u64,
+                    outcome,
+                });
+                if let Some(event) = event {
+                    let _ = bindings.fire_script_event(node_id, event);
+                }
+                continue;
+            }
             info!(source = %label, bytes = text.len(), "Running page script");
             let record = run(label, text.len(), &|| {
-                bindings.evaluate(&text).map(|_| ()).map_err(strip)
+                // `document.currentScript` is this element while it runs.
+                let _ = bindings.set_current_script(Some(node_id));
+                let result = bindings.evaluate(&text).map(|_| ()).map_err(strip);
+                let _ = bindings.set_current_script(None);
+                result
             });
             log.push(record);
         }
@@ -2011,6 +3813,65 @@ impl Engine {
             return;
         }
 
+        info!(
+            elapsed_ms = scripts_started.elapsed().as_millis() as u64,
+            "Page scripts ran (fetching the module graphs included)"
+        );
+        // What the scripts asked of the network, answered before the
+        // lifecycle events fire (a handler can start more; see the rounds).
+        // Delivery only: the timers run in their own step below.
+        let pump = |timers: Option<(u64, u32)>| {
+            let policy = policy.clone();
+            let loader = loader.clone();
+            let document = document_url.clone();
+            let modules_fetched = &modules_fetched;
+            async move {
+                match policy {
+                    Some(policy) => {
+                        let remaining = budget.saturating_sub(started.elapsed());
+                        let mut count = modules_fetched.get();
+                        // Network requests and dynamic imports alternate:
+                        // one can start the other.
+                        let found = script_net::pump_all(
+                            bindings,
+                            &policy,
+                            &loader,
+                            tokio::time::Instant::now() + remaining,
+                            net_rounds,
+                            timers,
+                            document.as_ref(),
+                            &mut count,
+                        )
+                        .await;
+                        modules_fetched.set(count);
+                        Some(found)
+                    }
+                    None => None,
+                }
+            }
+        };
+        let after_scripts = pump(None).await;
+        if let Some(found) = after_scripts {
+            if found.poisoned {
+                log.push(ScriptRecord {
+                    source: "network".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw("JS engine panic".into()),
+                });
+                return;
+            }
+            for message in found.threw {
+                log.push(ScriptRecord {
+                    source: "network".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                });
+            }
+        }
+
+        let timers_ran = Cell::new(0u32);
         // Lifecycle events and timers. Listener/callback exceptions are
         // caught in JS and drained after each step.
         let steps: [(&str, &dyn Fn() -> Result<(), String>); 3] = [
@@ -2032,13 +3893,23 @@ impl Engine {
             ("timers", &|| {
                 bindings
                     .run_timers(horizon_ms, MAX_TIMER_CALLBACKS)
-                    .map(|_| ())
+                    .map(|n| timers_ran.set(n))
                     .map_err(strip)
             }),
         ];
         for (source, step) in steps {
+            // What the scripts (or the previous step) wrote is laid out
+            // before the next step runs, so its script reads fresh geometry.
+            self.refresh_layout_for_script(id, bindings);
             info!(%source, "Running page lifecycle step");
+            let step_started = std::time::Instant::now();
             let record = run(source.to_string(), 0, step);
+            info!(
+                %source,
+                elapsed_ms = step_started.elapsed().as_millis() as u64,
+                callbacks = timers_ran.get(),
+                "Page lifecycle step done"
+            );
             // Only an escaped error (the loop limit, a panic) is worth a
             // record of its own; a clean step is not a script.
             if record.outcome != ScriptOutcome::Ran {
@@ -2046,6 +3917,28 @@ impl Engine {
             }
             if poisoned.get() {
                 return;
+            }
+            // The step's requests are answered now; after the timers step,
+            // each round also runs the timers the responses scheduled.
+            let timers = (source == "timers").then_some((horizon_ms, MAX_TIMER_CALLBACKS));
+            if let Some(found) = pump(timers).await {
+                for message in found.threw {
+                    log.push(ScriptRecord {
+                        source: "network".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(message),
+                    });
+                }
+                if found.poisoned {
+                    log.push(ScriptRecord {
+                        source: "network".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw("JS engine panic".into()),
+                    });
+                    return;
+                }
             }
             for message in bindings.take_reported_errors() {
                 log.push(ScriptRecord {
@@ -2120,23 +4013,47 @@ impl Engine {
             return Ok(());
         }
 
-        if !response.ok() {
-            let error = format!("HTTP {}", response.status);
-            let view = self
-                .views
-                .get_mut(&id)
-                .ok_or(EngineError::ViewNotFound(id))?;
-            view.navigation
-                .fail_navigation(error.clone())
-                .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        let status = response.status;
+        let header_referrer_policy = response
+            .headers
+            .get("referrer-policy")
+            .and_then(|v| v.to_str().ok())
+            .and_then(ReferrerPolicy::parse_header);
 
-            let _ = self.event_tx.send(EngineEvent::NavigationFailed {
-                view_id: id,
-                url,
-                error,
-            });
+        // A server's error page is a page: the body of a 403 or a 404 is
+        // shown like any other document. Only an error response with
+        // nothing in it fails the navigation.
+        let mut response = Some(response);
+        let mut error_page = None;
+        if !status.is_success() {
+            let body = match response.take() {
+                Some(response) => response.text().await.unwrap_or_default(),
+                None => String::new(),
+            };
+            if self.nav_superseded(id, generation) {
+                debug!(?id, %url, "Navigation abandoned after the body of an error response");
+                return Ok(());
+            }
+            if body.trim().is_empty() {
+                let error = format!("HTTP {status}");
+                let view = self
+                    .views
+                    .get_mut(&id)
+                    .ok_or(EngineError::ViewNotFound(id))?;
+                view.navigation
+                    .fail_navigation(error.clone())
+                    .map_err(|e| EngineError::NavigationError(e.to_string()))?;
 
-            return Err(EngineError::NavigationError("HTTP error".into()));
+                let _ = self.event_tx.send(EngineEvent::NavigationFailed {
+                    view_id: id,
+                    url,
+                    error,
+                });
+
+                return Err(EngineError::NavigationError("HTTP error".into()));
+            }
+            warn!(?id, %url, %status, bytes = body.len(), "Showing the body of an error response as the page");
+            error_page = Some(body);
         }
 
         // Commit navigation
@@ -2155,14 +4072,12 @@ impl Engine {
             url: url.clone(),
         });
 
-        let header_referrer_policy = response
-            .headers
-            .get("referrer-policy")
-            .and_then(|v| v.to_str().ok())
-            .and_then(ReferrerPolicy::parse_header);
-
         // Parse HTML
-        let html = response.text().await?;
+        let html = match (error_page, response) {
+            (Some(body), _) => body,
+            (None, Some(response)) => response.text().await?,
+            (None, None) => String::new(),
+        };
 
         // Body fully read — still current?
         if self.nav_superseded(id, generation) {
@@ -2185,6 +4100,7 @@ impl Engine {
         view.document = Some(document.clone());
         view.title = title.clone();
         view.header_referrer_policy = header_referrer_policy;
+        view.http_status = Some(status.as_u16());
         // A new document invalidates every per-node side table. NodeId is
         // PER-DOCUMENT (each Document restarts its counter at 1), so a
         // surviving entry keyed by raw id 4 would be read as the NEW page's
@@ -2195,17 +4111,38 @@ impl Engine {
         // how a silent correctness bug hides in plain sight.
         // (Prometheus, #110 R1 must-fix.)
         view.edit_states.clear();
+        view.checked_states.clear();
         view.focused_node = None;
+        view.hovered_node = None;
+        view.hover_chain.clear();
+        view.active_chain.clear();
+        view.rule_reads.get_mut().take();
+        view.pointer_restyle = false;
+        view.pointer_at = None;
+        view.primary_button_down = false;
+        view.press_target = None;
+        view.press_settled_focus = false;
+        view.compat_mouse_suppressed = false;
         view.script_log.clear();
+        view.script_policy = None;
+        // The last document's requests are nobody's now.
+        view.live_requests.clear();
+        view.live_images.clear();
 
         // Initialize JavaScript if enabled
+        let mut script_policy: Option<Arc<FetchPolicy>> = None;
         if self.config.javascript_enabled {
-            let js_runtime = JsRuntime::new().map_err(|e| EngineError::JsError(e.to_string()))?;
+            let js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
+                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
+                ..Default::default()
+            })
+            .map_err(|e| EngineError::JsError(e.to_string()))?;
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
-            bindings.set_selector_matcher(Rc::new(|node, selector| {
-                SelectorMatcher.node_matches(node, selector)
+            bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
+                SelectorMatcher.node_matches(node, selector, checked)
             }));
 
             bindings
@@ -2224,11 +4161,26 @@ impl Engine {
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
             }
 
+            // One FetchPolicy per URL-loaded document, owning its request
+            // counters and preflight cache; every script-initiated fetch
+            // (module graph, XHR, fetch) goes through it. A page with no URL
+            // (load_html) has none.
+            script_policy = Some(Arc::new(FetchPolicy::for_page(url.clone(), None)));
+            bindings.set_module_base(url.as_str());
+            // The script-network bridge exists only with a policy to
+            // answer it, and only if enabled.
+            if self.config.script_network_enabled {
+                bindings
+                    .enable_net_bridge()
+                    .map_err(|e| EngineError::JsError(e.to_string()))?;
+            }
+
             let view = self
                 .views
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
             view.bindings = Some(bindings);
+            view.script_policy = script_policy.clone();
         }
 
         // LAST GATE before we mutate anything visible: a stop that landed
@@ -2278,7 +4230,7 @@ impl Engine {
         // the page's scripts at the same time. Scripts still run after the
         // subresources; only their network time overlaps.
         let script_fetch = if self.config.javascript_enabled {
-            self.fetch_page_scripts(id, &url)
+            self.fetch_page_scripts(id, &url, script_policy.clone())
         } else {
             None
         };
@@ -2331,19 +4283,37 @@ impl Engine {
         if let Some((fetched, fetch_done)) = scripts {
             let timed_out = fetched
                 .iter()
-                .any(|(_, r)| matches!(r, Err(ScriptOutcome::OverBudget)));
+                .any(|(_, _, r, _)| matches!(r, Err(ScriptOutcome::OverBudget)));
             let budget = if timed_out {
                 std::time::Duration::ZERO
             } else {
                 std::time::Duration::from_millis(self.config.script_budget_ms)
                     .saturating_sub(fetch_done.saturating_duration_since(subresources_done))
             };
-            self.run_page_scripts(id, fetched, budget);
+            self.run_page_scripts(id, fetched, budget, script_policy).await;
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
             }
             self.flush_script_dom_writes(id)?;
+
+            // Images were discovered before the scripts ran. One more pass
+            // fetches what the scripts added, and lays out again only if
+            // one of those arrived.
+            match self.load_images_added_by_scripts(id).await {
+                Ok(0) => {}
+                Ok(count) => {
+                    info!(count, "Loaded images added by page scripts");
+                    if !self.nav_superseded(id, generation) {
+                        self.relayout(id)?;
+                    }
+                }
+                Err(e) => warn!(?e, "Failed to load images added by page scripts"),
+            }
+            if self.nav_superseded(id, generation) {
+                debug!(?id, %url, "Navigation abandoned after script-added images");
+                return Ok(());
+            }
         }
 
         // Finish navigation
@@ -2449,6 +4419,7 @@ impl Engine {
         view.document = Some(document.clone());
         view.title = title.clone();
         view.header_referrer_policy = None;
+        view.http_status = None;
         // A new document invalidates every per-node side table. NodeId is
         // PER-DOCUMENT (each Document restarts its counter at 1), so a
         // surviving entry keyed by raw id 4 would be read as the NEW page's
@@ -2459,17 +4430,37 @@ impl Engine {
         // how a silent correctness bug hides in plain sight.
         // (Prometheus, #110 R1 must-fix.)
         view.edit_states.clear();
+        view.checked_states.clear();
         view.focused_node = None;
+        view.hovered_node = None;
+        view.hover_chain.clear();
+        view.active_chain.clear();
+        view.rule_reads.get_mut().take();
+        view.pointer_restyle = false;
+        view.pointer_at = None;
+        view.primary_button_down = false;
+        view.press_target = None;
+        view.press_settled_focus = false;
+        view.compat_mouse_suppressed = false;
         view.script_log.clear();
+        view.script_policy = None;
+        // The last document's requests are nobody's now.
+        view.live_requests.clear();
+        view.live_images.clear();
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
-            let js_runtime = JsRuntime::new().map_err(|e| EngineError::JsError(e.to_string()))?;
+            let js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
+                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
+                ..Default::default()
+            })
+            .map_err(|e| EngineError::JsError(e.to_string()))?;
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
-            bindings.set_selector_matcher(Rc::new(|node, selector| {
-                SelectorMatcher.node_matches(node, selector)
+            bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
+                SelectorMatcher.node_matches(node, selector, checked)
             }));
 
             bindings
@@ -2539,6 +4530,10 @@ impl Engine {
     pub fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("relayout", ?id).entered();
 
+        // This build reads the hovered and pressed chains as they are now.
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pointer_restyle = false;
+        }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         // Text measurement below resolves family names; make THIS view's
@@ -2698,10 +4693,12 @@ impl Engine {
             for mut cmd in dl.commands.drain(..) {
                 match &mut cmd {
                     rustkit_layout::DisplayCommand::Image { url, .. }
-                    | rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => {
+                    | rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+                    | rustkit_layout::DisplayCommand::MaskedColor { url, .. } => {
                         if let Some(abs) = self.resolve_resource_url_in(id, url) {
                             *url = abs.to_string();
                         }
+                        self.cache_data_svg(url);
                     }
                     _ => {}
                 }
@@ -2727,6 +4724,40 @@ impl Engine {
                             continue;
                         }
                     }
+                    rustkit_layout::DisplayCommand::BackgroundImage {
+                        url,
+                        rect,
+                        size,
+                        position,
+                        offset,
+                        repeat,
+                    } => {
+                        if let Some(svg) = self.svg_cache.get(url) {
+                            expanded.extend(svg_background_commands(svg, *rect, size, *position, *offset, *repeat));
+                            continue;
+                        }
+                    }
+                    // A vector mask is spliced like a vector background,
+                    // its paint recoloured to the masked colour with its
+                    // alpha kept (`mask-mode: alpha`). A raster mask stays
+                    // a `MaskedColor` for the renderer.
+                    rustkit_layout::DisplayCommand::MaskedColor {
+                        color,
+                        url,
+                        rect,
+                        size,
+                        position,
+                        offset,
+                        repeat,
+                    } => {
+                        if let Some(svg) = self.svg_cache.get(url) {
+                            let mut cmds =
+                                svg_background_commands(svg, *rect, size, *position, *offset, *repeat);
+                            rustkit_layout::tint_mask_commands(&mut cmds, *color);
+                            expanded.extend(cmds);
+                            continue;
+                        }
+                    }
                     _ => {}
                 }
                 expanded.push(cmd);
@@ -2747,7 +4778,8 @@ impl Engine {
         }
 
         // Update max scroll offset based on content size
-        let content_height = root_box.dimensions.margin_box().height;
+        let html_clips = self.views.get(&id).is_some_and(|v| v.html_clips.get());
+        let content_height = scrollable_bottom(&root_box, html_clips);
         let viewport_height = bounds.height as f32;
         let max_scroll_y = (content_height - viewport_height).max(0.0);
 
@@ -2757,6 +4789,13 @@ impl Engine {
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
         view.layout = Some(root_box);
+        // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
+        // answer from this layout.
+        if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
+            let (geometry, computed) = geometry_snapshot(layout);
+            bindings.set_geometry(geometry);
+            bindings.set_computed_styles(computed);
+        }
         view.display_list = Some(display_list);
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
         // Re-clamp: a relayout can shrink the document (or a navigation can
@@ -2766,6 +4805,10 @@ impl Engine {
             view.scroll_offset.0.min(view.max_scroll_offset.0),
             view.scroll_offset.1.min(max_scroll_y),
         );
+        // window.scrollX/scrollY and the clamp on scrollTo read these.
+        if let Some(bindings) = view.bindings.as_ref() {
+            bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
+        }
 
         // Render
         self.render(id)?;
@@ -2941,8 +4984,6 @@ impl Engine {
         false
     }
 
-    /// Build a layout tree from a DOM document.
-
     /// Transfer position + offsets from a computed style onto a layout box.
     /// Percent offsets resolve later (apply time) from the style itself.
     fn transfer_positioning(layout_box: &mut LayoutBox, style: &ComputedStyle) {
@@ -2959,7 +5000,7 @@ impl Engine {
     /// What `transfer_positioning` reads from a style: position, the px
     /// offsets and z-index of a positioned box, float and clear.
     fn positioning_of(style: &ComputedStyle) -> BoxPositioning {
-        let position = if std::env::var("RK_NO_POS").is_ok() {
+        let position = if positioning_disabled() {
             Position::Static
         } else {
             match style.position {
@@ -3084,6 +5125,16 @@ impl Engine {
             external_sheets: external_stylesheets.len(),
             viewport,
             focus: self.building_focus.get(),
+            hover: self
+                .building_view
+                .get()
+                .and_then(|id| self.views.get(&id))
+                .and_then(|v| v.hover_chain.first().copied()),
+            active: self
+                .building_view
+                .get()
+                .and_then(|id| self.views.get(&id))
+                .and_then(|v| v.active_chain.first().copied()),
             fonts: self.web_font_count(),
         };
 
@@ -3166,11 +5217,21 @@ impl Engine {
         // missed still cascades correctly, by the unindexed scan.
         let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) {
             true => None,
-            false => Some(RuleIndexScope::install_for(
-                RuleIndex::source_of(&stylesheets),
-                self.shared_rule_index(&stylesheets),
-            )),
+            false => {
+                let index = self.shared_rule_index(&stylesheets);
+                if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
+                    *view.rule_reads.borrow_mut() = Some(index.clone());
+                }
+                Some(RuleIndexScope::install_for(RuleIndex::source_of(&stylesheets), index))
+            }
         };
+
+        // On unless RUSTKIT_STYLE_SHARE turns it off. A shared style records
+        // no trace entries, so a traced build never shares.
+        let _style_share = StyleShareScope::install(match traced {
+            true => StyleShareMode::Off,
+            false => style_share_mode(),
+        });
 
         let walk_started = mark();
 
@@ -3223,6 +5284,13 @@ impl Engine {
                 None
             }
         });
+
+        if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
+            view.html_clips.set(html_style.as_ref().is_some_and(|s| {
+                s.overflow_x != rustkit_css::Overflow::Visible
+                    || s.overflow_y != rustkit_css::Overflow::Visible
+            }));
+        }
 
         // Get the body element and build layout from it
         if let Some(body) = document.body() {
@@ -3399,8 +5467,10 @@ impl Engine {
         layout_box: &mut LayoutBox,
         images: &HashMap<usize, (Option<f32>, Option<f32>)>,
     ) -> usize {
-        // An inline `<svg>` box has no identity and nothing to refresh: its
-        // size comes from the DOM subtree, which has not changed.
+        // An inline `<svg>` box carries an identity but no recorded size
+        // hints — only `<img>` boxes call `note_snapshot_image` — so the
+        // lookup misses and there is nothing to refresh: an svg's size comes
+        // from the DOM subtree, which has not changed.
         let hints = layout_box
             .identity
             .as_ref()
@@ -3514,7 +5584,9 @@ impl Engine {
         }
 
         if same_tag_total > 1 {
-            segment.push_str(&format!(":nth-of-type({})", same_tag_index));
+            segment.push_str(":nth-of-type(");
+            segment.push_str(&same_tag_index.to_string());
+            segment.push(')');
         }
 
         segment
@@ -3581,7 +5653,13 @@ impl Engine {
     /// boxes must never inherit a path.
     fn child_selector_path(selector_path: &str, segment: Option<&str>) -> String {
         match (selector_path.is_empty(), segment) {
-            (false, Some(segment)) => format!("{} > {}", selector_path, segment),
+            (false, Some(segment)) => {
+                let mut path = String::with_capacity(selector_path.len() + 3 + segment.len());
+                path.push_str(selector_path);
+                path.push_str(" > ");
+                path.push_str(segment);
+                path
+            }
             _ => String::new(),
         }
     }
@@ -3595,14 +5673,14 @@ impl Engine {
         children: &[Rc<Node>],
         parent_is_foreign: bool,
     ) -> Vec<Option<String>> {
-        let mut totals: HashMap<String, usize> = HashMap::new();
+        let mut totals: HashMap<Cow<'_, str>, usize> = HashMap::new();
         for child in children {
             if let NodeType::Element { tag_name, .. } = &child.node_type {
-                *totals.entry(tag_name.to_lowercase()).or_insert(0) += 1;
+                *totals.entry(lower_tag(tag_name)).or_insert(0) += 1;
             }
         }
 
-        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut seen: HashMap<Cow<'_, str>, usize> = HashMap::new();
         children
             .iter()
             .map(|child| match &child.node_type {
@@ -3611,13 +5689,13 @@ impl Engine {
                     attributes,
                     ..
                 } => {
-                    let tag_lower = tag_name.to_lowercase();
+                    let tag_lower = lower_tag(tag_name);
                     let index = {
                         let counter = seen.entry(tag_lower.clone()).or_insert(0);
                         *counter += 1;
                         *counter
                     };
-                    let total = totals.get(&tag_lower).copied().unwrap_or(1);
+                    let total = totals.get(&*tag_lower).copied().unwrap_or(1);
                     let is_foreign = parent_is_foreign || Self::enters_foreign_content(&tag_lower);
                     Some(Self::selector_segment(
                         &tag_lower,
@@ -3695,11 +5773,16 @@ impl Engine {
                 attributes,
                 ..
             } => {
-                let tag_lower = tag_name.to_lowercase();
+                let tag_lower = lower_tag(tag_name);
+                // A checkbox or radio button is styled and painted from its
+                // live checkedness, not from its `checked` attribute; the
+                // elements under the pointer are styled as hovered.
+                let live = self.live_attributes(node.id.raw(), &tag_lower, attributes);
+                let attributes = &*live;
 
                 // Skip rendering for certain elements
                 let is_hidden = matches!(
-                    tag_lower.as_str(),
+                    &*tag_lower,
                     "head" | "title" | "meta" | "link" | "script" | "style" | "noscript"
                 );
 
@@ -3709,17 +5792,19 @@ impl Engine {
                 }
 
                 // Create computed style based on element, attributes, and stylesheets
-                let mut style = memoized_style(node.id, || {
-                    self.compute_style_for_element(
-                        tag_name,
-                        attributes,
-                        stylesheets,
-                        css_vars,
-                        ancestors,
-                        siblings_before,
-                        sib,
-                        parent_style,
-                    )
+                let (mut style, share_id) = style_share_tracked(|| {
+                    memoized_style(node.id, || {
+                        self.compute_style_for_element(
+                            tag_name,
+                            attributes,
+                            stylesheets,
+                            css_vars,
+                            ancestors,
+                            siblings_before,
+                            sib,
+                            parent_style,
+                        )
+                    })
                 });
 
                 // CSS computed-value resolution: font-size absolutizes at
@@ -3792,7 +5877,7 @@ impl Engine {
                     if matches!(style.line_height, rustkit_css::LineHeight::Normal)
                         && !matches!(parent.line_height, rustkit_css::LineHeight::Normal)
                     {
-                        style.line_height = parent.line_height.clone();
+                        style.line_height = parent.line_height;
                     }
                 }
 
@@ -3880,6 +5965,8 @@ impl Engine {
                         element_ids,
                     );
                     note_snapshot_image(&b, explicit_width, explicit_height);
+                    // A click on the image targets the image.
+                    b.node_id = Some(node.id.raw());
                     return b;
                 }
 
@@ -3902,7 +5989,7 @@ impl Engine {
                             .get(name)
                             .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
                     };
-                    let key = Self::inline_svg_key(&Self::serialize_svg_subtree(node));
+                    let key = Self::inline_svg_key(&Self::inline_svg_markup(node));
                     let cached = self.svg_cache.get(&key);
                     // A viewBox gives the SVG a ratio but no natural size.
                     // Such a replaced element is not 300×150: with both
@@ -3954,10 +6041,26 @@ impl Engine {
                             style.clone(),
                         );
                         Self::transfer_positioning(&mut svg_box, &style);
+                        Self::attach_identity(
+                            &mut svg_box,
+                            selector_path,
+                            attributes,
+                            &tag_lower,
+                            element_ids,
+                        );
+                        svg_box.node_id = Some(node.id.raw());
                         return svg_box;
                     }
                     let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
                     Self::transfer_positioning(&mut svg_box, &style);
+                    Self::attach_identity(
+                        &mut svg_box,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
+                    svg_box.node_id = Some(node.id.raw());
                     return svg_box;
                 }
 
@@ -4083,6 +6186,10 @@ impl Engine {
                             &tag_lower,
                             element_ids,
                         );
+                        // Without its node, a click on the button was hit
+                        // on behalf of the button's parent and the button's
+                        // own listeners never ran.
+                        b.node_id = Some(node.id.raw());
                         return b;
                     }
                     // Element children present: fall through to normal box
@@ -4284,13 +6391,10 @@ impl Engine {
 
                 // Build ancestors list for child elements with class and ID info
                 // Insert at beginning so ancestors[0] is always the immediate parent
-                let classes: Vec<String> = attributes
-                    .get("class")
-                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
-                    .unwrap_or_default();
+                let classes = element_classes(attributes);
                 let id = attributes.get("id").cloned();
                 let mut child_ancestors: Vec<Ancestor> = Vec::with_capacity(ancestors.len() + 1);
-                child_ancestors.push(Rc::new((tag_lower.clone(), classes, id)));
+                child_ancestors.push(Rc::new((tag_lower.to_string(), classes, id)));
                 child_ancestors.extend(ancestors.iter().cloned());
 
                 // Check for ::before pseudo-element
@@ -4329,17 +6433,37 @@ impl Engine {
                 let child_segments =
                     Self::child_selector_segments(&child_nodes, children_are_foreign);
                 // Same-tag totals feed the `-of-type` pseudo-classes.
-                let mut type_totals: HashMap<String, usize> = HashMap::new();
+                let mut type_totals: HashMap<Cow<'_, str>, usize> = HashMap::new();
                 for c in child_nodes.iter() {
                     if let NodeType::Element { tag_name, .. } = &c.node_type {
-                        *type_totals.entry(tag_name.to_lowercase()).or_insert(0) += 1;
+                        *type_totals.entry(lower_tag(tag_name)).or_insert(0) += 1;
                     }
                 }
-                let mut type_seen: HashMap<String, usize> = HashMap::new();
+                let mut type_seen: HashMap<Cow<'_, str>, usize> = HashMap::new();
+                // A <details> without `open` renders its first <summary>
+                // child and nothing else (HTML §15.3.9: the rest sits in a
+                // slot the UA hides, which author `display` cannot reach).
+                // The hidden children are still styled below: they count
+                // as siblings for the selectors of the one that shows.
+                let closed_details = &*tag_lower == "details" && !attributes.contains_key("open");
+                let details_summary = closed_details
+                    .then(|| {
+                        child_nodes.iter().position(|c| {
+                            matches!(&c.node_type, NodeType::Element { tag_name, .. } if &*lower_tag(tag_name) == "summary")
+                        })
+                    })
+                    .flatten();
                 let children_parent_style: &ComputedStyle = match &unblockified {
                     Some(s) => s,
                     None => &layout_box.style,
                 };
+                // Style sharing keys a child's cascade on its parent's style.
+                // Everything done to this style since the cascade (font-size,
+                // line-height, blockification) was a function of the style
+                // and the parent's, so `share_id` still names it.
+                let share_parent = StyleShareParent::enter(children_parent_style, share_id);
+                // Match sharing keys a child's matches on its ancestor chain.
+                let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 for (child_index, child) in child_nodes.iter().enumerate() {
                     let child_path = Self::child_selector_path(
                         selector_path,
@@ -4347,13 +6471,13 @@ impl Engine {
                     );
                     let child_sib = match &child.node_type {
                         NodeType::Element { tag_name, .. } => {
-                            let t = tag_name.to_lowercase();
-                            let type_index = *type_seen.get(&t).unwrap_or(&0);
+                            let t = lower_tag(tag_name);
+                            let type_index = *type_seen.get(&*t).unwrap_or(&0);
                             SiblingContext {
                                 index: preceding_siblings.len(),
                                 count: child_element_count,
                                 type_index,
-                                type_count: type_totals.get(&t).copied().unwrap_or(1),
+                                type_count: type_totals.get(&*t).copied().unwrap_or(1),
                                 has_children: Self::node_has_children(child),
                             }
                         }
@@ -4377,14 +6501,17 @@ impl Engine {
                         ..
                     } = &child.node_type
                     {
-                        let child_classes: Vec<String> = attributes
-                            .get("class")
-                            .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
-                            .unwrap_or_default();
-                        let t = tag_name.to_lowercase();
+                        let t = lower_tag(tag_name);
                         *type_seen.entry(t.clone()).or_insert(0) += 1;
-                        let state = ElementState::of(&t, attributes);
-                        preceding_siblings.push((t, child_classes, attributes.get("id").cloned(), state));
+                        let live = self.live_attributes(child.id.raw(), &t, attributes);
+                        let child_classes = element_classes(&live);
+                        let state = ElementState::of(&t, &live);
+                        preceding_siblings.push((
+                            t.into_owned(),
+                            child_classes,
+                            attributes.get("id").cloned(),
+                            state,
+                        ));
                     }
 
                     // Determine if box should be included in layout tree
@@ -4408,10 +6535,12 @@ impl Engine {
                         | BoxType::LineBreak => true,
                     };
 
-                    if should_include {
+                    if should_include && (!closed_details || details_summary == Some(child_index)) {
                         Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     }
                 }
+                drop(share_chain);
+                drop(share_parent);
 
                 // Check for ::after pseudo-element
                 if let Some(after_box) = memoized_pseudo_style(node.id, Pseudo::After, || {
@@ -4582,7 +6711,7 @@ impl Engine {
                         s.font_weight = parent.font_weight;
                         s.font_style = parent.font_style;
                         s.color = parent.color;
-                        s.line_height = parent.line_height.clone();
+                        s.line_height = parent.line_height;
                         s.text_align = parent.text_align;
                         s.text_decoration_line = parent.text_decoration_line;
                         s.text_decoration_color = parent.text_decoration_color;
@@ -4790,7 +6919,7 @@ impl Engine {
             pseudo_style.font_style = parent.font_style;
             pseudo_style.font_stretch = parent.font_stretch;
             pseudo_style.color = parent.color;
-            pseudo_style.line_height = parent.line_height.clone();
+            pseudo_style.line_height = parent.line_height;
             pseudo_style.letter_spacing = parent.letter_spacing.clone();
             pseudo_style.word_spacing = parent.word_spacing.clone();
             pseudo_style.text_align = parent.text_align;
@@ -4888,7 +7017,7 @@ impl Engine {
             _ => BoxType::Block,
         };
         let mut pseudo_box = LayoutBox::new(box_type, pseudo_style.clone());
-        if std::env::var("RK_NO_PSEUDO_POS").is_err() {
+        if !pseudo_positioning_disabled() {
             Self::transfer_positioning(&mut pseudo_box, &pseudo_style);
         }
 
@@ -4972,7 +7101,7 @@ impl Engine {
         // Apply tag-specific default styles (user-agent stylesheet)
         // Apply tag-specific default styles (Chrome UA stylesheet alignment)
         // Reference: https://chromium.googlesource.com/chromium/blink/+/master/Source/core/css/html.css
-        match tag_name.to_lowercase().as_str() {
+        match &*lower_tag(tag_name) {
             "html" => {
                 style.display = rustkit_css::Display::Block;
             }
@@ -5336,13 +7465,43 @@ impl Engine {
         // element's id, classes, tag or the universal bucket can pass
         // `rule_may_match`; the rest are never visited.
         let index = active_rule_index(stylesheets);
-        let rules: Box<dyn Iterator<Item = (usize, &Rule)>> = match index.as_ref() {
-            Some(ix) => Box::new(
+        // Match sharing: a selector with no sibling combinator and no
+        // positional pseudo-class reads only the element's tag and
+        // attributes and its ancestors' tags, classes and ids. An earlier
+        // element equal in all of those already has the answer for every
+        // such rule; the rest are matched afresh.
+        let match_share = match index.as_ref() {
+            Some(ix) => match_share_lookup(ix, tag_name, attributes, ancestors),
+            None => MatchShared::Untracked,
+        };
+        let shared_matches = match (&match_share, index.as_ref()) {
+            (MatchShared::Hit(entry), Some(ix)) => Some((entry.clone(), ix)),
+            _ => None,
+        };
+        let records_matches = matches!(match_share, MatchShared::Miss(_) | MatchShared::Check(..));
+        let mut fresh_matches = MatchShareEntry::default();
+        let rules: Box<dyn Iterator<Item = (usize, &Rule)>> = match (index.as_ref(), &shared_matches) {
+            (_, Some((entry, ix))) => {
+                matching_rules.extend(
+                    entry
+                        .matched
+                        .iter()
+                        .map(|&(g, specificity)| (ix.rule(stylesheets, g), specificity, g as usize)),
+                );
+                Box::new(
+                    entry
+                        .positional
+                        .clone()
+                        .into_iter()
+                        .map(|g| (g as usize, ix.rule(stylesheets, g))),
+                )
+            }
+            (Some(ix), None) => Box::new(
                 ix.candidates(tag_name, attributes)
                     .into_iter()
                     .map(|g| (g as usize, ix.rule(stylesheets, g))),
             ),
-            None => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).enumerate()),
+            (None, None) => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).enumerate()),
         };
 
         for (rule_index, rule) in rules {
@@ -5373,6 +7532,13 @@ impl Engine {
                         "the subject prefilter rejects {:?}, which matches <{tag_name}>",
                         rule.selector
                     );
+                    if records_matches {
+                        if ix.reads.positional[rule_index] {
+                            fresh_matches.positional.push(rule_index as u32);
+                        } else if let Some(specificity) = matched {
+                            fresh_matches.matched.push((rule_index as u32, specificity));
+                        }
+                    }
                     matched
                 }
                 None => {
@@ -5396,6 +7562,7 @@ impl Engine {
                 matching_rules.push((rule, specificity, rule_index));
             }
         }
+        match_share_store(match_share, fresh_matches);
 
         // Sort by cascade layer, then specificity, then source order (lower
         // first, so they get overwritten by higher). CSS Cascade 5 §6.4:
@@ -5412,6 +7579,26 @@ impl Engine {
         let rules_for = |important_pass: bool| match (&important_rules, important_pass) {
             (Some(rules), true) => rules.as_slice(),
             _ => matching_rules.as_slice(),
+        };
+
+        // Style sharing: everything below reads only the parent's style, the
+        // tag, the matched rules in this order, the inline style and whether
+        // a UA rule hid the element. An earlier element with the same five
+        // already has this style. Only under the build's own rule index,
+        // whose rule numbers the key holds.
+        let share = match (index.is_some(), parent_style) {
+            (true, Some(parent)) => style_share_lookup(parent, || StyleShareKey {
+                parent: 0,
+                tag: tag_name.to_string(),
+                rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
+                inline: attributes.get("style").cloned(),
+                ua_hidden: style.display == rustkit_css::Display::None,
+            }),
+            _ => StyleShared::Untracked,
+        };
+        let share = match share {
+            StyleShared::Hit(shared) => return *shared,
+            other => other,
         };
 
         // Custom properties first: every `var()` below resolves against THIS
@@ -5565,6 +7752,8 @@ impl Engine {
         zero_width_of_borderless_sides(&mut style);
 
         style.custom_properties = vars;
+
+        style_share_store(share, &style);
 
         if recording {
             let id = attributes.get("id").cloned();
@@ -5789,14 +7978,14 @@ impl Engine {
             "font-weight" => style.font_weight = parent.font_weight,
             "font-style" => style.font_style = parent.font_style,
             "font-stretch" => style.font_stretch = parent.font_stretch,
-            "line-height" => style.line_height = parent.line_height.clone(),
+            "line-height" => style.line_height = parent.line_height,
             "font" => {
                 style.font_family = parent.font_family.clone();
                 style.font_size = parent.font_size.clone();
                 style.font_weight = parent.font_weight;
                 style.font_style = parent.font_style;
                 style.font_stretch = parent.font_stretch;
-                style.line_height = parent.line_height.clone();
+                style.line_height = parent.line_height;
             }
             "letter-spacing" => style.letter_spacing = parent.letter_spacing.clone(),
             "word-spacing" => style.word_spacing = parent.word_spacing.clone(),
@@ -5898,8 +8087,34 @@ impl Engine {
                 // In the shorthand, the first layer is topmost, last is bottommost
                 let layer_strs: Vec<&str> = split_by_comma(value);
 
+                // Another engine's prefixed image (`-moz-linear-gradient(`,
+                // `-o-`, `-ms-`) does not parse in Chrome, which drops the
+                // whole declaration: the earlier background stays.
+                let foreign = layer_strs.iter().any(|layer| {
+                    split_top_level_whitespace(layer).into_iter().any(|token| {
+                        let token = token.to_ascii_lowercase();
+                        ["-moz-", "-ms-", "-o-"].iter().any(|p| token.starts_with(p))
+                    })
+                });
+                if foreign {
+                    return;
+                }
+
                 // Clear existing layers when setting new background
                 style.background_layers.clear();
+                // The legacy gradient goes with them: paint falls back to
+                // it, so `background: none` over a gradient kept the
+                // gradient.
+                style.background_gradient = None;
+                // The shorthand resets every longhand it does not name
+                // (css-backgrounds-3 §3.10), the colour included. It only
+                // ever SET a colour, so `background: none`, `0 0`, `unset`,
+                // `initial` or an image alone over an earlier colour left
+                // that colour painted.
+                let shorthand = property == "background";
+                if shorthand && !value.trim().eq_ignore_ascii_case("inherit") {
+                    style.background_color = rustkit_css::Color::TRANSPARENT;
+                }
 
                 // Process layers in reverse order so index 0 is bottommost
                 for layer_str in layer_strs.iter().rev() {
@@ -5913,9 +8128,21 @@ impl Engine {
                         style.background_color = color;
                         continue;
                     }
+                    // The shorthand's layer names its image, position, size,
+                    // repeat and boxes in any order, and a colour beside
+                    // them (`#fff url(a.png) no-repeat center / cover`).
+                    // `background-image` is the image alone.
+                    let layer = if shorthand {
+                        let (color, layer) = parse_background_shorthand_layer(layer_str);
+                        if let Some(color) = color {
+                            style.background_color = color;
+                        }
+                        layer
+                    } else {
+                        parse_background_layer(layer_str)
+                    };
 
-                    // Parse as a background layer (gradient or url)
-                    if let Some(layer) = parse_background_layer(layer_str) {
+                    if let Some(layer) = layer {
                         style.background_layers.push(layer.clone());
                         // Also set legacy field for backwards compatibility
                         if let rustkit_css::BackgroundImage::Gradient(ref gradient) = layer.image {
@@ -5923,6 +8150,11 @@ impl Engine {
                         }
                     }
                 }
+            }
+            // `mask-*` and the `-webkit-mask-*` aliases (css-masking-1 §6).
+            // A value that does not parse leaves the earlier one.
+            _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
+                style.mask.apply(property, value, &parse_gradient);
             }
             "background-size" => {
                 // Can be comma-separated for multiple layers
@@ -6353,6 +8585,25 @@ impl Engine {
                     _ => rustkit_css::AlignItems::Stretch,
                 };
             }
+            // css-align-3 shorthands: `<block-axis value> <inline-axis value>?`,
+            // one value setting both. None of the three was parsed, so
+            // `display: grid; place-items: center`, the usual way to centre
+            // a box, left its items stretched at the cell's top left.
+            "place-items" => {
+                let (block, inline) = place_pair(value);
+                self.apply_style_property(style, "align-items", block);
+                self.apply_style_property(style, "justify-items", inline);
+            }
+            "place-self" => {
+                let (block, inline) = place_pair(value);
+                self.apply_style_property(style, "align-self", block);
+                self.apply_style_property(style, "justify-self", inline);
+            }
+            "place-content" => {
+                let (block, inline) = place_pair(value);
+                self.apply_style_property(style, "align-content", block);
+                self.apply_style_property(style, "justify-content", inline);
+            }
             // Grid's inline-axis alignment. Neither property was parsed, so
             // every grid item stretched across its cell whatever the page
             // asked for (google's centred logo sat at the cell's left edge).
@@ -6382,6 +8633,7 @@ impl Engine {
                     "center" => rustkit_css::AlignContent::Center,
                     "space-between" => rustkit_css::AlignContent::SpaceBetween,
                     "space-around" => rustkit_css::AlignContent::SpaceAround,
+                    "space-evenly" => rustkit_css::AlignContent::SpaceEvenly,
                     "stretch" => rustkit_css::AlignContent::Stretch,
                     _ => rustkit_css::AlignContent::Stretch,
                 };
@@ -6568,6 +8820,10 @@ impl Engine {
                 ) {
                     style.object_fit = keyword;
                 }
+            }
+            "object-position" => {
+                (style.object_position, style.object_position_offset) =
+                    parse_object_position(value);
             }
             "position" => {
                 style.position = match value.trim() {
@@ -7140,15 +9396,12 @@ impl Engine {
                 let v = value.trim();
                 if v == "none" || v == "normal" {
                     style.content = None;
-                } else if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
-                    // Quoted string content
-                    style.content = Some(v[1..v.len() - 1].to_string());
-                } else if v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2 {
-                    // Single-quoted string content
-                    style.content = Some(v[1..v.len() - 1].to_string());
-                } else if v == "''" || v == "\"\"" {
-                    // Empty string
-                    style.content = Some(String::new());
+                } else if let Some(text) = rustkit_css::content::content_string(v) {
+                    // The value's strings, escapes resolved and joined. It
+                    // was the text between the first and last quote as
+                    // written, so an icon font's `"\f007"` was five
+                    // characters of the fallback font.
+                    style.content = Some(text);
                 }
             }
             // ==================== Background clip (for gradient text) ====================
@@ -7179,10 +9432,19 @@ impl Engine {
         match property {
             "color" => style.color = rustkit_css::Color::BLACK,
             "background-color" => style.background_color = rustkit_css::Color::TRANSPARENT,
+            // `background: initial` / `unset`: no colour, no image.
+            "background" => {
+                style.background_color = rustkit_css::Color::TRANSPARENT;
+                style.background_layers.clear();
+                style.background_gradient = None;
+            }
+            _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
+                style.mask.reset(property)
+            }
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
-            "font-family" => style.font_family = String::new(),
+            "font-family" => style.font_family = rustkit_css::INITIAL_FONT_FAMILY.to_string(),
             "line-height" => style.line_height = rustkit_css::LineHeight::Normal,
             "margin" | "margin-top" => style.margin_top = rustkit_css::Length::Zero,
             "margin-right" => style.margin_right = rustkit_css::Length::Zero,
@@ -7204,6 +9466,10 @@ impl Engine {
             "display" => style.display = rustkit_css::Display::Block,
             "opacity" => style.opacity = 1.0,
             "object-fit" => style.object_fit = "fill".to_string(),
+            "object-position" => {
+                style.object_position = (0.5, 0.5);
+                style.object_position_offset = (0.0, 0.0);
+            }
             "float" => style.float = rustkit_css::Float::None,
             "clear" => style.clear = rustkit_css::Clear::None,
             _ => {
@@ -7339,6 +9605,25 @@ impl Engine {
         view.nav_generation
     }
 
+    /// Whether a `<style>` or `<link>` found in the tree is one the page
+    /// has. With scripting on, the contents of `<noscript>` are text (HTML
+    /// 13.2.6.4.4, 13.2.6.4.7) and so hold no sheet; our parser builds the
+    /// elements regardless, so the collectors leave them out here. Google's
+    /// results page hides everything from such a sheet.
+    fn sheet_element_counts(&self, element: &Rc<Node>) -> bool {
+        if !self.config.javascript_enabled {
+            return true;
+        }
+        let mut ancestor = element.parent();
+        while let Some(node) = ancestor {
+            if node.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("noscript")) {
+                return false;
+            }
+            ancestor = node.parent();
+        }
+        true
+    }
+
     /// Extract CSS text from <style> elements in the document.
     fn extract_stylesheets(&self, document: &Document) -> Vec<Stylesheet> {
         let mut stylesheets = Vec::new();
@@ -7347,6 +9632,10 @@ impl Engine {
         let style_elements = document.get_elements_by_tag_name("style");
 
         for style_el in style_elements {
+            if !self.sheet_element_counts(&style_el) {
+                continue;
+            }
+
             // Get text content
             let mut css_text = String::new();
             for child in style_el.children() {
@@ -7383,6 +9672,9 @@ impl Engine {
         let link_elements = document.get_elements_by_tag_name("link");
 
         for link_el in link_elements {
+            if !self.sheet_element_counts(&link_el) {
+                continue;
+            }
             if let NodeType::Element { attributes, .. } = &link_el.node_type {
                 // Check if this is a stylesheet link
                 let rel = attributes.get("rel").map(|s| s.to_lowercase());
@@ -7521,6 +9813,80 @@ impl Engine {
         out
     }
 
+    /// The markup rustkit-svg parses for one inline `<svg>`: its own subtree,
+    /// then, inside a trailing `<defs>` (never painted on its own), every
+    /// element its `<use>`s name by `#id` that lives elsewhere in the page.
+    /// Sprite sheets sit in a separate hidden `<svg>`, so without these the
+    /// references could not resolve. Being part of the markup, the
+    /// referenced content is part of the cache key: a sprite sheet inserted
+    /// or changed later re-parses the icon.
+    fn inline_svg_markup(svg: &Rc<Node>) -> String {
+        fn walk(node: &Rc<Node>, f: &mut impl FnMut(&Rc<Node>)) {
+            f(node);
+            for child in node.children() {
+                walk(&child, f);
+            }
+        }
+        fn references(node: &Rc<Node>, defined: &mut std::collections::HashSet<String>, wanted: &mut Vec<String>) {
+            walk(node, &mut |n| {
+                if let Some(id) = n.get_attribute("id") {
+                    defined.insert(id.to_string());
+                }
+                if n.tag_name().is_some_and(|t| t.eq_ignore_ascii_case("use")) {
+                    let href = n.get_attribute("href").or_else(|| n.get_attribute("xlink:href"));
+                    if let Some(id) = href.and_then(|h| h.trim().strip_prefix('#')) {
+                        wanted.push(id.to_string());
+                    }
+                }
+            });
+        }
+
+        let mut out = Self::serialize_svg_subtree(svg);
+        let mut defined = std::collections::HashSet::new();
+        let mut wanted = Vec::new();
+        references(svg, &mut defined, &mut wanted);
+        wanted.retain(|id| !defined.contains(id));
+        if wanted.is_empty() {
+            return out;
+        }
+
+        let mut root = svg.clone();
+        while let Some(parent) = root.parent() {
+            root = parent;
+        }
+        // Only the elements rustkit-svg can instantiate are targets: an id
+        // naming an HTML container would serialize its whole subtree into
+        // the markup (and the key) to paint nothing.
+        const REFERABLE: &[&str] = &[
+            "symbol", "g", "svg", "use", "rect", "circle", "ellipse", "line", "path", "polyline", "polygon", "text",
+        ];
+        let mut by_id: HashMap<String, Rc<Node>> = HashMap::new();
+        walk(&root, &mut |n| {
+            if let Some(id) = n.get_attribute("id") {
+                if n.tag_name().is_some_and(|t| REFERABLE.iter().any(|r| t.eq_ignore_ascii_case(r))) {
+                    by_id.entry(id.to_string()).or_insert_with(|| n.clone());
+                }
+            }
+        });
+
+        // A referenced symbol may itself `<use>` another one: follow those
+        // too, each id once.
+        out.push_str("<defs>");
+        while let Some(id) = wanted.pop() {
+            if !defined.insert(id.clone()) {
+                continue;
+            }
+            if let Some(target) = by_id.get(&id) {
+                out.push_str(&Self::serialize_svg_subtree(target));
+                let mut nested = Vec::new();
+                references(target, &mut defined, &mut nested);
+                wanted.extend(nested.into_iter().filter(|n| !defined.contains(n)));
+            }
+        }
+        out.push_str("</defs>");
+        out
+    }
+
     /// Cache key for an inline SVG: content-addressed so identical icons
     /// (repeated list markers, nav glyphs) share one parsed document, and
     /// deterministic across the two serializations of one layout pass.
@@ -7543,7 +9909,7 @@ impl Engine {
     /// keys are skipped, so steady-state cost is one serialize per svg.
     fn cache_inline_svgs(&mut self, document: &Document) {
         for svg_el in document.get_elements_by_tag_name("svg") {
-            let xml = Self::serialize_svg_subtree(&svg_el);
+            let xml = Self::inline_svg_markup(&svg_el);
             let key = Self::inline_svg_key(&xml);
             if self.svg_cache.contains_key(&key) {
                 continue;
@@ -7555,6 +9921,119 @@ impl Engine {
                 Err(e) => {
                     debug!(?e, "Inline SVG failed to parse; box stays unpainted");
                 }
+            }
+        }
+    }
+
+    /// Index every inline `<svg>` subtree's shape geometry by the same
+    /// content-hash key the box build and the paint splice use.
+    ///
+    /// Keyed by content hash, so two identical svgs on one page share an
+    /// entry — which is harmless and not an ambiguity: identical subtrees
+    /// yield identical child segments and identical user-space geometry, and
+    /// each svg box resolves its OWN selector prefix from its own identity.
+    fn inline_svg_shape_index(&self, document: &Document) -> HashMap<String, InlineSvgShapes> {
+        let mut index = HashMap::new();
+        for svg_el in document.get_elements_by_tag_name("svg") {
+            let key = Self::inline_svg_key(&Self::inline_svg_markup(&svg_el));
+            if index.contains_key(&key) {
+                continue;
+            }
+            let Some(svg) = self.svg_cache.get(&key) else {
+                // No parsed document means the box build took its cache-MISS
+                // exit and painted nothing, so there is no geometry to report.
+                continue;
+            };
+            let mut shapes = Vec::new();
+            Self::collect_svg_shapes(&svg_el, "", &mut shapes);
+            index.insert(
+                key,
+                InlineSvgShapes {
+                    view_box: svg.view_box,
+                    stretch: svg.stretch,
+                    shapes,
+                },
+            );
+        }
+        index
+    }
+
+    /// Walk an inline `<svg>` subtree, collecting each shape's user-space
+    /// bbox under the selector Chrome reports for it.
+    ///
+    /// `parent_path` is relative to the `<svg>` itself and starts empty; the
+    /// svg's own prefix is joined on at export time from its box identity, so
+    /// one walk serves every box sharing this subtree's content hash.
+    ///
+    /// Selector segments come from `child_selector_segments` with
+    /// `parent_is_foreign = true` — the SAME machinery, and the same
+    /// `:nth-of-type` and foreign-content class rules, that the HTML side is
+    /// pinned to by `tools/parity_oracle/verify_selector_key.mjs`. A parallel
+    /// implementation here is exactly how a confident wrong join gets built.
+    ///
+    /// A `transform` attribute REFUSES that element and its whole subtree:
+    /// this walk composes no transforms, and a shape reported at its
+    /// untransformed position would be a wrong box rather than a missing one.
+    fn collect_svg_shapes(node: &Rc<Node>, parent_path: &str, out: &mut Vec<SvgShapeBox>) {
+        let children = node.children();
+        let segments = Self::child_selector_segments(&children, true);
+        for (child, segment) in children.iter().zip(segments) {
+            let NodeType::Element {
+                tag_name,
+                attributes,
+                ..
+            } = &child.node_type
+            else {
+                continue;
+            };
+            if attributes.contains_key("transform") {
+                continue;
+            }
+            let Some(segment) = segment else { continue };
+            let path = match parent_path.is_empty() {
+                true => segment,
+                false => format!("{parent_path} > {segment}"),
+            };
+            let tag_lower = lower_tag(tag_name);
+            if let Some((x, y, width, height)) = svg_shape_user_bbox(&tag_lower, attributes) {
+                out.push(SvgShapeBox {
+                    tag: tag_lower.to_string(),
+                    selector: path.clone(),
+                    x,
+                    y,
+                    width,
+                    height,
+                });
+            }
+            // `<g>` and friends carry no geometry of their own but hold
+            // shapes that do, so the walk continues through them.
+            Self::collect_svg_shapes(child, &path, out);
+        }
+    }
+
+    /// Parse a `data:image/svg+xml` image into svg_cache under its own url,
+    /// the key the display-list splice looks up, so it paints as vector
+    /// commands like a fetched SVG. Left to the raster lane, ImageManager's
+    /// stand-in rasterizer drew only solid `<rect>`s (bing's gradient logo
+    /// painted nothing). A data: url needs no request, so this runs at the
+    /// splice: the first layout paints it, and so does any later one.
+    fn cache_data_svg(&mut self, url: &str) {
+        if !url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) || self.svg_cache.contains_key(url) {
+            return;
+        }
+        let Ok((media_type, body)) = rustkit_net::decode_data_url(url) else {
+            return;
+        };
+        let essence = media_type.split(';').next().unwrap_or_default().trim();
+        if !essence.eq_ignore_ascii_case("image/svg+xml") {
+            return;
+        }
+        match rustkit_svg::SvgDocument::parse(&String::from_utf8_lossy(&body)) {
+            Ok(doc) => {
+                self.svg_cache.insert(url.to_string(), image_svg(doc));
+            }
+            Err(e) => {
+                debug!(?e, "data: SVG image failed to parse; left to the raster lane");
             }
         }
     }
@@ -7665,34 +10144,105 @@ impl Engine {
         Ok(fetched.into_iter().flatten().collect())
     }
 
+    /// The http(s) `url()` background images the view's display list paints.
+    ///
+    /// Only `<img>` was ever fetched: a CSS background image reached the
+    /// display list and waited for a cache entry that nothing made (a
+    /// `data:` url is decoded at upload, so those did paint). The display
+    /// list is the right place to look: its urls are already absolute, and
+    /// a box that is not rendered (`display: none`) has no command, as
+    /// Chrome fetches no background for it. An SVG one is fetched into the
+    /// SVG cache like an `<img>` and painted by [`svg_background_commands`].
+    fn discover_background_images(display_list: Option<&DisplayList>) -> Vec<(String, Url)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut images = Vec::new();
+        for cmd in display_list.map(|dl| dl.commands.as_slice()).unwrap_or(&[]) {
+            // A mask image (`MaskedColor`) is fetched like a background.
+            let (rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+            | rustkit_layout::DisplayCommand::MaskedColor { url, .. }) = cmd
+            else {
+                continue;
+            };
+            if !seen.insert(url.as_str()) {
+                continue;
+            }
+            let Ok(parsed) = Url::parse(url) else {
+                continue;
+            };
+            if !matches!(parsed.scheme(), "http" | "https") {
+                continue;
+            }
+            debug!(url = %parsed, "Discovered background image");
+            images.push((url.clone(), parsed));
+        }
+        images
+    }
+
     /// Load images asynchronously and store in cache.
     pub async fn load_images(&mut self, id: EngineViewId) -> Result<usize, EngineError> {
+        self.load_images_pass(id, false).await
+    }
+
+    /// The image pass after page scripts: fetch what the scripts added (an
+    /// appended `<img>`, a background a class change turned on) and nothing
+    /// else. A full `load_images` here would count every cached image as
+    /// loaded, so every scripted page would lay out once more, and would
+    /// give each image that already failed or timed out a second budget.
+    /// Returns how many new images arrived.
+    async fn load_images_added_by_scripts(&mut self, id: EngineViewId) -> Result<usize, EngineError> {
+        self.load_images_pass(id, true).await
+    }
+
+    async fn load_images_pass(&mut self, id: EngineViewId, only_new: bool) -> Result<usize, EngineError> {
+        let Some(plan) = self.plan_image_loads(id, only_new)? else {
+            return Ok(0);
+        };
+        let fetched = Self::fetch_planned_images(plan).await;
+        Ok(self.keep_fetched_images(fetched))
+    }
+
+    /// The first part of an image pass, which waits for nothing: find the
+    /// images the document shows, record them as attempted, and sort out
+    /// what there is to fetch. `None`: the view has no document.
+    fn plan_image_loads(&mut self, id: EngineViewId, only_new: bool) -> Result<Option<ImagePlan>, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         let Some(document) = &view.document else {
-            return Ok(0);
+            return Ok(None);
         };
 
         let base_url = view.url.as_ref();
-        let images = self.discover_images(document.as_ref(), base_url);
+        let mut images = self.discover_images(document.as_ref(), base_url);
+        images.extend(Self::discover_background_images(view.display_list.as_ref()));
+        if only_new {
+            images.retain(|(_, url)| !view.images_attempted.contains(url));
+        }
+        let discovered: Vec<Url> = images.iter().map(|(_, url)| url.clone()).collect();
+        if let Some(view) = self.views.get_mut(&id) {
+            // A full pass starts the record over: it is the first thing a
+            // navigation's subresource load does with the new document.
+            if !only_new {
+                view.images_attempted.clear();
+            }
+            view.images_attempted.extend(discovered);
+        }
 
         let image_manager = self.image_manager.clone();
-
-        // Fetch concurrently with bounded parallelism. The serial loop cost
-        // 69 seconds on a Wikipedia article whose ~30 thumbnails each burned
-        // a sequential round-trip failing (2026-08-05 live session);
-        // buffer_unordered polls the futures on this thread, so no Send
-        // bounds are required and the engine stays single-threaded.
-        use futures::stream::StreamExt;
-        const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
 
         let mut pending = Vec::new();
         let mut svg_urls = Vec::new();
         let mut loaded = 0;
+        let mut requested = std::collections::HashSet::new();
         for (_src, url) in images {
             if image_manager.is_cached(&url) || self.svg_cache.contains_key(url.as_str()) {
                 debug!(%url, "Image already cached");
-                loaded += 1;
+                // The layout that found a script-added image already drew
+                // it from the cache; it is not a reason to lay out again.
+                loaded += usize::from(!only_new);
+                continue;
+            }
+            // One request per URL, however many elements show it.
+            if !requested.insert(url.clone()) {
                 continue;
             }
             // SVG is vector content: ImageManager's raster decode rejects it
@@ -7707,16 +10257,40 @@ impl Engine {
             }
         }
 
+        Ok(Some(ImagePlan {
+            pending,
+            svg_urls,
+            already_loaded: loaded,
+            budget: std::time::Duration::from_millis(self.config.subresource_budget_ms),
+            deadline: self.subresource_deadline(),
+            referrer: self.subresource_referrer(id),
+            loader: self.loader.clone(),
+            image_manager,
+        }))
+    }
+
+    /// The second part: fetch and decode what the plan lists. It borrows
+    /// nothing from the engine, so the load awaits it in place and the live
+    /// loop keeps it across turns.
+    async fn fetch_planned_images(plan: ImagePlan) -> FetchedImages {
+        // Fetch concurrently with bounded parallelism. The serial loop cost
+        // 69 seconds on a Wikipedia article whose ~30 thumbnails each burned
+        // a sequential round-trip failing (2026-08-05 live session);
+        // buffer_unordered polls the futures on this thread, so no Send
+        // bounds are required and the engine stays single-threaded.
+        use futures::stream::StreamExt;
+        const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
+
+        let ImagePlan { pending, svg_urls, already_loaded, budget, deadline, referrer, loader, image_manager } = plan;
+        let mut loaded = already_loaded;
+        let mut svgs = Vec::new();
+
         // Concurrent like the raster lane (Prometheus, #104 R1: SVG was left
         // serial while images were parallelized). Parsing happens inside the
-        // futures; only the cache insert is serialized afterwards, because
-        // &mut self cannot be held across them.
-        let budget = std::time::Duration::from_millis(self.config.subresource_budget_ms);
-        let deadline = self.subresource_deadline();
-        let referrer = self.subresource_referrer(id);
+        // futures; the engine's cache insert comes afterwards, in
+        // `keep_fetched_images`.
         {
-            use futures::stream::StreamExt;
-            let loader = self.loader.clone();
+            let loader = loader.clone();
             let referrer = &referrer;
             let parsed: Vec<Option<(String, rustkit_svg::SvgDocument)>> =
                 futures::stream::iter(svg_urls.into_iter().map(|url| {
@@ -7729,7 +10303,7 @@ impl Engine {
                         match fetched {
                             Ok(response) if response.ok() => match response.text().await {
                                 Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
-                                    Ok(doc) => Some((url.to_string(), doc)),
+                                    Ok(doc) => Some((url.to_string(), image_svg(doc))),
                                     Err(e) => {
                                         warn!(?e, %url, "Failed to parse SVG image");
                                         None
@@ -7756,7 +10330,7 @@ impl Engine {
                 .await;
 
             for (url, doc) in parsed.into_iter().flatten() {
-                self.svg_cache.insert(url, doc);
+                svgs.push((url, doc));
                 loaded += 1;
             }
         }
@@ -7764,11 +10338,14 @@ impl Engine {
         // Each raster load is loaded (true), failed (false), or turned out to
         // be SVG by its type and parsed here for the SVG cache.
         type RasterOutcome = (bool, Option<(String, rustkit_svg::SvgDocument)>);
+        let referrer = &referrer;
         let results: Vec<RasterOutcome> = futures::stream::iter(pending.into_iter().map(|url| {
             let image_manager = image_manager.clone();
+            let loader = loader.clone();
             async move {
-                info!(%url, "Loading image via ImageManager");
-                let Ok(loaded) = tokio::time::timeout_at(deadline, image_manager.load(url.clone())).await else {
+                info!(%url, "Loading image");
+                let load = fetch_raster_image(&loader, &image_manager, referrer, url.clone());
+                let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
                     warn!(%url, "Image over the subresource budget; rendering without it");
                     return (false, None);
                 };
@@ -7786,7 +10363,7 @@ impl Engine {
                         match rustkit_svg::SvgDocument::parse(&xml) {
                             Ok(doc) => {
                                 info!(%url, "Image served as image/svg+xml; using the SVG lane");
-                                (true, Some((url.to_string(), doc)))
+                                (true, Some((url.to_string(), image_svg(doc))))
                             }
                             Err(e) => {
                                 warn!(?e, %url, "Failed to parse SVG image");
@@ -7806,13 +10383,18 @@ impl Engine {
         .await;
 
         for (ok, svg) in results {
-            if let Some((url, doc)) = svg {
-                self.svg_cache.insert(url, doc);
-            }
+            svgs.extend(svg);
             loaded += usize::from(ok);
         }
 
-        Ok(loaded)
+        FetchedImages { loaded, svgs }
+    }
+
+    /// The last part: keep what a fetch brought. Returns how many images
+    /// the pass loaded.
+    fn keep_fetched_images(&mut self, fetched: FetchedImages) -> usize {
+        self.svg_cache.extend(fetched.svgs);
+        fetched.loaded
     }
 
     /// Who a subresource request comes from: the document URL and the
@@ -7839,7 +10421,7 @@ impl Engine {
                     }
                     _ => None,
                 })
-                .last()
+                .next_back()
         });
         SubresourceReferrer {
             url: view.url.clone(),
@@ -8303,6 +10885,7 @@ impl Engine {
             specificity: Vec::new(),
             member_specificity: Vec::new(),
             prepared: Vec::new(),
+            reads: SelectorReads::default(),
             main: RuleBuckets::default(),
             before: RuleBuckets::default(),
             after: RuleBuckets::default(),
@@ -8327,7 +10910,12 @@ impl Engine {
                 };
                 ix.specificity.push(whole);
                 ix.member_specificity.push(members);
-                ix.prepared.push(SelectorMatcher.prepared_selector(rule.selector.trim()));
+                let prepared = SelectorMatcher.prepared_selector(rule.selector.trim());
+                ix.reads.hover.note(rule.selector.trim(), ":hover", HOVER_MARK);
+                ix.reads.active.note(rule.selector.trim(), ":active", ACTIVE_MARK);
+                let positional = ix.reads.note(&prepared);
+                ix.reads.positional.push(positional);
+                ix.prepared.push(prepared);
                 let mut pseudo_keys = None;
                 let mut pseudo_prepared = None;
                 // Same test as create_pseudo_element's (the single-colon
@@ -8423,18 +11011,18 @@ impl Engine {
     /// wikipedia's cascade went to those repeated attribute lookups).
     fn keys_may_match_keyed(keys: &[SubjectKey], element: &KeyedElement) -> bool {
         keys.iter().any(|k| {
-            k.id.as_deref().map_or(true, |id| element.id == Some(id))
+            k.id.as_deref().is_none_or(|id| element.id == Some(id))
                 && k.tag
                     .as_deref()
-                    .map_or(true, |t| t.eq_ignore_ascii_case(element.tag_name))
-                && k.class.as_deref().map_or(true, |c| {
+                    .is_none_or(|t| t.eq_ignore_ascii_case(element.tag_name))
+                && k.class.as_deref().is_none_or(|c| {
                     element
                         .class
                         .is_some_and(|cl| cl.split_whitespace().any(|x| x == c))
                 })
                 && k.attr
                     .as_deref()
-                    .map_or(true, |a| element.attributes.contains_key(a))
+                    .is_none_or(|a| element.attributes.contains_key(a))
         })
     }
 
@@ -8467,7 +11055,7 @@ impl Engine {
                 });
             }
             if compound.starts_with('.')
-                && !compound.contains(|c| c == '#' || c == '[' || c == ':')
+                && !compound.contains(['#', '[', ':'])
             {
                 // Every listed class is required; the first one suffices.
                 return out.push(SubjectKey {
@@ -8572,15 +11160,59 @@ impl SelectorMatcher {
     /// matcher: it builds the same ancestor, sibling and position context
     /// the cascade threads down, from the node's current place in the tree,
     /// so a script query and the style that paints agree on what matches.
-    pub(crate) fn node_matches(&self, node: &Rc<Node>, selector: &str) -> Option<bool> {
+    /// `checked` is the checkedness script holds for the controls that no
+    /// longer follow their `checked` attribute, by raw NodeId.
+    pub(crate) fn node_matches(
+        &self,
+        node: &Rc<Node>,
+        selector: &str,
+        checked: &HashMap<usize, bool>,
+    ) -> Option<bool> {
         let selector = selector.trim();
-        if selector.is_empty() || !Self::selector_list_is_valid(selector) {
+        // A query asks this for every node of the tree with one selector, so
+        // the selector is validated and prepared once, not once per node.
+        let (valid, prepared) = Self::query_selector_prepared(selector);
+        if selector.is_empty() || !valid {
             return None;
         }
         let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
             return Some(false);
         };
         let tag = tag_name.to_lowercase();
+        // `:checked` reads the attribute map; a control whose checkedness
+        // has left its attribute is matched with the attribute as it would
+        // be (the cascade does the same, `Engine::live_attributes`).
+        let live = |raw: usize, attributes: &HashMap<String, String>| match checked.get(&raw) {
+            Some(&on) if on != attributes.contains_key("checked") => {
+                let mut attributes = attributes.clone();
+                if on {
+                    attributes.insert("checked".to_string(), String::new());
+                } else {
+                    attributes.remove("checked");
+                }
+                Some(attributes)
+            }
+            _ => None,
+        };
+        let live_own = live(node.id.raw(), attributes);
+        let attributes = live_own.as_ref().unwrap_or(attributes);
+        // A selector that reads neither the ancestors nor the siblings (`.a`,
+        // `div`, `#id`, `[data-x]`, `div.a.b`, and lists of those) needs
+        // neither: building them walked every ancestor and every sibling of
+        // every node a query visited, which on a wide page made one
+        // `querySelector('x-tag')` cost milliseconds.
+        if prepared.is_context_free() {
+            return Some(SelectorMatcher.selector_matches_prepared(
+                &prepared,
+                &tag,
+                attributes,
+                &[],
+                &[],
+                SiblingContext::SOLE.with_children(Engine::node_has_children(node)),
+            ));
+        }
+        #[cfg(test)]
+        QUERY_CONTEXT_BUILDS.with(|n| n.set(n.get() + 1));
         let classes = |attributes: &HashMap<String, String>| -> Vec<String> {
             attributes
                 .get("class")
@@ -8626,7 +11258,8 @@ impl SelectorMatcher {
                         }
                     }
                     if before {
-                        let state = ElementState::of(&t, attributes);
+                        let live = live(c.id.raw(), attributes);
+                        let state = ElementState::of(&t, live.as_ref().unwrap_or(attributes));
                         siblings_before.push((t, classes(attributes), attributes.get("id").cloned(), state));
                     }
                 }
@@ -8640,6 +11273,28 @@ impl SelectorMatcher {
             }
         };
         Some(self.selector_matches(selector, &tag, attributes, &ancestors, &siblings_before, sib))
+    }
+
+    /// Whether `selector` is a valid selector list, with its prepared form,
+    /// for the one selector a query keeps asking about. The last answer is
+    /// kept: a query visits every node with the same string.
+    fn query_selector_prepared(selector: &str) -> (bool, Rc<PreparedSelector>) {
+        thread_local! {
+            static LAST: std::cell::RefCell<Option<(String, bool, Rc<PreparedSelector>)>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        if let Some(hit) = LAST.with(|l| {
+            l.borrow()
+                .as_ref()
+                .filter(|(s, _, _)| s == selector)
+                .map(|(_, valid, prepared)| (*valid, prepared.clone()))
+        }) {
+            return hit;
+        }
+        let valid = !selector.is_empty() && Self::selector_list_is_valid(selector);
+        let prepared = SelectorMatcher.prepared_selector(selector);
+        LAST.with(|l| *l.borrow_mut() = Some((selector.to_string(), valid, prepared.clone())));
+        (valid, prepared)
     }
 
     fn selector_matches(
@@ -9003,7 +11658,7 @@ impl SelectorMatcher {
         }
 
         // Class selector: .class (can be chained: .a.b)
-        if selector.starts_with('.') && !selector.contains(|c| c == '#' || c == '[' || c == ':') {
+        if selector.starts_with('.') && !selector.contains(['#', '[', ':']) {
             if let Some(el_class) = attributes.get("class") {
                 let el_classes: Vec<&str> = el_class.split_whitespace().collect();
                 return selector[1..]
@@ -9020,7 +11675,7 @@ impl SelectorMatcher {
 
         // Extract tag part
         let tag_end = remaining
-            .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+            .find(['.', '#', ':', '['])
             .unwrap_or(remaining.len());
         let tag_part = &remaining[..tag_end];
         remaining = &remaining[tag_end..];
@@ -9035,7 +11690,7 @@ impl SelectorMatcher {
             if let Some(rest) = remaining.strip_prefix('.') {
                 // Class
                 let class_end = rest
-                    .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+                    .find(['.', '#', ':', '['])
                     .unwrap_or(rest.len());
                 let class_name = css_ident(&rest[..class_end]);
                 remaining = &rest[class_end..];
@@ -9050,7 +11705,7 @@ impl SelectorMatcher {
             } else if let Some(rest) = remaining.strip_prefix('#') {
                 // ID
                 let id_end = rest
-                    .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+                    .find(['.', '#', ':', '['])
                     .unwrap_or(rest.len());
                 let id_name = css_ident(&rest[..id_end]);
                 remaining = &rest[id_end..];
@@ -9101,42 +11756,50 @@ impl SelectorMatcher {
         attributes: &HashMap<String, String>,
     ) -> bool {
         let attr_name = SelectorMatcher::attr_selector_name(attr_selector);
-        for op in &Self::ATTR_OPERATORS {
-            if let Some(pos) = attr_selector.find(op) {
-                let mut attr_value = attr_selector[pos + op.len()..].trim();
-
-                // Remove quotes if present
-                if (attr_value.starts_with('"') && attr_value.ends_with('"'))
-                    || (attr_value.starts_with('\'') && attr_value.ends_with('\''))
-                {
-                    attr_value = &attr_value[1..attr_value.len() - 1];
-                }
-
-                if let Some(el_attr) = attributes.get(attr_name) {
-                    return match *op {
-                        "=" => el_attr == attr_value,
-                        "~=" => el_attr.split_whitespace().any(|w| w == attr_value),
-                        "|=" => {
-                            el_attr == attr_value
-                                || el_attr.starts_with(&format!("{}-", attr_value))
-                        }
-                        "^=" => el_attr.starts_with(attr_value),
-                        "$=" => el_attr.ends_with(attr_value),
-                        "*=" => el_attr.contains(attr_value),
-                        _ => false,
-                    };
-                } else {
-                    return false;
-                }
-            }
+        match Self::attr_selector_test(attr_selector) {
+            Some((op, attr_value)) => attributes
+                .get(attr_name)
+                .is_some_and(|el_attr| Self::attr_test_passes(op, attr_value, el_attr)),
+            // Just [attr] - check presence
+            None => attributes.contains_key(attr_name),
         }
-
-        // Just [attr] - check presence
-        attributes.contains_key(attr_name)
     }
 
     /// Checked in this order; the first one found splits name from value.
     const ATTR_OPERATORS: [&'static str; 6] = ["~=", "|=", "^=", "$=", "*=", "="];
+
+    /// The operator of an `[...]` selector and the value it compares with
+    /// (trimmed, quotes removed). None for a bare `[name]`.
+    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, &str)> {
+        Self::ATTR_OPERATORS.iter().find_map(|op| {
+            let pos = attr_selector.find(op)?;
+            let mut attr_value = attr_selector[pos + op.len()..].trim();
+            if (attr_value.starts_with('"') && attr_value.ends_with('"'))
+                || (attr_value.starts_with('\'') && attr_value.ends_with('\''))
+            {
+                attr_value = &attr_value[1..attr_value.len() - 1];
+            }
+            Some((*op, attr_value))
+        })
+    }
+
+    /// Whether the element's value `el_attr` passes `op` against `attr_value`.
+    fn attr_test_passes(op: &str, attr_value: &str, el_attr: &str) -> bool {
+        match op {
+            "=" => el_attr == attr_value,
+            "~=" => el_attr.split_whitespace().any(|w| w == attr_value),
+            "|=" => {
+                el_attr == attr_value
+                    || el_attr
+                        .strip_prefix(attr_value)
+                        .is_some_and(|rest| rest.starts_with('-'))
+            }
+            "^=" => el_attr.starts_with(attr_value),
+            "$=" => el_attr.ends_with(attr_value),
+            "*=" => el_attr.contains(attr_value),
+            _ => false,
+        }
+    }
 
     /// The attribute an `[...]` selector looks up. Every form, with or
     /// without an operator, fails on an element that lacks it, which is
@@ -9193,8 +11856,10 @@ impl SelectorMatcher {
     /// Pseudo-classes that are false for every element of the first static
     /// frame: nothing is hovered, pressed, focused, or fragment-targeted,
     /// and no link has been visited. Shared by the subject matcher and the
-    /// ancestor/sibling matcher so a compound like `.card:hover` fails in
-    /// either position.
+    /// ancestor/sibling matcher so a compound like `.card:focus` fails in
+    /// either position. `:hover` and `:active` are listed for the first
+    /// frame only: both matchers decide them from [`HOVER_MARK`] and
+    /// [`ACTIVE_MARK`] before they ask here.
     fn pseudo_class_is_static_false(name: &str) -> bool {
         matches!(
             name,
@@ -9448,7 +12113,7 @@ impl SelectorMatcher {
         };
         let tag = tag.as_ref();
         let is_control = SelectorMatcher::is_form_control_tag(tag);
-        let value_is_empty = attributes.get("value").map_or(true, |v| v.is_empty());
+        let value_is_empty = attributes.get("value").is_none_or(|v| v.is_empty());
         match name {
             "first-child" => sib.index == 0,
             "last-child" => sib.index == sib.count.saturating_sub(1),
@@ -9467,7 +12132,7 @@ impl SelectorMatcher {
                 arg.is_some_and(|a| SelectorMatcher.match_nth(a, sib.type_count - sib.type_index))
             }
             // :not() takes a selector list; none of the members may match.
-            "not" => arg.map_or(true, |a| {
+            "not" => arg.is_none_or(|a| {
                 !SelectorMatcher.any_compound_in_list_matches(a, tag_name, attributes, sib)
             }),
             // :is()/:where() select exactly their arguments. They used to
@@ -9484,6 +12149,10 @@ impl SelectorMatcher {
             // and `focus-visible` used to fall to the catch-all below and
             // MATCH EVERYTHING, so `.wrapper:focus-within .icon { color }`
             // styled every icon as if its input were focused.
+            // The build marks the element under the pointer and the elements
+            // above it (`Engine::live_attributes`).
+            "hover" => attributes.contains_key(HOVER_MARK),
+            "active" => attributes.contains_key(ACTIVE_MARK),
             n if SelectorMatcher::pseudo_class_is_static_false(n) => false,
             // Link pseudo-classes: an <a>/<area> with an href.
             "link" | "any-link" => matches!(tag, "a" | "area") && attributes.contains_key("href"),
@@ -9959,7 +12628,15 @@ impl Engine {
 
         // Convert layout tree to JSON-serializable structure
 
-        let layout_json = layout_box_to_json(layout);
+        // SVG shape geometry is indexed from the DOM, not the layout tree:
+        // shapes generate no CSS box, so the tree has nothing to walk. Empty
+        // when the view has no document, which keeps the export identical to
+        // what it was rather than failing.
+        let svg_shapes = match view.document.as_ref() {
+            Some(document) => self.inline_svg_shape_index(document),
+            None => HashMap::new(),
+        };
+        let layout_json = layout_box_to_json_under(layout, None, &svg_shapes);
 
         // Get viewport size from compositor
         let (width, height) = self
@@ -10097,8 +12774,18 @@ impl Engine {
                     font_style,
                     advances,
                     ascent,
+                    run,
                 } => serde_json::json!({
                     "op": "text",
+                    // The SHAPED-RUN CONTRACT, made visible: the face paint
+                    // draws this command with and how many glyphs and
+                    // clusters it places. `null` means the command is
+                    // painted by walking `text` in `font_family`.
+                    "run": run.as_ref().map(|run| serde_json::json!({
+                        "face": run.face.postscript_name,
+                        "glyphs": run.glyphs.len(),
+                        "clusters": run.cluster_advances().len(),
+                    })),
                     "text": text,
                     "x": x,
                     "y": y,
@@ -10138,6 +12825,7 @@ impl Engine {
                     object_fit,
                     opacity,
                     current_color,
+                    ..
                 } => serde_json::json!({
                     "op": "image",
                     "url": url,
@@ -10152,6 +12840,7 @@ impl Engine {
                     rect: r,
                     size,
                     position,
+                    offset,
                     repeat,
                 } => serde_json::json!({
                     "op": "background_image",
@@ -10159,6 +12848,25 @@ impl Engine {
                     "rect": rect(r),
                     "size": format!("{:?}", size),
                     "position": { "x": position.0, "y": position.1 },
+                    "offset": { "x": offset.0, "y": offset.1 },
+                    "repeat": format!("{:?}", repeat)
+                }),
+                Cmd::MaskedColor {
+                    color: c,
+                    url,
+                    rect: r,
+                    size,
+                    position,
+                    offset,
+                    repeat,
+                } => serde_json::json!({
+                    "op": "masked_color",
+                    "color": color(c),
+                    "url": url,
+                    "rect": rect(r),
+                    "size": format!("{:?}", size),
+                    "position": { "x": position.0, "y": position.1 },
+                    "offset": { "x": offset.0, "y": offset.1 },
                     "repeat": format!("{:?}", repeat)
                 }),
                 Cmd::BoxShadow {
@@ -10168,6 +12876,7 @@ impl Engine {
                     spread_radius,
                     color: c,
                     rect: r,
+                    border_radius,
                     inset,
                 } => serde_json::json!({
                     "op": "box_shadow",
@@ -10177,6 +12886,7 @@ impl Engine {
                     "spread_radius": spread_radius,
                     "color": color(c),
                     "rect": rect(r),
+                    "border_radius": radius(border_radius),
                     "inset": inset
                 }),
                 Cmd::LinearGradient {
@@ -10720,24 +13430,26 @@ impl Engine {
         };
 
         // Collect unique image URLs from display list
-        let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>)> =
+        // (url, image, whether it is uploaded as a mask texture)
+        let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>, bool)> =
             Vec::new();
         let mut urls_seen = HashSet::new();
 
         for cmd in commands {
-            // Extract URL from both BackgroundImage and Image commands
-            let url = match cmd {
-                rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => url,
-                rustkit_layout::DisplayCommand::Image { url, .. } => url,
+            // Extract URL from BackgroundImage, Image and MaskedColor commands
+            let (url, mask) = match cmd {
+                rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => (url, false),
+                rustkit_layout::DisplayCommand::Image { url, .. } => (url, false),
+                rustkit_layout::DisplayCommand::MaskedColor { url, .. } => (url, true),
                 _ => continue,
             };
 
-            if !urls_seen.insert(url.clone()) {
+            if !urls_seen.insert((url.clone(), mask)) {
                 continue; // Already processed
             }
 
             // Skip if already in renderer
-            if renderer.has_image(url) {
+            if if mask { renderer.has_mask_image(url) } else { renderer.has_image(url) } {
                 continue;
             }
 
@@ -10765,16 +13477,19 @@ impl Engine {
             };
 
             if let Some(img) = image {
-                urls_to_upload.push((url.clone(), img));
+                urls_to_upload.push((url.clone(), img, mask));
             }
         }
 
         // Now upload all collected images
-        for (url_str, image) in urls_to_upload {
+        for (url_str, image, mask) in urls_to_upload {
             let frame = image.current_frame(Duration::ZERO);
-            if let Err(e) =
+            let uploaded = if mask {
+                renderer.upload_mask_image(&url_str, frame.width(), frame.height(), frame.data())
+            } else {
                 renderer.upload_image(&url_str, frame.width(), frame.height(), frame.data())
-            {
+            };
+            if let Err(e) = uploaded {
                 tracing::warn!(?e, %url_str, "Failed to upload image to renderer");
             } else {
                 tracing::debug!(%url_str, "Uploaded image to renderer");
@@ -10807,32 +13522,128 @@ impl Engine {
     /// Apply what script's DOM writes invalidated (the DOM-bindings pin §3
     /// flush): one relayout for however many writes the script made. Runs
     /// once when script settles; `relayout` rebuilds style and layout in
-    /// full, so both `DomDirty` buckets take the same path for now.
-    fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+    /// full, so both `DomDirty` buckets take the same path for now. Returns
+    /// whether it laid out.
+    fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let mut laid = self.flush_script_dom_writes_once(id)?;
+        // Observers report from the layout as it now stands. A callback that
+        // changes the page gets one more flush and one more report, bounded.
+        for _ in 0..3 {
+            let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) else {
+                break;
+            };
+            if bindings.tick_observers() == 0 {
+                break;
+            }
+            if bindings.take_dirty() == DomDirty::Clean {
+                break;
+            }
+            bindings.mark_dirty(DomDirty::Layout);
+            laid |= self.flush_script_dom_writes_once(id)?;
+        }
+        // The focused control paints its caret, so a focus script moved is
+        // a relayout.
+        if self.follow_script_focus(id) {
+            self.relayout(id)?;
+            laid = true;
+        }
+        Ok(laid)
+    }
+
+    fn flush_script_dom_writes_once(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         let Some(view) = self.views.get_mut(&id) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(bindings) = view.bindings.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let dirty = bindings.take_dirty();
+        Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
+        let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
+        if dirty == DomDirty::Clean {
+            // A scroll alone moves what is painted, not the layout.
+            if scrolled {
+                self.render(id)?;
+            }
+            return Ok(scrolled);
+        }
+        debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
+        self.relayout(id).map(|_| true)
+    }
+
+    /// Move the view to where script last scrolled the window, if it did.
+    /// The bindings clamp to the maximum they were last told, and the
+    /// engine clamps again, so a stale maximum cannot scroll past the end.
+    fn apply_script_scroll(
+        offset: &mut (f32, f32),
+        max: (f32, f32),
+        bindings: &DomBindings,
+    ) -> bool {
+        let Some((x, y)) = bindings.take_scroll_request() else {
+            return false;
+        };
+        let new = (x.clamp(0.0, max.0.max(0.0)), y.clamp(0.0, max.1.max(0.0)));
+        let changed = new != *offset;
+        *offset = new;
+        changed
+    }
+
+    /// Script-set control values and checkedness, copied into the view's
+    /// edit and checked state, which is what layout paints from.
+    fn apply_script_control_writes(
+        edit_states: &mut std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
+        checked_states: &mut std::collections::HashMap<usize, bool>,
+        bindings: &DomBindings,
+    ) {
         // Script-set control values reach layout through edit state, the
         // same path typed text takes.
         for (raw, value) in bindings.take_value_writes() {
-            match view.edit_states.get(&raw) {
+            match edit_states.get(&raw) {
                 Some(state) => state.set_value(value),
                 None => {
                     let state = rustkit_dom::forms::TextEditState::with_value(value);
                     state.move_to_end(false);
-                    view.edit_states.insert(raw, state);
+                    edit_states.insert(raw, state);
                 }
             }
         }
-        if dirty == DomDirty::Clean {
-            return Ok(());
+        // Checkedness is script's; style and paint read this copy.
+        for (raw, checked) in bindings.take_checked_writes() {
+            match checked {
+                Some(checked) => checked_states.insert(raw, checked),
+                None => checked_states.remove(&raw),
+            };
         }
-        debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
-        self.relayout(id)
+    }
+
+    /// Lay the page out again if script's writes dirtied it, and publish the
+    /// new geometry and styles to `bindings`, for scripts that run on bindings
+    /// held outside the view (the page's own load: `run_page_scripts`). One
+    /// layout per call, none when nothing changed.
+    fn refresh_layout_for_script(&mut self, id: EngineViewId, bindings: &DomBindings) {
+        let dirty = bindings.take_dirty();
+        if let Some(view) = self.views.get_mut(&id) {
+            Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
+            Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
+        }
+        if dirty == DomDirty::Clean {
+            return;
+        }
+        let started = std::time::Instant::now();
+        if let Err(e) = self.relayout(id) {
+            warn!(?id, ?e, "Relayout between lifecycle steps failed");
+            return;
+        }
+        if let Some(view) = self.views.get(&id) {
+            if let Some(layout) = view.layout.as_ref() {
+                let (geometry, computed) = geometry_snapshot(layout);
+                bindings.set_geometry(geometry);
+                bindings.set_computed_styles(computed);
+            }
+            bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
+        }
+        bindings.tick_observers();
+        info!(?id, elapsed_ms = started.elapsed().as_millis() as u64, "Relaid out for script");
     }
 
     /// Get the current URL of a view.
@@ -11238,8 +14049,17 @@ impl Engine {
     pub async fn load_image(&self, view_id: EngineViewId, url: Url) -> Result<(), EngineError> {
         let image_manager = self.image_manager.clone();
         let event_tx = self.event_tx.clone();
+        let referrer = self.subresource_referrer(view_id);
 
-        match image_manager.load(url.clone()).await {
+        let load = fetch_raster_image(&self.loader, &image_manager, &referrer, url.clone());
+        let loaded = tokio::time::timeout_at(self.subresource_deadline(), load)
+            .await
+            .unwrap_or_else(|_| {
+                Err(rustkit_image::ImageError::FetchError(
+                    "over the subresource budget".into(),
+                ))
+            });
+        match loaded {
             Ok(image) => {
                 let _ = event_tx.send(EngineEvent::ImageLoaded {
                     view_id,
@@ -11377,6 +14197,24 @@ impl EngineBuilder {
     /// Disable animations for deterministic parity testing.
     pub fn disable_animations(mut self, disable: bool) -> Self {
         self.config.disable_animations = disable;
+        self
+    }
+
+    /// Set the wall-clock budget for a page's scripts on the load path
+    /// (`EngineConfig::script_budget_ms`).
+    pub fn script_budget_ms(mut self, ms: u64) -> Self {
+        self.config.script_budget_ms = ms;
+        self
+    }
+
+    /// The configuration the engine will be built with.
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
+    /// Set an optional replay proxy URL for deterministic testing (test-only).
+    pub fn replay_proxy(mut self, proxy: Option<Url>) -> Self {
+        self.config.replay_proxy = proxy;
         self
     }
 
@@ -11655,8 +14493,7 @@ fn parse_conic_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gra
     let first = parts[0].trim().to_lowercase();
     if first.starts_with("from ") || first.contains(" at ") {
         // Parse "from Xdeg"
-        if first.starts_with("from ") {
-            let rest = &first[5..];
+        if let Some(rest) = first.strip_prefix("from ") {
             if let Some(deg_end) = rest.find("deg") {
                 if let Ok(deg) = rest[..deg_end].trim().parse::<f32>() {
                     from_angle = deg;
@@ -11839,123 +14676,20 @@ fn selects_the_root(selector: &str) -> bool {
 
 // ==================== Background Layer Parsing ====================
 
-/// Parse a background-size value.
-fn parse_background_size(value: &str) -> rustkit_css::BackgroundSize {
-    let value = value.trim().to_lowercase();
-    match value.as_str() {
-        "cover" => rustkit_css::BackgroundSize::Cover,
-        "contain" => rustkit_css::BackgroundSize::Contain,
-        "auto" => rustkit_css::BackgroundSize::Auto,
-        _ => {
-            // Parse explicit size (e.g., "100px 50px" or "50% auto")
-            let parts: Vec<&str> = value.split_whitespace().collect();
-            let width = parts
-                .first()
-                .and_then(|s| parse_background_size_dimension(s));
-            let height = parts
-                .get(1)
-                .and_then(|s| parse_background_size_dimension(s));
-            rustkit_css::BackgroundSize::Explicit { width, height }
-        }
-    }
-}
-
-/// Parse a single dimension for background-size (px, %, or auto).
-fn parse_background_size_dimension(value: &str) -> Option<f32> {
-    let value = value.trim();
-    if value == "auto" {
-        return None;
-    }
-    if value.ends_with("px") {
-        return value.strip_suffix("px").and_then(|s| s.parse().ok());
-    }
-    if value.ends_with('%') {
-        // Return percentage as negative value to indicate it's a percentage
-        // (will be resolved during layout)
-        return value
-            .strip_suffix('%')
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(|p| -p);
-    }
-    value.parse().ok()
-}
-
-/// Parse a background-repeat value.
-fn parse_background_repeat(value: &str) -> rustkit_css::BackgroundRepeat {
-    match value.trim().to_lowercase().as_str() {
-        "repeat" => rustkit_css::BackgroundRepeat::Repeat,
-        "repeat-x" => rustkit_css::BackgroundRepeat::RepeatX,
-        "repeat-y" => rustkit_css::BackgroundRepeat::RepeatY,
-        "no-repeat" => rustkit_css::BackgroundRepeat::NoRepeat,
-        "space" => rustkit_css::BackgroundRepeat::Space,
-        "round" => rustkit_css::BackgroundRepeat::Round,
-        _ => rustkit_css::BackgroundRepeat::default(),
-    }
-}
-
-/// Parse a background-position value.
-fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
-    let value = value.trim().to_lowercase();
-    let parts: Vec<&str> = value.split_whitespace().collect();
-
-    let x = parts
-        .first()
-        .map(|s| parse_background_position_value(s))
-        .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0));
-    let y = parts
-        .get(1)
-        .map(|s| parse_background_position_value(s))
-        .unwrap_or_else(|| {
-            // If only one value, center the other axis for keywords, or use same for lengths
-            match &x {
-                rustkit_css::BackgroundPositionValue::Percent(_) => {
-                    rustkit_css::BackgroundPositionValue::Percent(0.5)
-                }
-                rustkit_css::BackgroundPositionValue::Px(_) => {
-                    rustkit_css::BackgroundPositionValue::Percent(0.5)
-                }
-            }
-        });
-
-    rustkit_css::BackgroundPosition { x, y }
-}
-
-/// Parse a single background-position dimension.
-fn parse_background_position_value(value: &str) -> rustkit_css::BackgroundPositionValue {
-    let value = value.trim().to_lowercase();
-    match value.as_str() {
-        "left" | "top" => rustkit_css::BackgroundPositionValue::Percent(0.0),
-        "center" => rustkit_css::BackgroundPositionValue::Percent(0.5),
-        "right" | "bottom" => rustkit_css::BackgroundPositionValue::Percent(1.0),
-        _ if value.ends_with('%') => value
-            .strip_suffix('%')
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(|p| rustkit_css::BackgroundPositionValue::Percent(p / 100.0))
-            .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0)),
-        _ if value.ends_with("px") => value
-            .strip_suffix("px")
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(rustkit_css::BackgroundPositionValue::Px)
-            .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0)),
-        _ => {
-            // Try parsing as a number (assumed px)
-            value
-                .parse::<f32>()
-                .ok()
-                .map(rustkit_css::BackgroundPositionValue::Px)
-                .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0))
-        }
-    }
-}
-
-/// Parse a background-origin value.
-fn parse_background_origin(value: &str) -> rustkit_css::BackgroundOrigin {
-    match value.trim().to_lowercase().as_str() {
-        "border-box" => rustkit_css::BackgroundOrigin::BorderBox,
-        "padding-box" => rustkit_css::BackgroundOrigin::PaddingBox,
-        "content-box" => rustkit_css::BackgroundOrigin::ContentBox,
-        _ => rustkit_css::BackgroundOrigin::default(),
-    }
+/// Parse `object-position` (CSS Images 3 §5.6; the `<position>` grammar
+/// background-position uses) into a fraction of the free space per axis
+/// and a pixel offset per axis: `right 10px top` is (1, 0) and (-10, 0).
+fn parse_object_position(value: &str) -> ((f32, f32), (f32, f32)) {
+    use rustkit_css::BackgroundPositionValue::{Calc, Percent, Px};
+    let split = |v| match v {
+        Percent(p) => (p, 0.0),
+        Px(px) => (0.0, px),
+        Calc { percent, px } => (percent, px),
+    };
+    let position = parse_background_position(value);
+    let (fx, ox) = split(position.x);
+    let (fy, oy) = split(position.y);
+    ((fx, fy), (ox, oy))
 }
 
 /// Parse a single background layer from CSS (may contain image, position, size, repeat).
@@ -11993,6 +14727,129 @@ fn parse_background_layer(value: &str) -> Option<rustkit_css::BackgroundLayer> {
     }
 
     None
+}
+
+/// One comma-separated layer of the `background` shorthand
+/// (css-backgrounds-3 §3.10): an image, a position with an optional
+/// `/ size`, a repeat style, an attachment and up to two boxes, in any
+/// order, and a colour beside them. Returns the colour the layer names and
+/// the layer itself when it has an image.
+///
+/// A token that is none of these (`image-set()`, a `calc()` length) is
+/// skipped rather than failing the declaration.
+fn parse_background_shorthand_layer(
+    value: &str,
+) -> (Option<rustkit_css::Color>, Option<rustkit_css::BackgroundLayer>) {
+    // `center/cover` is one whitespace token: give the slash its own.
+    let mut spaced = String::with_capacity(value.len() + 2);
+    let mut depth = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if ch == '/' && depth == 0 {
+            spaced.push_str(" / ");
+        } else {
+            spaced.push(ch);
+        }
+    }
+
+    let numeric = |lower: &str| {
+        let digits = lower.strip_prefix(['-', '+']).unwrap_or(lower);
+        digits.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+    };
+
+    let mut layer = rustkit_css::BackgroundLayer::default();
+    let mut color = None;
+    let mut position: Vec<&str> = Vec::new();
+    let mut size: Vec<&str> = Vec::new();
+    let mut repeats: Vec<rustkit_css::BackgroundRepeat> = Vec::new();
+    let mut boxes = 0;
+    let mut in_size = false;
+
+    for token in split_top_level_whitespace(&spaced) {
+        let lower = token.to_ascii_lowercase();
+        if token == "/" {
+            in_size = true;
+            continue;
+        }
+        if in_size {
+            let takes = match size.len() {
+                0 => matches!(lower.as_str(), "auto" | "cover" | "contain") || numeric(&lower),
+                1 => {
+                    !matches!(size[0], "cover" | "contain")
+                        && (lower == "auto" || numeric(&lower))
+                }
+                _ => false,
+            };
+            if takes {
+                size.push(token);
+                continue;
+            }
+            // A `calc()` size is not resolved yet: it holds its place as
+            // `auto` rather than being read as a position.
+            if lower.starts_with("calc(") && size.len() < 2 {
+                size.push("auto");
+                continue;
+            }
+            in_size = false;
+        }
+        match lower.as_str() {
+            "none" | "scroll" | "fixed" | "local" => {}
+            "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round" => {
+                repeats.push(parse_background_repeat(&lower));
+            }
+            "border-box" | "padding-box" | "content-box" => {
+                // One box sets both origin and clip; a second is the clip.
+                if boxes == 0 {
+                    layer.origin = parse_background_origin(&lower);
+                }
+                layer.clip = match lower.as_str() {
+                    "padding-box" => rustkit_css::BackgroundClip::PaddingBox,
+                    "content-box" => rustkit_css::BackgroundClip::ContentBox,
+                    _ => rustkit_css::BackgroundClip::BorderBox,
+                };
+                boxes += 1;
+            }
+            "left" | "right" | "top" | "bottom" | "center" => position.push(token),
+            _ if lower.starts_with("url(") && token.ends_with(')') => {
+                let url = token[4..token.len() - 1]
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'');
+                layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
+            }
+            _ if numeric(&lower) || lower.starts_with("calc(") => position.push(token),
+            _ => {
+                if let Some(gradient) = parse_gradient(token) {
+                    layer.image = rustkit_css::BackgroundImage::Gradient(gradient);
+                } else if let Some(c) = parse_color(token) {
+                    color = Some(c);
+                }
+            }
+        }
+    }
+
+    if !position.is_empty() {
+        layer.position = parse_background_position(&position.join(" "));
+    }
+    if !size.is_empty() {
+        layer.size = parse_background_size(&size.join(" "));
+    }
+    {
+        use rustkit_css::BackgroundRepeat::{NoRepeat, Repeat, RepeatX, RepeatY};
+        layer.repeat = match repeats.as_slice() {
+            [] => layer.repeat,
+            // Two values are the horizontal then the vertical style.
+            [Repeat, NoRepeat] => RepeatX,
+            [NoRepeat, Repeat] => RepeatY,
+            [first, ..] => *first,
+        };
+    }
+
+    let has_image = !matches!(layer.image, rustkit_css::BackgroundImage::None);
+    (color, has_image.then_some(layer))
 }
 
 /// Parse a position value (percentage, keyword, or length).
@@ -12309,30 +15166,6 @@ enum LogicalMapping {
     Both(&'static str, &'static str),
 }
 
-/// `value` split at whitespace outside parentheses.
-fn split_top_level_whitespace(value: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = None;
-    for (i, ch) in value.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        if depth == 0 && ch.is_whitespace() {
-            if let Some(from) = start.take() {
-                parts.push(&value[from..i]);
-            }
-        } else if start.is_none() {
-            start = Some(i);
-        }
-    }
-    if let Some(from) = start {
-        parts.push(&value[from..]);
-    }
-    parts
-}
 
 /// css-logical-1 flow-relative margin / padding / inset / border names,
 /// mapped for horizontal-tb, ltr: inline-start = left, block-start = top.
@@ -12625,9 +15458,28 @@ fn parse_time(value: &str) -> Option<f32> {
 fn justify_keyword(value: &str) -> &str {
     value
         .split_whitespace()
-        .filter(|t| !matches!(*t, "safe" | "unsafe" | "legacy"))
-        .last()
+        .rfind(|t| !matches!(*t, "safe" | "unsafe" | "legacy"))
         .unwrap_or("")
+}
+
+/// The two halves of a `place-*` shorthand: the block-axis value, then the
+/// inline-axis value, which repeats the first when only one is given. A
+/// value can be two or three words (`first baseline`, `safe center`,
+/// `unsafe last baseline`), so the split is after the first whole value.
+fn place_pair(value: &str) -> (&str, &str) {
+    let value = value.trim();
+    let mut end = 0;
+    let mut words = value.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        end = word.as_ptr() as usize - value.as_ptr() as usize + word.len();
+        let more = matches!(word, "safe" | "unsafe")
+            || (matches!(word, "first" | "last") && words.peek() == Some(&"baseline"));
+        if !more {
+            break;
+        }
+    }
+    let (block, inline) = (value[..end].trim(), value[end..].trim());
+    (block, if inline.is_empty() { block } else { inline })
 }
 
 /// Parse a CSS timing function.
@@ -13483,6 +16335,221 @@ fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32,
     (min_x, min_y, max_x - min_x, max_y - min_y)
 }
 
+/// How far down the viewport can scroll: the bottom of the root box, or of
+/// the lowest box under it if that is lower. Content that overflows a box of
+/// fixed height (a `height: 100%` body), an absolutely positioned box, a
+/// float and a relatively shifted box all extend the page, as in Chrome.
+///
+/// Not counted: a fixed box and what it holds (it does not move with the
+/// page), and what is inside a box that clips or scrolls its own overflow.
+/// `body` is such a box only when `html` keeps a non-visible overflow for
+/// itself (`html_clips`); otherwise body's overflow belongs to the viewport.
+/// Transforms are not applied.
+fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
+    fn clips(b: &LayoutBox) -> bool {
+        b.style.overflow_x != rustkit_css::Overflow::Visible
+            || b.style.overflow_y != rustkit_css::Overflow::Visible
+    }
+    fn walk(b: &LayoutBox, descend: bool, bottom: &mut f32) {
+        if b.style.position == rustkit_css::Position::Fixed {
+            return;
+        }
+        let bb = b.dimensions.border_box();
+        let edge = bb.y + bb.height;
+        if edge.is_finite() {
+            *bottom = bottom.max(edge);
+        }
+        if descend {
+            for child in &b.children {
+                walk(child, !clips(child), bottom);
+            }
+        }
+    }
+    let mut bottom = root.dimensions.margin_box().height;
+    for body in &root.children {
+        walk(body, !(html_clips && clips(body)), &mut bottom);
+    }
+    bottom
+}
+
+/// Where the layout put every element, by DOM node, for script geometry reads
+/// (`DomBindings::set_geometry`). An element laid out as several boxes (a
+/// block split around anonymous boxes) reports the union of its boxes.
+/// `scroll_*` is the extent of the box's descendants from its padding edge.
+/// Transforms are not applied (`getBoundingClientRect` of a transformed
+/// element reports its untransformed box for now).
+fn geometry_snapshot(
+    root: &LayoutBox,
+) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
+    fn walk(
+        b: &LayoutBox,
+        out: &mut HashMap<usize, rustkit_bindings::BoxGeometry>,
+        styles: &mut HashMap<usize, String>,
+    ) -> Option<(f32, f32, f32, f32)> {
+        // The bounding rect (left, top, right, bottom) of this box and everything under it.
+        let bb = b.dimensions.border_box();
+        let mut extent = Some((bb.x, bb.y, bb.x + bb.width, bb.y + bb.height));
+        for child in &b.children {
+            if let Some(c) = walk(child, out, styles) {
+                extent = Some(match extent {
+                    Some(e) => (e.0.min(c.0), e.1.min(c.1), e.2.max(c.2), e.3.max(c.3)),
+                    None => c,
+                });
+            }
+        }
+        if let Some(node) = b.node_id {
+            let pb = b.dimensions.padding_box();
+            let (right, bottom) = extent.map_or((pb.x + pb.width, pb.y + pb.height), |e| (e.2, e.3));
+            // The computed value, not the layout box's: a relative or sticky
+            // box is laid out as static, but it is still positioned (it is
+            // an offsetParent).
+            let position = match b.style.position {
+                rustkit_css::Position::Static => 0,
+                rustkit_css::Position::Fixed => 2,
+                _ => 1,
+            };
+            let geometry = rustkit_bindings::BoxGeometry {
+                x: bb.x,
+                y: bb.y,
+                width: bb.width,
+                height: bb.height,
+                border_left: b.dimensions.border.left,
+                border_top: b.dimensions.border.top,
+                client_width: pb.width,
+                client_height: pb.height,
+                scroll_width: (right - pb.x).max(pb.width),
+                scroll_height: (bottom - pb.y).max(pb.height),
+                position,
+            };
+            styles.entry(node).or_insert_with(|| computed_style_lines(b));
+            out.entry(node)
+                .and_modify(|g| {
+                    // A second box of the same element: union.
+                    let (l, t) = (g.x.min(geometry.x), g.y.min(geometry.y));
+                    let (r, bt) = (
+                        (g.x + g.width).max(geometry.x + geometry.width),
+                        (g.y + g.height).max(geometry.y + geometry.height),
+                    );
+                    g.x = l;
+                    g.y = t;
+                    g.width = r - l;
+                    g.height = bt - t;
+                    g.scroll_width = g.scroll_width.max(geometry.scroll_width);
+                    g.scroll_height = g.scroll_height.max(geometry.scroll_height);
+                })
+                .or_insert(geometry);
+        }
+        extent
+    }
+    let mut out = HashMap::new();
+    let mut styles = HashMap::new();
+    walk(root, &mut out, &mut styles);
+    (out, styles)
+}
+
+/// A CSS keyword from a `Debug` variant name: `InlineBlock` -> `inline-block`.
+fn css_keyword(debug: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in debug.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('-');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out.replace("no-wrap", "nowrap")
+}
+
+/// `rgb()` / `rgba()` the way `getComputedStyle` serialises a colour.
+fn css_color(c: rustkit_css::Color) -> String {
+    if c.a >= 1.0 {
+        format!("rgb({}, {}, {})", c.r, c.g, c.b)
+    } else {
+        format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a)
+    }
+}
+
+fn css_px(v: f32) -> String {
+    let r = (v * 100.0).round() / 100.0;
+    if r.fract() == 0.0 { format!("{}px", r as i64) } else { format!("{r}px") }
+}
+
+/// The computed style of one box as `name\tvalue` lines, for the properties
+/// the engine models and script commonly reads. Sizes and box edges are the
+/// used values from the laid-out box (what `getComputedStyle` reports for
+/// `width`, `height`, `margin-*`, `padding-*`, `border-*-width`); `display`
+/// is the engine's own set, so `li` reads `block`, not `list-item`.
+fn computed_style_lines(b: &LayoutBox) -> String {
+    let s = &*b.style;
+    let d = &b.dimensions;
+    let font_px = match s.font_size {
+        rustkit_css::Length::Px(p) => p,
+        _ => 16.0,
+    };
+    let offset = |l: &Option<rustkit_css::Length>, size: f32| match l {
+        None | Some(rustkit_css::Length::Auto) => "auto".to_string(),
+        Some(l) => css_px(l.to_px(font_px, 16.0, size)),
+    };
+    let line_height = match s.line_height {
+        rustkit_css::LineHeight::Normal => "normal".to_string(),
+        rustkit_css::LineHeight::Number(n) => css_px(n * font_px),
+        rustkit_css::LineHeight::Px(p) => css_px(p),
+    };
+    let letter_spacing = match s.letter_spacing {
+        rustkit_css::Length::Px(p) if p != 0.0 => css_px(p),
+        _ => "normal".to_string(),
+    };
+    let rows: Vec<(&str, String)> = vec![
+        ("display", css_keyword(&format!("{:?}", s.display))),
+        ("position", css_keyword(&format!("{:?}", s.position))),
+        ("float", css_keyword(&format!("{:?}", s.float))),
+        ("visibility", css_keyword(&format!("{:?}", s.visibility))),
+        ("opacity", format!("{}", s.opacity)),
+        ("overflow-x", css_keyword(&format!("{:?}", s.overflow_x))),
+        ("overflow-y", css_keyword(&format!("{:?}", s.overflow_y))),
+        ("box-sizing", css_keyword(&format!("{:?}", s.box_sizing))),
+        // The computed style keeps `auto` as 0, so an explicit `z-index: 0` reads `auto`.
+        ("z-index", if s.z_index == 0 { "auto".into() } else { s.z_index.to_string() }),
+        ("width", css_px(d.content.width)),
+        ("height", css_px(d.content.height)),
+        ("margin-top", css_px(d.margin.top)),
+        ("margin-right", css_px(d.margin.right)),
+        ("margin-bottom", css_px(d.margin.bottom)),
+        ("margin-left", css_px(d.margin.left)),
+        ("padding-top", css_px(d.padding.top)),
+        ("padding-right", css_px(d.padding.right)),
+        ("padding-bottom", css_px(d.padding.bottom)),
+        ("padding-left", css_px(d.padding.left)),
+        ("border-top-width", css_px(d.border.top)),
+        ("border-right-width", css_px(d.border.right)),
+        ("border-bottom-width", css_px(d.border.bottom)),
+        ("border-left-width", css_px(d.border.left)),
+        ("top", offset(&s.top, d.content.height)),
+        ("right", offset(&s.right, d.content.width)),
+        ("bottom", offset(&s.bottom, d.content.height)),
+        ("left", offset(&s.left, d.content.width)),
+        ("color", css_color(s.color)),
+        ("background-color", css_color(s.background_color)),
+        ("font-size", css_px(font_px)),
+        ("font-weight", s.font_weight.0.to_string()),
+        ("font-style", css_keyword(&format!("{:?}", s.font_style))),
+        ("font-family", s.font_family.clone()),
+        ("line-height", line_height),
+        ("letter-spacing", letter_spacing),
+        ("text-align", css_keyword(&format!("{:?}", s.text_align))),
+        ("text-transform", css_keyword(&format!("{:?}", s.text_transform))),
+        ("white-space", css_keyword(&format!("{:?}", s.white_space))),
+        ("flex-direction", css_keyword(&format!("{:?}", s.flex_direction))),
+    ];
+    rows.into_iter()
+        .map(|(n, v)| format!("{n}\t{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Wrap a serialised layout tree with the provenance an oracle needs.
 ///
 /// Split out of `export_layout_json` so it can be asserted on directly. The
@@ -13520,8 +16587,285 @@ fn layout_export_wrapper(
 /// tests that go through `build_layout_from_document` need a GPU compositor and
 /// SKIP when none is present, which would make an identity test vacuous on any
 /// machine without a GPU adapter.
+/// One SVG shape element's geometry bbox, in the inline `<svg>` subtree's own
+/// USER units, with the join key Chrome reports for it.
+///
+/// SVG shape elements generate NO CSS box, so they are absent from the layout
+/// tree by design — but Chrome's baseline is `getBoundingClientRect()` over
+/// `querySelectorAll('*')`, which reports a rect for every rendered shape. So
+/// `shelf`'s `svg > circle` and `svg > path` reached Gate A as `missing_box`
+/// join failures and could never be compared, which put a ceiling on the
+/// metric that nobody chose: the case cannot reach geometry-green however
+/// correct the engine is.
+///
+/// These are emitted as children of the svg's box under `"type": "svg_shape"`
+/// — named so no reader mistakes them for CSS boxes — carrying the geometry
+/// RustKit will actually paint, through the same viewBox transform
+/// `SvgDocument::render_with_color` uses.
+///
+/// MEASURED against Chrome (run 37096150470, `macos-14`, and
+/// `baselines/chrome-148/builtins/shelf/layout-rects.json`): the rect is the
+/// FILL geometry bbox with STROKE EXCLUDED. `circle r=8` under
+/// `stroke-width="2"` reports 9.333332px at scale 14/24, which is 16.0 user
+/// units — the fill box (18 would be the stroke box).
+#[derive(Debug, Clone)]
+struct SvgShapeBox {
+    tag: String,
+    selector: String,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+/// The shapes of one inline `<svg>` subtree, keyed by its `inline_svg_key`.
+struct InlineSvgShapes {
+    view_box: Option<rustkit_svg::ViewBox>,
+    stretch: bool,
+    shapes: Vec<SvgShapeBox>,
+}
+
+/// Parse a `points` list (`"1,2 3,4"` / `"1 2 3 4"`) into coordinate pairs.
+fn svg_points(raw: &str) -> Vec<(f32, f32)> {
+    let nums: Vec<f32> = raw
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| t.parse::<f32>().ok())
+        .collect();
+    nums.chunks_exact(2).map(|p| (p[0], p[1])).collect()
+}
+
+fn bounds_of_points(points: &[(f32, f32)]) -> Option<(f32, f32, f32, f32)> {
+    let (first, rest) = points.split_first()?;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.0, first.1, first.0, first.1);
+    for &(x, y) in rest {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    Some((min_x, min_y, max_x - min_x, max_y - min_y))
+}
+
+/// The bbox of a path whose every command is a STRAIGHT line, in user units.
+///
+/// `None` for any path carrying a curve or an arc. A Bezier's bbox is NOT the
+/// bbox of its control points — that is a superset, and Chrome reports the
+/// tight bbox — so bounding one from its control points would report a box
+/// larger than the shape and call the difference a geometry defect. Refusing
+/// leaves the element UNMEASURED, which is the honest reading; the tight
+/// extrema of a cubic are a separate unit.
+fn straight_path_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f32, f32)> {
+    use rustkit_svg::PathCommand as C;
+    let mut points: Vec<(f32, f32)> = Vec::new();
+    let (mut cx, mut cy) = (0.0f32, 0.0f32);
+    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    for cmd in commands {
+        match *cmd {
+            C::MoveTo(x, y) => {
+                (cx, cy) = (x, y);
+                (sx, sy) = (x, y);
+                points.push((cx, cy));
+            }
+            C::MoveToRel(dx, dy) => {
+                (cx, cy) = (cx + dx, cy + dy);
+                (sx, sy) = (cx, cy);
+                points.push((cx, cy));
+            }
+            C::LineTo(x, y) => {
+                (cx, cy) = (x, y);
+                points.push((cx, cy));
+            }
+            C::LineToRel(dx, dy) => {
+                (cx, cy) = (cx + dx, cy + dy);
+                points.push((cx, cy));
+            }
+            C::HorizontalTo(x) => {
+                cx = x;
+                points.push((cx, cy));
+            }
+            C::HorizontalToRel(dx) => {
+                cx += dx;
+                points.push((cx, cy));
+            }
+            C::VerticalTo(y) => {
+                cy = y;
+                points.push((cx, cy));
+            }
+            C::VerticalToRel(dy) => {
+                cy += dy;
+                points.push((cx, cy));
+            }
+            C::Close => {
+                (cx, cy) = (sx, sy);
+            }
+            // Any curve or arc: refuse the whole path.
+            _ => return None,
+        }
+    }
+    bounds_of_points(&points)
+}
+
+/// The user-space geometry bbox of one SVG shape element, or `None` where the
+/// shape is one this exporter does not model EXACTLY.
+///
+/// Refusing is the correct failure: the element is then absent from
+/// `layout.json`, Gate A files it as `missing_box` and scores it UNMEASURED,
+/// and "unmeasured is never green". A box emitted from arithmetic that is
+/// merely close would be compared and believed.
+fn svg_shape_user_bbox(
+    tag: &str,
+    attributes: &HashMap<String, String>,
+) -> Option<(f32, f32, f32, f32)> {
+    let num = |name: &str, default: f32| -> f32 {
+        attributes
+            .get(name)
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(default)
+    };
+    match tag {
+        "circle" => {
+            let r = num("r", 0.0);
+            // r <= 0 disables rendering (SVG 1.1 §9.3); Chrome's capture
+            // skips the zero-size rect, so emitting one would be a phantom.
+            (r > 0.0).then(|| {
+                let (cx, cy) = (num("cx", 0.0), num("cy", 0.0));
+                (cx - r, cy - r, 2.0 * r, 2.0 * r)
+            })
+        }
+        "ellipse" => {
+            let (rx, ry) = (num("rx", 0.0), num("ry", 0.0));
+            (rx > 0.0 && ry > 0.0).then(|| {
+                let (cx, cy) = (num("cx", 0.0), num("cy", 0.0));
+                (cx - rx, cy - ry, 2.0 * rx, 2.0 * ry)
+            })
+        }
+        "rect" => {
+            let (w, h) = (num("width", 0.0), num("height", 0.0));
+            (w > 0.0 && h > 0.0).then(|| (num("x", 0.0), num("y", 0.0), w, h))
+        }
+        "line" => {
+            let (x1, y1) = (num("x1", 0.0), num("y1", 0.0));
+            let (x2, y2) = (num("x2", 0.0), num("y2", 0.0));
+            bounds_of_points(&[(x1, y1), (x2, y2)])
+        }
+        "polyline" | "polygon" => {
+            let points = svg_points(attributes.get("points")?);
+            bounds_of_points(&points)
+        }
+        "path" => {
+            let commands = rustkit_svg::SvgPath::parse(attributes.get("d")?);
+            straight_path_bbox(&commands)
+        }
+        // Everything else is UNMODELLED and stays unmeasured, deliberately:
+        // `text`/`tspan` need shaped glyph extents, a `use`'s box is its
+        // instantiated target's (rustkit-svg resolves it at parse time; this
+        // exporter does not walk the instance), and
+        // `image`/`foreignObject` are their own replaced lanes. Non-rendered
+        // elements (`defs`, `title`, gradients, `clipPath`) never reach the
+        // baseline at all: the capture skips any rect that is 0x0.
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn find_svg_border_box(b: &LayoutBox) -> Option<rustkit_layout::Rect> {
+    if b.identity().map(|i| i.tag == "svg").unwrap_or(false) {
+        return Some(b.dimensions.border_box());
+    }
+    b.children.iter().find_map(find_svg_border_box)
+}
+
+/// The no-inline-svg convenience: every production export goes through
+/// `layout_box_to_json_under` with a real shape index.
+#[cfg(test)]
 fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
-    layout_box_to_json_under(layout_box, None)
+    layout_box_to_json_under(layout_box, None, &HashMap::new())
+}
+
+/// Map an inline `<svg>`'s shape geometry from user units into page space.
+///
+/// The transform mirrors `SvgDocument::render_with_color` exactly — the same
+/// uniform-`min` scale, the same `stretch` escape, the same `min-x`/`min-y`
+/// origin shift — because the point is to report the geometry the engine will
+/// PAINT, not a second opinion about it. The viewport is the CONTENT box,
+/// which is what `render_image` passes as its container.
+///
+/// `None` wherever the mapping is not the one the painter uses: no viewBox
+/// (an svg sized without one puts its shapes in raw user units, which is a
+/// different lane and unverified here), a degenerate viewBox, or a non-default
+/// `object-fit` (which would make the paint dest differ from the content box). Chrome's
+/// default `preserveAspectRatio="xMidYMid"` also CENTERS letterboxed content
+/// and `render_with_color` does not, so a non-square fit is refused rather
+/// than reported from a transform known to differ.
+fn svg_shape_children_json(
+    layout_box: &LayoutBox,
+    shapes: &HashMap<String, InlineSvgShapes>,
+) -> Option<Vec<serde_json::Value>> {
+    let identity = layout_box.identity()?;
+    if identity.tag != "svg" {
+        return None;
+    }
+    let BoxType::Image { url, .. } = &layout_box.box_type else {
+        return None;
+    };
+    let entry = shapes.get(url)?;
+    let view_box = entry.view_box?;
+    if !(view_box.width > 0.0 && view_box.height > 0.0) {
+        return None;
+    }
+    if !matches!(layout_box.style.object_fit.as_str(), "fill" | "") {
+        return None;
+    }
+
+    let content = &layout_box.dimensions.content;
+    let (scale_x, scale_y) = {
+        let (sx, sy) = (
+            content.width / view_box.width,
+            content.height / view_box.height,
+        );
+        match entry.stretch {
+            true => (sx, sy),
+            false => {
+                let s = sx.min(sy);
+                // A letterboxed fit is where the painter and Chrome's
+                // xMidYMid centering part company; refuse rather than report.
+                if (sx - sy).abs() > 1e-4 {
+                    return None;
+                }
+                (s, s)
+            }
+        }
+    };
+    let origin_x = content.x - view_box.min_x * scale_x;
+    let origin_y = content.y - view_box.min_y * scale_y;
+
+    let prefix = &identity.selector;
+    Some(
+        entry
+            .shapes
+            .iter()
+            .map(|shape| {
+                let rect = serde_json::json!({
+                    "x": origin_x + shape.x * scale_x,
+                    "y": origin_y + shape.y * scale_y,
+                    "width": shape.width * scale_x,
+                    "height": shape.height * scale_y,
+                });
+                serde_json::json!({
+                    // NOT a CSS box, and named so no reader treats it as one.
+                    "type": "svg_shape",
+                    "tag": shape.tag,
+                    "selector": format!("{prefix} > {}", shape.selector),
+                    // An SVG shape has no box model, so there is one rect and
+                    // `border_box` carries it: Gate A reads `border_box` and
+                    // falls back to `rect`, and the two must not disagree.
+                    "rect": rect,
+                    "border_box": rect,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// `ancestor` is the composed transform of everything above this box, in page
@@ -13530,6 +16874,7 @@ fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
 fn layout_box_to_json_under(
     layout_box: &LayoutBox,
     ancestor: Option<[f32; 6]>,
+    svg_shapes: &HashMap<String, InlineSvgShapes>,
 ) -> serde_json::Value {
     let effective = match (ancestor, own_transform_affine(layout_box)) {
         (None, None) => None,
@@ -13542,11 +16887,24 @@ fn layout_box_to_json_under(
     // on anonymous and text boxes — the geometry oracle must SKIP
     // those rather than pair them positionally with Chrome elements.
     // Emitting a placeholder here would manufacture geometry failures.
-    let mut value = layout_box_body_to_json(layout_box, effective);
+    let mut value = layout_box_body_to_json(layout_box, effective, svg_shapes);
     if let (Some(identity), Some(object)) = (layout_box.identity(), value.as_object_mut()) {
         object.insert("element_id".into(), identity.element_id.into());
         object.insert("tag".into(), identity.tag.clone().into());
         object.insert("selector".into(), identity.selector.clone().into());
+    }
+
+    // An inline `<svg>`'s shape elements have no CSS box, so they are not in
+    // the layout tree; they are attached here, where identity already is,
+    // because that is what they are — a join key plus the geometry the paint
+    // lane will use. See `SvgShapeBox`.
+    if let (Some(children), Some(object)) = (
+        svg_shape_children_json(layout_box, svg_shapes),
+        value.as_object_mut(),
+    ) {
+        if !children.is_empty() {
+            object.insert("children".into(), children.into());
+        }
     }
     value
 }
@@ -13563,6 +16921,7 @@ fn rect_to_json(rect: &rustkit_layout::Rect) -> serde_json::Value {
 fn layout_box_body_to_json(
     layout_box: &LayoutBox,
     effective_transform: Option<[f32; 6]>,
+    svg_shapes: &HashMap<String, InlineSvgShapes>,
 ) -> serde_json::Value {
     let dims = &layout_box.dimensions;
     let content = &dims.content;
@@ -13626,7 +16985,7 @@ fn layout_box_body_to_json(
     let children: Vec<serde_json::Value> = layout_box
         .children
         .iter()
-        .map(|child| layout_box_to_json_under(child, effective_transform))
+        .map(|child| layout_box_to_json_under(child, effective_transform, svg_shapes))
         .collect();
 
     let mut json = serde_json::json!({
@@ -13995,6 +17354,588 @@ mod tests {
         assert_eq!(
             img.1, "body > div.container > img.test-img",
             "the image's join key must be the selector Chrome's capture reports"
+        );
+    }
+
+    /// An inline `<svg>` is built by its OWN early-return branch, below the
+    /// `<img>` one and above the general element path, and it carried no
+    /// identity on either of its two exits. So the one case in the gating
+    /// corpus with an inline svg — `shelf` — reached the geometry oracle with
+    /// its `<svg>` filed as a `missing_box` join failure and never compared,
+    /// while the box RustKit actually computed for it was
+    /// `{x: 29, y: 67.5, w: 14, h: 14}` — Chrome's rect to the bit
+    /// (`baselines/chrome-148/builtins/shelf/layout-rects.json`). The
+    /// geometry was already right; the instrument could not see it.
+    ///
+    /// The branch has TWO exits and they need separate cover: a cache HIT
+    /// builds `BoxType::Image` (sized from the parsed document), a MISS
+    /// builds `BoxType::Block`. `a_replaced_element_is_built_with_its_element_identity`
+    /// cannot stand in for either — it collects `Image | FormControl` boxes,
+    /// so the miss path's `Block` is invisible to it, and with an empty
+    /// `svg_cache` the miss path is the only one an engine built by
+    /// `layout_only_engine()` ever takes.
+    ///
+    /// The skip is LOUD for the same reason as the guard above: on macOS a
+    /// missing adapter FAILS, because a guard that skips itself prints the
+    /// same word as one that passed.
+    #[test]
+    fn an_inline_svg_is_built_with_its_element_identity() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!(
+                        "no GPU adapter on a macOS runner — this guard cannot \
+                         report a pass without building a layout tree"
+                    );
+                }
+                eprintln!(
+                    "SKIPPED an_inline_svg_is_built_with_its_element_identity: \
+                     no GPU adapter, so no layout tree was built and NOTHING was \
+                     asserted. Re-run with VK_ICD_FILENAMES set to a software \
+                     Vulkan ICD to make this guard actually execute."
+                );
+                return;
+            }
+        };
+
+        // `shelf`'s markup, which is what the corpus measures.
+        let html = r#"<!DOCTYPE html><html><body>
+            <div class="command-palette">
+              <div class="command-input-wrapper">
+                <svg class="command-input-icon" width="14" height="14" viewBox="0 0 24 24">
+                  <circle cx="11" cy="11" r="8"/>
+                  <path d="M21 21l-4.35-4.35"/>
+                </svg>
+              </div>
+            </div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+
+        const EXPECTED: &str = "body > div.command-palette > div.command-input-wrapper > svg";
+
+        fn svg_identities(b: &LayoutBox, out: &mut Vec<(String, String)>) {
+            if let Some(identity) = b.identity() {
+                if identity.tag == "svg" {
+                    out.push((identity.selector.clone(), format!("{:?}", b.box_type)));
+                }
+            }
+            for c in &b.children {
+                svg_identities(c, out);
+            }
+        }
+
+        // Exit 1: cache MISS — nothing has parsed the subtree, so the branch
+        // builds a plain Block. An empty svg_cache is the default state of
+        // `layout_only_engine()`.
+        assert!(
+            engine.svg_cache.is_empty(),
+            "this half of the guard is only meaningful on a cache miss"
+        );
+        let miss = engine.build_layout_from_document(&document, &[]);
+        let mut found = Vec::new();
+        svg_identities(&miss, &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "a cache-miss inline <svg> must still produce exactly one \
+             identified box; the geometry oracle cannot join it otherwise \
+             (found {found:?})"
+        );
+        assert_eq!(
+            found[0].0, EXPECTED,
+            "the svg's join key must be the selector Chrome's capture reports"
+        );
+
+        // Exit 2: cache HIT — the pre-pass has parsed the subtree, so the
+        // branch builds an Image sized from the viewBox. This is the exit the
+        // real engine takes on every relayout, and the one the `shelf`
+        // capture went through.
+        engine.cache_inline_svgs(&document);
+        assert!(
+            !engine.svg_cache.is_empty(),
+            "the pre-pass did not parse the subtree, so the cache-hit exit \
+             was never entered and this half asserted nothing"
+        );
+        let hit = engine.build_layout_from_document(&document, &[]);
+        let mut found = Vec::new();
+        svg_identities(&hit, &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "a cached inline <svg> must produce exactly one identified box \
+             (found {found:?})"
+        );
+        assert_eq!(
+            found[0].0, EXPECTED,
+            "the svg's join key must be the selector Chrome's capture reports"
+        );
+        assert!(
+            found[0].1.starts_with("Image"),
+            "the cache-hit exit must be the one under test — a Block here \
+             means the subtree did not parse and the miss path ran twice \
+             (box type {:?})",
+            found[0].1
+        );
+
+        // An identity with an EMPTY selector joins nothing and is reported as
+        // a phantom rather than excluded, so it is worse than none.
+        fn assert_no_empty_key(b: &LayoutBox) {
+            if let Some(identity) = b.identity() {
+                assert!(
+                    !identity.selector.is_empty(),
+                    "a box was stamped with an empty join key (tag {:?})",
+                    identity.tag
+                );
+            }
+            for c in &b.children {
+                assert_no_empty_key(c);
+            }
+        }
+        assert_no_empty_key(&hit);
+    }
+
+    /// `<svg><use href="#icon">` whose target lives in ANOTHER, hidden
+    /// `<svg>` (the sprite-sheet idiom; the 2026-10-06 diagnostics repro).
+    /// The icon's parse markup must carry the referenced element so the use
+    /// resolves, and the sprite sheet must paint nothing by itself. Pure
+    /// markup + rustkit-svg: no GPU engine needed.
+    #[test]
+    fn inline_svg_use_resolves_a_target_in_another_svg() {
+        let html = r##"<!DOCTYPE html><html><body>
+            <svg style="display:none">
+              <defs><g id="icon"><circle cx="25" cy="25" r="20" fill="green"/></g></defs>
+            </svg>
+            <svg width="50" height="50">
+              <use href="#icon"/>
+            </svg>
+        </body></html>"##;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let svgs = document.get_elements_by_tag_name("svg");
+        assert_eq!(svgs.len(), 2);
+
+        let green = |markup: &str| {
+            let svg = rustkit_svg::SvgDocument::parse(markup).expect("svg parses");
+            svg.render(0.0, 0.0, 50.0, 50.0)
+                .iter()
+                .filter(|c| match c {
+                    rustkit_layout::DisplayCommand::FillPolygon { color, .. }
+                    | rustkit_layout::DisplayCommand::FillCircle { color, .. } => {
+                        (color.r, color.g, color.b) == (0, 128, 0)
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+
+        let sheet = Engine::inline_svg_markup(&svgs[0]);
+        assert_eq!(green(&sheet), 0, "the sprite sheet's <defs> must not paint: {sheet}");
+
+        let icon = Engine::inline_svg_markup(&svgs[1]);
+        assert!(icon.contains(r#"id="icon""#), "the referenced <g> must be appended: {icon}");
+        assert!(green(&icon) > 0, "the circle must paint through the <use>: {icon}");
+    }
+
+    /// The same cross-svg reference spelled `xlink:href` (older sprite
+    /// markup), and an id that names an HTML element: only SVG elements are
+    /// appended as reference targets.
+    #[test]
+    fn inline_svg_use_by_xlink_href_appends_only_svg_targets() {
+        let html = r##"<!DOCTYPE html><html><body>
+            <div id="box"><p>not svg</p></div>
+            <svg style="display:none"><symbol id="s" viewBox="0 0 10 10"><rect width="10" height="10" fill="#00ff00"/></symbol></svg>
+            <svg width="20" height="20"><use xlink:href="#s" width="20" height="20"/><use href="#box"/></svg>
+        </body></html>"##;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let svgs = document.get_elements_by_tag_name("svg");
+        let icon = Engine::inline_svg_markup(&svgs[1]);
+        assert!(icon.contains(r#"id="s""#), "the xlink:href target must be appended: {icon}");
+        assert!(!icon.contains("not svg"), "an HTML element is never a <use> target: {icon}");
+
+        let svg = rustkit_svg::SvgDocument::parse(&icon).expect("svg parses");
+        let rects: Vec<_> = svg
+            .render(0.0, 0.0, 20.0, 20.0)
+            .into_iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::FillRect { rect, .. } => Some((rect.x, rect.y, rect.width, rect.height)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rects, vec![(0.0, 0.0, 20.0, 20.0)], "{icon}");
+    }
+
+    /// An inline `<svg>`'s SHAPE elements reach Chrome's baseline — the
+    /// capture is `getBoundingClientRect()` over `querySelectorAll('*')`, and
+    /// a rendered `<circle>` has a rect — but they generate no CSS box, so
+    /// they are absent from the layout tree by construction. `shelf`'s
+    /// `svg > circle` and `svg > path` were therefore `missing_box` join
+    /// failures that no engine fix could ever clear, which capped the metric:
+    /// the case could not reach geometry-green however correct the engine was.
+    ///
+    /// This asserts the exported shapes against Chrome's COMMITTED numbers
+    /// (`baselines/chrome-148/builtins/shelf/layout-rects.json`, run
+    /// 37096150470 `macos-14`), not against a recomputation of the same
+    /// arithmetic this exporter does — the test would be circular otherwise.
+    /// The svg's content box is pinned to the one RustKit actually computed
+    /// for `shelf` (`{29, 67.5, 14, 14}`, itself bit-identical to Chrome's
+    /// rect), so what is under test is the viewBox mapping and the join key.
+    #[test]
+    fn inline_svg_shapes_are_exported_at_chromes_rects() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!(
+                        "no GPU adapter on a macOS runner — this guard cannot \
+                         report a pass without building a layout tree"
+                    );
+                }
+                eprintln!(
+                    "SKIPPED inline_svg_shapes_are_exported_at_chromes_rects: \
+                     no GPU adapter, so no layout tree was built and NOTHING \
+                     was asserted. Re-run with VK_ICD_FILENAMES set to a \
+                     software Vulkan ICD to make this guard actually execute."
+                );
+                return;
+            }
+        };
+
+        let html = r#"<!DOCTYPE html><html><body>
+            <div class="command-palette">
+              <div class="command-input-wrapper">
+                <svg class="command-input-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"/>
+                  <path d="M21 21l-4.35-4.35"/>
+                </svg>
+              </div>
+            </div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        engine.cache_inline_svgs(&document);
+        let index = engine.inline_svg_shape_index(&document);
+        assert_eq!(
+            index.len(),
+            1,
+            "the subtree must be indexed under its content hash"
+        );
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+
+        // Pin the svg's content box to the one the macOS capture recorded, so
+        // this guard measures the mapping and not the page's own layout.
+        fn pin_svg_content(b: &mut LayoutBox) -> bool {
+            if b.identity().map(|i| i.tag == "svg").unwrap_or(false) {
+                b.dimensions.content.x = 29.0;
+                b.dimensions.content.y = 67.5;
+                b.dimensions.content.width = 14.0;
+                b.dimensions.content.height = 14.0;
+                return true;
+            }
+            b.children.iter_mut().any(pin_svg_content)
+        }
+        assert!(pin_svg_content(&mut layout), "no identified svg box");
+
+        let json = layout_box_to_json_under(&layout, None, &index);
+
+        // Collect every exported svg_shape, wherever it sits.
+        fn shapes(v: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("svg_shape") {
+                out.push(v.clone());
+            }
+            if let Some(children) = v.get("children").and_then(|c| c.as_array()) {
+                for c in children {
+                    shapes(c, out);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        shapes(&json, &mut found);
+        assert_eq!(
+            found.len(),
+            2,
+            "expected the circle and the path; got {found:#?}"
+        );
+
+        // Chrome's committed rects, verbatim from the baseline.
+        let expected: [(&str, [f64; 4]); 2] = [
+            (
+                "body > div.command-palette > div.command-input-wrapper > svg > circle",
+                [30.75, 69.25, 9.333332061767578, 9.333335876464844],
+            ),
+            (
+                "body > div.command-palette > div.command-input-wrapper > svg > path",
+                [
+                    38.712501525878906,
+                    77.2125015258789,
+                    2.5374984741210938,
+                    2.5374984741210938,
+                ],
+            ),
+        ];
+
+        for (selector, chrome) in expected {
+            let shape = found
+                .iter()
+                .find(|s| s.get("selector").and_then(|v| v.as_str()) == Some(selector))
+                .unwrap_or_else(|| {
+                    panic!("no exported shape joined on {selector}; got {found:#?}")
+                });
+            // Gate A reads `border_box` and falls back to `rect`; a shape has
+            // one geometry and the two must not disagree.
+            assert_eq!(
+                shape["rect"], shape["border_box"],
+                "a shape's two rects must be the same geometry"
+            );
+            for (axis, want) in ["x", "y", "width", "height"].iter().zip(chrome) {
+                let got = shape["rect"][axis].as_f64().expect("numeric axis");
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "{selector} {axis}: exported {got}, Chrome {want} \
+                     (Gate A's tolerance is 0.5px per box per axis)"
+                );
+            }
+        }
+    }
+
+    /// The refusals, which are the load-bearing half: a shape this exporter
+    /// does not model EXACTLY must produce NO box, leaving Gate A to file it
+    /// as `missing_box` and score it UNMEASURED. "Unmeasured is never green"
+    /// is already enforced; a box emitted from arithmetic that is merely
+    /// close would be compared and believed instead.
+    #[test]
+    fn an_unmodelled_svg_shape_is_refused_rather_than_approximated() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!("no GPU adapter on a macOS runner");
+                }
+                eprintln!(
+                    "SKIPPED an_unmodelled_svg_shape_is_refused_rather_than_approximated: \
+                     no GPU adapter, NOTHING asserted."
+                );
+                return;
+            }
+        };
+
+        // A cubic Bezier (bbox of control points is a SUPERSET of the tight
+        // bbox Chrome reports), an element carrying a transform this walk does
+        // not compose, a <text> needing shaped glyph extents, and a <use>
+        // rustkit-svg's renderer does not resolve. Plus one straight-line
+        // path and one rect, which MUST still come through — a refusal that
+        // refuses everything would pass this test vacuously.
+        let html = r##"<!DOCTYPE html><html><body>
+            <svg width="100" height="100" viewBox="0 0 100 100">
+              <path class="curve" d="M10 10 C 20 20, 40 20, 50 10"/>
+              <rect class="shifted" x="1" y="1" width="5" height="5" transform="translate(3,3)"/>
+              <text x="5" y="5">hi</text>
+              <use href="#nope" x="1" y="1"/>
+              <path class="straight" d="M10 10 L 30 40 Z"/>
+              <rect class="plain" x="2" y="4" width="6" height="8"/>
+            </svg>
+        </body></html>"##;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        engine.cache_inline_svgs(&document);
+        let index = engine.inline_svg_shape_index(&document);
+        let entry = index.values().next().expect("one indexed subtree");
+
+        let tags: Vec<&str> = entry.shapes.iter().map(|s| s.tag.as_str()).collect();
+        let selectors: Vec<&str> = entry.shapes.iter().map(|s| s.selector.as_str()).collect();
+
+        assert!(
+            selectors.contains(&"path:nth-of-type(2)"),
+            "the straight-line path must be exported, else this guard is \
+             vacuous; got {selectors:?}"
+        );
+        assert!(
+            selectors.contains(&"rect:nth-of-type(2)"),
+            "the untransformed rect must be exported; got {selectors:?}"
+        );
+        assert!(
+            !selectors.contains(&"path:nth-of-type(1)"),
+            "a path with a cubic Bezier must be REFUSED, not bounded by its \
+             control points; got {selectors:?}"
+        );
+        assert!(
+            !selectors.contains(&"rect:nth-of-type(1)"),
+            "an element with a transform must be refused — this walk \
+             composes none; got {selectors:?}"
+        );
+        assert!(
+            !tags.contains(&"text"),
+            "<text> needs shaped glyph extents and must be refused; got {tags:?}"
+        );
+        assert!(
+            !tags.contains(&"use"),
+            "<use> is unresolved in the renderer and must be refused; got {tags:?}"
+        );
+        assert_eq!(
+            entry.shapes.len(),
+            2,
+            "exactly the two modelled shapes; got {selectors:?}"
+        );
+
+        // The straight path's bbox is the tight one: M10 10 L30 40 spans
+        // 20x30 from (10,10). The curve's control-point bbox would have been
+        // 40x10 from (10,10) — a box the shape never occupies.
+        let straight = entry
+            .shapes
+            .iter()
+            .find(|s| s.selector == "path:nth-of-type(2)")
+            .expect("straight path");
+        assert_eq!(
+            (straight.x, straight.y, straight.width, straight.height),
+            (10.0, 10.0, 20.0, 30.0)
+        );
+    }
+
+    /// The two quantities `shelf` cannot distinguish, pinned on a case that
+    /// can. Both of these survived the first mutation sweep for the same
+    /// reason: `shelf`'s svg has NO padding or border, so its content box and
+    /// its border box are the same rect, and its `viewBox` is `0 0 24 24`, so
+    /// the origin shift is a no-op. A guard that only knows `shelf` cannot
+    /// tell the right implementation from either wrong one.
+    ///
+    /// - M4: mapping from the BORDER box origin instead of the CONTENT box.
+    ///   The SVG viewport is the content box — it is what `render_image`
+    ///   passes to the painter as its container.
+    /// - M5: dropping the `viewBox` `min-x`/`min-y` origin shift, so a
+    ///   viewBox that does not start at `0 0` paints offset by its own origin.
+    ///
+    /// Construction: `viewBox="10 20 24 24"` over a 24x24 content box, so the
+    /// scale is exactly 1 and the arithmetic is readable. The circle's user
+    /// bbox is `(10, 20, 4, 4)` — precisely the viewBox's own origin — so the
+    /// one correct answer is the CONTENT box's origin and nothing else. With
+    /// M4 it lands at the border origin (left and up by padding+border); with
+    /// M5 it lands 10 right and 20 down.
+    #[test]
+    fn a_shape_at_the_viewbox_origin_paints_at_the_content_origin() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!("no GPU adapter on a macOS runner");
+                }
+                eprintln!(
+                    "SKIPPED a_shape_at_the_viewbox_origin_paints_at_the_content_origin: \
+                     no GPU adapter, NOTHING asserted."
+                );
+                return;
+            }
+        };
+
+        let html = r#"<!DOCTYPE html><html><body>
+            <svg width="24" height="24" viewBox="10 20 24 24">
+              <circle cx="12" cy="22" r="2"/>
+            </svg>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        engine.cache_inline_svgs(&document);
+        let index = engine.inline_svg_shape_index(&document);
+
+        // The user-space bbox must be the viewBox's own origin, or the test
+        // below is measuring something other than what its comment claims.
+        let entry = index.values().next().expect("one indexed subtree");
+        let circle = entry.shapes.first().expect("the circle");
+        assert_eq!(
+            (circle.x, circle.y, circle.width, circle.height),
+            (10.0, 20.0, 4.0, 4.0),
+            "the circle's user bbox must sit exactly at the viewBox origin"
+        );
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        fn pin(b: &mut LayoutBox) -> bool {
+            if b.identity().map(|i| i.tag == "svg").unwrap_or(false) {
+                b.dimensions.content.x = 100.0;
+                b.dimensions.content.y = 200.0;
+                b.dimensions.content.width = 24.0;
+                b.dimensions.content.height = 24.0;
+                // Make the content box and the border box DIFFERENT rects,
+                // which is the whole point of this guard.
+                b.dimensions.padding.left = 5.0;
+                b.dimensions.padding.top = 7.0;
+                b.dimensions.border.left = 2.0;
+                b.dimensions.border.top = 3.0;
+                return true;
+            }
+            b.children.iter_mut().any(pin)
+        }
+        assert!(pin(&mut layout), "no identified svg box");
+        let border = layout_border_box_of_svg(&layout);
+        assert!(
+            (border.x - 100.0).abs() > 0.5 && (border.y - 200.0).abs() > 0.5,
+            "the border box must differ from the content box by more than \
+             Gate A's tolerance, else M4 is still indistinguishable (border \
+             {border:?})"
+        );
+
+        let json = layout_box_to_json_under(&layout, None, &index);
+        fn first_shape(v: &serde_json::Value) -> Option<serde_json::Value> {
+            if v.get("type").and_then(|t| t.as_str()) == Some("svg_shape") {
+                return Some(v.clone());
+            }
+            v.get("children")
+                .and_then(|c| c.as_array())
+                .and_then(|cs| cs.iter().find_map(first_shape))
+        }
+        let shape = first_shape(&json).expect("an exported shape");
+        for (axis, want) in [("x", 100.0), ("y", 200.0), ("width", 4.0), ("height", 4.0)] {
+            let got = shape["rect"][axis].as_f64().expect("numeric axis");
+            assert!(
+                (got - want).abs() < 0.01,
+                "{axis}: exported {got}, expected {want} — a shape at the \
+                 viewBox origin paints at the CONTENT box origin"
+            );
+        }
+    }
+
+    /// The svg box's border box, for the guard above.
+    fn layout_border_box_of_svg(b: &LayoutBox) -> rustkit_layout::Rect {
+        if b.identity().map(|i| i.tag == "svg").unwrap_or(false) {
+            return b.dimensions.border_box();
+        }
+        b.children
+            .iter()
+            .find_map(find_svg_border_box)
+            .expect("no identified svg box in the tree")
+    }
+
+    /// A transform on a `<g>` must refuse the shapes BENEATH it too, not just
+    /// the `<g>` (which has no geometry of its own and so refuses silently
+    /// either way). Separate from the test above because that one puts the
+    /// transform on the shape itself, where a subtree bug cannot show.
+    #[test]
+    fn a_transformed_group_refuses_the_shapes_beneath_it() {
+        let mut engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!("no GPU adapter on a macOS runner");
+                }
+                eprintln!(
+                    "SKIPPED a_transformed_group_refuses_the_shapes_beneath_it: \
+                     no GPU adapter, NOTHING asserted."
+                );
+                return;
+            }
+        };
+
+        let html = r#"<!DOCTYPE html><html><body>
+            <svg width="100" height="100" viewBox="0 0 100 100">
+              <g transform="translate(10,10)"><circle cx="5" cy="5" r="2"/></g>
+              <g><circle cx="7" cy="7" r="3"/></g>
+            </svg>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        engine.cache_inline_svgs(&document);
+        let index = engine.inline_svg_shape_index(&document);
+        let entry = index.values().next().expect("one indexed subtree");
+
+        let selectors: Vec<&str> = entry.shapes.iter().map(|s| s.selector.as_str()).collect();
+        assert_eq!(
+            selectors,
+            vec!["g:nth-of-type(2) > circle"],
+            "only the circle under the UNtransformed group may be exported"
         );
     }
 
@@ -15481,7 +19422,7 @@ mod tests {
 
         fn collect(b: &LayoutBox, out: &mut Vec<(String, rustkit_css::LineHeight)>) {
             if let BoxType::Text(t) = &b.box_type {
-                out.push((t.clone(), b.style.line_height.clone()));
+                out.push((t.clone(), b.style.line_height));
             }
             for c in &b.children {
                 collect(c, out);
@@ -15492,7 +19433,7 @@ mod tests {
         let get = |needle: &str| {
             lhs.iter()
                 .find(|(t, _)| t.contains(needle))
-                .map(|(_, s)| s.clone())
+                .map(|(_, s)| *s)
                 .unwrap_or_else(|| panic!("no text box containing {:?}", needle))
         };
         // html -> body -> h1 (unitless factor inherits as the number, re-resolved per font-size)
@@ -16203,6 +20144,276 @@ mod element_identity_tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn the_background_shorthand_resets_the_colour_it_does_not_name() {
+        // css-backgrounds-3 §3.10: the shorthand first sets every longhand
+        // to its initial value. Chrome 148 computes `background-color:
+        // rgba(0, 0, 0, 0)` after each of these over an earlier colour.
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let attrs: std::collections::HashMap<String, String> =
+            [("class".to_string(), "a".to_string())].into_iter().collect();
+        let vars = HashMap::new();
+        let style_under = |css: &str| {
+            let sheet = Stylesheet::parse(css).expect("css");
+            engine.compute_style_for_element(
+                "div",
+                &attrs,
+                &[sheet],
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        let clear = rustkit_css::Color::TRANSPARENT;
+
+        for reset in ["none", "0 0", "unset", "initial", "url(a.png) no-repeat"] {
+            let s = style_under(&format!(
+                ".a {{ background-color: red }} .a {{ background: {reset} }}"
+            ));
+            assert_eq!(s.background_color, clear, "`background: {reset}` clears the colour");
+        }
+
+        // A colour the shorthand does name is kept, alone or beside an image.
+        assert_eq!(style_under(".a { background: red }").background_color, red);
+        assert_eq!(
+            style_under(".a { background: red url(a.png) no-repeat }").background_color,
+            red
+        );
+        assert_eq!(
+            style_under(".a { background: url(a.png) no-repeat red }").background_color,
+            red
+        );
+
+        // `background-image` is a longhand: it leaves the colour alone.
+        assert_eq!(
+            style_under(".a { background-color: red } .a { background-image: none }")
+                .background_color,
+            red
+        );
+
+        // A value Chrome cannot parse is dropped whole: the earlier colour
+        // and image both stay.
+        let s = style_under(
+            ".a { background: linear-gradient(red, blue); background-color: red } \
+             .a { background: -moz-linear-gradient(top, red, blue) }",
+        );
+        assert_eq!(s.background_color, red, "a foreign prefix does not reset the colour");
+        assert_eq!(s.background_layers.len(), 1, "nor the image");
+
+        // `none` over a gradient removes the gradient.
+        let s = style_under(
+            ".a { background: linear-gradient(red, blue) } .a { background: none }",
+        );
+        assert!(s.background_layers.is_empty());
+        assert!(s.background_gradient.is_none(), "the gradient goes with its layer");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_four_digit_hex_colour_replaces_an_earlier_one() {
+        // `#rgba` (css-color-4 §5.2). Minifiers write `transparent` as
+        // `#0000`; the declaration was dropped, so the colour under it
+        // stayed (weather.com's and squarespace's button resets).
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let attrs: std::collections::HashMap<String, String> =
+            [("class".to_string(), "a".to_string())].into_iter().collect();
+        let vars = HashMap::new();
+        let style_under = |css: &str| {
+            let sheet = Stylesheet::parse(css).expect("css");
+            engine.compute_style_for_element(
+                "div",
+                &attrs,
+                &[sheet],
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let clear = rustkit_css::Color::new(0, 0, 0, 0.0);
+
+        let s = style_under(".a { background-color: red } .a { background-color: #0000 }");
+        assert_eq!(s.background_color, clear, "`background-color: #0000`");
+        let s = style_under(".a { background-color: red } .a { background: #0000 }");
+        assert_eq!(s.background_color, clear, "`background: #0000`");
+        let s = style_under(".a { color: red } .a { color: #00F8 }");
+        assert_eq!(s.color, rustkit_css::Color::new(0, 0, 255, 136.0 / 255.0));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_background_shorthand_sets_each_layers_position_size_and_repeat() {
+        // css-backgrounds-3 §3.10. Only the image was taken, and only when
+        // the layer began with it: `url(a.png) no-repeat` tiled, and
+        // `no-repeat url(a.png)` had no image at all.
+        use rustkit_css::BackgroundPositionValue::{Percent, Px};
+        use rustkit_css::{BackgroundImage, BackgroundRepeat, BackgroundSize};
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let attrs: std::collections::HashMap<String, String> =
+            [("class".to_string(), "a".to_string())].into_iter().collect();
+        let vars = HashMap::new();
+        let style_under = |css: &str| {
+            let sheet = Stylesheet::parse(css).expect("css");
+            engine.compute_style_for_element(
+                "div",
+                &attrs,
+                &[sheet],
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let url = |s: &ComputedStyle, i: usize| match &s.background_layers[i].image {
+            BackgroundImage::Url(u) => u.clone(),
+            other => panic!("layer {i} is not a url: {other:?}"),
+        };
+
+        let s = style_under(".a { background: url(a.png) no-repeat center / cover }");
+        assert_eq!(s.background_layers.len(), 1);
+        let l = &s.background_layers[0];
+        assert_eq!(url(&s, 0), "a.png");
+        assert_eq!(l.repeat, BackgroundRepeat::NoRepeat);
+        assert_eq!((&l.position.x, &l.position.y), (&Percent(0.5), &Percent(0.5)));
+        assert_eq!(l.size, BackgroundSize::Cover);
+
+        // No whitespace around the slash, and the image last.
+        let s = style_under(".a { background: no-repeat right bottom/contain url(a.png) }");
+        let l = &s.background_layers[0];
+        assert_eq!(url(&s, 0), "a.png");
+        assert_eq!(l.repeat, BackgroundRepeat::NoRepeat);
+        assert_eq!((&l.position.x, &l.position.y), (&Percent(1.0), &Percent(1.0)));
+        assert_eq!(l.size, BackgroundSize::Contain);
+
+        // A colour beside the image, lengths for position and size.
+        let s = style_under(
+            ".a { background: #ff0 linear-gradient(blue, blue) no-repeat 20px 10px / 30px 15px }",
+        );
+        let l = &s.background_layers[0];
+        assert!(matches!(l.image, BackgroundImage::Gradient(_)));
+        assert_eq!(s.background_color, rustkit_css::Color::new(255, 255, 0, 1.0));
+        assert_eq!(l.repeat, BackgroundRepeat::NoRepeat);
+        assert_eq!((&l.position.x, &l.position.y), (&Px(20.0), &Px(10.0)));
+        assert_eq!(
+            l.size,
+            BackgroundSize::Explicit { width: Some(30.0), height: Some(15.0) }
+        );
+
+        // Each layer keeps its own; the first named is the topmost (last).
+        let s = style_under(
+            ".a { background: url(a.png) 50% 0 repeat-x, url(b.png) no-repeat }",
+        );
+        assert_eq!(s.background_layers.len(), 2);
+        assert_eq!(url(&s, 1), "a.png");
+        assert_eq!(s.background_layers[1].repeat, BackgroundRepeat::RepeatX);
+        assert_eq!(s.background_layers[1].position.x, Percent(0.5));
+        assert_eq!(url(&s, 0), "b.png");
+        assert_eq!(s.background_layers[0].repeat, BackgroundRepeat::NoRepeat);
+
+        // What a layer does not name is the initial value, not the last
+        // declaration's.
+        let s = style_under(
+            ".a { background: url(a.png) no-repeat center } .a { background: url(b.png) }",
+        );
+        let l = &s.background_layers[0];
+        assert_eq!(l.repeat, BackgroundRepeat::Repeat);
+        assert_eq!((&l.position.x, &l.position.y), (&Percent(0.0), &Percent(0.0)));
+
+        // A longhand after the shorthand still applies to its layer.
+        let s = style_under(
+            ".a { background: url(a.png) no-repeat; background-position: 10px 100% }",
+        );
+        let l = &s.background_layers[0];
+        assert_eq!((&l.position.x, &l.position.y), (&Px(10.0), &Percent(1.0)));
+        assert_eq!(l.repeat, BackgroundRepeat::NoRepeat);
+    }
+
+    #[test]
+    fn a_background_position_reads_its_keywords_by_axis() {
+        use rustkit_css::BackgroundPositionValue::{Calc, Percent, Px};
+        let at = |v: &str| {
+            let p = parse_background_position(v);
+            (p.x, p.y)
+        };
+        // One value: the other axis is centred.
+        assert_eq!(at("left"), (Percent(0.0), Percent(0.5)));
+        assert_eq!(at("bottom"), (Percent(0.5), Percent(1.0)));
+        assert_eq!(at("top"), (Percent(0.5), Percent(0.0)));
+        assert_eq!(at("25%"), (Percent(0.25), Percent(0.5)));
+        // Two keywords in either order.
+        assert_eq!(at("top right"), (Percent(1.0), Percent(0.0)));
+        assert_eq!(at("right top"), (Percent(1.0), Percent(0.0)));
+        assert_eq!(at("center bottom"), (Percent(0.5), Percent(1.0)));
+        assert_eq!(at("bottom center"), (Percent(0.5), Percent(1.0)));
+        assert_eq!(at("10px 20px"), (Px(10.0), Px(20.0)));
+        // Edge and offset: from the near edge, or back from the far one.
+        assert_eq!(at("left 10px top 20px"), (Px(10.0), Px(20.0)));
+        assert_eq!(
+            at("right 5px bottom 5px"),
+            (Calc { percent: 1.0, px: -5.0 }, Calc { percent: 1.0, px: -5.0 })
+        );
+        assert_eq!(at("top 20px left"), (Percent(0.0), Px(20.0)));
+    }
+
+    #[test]
+    fn a_background_position_keeps_far_edge_offsets_and_calc() {
+        // css-backgrounds-3 §3.6: `right 5px` is 5px in from the right edge,
+        // and a position may be a `calc()` of a percentage and a length.
+        // The far-edge offset was dropped and a `calc()` was split at its
+        // spaces. Read as px for a 100x50 image in a 300x200 area.
+        let at = |v: &str| {
+            let p = parse_background_position(v);
+            (p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0))
+        };
+        assert_eq!(at("right 5px bottom 10px"), (195.0, 140.0));
+        assert_eq!(at("bottom 10px right 5px"), (195.0, 140.0));
+        assert_eq!(at("right 10% top 20px"), (180.0, 20.0));
+        assert_eq!(at("left 5px bottom"), (5.0, 150.0));
+        assert_eq!(at("calc(100% - 20px) 0"), (180.0, 0.0));
+        assert_eq!(at("10px calc(50% + 4px)"), (10.0, 79.0));
+        assert_eq!(at("right calc(10px + 5px) top"), (185.0, 0.0));
+
+        // The shorthand takes them as position tokens too.
+        let (_, layer) =
+            parse_background_shorthand_layer("url(a.png) no-repeat right 5px bottom 10px");
+        let p = layer.expect("layer").position;
+        assert_eq!((p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0)), (195.0, 140.0));
+        let (_, layer) =
+            parse_background_shorthand_layer("url(a.png) calc(100% - 20px) 50% / 100px no-repeat");
+        let layer = layer.expect("layer");
+        let p = &layer.position;
+        assert_eq!((p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0)), (180.0, 75.0));
+        assert_eq!(
+            layer.size,
+            rustkit_css::BackgroundSize::Explicit { width: Some(100.0), height: None }
+        );
+    }
+
+    #[test]
+    fn a_shorthand_layers_url_is_taken_whole() {
+        // The url ended at the first `)`, which a data: url may contain.
+        let (color, layer) = parse_background_shorthand_layer(
+            "url(\"data:image/svg+xml,<svg fill='rgb(0,0,0)'/>\") no-repeat #eee",
+        );
+        assert_eq!(color, Some(rustkit_css::Color::new(238, 238, 238, 1.0)));
+        match layer.expect("layer").image {
+            rustkit_css::BackgroundImage::Url(u) => {
+                assert_eq!(u, "data:image/svg+xml,<svg fill='rgb(0,0,0)'/>")
+            }
+            other => panic!("{other:?}"),
+        }
+        // No image, no layer; the colour is still named.
+        let (color, layer) = parse_background_shorthand_layer("none repeat-x red");
+        assert_eq!(color, Some(rustkit_css::Color::new(255, 0, 0, 1.0)));
+        assert!(layer.is_none());
+    }
+
+    #[test]
     fn split_important_strips_the_flag() {
         assert_eq!(split_important("red !important"), ("red", true));
         assert_eq!(split_important("red ! IMPORTANT "), ("red", true));
@@ -16810,6 +21021,622 @@ mod button_children_tests {
     }
 }
 
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, feature = "headless"))]
+mod background_image_fetch_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    /// A 2x2 red PNG.
+    const DOT_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xfd,
+        0xd4, 0x9a, 0x73, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x3c,
+        0xc1, 0x00, 0x02, 0x4c, 0x60, 0x92, 0x01, 0x00, 0x0a, 0x52, 0x00, 0xcc, 0x82, 0xce, 0x0a,
+        0x79, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    const PAGE: &str = r#"<html><head><style>
+div { width: 50px; height: 20px; }
+.shown { background: url(/shown.png) no-repeat; }
+.again { background-image: url(/shown.png); }
+.cross { background-image: url(http://localhost:PORT/cross.png); }
+.blocked { background-image: url(/tracker.png); }
+.hidden { display: none; background-image: url(/hidden.png); }
+</style></head><body><div class="shown"></div><div class="again"></div><div class="cross"></div>
+<div class="blocked"></div><div class="hidden"></div></body></html>"#;
+
+    const SVG_PAGE: &str = r#"<html><head><style>
+body { margin: 0; }
+div { height: 10px; }
+.one { width: 40px; background: url(/green.svg) no-repeat; }
+.row { width: 30px; background: url(/blue.svg) repeat-x; }
+</style></head><body><div class="one"></div><div class="row"></div></body></html>"#;
+
+    /// A 10x10 square of `fill`, served as `image/svg+xml`.
+    fn square_svg(fill: &str) -> String {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="{fill}"/></svg>"#
+        )
+    }
+
+    type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    /// Serve `/page` as [`PAGE`], anything else as a PNG, and record each
+    /// image request's path and Referer.
+    fn recording_server() -> (u16, Seen) {
+        recording_server_for(PAGE)
+    }
+
+    /// [`recording_server`] serving `page`; `/green.svg` and `/blue.svg`
+    /// are squares of that color.
+    fn recording_server_for(page: &'static str) -> (u16, Seen) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        let html = page.replace("PORT", &port.to_string());
+        let green = square_svg("#00ff00");
+        let blue = square_svg("#0000ff");
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let referer = head
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .find(|(k, _)| k.eq_ignore_ascii_case("referer"))
+                    .map(|(_, v)| v.trim().to_string());
+                let (ctype, body): (&str, &[u8]) = if path.starts_with("/page") {
+                    ("text/html", html.as_bytes())
+                } else if path.ends_with(".svg") {
+                    log.lock().unwrap().push((path.clone(), referer));
+                    let svg = if path == "/green.svg" { &green } else { &blue };
+                    ("image/svg+xml", svg.as_bytes())
+                } else {
+                    log.lock().unwrap().push((path, referer));
+                    ("image/png", DOT_PNG)
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        (port, seen)
+    }
+
+    /// Only `<img>` was fetched: a `background: url(...)` over http never
+    /// left the display list, so no page's CSS image painted. It goes out as
+    /// an `<img>` does: through the loader, past the shield, with the
+    /// policy's Referer.
+    #[test]
+    fn a_css_background_image_is_fetched() {
+        let (port, seen) = recording_server();
+        let mut shield = rustkit_net::RequestInterceptor::new();
+        shield.block(rustkit_net::intercept::UrlPattern::contains("tracker"));
+        let mut engine =
+            Engine::with_interceptor(EngineConfig::default(), Some(shield)).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page?q=1#frag")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            engine.load_url(view, url).await.expect("load_url");
+            engine.load_subresources(view).await.expect("subresources");
+        });
+
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                ("/shown.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
+            ],
+            "one request per same-origin background the shield allows, with the policy's Referer; \
+             none for the blocked one, none for a box that is not rendered, and none for the \
+             cross-origin loopback `localhost` image: the subresource vet only lets a local page \
+             reach its own origin (the origin-only Referer is pinned in security.rs)"
+        );
+
+        let at = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+        assert!(
+            engine.image_manager.is_cached(&at("/shown.png")),
+            "the background image is in the cache paint reads"
+        );
+        assert!(!engine.is_image_cached(&at("/tracker.png")));
+    }
+
+    /// Navigate to `page` and return the image paths the navigation
+    /// requested, then the paths requested once `load_subresources` has run
+    /// again on the finished document. The second list is the control: what
+    /// is in it and not in the first was there to discover and was missed.
+    fn requested_by_navigation_then_reload(page: &'static str) -> (Vec<String>, Vec<String>) {
+        let (port, seen) = recording_server_for(page);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let paths = |seen: &Seen| -> Vec<String> {
+            let mut paths: Vec<String> = seen.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+            paths.sort();
+            paths.dedup();
+            paths
+        };
+        rt.block_on(engine.load_url(view, url)).expect("load_url");
+        let by_navigation = paths(&seen);
+        rt.block_on(engine.load_subresources(view)).expect("subresources");
+        (by_navigation, paths(&seen))
+    }
+
+    /// Images were discovered once, before page scripts ran: `navigate`
+    /// loads subresources, runs the scripts, flushes their DOM writes and
+    /// finishes. An `<img>` a script appended was laid out and never
+    /// fetched.
+    #[test]
+    fn an_img_a_script_adds_is_fetched_by_the_navigation() {
+        const SCRIPTED_IMG_PAGE: &str = r#"<html><body><img src="/parsed.png"><script>
+var img = document.createElement('img');
+img.setAttribute('src', '/added.png');
+document.body.appendChild(img);
+</script></body></html>"#;
+        let (by_navigation, after_reload) = requested_by_navigation_then_reload(SCRIPTED_IMG_PAGE);
+        let has = |paths: &[String], path: &str| paths.iter().any(|p| p == path);
+        assert!(has(&by_navigation, "/parsed.png"), "the parsed <img> is fetched: {by_navigation:?}");
+        assert!(
+            has(&after_reload, "/added.png"),
+            "control: the script appended the <img> and a second discovery finds it: {after_reload:?}"
+        );
+        assert!(
+            has(&by_navigation, "/added.png"),
+            "the navigation itself fetches an <img> a script added: {by_navigation:?}"
+        );
+    }
+
+    /// The same for a CSS background a script switches on by class.
+    #[test]
+    fn a_background_a_script_turns_on_is_fetched_by_the_navigation() {
+        const SCRIPTED_BG_PAGE: &str = r#"<html><head><style>
+div { width: 50px; height: 20px; }
+.late { background: url(/late.png) no-repeat; }
+</style></head><body><div id="box"></div><script>
+document.getElementById('box').setAttribute('class', 'late');
+</script></body></html>"#;
+        let (by_navigation, after_reload) = requested_by_navigation_then_reload(SCRIPTED_BG_PAGE);
+        let has = |paths: &[String], path: &str| paths.iter().any(|p| p == path);
+        assert!(
+            has(&after_reload, "/late.png"),
+            "control: the script set the class and a second discovery finds the background: {after_reload:?}"
+        );
+        assert!(
+            has(&by_navigation, "/late.png"),
+            "the navigation itself fetches a background a script turned on: {by_navigation:?}"
+        );
+    }
+
+    /// Serve `/page` as `page` and every other path as an image negotiated
+    /// the way the image CDNs do it: AVIF to a request whose `Accept` names
+    /// `image/avif`, PNG to any other. Records each request's path and
+    /// `Accept`.
+    fn negotiating_server(page: &'static str) -> (u16, Seen) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        // The start of an AVIF file: an `ftyp` box with the `avif` brand.
+        const AVIF_HEAD: &[u8] = b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf";
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let accept = head
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .find(|(k, _)| k.eq_ignore_ascii_case("accept"))
+                    .map(|(_, v)| v.trim().to_string());
+                let wants_avif = accept.as_deref().is_some_and(|a| a.contains("image/avif"));
+                let (ctype, body): (&str, &[u8]) = if path.starts_with("/page") {
+                    ("text/html", page.as_bytes())
+                } else if wants_avif {
+                    ("image/avif", AVIF_HEAD)
+                } else {
+                    ("image/png", DOT_PNG)
+                };
+                log.lock().unwrap().push((path, accept));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        (port, seen)
+    }
+
+    /// Image requests went out with the navigation's `Accept`, which lists
+    /// `image/avif`. There is no AVIF decoder, and the CDNs answer that
+    /// header with AVIF, so 44 `<img>`s on microsoft, shopify and walmart
+    /// failed as "Unknown image format" (2026-10-03 census). An image
+    /// request now names only what the engine decodes; the navigation's
+    /// header keeps its browser shape.
+    #[test]
+    fn an_image_request_accepts_only_formats_the_engine_decodes() {
+        const NEGOTIATED_PAGE: &str = r#"<html><head><style>
+div { width: 50px; height: 20px; background: url(/bg.jpg) no-repeat; }
+</style></head><body><img src="/hero.jpg"><div></div></body></html>"#;
+        let (port, seen) = negotiating_server(NEGOTIATED_PAGE);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            engine.load_url(view, url).await.expect("load_url");
+            engine.load_subresources(view).await.expect("subresources");
+        });
+
+        let seen = seen.lock().unwrap().clone();
+        let accept_of = |path: &str| -> String {
+            seen.iter()
+                .find(|(p, _)| p == path)
+                .unwrap_or_else(|| panic!("{path} was requested; saw {seen:?}"))
+                .1
+                .clone()
+                .unwrap_or_default()
+        };
+        for path in ["/hero.jpg", "/bg.jpg"] {
+            let accept = accept_of(path);
+            assert!(
+                !accept.contains("avif"),
+                "{path} must not advertise AVIF, which nothing here decodes: {accept:?}"
+            );
+            assert!(
+                accept.contains("image/webp") && accept.contains("image/svg+xml"),
+                "{path} still names the formats that are decoded: {accept:?}"
+            );
+            let at = Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+            assert!(
+                engine.image_manager.is_cached(&at),
+                "{path} decodes: the server sent a format the request asked for"
+            );
+        }
+        assert!(
+            accept_of("/page").starts_with("text/html,"),
+            "the navigation keeps its document Accept"
+        );
+    }
+
+    /// SVG backgrounds were skipped at discovery: only `<img>` commands
+    /// were spliced from the SVG cache, so a fetched one would never paint.
+    /// Each is fetched now and painted as vector commands, one copy per
+    /// tile the raster lane would draw, clipped to the box.
+    #[test]
+    fn a_css_svg_background_is_fetched_and_painted_per_tile() {
+        let (port, seen) = recording_server_for(SVG_PAGE);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            engine.load_url(view, url).await.expect("load_url");
+            engine.load_subresources(view).await.expect("subresources");
+        });
+
+        let mut paths: Vec<String> = seen.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/blue.svg".to_string(), "/green.svg".to_string()]);
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        assert!(
+            !dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::BackgroundImage { url, .. } if url.ends_with(".svg"))),
+            "a cached SVG background is replaced by its vector commands"
+        );
+        let fills = |r: u8, g: u8, b: u8| -> Vec<(f32, f32, f32, f32)> {
+            dl.commands
+                .iter()
+                .filter_map(|c| match c {
+                    rustkit_layout::DisplayCommand::FillRect { rect, color }
+                        if (color.r, color.g, color.b) == (r, g, b) =>
+                    {
+                        Some((rect.x, rect.y, rect.width, rect.height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(fills(0, 255, 0), vec![(0.0, 0.0, 10.0, 10.0)], "no-repeat paints once at the origin");
+        assert_eq!(
+            fills(0, 0, 255),
+            vec![(0.0, 10.0, 10.0, 10.0), (10.0, 10.0, 10.0, 10.0), (20.0, 10.0, 10.0, 10.0)],
+            "repeat-x paints one tile per 10px across the 30px box"
+        );
+    }
+
+    /// A `data:image/svg+xml` image went to the raster decoder, whose
+    /// stand-in rasterizer draws only solid `<rect>`s: bing's logo (radial
+    /// gradients and paths, as a background and as an `<img>`) painted
+    /// nothing. It is decoded into the SVG cache at the splice instead, so
+    /// it paints as vector commands on the first layout, with no fetch.
+    #[test]
+    fn a_data_svg_background_and_img_paint_as_vectors() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+div { width: 30px; height: 10px; }
+.bg { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%2300ff00'/%3E%3C/svg%3E") repeat-x; }
+img { display: block; width: 10px; height: 10px; }
+</style></head><body><div class="bg"></div>
+<img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCI+PHJlY3Qgd2lkdGg9IjEwIiBoZWlnaHQ9IjEwIiBmaWxsPSIjMDAwMGZmIi8+PC9zdmc+">
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        assert!(
+            !dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+                | rustkit_layout::DisplayCommand::Image { url, .. } if url.starts_with("data:image/svg+xml"))),
+            "a data: SVG is replaced by its vector commands, not left for the raster upload"
+        );
+        let fills = |r: u8, g: u8, b: u8| -> Vec<(f32, f32, f32, f32)> {
+            dl.commands
+                .iter()
+                .filter_map(|c| match c {
+                    rustkit_layout::DisplayCommand::FillRect { rect, color }
+                        if (color.r, color.g, color.b) == (r, g, b) =>
+                    {
+                        Some((rect.x, rect.y, rect.width, rect.height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            fills(0, 255, 0),
+            vec![(0.0, 0.0, 10.0, 10.0), (10.0, 0.0, 10.0, 10.0), (20.0, 0.0, 10.0, 10.0)],
+            "the url-encoded background tiles across its 30px box"
+        );
+        assert_eq!(fills(0, 0, 255), vec![(0.0, 10.0, 10.0, 10.0)], "the base64 <img> paints in its box");
+    }
+
+    /// The board's mask-image repro (docs/diagnostics/2026-10-06): a 50x50
+    /// red box at (8, 8) masked by a data: SVG circle. Chrome paints a red
+    /// circle; RustKit painted the 50x50 red square, `mask-image` being
+    /// unparsed. The mask is spliced as the SVG's own commands, recoloured
+    /// red and clipped to the box.
+    #[test]
+    fn the_mask_image_repro_paints_a_red_circle_not_a_square() {
+        let html = r#"<!DOCTYPE html>
+<html><body>
+<div style="width: 50px; height: 50px; background-color: rgb(255, 0, 0); -webkit-mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>'); mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>');"></div>
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let red = |c: &rustkit_css::Color| (c.r, c.g, c.b) == (255, 0, 0);
+        assert!(
+            !dl.commands.iter().any(|c| match c {
+                rustkit_layout::DisplayCommand::SolidColor(color, _)
+                | rustkit_layout::DisplayCommand::RoundedRect { color, .. } => red(color),
+                _ => false,
+            }),
+            "the unmasked red square still paints: {:?}",
+            dl.commands
+        );
+        assert!(
+            !dl.commands.iter().any(|c| matches!(c, rustkit_layout::DisplayCommand::MaskedColor { .. })),
+            "a data: SVG mask is spliced as vector commands"
+        );
+        let circles: Vec<(f32, f32, f32)> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::FillCircle { cx, cy, radius, color } if red(color) => {
+                    Some((*cx, *cy, *radius))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(circles, vec![(33.0, 33.0, 25.0)], "{:?}", dl.commands);
+        assert!(
+            dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::PushClip(r)
+                    if (r.x, r.y, r.width, r.height) == (8.0, 8.0, 50.0, 50.0))),
+            "the mask paints inside the box"
+        );
+    }
+
+    /// `mask` is not inherited (css-masking-1 §6): a masked parent's child
+    /// paints its own background unmasked, not through the parent's icon.
+    #[test]
+    fn a_mask_is_not_inherited_by_a_child() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+.p { width: 40px; height: 40px; background-color: rgb(255, 0, 0); mask-image: url(icon.svg); }
+.c { width: 20px; height: 20px; background-color: rgb(0, 0, 255); }
+</style></head><body><div class="p"><div class="c"></div></div></body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 100, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let masked: Vec<(u8, u8, u8)> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::MaskedColor { color, .. } => Some((color.r, color.g, color.b)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(masked, vec![(255, 0, 0)], "only the parent is masked: {:?}", dl.commands);
+        assert!(
+            dl.commands.iter().any(|c| matches!(c,
+                rustkit_layout::DisplayCommand::SolidColor(color, r)
+                    if (color.r, color.g, color.b) == (0, 0, 255)
+                        && (r.x, r.y, r.width, r.height) == (0.0, 0.0, 20.0, 20.0))),
+            "the child paints its own background unmasked: {:?}",
+            dl.commands
+        );
+    }
+
+    /// Both mask lanes reach the frame: the vector one (a data: SVG,
+    /// spliced as recoloured commands) and the raster one (a PNG whose
+    /// alpha is uploaded as a white mask texture and drawn tinted). The
+    /// PNG is 2x1, its left pixel opaque and its right transparent,
+    /// stretched over a 40x20 blue box: the left half is blue, the right
+    /// half shows the white page (sampled away from the seam, where the
+    /// texture filter blends the two). The PNG mask sits in a style sheet:
+    /// the inline `style` parser splits at every `;`, `;base64` included.
+    #[test]
+    fn vector_and_raster_masks_reach_the_frame() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+.png { width: 40px; height: 20px; background-color: rgb(0, 0, 255); -webkit-mask: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAD0lEQVR4nGNgYGD4D8QMAAUEAQCwBUiSAAAAAElFTkSuQmCC) 0 0 / 100% 100% no-repeat; }
+</style></head><body>
+<div style="width: 50px; height: 50px; background-color: rgb(255, 0, 0); mask-image: url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 10 10%22><circle cx=%225%22 cy=%225%22 r=%225%22/></svg>')"></div>
+<div class="png"></div>
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 100, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        engine.render_view(view).expect("render");
+        let path = std::env::temp_dir().join(format!("rustkit-mask-frame-{}.ppm", std::process::id()));
+        engine.capture_frame(view, path.to_str().unwrap()).expect("capture");
+        let ppm = std::fs::read(&path).expect("frame");
+        let _ = std::fs::remove_file(&path);
+
+        // The pixel at `(x, y)` of a binary PPM.
+        let pixel = |x: usize, y: usize| -> [u8; 3] {
+            let mut fields = Vec::new();
+            let mut pos = 0;
+            while fields.len() < 4 {
+                let start = pos;
+                while !ppm[pos].is_ascii_whitespace() {
+                    pos += 1;
+                }
+                fields.push(std::str::from_utf8(&ppm[start..pos]).unwrap().to_string());
+                pos += 1;
+            }
+            assert_eq!(fields[0], "P6");
+            let width: usize = fields[1].parse().unwrap();
+            let p = &ppm[pos + (y * width + x) * 3..][..3];
+            [p[0], p[1], p[2]]
+        };
+
+        const WHITE: [u8; 3] = [255, 255, 255];
+        assert_eq!(pixel(25, 25), [255, 0, 0], "inside the circle");
+        assert_eq!(pixel(2, 2), WHITE, "the box's corner, outside the circle");
+        assert_eq!(pixel(47, 47), WHITE, "the opposite corner");
+        assert_eq!(pixel(5, 60), [0, 0, 255], "under the opaque half of the PNG mask");
+        assert_eq!(pixel(35, 60), WHITE, "under the transparent half");
+    }
+
+    /// An SVG image with `width`/`height` and no `viewBox` scales to its
+    /// box, as Blink synthesizes the viewBox for SVG images; `render` drew
+    /// it at its own size, so moving data: SVGs onto the vector lane left
+    /// every 100x100 square of the images-intrinsic case at 100x100.
+    #[test]
+    fn an_svg_image_without_a_viewbox_scales_to_its_box() {
+        let html = r#"<html><head><style>
+body { margin: 0; }
+img { display: block; }
+</style></head><body>
+<img style="width: 20px; height: 20px" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23ff0000'/%3E%3C/svg%3E">
+<div style="width: 40px; height: 20px; background: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%2300ff00'/%3E%3C/svg%3E&quot;) 0 0 / 20px 20px repeat-x"></div>
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let fills = |r: u8, g: u8, b: u8| -> Vec<(f32, f32, f32, f32)> {
+            dl.commands
+                .iter()
+                .filter_map(|c| match c {
+                    rustkit_layout::DisplayCommand::FillRect { rect, color }
+                        if (color.r, color.g, color.b) == (r, g, b) =>
+                    {
+                        Some((rect.x, rect.y, rect.width, rect.height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(fills(255, 0, 0), vec![(0.0, 0.0, 20.0, 20.0)], "the <img> fills its 20px box");
+        assert_eq!(
+            fills(0, 255, 0),
+            vec![(0.0, 20.0, 20.0, 20.0), (20.0, 20.0, 20.0, 20.0)],
+            "background-size 20px scales each tile"
+        );
+    }
+
+    /// The synthesized viewBox comes with `preserveAspectRatio="none"`: a
+    /// square SVG image in a 40x20 `<img>` stretches to fill it, as a
+    /// raster does (images-intrinsic test 4 in pinned Chrome).
+    #[test]
+    fn an_svg_image_without_a_viewbox_stretches_to_its_box() {
+        let html = r#"<html><head><style>body { margin: 0; } img { display: block; }</style></head><body>
+<img style="width: 40px; height: 20px" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23ff0000'/%3E%3C/svg%3E">
+</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let dl = engine.views[&view].display_list.as_ref().expect("display list");
+        let red: Vec<_> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::FillRect { rect, color } if (color.r, color.g, color.b) == (255, 0, 0) => {
+                    Some((rect.x, rect.y, rect.width, rect.height))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(red, vec![(0.0, 0.0, 40.0, 20.0)], "the square stretches to the 40x20 box");
+    }
+}
+
 #[cfg(test)]
 mod svg_image_tests {
     use super::*;
@@ -17099,6 +21926,12 @@ mod web_font_tests {
     static WEB_FONT_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn test_engine() -> Option<LockedEngine> {
+        // GPU guard first, then the web-font lock, always in that order. The
+        // guard stays with this thread after the engine is dropped, so a test
+        // that asks for a second engine would otherwise hold the guard and
+        // wait for the lock while a neighbour holds the lock and waits for
+        // the guard.
+        crate::test_gpu::hold_for_this_test();
         let guard = WEB_FONT_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let compositor = match crate::test_compositor() {
             Ok(c) => c,
@@ -17365,6 +22198,20 @@ mod web_font_tests {
             "a br breaks under white-space: pre too: p@{} q@{}",
             y("p"),
             y("q")
+        );
+    }
+
+    #[test]
+    fn object_position_parses_keywords_percentages_and_lengths() {
+        assert_eq!(parse_object_position("center"), ((0.5, 0.5), (0.0, 0.0)));
+        assert_eq!(parse_object_position("left top"), ((0.0, 0.0), (0.0, 0.0)));
+        assert_eq!(parse_object_position("top"), ((0.5, 0.0), (0.0, 0.0)));
+        assert_eq!(parse_object_position("RIGHT bottom"), ((1.0, 1.0), (0.0, 0.0)));
+        assert_eq!(parse_object_position("25% 75%"), ((0.25, 0.75), (0.0, 0.0)));
+        assert_eq!(parse_object_position("10px 20px"), ((0.0, 0.0), (10.0, 20.0)));
+        assert_eq!(
+            parse_object_position("right 10px top 5px"),
+            ((1.0, 0.0), (-10.0, 5.0))
         );
     }
 
@@ -17676,9 +22523,9 @@ mod node_identity_tests {
 
     #[test]
     fn hit_test_reports_the_node_of_the_box_actually_under_the_cursor() {
-        // node_id must NOT inherit from ancestors the way link_href does:
-        // the caller wants the element under the cursor, not the nearest
-        // interesting one above it.
+        // A box with a node reports its own node, not an ancestor's: the
+        // caller wants the element under the cursor. (A box with NO node
+        // reports its nearest ancestor's, below.)
         let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         parent.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 100.0);
         parent.node_id = Some(1);
@@ -17699,6 +22546,23 @@ mod node_identity_tests {
         let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         b.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 50.0, 50.0);
         assert_eq!(b.hit_test(10.0, 10.0).unwrap().node_id, None);
+    }
+
+    #[test]
+    fn an_anonymous_box_is_hit_on_behalf_of_its_nearest_element() {
+        // Z lane I0: a click on `<a style="display:block">go</a>` landed on
+        // the anchor's anonymous line box, which has no node, so the click
+        // reached no element and its listeners never ran. The element under
+        // the cursor is the box's nearest ancestor with a node, as in a
+        // browser, where a click on text targets the text's element.
+        let mut a = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        a.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 40.0);
+        a.node_id = Some(4);
+        let mut line = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        line.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 20.0);
+        a.children.push(line);
+
+        assert_eq!(a.hit_test(5.0, 10.0).unwrap().node_id, Some(4));
     }
 
     #[test]
@@ -17752,6 +22616,2103 @@ mod node_identity_tests {
         // going to an element the user visibly clicked away from.
         assert_eq!(engine.focus_at_point(id, 10.0, 110.0), None);
         assert_eq!(engine.focused_node(id), None);
+    }
+
+    // ---- live clicks reach the page (Z lane I0, 2026-10-03) ----
+    //
+    // Pete's live testing: clicks were logged and nothing changed. The live
+    // click path only hit-tested for focus and links; no mousedown, mouseup
+    // or click ever reached a listener, so every script-driven control was
+    // dead, and a link whose listener cancels the click navigated anyway.
+
+    fn js(engine: &mut Engine, id: EngineViewId, script: &str) -> String {
+        engine.execute_script(id, script).expect("script")
+    }
+
+    // A press on one element released on another sent `click` to the
+    // release's element and followed the link there. Chrome sends it to
+    // the nearest element both are in (`click:BODY` in the two oracle
+    // logs), so a press on one link dragged onto another follows neither,
+    // nor does a press on one part of a link released on another part.
+
+    const DRAG_CLICK_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<a id="one" href="https://example.test/one" style="display:block">"#,
+        r#"<div id="s1" style="height:20px">first</div><div id="s2" style="height:20px">second</div></a>"#,
+        r#"<a id="two" href="https://example.test/two" style="display:block;height:40px">two</a>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_press_and_a_release_on_different_elements_click_their_common_ancestor() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DRAG_CLICK_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             ['mouseup', 'click'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push(t + ':' + (e.target.id || e.target.nodeName) + ':' + e.offsetY); }); });",
+        );
+        let drag = |engine: &mut Engine, from: f32, to: f32| -> (String, Option<String>) {
+            engine.mouse_down_at_point(id, 12.0, from);
+            engine.mouse_move_at_point(id, 12.0, to);
+            let outcome = engine.click_at_point(id, 12.0, to);
+            (js(engine, id, "var out = log.join(' '); log.length = 0; out"), outcome.navigate)
+        };
+
+        // On one element: its click, and its link.
+        assert_eq!(
+            drag(&mut engine, 10.0, 12.0),
+            (js_string("mouseup:s1:12 click:s1:12"), Some("https://example.test/one".to_string()))
+        );
+        // Two elements of one link: the click is the link's, and the link
+        // is not followed (Chrome starts a drag of the link here and sends
+        // no click at all; the engine has no drag).
+        assert_eq!(drag(&mut engine, 10.0, 30.0), (js_string("mouseup:s2:10 click:one:30"), None));
+        // From one link onto another: the click is the body's; neither is followed.
+        assert_eq!(drag(&mut engine, 10.0, 60.0), (js_string("mouseup:two:20 click:BODY:60"), None));
+        // A release with no press before it is a click where it lands.
+        let outcome = engine.click_at_point(id, 12.0, 60.0);
+        assert_eq!(outcome.navigate.as_deref(), Some("https://example.test/two"));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("mouseup:two:20 click:two:20"));
+    }
+
+    // The focus moved at the release, whatever the page did with the
+    // press: a list of options under a field cancels `mousedown` so the
+    // field keeps its focus while an option is clicked, and here the field
+    // was blurred (and its list closed) before the `click` arrived. The
+    // expected lines are the oracle Chrome's log for the same page and the
+    // same presses (tools/parity_oracle/focus_press_log.mjs), capturing
+    // listeners on the document:
+    // type:target:relatedTarget:document.activeElement.
+
+    const FOCUS_PRESS_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<input id="f" style="display:block;height:30px;margin:0;box-sizing:border-box">"#,
+        r#"<input id="g" style="display:block;height:30px;margin:0;box-sizing:border-box">"#,
+        r#"<div id="opt" style="height:40px">an option that keeps the field's focus</div>"#,
+        r#"<div id="d" style="height:40px">plain text</div>"#,
+        r#"<div id="drag" style="height:40px">release target</div>"#,
+        r#"<div id="pd" style="height:40px">its pointerdown is cancelled</div>"#,
+        r#"</body></html>"#
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn the_focus_moves_at_the_press() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, FOCUS_PRESS_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             function nm(n) { return n ? (n.id || n.nodeName) : 'null'; } \
+             ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'focus', 'blur', 'focusin', 'focusout', \
+              'change'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push([e.type, nm(e.target), nm(e.relatedTarget), nm(document.activeElement)].join(':')); \
+               }, true); }); \
+             document.getElementById('opt').addEventListener('mousedown', function (e) { e.preventDefault(); }); \
+             document.getElementById('pd').addEventListener('pointerdown', function (e) { e.preventDefault(); });",
+        );
+        fn taken(engine: &mut Engine, id: EngineViewId) -> String {
+            js(engine, id, "var out = log.join(' '); log.length = 0; out")
+        }
+        // In #f: the focus arrives at the press, after `mousedown`.
+        engine.mouse_down_at_point(id, 12.0, 15.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:f:null:BODY ",
+                "mousedown:f:null:BODY ",
+                "focus:f:null:f ",
+                "focusin:f:null:f"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 15.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:f:null:f ",
+                "mouseup:f:null:f ",
+                "click:f:null:f"
+            ))
+        );
+        // In #g: #f hears `blur` with nothing focused, then #g `focus`.
+        engine.mouse_down_at_point(id, 12.0, 45.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:g:null:f ",
+                "mousedown:g:null:f ",
+                "blur:f:g:BODY ",
+                "focusout:f:g:BODY ",
+                "focus:g:f:g ",
+                "focusin:g:f:g"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 45.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:g:null:g ",
+                "mouseup:g:null:g ",
+                "click:g:null:g"
+            ))
+        );
+        // A cancelled `mousedown` moves no focus: an option list under a
+        // field keeps the field focused while the option is clicked.
+        engine.mouse_down_at_point(id, 12.0, 80.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:opt:null:g ",
+                "mousedown:opt:null:g"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 80.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:opt:null:g ",
+                "mouseup:opt:null:g ",
+                "click:opt:null:g"
+            ))
+        );
+        // Plain text: the field is blurred at the press.
+        engine.mouse_down_at_point(id, 12.0, 120.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:d:null:g ",
+                "mousedown:d:null:g ",
+                "blur:g:null:BODY ",
+                "focusout:g:null:BODY"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 120.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:d:null:BODY ",
+                "mouseup:d:null:BODY ",
+                "click:d:null:BODY"
+            ))
+        );
+        // A press in #f released somewhere else: #f keeps the focus.
+        engine.mouse_down_at_point(id, 12.0, 15.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:f:null:BODY ",
+                "mousedown:f:null:BODY ",
+                "focus:f:null:f ",
+                "focusin:f:null:f"
+            ))
+        );
+        engine.mouse_move_at_point(id, 12.0, 160.0);
+        engine.click_at_point(id, 12.0, 160.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:drag:null:f ",
+                "mouseup:drag:null:f ",
+                "click:BODY:null:f"
+            ))
+        );
+        // A cancelled `pointerdown`: no `mousedown`, and no focus move.
+        engine.mouse_down_at_point(id, 12.0, 200.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:pd:null:f"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 200.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:pd:null:f ",
+                "click:pd:null:f"
+            ))
+        );
+        // The engine's own focus (where typing goes) is where the page's is.
+        assert_eq!(engine.focused_tag(id).as_deref(), Some("input"));
+    }
+
+    // Nothing told the page where the mouse was: no `mousemove`, no
+    // `mouseover` or `mouseenter`, so a menu that opens on hover never
+    // opened and a drag never moved. The expected lines below are what the
+    // oracle's Chrome logged for the same page and the same moves
+    // (tools/parity_oracle, Playwright `mouse.move`), at-target listeners on
+    // the elements with an id:
+    // type:target:relatedTarget:bubbles:cancelable:composed:button:buttons:
+    // which:detail:is a PointerEvent:clientX:clientY:offsetX:offsetY:
+    // movementX:isTrusted.
+
+    const HOVER_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<div id="a" style="height:50px">a</div>"#,
+        r#"<div id="o" style="height:100px"><div id="i" style="height:50px">inner</div></div>"#,
+        r#"<div id="tall" style="height:3000px"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_mouse_move_reaches_the_page_as_chrome_sends_it() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             function nm(n) { return n ? (n.id || n.nodeName || 'window') : 'null'; } \
+             ['pointerover', 'pointerenter', 'pointerout', 'pointerleave', 'pointermove', \
+              'mouseover', 'mouseenter', 'mouseout', 'mouseleave', 'mousemove', \
+              'pointerdown', 'mousedown', 'pointerup', 'mouseup'].forEach(function (t) { \
+               document.querySelectorAll('[id]').forEach(function (el) { \
+                 el.addEventListener(t, function (e) { \
+                   if (e.eventPhase !== 2) return; \
+                   log.push([e.type, nm(e.target), nm(e.relatedTarget), e.bubbles, e.cancelable, e.composed, \
+                     e.button, e.buttons, e.which, e.detail, e instanceof PointerEvent, e.clientX, e.clientY, \
+                     e.offsetX, e.offsetY, e.movementX, e.isTrusted].join(':')); }); }); }); \
+             window.heard = []; \
+             document.addEventListener('mouseover', function (e) { heard.push('over:' + e.target.id); }); \
+             document.addEventListener('mouseenter', function (e) { heard.push('enter:' + e.target.id); }); \
+             document.addEventListener('mouseenter', function (e) { heard.push('enter-capture:' + e.target.id); }, true);",
+        );
+        fn taken(engine: &mut Engine, id: EngineViewId) -> String {
+            js(engine, id, "var out = log.join(' '); log.length = 0; out")
+        }
+
+        // Onto #a from nowhere.
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerover:a:null:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "pointerenter:a:null:false:false:false:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mouseover:a:null:true:true:true:0:0:0:0:false:12:20:12:20:0:true ",
+                "mouseenter:a:null:false:false:false:0:0:0:0:false:12:20:12:20:0:true ",
+                "pointermove:a:null:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mousemove:a:null:true:true:true:0:0:0:0:false:12:20:12:20:0:true"
+            ))
+        );
+        // `mouseover` bubbles to the document; `mouseenter` does not, but a
+        // capturing listener above still hears it, once per element entered
+        // (html and body have no id).
+        assert_eq!(
+            js(&mut engine, id, "heard.join(' ')"),
+            js_string("over:a enter-capture: enter-capture: enter-capture:a")
+        );
+        // Within #a: moves only.
+        engine.mouse_move_at_point(id, 30.0, 25.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointermove:a:null:true:true:true:-1:0:0:0:true:30:25:30:25:18:true ",
+                "mousemove:a:null:true:true:true:0:0:0:0:false:30:25:30:25:18:true"
+            ))
+        );
+        // #a to #i, which is inside #o: both are entered, the outer first.
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:a:i:true:true:true:-1:0:0:0:true:12:70:12:70:0:true ",
+                "pointerleave:a:i:false:false:false:-1:0:0:0:true:12:70:12:70:0:true ",
+                "pointerover:i:a:true:true:true:-1:0:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:o:a:false:false:false:-1:0:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:i:a:false:false:false:-1:0:0:0:true:12:70:12:20:0:true ",
+                "mouseout:a:i:true:true:true:0:0:0:0:false:12:70:12:70:0:true ",
+                "mouseleave:a:i:false:false:false:0:0:0:0:false:12:70:12:70:0:true ",
+                "mouseover:i:a:true:true:true:0:0:0:0:false:12:70:12:20:0:true ",
+                "mouseenter:o:a:false:false:false:0:0:0:0:false:12:70:12:20:0:true ",
+                "mouseenter:i:a:false:false:false:0:0:0:0:false:12:70:12:20:0:true ",
+                "pointermove:i:null:true:true:true:-1:0:0:0:true:12:70:12:20:-18:true ",
+                "mousemove:i:null:true:true:true:0:0:0:0:false:12:70:12:20:-18:true"
+            ))
+        );
+        // #i to its parent #o: #i is left, #o is not entered again.
+        engine.mouse_move_at_point(id, 12.0, 120.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:i:o:true:true:true:-1:0:0:0:true:12:120:12:70:0:true ",
+                "pointerleave:i:o:false:false:false:-1:0:0:0:true:12:120:12:70:0:true ",
+                "pointerover:o:i:true:true:true:-1:0:0:0:true:12:120:12:70:0:true ",
+                "mouseout:i:o:true:true:true:0:0:0:0:false:12:120:12:70:0:true ",
+                "mouseleave:i:o:false:false:false:0:0:0:0:false:12:120:12:70:0:true ",
+                "mouseover:o:i:true:true:true:0:0:0:0:false:12:120:12:70:0:true ",
+                "pointermove:o:null:true:true:true:-1:0:0:0:true:12:120:12:70:0:true ",
+                "mousemove:o:null:true:true:true:0:0:0:0:false:12:120:12:70:0:true"
+            ))
+        );
+        // #o back to #a.
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:o:a:true:true:true:-1:0:0:0:true:12:20:12:-30:0:true ",
+                "pointerleave:o:a:false:false:false:-1:0:0:0:true:12:20:12:-30:0:true ",
+                "pointerover:a:o:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "pointerenter:a:o:false:false:false:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mouseout:o:a:true:true:true:0:0:0:0:false:12:20:12:-30:0:true ",
+                "mouseleave:o:a:false:false:false:0:0:0:0:false:12:20:12:-30:0:true ",
+                "mouseover:a:o:true:true:true:0:0:0:0:false:12:20:12:20:0:true ",
+                "mouseenter:a:o:false:false:false:0:0:0:0:false:12:20:12:20:0:true ",
+                "pointermove:a:null:true:true:true:-1:0:0:0:true:12:20:12:20:0:true ",
+                "mousemove:a:null:true:true:true:0:0:0:0:false:12:20:12:20:0:true"
+            ))
+        );
+        // A press, then a drag onto #i: the button is held in `buttons`,
+        // and in `which` on the mouse events.
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerdown:a:null:true:true:true:0:1:1:0:true:12:20:12:20:0:true ",
+                "mousedown:a:null:true:true:true:0:1:1:1:false:12:20:12:20:0:true"
+            ))
+        );
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerout:a:i:true:true:true:-1:1:0:0:true:12:70:12:70:0:true ",
+                "pointerleave:a:i:false:false:false:-1:1:0:0:true:12:70:12:70:0:true ",
+                "pointerover:i:a:true:true:true:-1:1:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:o:a:false:false:false:-1:1:0:0:true:12:70:12:20:0:true ",
+                "pointerenter:i:a:false:false:false:-1:1:0:0:true:12:70:12:20:0:true ",
+                "mouseout:a:i:true:true:true:0:1:1:0:false:12:70:12:70:0:true ",
+                "mouseleave:a:i:false:false:false:0:1:1:0:false:12:70:12:70:0:true ",
+                "mouseover:i:a:true:true:true:0:1:1:0:false:12:70:12:20:0:true ",
+                "mouseenter:o:a:false:false:false:0:1:1:0:false:12:70:12:20:0:true ",
+                "mouseenter:i:a:false:false:false:0:1:1:0:false:12:70:12:20:0:true ",
+                "pointermove:i:null:true:true:true:-1:1:0:0:true:12:70:12:20:0:true ",
+                "mousemove:i:null:true:true:true:0:1:1:0:false:12:70:12:20:0:true"
+            ))
+        );
+        engine.click_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            taken(&mut engine, id),
+            js_string(concat!(
+                "pointerup:i:null:true:true:true:0:0:1:0:true:12:70:12:20:0:true ",
+                "mouseup:i:null:true:true:true:0:0:1:1:false:12:70:12:20:0:true"
+            ))
+        );
+        // The button is up again.
+        engine.mouse_move_at_point(id, 13.0, 70.0);
+        assert_eq!(
+            js(&mut engine, id, "log.map(function (l) { var f = l.split(':'); return f[0] + ':' + f[7] + ':' + f[15]; }).join(' ')"),
+            js_string("pointermove:0:1 mousemove:0:1")
+        );
+    }
+
+    // Node ids restart with each document, so the element hovered in the
+    // last page is some other node of the next one: a new document starts
+    // with nothing hovered and no button held.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_new_document_starts_with_nothing_hovered() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             ['mouseout', 'mouseover', 'mousemove'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push([t, e.target.id, e.relatedTarget, e.buttons, e.movementX].join(':')); }); });",
+        );
+        engine.mouse_move_at_point(id, 30.0, 20.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("mouseover:a::0:0 mousemove:a::0:0")
+        );
+    }
+
+    // `:hover` was false for every element, always: a rule that restyles
+    // what the pointer is over, or opens a menu under it, never applied, so
+    // a page gave no sign the pointer was on anything. It matches the
+    // element under the pointer and every element above it, as the subject
+    // of a rule, as an ancestor and as an earlier sibling, and stops
+    // matching when the pointer moves on or leaves the view.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn css_hover_follows_the_pointer() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        // Rows of 40px: #b, #c, then #a holding #t and #sub. Only widths
+        // change, so nothing moves under the pointer.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } #a { height: auto }"#,
+                    r#"#b:hover { width: 300px } #b:hover + #c { width: 200px }"#,
+                    r#".menu:hover .sub { width: 100px } #c:not(:hover) { margin-left: 5px }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="c">c</div>"#,
+                    r#"<div id="a" class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let read = "['b', 'c', 'sub'].map(function (i) { \
+                      var r = document.getElementById(i).getBoundingClientRect(); \
+                      return r.width + '@' + r.left; }).join(' ')";
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 400@0"));
+
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("300@0 200@5 400@0"), "over #b");
+
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@0 400@0"), "over #c");
+
+        engine.mouse_move_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "over #t, inside .menu");
+
+        engine.mouse_leave(id);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 400@0"), "outside the view");
+
+    }
+
+    // A hover restyle is a whole cascade and layout (0.1 s on wikipedia's
+    // front page, 0.4 s on github's), so it runs only when an element that
+    // gained or lost the pointer is one a `:hover` compound can match. The
+    // matcher's own counter says whether a move ran the cascade.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_move_no_hover_rule_can_see_does_not_restyle() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        // Rows of 40px: #b, then .menu holding #t and #sub, then #c.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } .menu { height: auto }"#,
+                    r#"#b:hover { width: 300px } .menu:hover .sub { width: 100px }"#,
+                    r#"#c:active { width: 310px } p:hover::after { content: "x" }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div>"#,
+                    r#"<div class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"<div id="c">c</div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let cascades = |engine: &mut Engine, act: &dyn Fn(&mut Engine)| {
+            FULL_SELECTOR_MATCHES.with(|n| n.set(0));
+            act(engine);
+            FULL_SELECTOR_MATCHES.with(|n| n.get()) > 0
+        };
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t: .menu gains the pointer");
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#t to #sub, inside .menu");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 140.0)), "onto #c: .menu loses it");
+        assert!(!cascades(&mut engine, &|e| e.mouse_leave(id)), "off #c, which no :hover rule names");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "onto #b");
+        // A press restyles only where an `:active` compound can match.
+        assert!(!cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 20.0); }), "press on #b");
+        assert!(!cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 20.0); }), "release on #b");
+        assert!(cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 140.0); }), "press on #c");
+        assert!(cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 140.0); }), "release on #c");
+
+        // `:hover` where the compounds do not show it: every change counts.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>body { margin: 0 } div { height: 40px } "#,
+                    r#"#b:not(:hover) { width: 300px }</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="t">t</div><div id="c">c</div></body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#t to #c");
+
+        // No sheet names `:hover`: no move restyles.
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "a page with no :hover rule");
+    }
+
+    // `:active` was false for every element too, so a press showed nothing.
+    // It matches the element pressed and the elements above it from the
+    // press to the release, wherever the pointer goes in between, while
+    // `:hover` goes on following the pointer. The page is
+    // tools/parity_oracle/css_hover_page.html and every expected line is
+    // what the oracle's Chrome measured for the same step
+    // (tools/parity_oracle/css_hover_log.mjs).
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn css_active_holds_from_the_press_to_the_release() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>"#,
+                    r#"body { margin: 0 } div { width: 400px; height: 40px } #a { height: auto }"#,
+                    r#"#b:hover { width: 300px } #b:hover + #c { width: 200px }"#,
+                    r#".menu:hover .sub { width: 100px } #c:not(:hover) { margin-left: 5px }"#,
+                    r#"#b:active { width: 310px } #b:active + #c { width: 210px }"#,
+                    r#".menu:active .sub { width: 110px }"#,
+                    r#"</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="c">c</div>"#,
+                    r#"<div id="a" class="menu"><div id="t">t</div><div id="sub" class="sub">sub</div></div>"#,
+                    r#"</body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        let read = "['b', 'c', 'sub'].map(function (i) { \
+                      var r = document.getElementById(i).getBoundingClientRect(); \
+                      return r.width + '@' + r.left; }).join(' ')";
+
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("300@0 200@5 400@0"), "over #b");
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@5 400@0"), "press on #b");
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@0 400@0"), "held, over #c");
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, read), js_string("310@0 210@5 400@0"), "held, back over #b");
+        engine.mouse_move_at_point(id, 12.0, 60.0);
+        engine.click_at_point(id, 12.0, 60.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@0 400@0"), "released over #c");
+
+        engine.mouse_move_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "over #t");
+        engine.mouse_down_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 110@0"), "press on #t, inside .menu");
+        engine.click_at_point(id, 12.0, 100.0);
+        assert_eq!(js(&mut engine, id, read), js_string("400@0 400@5 100@0"), "released on #t");
+    }
+
+    // A cancelled `pointerdown` stops the `mousemove`s of that press, not
+    // the boundary events (Pointer Events §11.3). A move writes to the DOM
+    // like any other listener: the layout follows before the call returns.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_hover_listener_changes_the_page() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, HOVER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             var o = document.getElementById('o'); \
+             o.addEventListener('mouseenter', function () { o.style.height = '400px'; }); \
+             o.addEventListener('mouseleave', function () { o.style.height = '100px'; }); \
+             document.getElementById('a').addEventListener('pointerdown', function (e) { e.preventDefault(); }); \
+             ['mousemove', 'pointermove', 'mouseover'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { log.push(t + ':' + e.target.id); }); });",
+        );
+        // #o is 50..150; hovering it opens it to 50..450, leaving closes it.
+        engine.mouse_move_at_point(id, 12.0, 120.0);
+        engine.mouse_move_at_point(id, 12.0, 300.0);
+        assert_eq!(js(&mut engine, id, "log[log.length - 1]"), js_string("mousemove:o"));
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        engine.mouse_move_at_point(id, 12.0, 300.0);
+        assert_eq!(js(&mut engine, id, "log[log.length - 1]"), js_string("mousemove:tall"));
+
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_move_at_point(id, 12.0, 20.0);
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        engine.mouse_move_at_point(id, 12.0, 30.0);
+        engine.mouse_move_at_point(id, 12.0, 300.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("pointermove:a mouseover:tall pointermove:tall")
+        );
+        engine.click_at_point(id, 12.0, 300.0);
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_move_at_point(id, 12.0, 310.0);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("pointermove:tall mousemove:tall"));
+
+        // The pointer leaves the view from inside #i: everything it was
+        // over is left, toward nothing; coming back enters it all again.
+        js(
+            &mut engine,
+            id,
+            "log.length = 0; \
+             ['mouseout', 'mouseleave', 'mouseenter'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push(t + ':' + (e.target.id || e.target.nodeName) + ':' + e.relatedTarget); }, true); });",
+        );
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_leave(id);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("mouseout:i:null mouseleave:i:null mouseleave:o:null mouseleave:BODY:null mouseleave:HTML:null")
+        );
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_leave(id);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string(""));
+        engine.mouse_move_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string(
+                "mouseover:i mouseenter:HTML:null mouseenter:BODY:null mouseenter:o:null mouseenter:i:null \
+                 pointermove:i mousemove:i"
+            )
+        );
+    }
+
+    // weather.com's drawer and yahoo's More menu (Pollux, 2026-10-04): the
+    // click was dispatched, nothing threw, and the page did not react. A
+    // press and release in Chrome is pointerdown, mousedown, pointerup,
+    // mouseup, click, the click being a PointerEvent; here it was three
+    // MouseEvents with `detail` 0 and no `which`, so a listener on
+    // `pointerdown`, or one that asks for `which === 1` or a click count,
+    // never ran.
+
+    const POINTER_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<div id="b" style="height:50px">press</div>"#,
+        r#"<div id="p" style="height:50px">no compatibility mouse events</div>"#,
+        r#"<div id="tall" style="height:3000px"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_is_the_full_pointer_and_mouse_sequence() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, POINTER_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; window.where = []; window.delegated = 0; \
+             ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { \
+                 log.push([e.type, e.target.id, e.button, e.buttons, e.which, e.detail, e.isTrusted, e.bubbles, \
+                           e.composed, e instanceof PointerEvent, e.pointerType, e.pointerId].join(':')); \
+                 where.push([e.clientY, e.pageY, e.offsetX, e.offsetY].join(':')); }); }); \
+             window.addEventListener('click', function (e) { \
+               if (e.button === 0 && e.which === 1 && e.detail === 1) delegated++; }, true); \
+             document.getElementById('p').addEventListener('pointerdown', function (e) { e.preventDefault(); });",
+        );
+
+        assert!(engine.mouse_down_at_point(id, 12.0, 20.0));
+        engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string(concat!(
+                "pointerdown:b:0:1:1:0:true:true:true:true:mouse:1 ",
+                "mousedown:b:0:1:1:1:true:true:true:false:: ",
+                "pointerup:b:0:0:1:0:true:true:true:true:mouse:1 ",
+                "mouseup:b:0:0:1:1:true:true:true:false:: ",
+                "click:b:0:0:1:1:true:true:true:true:mouse:1"
+            ))
+        );
+        assert_eq!(js(&mut engine, id, "String(delegated)"), js_string("1"));
+
+        // A cancelled pointerdown stops the compatibility mouse events of
+        // that press (Pointer Events §11.3); the click still fires.
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_down_at_point(id, 12.0, 70.0);
+        engine.click_at_point(id, 12.0, 70.0);
+        assert_eq!(
+            js(&mut engine, id, "log.map(function (l) { return l.split(':')[0]; }).join(' ')"),
+            js_string("pointerdown pointerup click")
+        );
+        // The next press is a new one.
+        js(&mut engine, id, "log.length = 0");
+        engine.mouse_down_at_point(id, 12.0, 20.0);
+        engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(
+            js(&mut engine, id, "log.map(function (l) { return l.split(':')[0]; }).join(' ')"),
+            js_string("pointerdown mousedown pointerup mouseup click")
+        );
+
+        // On a scrolled page: client is the viewport, page is the document,
+        // offset is from the target's own box (#tall starts at 100).
+        js(&mut engine, id, "window.scrollTo(0, 150); where.length = 0");
+        assert_eq!(engine.views[&id].scroll_offset.1, 150.0, "precondition: the view scrolled");
+        engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(js(&mut engine, id, "where[where.length - 1]"), js_string("20:170:12:70"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_reaches_the_pages_listeners_in_order() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                r#"<html><body style="margin:0"><div id="b" style="height:50px">press</div></body></html>"#,
+            )
+            .expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; ['mousedown', 'mouseup', 'click'].forEach(function (t) { \
+             document.body.addEventListener(t, function (e) { \
+             log.push([e.type, e.target.id, e.clientX, e.clientY, e.button, e.isTrusted, e instanceof MouseEvent].join(':')); }); });",
+        );
+
+        assert!(engine.mouse_down_at_point(id, 12.0, 20.0));
+        let outcome = engine.click_at_point(id, 12.0, 20.0);
+        assert_eq!(outcome.navigate, None);
+
+        // The text run is hit, but the target is its element (as in Chrome),
+        // and the events bubble to body.
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            format!(
+                "{:?}",
+                rustkit_js::JsValue::String(
+                    "mousedown:b:12:20:0:true:true mouseup:b:12:20:0:true:true click:b:12:20:0:true:true"
+                        .into()
+                )
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn prevent_default_on_click_cancels_the_link_and_only_then() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let html = r#"<html><body style="margin:0"><a id="a" href="https://example.com/x" style="display:block;height:40px">go</a></body></html>"#;
+        engine.load_html(id, html).expect("load_html");
+
+        // No listener: the link is followed.
+        assert_eq!(
+            engine.click_at_point(id, 5.0, 10.0).navigate.as_deref(),
+            Some("https://example.com/x")
+        );
+
+        // A listener that cancels the click keeps the page where it is.
+        js(
+            &mut engine,
+            id,
+            "document.getElementById('a').addEventListener('click', function (e) { e.preventDefault(); });",
+        );
+        assert_eq!(engine.click_at_point(id, 5.0, 10.0).navigate, None);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn what_a_click_listener_writes_is_laid_out_before_the_default_action() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                r#"<html><body style="margin:0"><div id="menu" style="height:40px">menu</div></body></html>"#,
+            )
+            .expect("load_html");
+        // A disclosure control: clicking it adds a link below it.
+        js(
+            &mut engine,
+            id,
+            "document.getElementById('menu').addEventListener('click', function () { \
+             var a = document.createElement('a'); a.setAttribute('href', 'https://example.com/opened'); \
+             a.style.display = 'block'; a.style.height = '40px'; a.textContent = 'opened'; \
+             document.body.appendChild(a); });",
+        );
+        assert_eq!(engine.link_at_point(id, 5.0, 60.0), None, "precondition: nothing below the menu");
+
+        engine.click_at_point(id, 5.0, 10.0);
+
+        assert_eq!(
+            engine.link_at_point(id, 5.0, 60.0).as_deref(),
+            Some("https://example.com/opened"),
+            "the listener's new element must be in the layout the next click hits"
+        );
+    }
+
+
+    // Pete's live testing, continued: a click on a plain <button> was
+    // delivered to the button's PARENT, so a listener on the button never
+    // ran. The box builder returns early for the leaf boxes (a text-only
+    // button, an image, an inline svg) and did not record their DOM node;
+    // the hit test then answered with the nearest ancestor that had one.
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_button_an_image_or_an_svg_targets_that_element() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let html = concat!(
+            r#"<html><body style="margin:0">"#,
+            r#"<div style="height:40px;overflow:hidden"><button id="b">press</button></div>"#,
+            r#"<div style="height:40px;overflow:hidden"><img id="i" width="40" height="30" alt=""></div>"#,
+            r#"<div style="height:40px;overflow:hidden"><svg id="s" width="40" height="30">"#,
+            r#"<rect width="40" height="30"></rect></svg></div>"#,
+            r#"</body></html>"#,
+        );
+        engine.load_html(id, html).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.own = []; window.seen = []; ['b', 'i', 's'].forEach(function (k) { \
+             document.getElementById(k).addEventListener('click', function () { own.push(k); }); }); \
+             document.addEventListener('click', function (e) { seen.push(e.target.id || e.target.localName); });",
+        );
+
+        for row in 0..3 {
+            engine.click_at_point(id, 12.0, 40.0 * row as f32 + 12.0);
+        }
+
+        assert_eq!(
+            js(&mut engine, id, "seen.join(',') + ' | ' + own.join(',')"),
+            format!("{:?}", rustkit_js::JsValue::String("b,i,s | b,i,s".into())),
+            "each click's target is the element under it, and that element's own listener runs"
+        );
+    }
+
+    // Pete's live testing, continued: a control wired with an `onclick="..."`
+    // attribute did nothing. Dispatch looked up the `onclick` PROPERTY only;
+    // the attribute's text was never compiled into a handler.
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_runs_an_onclick_attribute_and_lays_out_what_it_wrote() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let html = r#"<html><body style="margin:0"><div id="menu" style="height:40px" onclick="var a = document.createElement('a'); a.setAttribute('href', 'https://example.com/' + this.id + '-' + event.type); a.style.display = 'block'; a.style.height = '40px'; a.textContent = 'opened'; document.body.appendChild(a);">menu</div></body></html>"#;
+        engine.load_html(id, html).expect("load_html");
+        assert_eq!(engine.link_at_point(id, 5.0, 60.0), None, "precondition: nothing below the menu");
+
+        engine.click_at_point(id, 5.0, 10.0);
+
+        assert_eq!(
+            engine.link_at_point(id, 5.0, 60.0).as_deref(),
+            Some("https://example.com/menu-click"),
+            "the attribute's handler must run with `this` and `event`, and its writes must be laid out"
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn an_onclick_attribute_that_returns_false_cancels_the_link() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let html = r#"<html><body style="margin:0"><a href="https://example.com/x" style="display:block;height:40px" onclick="return false">stay</a><a href="https://example.com/y" style="display:block;height:40px" onclick="window.seen = 1">go</a></body></html>"#;
+        engine.load_html(id, html).expect("load_html");
+
+        assert_eq!(engine.click_at_point(id, 5.0, 10.0).navigate, None);
+        // A handler that returns nothing leaves the default action alone.
+        assert_eq!(
+            engine.click_at_point(id, 5.0, 50.0).navigate.as_deref(),
+            Some("https://example.com/y")
+        );
+    }
+
+    // Pete's live testing, continued: a click on a checkbox did not check
+    // it, a radio button did not take over its group, and a click on a
+    // <label> did nothing to its control. The click was dispatched and that
+    // was all: nothing ran the element's activation behaviour (HTML
+    // §4.10.5.1.15, §4.10.5.1.16, §4.10.4), and the box builder painted a
+    // control from its `checked` ATTRIBUTE, which a click never changes.
+
+    /// Checkedness of every checkbox and radio box in the layout, in tree
+    /// order: what paint draws.
+    fn painted_checks(b: &LayoutBox, out: &mut Vec<bool>) {
+        match &b.box_type {
+            BoxType::FormControl(rustkit_layout::FormControlType::Checkbox { checked })
+            | BoxType::FormControl(rustkit_layout::FormControlType::Radio { checked, .. }) => {
+                out.push(*checked)
+            }
+            _ => {}
+        }
+        for c in &b.children {
+            painted_checks(c, out);
+        }
+    }
+
+    const ACTIVATION_PAGE: &str = concat!(
+        r#"<html><head><style>a { display: none } input:checked + a { display: block; height: 40px }</style></head>"#,
+        r#"<body style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="c" type="checkbox" style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="no" type="checkbox" style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="r1" type="radio" name="g" checked style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="r2" type="radio" name="g" style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="l" for="t" style="display:block;height:40px">label</label></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="t" type="checkbox" style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div><input id="s" type="checkbox" style="display:block;width:30px;height:30px;margin:0">"#,
+        r#"<a href="https://example.com/shown">shown</a></div>"#,
+        r#"</body></html>"#,
+    );
+
+    fn activation_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, ACTIVATION_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             $('c').addEventListener('click', function () { log.push('click:' + $('c').checked); }); \
+             $('c').addEventListener('input', function (e) { log.push('input:' + e.bubbles); }); \
+             $('c').addEventListener('change', function (e) { log.push('change:' + $('c').checked + ':' + e.bubbles); }); \
+             $('no').addEventListener('click', function (e) { log.push('no:' + $('no').checked); e.preventDefault(); }); \
+             $('no').addEventListener('change', function () { log.push('no-change'); }); \
+             $('r1').addEventListener('change', function () { log.push('r1-change'); }); \
+             $('r2').addEventListener('change', function () { log.push('r2-change'); }); \
+             $('t').addEventListener('click', function (e) { log.push('t-click:' + e.target.id); });",
+        );
+        (engine, id)
+    }
+
+    fn js_string(s: &str) -> String {
+        format!("{:?}", rustkit_js::JsValue::String(s.into()))
+    }
+
+    fn painted(engine: &Engine, id: EngineViewId) -> Vec<bool> {
+        let mut out = Vec::new();
+        painted_checks(engine.views[&id].layout.as_ref().expect("layout"), &mut out);
+        out
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_checks_a_checkbox_and_a_radio_and_fires_input_and_change() {
+        let (mut engine, id) = activation_page();
+        // c, no, r1, r2, t, s
+        assert_eq!(painted(&engine, id), [false, false, true, false, false, false]);
+
+        // The checkbox is already checked when its click listeners run, and
+        // input then change follow the click.
+        engine.click_at_point(id, 8.0, 10.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('c').checked + ' ' + $('c').hasAttribute('checked')"),
+            js_string("click:true input:true change:true:true | true false")
+        );
+        assert_eq!(painted(&engine, id), [true, false, true, false, false, false]);
+
+        // A cancelled click puts the checkbox back, with no change event.
+        js(&mut engine, id, "log.length = 0");
+        engine.click_at_point(id, 8.0, 50.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('no').checked"),
+            js_string("no:true | false")
+        );
+        assert_eq!(painted(&engine, id), [true, false, true, false, false, false]);
+
+        // A radio button takes over its group; only it gets the change.
+        js(&mut engine, id, "log.length = 0");
+        engine.click_at_point(id, 8.0, 130.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('r1').checked + ' ' + $('r2').checked"),
+            js_string("r2-change | false true")
+        );
+        assert_eq!(painted(&engine, id), [true, false, false, true, false, false]);
+        // Clicking the checked radio again changes nothing.
+        js(&mut engine, id, "log.length = 0");
+        engine.click_at_point(id, 8.0, 130.0);
+        assert_eq!(js(&mut engine, id, "log.join(' ') + ' | ' + $('r2').checked"), js_string(" | true"));
+
+        // A second click unchecks the checkbox.
+        engine.click_at_point(id, 8.0, 10.0);
+        assert_eq!(js(&mut engine, id, "$('c').checked"), "Boolean(false)");
+        assert_eq!(painted(&engine, id), [false, false, false, true, false, false]);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_label_clicks_its_control() {
+        let (mut engine, id) = activation_page();
+        engine.click_at_point(id, 8.0, 180.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('t').checked"),
+            js_string("t-click:t | true")
+        );
+        assert_eq!(painted(&engine, id), [false, false, true, false, true, false]);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn checked_styles_follow_a_click() {
+        let (mut engine, id) = activation_page();
+        assert_eq!(engine.link_at_point(id, 8.0, 285.0), None, "precondition: the link is display:none");
+        engine.click_at_point(id, 8.0, 250.0);
+        assert_eq!(
+            engine.link_at_point(id, 8.0, 285.0).as_deref(),
+            Some("https://example.com/shown"),
+            "`input:checked + a` must match once the click has checked the box"
+        );
+        // Script setting it back is styled and painted too.
+        js(&mut engine, id, "$('s').checked = false");
+        assert_eq!(engine.link_at_point(id, 8.0, 285.0), None);
+        assert_eq!(painted(&engine, id), [false, false, true, false, false, false]);
+    }
+
+    // `matches(':checked')`, `closest` and `querySelector[All]` read the
+    // `checked` attribute, so after a click or `input.checked = ...` script
+    // was told the opposite of what the page painted (the usual
+    // `form.querySelector('input[name=x]:checked')` returned the default
+    // choice). They read the same live checkedness as the cascade.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn script_queries_read_live_checkedness() {
+        let (mut engine, id) = activation_page();
+        let checked = "Array.prototype.map.call(document.querySelectorAll('input:checked'), \
+                       function (e) { return e.id; }).join(',')";
+        assert_eq!(js(&mut engine, id, checked), js_string("r1"), "precondition: the attribute");
+
+        // The user checks the box and picks the other radio button.
+        engine.click_at_point(id, 8.0, 10.0);
+        engine.click_at_point(id, 8.0, 130.0);
+        assert_eq!(js(&mut engine, id, checked), js_string("c,r2"));
+        assert_eq!(
+            js(
+                &mut engine,
+                id,
+                "[$('c').matches(':checked'), $('r1').matches(':checked'), $('r2').matches('input:checked'), \
+                 $('r2').closest(':checked') === $('r2'), \
+                 document.querySelector('input[name=g]:checked').id].join('|')"
+            ),
+            js_string("true|false|true|true|r2")
+        );
+
+        // Script's own writes, and `:checked` left of a sibling combinator.
+        assert_eq!(js(&mut engine, id, "String(document.querySelector('input:checked + a'))"), js_string("null"));
+        assert_eq!(
+            js(
+                &mut engine,
+                id,
+                "$('s').checked = true; $('c').checked = false; \
+                 [document.querySelector('input:checked + a') !== null, $('c').matches(':checked'), \
+                  $('c').matches(':not(:checked)')].join('|')"
+            ),
+            js_string("true|false|true")
+        );
+        assert_eq!(js(&mut engine, id, checked), js_string("r2,s"));
+    }
+
+    // Pete's live testing, continued: a link to a place in the same page
+    // (`href="#id"`) loaded the page again from the top, and a
+    // `javascript:` link did nothing. A URL that differs from the
+    // document's only in its fragment is a navigation inside the document
+    // (HTML §7.4.2.3.3): scroll to the element, change the URL, fire
+    // `hashchange`, load nothing. A `javascript:` URL runs its script
+    // (§7.4.2.3.2).
+
+    const FRAGMENT_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r##"<a href="#target" style="display:block;height:40px">jump</a>"##,
+        r##"<a href="#missing" style="display:block;height:40px">nowhere</a>"##,
+        r##"<a id="no" href="#target" style="display:block;height:40px">cancelled</a>"##,
+        r#"<a href="javascript:window.ran = (window.ran || 0) + 1; document.getElementById('gone').remove()" style="display:block;height:40px">run</a>"#,
+        r#"<a id="gone" href="https://example.com/gone" style="display:block;height:40px">gone</a>"#,
+        r#"<a href="/page?q=1" style="display:block;height:40px">same page, no fragment</a>"#,
+        r#"<div style="height:2000px"></div>"#,
+        r#"<div id="target" style="height:40px">here</div>"#,
+        r#"<div style="height:2000px"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    fn fragment_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, FRAGMENT_PAGE).expect("load_html");
+        let url = Url::parse("https://example.com/page?q=1").unwrap();
+        let view = engine.views.get_mut(&id).expect("view");
+        view.bindings.as_ref().expect("bindings").set_location(&url).expect("location");
+        view.url = Some(url);
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             document.getElementById('no').addEventListener('click', function (e) { e.preventDefault(); }); \
+             window.addEventListener('hashchange', function (e) { \
+             log.push(e.oldURL.split('/').pop() + '>' + e.newURL.split('/').pop()); });",
+        );
+        (engine, id)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_fragment_link_scrolls_to_its_target_and_loads_nothing() {
+        let (mut engine, id) = fragment_page();
+
+        let outcome = click_row(&mut engine, id, 0);
+        assert_eq!(outcome.navigate, None, "a fragment of this document is not a load");
+        // Six 40px links and the 2000px spacer sit above the target.
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 2240.0));
+        assert_eq!(
+            engine.get_url(id).map(|u| u.to_string()).as_deref(),
+            Some("https://example.com/page?q=1#target")
+        );
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + location.hash + ' ' + history.length"),
+            js_string("page?q=1>page?q=1#target | #target 2")
+        );
+
+        // No element has the id: the URL changes, the page stays where it is.
+        engine.set_scroll_offset(id, 0.0, 0.0).unwrap();
+        js(&mut engine, id, "log.length = 0");
+        let outcome = click_row(&mut engine, id, 1);
+        assert_eq!(outcome.navigate, None);
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 0.0));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + location.hash"),
+            js_string("page?q=1#target>page?q=1#missing | #missing")
+        );
+
+        // A cancelled click goes nowhere.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(outcome.navigate, None);
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 0.0));
+        assert_eq!(js(&mut engine, id, "log.join(' ') + ' | ' + location.hash"), js_string(" | #missing"));
+
+        // The same page without a fragment is still a load.
+        let outcome = click_row(&mut engine, id, 5);
+        assert_eq!(outcome.navigate.as_deref(), Some("https://example.com/page?q=1"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_javascript_link_runs_its_script() {
+        let (mut engine, id) = fragment_page();
+        assert_eq!(
+            engine.link_at_point(id, 12.0, 172.0).as_deref(),
+            Some("https://example.com/gone"),
+            "precondition: the link the script removes is in row 4"
+        );
+
+        let outcome = click_row(&mut engine, id, 3);
+        assert_eq!(outcome.navigate, None);
+        assert_eq!(js(&mut engine, id, "String(window.ran)"), js_string("1"));
+        // What the script wrote to the DOM is laid out.
+        assert_eq!(
+            engine.link_at_point(id, 12.0, 172.0).as_deref(),
+            Some("https://example.com/page?q=1")
+        );
+
+        // A cancelled click does not run it.
+        js(
+            &mut engine,
+            id,
+            "document.addEventListener('click', function (e) { e.preventDefault(); })",
+        );
+        click_row(&mut engine, id, 3);
+        assert_eq!(js(&mut engine, id, "String(window.ran)"), js_string("1"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_fragment_jump_is_a_scroll_the_page_sees() {
+        let (mut engine, id) = fragment_page();
+        js(
+            &mut engine,
+            id,
+            "window.scrolls = []; window.addEventListener('scroll', function () { scrolls.push(window.scrollY); });",
+        );
+        click_row(&mut engine, id, 0);
+        assert_eq!(
+            js(&mut engine, id, "window.scrollY + ' | ' + scrolls.join()"),
+            js_string("2240 | 2240"),
+            "script reads the new offset and hears `scroll`"
+        );
+        // A fragment with no target moves nothing, so no `scroll`.
+        engine.execute_script(id, "window.scrollTo(0, 0)").unwrap();
+        js(&mut engine, id, "scrolls.length = 0");
+        click_row(&mut engine, id, 1);
+        assert_eq!(js(&mut engine, id, "window.scrollY + ' | ' + scrolls.join()"), js_string("0 | "));
+    }
+
+    // Pete's live testing, continued: a click on a form's submit button did
+    // nothing. Only Enter in a focused field submitted, and that path fires
+    // no `submit` event. A click on a submit button is the form's
+    // activation (HTML §4.10.21.3): validate, fire `submit`, and unless a
+    // listener cancels it, navigate with the form's data and the button's.
+
+    const SUBMIT_PAGE: &str = concat!(
+        r#"<html><body style="margin:0"><form id="f" action="/search">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q" value="rust"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="box" type="checkbox" name="box" value="on" style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="go" name="via" value="button">Go</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="alt" type="submit" name="via" value="input"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="plain" type="button">Plain</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="reset" type="reset">Reset</button></div>"#,
+        r#"</form></body></html>"#,
+    );
+
+    /// The page above with a document URL. Each control is alone in a 40px
+    /// row, so `click_row(n)` clicks the nth control.
+    fn submit_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, SUBMIT_PAGE).expect("load_html");
+        engine.views.get_mut(&id).expect("view").url = Some(Url::parse("https://example.com/page").unwrap());
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             document.addEventListener('click', function (e) { log.push('click:' + e.target.id); }); \
+             $('f').addEventListener('submit', function (e) { \
+             log.push('submit:' + (e.submitter && e.submitter.id) + ':' + e.cancelable); \
+             if (window.block) e.preventDefault(); });",
+        );
+        (engine, id)
+    }
+
+    fn click_row(engine: &mut Engine, id: EngineViewId, row: usize) -> ClickOutcome {
+        engine.click_at_point(id, 12.0, 40.0 * row as f32 + 12.0)
+    }
+
+    // Pete's hand tests H14 and H16: a navigation the page starts itself
+    // went nowhere in the live app. The engine does not navigate; it hands
+    // the URL to whoever asks (`take_script_navigation`), once.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_navigation_script_starts_is_handed_to_the_embedder() {
+        let (mut engine, id) = submit_page();
+        let doc = Url::parse("https://example.com/page").unwrap();
+        engine.views.get(&id).unwrap().bindings.as_ref().unwrap().set_location(&doc).unwrap();
+        assert_eq!(engine.take_script_navigation(id), None);
+
+        // A submit button clicked by script, as a timer or a handler would.
+        js(&mut engine, id, "$('go').click()");
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("click:go submit:go:true"));
+        assert_eq!(
+            engine.take_script_navigation(id).as_deref(),
+            Some("https://example.com/search?q=rust&via=button")
+        );
+        assert_eq!(engine.take_script_navigation(id), None, "taken once");
+
+        // requestSubmit() fires `submit`; submit() does not, and sends no
+        // button's pair.
+        js(&mut engine, id, "log.length = 0; $('f').requestSubmit()");
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("submit:null:true"));
+        assert_eq!(engine.take_script_navigation(id).as_deref(), Some("https://example.com/search?q=rust"));
+        js(&mut engine, id, "log.length = 0; $('f').submit()");
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string(""));
+        assert_eq!(engine.take_script_navigation(id).as_deref(), Some("https://example.com/search?q=rust"));
+
+        // A cancelled submit asks for nothing.
+        js(&mut engine, id, "window.block = true; $('go').click()");
+        assert_eq!(engine.take_script_navigation(id), None);
+        js(&mut engine, id, "window.block = false");
+
+        // A URL script assigned.
+        js(&mut engine, id, "location.href = '/next?x=1'");
+        assert_eq!(engine.take_script_navigation(id).as_deref(), Some("https://example.com/next?x=1"));
+
+        // The user's own click on the button is the click's outcome, not a
+        // second navigation waiting for the next turn.
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(
+            outcome.navigate.as_deref(),
+            Some("https://example.com/search?q=rust&via=button")
+        );
+        assert_eq!(engine.take_script_navigation(id), None);
+
+        // A click listener that assigns a URL and does not cancel: the
+        // click's default action is the later navigation, and the only one.
+        js(&mut engine, id, "$('go').addEventListener('click', function () { location.href = '/from-listener'; })");
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(
+            outcome.navigate.as_deref(),
+            Some("https://example.com/search?q=rust&via=button")
+        );
+        assert_eq!(engine.take_script_navigation(id), None);
+        // The same listener on a click that submits nothing: its URL stands.
+        js(&mut engine, id, "window.block = true");
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(outcome.navigate, None);
+        assert_eq!(
+            engine.take_script_navigation(id).as_deref(),
+            Some("https://example.com/from-listener")
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_submit_button_submits_its_form() {
+        let (mut engine, id) = submit_page();
+
+        // The button's own name and value go with the form's data.
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("click:go submit:go:true"));
+        assert_eq!(
+            outcome.navigate.as_deref(),
+            Some("https://example.com/search?q=rust&via=button")
+        );
+
+        // An <input type=submit> the same; the other button's pair stays out.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = click_row(&mut engine, id, 3);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("click:alt submit:alt:true"));
+        assert_eq!(
+            outcome.navigate.as_deref(),
+            Some("https://example.com/search?q=rust&via=input")
+        );
+
+        // A checkbox the user checked is submitted (and only then).
+        click_row(&mut engine, id, 1);
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(
+            outcome.navigate.as_deref(),
+            Some("https://example.com/search?q=rust&box=on&via=button")
+        );
+
+        // A listener that cancels `submit` keeps the page.
+        js(&mut engine, id, "log.length = 0; window.block = true");
+        let outcome = click_row(&mut engine, id, 2);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("click:go submit:go:true"));
+        assert_eq!(outcome.navigate, None);
+
+        // type=button submits nothing.
+        js(&mut engine, id, "log.length = 0; window.block = false");
+        let outcome = click_row(&mut engine, id, 4);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("click:plain"));
+        assert_eq!(outcome.navigate, None);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_reset_button_resets_its_form() {
+        let (mut engine, id) = submit_page();
+        click_row(&mut engine, id, 1);
+        assert_eq!(painted(&engine, id), [true]);
+        js(&mut engine, id, "$('f').addEventListener('reset', function () { log.push('reset'); })");
+
+        let outcome = click_row(&mut engine, id, 5);
+        assert_eq!(outcome.navigate, None);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('box').checked"),
+            js_string("click:box click:reset reset | false")
+        );
+        assert_eq!(painted(&engine, id), [false]);
+    }
+
+    // Pete's live testing, continued: the engine and the page each had a
+    // focus and neither knew the other's. A field script focused (a search
+    // shortcut, a click on a search icon) took no typing, and a field the
+    // user clicked into was not `document.activeElement` and heard no
+    // `focus`, `blur` or `change`. One focus (HTML §6.6.4 focus update
+    // steps), moved by the user's click before the `click` event and by
+    // script's `focus()`/`blur()`.
+
+    const FOCUS_PAGE: &str = concat!(
+        r#"<html><body id="b" style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="r" name="r" value="was"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="find" type="button">Find</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="off" disabled></div>"#,
+        r#"<div id="plain" style="height:40px">text</div>"#,
+        r#"</body></html>"#,
+    );
+
+    fn focus_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, FOCUS_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             ['focus', 'blur', 'focusin', 'focusout', 'change', 'click'].forEach(function (t) { \
+             document.addEventListener(t, function (e) { log.push(t + ':' + e.target.id); }, true); }); \
+             $('find').addEventListener('click', function () { $('q').focus(); });",
+        );
+        (engine, id)
+    }
+
+    fn focused_id(engine: &mut Engine, id: EngineViewId) -> String {
+        let raw = engine.focused_node(id).map(|n| n.raw());
+        let script = match raw {
+            Some(raw) => format!("(function () {{ var a = document.activeElement; return a.id + '/' + {raw}; }})()"),
+            None => "document.activeElement.id + '/none'".to_string(),
+        };
+        js(engine, id, &script)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_field_script_focuses_takes_the_typing() {
+        let (mut engine, id) = focus_page();
+        let q = engine.views[&id].document.as_ref().unwrap().get_element_by_id("q").unwrap().id;
+
+        // Script focuses the field; the user's keys go into it.
+        js(&mut engine, id, "$('q').focus()");
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("a"));
+
+        // Script blurs it; the keys are nobody's.
+        js(&mut engine, id, "$('q').blur()");
+        assert_eq!(engine.focused_node(id), None);
+        assert!(!engine.handle_text_key(id, 0, "b", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("a"));
+
+        // A click on a button whose listener focuses the field: the field
+        // has the focus when the click is over, and takes the typing.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = engine.click_at_point(id, 12.0, 92.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("click:find focus:q focusin:q")
+        );
+        assert!(engine.handle_text_key(id, 0, "c", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("ac"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_into_a_field_is_the_pages_focus() {
+        let (mut engine, id) = focus_page();
+
+        // The click focuses the field before `click` fires.
+        let outcome = engine.click_at_point(id, 12.0, 12.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + document.activeElement.id"),
+            js_string("focus:q focusin:q click:q | q")
+        );
+
+        // Typing, then a click into another field: the first hears
+        // `change` (the user edited it) and loses the focus.
+        engine.handle_text_key(id, 0, "a", false, false, false);
+        js(&mut engine, id, "log.length = 0");
+        engine.click_at_point(id, 12.0, 52.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + document.activeElement.id"),
+            js_string("change:q blur:q focusout:q focus:r focusin:r click:r | r")
+        );
+
+        // A click on plain content: nothing is focused, and no `change`
+        // for a field nobody edited.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = engine.click_at_point(id, 12.0, 172.0);
+        assert_eq!(outcome.focused, None);
+        assert_eq!(engine.focused_node(id), None);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + document.activeElement.id"),
+            js_string("blur:r focusout:r click:plain | b")
+        );
+
+        // A disabled field does not take the focus.
+        js(&mut engine, id, "log.length = 0");
+        let outcome = engine.click_at_point(id, 12.0, 132.0);
+        assert_eq!(outcome.focused, None);
+        assert_eq!(focused_id(&mut engine, id), js_string("b/none"));
+    }
+
+    // A click on a disabled button still fired `click` at it and bubbled,
+    // so a page's handler ran for a control the page had switched off (a
+    // greyed-out "Pay" button paid). A disabled form control takes no
+    // click from the user (HTML §4.10.18.5), and no `mouseup` either.
+
+    const DISABLED_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="off" disabled style="display:block;width:100px;height:30px">off</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="on" style="display:block;width:100px;height:30px">on</button></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="cb" type="checkbox" disabled style="display:block;width:30px;height:30px;margin:0"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button disabled style="display:block;width:100px;height:30px;padding:0;border:0"><span id="in" style="display:block;width:100px;height:30px">in</span></button></div>"#,
+        r#"<fieldset disabled style="margin:0;padding:0;border:0">"#,
+        r#"<legend style="padding:0"><button id="lg" style="display:block;width:100px;height:30px;margin:0 0 10px">legend</button></legend>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="fs" style="display:block;width:100px;height:30px">set</button></div>"#,
+        r#"<div id="plain" style="height:40px;overflow:hidden">plain</div>"#,
+        r#"</fieldset>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn the_users_click_on_a_disabled_control_is_not_dispatched() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DISABLED_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             document.addEventListener('mouseup', function (e) { log.push('up:' + e.target.id); }); \
+             document.addEventListener('click', function (e) { log.push('click:' + e.target.id); });",
+        );
+        let top = |engine: &Engine, name: &str| {
+            let view = &engine.views[&id];
+            let node = view.document.as_ref().unwrap().get_element_by_id(name).unwrap().id.raw();
+            Engine::box_top(view.layout.as_ref().unwrap(), node).unwrap()
+        };
+        let mut click = |engine: &mut Engine, name: &str| {
+            js(engine, id, "log.length = 0");
+            let y = top(engine, name) + 10.0;
+            engine.click_at_point(id, 8.0, y);
+            js(engine, id, "log.join(' ')")
+        };
+
+        assert_eq!(click(&mut engine, "on"), js_string("up:on click:on"), "precondition");
+        assert_eq!(click(&mut engine, "off"), js_string(""));
+        assert_eq!(click(&mut engine, "cb"), js_string(""));
+        // Disabled by its fieldset; the fieldset's own legend is not, and
+        // neither is content that is not a form control.
+        assert_eq!(click(&mut engine, "fs"), js_string(""));
+        assert_eq!(click(&mut engine, "lg"), js_string("up:lg click:lg"));
+        assert_eq!(click(&mut engine, "plain"), js_string("up:plain click:plain"));
+        // Script enables it again.
+        js(&mut engine, id, "$('off').disabled = false");
+        assert_eq!(click(&mut engine, "off"), js_string("up:off click:off"));
+    }
+
+    // A press and release on a disabled control sent it `mousedown` and
+    // `mouseup`, so a page's "press" handler ran on a greyed-out button.
+    // The oracle's Chrome sends such a control `pointerdown` and `pointerup`
+    // and no mouse event at all, also when the point is on an element
+    // inside it or it is disabled by its fieldset
+    // (tools/parity_oracle/disabled_press_log.mjs, Chromium 143).
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_disabled_control_hears_pointer_events_and_no_mouse_events() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DISABLED_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (t) { \
+               document.addEventListener(t, function (e) { log.push(e.type + ':' + e.target.id); }, true); });",
+        );
+        let top = |engine: &Engine, name: &str| {
+            let view = &engine.views[&id];
+            let node = view.document.as_ref().unwrap().get_element_by_id(name).unwrap().id.raw();
+            Engine::box_top(view.layout.as_ref().unwrap(), node).unwrap()
+        };
+        let mut press_release = |engine: &mut Engine, name: &str| {
+            js(engine, id, "log.length = 0");
+            let y = top(engine, name) + 10.0;
+            engine.mouse_down_at_point(id, 8.0, y);
+            engine.click_at_point(id, 8.0, y);
+            js(engine, id, "log.join(' ')")
+        };
+        let all = |n: &str| js_string(&format!("pointerdown:{n} mousedown:{n} pointerup:{n} mouseup:{n} click:{n}"));
+        let pointer_only = |n: &str| js_string(&format!("pointerdown:{n} pointerup:{n}"));
+
+        assert_eq!(press_release(&mut engine, "on"), all("on"), "precondition");
+        assert_eq!(press_release(&mut engine, "off"), pointer_only("off"));
+        assert_eq!(press_release(&mut engine, "cb"), pointer_only("cb"));
+        // On an element inside a disabled button.
+        assert_eq!(press_release(&mut engine, "in"), pointer_only("in"));
+        // Disabled by its fieldset; the fieldset's own legend is not, and
+        // neither is content that is not a form control.
+        assert_eq!(press_release(&mut engine, "fs"), pointer_only("fs"));
+        assert_eq!(press_release(&mut engine, "lg"), all("lg"));
+        assert_eq!(press_release(&mut engine, "plain"), all("plain"));
+        // Script enables it again.
+        js(&mut engine, id, "document.getElementById('off').disabled = false");
+        assert_eq!(press_release(&mut engine, "off"), all("off"));
+    }
+
+    // A click on a label's text did not focus the field it labels, so the
+    // usual "click the word, then type" did nothing. The labeled control
+    // (HTML §4.10.4: the `for` target, else the first labelable
+    // descendant) takes the focus.
+
+    const LABEL_PAGE: &str = concat!(
+        r#"<html><body id="b" style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="l" for="q">Name</label></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="w">Wrap <input id="r" name="r"></label></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><label id="n" for="missing">Nobody</label></div>"#,
+        r#"</body></html>"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_label_focuses_its_control() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, LABEL_PAGE).expect("load_html");
+        js(&mut engine, id, "var $ = function (i) { return document.getElementById(i); };");
+        let node = |engine: &Engine, name: &str| {
+            engine.views[&id].document.as_ref().unwrap().get_element_by_id(name).unwrap().id
+        };
+        let (q, r) = (node(&engine, "q"), node(&engine, "r"));
+
+        // `for` names the field.
+        let outcome = engine.click_at_point(id, 12.0, 52.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert_eq!(js(&mut engine, id, "document.activeElement.id"), js_string("q"));
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        assert_eq!(js(&mut engine, id, "$('q').value"), js_string("a"));
+
+        // The label's own text, with the field inside the label.
+        engine.click_at_point(id, 12.0, 92.0);
+        assert_eq!(engine.focused_node(id), Some(r));
+        assert_eq!(js(&mut engine, id, "document.activeElement.id"), js_string("r"));
+
+        // A label with no control focuses nothing.
+        let outcome = engine.click_at_point(id, 12.0, 132.0);
+        assert_eq!(outcome.focused, None);
+        assert_eq!(engine.focused_node(id), None);
+
+        // The way a person clicks, a press and then a release: the focus
+        // moves at the press, and the label's field takes it at the release.
+        engine.click_at_point(id, 12.0, 92.0);
+        assert_eq!(engine.focused_node(id), Some(r));
+        engine.mouse_down_at_point(id, 12.0, 52.0);
+        let outcome = engine.click_at_point(id, 12.0, 52.0);
+        assert_eq!(outcome.focused.as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(q));
+        assert_eq!(js(&mut engine, id, "document.activeElement.id"), js_string("q"));
+    }
+
+    // Pete's live testing, continued: typing in a field told the page
+    // nothing. No `keydown`, no `input`, and Enter built the form's URL
+    // without a `submit` event, so a page that handles its own search box
+    // was navigated away from. Keys go to the focused element as trusted
+    // events (UI Events §3.7), a cancelled `keydown` types nothing, and
+    // Enter is implicit submission (HTML §4.10.21.2).
+
+    const KEYS_PAGE: &str = concat!(
+        r#"<html><body style="margin:0"><form id="f" action="/search">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"<div style="height:40px;overflow:hidden"><button id="go" name="via" value="button">Go</button></div>"#,
+        r#"</form></body></html>"#,
+    );
+
+    fn keys_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, KEYS_PAGE).expect("load_html");
+        engine.views.get_mut(&id).expect("view").url = Some(Url::parse("https://example.com/page").unwrap());
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             document.addEventListener('keydown', function (e) { \
+             log.push('keydown:' + e.key + ':' + e.target.id + ':' + e.isTrusted); \
+             if (e.key === window.block) e.preventDefault(); }); \
+             document.addEventListener('input', function (e) { log.push('input:' + e.target.value); }); \
+             document.addEventListener('click', function (e) { log.push('click:' + e.target.id); }); \
+             $('f').addEventListener('submit', function (e) { \
+             log.push('submit:' + (e.submitter && e.submitter.id)); if (window.stay) e.preventDefault(); });",
+        );
+        // Focus the field.
+        engine.click_at_point(id, 12.0, 12.0);
+        js(&mut engine, id, "log.length = 0");
+        (engine, id)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn typing_fires_keydown_and_input_at_the_focused_field() {
+        let (mut engine, id) = keys_page();
+
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:a:q:true input:a"));
+
+        // Backspace is a key too, and its edit is an input.
+        js(&mut engine, id, "log.length = 0");
+        assert!(engine.handle_text_key(id, 0x08, "", false, false, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:Backspace:q:true input:"));
+
+        // A cancelled keydown types nothing.
+        js(&mut engine, id, "log.length = 0; window.block = 'x'");
+        assert!(!engine.handle_text_key(id, 0, "x", false, false, false));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('q').value"),
+            js_string("keydown:x:q:true | ")
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn enter_in_a_field_submits_its_form_through_the_page() {
+        let (mut engine, id) = keys_page();
+        engine.handle_text_key(id, 0, "r", false, false, false);
+        js(&mut engine, id, "log.length = 0");
+
+        // Enter clicks the form's default button, which submits the form.
+        assert_eq!(
+            engine.submit_focused_form(id).as_deref(),
+            Some("https://example.com/search?q=r&via=button")
+        );
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:Enter:q:true click:go submit:go")
+        );
+
+        // A `submit` listener that cancels keeps the page.
+        js(&mut engine, id, "log.length = 0; window.stay = true");
+        assert_eq!(engine.submit_focused_form(id), None);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:Enter:q:true click:go submit:go")
+        );
+
+        // A cancelled keydown submits nothing.
+        js(&mut engine, id, "log.length = 0; window.stay = false; window.block = 'Enter'");
+        assert_eq!(engine.submit_focused_form(id), None);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:Enter:q:true"));
+    }
+
+    // Pete's live testing, continued: a page's own keyboard shortcuts were
+    // dead. A key pressed with nothing focused reached no listener, and no
+    // key ever fired `keyup`. With nothing focused the key goes to the body
+    // (UI Events §3.7.1: the focused element, else the body), and a
+    // cancelled `keydown` is the page's, so the app must not scroll on it.
+
+    const SHORTCUT_PAGE: &str = concat!(
+        r#"<html><body id="b" style="margin:0">"#,
+        r#"<div style="height:40px;overflow:hidden"><input id="q" name="q"></div>"#,
+        r#"</body></html>"#,
+    );
+
+    fn shortcut_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, SHORTCUT_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             ['keydown', 'keyup'].forEach(function (t) { document.addEventListener(t, function (e) { \
+             log.push(t + ':' + e.key + ':' + e.target.id + ':' + e.isTrusted); \
+             if (t === 'keydown' && e.key === window.block) e.preventDefault(); }); }); \
+             document.addEventListener('input', function (e) { log.push('input:' + e.target.value); });",
+        );
+        (engine, id)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_key_with_nothing_focused_goes_to_the_body() {
+        let (mut engine, id) = shortcut_page();
+
+        // Nobody cancelled it: the caller keeps its own default (scrolling).
+        assert!(!engine.handle_text_key(id, 0, "j", false, false, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:j:b:true"));
+
+        // Named keys, and Enter with no form to submit.
+        js(&mut engine, id, "log.length = 0");
+        assert!(!engine.handle_text_key(id, 0x1B, "", false, false, false));
+        assert!(!engine.handle_text_key(id, 0x28, "", false, false, false));
+        assert!(!engine.handle_text_key(id, 0x0D, "", false, false, false));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:Escape:b:true keydown:ArrowDown:b:true keydown:Enter:b:true")
+        );
+
+        // A shortcut the page handles: it is the page's key, not a scroll.
+        js(&mut engine, id, "log.length = 0; window.block = '/'");
+        assert!(engine.handle_text_key(id, 0, "/", false, false, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:/:b:true"));
+
+        // What the listener wrote is laid out.
+        js(
+            &mut engine,
+            id,
+            "window.block = null; document.addEventListener('keydown', function (e) { \
+             if (e.key === 'n') { var d = document.createElement('div'); d.id = 'made'; \
+             d.style.height = '30px'; d.textContent = 'new'; document.body.appendChild(d); } });",
+        );
+        engine.handle_text_key(id, 0, "n", false, false, false);
+        assert_eq!(
+            js(&mut engine, id, "String($('made').getBoundingClientRect().height)"),
+            js_string("30")
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn releasing_a_key_fires_keyup() {
+        let (mut engine, id) = shortcut_page();
+
+        // Nothing focused: the body hears it.
+        engine.handle_text_key(id, 0, "j", false, false, false);
+        engine.handle_key_up(id, 0, "j", false, false, false);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:j:b:true keyup:j:b:true")
+        );
+
+        // In a field: after the edit and its `input`.
+        engine.click_at_point(id, 12.0, 12.0);
+        js(&mut engine, id, "log.length = 0");
+        assert!(engine.handle_text_key(id, 0, "a", false, false, false));
+        engine.handle_key_up(id, 0, "a", false, false, false);
+        engine.handle_key_up(id, 0x0D, "", false, false, false);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ')"),
+            js_string("keydown:a:q:true input:a keyup:a:q:true keyup:Enter:q:true")
+        );
+    }
+
+    // Pete's live testing, continued: a click on a <summary> did nothing,
+    // and a closed <details> showed everything inside it. Only the first
+    // <summary> child of a <details> without `open` is rendered (HTML
+    // §15.3.9, §4.11.1), and a click on that summary toggles `open`
+    // (§4.11.2).
+
+    const DETAILS_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<details id="d"><summary id="s" style="display:block;height:40px">More</summary>"#,
+        r#"<a href="https://example.com/inside" style="display:block;height:40px">inside</a></details>"#,
+        r#"<details id="o" open><summary id="os" style="display:block;height:40px">Open</summary>"#,
+        r#"<a href="https://example.com/open" style="display:block;height:40px">open</a></details>"#,
+        r#"<a href="https://example.com/after" style="display:block;height:40px">after</a>"#,
+        r#"</body></html>"#,
+    );
+
+    fn details_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, DETAILS_PAGE).expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.log = []; var $ = function (i) { return document.getElementById(i); }; \
+             $('s').addEventListener('click', function (e) { \
+             log.push('click:' + $('d').open); if (window.block) e.preventDefault(); }); \
+             $('d').addEventListener('toggle', function (e) { log.push('toggle:' + $('d').open + ':' + e.bubbles); });",
+        );
+        (engine, id)
+    }
+
+    /// The link at each 40px row, top down.
+    fn link_rows(engine: &Engine, id: EngineViewId, rows: usize) -> Vec<Option<String>> {
+        (0..rows)
+            .map(|r| {
+                engine
+                    .link_at_point(id, 8.0, 40.0 * r as f32 + 10.0)
+                    .map(|u| u.rsplit('/').next().unwrap_or_default().to_string())
+            })
+            .collect()
+    }
+
+    fn rows(names: &[&str]) -> Vec<Option<String>> {
+        names.iter().map(|n| (!n.is_empty()).then(|| n.to_string())).collect()
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_closed_details_shows_only_its_summary() {
+        let (mut engine, id) = details_page();
+        // summary, (closed content), open summary, open content, after
+        assert_eq!(link_rows(&engine, id, 4), rows(&["", "", "open", "after"]));
+        assert_eq!(js(&mut engine, id, "$('d').open + ' ' + $('o').open"), js_string("false true"));
+
+        // Script opening and closing it is laid out.
+        js(&mut engine, id, "$('d').open = true; $('o').removeAttribute('open')");
+        assert_eq!(link_rows(&engine, id, 4), rows(&["", "inside", "", "after"]));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_click_on_a_summary_toggles_its_details() {
+        let (mut engine, id) = details_page();
+
+        // The click's listeners see it closed; it opens after them, then
+        // `toggle` fires on the details (it does not bubble).
+        assert_eq!(engine.click_at_point(id, 8.0, 10.0).navigate, None);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('d').open + ' ' + $('d').hasAttribute('open')"),
+            js_string("click:false toggle:true:false | true true")
+        );
+        assert_eq!(link_rows(&engine, id, 5), rows(&["", "inside", "", "open", "after"]));
+
+        // A cancelled click leaves it as it is.
+        js(&mut engine, id, "log.length = 0; window.block = true");
+        engine.click_at_point(id, 8.0, 10.0);
+        assert_eq!(js(&mut engine, id, "log.join(' ') + ' | ' + $('d').open"), js_string("click:true | true"));
+
+        // A second click closes it.
+        js(&mut engine, id, "log.length = 0; window.block = false");
+        engine.click_at_point(id, 8.0, 10.0);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + $('d').open"),
+            js_string("click:true toggle:false:false | false")
+        );
+        assert_eq!(link_rows(&engine, id, 4), rows(&["", "", "open", "after"]));
+
+        // A link inside the open content is still a link.
+        assert_eq!(
+            engine.click_at_point(id, 8.0, 90.0).navigate.as_deref(),
+            Some("https://example.com/open")
+        );
+    }
+
+    // ---- the live loop runs what the page scheduled (Z lane I0, 2026-10-03) ----
+    //
+    // Pete's live testing: content that arrives after the load never shows.
+    // The load ran the page's timers on a virtual clock up to its horizon
+    // and then nothing ran them again: a `setTimeout` set by a click
+    // listener, or one due past the horizon, never fired.
+
+    fn pump(engine: &mut Engine, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(engine.pump_live(id, elapsed_ms))
+    }
+
+    /// A callback that adds a link below the 40px block at the top.
+    const ADD_LINK: &str = "function () { \
+         var a = document.createElement('a'); a.setAttribute('href', 'https://example.com/late'); \
+         a.style.display = 'block'; a.style.height = '40px'; a.textContent = 'late'; \
+         document.body.appendChild(a); }";
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_timer_set_after_the_load_fires_once_its_time_has_passed() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                r#"<html><body style="margin:0"><div style="height:40px">early</div></body></html>"#,
+            )
+            .expect("load_html");
+        js(&mut engine, id, &format!("setTimeout({ADD_LINK}, 300);"));
+
+        // Not yet due: nothing runs, and the loop is told when to come back.
+        let early = pump(&mut engine, id, 100);
+        assert_eq!((early.timers_ran, early.relaid_out, early.next_timer_ms), (0, false, Some(200)));
+        assert_eq!(engine.link_at_point(id, 5.0, 60.0), None);
+
+        // Due: it runs, and what it wrote is in the layout.
+        let late = pump(&mut engine, id, 250);
+        assert_eq!((late.timers_ran, late.relaid_out, late.next_timer_ms), (1, true, None));
+        assert_eq!(
+            engine.link_at_point(id, 5.0, 60.0).as_deref(),
+            Some("https://example.com/late")
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_timer_set_by_a_click_listener_fires_on_a_later_turn() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(
+                id,
+                r#"<html><body style="margin:0"><div id="menu" style="height:40px">menu</div></body></html>"#,
+            )
+            .expect("load_html");
+        js(
+            &mut engine,
+            id,
+            &format!(
+                "document.getElementById('menu').addEventListener('click', function () {{ setTimeout({ADD_LINK}, 50); }});"
+            ),
+        );
+        // The clock follows the loop, not the click: time that passed before
+        // the click does not count toward the timer it sets.
+        pump(&mut engine, id, 10_000);
+        engine.click_at_point(id, 5.0, 10.0);
+        assert_eq!(pump(&mut engine, id, 20).timers_ran, 0);
+        assert_eq!(engine.link_at_point(id, 5.0, 60.0), None);
+
+        assert_eq!(pump(&mut engine, id, 40).timers_ran, 1);
+        assert_eq!(
+            engine.link_at_point(id, 5.0, 60.0).as_deref(),
+            Some("https://example.com/late")
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn an_interval_keeps_firing_and_a_cleared_one_stops() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(id, r#"<html><body style="margin:0">tick</body></html>"#)
+            .expect("load_html");
+        js(&mut engine, id, "window.n = 0; window.t = setInterval(function () { n++; }, 100);");
+
+        // 250ms: due at 100 and 200, next at 300. It wrote nothing to the
+        // DOM, so nothing is laid out.
+        let turn = pump(&mut engine, id, 250);
+        assert_eq!((turn.timers_ran, turn.relaid_out, turn.next_timer_ms), (2, false, Some(50)));
+        assert_eq!(pump(&mut engine, id, 50).timers_ran, 1);
+
+        js(&mut engine, id, "clearInterval(t);");
+        let after = pump(&mut engine, id, 1_000);
+        assert_eq!((after.timers_ran, after.next_timer_ms), (0, None));
+        assert_eq!(js(&mut engine, id, "n"), format!("{:?}", rustkit_js::JsValue::Number(3.0)));
     }
 }
 
@@ -17923,8 +24884,8 @@ mod form_typing_tests {
     #[cfg(all(target_os = "macos", feature = "headless"))]
     fn keys_go_nowhere_when_nothing_is_focused() {
         // The property that makes it safe to route window-level keys here:
-        // with no focus, handle_text_key must decline so the caller can fall
-        // back to scrolling.
+        // with no focus and no listener cancelling the key, handle_text_key
+        // must decline so the caller can fall back to scrolling.
         let (mut engine, id) =
             engine_with_html(r#"<html><body><input type="text"></body></html>"#);
         assert!(!engine.handle_text_key(id, 0, "c", false, false, false));
@@ -18601,6 +25562,9 @@ mod visual_rect_tests {
 thread_local! {
     /// How many times the full selector matcher ran on this thread.
     static FULL_SELECTOR_MATCHES: Cell<u64> = const { Cell::new(0) };
+    /// How many times a script query built an element's ancestor and
+    /// sibling context (see `SelectorMatcher::node_matches`).
+    static QUERY_CONTEXT_BUILDS: Cell<u64> = const { Cell::new(0) };
     /// How many rule-index candidates were tried against an element on this
     /// thread (the cascade's and the `::before`/`::after` lists').
     static CANDIDATE_VISITS: Cell<u64> = const { Cell::new(0) };
@@ -18608,6 +25572,85 @@ thread_local! {
     static SELECTOR_TOKENIZATIONS: Cell<u64> = const { Cell::new(0) };
     /// How many selectors the ancestor filter rejected on this thread.
     static ANCESTOR_FILTER_REJECTS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Pure `SelectorMatcher` pins that do not need a GPU / compositor. Kept
+/// off the macOS-only `rule_prefilter_tests` gate so Linux CI exercises them.
+#[cfg(test)]
+mod selector_is_escape_tests {
+    use super::*;
+
+    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn ancestor(tag: &str, classes: &[&str], id: Option<&str>) -> Ancestor {
+        Rc::new((
+            tag.to_string(),
+            classes.iter().map(|c| c.to_string()).collect(),
+            id.map(str::to_string),
+        ))
+    }
+
+    #[test]
+    fn escaped_class_inside_is_matches_the_literal_name() {
+        // Subject `.sm\:flex` is covered in web_font_tests. Tailwind also
+        // nests escapes inside forgiving lists (`:is(.sm\:flex)`,
+        // `:is(.w-1\/2)`). If the functional-pseudo argument path skips
+        // escape decoding, the rule never matches and responsive utilities
+        // vanish on real sites. Selectors are pre-encoded the way the CSS
+        // parser leaves them after `encode_selector_escapes`.
+        let is_sm = rustkit_css::encode_selector_escapes(":is(.sm\\:flex, .lg\\:flex)").into_owned();
+        let is_half = rustkit_css::encode_selector_escapes("div:is(.w-1\\/2) span").into_owned();
+
+        assert!(
+            SelectorMatcher.selector_matches(
+                &is_sm,
+                "p",
+                &attrs(&[("class", "sm:flex")]),
+                &[],
+                &[],
+                SiblingContext::SOLE,
+            ),
+            ":is(.sm\\:flex)"
+        );
+        assert!(
+            SelectorMatcher.selector_matches(
+                &is_half,
+                "span",
+                &attrs(&[]),
+                &[ancestor("div", &["w-1/2"], None)],
+                &[],
+                SiblingContext::SOLE,
+            ),
+            "div:is(.w-1\\/2) span"
+        );
+        assert!(
+            !SelectorMatcher.selector_matches(
+                ":is(.nope)",
+                "p",
+                &attrs(&[("class", "sm")]),
+                &[],
+                &[],
+                SiblingContext::SOLE,
+            ),
+            ":is(.nope) must not match .sm"
+        );
+        assert!(
+            SelectorMatcher.selector_matches(
+                ".sm",
+                "p",
+                &attrs(&[("class", "sm")]),
+                &[],
+                &[],
+                SiblingContext::SOLE,
+            ),
+            "plain .sm must not be poisoned by a failed :is(.sm\\:flex) parse"
+        );
+    }
 }
 
 // Real Engine (Compositor wants a device) — macOS only, like
@@ -19632,15 +26675,17 @@ mod rule_prefilter_tests {
 //
 // The Windows tree called a receiver-less `Engine::apply_declaration`; here
 // the production path is `Engine::apply_style_property(&self, ..)`, so each
-// test builds one Engine behind the init mutex (Compositor::new performs
-// wgpu adapter init, which must not run concurrently — hiwave-windows #51).
+// test builds its own Engine. `Engine::new` takes the GPU test guard
+// (`test_gpu`), which already keeps wgpu adapter init from running
+// concurrently (hiwave-windows #51). A module mutex around it is a second
+// lock taken in the other order: a test that builds two engines holds the
+// guard and waits for the mutex, while its neighbour holds the mutex and
+// waits for the guard.
 #[cfg(test)]
 mod cascade_wire_tests {
     use super::*;
 
     fn engine() -> Engine {
-        static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
         Engine::new(EngineConfig::default()).expect("engine")
     }
 
@@ -20059,19 +27104,19 @@ mod history_traversal_tests {
     #[tokio::test]
     async fn back_on_a_fresh_view_is_a_quiet_no_op() {
         let (mut e, id) = engine_with_view();
-        assert_eq!(e.go_back(id).await.unwrap(), false);
+        assert!(!e.go_back(id).await.unwrap());
     }
 
     #[tokio::test]
     async fn forward_on_a_fresh_view_is_a_quiet_no_op() {
         let (mut e, id) = engine_with_view();
-        assert_eq!(e.go_forward(id).await.unwrap(), false);
+        assert!(!e.go_forward(id).await.unwrap());
     }
 
     #[tokio::test]
     async fn reload_with_no_history_is_a_quiet_no_op() {
         let (mut e, id) = engine_with_view();
-        assert_eq!(e.reload(id).await.unwrap(), false);
+        assert!(!e.reload(id).await.unwrap());
     }
 
     #[tokio::test]
@@ -20394,7 +27439,7 @@ window.addEventListener('load', function () {
         let order = engine.execute_script(view, "order.join(',')").unwrap();
         assert_eq!(
             order,
-            r#"String("inline1,classic,inline2,defer,async,dcl:interactive,load:complete,timer")"#
+            r#"String("inline1,classic,inline2,defer,module,async,dcl:interactive,load:complete,timer")"#
         );
 
         let log = engine.script_log(view).unwrap();
@@ -20406,7 +27451,8 @@ window.addEventListener('load', function () {
         };
         assert_eq!(outcome("classic.js"), ScriptOutcome::Ran);
         assert_eq!(outcome("missing.js"), ScriptOutcome::FetchFailed("HTTP 404 Not Found".into()));
-        assert_eq!(outcome("inline#5"), ScriptOutcome::Skipped("type=module unsupported"));
+        // A module script runs, deferred, in document order with the defer ones.
+        assert_eq!(outcome("inline#5"), ScriptOutcome::Ran);
         assert!(
             matches!(outcome("inline#6"), ScriptOutcome::Skipped(why) if why.starts_with("nomodule")),
             "{log:#?}"
@@ -20444,6 +27490,54 @@ window.addEventListener('load', function () {
         // not started either.
         assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
         assert_eq!(engine.execute_script(view, "typeof slow").unwrap(), r#"String("undefined")"#);
+    }
+
+    /// `document.currentScript` is the classic <script> element while it
+    /// runs and null otherwise. x.com ends inline scripts with
+    /// `document.currentScript.remove()`; before this, that threw
+    /// "cannot convert 'null' or 'undefined' to object" on 5 of its 7
+    /// scripts, and webpack's `publicPath` detection (cnn) failed the same
+    /// way.
+    #[test]
+    fn document_current_script_names_the_running_script_element() {
+        let page = r#"<html><head>
+<script id="first">
+var seen = [];
+seen.push('first:' + document.currentScript.id);
+document.currentScript.remove();
+</script>
+<script id="ext" src="/ext.js"></script>
+<script id="third">seen.push('third:' + document.currentScript.tagName);</script>
+</head><body><div id="after">x</div></body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            (
+                "/ext.js",
+                "text/javascript",
+                "seen.push('ext:' + document.currentScript.id + ':' + /ext[.]js$/.test(document.currentScript.src));".into(),
+            ),
+        ]);
+        let (mut engine, view) = load(EngineConfig::default(), port);
+
+        assert_eq!(
+            engine.execute_script(view, "seen.join(',')").unwrap(),
+            r#"String("first:first,ext:ext:true,third:SCRIPT")"#
+        );
+        // Between scripts it is null again.
+        assert_eq!(
+            engine.execute_script(view, "String(document.currentScript)").unwrap(),
+            r#"String("null")"#
+        );
+        // `remove()` really removed the element, and no script failed.
+        assert_eq!(
+            engine.execute_script(view, "String(document.getElementById('first'))").unwrap(),
+            r#"String("null")"#
+        );
+        let log = engine.script_log(view).unwrap();
+        assert!(
+            log.iter().all(|r| r.outcome == ScriptOutcome::Ran),
+            "{log:#?}"
+        );
     }
 
     #[test]
@@ -20491,8 +27585,98 @@ window.addEventListener('load', function () {
             took < std::time::Duration::from_millis(2_500),
             "waited for the stalled subresources: {took:?}"
         );
-        // The sheet that did arrive still applies.
-        assert_eq!(engine.views[&view].external_stylesheets.len(), 1);
+        // The sheet that did arrive still applies — and it must be the fast
+        // one. A count-only assertion would still pass if the stalled red
+        // sheet somehow won and blue was dropped.
+        let sheets = &engine.views[&view].external_stylesheets;
+        assert_eq!(sheets.len(), 1);
+        let colors: Vec<&str> = sheets[0]
+            .rules
+            .iter()
+            .flat_map(|r| &r.declarations)
+            .filter(|d| d.property == "color")
+            .filter_map(|d| match &d.value {
+                rustkit_css::PropertyValue::Specified(v) => Some(v.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            colors,
+            ["blue"],
+            "the fast sheet must be the survivor, not the stalled red one: {sheets:#?}"
+        );
+
+        // Image and SVG lanes share the same budget: a hung image must not
+        // keep the load open past the deadline, and must not land in cache.
+        let base = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let slow_png = base.join("/slow.png").unwrap();
+        let slow_svg = base.join("/slow.svg").unwrap();
+        assert!(
+            !engine.image_manager().is_cached(&slow_png),
+            "stalled raster image must not be cached after the budget"
+        );
+        assert!(
+            !engine.svg_cache.contains_key(slow_svg.as_str()),
+            "stalled SVG must not enter the SVG cache after the budget"
+        );
+    }
+
+    /// A hung `@font-face` fetch is cut at `subresource_budget_ms` and marked
+    /// failed so a later relayout does not retry it forever.
+    #[test]
+    fn a_stalled_web_font_is_dropped_at_the_subresource_budget() {
+        let port = serve(vec![(
+            "/slow.ttf",
+            "font/ttf",
+            "not-a-real-font".into(),
+        )]);
+        let html = format!(
+            r#"<html><head><style>
+@font-face {{ font-family: delayed; src: url(http://127.0.0.1:{port}/slow.ttf); }}
+</style></head><body style="font-family: delayed">x</body></html>"#
+        );
+        let config = EngineConfig {
+            subresource_budget_ms: 500,
+            ..EngineConfig::default()
+        };
+        let mut engine = Engine::new(config).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 100,
+            })
+            .expect("view");
+        engine.load_html(view, &html).expect("load");
+
+        let rules = engine.view_font_face_rules(view);
+        assert_eq!(rules.len(), 1, "inline @font-face must be discovered");
+        let partition = Engine::font_partition(engine.views[&view].url.as_ref());
+        let face = Engine::layout_font_face(&rules[0]);
+        let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let loaded = rt.block_on(engine.load_remote_web_fonts(view));
+        let took = started.elapsed();
+
+        assert_eq!(loaded, 0, "a stalled face must not count as loaded");
+        assert!(
+            took < std::time::Duration::from_millis(2_500),
+            "waited for the stalled web font: {took:?}"
+        );
+        assert!(
+            engine.font_loader.is_failed(&key),
+            "timeout must mark the face failed so relayout stops retrying it"
+        );
+        assert!(
+            engine.font_loader.faces_for(&partition).is_empty(),
+            "no face bytes may be installed after a budget timeout"
+        );
     }
 
     /// The first layout waits for linked sheets; when none of them arrives,
@@ -20574,6 +27758,67 @@ window.addEventListener('load', function () {
             "{log:#?}"
         );
     }
+
+    #[test]
+    fn runaway_promise_microtask_does_not_hang_navigation_or_tab_close() {
+        let page = r#"<html><head>
+<script>
+function again() { Promise.resolve().then(again); }
+again();
+</script>
+<script>var after = true;</script>
+</head><body><p>alive</p></body></html>"#;
+        let port = serve(vec![("/", "text/html", page.to_string())]);
+        let config = EngineConfig {
+            script_budget_ms: 200,
+            ..EngineConfig::default()
+        };
+        let (mut engine, view, took) = load_timed(config, port);
+        // Navigation completed promptly without hanging on runaway promise microtasks
+        assert!(took < std::time::Duration::from_secs(5), "navigation hung: {took:?}");
+
+        let log = engine.script_log(view).unwrap();
+        assert!(
+            matches!(&log[0].outcome, ScriptOutcome::Threw(m) if m.contains("timeout")),
+            "{log:#?}"
+        );
+        assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+
+        // Tab close / destroy_view stays completely responsive
+        engine.destroy_view(view).expect("destroy_view / tab close must succeed promptly");
+    }
+
+    #[test]
+    fn runaway_promise_microtask_hits_iteration_limit_and_allows_subsequent_scripts() {
+        let page = r#"<html><head>
+<script>
+function again() { Promise.resolve().then(again); }
+again();
+</script>
+<script>var after = true;</script>
+</head><body><p>alive</p></body></html>"#;
+        let port = serve(vec![("/", "text/html", page.to_string())]);
+        let config = EngineConfig {
+            script_budget_ms: 5_000,
+            script_loop_iteration_limit: 500,
+            ..EngineConfig::default()
+        };
+        let (mut engine, view, took) = load_timed(config, port);
+        assert!(took < std::time::Duration::from_secs(5), "navigation hung: {took:?}");
+
+        assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
+        let log = engine.script_log(view).unwrap();
+        assert!(
+            matches!(&log[0].outcome, ScriptOutcome::Threw(m) if m.contains("limit")),
+            "{log:#?}"
+        );
+        // Because the runaway microtask was bounded and aborted promptly by iteration limit,
+        // the engine had plenty of budget left to run inline#2:
+        assert_eq!(log[1].outcome, ScriptOutcome::Ran);
+
+        // Tab close / destroy_view stays completely responsive
+        engine.destroy_view(view).expect("destroy_view / tab close must succeed promptly");
+    }
 }
 
 /// A selector string as `Engine::selector_matches` uses it, prepared once
@@ -20596,6 +27841,21 @@ enum PreparedSelector {
         /// before the walk.
         ancestor_keys: Vec<u32>,
     },
+}
+
+impl PreparedSelector {
+    /// True when matching reads only the element's own tag, attributes and
+    /// child-ness: no combinator and no structural or state pseudo-class,
+    /// so no ancestor or sibling is consulted.
+    fn is_context_free(&self) -> bool {
+        match self {
+            PreparedSelector::Never => true,
+            PreparedSelector::List(members) => members.iter().all(|m| m.is_context_free()),
+            PreparedSelector::Complex { tokens, subject, .. } => {
+                tokens.len() == 1 && subject.is_context_free()
+            }
+        }
+    }
 }
 
 /// A key's hash for [`AncestorFilter`]: FNV-1a over a kind byte (`<` tag,
@@ -20759,6 +28019,22 @@ fn is_bare_id(rest: &str) -> bool {
 }
 
 impl SubjectCompound {
+    /// See [`PreparedSelector::is_context_free`]. Any pseudo-class makes the
+    /// compound context-dependent (`:first-child`, `:nth-*`, `:hover`, ...);
+    /// `:not()` and `:is()` are free only when every member is.
+    fn is_context_free(&self) -> bool {
+        match self {
+            Self::Universal | Self::Root | Self::IdOnly(_) | Self::ClassesOnly(_) => true,
+            Self::General { parts, .. } => parts.iter().all(|part| match part {
+                SubjectPart::Class(_) | SubjectPart::Id(_) | SubjectPart::Attr(_) => true,
+                SubjectPart::Pseudo(..) => false,
+                SubjectPart::List { members, .. } => {
+                    members.iter().all(|m| m.as_ref().is_none_or(|m| m.is_context_free()))
+                }
+            }),
+        }
+    }
+
     fn parse(engine: &SelectorMatcher, selector: &str) -> Self {
         if selector == "*" {
             return Self::Universal;
@@ -20769,7 +28045,7 @@ impl SubjectCompound {
         if let Some(id) = selector.strip_prefix('#').filter(|id| is_bare_id(id)) {
             return Self::IdOnly(css_ident(id).into_owned());
         }
-        if selector.starts_with('.') && !selector.contains(|c| c == '#' || c == '[' || c == ':') {
+        if selector.starts_with('.') && !selector.contains(['#', '[', ':']) {
             return Self::ClassesOnly(
                 selector[1..]
                     .split('.')
@@ -20862,6 +28138,28 @@ impl SubjectCompound {
             }
         }
     }
+}
+
+/// What marks an element as hovered (pressed) for one build: an attribute
+/// name on the element itself (the subject matcher reads attributes) and a
+/// class on it as an ancestor or an earlier sibling (those are known by
+/// tag, classes and id). A page can spell it only by writing U+0001 into a
+/// class or an attribute name, and then styles that element as hovered.
+const HOVER_MARK: &str = "\u{1}hover";
+const ACTIVE_MARK: &str = "\u{1}active";
+
+/// An element's classes as its descendants and later siblings see them.
+fn element_classes(attributes: &HashMap<String, String>) -> Vec<String> {
+    let mut classes: Vec<String> = attributes
+        .get("class")
+        .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    for mark in [HOVER_MARK, ACTIVE_MARK] {
+        if attributes.contains_key(mark) {
+            classes.push(mark.to_string());
+        }
+    }
+    classes
 }
 
 /// An earlier sibling as `+` / `~` see it: tag, classes, id, and the form
@@ -21026,6 +28324,10 @@ impl AncestorCompound {
                             // Relational: the subject path under-matches it
                             // too.
                             ("has", _) => out.never = true,
+                            // A hovered ancestor or sibling carries the
+                            // mark among its classes (`element_classes`).
+                            ("hover", None) => out.classes.push(HOVER_MARK.to_string()),
+                            ("active", None) => out.classes.push(ACTIVE_MARK.to_string()),
                             (n, _) if SelectorMatcher::pseudo_class_is_static_false(n) => out.never = true,
                             // Structural and the rest need context the tuple
                             // does not carry: permissive.
@@ -21064,9 +28366,9 @@ impl AncestorCompound {
 
     fn matches(&self, tag_name: &str, classes: &[String], id: Option<&String>) -> bool {
         !self.never
-            && self.tag.as_deref().map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
+            && self.tag.as_deref().is_none_or(|t| t.eq_ignore_ascii_case(tag_name))
             && self.classes.iter().all(|req| classes.iter().any(|c| c == req))
-            && self.id.as_deref().map_or(true, |req| id.is_some_and(|el| el == req))
+            && self.id.as_deref().is_none_or(|req| id.is_some_and(|el| el == req))
             && self
                 .any_of
                 .iter()
@@ -21135,6 +28437,8 @@ struct RuleIndex {
     /// SipHash the selector string into the prepared cache on every
     /// candidate of every element.
     prepared: Vec<Rc<PreparedSelector>>,
+    /// What the prepared selectors read, for match sharing.
+    reads: SelectorReads,
     /// Every rule, by its subject keys.
     main: RuleBuckets,
     /// Rules whose selector ends in `:before`/`::before` (resp. after), the
@@ -21423,6 +28727,811 @@ fn tree_reuse_mode() -> TreeReuse {
     *MODE.get_or_init(|| tree_reuse_from(std::env::var("RUSTKIT_TREE_REUSE").ok().as_deref()))
 }
 
+/// `RUSTKIT_STYLE_SHARE`: on by default. An element is handed the style an
+/// earlier element of the same build computed from the same parent style,
+/// tag, matched rules, inline style and UA hiding, instead of applying the
+/// declarations again. `0` or `off` applies them for every element. `verify`
+/// applies them anyway and counts the styles that differ from the shared one.
+///
+/// The default and `verify` also share matches (see [`MatchShareKey`]): an
+/// element takes the matched rules of an earlier element with the same tag,
+/// attributes and ancestor chain, for every rule that reads nothing else.
+/// `style` shares styles only.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StyleShareMode {
+    Off,
+    StyleOnly,
+    Share,
+    Verify,
+}
+
+fn style_share_from(value: Option<&str>) -> StyleShareMode {
+    match value {
+        Some("0") | Some("off") => StyleShareMode::Off,
+        Some("style") => StyleShareMode::StyleOnly,
+        Some("verify") => StyleShareMode::Verify,
+        _ => StyleShareMode::Share,
+    }
+}
+
+fn style_share_mode() -> StyleShareMode {
+    #[cfg(test)]
+    if let Some(mode) = STYLE_SHARE_TEST_MODE.with(|m| m.get()) {
+        return mode;
+    }
+    static MODE: std::sync::OnceLock<StyleShareMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| style_share_from(std::env::var("RUSTKIT_STYLE_SHARE").ok().as_deref()))
+}
+
+/// Everything the cascade reads once the matching rules are known. `parent`
+/// is the share id of the parent's style: equal ids mean equal styles.
+/// `rules` holds each matched rule's number and the specificity it matched
+/// with, in cascade order.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct StyleShareKey {
+    parent: u64,
+    tag: String,
+    rules: Vec<(usize, (usize, usize, usize))>,
+    inline: Option<String>,
+    ua_hidden: bool,
+}
+
+/// What `style_share_lookup` found for one element.
+enum StyleShared {
+    /// No sharing in this build, or the parent's style has no share id.
+    Untracked,
+    /// An earlier element's style, to use as is.
+    Hit(Box<ComputedStyle>),
+    /// Nothing stored under this key yet: compute, then store.
+    Miss(StyleShareKey),
+    /// Verify mode: compute anyway and compare with the style under this key.
+    Check(StyleShareKey),
+}
+
+/// One build's shared styles.
+struct StyleShare {
+    verify: bool,
+    /// The styles computed so far, each with its share id.
+    styles: HashMap<StyleShareKey, (u64, ComputedStyle)>,
+    /// The enclosing elements whose children are being built, innermost
+    /// last: the address of the style their children inherit from, and its
+    /// share id when it has one.
+    parents: Vec<(*const ComputedStyle, Option<u64>)>,
+    /// Verify mode: the first parent style seen under each share id.
+    parent_styles: HashMap<u64, ComputedStyle>,
+    /// The share id of the style the cascade last produced, for the walk.
+    last_id: Option<u64>,
+    next_id: u64,
+    hits: usize,
+    misses: usize,
+    untracked: usize,
+    mismatches: usize,
+    parent_mismatches: usize,
+    /// Match sharing; `None` under `RUSTKIT_STYLE_SHARE=style`.
+    matches: Option<MatchShare>,
+}
+
+/// Rule numbers of [`MatchShareEntry`] are the rule index's.
+type MatchedRule = (u32, (usize, usize, usize));
+
+/// What one element's matching came to, split by what the rules read.
+#[derive(Default, PartialEq, Debug)]
+struct MatchShareEntry {
+    /// The matched rules among the candidates that read only what
+    /// [`MatchShareKey`] holds, ascending, each with the specificity it
+    /// matched with.
+    matched: Vec<MatchedRule>,
+    /// The candidates that also read siblings, position or children
+    /// (`SelectorReads::positional`), ascending. An element sharing this
+    /// entry matches them itself.
+    positional: Vec<u32>,
+}
+
+/// Everything a selector with no sibling combinator and no positional
+/// pseudo-class can read: the element's tag and attributes, and its
+/// ancestors' tags, classes and ids (`chain`: equal ids mean chains equal
+/// in all three, see [`MatchShareChain`]). An attribute's name is always
+/// held; of its value, what a selector can read
+/// ([`SelectorReads::keyed_value`]). The candidate list is a function of the
+/// same key.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct MatchShareKey {
+    chain: u64,
+    tag: String,
+    /// Sorted by name.
+    attributes: Vec<(String, MatchKeyValue)>,
+}
+
+/// What [`MatchShareKey`] holds of one attribute's value.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum MatchKeyValue {
+    /// No selector reads the value.
+    Present,
+    Value(String),
+    /// The outcome of each attribute selector the sheets test this name
+    /// with, in `SelectorReads::attribute_tests` order.
+    Tests(Vec<bool>),
+}
+
+/// What `match_share_lookup` found for one element.
+enum MatchShared {
+    /// No match sharing in this build, or the element's ancestor slice is
+    /// not the one the innermost [`MatchShareChain`] named.
+    Untracked,
+    /// An earlier element's matches.
+    Hit(Rc<MatchShareEntry>),
+    /// Nothing stored under this key yet: match, then store.
+    Miss(MatchShareKey),
+    /// Verify mode: match anyway and compare with the entry under this key.
+    Check(MatchShareKey, Rc<MatchShareEntry>),
+}
+
+/// One build's shared matches.
+struct MatchShare {
+    verify: bool,
+    /// `RuleIndex::source` of the index the entries' rule numbers belong to.
+    source: Option<(usize, usize, usize)>,
+    entries: HashMap<MatchShareKey, Rc<MatchShareEntry>>,
+    /// Chain ids by content: the rest of the chain's id, then the nearest
+    /// ancestor's tag, classes and id (the id only when a selector names
+    /// it). The empty chain is 0.
+    chain_ids: HashMap<(u64, String, Vec<String>, Option<String>), u64>,
+    /// The enclosing elements whose children are being built, innermost
+    /// last: the address and length of the ancestor slice their children
+    /// are matched against, and its chain id.
+    chains: Vec<(usize, usize, u64)>,
+    next_chain: u64,
+    hits: usize,
+    misses: usize,
+    untracked: usize,
+    mismatches: usize,
+}
+
+/// Attributes a state pseudo-class decides by value (`:checked`, `:valid`,
+/// `:read-write`, `:lang()`, `:dir()`): always held by value in the key.
+const MATCH_STATE_ATTRIBUTES: [&str; 5] = ["type", "value", "contenteditable", "lang", "dir"];
+
+/// What the sheets' selectors read beyond tags, classes and attribute
+/// names, collected once per rule index.
+#[derive(Default)]
+struct SelectorReads {
+    /// Global rule index -> the rule's match also depends on the element's
+    /// siblings, its position among them or whether it has children: it has
+    /// a `+` or `~` combinator, or a subject pseudo-class outside
+    /// [`SelectorReads::pseudo_reads_only_the_element`].
+    positional: Vec<bool>,
+    /// Ids some compound names.
+    ids: std::collections::HashSet<String>,
+    /// Attribute name -> the distinct tests (operator and value, as
+    /// `SelectorMatcher::attr_selector_test` splits them) some subject
+    /// compound puts its value to. Split here, once per index: the key of
+    /// every element ran `match_attribute_selector` over the selector text
+    /// for each of them, 14% of wikipedia's build with sharing on.
+    attribute_tests: HashMap<String, Vec<(&'static str, String)>>,
+    /// Where the sheets read `:hover` and `:active`.
+    hover: PointerReads,
+    active: PointerReads,
+}
+
+/// Which elements a pointer pseudo-class (`:hover`, `:active`) can change
+/// a rule's match from.
+#[derive(Default)]
+struct PointerReads {
+    /// The compounds that carry it, without it: an element none of them
+    /// matches by tag, classes and id gains or loses the pseudo-class
+    /// without any rule noticing.
+    compounds: Vec<AncestorCompound>,
+    seen: std::collections::HashSet<(Option<String>, Vec<String>, Option<String>)>,
+    /// Some selector names it where `compounds` does not show it (inside
+    /// `:not()`, `:has()`, or an `:is()` member with a combinator): any
+    /// element may count.
+    anywhere: bool,
+}
+
+impl PointerReads {
+    /// Record where `selector` reads `name` (`":hover"`), which the
+    /// compound parser turns into the class `mark`.
+    fn note(&mut self, selector: &str, name: &str, mark: &str) {
+        if !selector.contains(name) {
+            return;
+        }
+        for member in SelectorMatcher::split_top_level_commas(selector) {
+            let member = member.trim();
+            let named = member.matches(name).count();
+            if named == 0 {
+                continue;
+            }
+            // A `::before` / `::after` rule is matched by its base selector.
+            let base = [(":before", "::before"), (":after", "::after")]
+                .into_iter()
+                .find(|(suffix, _)| member.ends_with(suffix))
+                .map_or(member, |(suffix, pseudo)| pseudo_base_selector(member, pseudo, suffix));
+            let prepared = SelectorMatcher.prepared_selector(base);
+            let PreparedSelector::Complex { compounds, .. } = &*prepared else {
+                // Invalid, or some other pseudo-element's: it styles nothing.
+                continue;
+            };
+            let mut found = 0;
+            for compound in compounds {
+                let marks = compound.classes.iter().filter(|c| *c == mark).count();
+                if marks == 0 {
+                    continue;
+                }
+                found += marks;
+                let classes: Vec<String> = compound
+                    .classes
+                    .iter()
+                    .filter(|c| !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK))
+                    .cloned()
+                    .collect();
+                if self.seen.insert((compound.tag.clone(), classes.clone(), compound.id.clone())) {
+                    self.compounds.push(AncestorCompound {
+                        never: compound.never,
+                        tag: compound.tag.clone(),
+                        classes,
+                        id: compound.id.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+            self.anywhere |= found != named;
+        }
+    }
+}
+
+impl SelectorReads {
+    /// Record what `prepared` reads. True when it is positional.
+    fn note(&mut self, prepared: &PreparedSelector) -> bool {
+        match prepared {
+            PreparedSelector::Never => false,
+            PreparedSelector::List(members) => {
+                members.iter().fold(false, |positional, m| self.note(m) | positional)
+            }
+            PreparedSelector::Complex { tokens, compounds, subject, .. } => {
+                let mut positional = false;
+                for ((_, combinator), compound) in tokens.iter().zip(compounds) {
+                    match combinator.as_str() {
+                        // The subject's own token: `subject` below.
+                        "" => {}
+                        " " | ">" => self.note_ancestor(compound),
+                        _ => positional = true,
+                    }
+                }
+                self.note_subject(subject) | positional
+            }
+        }
+    }
+
+    fn note_ancestor(&mut self, compound: &AncestorCompound) {
+        self.ids.extend(compound.id.iter().cloned());
+        for alternative in compound.any_of.iter().flatten() {
+            self.note_ancestor(alternative);
+        }
+    }
+
+    fn note_subject(&mut self, subject: &SubjectCompound) -> bool {
+        let parts = match subject {
+            SubjectCompound::Universal | SubjectCompound::Root | SubjectCompound::ClassesOnly(_) => {
+                return false;
+            }
+            SubjectCompound::IdOnly(id) => {
+                self.ids.insert(id.clone());
+                return false;
+            }
+            SubjectCompound::General { parts, .. } => parts,
+        };
+        let mut positional = false;
+        for part in parts {
+            match part {
+                SubjectPart::Class(_) => {}
+                SubjectPart::Id(id) => {
+                    self.ids.insert(id.clone());
+                }
+                // A bare `[name]` reads the name's presence, which the key
+                // always holds.
+                SubjectPart::Attr(attr) => {
+                    if let Some((op, value)) = SelectorMatcher::attr_selector_test(attr) {
+                        let tests = self
+                            .attribute_tests
+                            .entry(SelectorMatcher::attr_selector_name(attr).to_string())
+                            .or_default();
+                        if !tests.iter().any(|(o, v)| *o == op && v == value) {
+                            tests.push((op, value.to_string()));
+                        }
+                    }
+                }
+                SubjectPart::Pseudo(name, _) => {
+                    positional |= !Self::pseudo_reads_only_the_element(name);
+                }
+                SubjectPart::List { members, .. } => {
+                    for member in members.iter().flatten() {
+                        positional |= self.note_subject(member);
+                    }
+                }
+            }
+        }
+        positional
+    }
+
+    /// Pseudo-classes `match_pseudo_class` decides from the tag and the
+    /// attributes alone (names, and the values of
+    /// [`MATCH_STATE_ATTRIBUTES`]), or the same way for every element. A
+    /// name not listed here makes its rule positional, which is always safe.
+    fn pseudo_reads_only_the_element(name: &str) -> bool {
+        SelectorMatcher::pseudo_class_is_static_false(name)
+            || matches!(
+                name,
+                "link"
+                    | "any-link"
+                    | "disabled"
+                    | "enabled"
+                    | "checked"
+                    | "indeterminate"
+                    | "default"
+                    | "autofill"
+                    | "user-valid"
+                    | "user-invalid"
+                    | "required"
+                    | "optional"
+                    | "read-write"
+                    | "read-only"
+                    | "invalid"
+                    | "valid"
+                    | "in-range"
+                    | "out-of-range"
+                    | "defined"
+                    | "lang"
+                    | "dir"
+                    | "fullscreen"
+                    | "modal"
+                    | "popover-open"
+                    | "picture-in-picture"
+                    | "playing"
+                    | "muted"
+                    | "host"
+                    | "host-context"
+                    | "paused"
+                    | "first-line"
+                    | "first-letter"
+                    | "root"
+                    | "scope"
+                    | "has"
+            )
+    }
+
+    /// What a selector can read of one attribute's value: all of it for
+    /// `class`, the state attributes and an id some compound names; else
+    /// only whether each attribute selector on that name passes.
+    fn keyed_value(&self, name: &str, value: &str) -> MatchKeyValue {
+        if name == "class"
+            || MATCH_STATE_ATTRIBUTES.contains(&name)
+            || (name == "id" && self.ids.contains(value))
+        {
+            return MatchKeyValue::Value(value.to_string());
+        }
+        match self.attribute_tests.get(name) {
+            Some(tests) => MatchKeyValue::Tests(
+                tests
+                    .iter()
+                    .map(|(op, test)| SelectorMatcher::attr_test_passes(op, test, value))
+                    .collect(),
+            ),
+            None => MatchKeyValue::Present,
+        }
+    }
+
+    fn key(&self, chain: u64, tag_name: &str, attributes: &HashMap<String, String>) -> MatchShareKey {
+        let mut attributes: Vec<(String, MatchKeyValue)> = attributes
+            .iter()
+            .map(|(name, value)| (name.clone(), self.keyed_value(name, value)))
+            .collect();
+        attributes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        MatchShareKey {
+            chain,
+            tag: tag_name.to_string(),
+            attributes,
+        }
+    }
+}
+
+/// Names `child_chain` as the ancestor slice the elements built inside this
+/// scope are matched against, and gives it a chain id. `child_chain` is
+/// `parent_chain` with the element entering the scope in front. An element's
+/// matches are keyed on the id only while the scope is alive and only when
+/// it is handed this very slice, which the scope's owner keeps borrowed.
+struct MatchShareChain {
+    entered: bool,
+}
+
+impl MatchShareChain {
+    fn enter(stylesheets: &[Stylesheet], parent_chain: &[Ancestor], child_chain: &[Ancestor]) -> Self {
+        let entered = STYLE_SHARE.with(|s| {
+            let mut slot = s.borrow_mut();
+            let Some(share) = slot.as_mut().and_then(|s| s.matches.as_mut()) else {
+                return false;
+            };
+            let (Some(ix), Some(nearest)) = (active_rule_index(stylesheets), child_chain.first())
+            else {
+                return false;
+            };
+            // Which ids are named is the index's; so are the chain ids.
+            if *share.source.get_or_insert(ix.source) != ix.source {
+                return false;
+            }
+            let rest = match share.chains.last() {
+                _ if parent_chain.is_empty() => Some(0),
+                Some(&(at, len, id))
+                    if at == parent_chain.as_ptr() as usize && len == parent_chain.len() =>
+                {
+                    Some(id)
+                }
+                _ => None,
+            };
+            // A chain not seen before, or one nothing else can be told equal
+            // to (its rest is unknown): its own id.
+            share.next_chain += 1;
+            let fresh = share.next_chain;
+            let id = match rest.filter(|_| child_chain.len() == parent_chain.len() + 1) {
+                Some(rest) => {
+                    let (tag, classes, id) = &**nearest;
+                    let named = id.clone().filter(|id| ix.reads.ids.contains(id));
+                    *share
+                        .chain_ids
+                        .entry((rest, tag.clone(), classes.clone(), named))
+                        .or_insert(fresh)
+                }
+                None => fresh,
+            };
+            share.chains.push((child_chain.as_ptr() as usize, child_chain.len(), id));
+            true
+        });
+        MatchShareChain { entered }
+    }
+}
+
+impl Drop for MatchShareChain {
+    fn drop(&mut self) {
+        if self.entered {
+            STYLE_SHARE.with(|s| {
+                if let Some(share) = s.borrow_mut().as_mut().and_then(|s| s.matches.as_mut()) {
+                    share.chains.pop();
+                }
+            });
+        }
+    }
+}
+
+/// Look one element's matches up. Only under the rule index the build's
+/// entries were stored under, and only for the ancestor slice the innermost
+/// [`MatchShareChain`] scope named.
+fn match_share_lookup(
+    ix: &RuleIndex,
+    tag_name: &str,
+    attributes: &HashMap<String, String>,
+    ancestors: &[Ancestor],
+) -> MatchShared {
+    STYLE_SHARE.with(|s| {
+        let mut slot = s.borrow_mut();
+        let Some(share) = slot.as_mut().and_then(|s| s.matches.as_mut()) else {
+            return MatchShared::Untracked;
+        };
+        let same_index = *share.source.get_or_insert(ix.source) == ix.source;
+        let chain = match share.chains.last() {
+            Some(&(at, len, id))
+                if same_index && at == ancestors.as_ptr() as usize && len == ancestors.len() =>
+            {
+                id
+            }
+            _ => {
+                share.untracked += 1;
+                return MatchShared::Untracked;
+            }
+        };
+        let key = ix.reads.key(chain, tag_name, attributes);
+        match share.entries.get(&key) {
+            Some(entry) => {
+                share.hits += 1;
+                match share.verify {
+                    true => MatchShared::Check(key, entry.clone()),
+                    false => MatchShared::Hit(entry.clone()),
+                }
+            }
+            None => {
+                share.misses += 1;
+                MatchShared::Miss(key)
+            }
+        }
+    })
+}
+
+/// The matcher ran over every candidate of an element `match_share_lookup`
+/// did not answer; `fresh` is what it found.
+fn match_share_store(found: MatchShared, fresh: MatchShareEntry) {
+    let (key, shared) = match found {
+        MatchShared::Untracked | MatchShared::Hit(_) => return,
+        MatchShared::Miss(key) => (key, None),
+        MatchShared::Check(key, shared) => (key, Some(shared)),
+    };
+    STYLE_SHARE.with(|s| {
+        let mut slot = s.borrow_mut();
+        let Some(share) = slot.as_mut().and_then(|s| s.matches.as_mut()) else {
+            return;
+        };
+        match shared {
+            None => {
+                share.entries.insert(key, Rc::new(fresh));
+            }
+            Some(shared) if *shared != fresh => {
+                share.mismatches += 1;
+                warn!(?key, ?shared, ?fresh, "Match share: shared matches differ from a fresh match");
+            }
+            Some(_) => {}
+        }
+    });
+}
+
+impl StyleShare {
+    fn fresh_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+}
+
+thread_local! {
+    /// Set by `StyleShareScope` for the span of one layout build.
+    static STYLE_SHARE: std::cell::RefCell<Option<StyleShare>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Overrides `RUSTKIT_STYLE_SHARE` for the builds of one test.
+    static STYLE_SHARE_TEST_MODE: Cell<Option<StyleShareMode>> = const { Cell::new(None) };
+    /// The last build's (hits, misses, mismatches, parent mismatches).
+    static STYLE_SHARE_LAST: Cell<(usize, usize, usize, usize)> = const { Cell::new((0, 0, 0, 0)) };
+    /// The last match-sharing build's (hits, misses, mismatches).
+    static MATCH_SHARE_LAST: Cell<(usize, usize, usize)> = const { Cell::new((0, 0, 0)) };
+}
+
+/// Arms style sharing for one layout build. Dropping it (also on unwind)
+/// restores what was there before, so no shared style or share id outlives
+/// the sheets, viewport and fonts it was computed under.
+struct StyleShareScope {
+    armed: bool,
+    previous: Option<StyleShare>,
+}
+
+impl StyleShareScope {
+    fn install(mode: StyleShareMode) -> Self {
+        if mode == StyleShareMode::Off {
+            return StyleShareScope {
+                armed: false,
+                previous: None,
+            };
+        }
+        let share = StyleShare {
+            verify: mode == StyleShareMode::Verify,
+            styles: HashMap::new(),
+            parents: Vec::new(),
+            parent_styles: HashMap::new(),
+            last_id: None,
+            next_id: 0,
+            hits: 0,
+            misses: 0,
+            untracked: 0,
+            mismatches: 0,
+            parent_mismatches: 0,
+            matches: (mode != StyleShareMode::StyleOnly).then(|| MatchShare {
+                verify: mode == StyleShareMode::Verify,
+                source: None,
+                entries: HashMap::new(),
+                chain_ids: HashMap::new(),
+                chains: Vec::new(),
+                next_chain: 0,
+                hits: 0,
+                misses: 0,
+                untracked: 0,
+                mismatches: 0,
+            }),
+        };
+        StyleShareScope {
+            armed: true,
+            previous: STYLE_SHARE.with(|s| s.replace(Some(share))),
+        }
+    }
+}
+
+impl Drop for StyleShareScope {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let ended = STYLE_SHARE.with(|s| s.replace(self.previous.take()));
+        if let Some(share) = ended {
+            info!(
+                verify = share.verify,
+                hits = share.hits,
+                misses = share.misses,
+                untracked = share.untracked,
+                mismatches = share.mismatches,
+                parent_mismatches = share.parent_mismatches,
+                "Style share"
+            );
+            if let Some(matches) = &share.matches {
+                info!(
+                    verify = matches.verify,
+                    match_hits = matches.hits,
+                    match_misses = matches.misses,
+                    match_untracked = matches.untracked,
+                    match_mismatches = matches.mismatches,
+                    "Match share"
+                );
+                #[cfg(test)]
+                MATCH_SHARE_LAST.with(|l| l.set((matches.hits, matches.misses, matches.mismatches)));
+            }
+            #[cfg(test)]
+            STYLE_SHARE_LAST.with(|l| {
+                l.set((
+                    share.hits,
+                    share.misses,
+                    share.mismatches,
+                    share.parent_mismatches,
+                ))
+            });
+        }
+    }
+}
+
+/// Run one element's cascade and report the share id of the style it
+/// produced. `None` when the cascade did not run (a replayed style) or the
+/// build does not share: that element's children then share nothing.
+fn style_share_tracked<T>(cascade: impl FnOnce() -> T) -> (T, Option<u64>) {
+    let take = || STYLE_SHARE.with(|s| s.borrow_mut().as_mut().and_then(|s| s.last_id.take()));
+    take();
+    let style = cascade();
+    (style, take())
+}
+
+/// Marks `style` as the one the elements built inside this scope inherit
+/// from. A child's cascade is keyed on `id` only while the scope is alive
+/// and only when it is handed this very style.
+struct StyleShareParent {
+    entered: bool,
+}
+
+impl StyleShareParent {
+    fn enter(style: &ComputedStyle, id: Option<u64>) -> Self {
+        let entered = STYLE_SHARE.with(|s| {
+            let mut slot = s.borrow_mut();
+            let Some(share) = slot.as_mut() else {
+                return false;
+            };
+            if let (true, Some(id)) = (share.verify, id) {
+                let differs = share
+                    .parent_styles
+                    .get(&id)
+                    .map(|first| !same_computed_style(first, style));
+                match differs {
+                    None => {
+                        share.parent_styles.insert(id, style.clone());
+                    }
+                    Some(true) => {
+                        share.parent_mismatches += 1;
+                        warn!(id, "Style share: two parent styles differ under one share id");
+                    }
+                    Some(false) => {}
+                }
+            }
+            share.parents.push((style as *const ComputedStyle, id));
+            true
+        });
+        StyleShareParent { entered }
+    }
+}
+
+impl Drop for StyleShareParent {
+    fn drop(&mut self) {
+        if self.entered {
+            STYLE_SHARE.with(|s| {
+                if let Some(share) = s.borrow_mut().as_mut() {
+                    share.parents.pop();
+                }
+            });
+        }
+    }
+}
+
+/// Look one element up. `key` is built only when the build shares and
+/// `parent` is the style the innermost `StyleShareParent` scope named; its
+/// `parent` field is filled in here.
+fn style_share_lookup(parent: &ComputedStyle, key: impl FnOnce() -> StyleShareKey) -> StyleShared {
+    STYLE_SHARE.with(|s| {
+        let mut slot = s.borrow_mut();
+        let Some(share) = slot.as_mut() else {
+            return StyleShared::Untracked;
+        };
+        let parent_id = match share.parents.last() {
+            Some((style, Some(id))) if std::ptr::eq(*style, parent) => *id,
+            _ => {
+                // A style nothing else can be told equal to: its own id.
+                share.untracked += 1;
+                share.last_id = Some(share.fresh_id());
+                return StyleShared::Untracked;
+            }
+        };
+        let mut key = key();
+        key.parent = parent_id;
+        let found = share
+            .styles
+            .get(&key)
+            .map(|(id, style)| (*id, (!share.verify).then(|| Box::new(style.clone()))));
+        match found {
+            Some((id, style)) => {
+                share.hits += 1;
+                share.last_id = Some(id);
+                match style {
+                    Some(style) => StyleShared::Hit(style),
+                    None => StyleShared::Check(key),
+                }
+            }
+            None => {
+                share.misses += 1;
+                StyleShared::Miss(key)
+            }
+        }
+    })
+}
+
+/// The cascade finished for an element `style_share_lookup` did not answer.
+fn style_share_store(found: StyleShared, style: &ComputedStyle) {
+    STYLE_SHARE.with(|s| {
+        let mut slot = s.borrow_mut();
+        let Some(share) = slot.as_mut() else {
+            return;
+        };
+        match found {
+            StyleShared::Miss(key) => {
+                let id = share.fresh_id();
+                share.last_id = Some(id);
+                share.styles.insert(key, (id, style.clone()));
+            }
+            StyleShared::Check(key) => {
+                let differs = share
+                    .styles
+                    .get(&key)
+                    .is_some_and(|(_, shared)| !same_computed_style(shared, style));
+                if differs {
+                    share.mismatches += 1;
+                    warn!(?key, "Style share: shared style differs from a fresh cascade");
+                }
+            }
+            StyleShared::Untracked | StyleShared::Hit(_) => {}
+        }
+    });
+}
+
+/// `tag.to_lowercase()`, borrowed when the tag is already lowercase ASCII.
+/// The walk lowercases each element's tag several times over.
+fn lower_tag(tag: &str) -> Cow<'_, str> {
+    if tag.bytes().all(|b| b.is_ascii() && !b.is_ascii_uppercase()) {
+        Cow::Borrowed(tag)
+    } else {
+        Cow::Owned(tag.to_lowercase())
+    }
+}
+
+/// `RK_NO_POS` is set. Read once: the walk asks for every box.
+fn positioning_disabled() -> bool {
+    static SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SET.get_or_init(|| std::env::var("RK_NO_POS").is_ok())
+}
+
+/// `RK_NO_PSEUDO_POS` is set. Read once, like `positioning_disabled`.
+fn pseudo_positioning_disabled() -> bool {
+    static SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SET.get_or_init(|| std::env::var("RK_NO_PSEUDO_POS").is_ok())
+}
+
 /// A recording build with tree reuse on notes each `<img>` box's size
 /// hints under its identity, for `refresh_image_sizes`.
 fn note_snapshot_image(image_box: &LayoutBox, width: Option<f32>, height: Option<f32>) {
@@ -21484,6 +29593,10 @@ struct StyleMemoKey {
     external_sheets: usize,
     viewport: Option<(f32, f32)>,
     focus: Option<rustkit_dom::NodeId>,
+    /// The hovered and the pressed element: `:hover` and `:active` style
+    /// them and the elements above them.
+    hover: Option<usize>,
+    active: Option<usize>,
     /// How many web faces the view's font partition has loaded (the loader
     /// only grows a partition, so the count names the set): `ch` lengths
     /// resolve against the element's font, so a face arriving between two
@@ -21796,13 +29909,453 @@ fn same_computed_style(a: &ComputedStyle, b: &ComputedStyle) -> bool {
 }
 
 #[cfg(test)]
+mod style_share_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, DisplayList, Rect};
+
+    fn engine() -> Engine {
+        Engine::new(EngineConfig::default()).expect("engine")
+    }
+
+    /// Repeats (list items, their links, the notes) next to everything that
+    /// must keep two look-alikes apart: a parent with another font size, an
+    /// inline style, a positional rule, a `hidden` attribute, a custom
+    /// property set on one parent only.
+    const PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+        :root { --accent: #c00; }
+        html { font-size: 15px; line-height: 1.4; }
+        body { margin: 0; font-family: sans-serif; }
+        ul li { padding: 2px 4px; color: var(--accent); }
+        ul li a { font-size: 1.2em; text-decoration: none; border-left: 0.5em solid; }
+        li:nth-child(2n) { background: #eee; }
+        #big { font-size: 30px; }
+        #green { --accent: #080; }
+        .note { margin: 1em; padding: 3px; }
+        div.gone { display: block; }
+        </style></head><body>
+        <ul><li><a href="/1">one</a></li><li><a href="/2">two</a></li><li><a href="/3">three</a></li><li><a href="/4">four</a></li></ul>
+        <ul id="big"><li><a href="/5">five</a></li><li><a href="/6">six</a></li><li><a href="/7">seven</a></li></ul>
+        <ul id="green"><li><a href="/8">eight</a></li><li><a href="/9">nine</a></li><li><a href="/10">ten</a></li></ul>
+        <p class="note">a</p><p class="note" style="color: green">b</p><p class="note">c</p>
+        <div hidden>unseen</div><div>seen</div><div class="gone" hidden>shown anyway</div>
+        </body></html>"#;
+
+    struct Mode;
+
+    impl Mode {
+        fn set(mode: StyleShareMode) -> Self {
+            STYLE_SHARE_TEST_MODE.with(|m| m.set(Some(mode)));
+            Mode
+        }
+    }
+
+    impl Drop for Mode {
+        fn drop(&mut self) {
+            STYLE_SHARE_TEST_MODE.with(|m| m.set(None));
+        }
+    }
+
+    /// The page's display list under `mode`, and the build's
+    /// (hits, misses, mismatches, parent mismatches).
+    fn paint(e: &Engine, mode: StyleShareMode) -> (String, (usize, usize, usize, usize)) {
+        paint_page(e, PAGE, mode)
+    }
+
+    fn paint_page(e: &Engine, page: &str, mode: StyleShareMode) -> (String, (usize, usize, usize, usize)) {
+        let _mode = Mode::set(mode);
+        STYLE_SHARE_LAST.with(|l| l.set((0, 0, 0, 0)));
+        MATCH_SHARE_LAST.with(|l| l.set((0, 0, 0)));
+        let d = Document::parse_html(page).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        root.layout(&cb);
+        let painted = DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (painted, STYLE_SHARE_LAST.with(|l| l.get()))
+    }
+
+    #[test]
+    fn sharing_is_on_unless_turned_off() {
+        assert_eq!(style_share_from(None), StyleShareMode::Share);
+        assert_eq!(style_share_from(Some("")), StyleShareMode::Share);
+        assert_eq!(style_share_from(Some("0")), StyleShareMode::Off);
+        assert_eq!(style_share_from(Some("off")), StyleShareMode::Off);
+        assert_eq!(style_share_from(Some("1")), StyleShareMode::Share);
+        assert_eq!(style_share_from(Some("on")), StyleShareMode::Share);
+        assert_eq!(style_share_from(Some("style")), StyleShareMode::StyleOnly);
+        assert_eq!(style_share_from(Some("verify")), StyleShareMode::Verify);
+    }
+
+    /// Look-alikes that match different rules: an ancestor's class, an
+    /// ancestor's id a rule names (next to one no rule names), an own id a
+    /// rule names, attribute values on either side of an operator test,
+    /// position, an earlier sibling, emptiness and form state.
+    const MATCH_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+        body { margin: 0; font-family: sans-serif; }
+        li { padding: 1px; }
+        .dark li { background: #222; color: #fff; }
+        #second li { border-left: 3px solid #00f; }
+        li:first-child { font-weight: bold; }
+        li + li { margin-top: 2px; }
+        a[href^="http"] { color: #080; }
+        a[href$=".pdf"] { background: #fc0; }
+        #named { background: #ff0; }
+        p:empty { height: 7px; background: #f0f; }
+        input:checked { margin-left: 11px; }
+        [data-kind] { padding-left: 9px; }
+        [data-kind="b"] { padding-left: 19px; }
+        </style></head><body>
+        <ul><li><a href="/a">a</a></li><li><a href="/b">b</a></li><li><a href="http://x/c">c</a></li><li><a href="/d.pdf">d</a></li><li><a href="/e">e</a></li></ul>
+        <ul class="dark"><li>f</li><li>g</li><li>h</li></ul>
+        <ul id="second"><li>i</li><li>j</li><li>k</li></ul>
+        <ul id="third"><li>l</li><li>m</li><li>n</li></ul>
+        <div id="named">o</div><div id="other">p</div><div id="another">q</div>
+        <p></p><p>r</p><p>s</p>
+        <span data-kind="a">t</span><span data-kind="b">u</span><span data-kind="a">v</span><span data-other="a">w</span>
+        <input type="checkbox" checked><input type="checkbox"><input type="text" checked><input type="checkbox">
+        </body></html>"#;
+
+    fn match_share_last() -> (usize, usize, usize) {
+        MATCH_SHARE_LAST.with(|l| l.get())
+    }
+
+    #[test]
+    fn shared_matches_paint_what_a_full_cascade_paints() {
+        let e = engine();
+        for page in [MATCH_PAGE, PAGE] {
+            let (full, _) = paint_page(&e, page, StyleShareMode::Off);
+            assert_eq!(match_share_last(), (0, 0, 0), "an unshared build shares no matches");
+            let (styles_only, _) = paint_page(&e, page, StyleShareMode::StyleOnly);
+            assert_eq!(match_share_last(), (0, 0, 0), "`style` shares no matches");
+            let (shared, _) = paint_page(&e, page, StyleShareMode::Share);
+            let (hits, misses, _) = match_share_last();
+            let (verified, _) = paint_page(&e, page, StyleShareMode::Verify);
+            let (verify_hits, verify_misses, mismatches) = match_share_last();
+
+            assert!(hits > 0 && misses > 0, "{hits} shared, {misses} matched");
+            assert_eq!((verify_hits, verify_misses), (hits, misses));
+            assert_eq!(mismatches, 0);
+            assert_eq!(styles_only, full);
+            assert_eq!(shared, full);
+            assert_eq!(verified, full);
+        }
+    }
+
+    #[test]
+    fn the_match_key_tells_look_alikes_apart() {
+        let e = engine();
+        paint_page(&e, MATCH_PAGE, StyleShareMode::Share);
+        // Matched afresh (19): each of the four lists (no id, a class, a
+        // named id, an unnamed id); the first item under the plain, the
+        // dark and the `#second` list; the `/a`, `http:` and `.pdf` links;
+        // `#named` and `#other`; the first paragraph; the first `a` and the
+        // `b` kind and `data-other`; the checked checkbox, the unchecked
+        // one and the checked text input.
+        // Shared (18): the other items of those three lists (4, 2, 2) and
+        // all three under `#third`, whose chain is the plain list's; the
+        // `/b` and `/e` links; `#another`; two paragraphs (`:empty` is
+        // matched for each); the second `a` kind; the last checkbox.
+        // `html` and `body` are styled outside any chain scope.
+        let (hits, misses, _) = match_share_last();
+        assert_eq!((hits, misses), (18, 19));
+    }
+
+    fn reads_of(selectors: &[&str]) -> (SelectorReads, Vec<bool>) {
+        let mut reads = SelectorReads::default();
+        let positional = selectors
+            .iter()
+            .map(|s| reads.note(&SelectorMatcher.prepared_selector(s)))
+            .collect();
+        (reads, positional)
+    }
+
+    #[test]
+    fn a_rule_that_reads_siblings_position_or_children_is_never_shared() {
+        let positional = [
+            "li:first-child",
+            "li:nth-of-type(2n)",
+            "p:empty",
+            "a + b",
+            "a ~ b",
+            "a + b c",
+            "div :not(:last-child)",
+            "ul :is(.a, .b:only-child)",
+            ".x, li:last-child",
+            "textarea:placeholder-shown",
+        ];
+        let (_, flags) = reads_of(&positional);
+        for (selector, flag) in positional.iter().zip(flags) {
+            assert!(flag, "{selector} reads more than the key holds");
+        }
+
+        let plain = [
+            "*",
+            ":root",
+            "#a",
+            ".a.b",
+            "div p",
+            "ul > li.x",
+            "a:link",
+            "a:hover",
+            "input:checked",
+            "a[href^=\"http\"]",
+            "div:not(.a, #b)",
+            ":is(h1, h2) span",
+            ".x, .y z",
+        ];
+        let (_, flags) = reads_of(&plain);
+        for (selector, flag) in plain.iter().zip(flags) {
+            assert!(!flag, "{selector} reads only the element and its ancestors");
+        }
+    }
+
+    #[test]
+    fn the_key_holds_what_the_selectors_read_of_an_attribute() {
+        let (reads, _) = reads_of(&[
+            "#top li",
+            "div#own",
+            ":is(#listed, .x) a",
+            "span:not(#denied)",
+            "a[href^=\"http\"]",
+            "a[href$=\".pdf\"]",
+            "[title]",
+        ]);
+        for id in ["top", "own", "listed", "denied"] {
+            assert!(reads.ids.contains(id), "{id} is named");
+        }
+        let attributes = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect()
+        };
+        let key = |pairs: &[(&str, &str)]| reads.key(1, "a", &attributes(pairs));
+
+        // Values no selector reads do not split the key; their names do.
+        assert_eq!(key(&[("href", "/a"), ("title", "x")]), key(&[("href", "/b"), ("title", "y")]));
+        assert_ne!(key(&[("href", "/a"), ("title", "x")]), key(&[("href", "/a")]));
+        // Either side of an operator test.
+        assert_ne!(key(&[("href", "/a")]), key(&[("href", "http://a")]));
+        assert_ne!(key(&[("href", "/a")]), key(&[("href", "/a.pdf")]));
+        // A named id, an unnamed one, and none.
+        assert_eq!(key(&[("id", "one")]), key(&[("id", "two")]));
+        assert_ne!(key(&[("id", "one")]), key(&[("id", "own")]));
+        assert_ne!(key(&[("id", "one")]), key(&[]));
+        // Classes and state attributes by value; the chain and the tag.
+        assert_ne!(key(&[("class", "a")]), key(&[("class", "b")]));
+        assert_ne!(key(&[("type", "radio")]), key(&[("type", "text")]));
+        assert_ne!(reads.key(1, "a", &attributes(&[])), reads.key(2, "a", &attributes(&[])));
+        assert_ne!(reads.key(1, "a", &attributes(&[])), reads.key(1, "b", &attributes(&[])));
+    }
+
+    /// The key splits each attribute test once, when the index is built. It
+    /// must hold what the matcher answers from the selector's text.
+    #[test]
+    fn the_keyed_attribute_tests_answer_as_the_matcher_does() {
+        let tests = [
+            "data-x=a",
+            "data-x=\"a\"",
+            "data-x~=a",
+            "data-x|=a",
+            "data-x^=\"a\"",
+            "data-x$='a'",
+            "data-x*=a",
+            "data-x*=\"\"",
+            "data-x=\"a=b\"",
+        ];
+        let selectors: Vec<String> = tests.iter().map(|t| format!("i[{t}]")).collect();
+        let (reads, _) = reads_of(&selectors.iter().map(String::as_str).collect::<Vec<_>>());
+        let kept = &reads.attribute_tests["data-x"];
+        assert_eq!(kept.len(), tests.len() - 1, "`=a` twice is one test");
+        for value in ["a", "a b", "b a", "a-b", "ab", "ba", "b", "", "a=b", "x~=a", "A"] {
+            let attributes: HashMap<String, String> =
+                [("data-x".to_string(), value.to_string())].into();
+            let MatchKeyValue::Tests(keyed) = reads.keyed_value("data-x", value) else {
+                panic!("data-x is tested");
+            };
+            assert_eq!(keyed.len(), kept.len());
+            for test in tests {
+                let (op, operand) = SelectorMatcher::attr_selector_test(test).expect("operator");
+                let at = kept.iter().position(|(o, v)| *o == op && v == operand).expect("kept");
+                assert_eq!(
+                    keyed[at],
+                    SelectorMatcher.match_attribute_selector(test, &attributes),
+                    "[{test}] on data-x={value:?}"
+                );
+            }
+        }
+        // A bare `[name]` is no test: the key holds the name's presence.
+        assert!(SelectorMatcher::attr_selector_test("data-x").is_none());
+        // The matcher itself, operator by operator.
+        for (test, value, passes) in [
+            ("data-x=a", "a", true),
+            ("data-x=a", "ab", false),
+            ("data-x~=a", "b a", true),
+            ("data-x~=a", "ba", false),
+            ("data-x|=a", "a", true),
+            ("data-x|=a", "a-b", true),
+            ("data-x|=a", "ab", false),
+            ("data-x^=a", "ab", true),
+            ("data-x^=a", "ba", false),
+            ("data-x$=a", "ba", true),
+            ("data-x$=a", "ab", false),
+            ("data-x*=a", "bab", true),
+            ("data-x*=a", "b", false),
+        ] {
+            let attributes: HashMap<String, String> =
+                [("data-x".to_string(), value.to_string())].into();
+            assert_eq!(
+                SelectorMatcher.match_attribute_selector(test, &attributes),
+                passes,
+                "[{test}] on data-x={value:?}"
+            );
+            assert!(!SelectorMatcher.match_attribute_selector(test, &HashMap::new()));
+        }
+    }
+
+    #[test]
+    fn matches_are_shared_only_for_the_slice_the_enclosing_scope_named() {
+        let e = engine();
+        let sheets = vec![rustkit_css::Stylesheet::parse("#top li { color: red } li { margin: 0 }").expect("css")];
+        let _index = RuleIndexScope::install(e.build_rule_index(&sheets));
+        let ix = active_rule_index(&sheets).expect("index");
+        let _scope = StyleShareScope::install(StyleShareMode::Share);
+        let none = HashMap::new();
+        let chain = |tag: &str, id: Option<&str>| -> Vec<Ancestor> {
+            vec![Rc::new((tag.to_string(), Vec::new(), id.map(str::to_string)))]
+        };
+        let (top, plain, other) = (chain("ul", Some("top")), chain("ul", None), chain("ul", Some("x")));
+
+        // No scope: nothing is keyed.
+        assert!(matches!(match_share_lookup(&ix, "li", &none, &top), MatchShared::Untracked));
+
+        let stored = |ancestors: &[Ancestor]| {
+            let _chain = MatchShareChain::enter(&sheets, &[], ancestors);
+            // Another slice than the scope's, equal or not, is not keyed.
+            assert!(matches!(
+                match_share_lookup(&ix, "li", &none, ancestors),
+                MatchShared::Untracked
+            ));
+            match match_share_lookup(&ix, "li", &none, ancestors) {
+                MatchShared::Miss(key) => {
+                    match_share_store(MatchShared::Miss(key), MatchShareEntry::default());
+                    false
+                }
+                MatchShared::Hit(_) => true,
+                _ => panic!("a scoped slice is keyed"),
+            }
+        };
+        assert!(!stored(&top), "first under #top");
+        assert!(stored(&top), "the same chain again");
+        assert!(!stored(&plain), "an id a rule names tells the chains apart");
+        assert!(stored(&other), "an id no rule names does not");
+        assert!(matches!(match_share_lookup(&ix, "li", &none, &top), MatchShared::Untracked));
+    }
+
+    #[test]
+    fn a_sharing_build_paints_what_a_full_cascade_paints() {
+        let e = engine();
+        let (full, off) = paint(&e, StyleShareMode::Off);
+        let (shared, (hits, misses, _, _)) = paint(&e, StyleShareMode::Share);
+
+        assert!(!full.contains("unseen") && full.contains("anyway"), "the page's own traps");
+        assert_eq!(off, (0, 0, 0, 0), "an unshared build keeps no share state");
+        // Odd and even items differ (`:nth-child(2n)`), and so do the links
+        // inside them. The first list's third and fourth items repeat its
+        // first and second, links included (4); the other two lists' third
+        // items repeat their first (2 each); the third note repeats the
+        // first (1). Nothing is shared across the lists or with the inline-
+        // styled note.
+        assert_eq!((hits, misses), (9, 20), "shared and computed styles");
+        assert_eq!(shared, full);
+    }
+
+    #[test]
+    fn verify_mode_finds_no_difference_between_a_shared_and_a_fresh_style() {
+        let e = engine();
+        let (full, _) = paint(&e, StyleShareMode::Off);
+        let (_, (shared_hits, _, _, _)) = paint(&e, StyleShareMode::Share);
+        let (verified, (hits, _, mismatches, parent_mismatches)) =
+            paint(&e, StyleShareMode::Verify);
+
+        assert_eq!(hits, shared_hits, "verify checks every style a sharing build shares");
+        assert_eq!(mismatches, 0);
+        assert_eq!(parent_mismatches, 0);
+        assert_eq!(verified, full);
+    }
+
+    #[test]
+    fn an_element_whose_parent_is_not_the_enclosing_scope_shares_nothing() {
+        let _scope = StyleShareScope::install(StyleShareMode::Share);
+        let named = ComputedStyle::new();
+        let other = ComputedStyle::new();
+        let key = || StyleShareKey {
+            parent: 0,
+            tag: "p".to_string(),
+            rules: Vec::new(),
+            inline: None,
+            ua_hidden: false,
+        };
+
+        // No scope at all, then a scope naming another style, then a scope
+        // whose own style has no share id.
+        assert!(matches!(style_share_lookup(&other, key), StyleShared::Untracked));
+        let parent = StyleShareParent::enter(&named, Some(7));
+        assert!(matches!(style_share_lookup(&other, key), StyleShared::Untracked));
+        let unnamed = StyleShareParent::enter(&other, None);
+        assert!(matches!(style_share_lookup(&other, key), StyleShared::Untracked));
+        drop(unnamed);
+
+        // Under the named parent: a miss, then a hit once stored.
+        let miss = style_share_lookup(&named, key);
+        assert!(matches!(miss, StyleShared::Miss(_)));
+        style_share_store(miss, &ComputedStyle::new());
+        assert!(matches!(style_share_lookup(&named, key), StyleShared::Hit(_)));
+
+        // The scope ends: the same style is no longer a known parent.
+        drop(parent);
+        assert!(matches!(style_share_lookup(&named, key), StyleShared::Untracked));
+    }
+
+    #[test]
+    fn every_untracked_or_computed_style_gets_an_id_of_its_own() {
+        let _scope = StyleShareScope::install(StyleShareMode::Share);
+        let named = ComputedStyle::new();
+        let key = |tag: &'static str| {
+            move || StyleShareKey {
+                parent: 0,
+                tag: tag.to_string(),
+                rules: Vec::new(),
+                inline: None,
+                ua_hidden: false,
+            }
+        };
+        let (_, untracked) = style_share_tracked(|| style_share_lookup(&named, key("p")));
+        let _parent = StyleShareParent::enter(&named, untracked);
+        let id_of = |tag: &'static str| {
+            style_share_tracked(|| {
+                let found = style_share_lookup(&named, key(tag));
+                style_share_store(found, &ComputedStyle::new());
+            })
+            .1
+        };
+        let (p, div, p_again) = (id_of("p"), id_of("div"), id_of("p"));
+
+        assert!(untracked.is_some());
+        assert!(p.is_some() && p != untracked && p != div);
+        assert_eq!(p_again, p, "a shared style keeps the id it was stored under");
+        assert_eq!(style_share_tracked(|| ()).1, None, "no cascade, no id");
+    }
+}
+
+#[cfg(test)]
 mod incremental_restyle_tests {
     use super::*;
     use rustkit_layout::{Dimensions, DisplayList, Rect};
 
     fn engine() -> Engine {
-        static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
         Engine::new(EngineConfig::default()).expect("engine")
     }
 
@@ -21899,6 +30452,8 @@ mod incremental_restyle_tests {
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                hover: None,
+                active: None,
                 fonts: 0,
             };
             let mut changed = original.clone();
@@ -21924,6 +30479,8 @@ mod incremental_restyle_tests {
         assert_restarts("focus", |key| {
             key.focus = Some(rustkit_dom::NodeId::new(1))
         });
+        assert_restarts("hover", |key| key.hover = Some(1));
+        assert_restarts("active", |key| key.active = Some(1));
         assert_restarts("web fonts", |key| key.fonts = 1);
     }
 
@@ -22180,6 +30737,8 @@ mod incremental_restyle_tests {
             external_sheets: 0,
             viewport: None,
             focus: None,
+            hover: None,
+            active: None,
             fonts: 0,
         };
         let recorded_node = rustkit_dom::NodeId::new(7);
@@ -22235,6 +30794,8 @@ mod incremental_restyle_tests {
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                hover: None,
+                active: None,
                 fonts: 0,
             })
             .expect("records");
@@ -22275,15 +30836,14 @@ mod incremental_restyle_tests {
 //
 // Each test drives the real engine paths (build_layout_from_document +
 // DisplayList::build, selector_matches, compute_style_for_element,
-// load_html) on one Engine built behind the init mutex (hiwave-windows #51).
+// load_html) on one Engine; `Engine::new` takes the GPU test guard
+// (hiwave-windows #51).
 #[cfg(test)]
 mod windows_engine_pins {
     use super::*;
     use rustkit_layout::{Dimensions, DisplayList, Rect};
 
     fn engine() -> Engine {
-        static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
         Engine::new(EngineConfig::default()).expect("engine")
     }
 
@@ -22482,6 +31042,87 @@ mod windows_engine_pins {
         );
     }
 
+    /// `border-radius` on the `<img>` itself rounds the image: replaced
+    /// content is trimmed to the content edge curve (CSS Backgrounds 3
+    /// §5.3). Only the image's (empty) background was rounded before.
+    #[test]
+    fn a_rounded_img_clips_its_image_to_the_content_edge_curve() {
+        const GIF: &str = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+        let e = engine();
+        let commands_for = |style: &str| {
+            dl(&e, &format!(
+                r#"<!DOCTYPE html><html><body><img src="{GIF}" style="display:block;width:100px;height:60px;{style}"></body></html>"#
+            ))
+        };
+
+        // The clip opens just before the image and closes just after it.
+        let list = commands_for("border-radius:50%");
+        let lines: Vec<&str> = list.lines().collect();
+        let image_at = lines
+            .iter()
+            .position(|c| c.starts_with("Image"))
+            .unwrap_or_else(|| panic!("no Image command:\n{list}"));
+        let clip = lines[image_at - 1];
+        assert!(clip.starts_with("PushClipRounded"), "before the image: {clip}");
+        assert!(clip.contains("width: 100.0, height: 60.0"), "{clip}");
+        assert_eq!(
+            clip.matches("CornerRadius { h: 50.0, v: 30.0 }").count(),
+            4,
+            "{clip}"
+        );
+        assert!(lines[image_at + 1].starts_with("PopClip"), "after the image: {}", lines[image_at + 1]);
+
+        // Border and padding move the curve in: 30px less 5px + 5px.
+        let list = commands_for("border-radius:30px;border:5px solid #000;padding:5px");
+        let clip = list
+            .lines()
+            .find(|c| c.starts_with("PushClipRounded"))
+            .unwrap_or_else(|| panic!("no rounded clip:\n{list}"));
+        assert_eq!(
+            clip.matches("CornerRadius { h: 20.0, v: 20.0 }").count(),
+            4,
+            "{clip}"
+        );
+
+        // A radius the border and padding swallow, or none at all: no clip.
+        for style in ["border-radius:8px;border:5px solid #000;padding:5px", ""] {
+            let list = commands_for(style);
+            assert!(list.lines().any(|c| c.starts_with("Image")), "{list}");
+            assert!(!list.contains("PushClipRounded"), "`{style}`:\n{list}");
+        }
+    }
+
+    /// The shadow of a rounded box is rounded, and its hole is the box's own
+    /// curve, so the command has to carry the box's corner radii. It carried
+    /// none: every shadow was painted as a rectangle with a rectangular hole.
+    #[test]
+    fn a_shadow_carries_the_corner_radii_of_its_box() {
+        let e = engine();
+        let s = dl(&e, "<html><body><div style=\"width:100px;height:50px;background-color:#fff;\
+                    border-radius: 20px / 10px; box-shadow: 0 0 0 4px #000\"></div></body></html>");
+        let shadow = s
+            .lines()
+            .find(|c| c.starts_with("BoxShadow"))
+            .expect("no BoxShadow command");
+        assert_eq!(
+            shadow.matches("CornerRadius { h: 20.0, v: 10.0 }").count(),
+            4,
+            "{shadow}"
+        );
+
+        let square = dl(&e, "<html><body><div style=\"width:100px;height:50px;background-color:#fff;\
+                    box-shadow: 0 0 0 4px #000\"></div></body></html>");
+        let shadow = square
+            .lines()
+            .find(|c| c.starts_with("BoxShadow"))
+            .expect("no BoxShadow command");
+        assert_eq!(
+            shadow.matches("CornerRadius { h: 0.0, v: 0.0 }").count(),
+            4,
+            "{shadow}"
+        );
+    }
+
     #[test]
     fn the_shadow_is_emitted_before_the_background() {
         let e = engine();
@@ -22639,8 +31280,6 @@ mod windows_a_leg_pins {
     use rustkit_layout::{Dimensions, Rect};
 
     fn engine() -> Engine {
-        static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
         Engine::new(EngineConfig::default()).expect("engine")
     }
 
@@ -23236,6 +31875,44 @@ mod logical_property_tests {
         // Three values is not a valid two-value shorthand: ignored.
         e.apply_style_property(&mut style, "margin-inline", "1px 2px 3px");
         assert_eq!(style.margin_left, ComputedStyle::new().margin_left);
+
+        // A single calc() with internal spaces is one value, not three.
+        // Before #403's top-level split, `calc(1px + 2px)` was dropped.
+        let mut calc_style = ComputedStyle::new();
+        e.apply_style_property(&mut calc_style, "margin-inline", "calc(1px + 2px)");
+        assert_eq!(
+            calc_style.margin_left,
+            rustkit_css::Length::Px(3.0),
+            "margin-inline: calc(1px + 2px) must apply to both sides"
+        );
+        assert_eq!(calc_style.margin_right, rustkit_css::Length::Px(3.0));
+        e.apply_style_property(
+            &mut calc_style,
+            "padding-inline",
+            "calc(1px + 2px) calc(3px + 4px)",
+        );
+        assert_eq!(calc_style.padding_left, rustkit_css::Length::Px(3.0));
+        assert_eq!(calc_style.padding_right, rustkit_css::Length::Px(7.0));
+    }
+
+    /// Pair shorthands split only at whitespace outside parentheses, so a
+    /// function argument list never becomes extra shorthand values.
+    #[test]
+    fn split_top_level_whitespace_keeps_parenthesized_values_whole() {
+        assert_eq!(
+            split_top_level_whitespace("calc(1px + 2px)"),
+            ["calc(1px + 2px)"]
+        );
+        assert_eq!(
+            split_top_level_whitespace("rgb(1, 2, 3) rgba(0, 0, 0, 0.5)"),
+            ["rgb(1, 2, 3)", "rgba(0, 0, 0, 0.5)"]
+        );
+        assert_eq!(split_top_level_whitespace("1px 2px"), ["1px", "2px"]);
+        assert_eq!(
+            split_top_level_whitespace("  1px   calc(2px + 3px)  "),
+            ["1px", "calc(2px + 3px)"]
+        );
+        assert!(split_top_level_whitespace("   ").is_empty());
     }
 
     /// The flow-relative border properties had no arms, so a box styled
@@ -23846,6 +32523,142 @@ p { margin: 0 0 10px 0; line-height: 20px; }
 
 // Needs a headless view: `cargo test -p rustkit-engine --features headless`.
 #[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod rounded_paint_frame_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    // 4x4 RGBA, every texel (0, 0, 0, 0).
+    const CLEAR_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0xa9, 0xf1, 0x9e, 0x7e, 0x00, 0x00, 0x00,
+        0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x60, 0xa0, 0x1c, 0x00,
+        0x00, 0x00, 0x44, 0x00, 0x01, 0xe9, 0x1e, 0x9b, 0x51, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    // 4x4 RGBA, every texel opaque red.
+    const RED_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0xa9, 0xf1, 0x9e, 0x7e, 0x00, 0x00, 0x00,
+        0x15, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0xf0,
+        0x9f, 0x01, 0x09, 0x30, 0x31, 0xa0, 0x01, 0xc2, 0x02, 0x00, 0x83, 0xd1,
+        0x02, 0x06, 0xb3, 0x4b, 0xd2, 0x9b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+        0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    // Three 60x60 boxes down the left edge, 40px apart from y=20:
+    // a transparent image over blue, a red image in a circular clip, and a
+    // circular box with a 10px green spread shadow.
+    const PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+body { margin: 20px; background: white; }
+div { width: 60px; height: 60px; margin: 0 0 40px 20px; }
+img { display: block; width: 60px; height: 60px; }
+#over { background: #0000ff; }
+#clip { border-radius: 50%; overflow: hidden; }
+#shadow { border-radius: 50%; background: white; box-shadow: 0 0 0 10px #00ff00; }
+</style></head><body>
+<div id="over"><img src="/clear.png"></div>
+<div id="clip"><img src="/red.png"></div>
+<div id="shadow"></div>
+</body></html>"#;
+
+    fn serve() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (ctype, body): (&str, &[u8]) =
+                    match head.split_whitespace().nth(1).unwrap_or("") {
+                        "/" => ("text/html", PAGE.as_bytes()),
+                        "/clear.png" => ("image/png", CLEAR_PNG),
+                        "/red.png" => ("image/png", RED_PNG),
+                        _ => ("text/plain", b""),
+                    };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        port
+    }
+
+    /// The pixel at `(x, y)` of a binary PPM.
+    fn pixel(ppm: &[u8], x: usize, y: usize) -> [u8; 3] {
+        let mut fields = Vec::new();
+        let mut pos = 0;
+        while fields.len() < 4 {
+            let start = pos;
+            while !ppm[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            fields.push(std::str::from_utf8(&ppm[start..pos]).unwrap());
+            pos += 1;
+        }
+        assert_eq!(fields[0], "P6");
+        let width: usize = fields[1].parse().unwrap();
+        let p = &ppm[pos + (y * width + x) * 3..][..3];
+        [p[0], p[1], p[2]]
+    }
+
+    #[test]
+    fn image_alpha_rounded_image_clips_and_rounded_shadows_reach_the_frame() {
+        let port = serve();
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 340,
+            })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(engine.load_url(
+            view,
+            Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap(),
+        ))
+        .expect("load_url");
+        engine.render_view(view).expect("render");
+        let path = std::env::temp_dir().join(format!("rustkit-rounded-paint-{port}.ppm"));
+        engine
+            .capture_frame(view, path.to_str().unwrap())
+            .expect("capture");
+        let ppm = std::fs::read(&path).expect("frame");
+        let _ = std::fs::remove_file(&path);
+
+        const WHITE: [u8; 3] = [255, 255, 255];
+        const RED: [u8; 3] = [255, 0, 0];
+        const GREEN: [u8; 3] = [0, 255, 0];
+
+        // A fully transparent image shows the blue behind it. Drawn without
+        // blending it painted its own texels: black.
+        assert_eq!(pixel(&ppm, 70, 50), [0, 0, 255], "transparent image over blue");
+
+        // The red image fills the circle and is cut at its corners.
+        assert_eq!(pixel(&ppm, 70, 150), RED, "centre of the clipped image");
+        assert_eq!(pixel(&ppm, 42, 122), WHITE, "top-left corner of the clipped image");
+        assert_eq!(pixel(&ppm, 97, 177), WHITE, "bottom-right corner of the clipped image");
+
+        // The ring is green on its axis and round at the corner of its
+        // bounding square; the box inside it stays white.
+        assert_eq!(pixel(&ppm, 70, 215), GREEN, "top of the ring");
+        assert_eq!(pixel(&ppm, 32, 212), WHITE, "corner of the ring's bounding square");
+        assert_eq!(pixel(&ppm, 70, 250), WHITE, "inside the shadowed box");
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
 mod referrer_tests {
     use super::*;
     use std::io::{Read, Write};
@@ -23951,6 +32764,124 @@ mod referrer_tests {
                 ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
             ]
         );
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod image_loader_routing_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    // 4x4 RGBA, every texel opaque red.
+    const RED_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0xa9, 0xf1, 0x9e, 0x7e, 0x00, 0x00, 0x00,
+        0x15, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0xf0,
+        0x9f, 0x01, 0x09, 0x30, 0x31, 0xa0, 0x01, 0xc2, 0x02, 0x00, 0x83, 0xd1,
+        0x02, 0x06, 0xb3, 0x4b, 0xd2, 0x9b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+        0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    const PAGE: &str = r#"<html><body>
+        <img src="/same.png"><img src="/same.png">
+        <img src="http://localhost:PORT/cross.png">
+        <img src="/tracker.png">
+        </body></html>"#;
+
+    type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    /// Serve `/page` as [`PAGE`], anything else as a PNG, and record each
+    /// image request's path and Referer.
+    fn recording_server() -> (u16, Seen) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        let html = PAGE.replace("PORT", &port.to_string());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let referer = head
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .find(|(k, _)| k.eq_ignore_ascii_case("referer"))
+                    .map(|(_, v)| v.trim().to_string());
+                let (ctype, body): (&str, &[u8]) = if path.starts_with("/page") {
+                    ("text/html", html.as_bytes())
+                } else {
+                    log.lock().unwrap().push((path, referer));
+                    ("image/png", RED_PNG)
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        (port, seen)
+    }
+
+    /// An `<img>` went out through the image manager's own HTTP client: no
+    /// Referer (hotlink-protected CDNs refuse that), and past the request
+    /// interceptor, so a blocked tracker pixel was fetched anyway.
+    #[test]
+    fn an_img_is_fetched_through_the_loader_with_its_referer_and_the_shield() {
+        let (port, seen) = recording_server();
+        let mut shield = rustkit_net::RequestInterceptor::new();
+        shield.block(rustkit_net::intercept::UrlPattern::contains("tracker"));
+        let mut engine =
+            Engine::with_interceptor(EngineConfig::default(), Some(shield)).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page?q=1#frag")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            engine.load_url(view, url).await.expect("load_url");
+            engine.load_subresources(view).await.expect("subresources");
+        });
+
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                ("/cross.png".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
+                ("/same.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
+            ],
+            "one request per image the shield allows, each with the policy's Referer; none for the blocked one"
+        );
+
+        let at = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+        assert_eq!(engine.get_image_dimensions(&at("/same.png")), Some((4, 4)));
+        assert!(!engine.is_image_cached(&at("/tracker.png")));
+    }
+
+    /// The image manager makes no request of its own: there is no second
+    /// way out for an image URL.
+    #[test]
+    fn the_image_manager_does_not_fetch() {
+        let (port, seen) = recording_server();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/direct.png")).unwrap();
+        let manager = ImageManager::new();
+        assert!(manager.load_blocking(url.clone()).is_err());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(rt.block_on(manager.load(url)).is_err());
+        assert!(seen.lock().unwrap().is_empty(), "{:?}", seen.lock().unwrap());
     }
 }
 
@@ -24585,6 +33516,115 @@ mod script_selector_tests {
         assert_eq!(js("document.querySelectorAll('.card')[1].querySelectorAll('.featured p').length"), "0");
     }
 
+    // A query visits every node with one selector. A selector that reads
+    // neither ancestors nor siblings must not pay to build them for each node
+    // (github's element registry asks `querySelector(tag)` about 400 times,
+    // 3.3 s of one timer callback).
+    #[test]
+    fn context_free_queries_do_not_build_ancestor_and_sibling_context() {
+        let mut html = String::from("<html><body>");
+        for i in 0..60 {
+            html.push_str(&format!("<div class='card c{}' data-n='{}'><p>t</p></div>", i % 3, i));
+        }
+        html.push_str("<x-thing id='only'></x-thing></body></html>");
+        let (mut engine, view) = loaded(&html);
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        for (selector, want) in [
+            ("x-thing", "1"),
+            ("#only", "1"),
+            (".card", "60"),
+            ("div.card.c1", "20"),
+            ("[data-n='7']", "1"),
+            ("[data-n]", "60"),
+            ("x-thing, .c2", "21"),
+            ("p:not(.nope)", "60"),
+            ("no-such-tag", "0"),
+        ] {
+            QUERY_CONTEXT_BUILDS.with(|n| n.set(0));
+            assert_eq!(js(&format!("document.querySelectorAll({selector:?}).length")), want, "{selector}");
+            assert_eq!(
+                QUERY_CONTEXT_BUILDS.with(|n| n.get()),
+                0,
+                "{selector} needs no ancestor or sibling context"
+            );
+        }
+        // Selectors that DO read the tree still build it and still answer right.
+        for (selector, want) in [
+            ("div p", "60"),
+            ("p:first-child", "60"),
+            (".c0 + .c1", "20"),
+            ("body > x-thing", "1"),
+        ] {
+            QUERY_CONTEXT_BUILDS.with(|n| n.set(0));
+            assert_eq!(js(&format!("document.querySelectorAll({selector:?}).length")), want, "{selector}");
+            assert!(QUERY_CONTEXT_BUILDS.with(|n| n.get()) > 0, "{selector} reads the tree");
+        }
+    }
+
+    // Geometry reads answer from the layout the engine just did: the box the
+    // painter draws is the box script measures.
+    #[test]
+    fn script_geometry_reads_come_from_the_layout() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>body{margin:0} #a{width:120px;height:50px;margin-top:10px;             padding:4px;border:2px solid #000} #wrap{position:relative;margin-left:30px;width:200px}             #in{margin-left:5px;width:50px;height:20px} #off{display:none}</style></head>             <body><div id=a></div><div id=wrap><div id=in></div></div><div id=off></div></body></html>",
+        );
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        // #a: content 120x50 + padding 4 + border 2 each side = 132x62, top margin 10.
+        assert_eq!(
+            js("var r = document.getElementById('a').getBoundingClientRect(); [r.x, r.y, r.width, r.height].join()"),
+            "0,10,132,62"
+        );
+        assert_eq!(
+            js("var a = document.getElementById('a'); [a.offsetWidth, a.offsetHeight, a.clientWidth, a.clientHeight, a.clientLeft, a.clientTop].join()"),
+            "132,62,128,58,2,2"
+        );
+        // #in is inside the positioned #wrap: its offsets are from #wrap's padding edge.
+        assert_eq!(
+            js("var i = document.getElementById('in'); [i.offsetParent.id, i.offsetLeft, i.offsetTop, i.offsetWidth].join()"),
+            "wrap,5,0,50"
+        );
+        assert_eq!(js("document.getElementById('wrap').getBoundingClientRect().x"), "30");
+        // display:none has no box.
+        assert_eq!(
+            js("var o = document.getElementById('off'); [o.offsetWidth, o.getBoundingClientRect().height, String(o.offsetParent)].join()"),
+            "0,0,null"
+        );
+    }
+
+    // A shadow root's tree answers the engine's selector matcher, and (until the
+    // flat tree lands) nothing in it is painted.
+    #[test]
+    fn a_shadow_root_answers_queries_and_is_not_painted_yet() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>body{margin:0}</style></head><body><div id=h><span slot=x id=a>A</span></div>\n             <p id=out>outside</p></body></html>",
+        );
+        let before = painted_text(&engine, view);
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        assert_eq!(
+            js("var r = document.getElementById('h').attachShadow({ mode: 'open' }); r.innerHTML = '<p class=c id=p>hi</p><slot name=x></slot>'; [r.querySelectorAll('.c').length, r.querySelector('p').id, r.querySelectorAll('p, slot').length, String(document.querySelector('.c')), r.querySelector('slot').assignedElements()[0].id].join()"),
+            "1,p,2,null,a"
+        );
+        assert_eq!(painted_text(&engine, view), before, "the shadow tree is not in the rendered tree yet");
+    }
+
+    // getComputedStyle answers from the cascade the painter used.
+    #[test]
+    fn get_computed_style_reads_the_cascade() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>body{margin:0} .card{color:#336699;font-size:20px;opacity:.5;\n             margin-top:10px;position:relative;visibility:hidden;font-weight:bold;width:100px;height:40px}\n             .gone{display:none} #t{text-transform:uppercase}</style></head>\n             <body><div id=a class=card style='padding-left:6px'>x</div><div id=g class=gone></div>\n             <p id=t>t</p></body></html>",
+        );
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        assert_eq!(
+            js("var c = getComputedStyle(document.getElementById('a')); [c.display, c.color, c.fontSize, c.opacity, c.marginTop, c.position, c.visibility, c.fontWeight, c.width, c.height, c.paddingLeft, c.zIndex].join('|')"),
+            "block|rgb(51, 102, 153)|20px|0.5|10px|relative|hidden|700|100px|40px|6px|auto"
+        );
+        assert_eq!(js("getComputedStyle(document.getElementById('g')).display"), "none");
+        assert_eq!(js("getComputedStyle(document.getElementById('t')).textTransform"), "uppercase");
+        assert_eq!(js("getComputedStyle(document.head).display"), "none");
+        // Script writes show through before the next layout.
+        assert_eq!(js("var a = document.getElementById('a'); a.style.display = 'inline'; getComputedStyle(a).display"), "inline");
+    }
+
     #[test]
     fn matches_and_closest_use_the_cascade_matcher() {
         let (mut engine, view) = loaded(CARDS);
@@ -25079,6 +34119,115 @@ mod ua_hidden_tests {
             "<body><div hidden class=show>author</div></body></html>",
         ));
         assert_eq!(text, "author");
+    }
+}
+
+// With scripting on, the contents of `<noscript>` are text, not elements
+// (HTML 13.2.6.4.4 and 13.2.6.4.7), so a `<style>` or `<link rel=stylesheet>`
+// written there is no sheet. Our parser builds the elements either way, and
+// the sheet collectors took them: google's results page ships
+// `<noscript><style>table,div,span,p{display:none}</style></noscript>` and
+// painted nothing at all (hand test H14).
+#[cfg(all(test, feature = "headless"))]
+mod noscript_style_tests {
+    use super::*;
+
+    fn painted_by(mut engine: Engine, html: &str) -> String {
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        let list = engine.views[&view].display_list.as_ref().expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn painted(html: &str) -> String {
+        painted_by(Engine::new(EngineConfig::default()).expect("engine"), html)
+    }
+
+    #[test]
+    fn a_style_in_a_head_noscript_is_not_a_sheet_when_scripting_is_on() {
+        let text = painted(concat!(
+            "<html><head><noscript><style>div,p{display:none}</style></noscript></head>",
+            "<body><div><p>shown</p></div></body></html>",
+        ));
+        assert_eq!(text, "shown");
+    }
+
+    #[test]
+    fn a_style_in_a_body_noscript_is_not_a_sheet_when_scripting_is_on() {
+        let text = painted(concat!(
+            "<html><body><noscript><style>div,p{display:none}</style></noscript>",
+            "<div><p>shown</p></div></body></html>",
+        ));
+        assert_eq!(text, "shown");
+    }
+
+    #[test]
+    fn a_style_nested_deeper_in_a_noscript_is_not_a_sheet_either() {
+        let text = painted(concat!(
+            "<html><body><noscript><div><style>p{display:none}</style></div></noscript>",
+            "<p>shown</p></body></html>",
+        ));
+        assert_eq!(text, "shown");
+    }
+
+    #[test]
+    fn a_style_outside_a_noscript_still_applies() {
+        let text = painted(concat!(
+            "<html><head><noscript><style>p{display:none}</style></noscript>",
+            "<style>.gone{display:none}</style></head>",
+            "<body><p>shown</p><div class=gone>gone</div></body></html>",
+        ));
+        assert_eq!(text, "shown");
+    }
+
+    #[test]
+    fn a_noscript_style_is_a_sheet_when_scripting_is_off() {
+        let engine = EngineBuilder::new().javascript_enabled(false).build().expect("engine");
+        let text = painted_by(
+            engine,
+            concat!(
+                "<html><head><noscript><style>.gone{display:none}</style></noscript></head>",
+                "<body><p>shown</p><div class=gone>gone</div></body></html>",
+            ),
+        );
+        assert_eq!(text, "shown");
+    }
+
+    fn sheet_links(engine: &Engine, html: &str) -> Vec<String> {
+        let document = Document::parse_html(html).expect("parse");
+        let base = Url::parse("https://example.test/").expect("url");
+        engine
+            .discover_external_stylesheets(&document, Some(&base))
+            .iter()
+            .map(|u| u.path().to_string())
+            .collect()
+    }
+
+    const LINKS: &str = concat!(
+        "<html><head><link rel=stylesheet href=/a.css>",
+        "<noscript><link rel=stylesheet href=/noscript.css></noscript></head>",
+        "<body><noscript><link rel=stylesheet href=/body.css></noscript></body></html>",
+    );
+
+    #[test]
+    fn a_stylesheet_link_in_a_noscript_is_not_fetched_when_scripting_is_on() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        assert_eq!(sheet_links(&engine, LINKS), ["/a.css"]);
+    }
+
+    #[test]
+    fn a_stylesheet_link_in_a_noscript_is_fetched_when_scripting_is_off() {
+        let engine = EngineBuilder::new().javascript_enabled(false).build().expect("engine");
+        assert_eq!(sheet_links(&engine, LINKS), ["/a.css", "/noscript.css", "/body.css"]);
     }
 }
 
@@ -25920,9 +35069,9 @@ mod text_provenance_tests {
                  stub is what ran and the claim is false — a parity receipt \
                  taken here would be measured against a ruler, not a font."
             );
-            assert!(
-                rustkit_layout::TEXT_SHAPER_BACKEND == "coretext"
-                    || rustkit_layout::TEXT_SHAPER_BACKEND == "directwrite",
+            assert_eq!(
+                Some(rustkit_layout::TEXT_SHAPER_BACKEND),
+                rustkit_layout::TARGET_FONT_BACKEND,
                 "a font-derived build must name the backend that read the font"
             );
         } else {
@@ -26064,5 +35213,269 @@ mod control_semantics_tests {
         assert_eq!(kind_of("days"), "MenuList");
         assert_eq!(kind_of("typed"), "Text");
         assert_eq!(kind_of("notes"), "TextArea");
+    }
+}
+
+#[cfg(test)]
+mod walk_smalls_tests {
+    use super::*;
+
+    #[test]
+    fn lower_tag_is_to_lowercase_and_borrows_when_it_can() {
+        for tag in ["div", "h1", "my-element", "DIV", "Svg", "foreignObject", "É", "é", "İ", ""] {
+            assert_eq!(&*lower_tag(tag), tag.to_lowercase().as_str(), "{tag:?}");
+        }
+        assert!(matches!(lower_tag("my-element"), Cow::Borrowed(_)));
+        assert!(matches!(lower_tag("DIV"), Cow::Owned(_)));
+        // Lowercase already, but not ASCII: left to `to_lowercase`.
+        assert!(matches!(lower_tag("é"), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn selector_paths_and_segments_are_spelled_as_before() {
+        assert_eq!(
+            Engine::child_selector_path("body > div.a b", Some("p:nth-of-type(12)")),
+            format!("{} > {}", "body > div.a b", "p:nth-of-type(12)"),
+        );
+        assert_eq!(Engine::child_selector_path("", Some("p")), "");
+        assert_eq!(Engine::child_selector_path("body", None), "");
+        let attributes = HashMap::new();
+        assert_eq!(Engine::selector_segment("li", &attributes, 12, 30, false), "li:nth-of-type(12)");
+        assert_eq!(Engine::selector_segment("li", &attributes, 1, 1, false), "li");
+    }
+}
+
+// ── sticky-scroll `.overflow-content`: a percentage inset inside a grid
+//    item's child, measured through the real cascade. ──
+#[cfg(test)]
+mod grid_item_child_abspos_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// The layout-crate guards for this defect
+    /// (`rustkit-layout::grid::an_abspos_child_of_a_grid_items_child_…`) drive
+    /// `layout_grid_container` directly. The engine reaches grid layout
+    /// through `layout_with_collapse`, which runs a block pre-pass over the
+    /// whole subtree FIRST — and a pre-pass that happens to leave the right
+    /// height behind makes the same tree come out correct for the wrong
+    /// reason. An arrangement of this shape built at the layout level did
+    /// exactly that and read as an exoneration while the real page was 75px
+    /// out. So the engine path gets its own guard.
+    ///
+    /// T-RED without `reanchor_absolute_children` in grid Phase 9: the circle
+    /// lands at the demo's own top (`top: 50%` resolved against the stale
+    /// height) instead of 75px down.
+    fn laid_out(html: &str) -> LayoutBox {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        // Height 0, as the engine lays out the root: a block's containing
+        // block height is the flow cursor.
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut margins = rustkit_layout::MarginCollapseContext::new();
+        let mut floats = rustkit_layout::FloatContext::new();
+        root.layout_with_collapse(&cb, &mut margins, &mut floats);
+        root
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    #[test]
+    fn a_percentage_inset_in_a_grid_items_child_resolves_against_its_final_height() {
+        let root = laid_out(concat!(
+            r#"<body style="margin:0">"#,
+            r#"<div style="display:grid;grid-template-columns:250px 1fr 250px;gap:30px">"#,
+            r#"<aside style="height:20px"></aside>"#,
+            r#"<main style="min-height:1500px">"#,
+            r#"<div id="demo" style="position:relative;height:150px;overflow:hidden;margin-top:20px">"#,
+            r#"<div id="circle" style="position:absolute;width:300px;height:300px;"#,
+            r#"top:50%;left:50%;transform:translate(-50%,-50%)"></div>"#,
+            r#"</div></main>"#,
+            r#"<aside style="height:20px"></aside>"#,
+            r#"</div></body>"#,
+        ));
+        let demo = by_id(&root, "demo").expect("the demo box");
+        let circle = by_id(&root, "circle").expect("the circle");
+        assert_eq!(
+            demo.dimensions.content.height, 150.0,
+            "the precondition: the demo keeps its own definite height"
+        );
+        let lead = circle.dimensions.content.y - demo.dimensions.content.y;
+        assert!(
+            (lead - 75.0).abs() < 0.01,
+            "`top: 50%` of the demo's 150px is 75px, not {lead}"
+        );
+        // The transform is a paint-time translate, so the LAYOUT box must not
+        // carry it — the oracle reads `visual_border_box` for Chrome's
+        // post-transform rect and `border_box` for the layout one.
+        let inset = circle.dimensions.content.x - demo.dimensions.content.x;
+        assert!(
+            (inset - demo.dimensions.content.width / 2.0).abs() < 0.01,
+            "`left: 50%` must stay correct: expected {}, got {inset}",
+            demo.dimensions.content.width / 2.0
+        );
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod error_response_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// `/blocked` answers 403 with a page, `/missing` 404 with nothing,
+    /// `/` 200 with a page.
+    fn serve() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => req.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&req);
+                    let (status, body) = match req.split_whitespace().nth(1).unwrap_or("/") {
+                        "/" => ("200 OK", "<html><head><title>Home</title></head><body><p>home</p></body></html>"),
+                        "/blocked" => (
+                            "403 Forbidden",
+                            "<html><head><title>Blocked</title></head><body><p>Access denied</p></body></html>",
+                        ),
+                        _ => ("404 Not Found", ""),
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        port
+    }
+
+    // A navigation that got a 403 or a 404 failed with "HTTP error" and the
+    // view kept whatever it had, though the server had sent a page saying
+    // why (ebay's 403, any site's 404 page). A browser shows that page. An
+    // error with no body still fails: there is nothing of the site's to
+    // show.
+    #[test]
+    fn the_body_of_an_error_response_is_shown_as_the_page() {
+        let port = serve();
+        let url = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+        rt.block_on(engine.load_url(view, url("/blocked")))
+            .expect("a 403 with a page is a navigation to that page");
+        assert_eq!(engine.views[&view].title.as_deref(), Some("Blocked"));
+        assert_eq!(engine.views[&view].url, Some(url("/blocked")));
+        assert!(engine.views[&view].layout.is_some(), "the error page is laid out");
+        assert_eq!(engine.http_status(view), Some(403), "the status stays known");
+        let failed = rt.block_on(engine.load_url(view, url("/missing")));
+        assert!(
+            matches!(failed, Err(EngineError::NavigationError(_))),
+            "a 404 with no body is a failed navigation: {failed:?}"
+        );
+        assert_eq!(engine.views[&view].title.as_deref(), Some("Blocked"), "the view keeps the page it had");
+        assert_eq!(engine.http_status(view), Some(403));
+        rt.block_on(engine.load_url(view, url("/"))).expect("load_url");
+        assert_eq!(engine.views[&view].title.as_deref(), Some("Home"));
+        assert_eq!(engine.http_status(view), Some(200));
+
+        engine.load_html(view, "<p>local</p>").expect("load_html");
+        assert_eq!(engine.http_status(view), None, "a document that came from no response has no status");
+    }
+}
+
+#[cfg(test)]
+mod scroll_extent_tests {
+    use super::*;
+
+    // How far a page scrolls, against the pinned Chromium (Z lane I0, H6,
+    // 2026-10-05). The pages and Chrome's answers are in
+    // tools/parity_oracle/scroll_extent_cases.json, written by
+    // scroll_extent_log.mjs: `chrome_script_y` is where window.scrollTo to a
+    // very large y ends, `chrome_wheel_y` where a very large wheel turn ends.
+
+    /// Transforms do not move a box in the layout tree, and the offsets of
+    /// a relative box are not applied (`positioning_of`), so neither box
+    /// extends the page yet. `html` has no box of its own, so with
+    /// `html { height: 100% }` the body's bottom margin still counts (16
+    /// where Chrome has 8).
+    const SCRIPT_GAPS: &[&str] = &["translate-down", "relative-top", "html-body-overflow-x-hidden"];
+    /// Chrome's wheel does not scroll a viewport whose overflow is hidden
+    /// (script still does). The engine's wheel is not locked yet.
+    /// And a body that scrolls takes the wheel itself: the 8px of its
+    /// margin are left to the viewport, which only script moves.
+    const WHEEL_GAPS: &[&str] = &[
+        "translate-down",
+        "relative-top",
+        "body-overflow-hidden",
+        "html-overflow-hidden",
+        "html-body-overflow-x-hidden",
+    ];
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_page_scrolls_as_far_as_it_does_in_chrome() {
+        let data: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tools/parity_oracle/scroll_extent_cases.json"))
+                .expect("case file");
+        let (w, h) = (data["viewport"][0].as_u64().unwrap(), data["viewport"][1].as_u64().unwrap());
+        let mut wrong = Vec::new();
+        let mut gaps_that_pass = Vec::new();
+        for case in data["cases"].as_array().expect("cases") {
+            let name = case["name"].as_str().unwrap();
+            let chrome_script = case["chrome_script_y"].as_f64().expect("run scroll_extent_log.mjs --write") as f32;
+            let chrome_wheel = case["chrome_wheel_y"].as_f64().unwrap() as f32;
+
+            let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+            let id = engine
+                .create_headless_view(Bounds::new(0, 0, w as u32, h as u32))
+                .expect("headless view");
+            engine.load_html(id, case["html"].as_str().unwrap()).expect("load_html");
+
+            engine.set_scroll_offset(id, 0.0, 1.0e7).unwrap();
+            let script = engine.get_scroll_offset(id).unwrap().1;
+            engine.set_scroll_offset(id, 0.0, 0.0).unwrap();
+            // A wheel turned down arrives as a negative delta.
+            engine.scroll_view(id, 0.0, -1.0e7).unwrap();
+            let wheel = engine.get_scroll_offset(id).unwrap().1;
+
+            for (what, got, chrome, gaps) in [
+                ("script", script, chrome_script, SCRIPT_GAPS),
+                ("wheel", wheel, chrome_wheel, WHEEL_GAPS),
+            ] {
+                let same = (got - chrome).abs() <= 1.0;
+                match (same, gaps.contains(&name)) {
+                    (false, false) => wrong.push(format!("{name}: {what} reaches {got}, Chrome {chrome}")),
+                    (true, true) if chrome > 0.0 => gaps_that_pass.push(format!("{name} ({what})")),
+                    _ => {}
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong:\n{}", wrong.len(), wrong.join("\n"));
+        assert!(
+            gaps_that_pass.is_empty(),
+            "listed as a gap but matches Chrome now, take it off the list: {gaps_that_pass:?}"
+        );
     }
 }

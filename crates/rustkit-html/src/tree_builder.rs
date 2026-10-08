@@ -351,12 +351,7 @@ impl<S: TreeSink> TreeBuilder<S> {
     /// Find the index of the last table element in the stack.
     #[allow(dead_code)]
     fn find_last_table_index(&self) -> Option<usize> {
-        for i in (0..self.open_elements.len()).rev() {
-            if self.open_elements[i].0 == "table" {
-                return Some(i);
-            }
-        }
-        None
+        (0..self.open_elements.len()).rev().find(|&i| self.open_elements[i].0 == "table")
     }
 
     /// Get the foster parent location (element before table, or table's parent).
@@ -811,24 +806,24 @@ impl<S: TreeSink> TreeBuilder<S> {
         }
 
         // HTML 4.01 Transitional/Frameset without system identifier = quirks
-        if public_lower.contains("html 4.01") && system_id.is_empty() {
-            if public_lower.contains("transitional") || public_lower.contains("frameset") {
-                return QuirksMode::Quirks;
-            }
+        if public_lower.contains("html 4.01") && system_id.is_empty()
+            && (public_lower.contains("transitional") || public_lower.contains("frameset"))
+        {
+            return QuirksMode::Quirks;
         }
 
         // XHTML 1.0 Transitional/Frameset = limited quirks
-        if public_lower.contains("xhtml 1.0") {
-            if public_lower.contains("transitional") || public_lower.contains("frameset") {
-                return QuirksMode::LimitedQuirks;
-            }
+        if public_lower.contains("xhtml 1.0")
+            && (public_lower.contains("transitional") || public_lower.contains("frameset"))
+        {
+            return QuirksMode::LimitedQuirks;
         }
 
         // HTML 4.01 Transitional/Frameset with system identifier = limited quirks
-        if public_lower.contains("html 4.01") && !system_id.is_empty() {
-            if public_lower.contains("transitional") || public_lower.contains("frameset") {
-                return QuirksMode::LimitedQuirks;
-            }
+        if public_lower.contains("html 4.01") && !system_id.is_empty()
+            && (public_lower.contains("transitional") || public_lower.contains("frameset"))
+        {
+            return QuirksMode::LimitedQuirks;
         }
 
         // Default to no quirks for valid doctypes
