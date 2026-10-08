@@ -693,3 +693,60 @@ fn text_align_works_within_the_shortened_line() {
         );
     }
 }
+
+/// A flex container establishes a formatting context: it is narrowed beside
+/// the float, and its item's lines use the item's whole width.
+#[test]
+fn a_float_does_not_reach_into_a_flex_item() {
+    for_both("float:right + div(flex) > div > text", |name, collapse| {
+        let body = laid_out(
+            vec![
+                float_box(Float::Right, 150.0, 100.0, |_| {}),
+                block_with(|s| s.display = Display::Flex, vec![block(vec![text(PARA)])]),
+            ],
+            collapse,
+        );
+        assert_no_line_under_a_float(name, &body, &body);
+        let item = &body.children[1].children[0];
+        let d = item.dimensions.content;
+        let lines = line_rects(item);
+        for l in &lines {
+            assert!(
+                l.x >= d.x - EPS && l.right() <= d.right() + EPS,
+                "{name}: {l:?} outside the item {d:?}"
+            );
+        }
+        assert!(
+            lines.iter().any(|l| l.right() > d.right() - 40.0),
+            "{name}: the item's lines are not shortened again inside it: {lines:?}"
+        );
+    });
+}
+
+/// A non-atomic inline (a link) too wide for the band at the start of a
+/// line is not pushed below the float as a whole: it starts beside it.
+#[test]
+fn a_wide_link_at_the_start_of_a_line_stays_beside_the_float() {
+    for_both("float:right + p > a(long)", |name, collapse| {
+        let mut a = LayoutBox::new(BoxType::Inline, {
+            let mut st = ComputedStyle::new();
+            st.display = Display::Inline;
+            st
+        });
+        a.children
+            .push(text("the list of web browsers and their engines"));
+        let body = laid_out(
+            vec![
+                float_box(Float::Right, 250.0, 100.0, |_| {}),
+                para(vec![a, text(" is long.")]),
+            ],
+            collapse,
+        );
+        let link = &body.children[1].children[0];
+        assert!(
+            link.dimensions.content.y < 100.0,
+            "{name}: the link starts beside the float, not below it: {:?}",
+            link.dimensions.content
+        );
+    });
+}

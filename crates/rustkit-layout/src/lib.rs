@@ -1011,6 +1011,24 @@ impl FloatContext {
         self.left_floats.len() + self.right_floats.len()
     }
 
+    /// The same floats with every rect moved by `(dx, dy)`: how a context
+    /// changes coordinate space between a block and a descendant block
+    /// that shares its formatting context.
+    pub fn translated(&self, dx: f32, dy: f32) -> Self {
+        let mv = |v: &Vec<FloatExclusion>| {
+            v.iter()
+                .map(|f| FloatExclusion {
+                    rect: Rect::new(f.rect.x + dx, f.rect.y + dy, f.rect.width, f.rect.height),
+                    float_type: f.float_type,
+                })
+                .collect()
+        };
+        Self {
+            left_floats: mv(&self.left_floats),
+            right_floats: mv(&self.right_floats),
+        }
+    }
+
     /// CSS 2.1 §9.5: the band `(left, width)` a line box of height `height`
     /// whose top is at `y` gets beside these floats, in the coordinates of
     /// a container `container_width` wide. The whole container when there
@@ -1583,6 +1601,14 @@ pub struct LayoutBox {
     /// block (the viewport), so `html, body { height: 100% }` keeps body at
     /// the viewport's height while an `auto` html makes body's `100%` auto.
     pub root_element_height: Option<Length>,
+    /// CSS 2.1 §9.5: the floats of the block formatting context this box's
+    /// content shares with its parent, in PAGE coordinates. Set by the
+    /// parent's child loop before it lays out an in-flow block that does
+    /// not establish a formatting context (`None` for every other box);
+    /// this box's own child loop takes them so its line boxes are shortened
+    /// beside them, and hands back the context — its own descendant floats
+    /// added — for the parent to carry on to the following siblings.
+    pub(crate) context_floats: Option<FloatContext>,
 }
 
 impl LayoutBox {
@@ -1611,6 +1637,7 @@ impl LayoutBox {
             text_flow_first_offset: None,
             percent_height_is_auto: false,
             root_element_height: None,
+            context_floats: None,
         }
     }
 
@@ -4344,6 +4371,40 @@ impl LayoutBox {
         }
     }
 
+    /// How far `apply_clearance` would move `child` (0 when it clears
+    /// nothing), without moving it.
+    fn clearance_shift(child: &LayoutBox, floats: &FloatContext, container_y: f32) -> f32 {
+        if child.clear == Clear::None || floats.is_empty() {
+            return 0.0;
+        }
+        let bottoms =
+            |v: &Vec<FloatExclusion>| v.iter().map(|f| f.rect.bottom()).fold(0.0, f32::max);
+        let cleared = match child.clear {
+            Clear::Left => bottoms(&floats.left_floats),
+            Clear::Right => bottoms(&floats.right_floats),
+            _ => bottoms(&floats.left_floats).max(bottoms(&floats.right_floats)),
+        };
+        (container_y + cleared - child.dimensions.border_box().y).max(0.0)
+    }
+
+    /// CSS 2.1 §9.4.1 / §9.5: an in-flow block child that does not establish
+    /// a formatting context shares its parent's, so the floats placed so far
+    /// (`floats`, in `parent`'s content coordinates) reach its line boxes.
+    /// Returns them in page coordinates for `context_floats`, or `None` for
+    /// a child that does not share the context.
+    fn shared_floats(
+        child: &LayoutBox,
+        hands_floats_down: bool,
+        floats: &FloatContext,
+        parent: &Dimensions,
+    ) -> Option<FloatContext> {
+        let shares = hands_floats_down
+            && matches!(child.box_type, BoxType::Block | BoxType::AnonymousBlock)
+            && !child.style.display.is_atomic_inline()
+            && !crate::margin_collapse::establishes_bfc(&child.style, child.float);
+        shares.then(|| floats.translated(parent.content.x, parent.content.y))
+    }
+
     /// The band (see `FloatContext::line_band`) of the first line at or
     /// below `*y` where a box `width` wide fits beside the floats, moving
     /// `*y` down to the next float edge until it does or no float remains
@@ -4458,8 +4519,20 @@ impl LayoutBox {
         let mut seam: Option<SeamEdge> = None;
         // Floats placed among these children, in content-box coordinates
         // (x from 0 at the content edge, y relative to the content top).
-        let mut floats = FloatContext::new();
+        // A block that shares its parent's formatting context starts with
+        // that context's floats (CSS 2.1 §9.5; see `context_floats`).
+        let shares_context = self.context_floats.is_some();
+        let mut floats = self
+            .context_floats
+            .take()
+            .map(|f| f.translated(-self.dimensions.content.x, -self.dimensions.content.y))
+            .unwrap_or_default();
         let mut last_float_top = 0.0_f32;
+        // In-flow block children that do not establish a formatting context
+        // share this one: they get its floats and hand theirs back. The
+        // children of a flex, grid or multi-column container do not.
+        let hands_floats_down = !(self.style.display.is_flex() || self.style.display.is_grid())
+            && multicol::column_geometry(&self.style, container_width).is_none();
         // Content a left float placed mid-line pushed right: (start, end, dx).
         let mut line_shifts: Vec<(usize, usize, f32)> = Vec::new();
 
@@ -4608,6 +4681,14 @@ impl LayoutBox {
 
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
+                let splits_across_lines = matches!(child.box_type, BoxType::Inline);
+                // The width that must fit beside the floats before the box
+                // may sit on a line (none for an inline, which splits).
+                let fit_width = if splits_across_lines {
+                    0.0
+                } else {
+                    child_width
+                };
 
                 // Check if child fits on current line (nowrap/pre never soft-wrap)
                 if container_allows_wrap && cursor_x > 0.0 && cursor_x + child_width > line_avail {
@@ -4632,11 +4713,12 @@ impl LayoutBox {
 
                     // Re-layout at new position
                     // The next line may be narrowed by floats too: move down
-                    // until the box fits beside them or none remain.
+                    // until the box fits beside them or none remain. A
+                    // non-atomic inline splits instead (it keeps the band).
                     (line_left, line_avail) = Self::fitting_band(
                         &floats,
                         &mut cursor_y,
-                        child_width,
+                        fit_width,
                         empty_line_height,
                         container_width,
                     );
@@ -4651,6 +4733,7 @@ impl LayoutBox {
                 // At the start of a line beside floats, a box too wide for
                 // the band moves down until it fits (CSS 2.1 §9.5).
                 if container_allows_wrap
+                    && !splits_across_lines
                     && cursor_x == 0.0
                     && child_width > line_avail + 0.01
                     && line_avail < container_width
@@ -4848,6 +4931,9 @@ impl LayoutBox {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 Self::narrow_beside_floats(child, &floats, &mut cb, cursor_y);
+                let shared =
+                    Self::shared_floats(child, hands_floats_down, &floats, &self.dimensions);
+                child.context_floats = shared.clone();
                 match (container_is_definite_zero, &child.box_type) {
                     // Author `width: 0`: block-path text wraps against it
                     // (see layout_text_with_zero_wrap).
@@ -4860,7 +4946,23 @@ impl LayoutBox {
                         definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
                     ),
                 }
+                // A cleared block that shares the floats is laid out again
+                // where its clearance puts it, so its lines are broken
+                // beside the floats it actually sits next to.
+                let shift = Self::clearance_shift(child, &floats, self.dimensions.content.y);
+                if shift > 0.0 && shared.is_some() {
+                    cb.content.height += shift;
+                    cursor_y += shift;
+                    child.context_floats = shared;
+                    child.layout_with_percent_base(
+                        &cb,
+                        definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
+                    );
+                }
                 cursor_y += Self::apply_clearance(child, &mut floats, self.dimensions.content.y);
+                if let Some(f) = child.context_floats.take() {
+                    floats = f.translated(-self.dimensions.content.x, -self.dimensions.content.y);
+                }
 
                 // An inline-level box (e.g. a styled <span>/<a>) laid out on
                 // its own is centered/right-aligned as a single-item line so
@@ -4954,6 +5056,10 @@ impl LayoutBox {
         }
 
         self.dimensions.content.height = cursor_y;
+        if shares_context {
+            self.context_floats =
+                Some(floats.translated(self.dimensions.content.x, self.dimensions.content.y));
+        }
     }
 
     /// IFC Slice C (CSS2 §10.8 subset): align line members VERTICALLY about
@@ -5390,8 +5496,20 @@ impl LayoutBox {
         let mut seam: Option<SeamEdge> = None;
 
         // Floats placed among these children (see layout_block_children).
-        let mut floats = FloatContext::new();
+        // A block that shares its parent's formatting context starts with
+        // that context's floats (CSS 2.1 §9.5; see `context_floats`).
+        let shares_context = self.context_floats.is_some();
+        let mut floats = self
+            .context_floats
+            .take()
+            .map(|f| f.translated(-self.dimensions.content.x, -self.dimensions.content.y))
+            .unwrap_or_default();
         let mut last_float_top = 0.0_f32;
+        // In-flow block children that do not establish a formatting context
+        // share this one: they get its floats and hand theirs back. The
+        // children of a flex, grid or multi-column container do not.
+        let hands_floats_down = !(self.style.display.is_flex() || self.style.display.is_grid())
+            && multicol::column_geometry(&self.style, container_width).is_none();
         // Content a left float placed mid-line pushed right: (start, end, dx).
         let mut line_shifts: Vec<(usize, usize, f32)> = Vec::new();
 
@@ -5571,6 +5689,14 @@ impl LayoutBox {
 
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
+                let splits_across_lines = matches!(child.box_type, BoxType::Inline);
+                // The width that must fit beside the floats before the box
+                // may sit on a line (none for an inline, which splits).
+                let fit_width = if splits_across_lines {
+                    0.0
+                } else {
+                    child_width
+                };
 
                 // Check if child fits on current line (nowrap/pre never soft-wrap)
                 if container_allows_wrap && cursor_x > 0.0 && cursor_x + child_width > line_avail {
@@ -5595,11 +5721,12 @@ impl LayoutBox {
 
                     // Re-layout at new position
                     // The next line may be narrowed by floats too: move down
-                    // until the box fits beside them or none remain.
+                    // until the box fits beside them or none remain. A
+                    // non-atomic inline splits instead (it keeps the band).
                     (line_left, line_avail) = Self::fitting_band(
                         &floats,
                         &mut cursor_y,
-                        child_width,
+                        fit_width,
                         empty_line_height,
                         container_width,
                     );
@@ -5616,6 +5743,7 @@ impl LayoutBox {
                 // At the start of a line beside floats, a box too wide for
                 // the band moves down until it fits (CSS 2.1 §9.5).
                 if container_allows_wrap
+                    && !splits_across_lines
                     && cursor_x == 0.0
                     && child_width > line_avail + 0.01
                     && line_avail < container_width
@@ -5806,6 +5934,10 @@ impl LayoutBox {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 Self::narrow_beside_floats(child, &floats, &mut cb, cursor_y);
+                let shared =
+                    Self::shared_floats(child, hands_floats_down, &floats, &self.dimensions);
+                child.context_floats = shared.clone();
+                let margins_before = shared.as_ref().map(|_| margin_context.clone());
                 match (container_is_definite_zero, &child.box_type) {
                     // Author `width: 0`: block-path text wraps against it
                     // (see layout_text_with_zero_wrap). Text has no margins
@@ -5821,9 +5953,27 @@ impl LayoutBox {
                         definite_height,
                     ),
                 }
+                // A cleared block that shares the floats is laid out again
+                // where its clearance puts it (same pending margins), so its
+                // lines are broken beside the floats it actually sits next to.
+                let shift = Self::clearance_shift(child, &floats, self.dimensions.content.y);
+                if let (true, Some(before)) = (shift > 0.0, margins_before) {
+                    *margin_context = before;
+                    cb.content.height += shift;
+                    child.context_floats = shared;
+                    child.layout_with_collapse_in(
+                        &cb,
+                        margin_context,
+                        float_context,
+                        definite_height,
+                    );
+                }
                 // cursor_y below is read from the child's border box, so the
                 // clearance shift carries into the flow.
                 Self::apply_clearance(child, &mut floats, self.dimensions.content.y);
+                if let Some(f) = child.context_floats.take() {
+                    floats = f.translated(-self.dimensions.content.x, -self.dimensions.content.y);
+                }
 
                 // See layout_block_children: keep inline box decoration aligned.
                 if matches!(child.box_type, BoxType::Inline) {
@@ -5931,6 +6081,10 @@ impl LayoutBox {
         }
 
         self.dimensions.content.height = cursor_y;
+        if shares_context {
+            self.context_floats =
+                Some(floats.translated(self.dimensions.content.x, self.dimensions.content.y));
+        }
     }
 
     /// CSS 2.1 §10.5: the content height a percentage-height CHILD of this
