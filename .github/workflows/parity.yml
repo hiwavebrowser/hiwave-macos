@@ -105,6 +105,58 @@ jobs:
           done
           cat "$summary" >> "$GITHUB_STEP_SUMMARY"
           exit $status
+
+  # F3 — JS engine and bindings test suites (blocking).
+  #
+  # Closes the CI gap from Issue #574 (Item 5): rustkit-js and rustkit-bindings
+  # integration tests (class fields TDZ, GC weak cycles, let/for-of, web API
+  # census probe) along with the full unit test suites must execute on CI.
+  # Unlike F2 (layout/engine, which are advisory for one cycle), this lane is
+  # BLOCKING: these crates are headless, fast, and verify the Boa 0.22 engine
+  # and web bindings invariants.
+  js-suites:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: JS engine and bindings test suites must PASS (F3, blocking)
+        run: |
+          set -uo pipefail
+          summary="$RUNNER_TEMP/js-suites.md"
+          {
+            echo "## JS engine and bindings test suites (blocking)"
+            echo
+            echo "Full unit and integration test suites for rustkit-js and rustkit-bindings."
+            echo
+            echo "| suite | result line | verdict |"
+            echo "|---|---|---|"
+          } > "$summary"
+          status=0
+          for pkg in rustkit-js rustkit-bindings; do
+            log="$RUNNER_TEMP/$pkg.log"
+            echo "::group::cargo test -p $pkg"
+            if cargo test -p "$pkg" --no-fail-fast 2>&1 | tee "$log"; then rc=0; else rc=1; fi
+            echo "::endgroup::"
+            ran=$(grep -cE '^test result:' "$log" || true)
+            fail_line=$(grep -E '^test result: FAILED' "$log" | head -1 || true)
+            pass_line=$(grep -E '^test result: ok' "$log" | head -1 || true)
+            if [ "$ran" -eq 0 ]; then
+              echo "| \`$pkg\` | (none) | **DID NOT RUN** — no \`test result:\` line, so nothing executed |" >> "$summary"
+              status=1
+            elif [ "$rc" -ne 0 ]; then
+              line="${fail_line:-$pass_line}"
+              echo "| \`$pkg\` | $line | **RED** |" >> "$summary"
+              status=1
+            else
+              echo "| \`$pkg\` | $pass_line | green |" >> "$summary"
+            fi
+          done
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
   # ===========================================================================
   # Join-key contract (~1m). Cheap, corpus-wide, no Rust and no swarm.
   # ===========================================================================
