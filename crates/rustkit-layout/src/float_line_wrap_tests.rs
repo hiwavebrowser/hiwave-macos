@@ -48,12 +48,7 @@ fn para(children: Vec<LayoutBox>) -> LayoutBox {
 
 /// A floated block `width` x `height` (a coloured box standing in for an
 /// image), with `edit` for margins.
-fn float_box(
-    side: Float,
-    width: f32,
-    height: f32,
-    edit: impl Fn(&mut ComputedStyle),
-) -> LayoutBox {
+fn float_box(side: Float, width: f32, height: f32, edit: impl Fn(&mut ComputedStyle)) -> LayoutBox {
     let mut s = ComputedStyle::new();
     s.width = Length::Px(width);
     s.height = Length::Px(height);
@@ -105,12 +100,12 @@ fn line_rects(b: &LayoutBox) -> Vec<Rect> {
             let c = b.dimensions.content;
             match &b.text_lines {
                 Some(lines) => {
-                    let lh = b.get_line_height();
-                    for (k, l) in lines.iter().enumerate() {
-                        if l.text.trim().is_empty() {
-                            continue;
+                    // Where paint seats each line (`text_line_fragments`).
+                    let rects = b.text_line_fragments().unwrap_or_default();
+                    for (l, r) in lines.iter().zip(rects) {
+                        if !l.text.trim().is_empty() {
+                            out.push(r);
                         }
-                        out.push(Rect::new(c.x + l.x_offset, c.y + k as f32 * lh, l.width, lh));
                     }
                 }
                 None => out.push(c),
@@ -142,7 +137,10 @@ fn float_rects(b: &LayoutBox) -> Vec<Rect> {
 }
 
 fn overlaps(a: &Rect, b: &Rect) -> bool {
-    a.x < b.right() - EPS && b.x < a.right() - EPS && a.y < b.bottom() - EPS && b.y < a.bottom() - EPS
+    a.x < b.right() - EPS
+        && b.x < a.right() - EPS
+        && a.y < b.bottom() - EPS
+        && b.y < a.bottom() - EPS
 }
 
 fn beside(line: &Rect, f: &Rect) -> bool {
@@ -178,11 +176,18 @@ fn for_both(name: &str, check: impl Fn(&str, bool)) {
 fn a_right_float_before_two_paragraphs_shortens_their_lines() {
     for_both("float:right + p + p", |name, collapse| {
         let body = laid_out(
-            vec![float_box(Float::Right, 150.0, 100.0, |_| {}), para(vec![text(PARA)]), para(vec![text(PARA)])],
+            vec![
+                float_box(Float::Right, 150.0, 100.0, |_| {}),
+                para(vec![text(PARA)]),
+                para(vec![text(PARA)]),
+            ],
             collapse,
         );
         let f = body.children[0].dimensions.margin_box();
-        assert!((f.x - 250.0).abs() < EPS && f.y.abs() < EPS, "{name}: float at {f:?}");
+        assert!(
+            (f.x - 250.0).abs() < EPS && f.y.abs() < EPS,
+            "{name}: float at {f:?}"
+        );
         assert_no_line_under_a_float(name, &body, &body);
         for p in &body.children[1..] {
             assert!(
@@ -191,12 +196,20 @@ fn a_right_float_before_two_paragraphs_shortens_their_lines() {
             );
         }
         let lines = line_rects(&body);
-        assert!(lines.iter().any(|l| beside(l, &f)), "{name}: no line beside the float");
+        assert!(
+            lines.iter().any(|l| beside(l, &f)),
+            "{name}: no line beside the float"
+        );
         for l in lines.iter().filter(|l| beside(l, &f)) {
-            assert!(l.x.abs() < EPS, "{name}: a line beside a right float starts at 0: {l:?}");
+            assert!(
+                l.x.abs() < EPS,
+                "{name}: a line beside a right float starts at 0: {l:?}"
+            );
         }
         assert!(
-            lines.iter().any(|l| l.y >= f.bottom() - EPS && l.right() > 250.0 + EPS),
+            lines
+                .iter()
+                .any(|l| l.y >= f.bottom() - EPS && l.right() > 250.0 + EPS),
             "{name}: lines below the float use the full width: {lines:?}"
         );
     });
@@ -208,17 +221,26 @@ fn a_right_float_before_two_paragraphs_shortens_their_lines() {
 fn a_left_float_before_two_paragraphs_moves_their_lines_right() {
     for_both("float:left + p + p", |name, collapse| {
         let body = laid_out(
-            vec![float_box(Float::Left, 150.0, 100.0, |_| {}), para(vec![text(PARA)]), para(vec![text(PARA)])],
+            vec![
+                float_box(Float::Left, 150.0, 100.0, |_| {}),
+                para(vec![text(PARA)]),
+                para(vec![text(PARA)]),
+            ],
             collapse,
         );
         let f = body.children[0].dimensions.margin_box();
         assert_no_line_under_a_float(name, &body, &body);
         let lines = line_rects(&body);
         for l in lines.iter().filter(|l| beside(l, &f)) {
-            assert!(l.x >= 150.0 - EPS, "{name}: {l:?} starts inside the left float");
+            assert!(
+                l.x >= 150.0 - EPS,
+                "{name}: {l:?} starts inside the left float"
+            );
         }
         assert!(
-            lines.iter().any(|l| l.y >= f.bottom() - EPS && l.x.abs() < EPS),
+            lines
+                .iter()
+                .any(|l| l.y >= f.bottom() - EPS && l.x.abs() < EPS),
             "{name}: lines below the float start at the content edge: {lines:?}"
         );
     });
@@ -238,7 +260,10 @@ fn a_float_in_the_middle_of_a_paragraph_shortens_the_following_lines() {
             collapse,
         );
         let f = float_rects(&body)[0];
-        assert!((f.x - 280.0).abs() < EPS, "{name}: the float goes to the right edge: {f:?}");
+        assert!(
+            (f.x - 280.0).abs() < EPS,
+            "{name}: the float goes to the right edge: {f:?}"
+        );
         assert_no_line_under_a_float(name, &body, &body);
         let lines = line_rects(&body);
         assert!(
@@ -254,7 +279,10 @@ fn a_float_in_one_paragraph_shortens_the_next_paragraph() {
     for_both("p(float) + p", |name, collapse| {
         let body = laid_out(
             vec![
-                para(vec![text("Short."), float_box(Float::Right, 150.0, 120.0, |_| {})]),
+                para(vec![
+                    text("Short."),
+                    float_box(Float::Right, 150.0, 120.0, |_| {}),
+                ]),
                 para(vec![text(PARA)]),
             ],
             collapse,
@@ -273,41 +301,52 @@ fn a_float_in_one_paragraph_shortens_the_next_paragraph() {
 #[test]
 fn a_cleared_block_goes_below_the_float_with_full_width_lines() {
     for clear in [Clear::Right, Clear::Both] {
-        for_both(&format!("float:right + p(clear:{clear:?})"), |name, collapse| {
+        for_both(
+            &format!("float:right + p(clear:{clear:?})"),
+            |name, collapse| {
+                let body = laid_out(
+                    vec![
+                        float_box(Float::Right, 150.0, 100.0, |_| {}),
+                        cleared(para(vec![text(PARA)]), clear),
+                    ],
+                    collapse,
+                );
+                let f = body.children[0].dimensions.margin_box();
+                let p = &body.children[1];
+                assert!(
+                    p.dimensions.border_box().y >= f.bottom() - EPS,
+                    "{name}: the cleared block starts below the float: {:?}",
+                    p.dimensions.border_box()
+                );
+                let lines = line_rects(p);
+                assert!(
+                    lines.iter().any(|l| l.right() > 250.0 + EPS),
+                    "{name}: its lines use the full width: {lines:?}"
+                );
+            },
+        );
+    }
+    for_both(
+        "float:left + float:right + p(clear:both)",
+        |name, collapse| {
             let body = laid_out(
                 vec![
-                    float_box(Float::Right, 150.0, 100.0, |_| {}),
-                    cleared(para(vec![text(PARA)]), clear),
+                    float_box(Float::Left, 100.0, 60.0, |_| {}),
+                    float_box(Float::Right, 100.0, 100.0, |_| {}),
+                    cleared(para(vec![text(PARA)]), Clear::Both),
                 ],
                 collapse,
             );
-            let f = body.children[0].dimensions.margin_box();
-            let p = &body.children[1];
+            let p = &body.children[2];
             assert!(
-                p.dimensions.border_box().y >= f.bottom() - EPS,
-                "{name}: the cleared block starts below the float: {:?}",
-                p.dimensions.border_box()
+                p.dimensions.border_box().y >= 100.0 - EPS,
+                "{name}: below both floats"
             );
-            let lines = line_rects(p);
-            assert!(
-                lines.iter().any(|l| l.right() > 250.0 + EPS),
-                "{name}: its lines use the full width: {lines:?}"
-            );
-        });
-    }
-    for_both("float:left + float:right + p(clear:both)", |name, collapse| {
-        let body = laid_out(
-            vec![
-                float_box(Float::Left, 100.0, 60.0, |_| {}),
-                float_box(Float::Right, 100.0, 100.0, |_| {}),
-                cleared(para(vec![text(PARA)]), Clear::Both),
-            ],
-            collapse,
-        );
-        let p = &body.children[2];
-        assert!(p.dimensions.border_box().y >= 100.0 - EPS, "{name}: below both floats");
-        assert!(line_rects(p).iter().any(|l| l.x.abs() < EPS && l.right() > 300.0 + EPS));
-    });
+            assert!(line_rects(p)
+                .iter()
+                .any(|l| l.x.abs() < EPS && l.right() > 300.0 + EPS));
+        },
+    );
 }
 
 /// (f) a block with `overflow: hidden` establishes a formatting context: it
@@ -324,8 +363,14 @@ fn a_formatting_root_sits_beside_the_float() {
         );
         let f = body.children[0].dimensions.margin_box();
         let d = body.children[1].dimensions.border_box();
-        assert!(d.y < f.bottom(), "{name}: beside the float, not below it: {d:?}");
-        assert!(d.right() <= f.x + EPS, "{name}: does not overlap the float: {d:?}");
+        assert!(
+            d.y < f.bottom(),
+            "{name}: beside the float, not below it: {d:?}"
+        );
+        assert!(
+            d.right() <= f.x + EPS,
+            "{name}: does not overlap the float: {d:?}"
+        );
         assert_no_line_under_a_float(name, &body, &body);
     });
 }
@@ -345,9 +390,15 @@ fn left_and_right_floats_narrow_lines_from_both_sides() {
         assert_no_line_under_a_float(name, &body, &body);
         let lines = line_rects(&body.children[2]);
         for l in lines.iter().filter(|l| l.y < 80.0 - EPS) {
-            assert!(l.x >= 100.0 - EPS && l.right() <= 300.0 + EPS, "{name}: {l:?}");
+            assert!(
+                l.x >= 100.0 - EPS && l.right() <= 300.0 + EPS,
+                "{name}: {l:?}"
+            );
         }
-        assert!(lines.iter().any(|l| l.y < 80.0 - EPS), "{name}: no line beside the floats");
+        assert!(
+            lines.iter().any(|l| l.y < 80.0 - EPS),
+            "{name}: no line beside the floats"
+        );
     });
 }
 
@@ -359,13 +410,18 @@ fn a_line_too_narrow_beside_a_float_moves_below_it() {
         let body = laid_out(
             vec![
                 float_box(Float::Right, 380.0, 50.0, |_| {}),
-                para(vec![text("Incomprehensibilities are everywhere on the web today.")]),
+                para(vec![text(
+                    "Incomprehensibilities are everywhere on the web today.",
+                )]),
             ],
             collapse,
         );
         assert_no_line_under_a_float(name, &body, &body);
         let first = line_rects(&body.children[1])[0];
-        assert!(first.y >= 50.0 - EPS, "{name}: the first line moves below: {first:?}");
+        assert!(
+            first.y >= 50.0 - EPS,
+            "{name}: the first line moves below: {first:?}"
+        );
     });
 }
 
@@ -399,9 +455,15 @@ fn the_wikipedia_thumbnail_shape_wraps_text_beside_the_figure() {
         let content = block(vec![block(vec![figure, p1, p2])]);
         let body = laid_out(vec![content], collapse);
         let f = float_rects(&body)[0];
-        assert!((f.right() - 400.0).abs() < EPS, "{name}: figure at the right edge: {f:?}");
+        assert!(
+            (f.right() - 400.0).abs() < EPS,
+            "{name}: figure at the right edge: {f:?}"
+        );
         assert_no_line_under_a_float(name, &body, &body);
-        assert!(line_rects(&body).iter().any(|l| beside(l, &f)), "{name}: no line beside");
+        assert!(
+            line_rects(&body).iter().any(|l| beside(l, &f)),
+            "{name}: no line beside"
+        );
     });
 }
 
@@ -440,17 +502,29 @@ fn shortening_is_measured_from_the_content_edge() {
                     s.padding_right = Length::Px(30.0);
                     s.padding_top = Length::Px(10.0);
                 },
-                vec![float_box(Float::Right, 100.0, 80.0, |_| {}), para(vec![text(PARA)])],
+                vec![
+                    float_box(Float::Right, 100.0, 80.0, |_| {}),
+                    para(vec![text(PARA)]),
+                ],
             )],
             collapse,
         );
         let f = float_rects(&body)[0];
-        assert!((f.right() - 370.0).abs() < EPS, "{name}: float at the content edge: {f:?}");
-        assert!((f.y - 10.0).abs() < EPS, "{name}: float under the padding: {f:?}");
+        assert!(
+            (f.right() - 370.0).abs() < EPS,
+            "{name}: float at the content edge: {f:?}"
+        );
+        assert!(
+            (f.y - 10.0).abs() < EPS,
+            "{name}: float under the padding: {f:?}"
+        );
         assert_no_line_under_a_float(name, &body, &body);
         let lines = line_rects(&body);
         for l in &lines {
-            assert!(l.x >= 20.0 - EPS, "{name}: line left of the content edge: {l:?}");
+            assert!(
+                l.x >= 20.0 - EPS,
+                "{name}: line left of the content edge: {l:?}"
+            );
         }
         assert!(lines.iter().any(|l| beside(l, &f)));
     });
@@ -471,12 +545,19 @@ fn a_floats_margins_are_excluded_too() {
             collapse,
         );
         let f = body.children[0].dimensions.margin_box();
-        assert!((f.x - 260.0).abs() < EPS && (f.height - 80.0).abs() < EPS, "{name}: {f:?}");
+        assert!(
+            (f.x - 260.0).abs() < EPS && (f.height - 80.0).abs() < EPS,
+            "{name}: {f:?}"
+        );
         assert_no_line_under_a_float(name, &body, &body);
         let lines = line_rects(&body);
-        assert!(lines.iter().any(|l| l.y >= 60.0 - EPS && l.y < 80.0 - EPS && l.right() <= 260.0 + EPS)
-            || !lines.iter().any(|l| l.y >= 60.0 - EPS && l.y < 80.0 - EPS),
-            "{name}: lines beside the bottom margin are shortened too: {lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.y >= 60.0 - EPS && l.y < 80.0 - EPS && l.right() <= 260.0 + EPS)
+                || !lines.iter().any(|l| l.y >= 60.0 - EPS && l.y < 80.0 - EPS),
+            "{name}: lines beside the bottom margin are shortened too: {lines:?}"
+        );
     });
 }
 
@@ -492,16 +573,25 @@ fn intrinsic_width_does_not_shrink_with_shortened_lines() {
         let mut s = ComputedStyle::new();
         s.float = Float::Left;
         let mut outer = LayoutBox::with_float(BoxType::Block, s, Float::Left);
-        outer.children = vec![float_box(Float::Right, 50.0, 40.0, |_| {}), text("Browsers fetch pages.")];
+        outer.children = vec![
+            float_box(Float::Right, 50.0, 40.0, |_| {}),
+            text("Browsers fetch pages."),
+        ];
         outer
     };
     let mut alone = LayoutBox::new(BoxType::Block, ComputedStyle::new());
     alone.children = vec![text("Browsers fetch pages.")];
     let base = crate::grid::estimate_max_content_width(&alone);
     let w = crate::grid::estimate_max_content_width(&make());
-    assert!(w >= base - EPS, "max-content {w} shrank below the text's own {base}");
+    assert!(
+        w >= base - EPS,
+        "max-content {w} shrank below the text's own {base}"
+    );
     let mn = crate::grid::estimate_min_content_width(&make());
-    assert!(mn >= 50.0 - EPS, "min-content {mn} smaller than the inner float");
+    assert!(
+        mn >= 50.0 - EPS,
+        "min-content {mn} smaller than the inner float"
+    );
 }
 
 /// A float does not shorten lines inside another formatting context: the
@@ -509,24 +599,32 @@ fn intrinsic_width_does_not_shrink_with_shortened_lines() {
 /// own lines use its whole width.
 #[test]
 fn a_float_does_not_reach_into_another_formatting_context() {
-    for_both("float:right + div(overflow:hidden) > p", |name, collapse| {
-        let body = laid_out(
-            vec![
-                float_box(Float::Right, 150.0, 100.0, |_| {}),
-                block_with(|s| s.overflow_x = Overflow::Hidden, vec![para(vec![text(PARA)])]),
-            ],
-            collapse,
-        );
-        let d = body.children[1].dimensions.content;
-        let lines = line_rects(&body.children[1]);
-        assert!(
-            lines.iter().any(|l| l.y < 100.0 && (l.right() - d.right()).abs() < 40.0),
-            "{name}: lines fill the formatting root's own width {d:?}: {lines:?}"
-        );
-        for l in &lines {
-            assert!(l.x >= d.x - EPS, "{name}: {l:?} left of the root {d:?}");
-        }
-    });
+    for_both(
+        "float:right + div(overflow:hidden) > p",
+        |name, collapse| {
+            let body = laid_out(
+                vec![
+                    float_box(Float::Right, 150.0, 100.0, |_| {}),
+                    block_with(
+                        |s| s.overflow_x = Overflow::Hidden,
+                        vec![para(vec![text(PARA)])],
+                    ),
+                ],
+                collapse,
+            );
+            let d = body.children[1].dimensions.content;
+            let lines = line_rects(&body.children[1]);
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.y < 100.0 && (l.right() - d.right()).abs() < 40.0),
+                "{name}: lines fill the formatting root's own width {d:?}: {lines:?}"
+            );
+            for l in &lines {
+                assert!(l.x >= d.x - EPS, "{name}: {l:?} left of the root {d:?}");
+            }
+        },
+    );
     for_both("float:right + inline-block", |name, collapse| {
         let mut ib = block_with(
             |s| {
@@ -537,7 +635,10 @@ fn a_float_does_not_reach_into_another_formatting_context() {
         );
         ib.box_type = BoxType::Block;
         let body = laid_out(
-            vec![para(vec![float_box(Float::Right, 150.0, 100.0, |_| {}), ib])],
+            vec![para(vec![
+                float_box(Float::Right, 150.0, 100.0, |_| {}),
+                ib,
+            ])],
             collapse,
         );
         let ib = &body.children[0].children[1];
@@ -560,27 +661,35 @@ fn a_float_does_not_reach_into_another_formatting_context() {
 #[test]
 fn text_align_works_within_the_shortened_line() {
     for align in [TextAlign::Center, TextAlign::Right] {
-        for_both(&format!("float:right + p(text-align:{align:?})"), |name, collapse| {
-            let body = laid_out(
-                vec![
-                    float_box(Float::Right, 150.0, 100.0, |_| {}),
-                    block_with(|s| s.text_align = align, vec![text(PARA)]),
-                ],
-                collapse,
-            );
-            let f = body.children[0].dimensions.margin_box();
-            assert_no_line_under_a_float(name, &body, &body);
-            let lines = line_rects(&body.children[1]);
-            let beside_lines: Vec<_> = lines.iter().filter(|l| beside(l, &f)).collect();
-            assert!(!beside_lines.is_empty(), "{name}: no line beside the float");
-            for l in beside_lines {
-                let slack = 250.0 - l.right();
-                let lead = l.x;
-                match align {
-                    TextAlign::Right => assert!(slack < EPS, "{name}: right-aligned to the float: {l:?}"),
-                    _ => assert!((slack - lead).abs() < 1.0, "{name}: centred in 0..250: {l:?}"),
+        for_both(
+            &format!("float:right + p(text-align:{align:?})"),
+            |name, collapse| {
+                let body = laid_out(
+                    vec![
+                        float_box(Float::Right, 150.0, 100.0, |_| {}),
+                        block_with(|s| s.text_align = align, vec![text(PARA)]),
+                    ],
+                    collapse,
+                );
+                let f = body.children[0].dimensions.margin_box();
+                assert_no_line_under_a_float(name, &body, &body);
+                let lines = line_rects(&body.children[1]);
+                let beside_lines: Vec<_> = lines.iter().filter(|l| beside(l, &f)).collect();
+                assert!(!beside_lines.is_empty(), "{name}: no line beside the float");
+                for l in beside_lines {
+                    let slack = 250.0 - l.right();
+                    let lead = l.x;
+                    match align {
+                        TextAlign::Right => {
+                            assert!(slack < EPS, "{name}: right-aligned to the float: {l:?}")
+                        }
+                        _ => assert!(
+                            (slack - lead).abs() < 1.0,
+                            "{name}: centred in 0..250: {l:?}"
+                        ),
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 }
