@@ -96,3 +96,52 @@ fn a_root_class_is_not_matched_as_a_descendant_or_without_being_there() {
         </div></body></html>"#;
     assert_eq!(shown(page).join(" "), "d");
 }
+
+/// The root element is in every ancestor chain, so the attribute and
+/// `:not()` parts of a compound that it matches by tag or class must be
+/// tested against it: otherwise `html[dir=rtl] .x`, `html[lang=de] .x` and
+/// `html:not(.js) .x` match on every page (Prometheus, R1 on #614: rows a,
+/// b, d and e are his probe). His `[dir=rtl] .c` is not here: it matches
+/// through `body` and `div`, whose attributes the chain does not carry, as
+/// it did before the root was an ancestor. The expected row is the oracle
+/// Chromium 143's for this page.
+const ROOT_ATTRIBUTES: &str = r#"<!doctype html>
+<html lang="en" dir="ltr" class="p1" data-theme="dark" data-n="a b"><head><style>
+nav { display: none; }
+html[lang=fr] .a { display: block; }
+html[dir=rtl] .b { display: block; }
+html[dir=rtl] > body .c { display: block; }
+html:not(.p1) .d { display: block; }
+html[lang=en] .e { display: block; }
+html[lang] .f { display: block; }
+html[data-missing] .g { display: block; }
+html[data-theme="light"] .h { display: block; }
+html[data-theme^=da] .i { display: block; }
+html[data-n~=b] .j { display: block; }
+html[data-n~=c] .k { display: block; }
+html:not(.p2) .l { display: block; }
+html:not([dir=rtl]) .m { display: block; }
+html:not([dir=ltr]) .n { display: block; }
+html:not(.p2, .p1) .o { display: block; }
+html:not(body) .p { display: block; }
+:root:not(html) .q { display: block; }
+.p1[lang|=en] > body .r { display: block; }
+.p1[lang=de] > body .s { display: block; }
+html:is([lang=de], [lang=fr]) .t { display: block; }
+html:is([lang=de], [lang=en]) .u { display: block; }
+html:not(.p1) body .v, html.p1[dir=ltr] .v { display: block; }
+html:not(:lang(fr)) .w { display: block; }
+</style></head><body>
+<div class="col">
+<nav class="a">a</nav><nav class="b">b</nav><nav class="c">c</nav><nav class="d">d</nav><nav class="e">e</nav>
+<nav class="f">f</nav><nav class="g">g</nav><nav class="h">h</nav><nav class="i">i</nav><nav class="j">j</nav>
+<nav class="k">k</nav><nav class="l">l</nav><nav class="m">m</nav><nav class="n">n</nav><nav class="o">o</nav>
+<nav class="p">p</nav><nav class="q">q</nav><nav class="r">r</nav><nav class="s">s</nav><nav class="t">t</nav>
+<nav class="u">u</nav><nav class="v">v</nav><nav class="w">w</nav>
+</div>
+</body></html>"#;
+
+#[test]
+fn the_root_elements_attributes_and_negations_are_tested_when_it_is_the_ancestor() {
+    assert_eq!(shown(ROOT_ATTRIBUTES).join(" "), "e f i j l m p r u v w");
+}
