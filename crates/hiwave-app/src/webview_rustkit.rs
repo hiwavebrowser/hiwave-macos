@@ -69,7 +69,13 @@ pub struct RustKitView {
 /// what parity-capture and the board keep; a person waits longer than a
 /// capture does, and YouTube's 10.8 MB base module alone ran past 5 s and
 /// left the page white (Pete, 2026-10-06).
-const LIVE_SCRIPT_BUDGET_MS: u64 = 60_000;
+///
+/// 15 s, down from 60 s (Pete, 2026-10-08): scripts run on the window's
+/// thread, so a script that never yields freezes the window until this
+/// budget is spent (#616 stops it at its next host call only then). ebay's
+/// new module graph held the window for the full minute. Nothing loaded in
+/// the hand tests of 2026-10-08 needed more than about 8 s.
+const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
 
 /// The engine builder for content views, before the shield is attached.
 fn content_engine_builder() -> EngineBuilder {
@@ -667,7 +673,7 @@ mod tests {
     #[test]
     fn content_views_get_the_live_script_budget() {
         let builder = content_engine_builder();
-        assert_eq!(builder.config().script_budget_ms, 60_000);
+        assert_eq!(builder.config().script_budget_ms, 15_000);
         // Only the script budget is raised: the virtual timer clock and
         // the engine's own default (parity-capture, the board) stay at 5 s.
         assert_eq!(builder.config().timer_horizon_ms, 5_000);
