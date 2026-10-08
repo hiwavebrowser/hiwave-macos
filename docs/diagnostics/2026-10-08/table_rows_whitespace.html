@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<!--
+  #621 reduced page: an infobox table with newlines between its rows, floated right.
+  Chrome: one tbody with three rows; the infobox (about 260px wide) sits at the top
+  right and BOTH paragraphs are children of <body>. They wrap to the left of the
+  infobox and continue full width below it. They are NOT inside the table.
+  RustKit before the fix: each row got its own tbody and the table never closed, so
+  both paragraphs were laid out inside the floated table.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>table rows whitespace</title>
+</head>
+<body style="margin: 16px; font: 14px/1.5 sans-serif; width: 640px;">
+<table class="infobox" style="float: right; width: 260px; margin: 0 0 12px 16px; border: 1px solid #a2a9b1; background: #f8f9fa; border-collapse: collapse;">
+<tbody>
+<tr><th colspan="2" style="background: #cedff2; padding: 4px;">Infobox title</th></tr>
+<tr><th style="text-align: left; padding: 4px;">Born</th><td style="padding: 4px;">1 January 1900</td></tr>
+<tr><th style="text-align: left; padding: 4px;">Known for</th><td style="padding: 4px;">Example markup</td></tr>
+</tbody>
+</table>
+<p style="margin: 0 0 12px 0;">First paragraph of article text. In Chrome this paragraph sits to the left of
+the infobox, wrapping around it. Lorem ipsum dolor sit amet, consectetur adipiscing elit,
+sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>
+<p style="margin: 0;">Second paragraph. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris
+nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate
+velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non
+proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>
+</body>
+</html>
