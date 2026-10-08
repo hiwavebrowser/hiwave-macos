@@ -41,6 +41,9 @@ mod min_max_height_unit_tests;
 mod percent_height_definite_tests;
 
 #[cfg(test)]
+mod replaced_size_unit_tests;
+
+#[cfg(test)]
 mod shaped_run_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
@@ -2606,24 +2609,19 @@ impl LayoutBox {
         // that is what the intrinsic-sizing rules and `dimensions.content` are
         // expressed in; `auto` stays absent and takes the natural size.
         let explicit_width = replaced_content_size(
-            match self.style.width {
-                Length::Px(px) => Some(px),
-                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
-                _ => None,
-            },
+            self.replaced_length(&self.style.width, Some(cb_width)),
             horizontal_decoration,
             border_box_sizing,
         );
 
         let explicit_height = replaced_content_size(
-            match self.style.height {
-                Length::Px(px) => Some(px),
-                Length::Percent(pct) => percent_height_base.map(|base| pct / 100.0 * base),
-                _ => None,
-            },
+            self.replaced_length(&self.style.height, percent_height_base),
             vertical_decoration,
             border_box_sizing,
         );
+        // Which axes the page left to the ratio: a minimum that grows the
+        // other axis takes these along and leaves a specified size alone.
+        let (width_is_auto, height_is_auto) = (explicit_width.is_none(), explicit_height.is_none());
 
         // A specified `aspect-ratio` replaces the natural ratio before the
         // intrinsic-sizing rules run, so a missing axis is derived from the
@@ -2663,20 +2661,12 @@ impl LayoutBox {
         // preserving the aspect ratio (max-width applied first, then max-height,
         // matching the constraint-violation table for the common cases).
         let max_width = replaced_content_size(
-            match self.style.max_width {
-                Length::Px(px) => Some(px),
-                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
-                _ => None,
-            },
+            self.replaced_length(&self.style.max_width, Some(cb_width)),
             horizontal_decoration,
             border_box_sizing,
         );
         let max_height = replaced_content_size(
-            match self.style.max_height {
-                Length::Px(px) => Some(px),
-                Length::Percent(pct) => percent_height_base.map(|base| pct / 100.0 * base),
-                _ => None,
-            },
+            self.replaced_length(&self.style.max_height, percent_height_base),
             vertical_decoration,
             border_box_sizing,
         );
@@ -2701,6 +2691,38 @@ impl LayoutBox {
             }
         }
 
+        // `min-width` and `min-height` (CSS 2.1 §10.4, §10.7), which were not
+        // read here at all. A minimum wins over a maximum, and an axis the
+        // page left `auto` follows the grown one across the ratio; a
+        // specified axis stays (measured: `width: 16px; min-width: 2em` at a
+        // 14px font is 28x28, `16px x 16px; min-height: 32px` is 16x32).
+        let min_width = replaced_content_size(
+            self.replaced_length(&self.style.min_width, Some(cb_width)),
+            horizontal_decoration,
+            border_box_sizing,
+        );
+        let min_height = replaced_content_size(
+            self.replaced_length(&self.style.min_height, percent_height_base),
+            vertical_decoration,
+            border_box_sizing,
+        );
+        if let Some(mw) = min_width {
+            if width < mw {
+                if height_is_auto && width > 0.0 {
+                    height = mw * height / width;
+                }
+                width = mw;
+            }
+        }
+        if let Some(mh) = min_height {
+            if height < mh {
+                if width_is_auto && height > 0.0 {
+                    width = mh * width / height;
+                }
+                height = mh;
+            }
+        }
+
         // Position within containing block. The CONTENT box sits inside this
         // element's own margin/border/padding, so the BORDER box starts at the
         // containing block's content edge — the same offsets
@@ -2716,6 +2738,33 @@ impl LayoutBox {
             + self.dimensions.padding.top;
         self.dimensions.content.width = width;
         self.dimensions.content.height = height;
+    }
+
+    /// A specified size on a replaced element in pixels, or `None` for
+    /// `auto`. `percent_base` is what a percentage refers to; `None` means
+    /// that base is indefinite, and a percentage of it is `auto` (`none` for a
+    /// maximum). Until 2026-10-07 only `px` and percentages were read here,
+    /// so `svg { width: 1em; height: 1em }`, the usual way to size an icon to
+    /// its text, came out at the viewBox size.
+    fn replaced_length(&self, length: &Length, percent_base: Option<f32>) -> Option<f32> {
+        match length {
+            Length::Auto | Length::FitContent => None,
+            Length::Px(px) => Some(*px),
+            Length::Percent(pct) => percent_base.map(|base| pct / 100.0 * base),
+            Length::Em(_)
+            | Length::Rem(_)
+            | Length::Vw(_)
+            | Length::Vh(_)
+            | Length::Vmin(_)
+            | Length::Vmax(_) => Some(self.length_to_px(length, 0.0)),
+            // These may hold a percentage. Against an indefinite base it
+            // counts as zero, and a result that is not positive is `auto`.
+            Length::Min(_) | Length::Max(_) | Length::Clamp(_) | Length::Calc(_) => {
+                let px = self.length_to_px(length, percent_base.unwrap_or(0.0));
+                (percent_base.is_some() || px > 0.0).then_some(px)
+            }
+            _ => None,
+        }
     }
 
     /// Layout a form control (input, button, textarea, etc.)
