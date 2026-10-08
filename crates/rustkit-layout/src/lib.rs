@@ -26,6 +26,9 @@ pub mod scroll;
 pub mod text;
 
 #[cfg(test)]
+mod flex_container_height_unit_tests;
+
+#[cfg(test)]
 mod flex_item_relayout_tests;
 
 #[cfg(test)]
