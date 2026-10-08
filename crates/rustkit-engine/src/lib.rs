@@ -5300,11 +5300,25 @@ impl Engine {
             // Identity tracking starts at body, matching Chrome's capture: it
             // skips `html`, so `body` is the root of every selector path.
             let element_ids = Cell::new(0);
+            // The root element has no box, but it is body's parent in every
+            // selector: `.client-js .x`, `html.dark .x`, `html > body`.
+            let root_ancestor: Vec<Ancestor> = document
+                .document_element()
+                .and_then(|html| match &html.node_type {
+                    NodeType::Element { tag_name, attributes, .. } => Some(Rc::new((
+                        lower_tag(tag_name).to_string(),
+                        element_classes(attributes),
+                        attributes.get("id").cloned(),
+                    ))),
+                    _ => None,
+                })
+                .into_iter()
+                .collect();
             let body_box = self.build_layout_from_parent_style_and_path(
                 &body,
                 &stylesheets,
                 &css_vars,
-                &[],
+                &root_ancestor,
                 html_style.as_deref(),
                 &[],
                 SiblingContext::SOLE.with_children(Self::node_has_children(&body)),
