@@ -130,18 +130,39 @@ impl SvgDocument {
 
         // Parse elements (simplified)
         let mut servers = HashMap::new();
-        doc.root = parse_svg_content(xml, &root_style, &mut servers)?;
-
-        // `<use>` names its target by id, anywhere in the markup and possibly
-        // after itself, so every reference is resolved once the whole
-        // document has been read. The instances are built before paint
-        // servers resolve so a gradient they name is swapped in too.
+        // The root's user units: what the percentages of a nested viewport
+        // and of a `<use>` resolve against.
         let viewport = doc.view_box.map(|vb| (vb.width, vb.height)).unwrap_or_else(|| {
             (
                 doc.width.map(|w| w.to_px(300.0)).unwrap_or(300.0),
                 doc.height.map(|h| h.to_px(150.0)).unwrap_or(150.0),
             )
         });
+        // The root's own tag is read above: what is parsed here is its
+        // content, so an `<svg>` met there is a nested one. Markup after its
+        // close tag (the sprite sheet the engine appends) never paints; it
+        // is read for the paint servers it defines.
+        let (body, appended) = xml
+            .find("<svg")
+            .and_then(|start| {
+                let after_tag = start + xml[start..].find('>')? + 1;
+                if xml[..after_tag].ends_with("/>") {
+                    return Some(("", &xml[after_tag..]));
+                }
+                let lower = xml.to_ascii_lowercase();
+                Some(match element_extent(&lower, after_tag, "svg") {
+                    Some((body_end, after_close)) => (&xml[after_tag..body_end], &xml[after_close..]),
+                    None => (&xml[after_tag..], ""),
+                })
+            })
+            .unwrap_or((xml, ""));
+        doc.root = parse_svg_content(body, &root_style, &mut servers, viewport)?;
+        parse_svg_content(appended, &root_style, &mut servers, viewport)?;
+
+        // `<use>` names its target by id, anywhere in the markup and possibly
+        // after itself, so every reference is resolved once the whole
+        // document has been read. The instances are built before paint
+        // servers resolve so a gradient they name is swapped in too.
         let ids = collect_ids(xml);
         if !ids.is_empty() {
             let mut ctx = UseContext {
@@ -2361,7 +2382,7 @@ fn instantiate_use(u: &SvgUse, ctx: &mut UseContext, viewport: (f32, f32)) -> Op
                     inner_viewport = (vb.width, vb.height);
                 }
             }
-            let SvgElement::Group(mut g) = parse_svg_content(&def.body, &style, ctx.servers).ok()? else {
+            let SvgElement::Group(mut g) = parse_svg_content(&def.body, &style, ctx.servers, inner_viewport).ok()? else {
                 return None;
             };
             g.style = style;
@@ -2655,6 +2676,7 @@ fn parse_svg_content(
     xml: &str,
     base_style: &SvgStyle,
     servers: &mut HashMap<String, GradientDef>,
+    viewport: (f32, f32),
 ) -> Result<SvgElement, SvgError> {
     let mut group = SvgGroup::new();
     let lower = xml.to_ascii_lowercase();
@@ -2717,7 +2739,60 @@ fn parse_svg_content(
                 if (tag_name == "defs" || tag_name == "symbol") && !tag.ends_with("/>") {
                     let (body_end, after_close) =
                         element_extent(&lower, after_tag, &tag_name).unwrap_or((xml.len(), xml.len()));
-                    parse_svg_content(&xml[after_tag..body_end], base_style, servers)?;
+                    parse_svg_content(&xml[after_tag..body_end], base_style, servers, viewport)?;
+                    pos = after_close;
+                    continue;
+                }
+
+                // A `<g>` and a nested `<svg>` are containers (SVG 2 §5.2,
+                // §8.2): their children are read with the container's style
+                // as the inherited one and drawn under its transform. A
+                // nested `<svg>` is a viewport at (x, y) with its viewBox
+                // mapped in; it is not clipped to it yet. Until 2026-10-08
+                // both tags were dropped and their children read as the
+                // root's: no group transform, no inherited fill, and every
+                // icon of a sprite sheet at its viewBox's own units.
+                if matches!(tag_name.as_str(), "g" | "a" | "svg") && !tag.ends_with("/>") {
+                    let (body_end, after_close) =
+                        element_extent(&lower, after_tag, &tag_name).unwrap_or((xml.len(), xml.len()));
+                    let attrs = tag_attributes(tag);
+                    let mut style = base_style.clone();
+                    style.parse_attributes(&attrs);
+                    let mut transform = attrs
+                        .get("transform")
+                        .map_or_else(Transform2D::identity, |t| Transform2D::parse(t));
+                    let mut inner_viewport = viewport;
+                    let mut renders = true;
+                    if tag_name == "svg" {
+                        let length = |name: &str, full: f32, default: f32| {
+                            attrs
+                                .get(name)
+                                .and_then(|v| SvgLength::parse(v))
+                                .map_or(default, |l| l.to_px(full))
+                        };
+                        let width = length("width", viewport.0, viewport.0);
+                        let height = length("height", viewport.1, viewport.1);
+                        transform = transform.translate(length("x", viewport.0, 0.0), length("y", viewport.1, 0.0));
+                        inner_viewport = (width, height);
+                        if let Some(vb) = attrs.get("viewbox").and_then(|v| ViewBox::parse(v)) {
+                            let par = attrs.get("preserveaspectratio").map(String::as_str);
+                            match viewbox_transform(&vb, width, height, par) {
+                                Some(fit) => {
+                                    transform = transform.multiply(&fit);
+                                    inner_viewport = (vb.width, vb.height);
+                                }
+                                // An empty viewBox disables rendering.
+                                None => renders = false,
+                            }
+                        }
+                    }
+                    let content = parse_svg_content(&xml[after_tag..body_end], &style, servers, inner_viewport)?;
+                    if let (true, SvgElement::Group(mut container)) = (renders, content) {
+                        container.transform = transform;
+                        container.style = style;
+                        container.id = attrs.get("id").cloned();
+                        group.children.push(SvgElement::Group(container));
+                    }
                     pos = after_close;
                     continue;
                 }
