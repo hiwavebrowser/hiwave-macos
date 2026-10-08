@@ -72,6 +72,7 @@ of a run (about a minute for all checks).
 | `h6_extent` | H6 scroll | `h6_extent.html`: three 1500 px bands overflowing a `height: 100%` html, body and wrapper; script scrolls to the end | no |
 | `h8` | H8 error page | `h8_error.html`, which the server answers with 403: its script and its image | no |
 | `h16_click_nav` | H14, H16 navigation from a loaded page | `h16_a.html` (red) to `h16_b.html` (green): the user's click on a link, and four routes the page starts itself (`link.click()`, `location.href = url`, a submit button's `click()`, `form.submit()`) | the link click only |
+| `h19_spin` | H19 a script that does not end (ebay hang, 2026-10-08) | `h19_spin.html`: a script inside nested `forEach` callbacks that would run for hours; the load must finish at the app's 60 s script budget (the check takes a minute) | no |
 
 Pages use targets that fill the viewport or flat colours counted over the
 whole frame, so no check depends on where the content view sits inside the

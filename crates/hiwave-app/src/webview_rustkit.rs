@@ -83,6 +83,10 @@ fn content_engine_builder() -> EngineBuilder {
         .javascript_enabled(true)
         .cookies_enabled(true)
         .script_budget_ms(LIVE_SCRIPT_BUDGET_MS)
+        // A script still running at the budget is stopped: scripts run on
+        // the window's thread, and ebay.com's module graph held it for
+        // minutes (Pete had to kill the app, 2026-10-08).
+        .interrupt_scripts_at_budget(true)
 }
 
 impl RustKitView {
@@ -649,5 +653,12 @@ mod tests {
         // the engine's own default (parity-capture, the board) stay at 5 s.
         assert_eq!(builder.config().timer_horizon_ms, 5_000);
         assert_eq!(rustkit_engine::EngineConfig::default().script_budget_ms, 5_000);
+    }
+
+    #[test]
+    fn content_views_stop_a_script_that_outruns_the_budget() {
+        assert!(content_engine_builder().config().interrupt_scripts_at_budget);
+        // The engine's default (parity-capture, the board) lets it run on.
+        assert!(!rustkit_engine::EngineConfig::default().interrupt_scripts_at_budget);
     }
 }

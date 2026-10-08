@@ -91,6 +91,12 @@ struct Args {
     #[arg(long)]
     script_budget_ms: Option<u64>,
 
+    /// Stop a script that is still running when the script budget is spent, as the
+    /// live app does (off by default: the board lets a running script finish). A
+    /// capture taken with it is not comparable with the board and must be labelled.
+    #[arg(long)]
+    interrupt_scripts: bool,
+
     /// Enable verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -1035,6 +1041,7 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     if let Some(budget) = args.script_budget_ms {
         config.script_budget_ms = budget;
     }
+    config.interrupt_scripts_at_budget = args.interrupt_scripts;
     config.replay_proxy = replay_proxy;
     config
 }
@@ -1065,6 +1072,15 @@ mod tests {
             config.timer_horizon_ms,
             EngineConfig::for_parity_testing().timer_horizon_ms
         );
+    }
+
+    #[test]
+    fn a_running_script_is_stopped_at_the_budget_only_with_the_flag() {
+        assert!(!capture_config(&parsed(&[]), None).interrupt_scripts_at_budget);
+        assert!(!capture_config(&parsed(&["--script-budget-ms", "60000"]), None).interrupt_scripts_at_budget);
+        let config = capture_config(&parsed(&["--interrupt-scripts"]), None);
+        assert!(config.interrupt_scripts_at_budget);
+        assert_eq!(config.script_budget_ms, 5_000);
     }
 
     #[test]
