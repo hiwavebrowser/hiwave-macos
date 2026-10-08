@@ -117,6 +117,12 @@ pub fn fixup_table_boxes(root: &mut LayoutBox) {
     fix_children(root);
 }
 
+/// [`fixup_table_boxes`] for `parent`'s own children only, for a builder
+/// that fixes each box as it completes it (its children are already fixed).
+pub fn fixup_table_children(parent: &mut LayoutBox) {
+    fix_children(parent);
+}
+
 fn fix_children(parent: &mut LayoutBox) {
     let d = role(parent);
     if d == Display::TableColumn {
