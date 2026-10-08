@@ -66,3 +66,92 @@ fn the_subtree_of_a_box_at_opacity_zero_paints_nothing() {
     assert_eq!(fills(&list, blue()), 0, "its child: {:?}", list.commands);
     assert_eq!(fills(&list, Color::WHITE), 1, "what is under it still paints");
 }
+
+/// The commands of `list` with the product of the opacity scopes each sits
+/// in.
+fn faded(list: &DisplayList) -> Vec<(&DisplayCommand, f32)> {
+    let mut open: Vec<f32> = Vec::new();
+    let mut out = Vec::new();
+    for command in &list.commands {
+        match command {
+            DisplayCommand::PushOpacity(alpha) => open.push(*alpha),
+            DisplayCommand::PopOpacity => {
+                open.pop().expect("a pop for every push");
+            }
+            other => out.push((other, open.iter().product())),
+        }
+    }
+    assert!(open.is_empty(), "every scope is closed: {:?}", list.commands);
+    out
+}
+
+fn fade_of(list: &DisplayList, of: Color) -> f32 {
+    faded(list)
+        .into_iter()
+        .find_map(|(c, alpha)| match c {
+            DisplayCommand::SolidColor(color, _) if *color == of => Some(alpha),
+            _ => None,
+        })
+        .expect("the fill")
+}
+
+#[test]
+fn a_translucent_box_fades_itself_and_its_subtree() {
+    let list = DisplayList::build(&page(0.5));
+    assert_eq!(fade_of(&list, red()), 0.5);
+    assert_eq!(fade_of(&list, blue()), 0.5, "the child has no opacity of its own");
+    assert_eq!(fade_of(&list, Color::WHITE), 1.0, "what is outside is not faded");
+}
+
+#[test]
+fn an_opaque_box_opens_no_scope() {
+    let list = DisplayList::build(&page(1.0));
+    assert!(
+        !list
+            .commands
+            .iter()
+            .any(|c| matches!(c, DisplayCommand::PushOpacity(_) | DisplayCommand::PopOpacity)),
+        "{:?}",
+        list.commands
+    );
+}
+
+#[test]
+fn nested_opacities_multiply() {
+    let mut root = page(0.5);
+    root.children[0].children[0].style.opacity = 0.5;
+    let list = DisplayList::build(&root);
+    assert_eq!(fade_of(&list, red()), 0.5);
+    assert_eq!(fade_of(&list, blue()), 0.25);
+}
+
+#[test]
+fn a_text_run_does_not_apply_the_opacity_it_copied_from_its_parent() {
+    // A pseudo-element's text child clones the pseudo's whole style.
+    let mut root = page(0.5);
+    let mut style = root.children[0].style.clone();
+    style.background_color = Color::TRANSPARENT;
+    root.children[0].children.push(LayoutBox::new(BoxType::Text("x".into()), style));
+    let list = DisplayList::build(&root);
+    let pushes = list
+        .commands
+        .iter()
+        .filter(|c| matches!(c, DisplayCommand::PushOpacity(_)))
+        .count();
+    assert_eq!(pushes, 1, "{:?}", list.commands);
+}
+
+#[test]
+fn the_scope_opens_before_the_boxs_clip_and_closes_after_it() {
+    // Pushes and pops stay nested.
+    let mut root = page(0.5);
+    root.children[0].style.overflow_x = rustkit_css::Overflow::Hidden;
+    root.children[0].style.overflow_y = rustkit_css::Overflow::Hidden;
+    let list = DisplayList::build(&root);
+    let at = |want: fn(&DisplayCommand) -> bool| list.commands.iter().position(want).expect("command");
+    let push = at(|c| matches!(c, DisplayCommand::PushOpacity(_)));
+    let clip = at(|c| matches!(c, DisplayCommand::PushClip(_)));
+    let unclip = at(|c| matches!(c, DisplayCommand::PopClip));
+    let pop = at(|c| matches!(c, DisplayCommand::PopOpacity));
+    assert!(push < clip && clip < unclip && unclip < pop, "{:?}", list.commands);
+}

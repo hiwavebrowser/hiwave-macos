@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<!-- H22 reduced: `opacity` on boxes that are not images. View at 800x600, DPR 1. Each 100x60 cell sits on white; row 2 sits on a black band. Chrome 148 pixels at the cell centres are in box_opacity_h22.md. -->
+<html><body style="margin: 0"><style>
+  .row { position: absolute; left: 0; width: 800px; height: 80px; }
+  .cell { position: absolute; top: 10px; width: 100px; height: 60px; }
+  .red { background: #f00; } .blue { background: #00f; }
+  .inner { position: absolute; left: 25px; top: 15px; width: 50px; height: 30px; }
+  .t { font: 40px/60px Ahem, monospace; color: #000; }
+</style>
+<div class="row" style="top: 0">
+  <div class="cell red" id="a" style="left: 10px; opacity: 1"></div>
+  <div class="cell red" id="b" style="left: 120px; opacity: .5"></div>
+  <div class="cell red" id="c" style="left: 230px; opacity: 0"></div>
+  <div class="cell red" id="d" style="left: 340px; opacity: .25"><div class="inner blue" style="opacity: .5"></div></div>
+  <div class="cell" id="e" style="left: 450px; opacity: .5; border: 10px solid #00f; box-sizing: border-box"></div>
+  <div class="cell" id="f" style="left: 560px; opacity: 0"><div class="inner blue"></div></div>
+  <div class="cell" id="g" style="left: 670px; opacity: .5; background: linear-gradient(#f00, #f00)"></div>
+</div>
+<div class="row" style="top: 100px; background: #000">
+  <div class="cell red" id="h" style="left: 10px; opacity: .5"></div>
+  <div class="cell" id="i" style="left: 120px; opacity: .5; background: #fff; border-radius: 30px"></div>
+  <div class="cell" id="j" style="left: 230px; background: rgba(255, 255, 255, .5); opacity: .5"></div>
+  <div class="cell red" id="k" style="left: 340px; opacity: .5; overflow: hidden"><div class="inner blue" style="left: 60px; width: 100px"></div></div>
+  <div class="cell" id="l" style="left: 450px; opacity: .5; transform: translateX(20px); background: #fff"></div>
+</div>
+<div class="row" style="top: 200px">
+  <div class="cell t" id="m" style="left: 10px; opacity: .5">XX</div>
+  <div class="cell t" id="n" style="left: 120px; opacity: 0">XX</div>
+  <span class="t" id="o" style="position: absolute; left: 230px; top: 10px; opacity: .5; background: #f00">XX</span>
+  <div class="cell red" id="p" style="left: 450px; opacity: .5"><div class="inner blue" style="left: 0; top: 0; width: 100px; height: 60px; opacity: 1"></div></div>
+  <div class="cell red" id="q" style="left: 560px; opacity: .5"><div class="inner blue"></div></div>
+</div>
+</body></html>

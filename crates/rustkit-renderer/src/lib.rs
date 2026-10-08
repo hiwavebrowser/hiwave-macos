@@ -432,6 +432,8 @@ pub struct Renderer {
     /// Stack of 2D transform matrices and their origins.
     /// Each entry is (matrix [a,b,c,d,e,f], origin (x,y)).
     transform_stack: Vec<([f32; 6], (f32, f32))>,
+    /// Open `PushOpacity` scopes.
+    opacity_scopes: OpacityScopes,
 
     // Caches
     texture_cache: TextureCache,
@@ -699,6 +701,7 @@ impl Renderer {
             clip_pieces: Vec::new(),
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
+            opacity_scopes: OpacityScopes::default(),
             texture_cache,
             glyph_cache,
             texture_bind_group_layout,
@@ -872,6 +875,7 @@ impl Renderer {
     /// Flush current batched vertices to the target without clearing.
     /// Used for incremental rendering when backdrop filters are present.
     fn flush_batches_to(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
+        self.settle_opacity();
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
@@ -982,12 +986,14 @@ impl Renderer {
         self.image_vertices.clear();
         self.image_indices.clear();
         self.image_runs.clear();
+        self.opacity_scopes.rebase();
         Ok(())
     }
 
     /// Flush batched vertices before rendering a GPU gradient.
     /// This ensures correct z-order: batched content renders before the gradient.
     fn flush_batches_for_gradient(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
+        self.settle_opacity();
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
@@ -1120,6 +1126,7 @@ impl Renderer {
         self.image_vertices.clear();
         self.image_indices.clear();
         self.image_runs.clear();
+        self.opacity_scopes.rebase();
         Ok(())
     }
 
@@ -1375,6 +1382,7 @@ impl Renderer {
         self.clip_stack.clear();
         self.stacking_contexts.clear();
         self.transform_stack.clear();
+        self.opacity_scopes.clear();
 
         // Check if there are any blur backdrop filters that need GPU processing
         let has_blur_filters = commands.iter().any(|cmd| {
@@ -2454,6 +2462,17 @@ impl Renderer {
 
             DisplayCommand::PopTransform => {
                 self.pop_transform();
+            }
+
+            DisplayCommand::PushOpacity(alpha) => {
+                let lens = self.batch_lens();
+                self.opacity_scopes.push(*alpha, lens);
+            }
+
+            DisplayCommand::PopOpacity => {
+                if let Some((alpha, starts)) = self.opacity_scopes.pop() {
+                    self.fade_since(alpha, starts);
+                }
             }
 
             DisplayCommand::GradientText {
@@ -5858,6 +5877,33 @@ impl Renderer {
     }
 
 
+    fn batch_lens(&self) -> BatchLens {
+        [
+            self.color_vertices.len(),
+            self.texture_vertices.len(),
+            self.color_glyph_vertices.len(),
+            self.image_vertices.len(),
+        ]
+    }
+
+    /// Fade the vertices each batch has gained since `starts` by `alpha`.
+    /// The colour-glyph pipeline blends premultiplied; the others straight.
+    fn fade_since(&mut self, alpha: f32, starts: BatchLens) {
+        fade_straight(self.color_vertices.iter_mut().map(|v| &mut v.color), starts[0], alpha);
+        fade_straight(self.texture_vertices.iter_mut().map(|v| &mut v.color), starts[1], alpha);
+        fade_premultiplied(self.color_glyph_vertices.iter_mut().map(|v| &mut v.color), starts[2], alpha);
+        fade_straight(self.image_vertices.iter_mut().map(|v| &mut v.color), starts[3], alpha);
+    }
+
+    /// Fade what the open opacity scopes have batched so far. Called before
+    /// every draw of the batches.
+    fn settle_opacity(&mut self) {
+        let lens = self.batch_lens();
+        for (alpha, starts) in self.opacity_scopes.settle(lens) {
+            self.fade_since(alpha, starts);
+        }
+    }
+
     /// Push a 2D transform matrix onto the stack.
     fn push_transform(&mut self, matrix: [f32; 6], origin: (f32, f32)) {
         self.transform_stack.push((matrix, origin));
@@ -6059,6 +6105,8 @@ impl Renderer {
         self.radial_gradient_queue.clear();
         self.conic_gradient_queue.clear();
 
+        self.settle_opacity();
+
         // Render batched content
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
@@ -6226,6 +6274,76 @@ struct ClipEntry {
     /// Rounded constraints still in force, outermost first. A point must be
     /// inside every one of them.
     rounded: Vec<(Rect, rustkit_layout::BorderRadius)>,
+}
+
+/// How many vertices each of the four batches holds, in the order colour,
+/// glyph, colour glyph, image.
+type BatchLens = [usize; 4];
+
+/// The open `PushOpacity` scopes, innermost last.
+///
+/// Draw calls do not know about opacity. A scope remembers where each batch
+/// stood when it opened, and the vertices added since are faded when it
+/// closes; scopes nest, so an inner scope's vertices are faded again by the
+/// outer one, which multiplies the factors. A batch flush in the middle of a
+/// scope fades what the scope has added so far ([`OpacityScopes::settle`])
+/// and the scope carries on from the empty batches.
+///
+/// Pure for the same reason as [`clip_entry_for`]: no device is needed to
+/// test the bookkeeping.
+#[derive(Debug, Default)]
+struct OpacityScopes {
+    scopes: Vec<(f32, BatchLens)>,
+}
+
+impl OpacityScopes {
+    fn clear(&mut self) {
+        self.scopes.clear();
+    }
+
+    fn push(&mut self, alpha: f32, lens: BatchLens) {
+        self.scopes.push((alpha.clamp(0.0, 1.0), lens));
+    }
+
+    /// Close the innermost scope: its factor and where its vertices start.
+    /// `None` for a pop without a push.
+    fn pop(&mut self) -> Option<(f32, BatchLens)> {
+        self.scopes.pop()
+    }
+
+    /// Before the batches are drawn: every open scope's factor and start, to
+    /// be faded now. Afterwards each scope starts at `lens`, so a second
+    /// call before the batches are emptied fades nothing twice.
+    fn settle(&mut self, lens: BatchLens) -> Vec<(f32, BatchLens)> {
+        let due = self.scopes.clone();
+        for scope in &mut self.scopes {
+            scope.1 = lens;
+        }
+        due
+    }
+
+    /// After the batches are emptied: every open scope starts at zero.
+    fn rebase(&mut self) {
+        for scope in &mut self.scopes {
+            scope.1 = [0; 4];
+        }
+    }
+}
+
+/// Fade straight-alpha vertex colours from `start` on.
+fn fade_straight<'a>(colors: impl Iterator<Item = &'a mut [f32; 4]>, start: usize, alpha: f32) {
+    for color in colors.skip(start) {
+        color[3] *= alpha;
+    }
+}
+
+/// Fade premultiplied vertex colours from `start` on: all four channels.
+fn fade_premultiplied<'a>(colors: impl Iterator<Item = &'a mut [f32; 4]>, start: usize, alpha: f32) {
+    for color in colors.skip(start) {
+        for channel in color.iter_mut() {
+            *channel *= alpha;
+        }
+    }
 }
 
 /// The clip entry a `PushClip`/`PushClipRounded` produces on top of `current`.
@@ -9400,5 +9518,89 @@ mod mask_layer_tests {
         );
         let quads: Vec<_> = quads.into_iter().map(|(r, t)| (xywh(r), t)).collect();
         assert_eq!(quads, vec![((0.0, 0.0, 12.0, 8.0), [0.25, 0.5, 1.0, 1.0])]);
+    }
+}
+
+#[cfg(test)]
+mod opacity_scope_tests {
+    //! `PushOpacity`/`PopOpacity` fade the vertices batched between them.
+    //! The four batches are stood in for by one list of colours; a flush is
+    //! `settle`, emptying the list, `rebase`.
+    use super::*;
+
+    const OPAQUE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+    fn alphas(batch: &[[f32; 4]]) -> Vec<f32> {
+        batch.iter().map(|c| c[3]).collect()
+    }
+
+    fn close(scopes: &mut OpacityScopes, batch: &mut [[f32; 4]]) {
+        let (alpha, starts) = scopes.pop().expect("an open scope");
+        fade_straight(batch.iter_mut(), starts[0], alpha);
+    }
+
+    #[test]
+    fn a_scope_fades_what_was_batched_inside_it_only() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = vec![OPAQUE];
+        scopes.push(0.5, [batch.len(); 4]);
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        batch.push(OPAQUE);
+        assert_eq!(alphas(&batch), [1.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn nested_scopes_multiply() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = Vec::new();
+        scopes.push(0.5, [0; 4]);
+        batch.push(OPAQUE);
+        scopes.push(0.5, [batch.len(); 4]);
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        close(&mut scopes, &mut batch);
+        assert_eq!(alphas(&batch), [0.5, 0.25]);
+    }
+
+    #[test]
+    fn a_flush_inside_a_scope_fades_both_halves_once() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = vec![OPAQUE];
+        scopes.push(0.5, [batch.len(); 4]);
+        batch.push(OPAQUE);
+        scopes.push(0.5, [batch.len(); 4]);
+        batch.push(OPAQUE);
+
+        // The flush: settle, a second settle before the draw (a flush that
+        // calls another), then the batches are emptied.
+        for _ in 0..2 {
+            let lens = [batch.len(); 4];
+            for (alpha, starts) in scopes.settle(lens) {
+                fade_straight(batch.iter_mut(), starts[0], alpha);
+            }
+        }
+        assert_eq!(alphas(&batch), [1.0, 0.5, 0.25], "what was drawn");
+        batch.clear();
+        scopes.rebase();
+
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        batch.push(OPAQUE);
+        assert_eq!(alphas(&batch), [0.25, 0.5, 1.0], "after the flush");
+    }
+
+    #[test]
+    fn a_pop_without_a_push_is_ignored() {
+        assert!(OpacityScopes::default().pop().is_none());
+    }
+
+    #[test]
+    fn premultiplied_colours_fade_on_every_channel() {
+        let mut batch = vec![OPAQUE, [0.8, 0.4, 0.2, 0.8]];
+        fade_premultiplied(batch.iter_mut(), 1, 0.5);
+        assert_eq!(batch, vec![OPAQUE, [0.4, 0.2, 0.1, 0.4]]);
     }
 }

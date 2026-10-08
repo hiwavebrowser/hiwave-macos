@@ -7176,6 +7176,17 @@ pub enum DisplayCommand {
     },
     /// Pop a transform matrix.
     PopTransform,
+    /// Fade everything up to the matching `PopOpacity` by this factor (CSS
+    /// Color 4 §4 `opacity`, strictly between 0 and 1: a box at 0 emits
+    /// nothing and a box at 1 needs no scope). Scopes nest and multiply.
+    ///
+    /// The painter fades each command in the scope, which is the group
+    /// opacity the spec asks for only where the group's own paint does not
+    /// overlap itself: a child over its parent's background shows the
+    /// background through it.
+    PushOpacity(f32),
+    /// End the innermost opacity scope.
+    PopOpacity,
 
     /// Draw text with a gradient fill (for background-clip: text effect).
     GradientText {
@@ -8083,6 +8094,16 @@ impl DisplayList {
 
     /// Render a stacking context with proper z-ordering.
     fn render_stacking_context(&mut self, layout_box: &LayoutBox, parent_z: i32, layer: &mut u32) {
+        // `opacity` fades the box and its whole subtree as one group, and
+        // at 0 the group paints nothing (it still takes its space and its
+        // hits). Until 2026-10-08 only the image command carried it, so a
+        // `div` at `opacity: 0` painted solid: google.com's search box
+        // glow and every hover overlay that waits at 0.
+        let opacity = Self::group_opacity(layout_box);
+        if opacity <= 0.0 {
+            return;
+        }
+
         let z_index = if layout_box.position != Position::Static {
             layout_box.z_index
         } else {
@@ -8129,6 +8150,11 @@ impl DisplayList {
                 z_index,
                 rect: layout_box.dimensions.border_box(),
             });
+        }
+
+        let fades = opacity < 1.0;
+        if fades {
+            self.commands.push(DisplayCommand::PushOpacity(opacity));
         }
 
         // Check if this box has a transform
@@ -8259,6 +8285,10 @@ impl DisplayList {
             self.commands.push(DisplayCommand::PopTransform);
         }
 
+        if fades {
+            self.commands.push(DisplayCommand::PopOpacity);
+        }
+
         if creates_context {
             self.commands.push(DisplayCommand::PopStackingContext);
         }
@@ -8278,6 +8308,22 @@ impl DisplayList {
                 }
             }
             self.escapable_clips = outer;
+        }
+    }
+
+    /// The `opacity` this box fades its subtree by. A text run is not an
+    /// element: its style is its parent's, copied (a pseudo-element's text
+    /// child clones the whole pseudo style), so the value on it is the
+    /// parent's own and applying it would fade the text twice.
+    fn group_opacity(layout_box: &LayoutBox) -> f32 {
+        if matches!(layout_box.box_type, BoxType::Text(_)) {
+            return 1.0;
+        }
+        let opacity = layout_box.style.opacity;
+        if opacity.is_nan() {
+            1.0
+        } else {
+            opacity.clamp(0.0, 1.0)
         }
     }
 
