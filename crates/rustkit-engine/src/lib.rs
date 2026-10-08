@@ -8329,53 +8329,44 @@ impl Engine {
                 // CSS order: first size applies to first (topmost) layer
                 // Our array: index 0 is bottommost, last index is topmost
                 // So we need to apply in reverse order
+                // A list shorter than the layers repeats (CSS Backgrounds 3
+                // §3.10); values past the last layer are not used. Until
+                // 2026-10-08 a single value reached the top layer only, and
+                // one too many overwrote the bottom layer.
                 let sizes: Vec<&str> = split_by_comma(value);
                 let num_layers = style.background_layers.len();
-                for (i, size_str) in sizes.iter().enumerate() {
-                    let size = parse_background_size(size_str);
+                for i in 0..num_layers.min(num_layers * sizes.len()) {
                     // Map CSS index to our reversed array: CSS[0] -> layers[n-1]
-                    let layer_idx = num_layers.saturating_sub(i + 1);
-                    if layer_idx < num_layers {
-                        style.background_layers[layer_idx].size = size;
-                    }
+                    style.background_layers[num_layers - 1 - i].size = parse_background_size(sizes[i % sizes.len()]);
                 }
             }
             "background-position" => {
                 // Can be comma-separated for multiple layers
-                // Same reversal logic as background-size
+                // Same reversal and repetition as background-size
                 let positions: Vec<&str> = split_by_comma(value);
                 let num_layers = style.background_layers.len();
-                for (i, pos_str) in positions.iter().enumerate() {
-                    let position = parse_background_position(pos_str);
-                    let layer_idx = num_layers.saturating_sub(i + 1);
-                    if layer_idx < num_layers {
-                        style.background_layers[layer_idx].position = position;
-                    }
+                for i in 0..num_layers.min(num_layers * positions.len()) {
+                    style.background_layers[num_layers - 1 - i].position =
+                        parse_background_position(positions[i % positions.len()]);
                 }
             }
             "background-repeat" => {
                 // Can be comma-separated for multiple layers
-                // Same reversal logic as background-size
+                // Same reversal and repetition as background-size
                 let repeats: Vec<&str> = split_by_comma(value);
                 let num_layers = style.background_layers.len();
-                for (i, repeat_str) in repeats.iter().enumerate() {
-                    let repeat = parse_background_repeat(repeat_str);
-                    let layer_idx = num_layers.saturating_sub(i + 1);
-                    if layer_idx < num_layers {
-                        style.background_layers[layer_idx].repeat = repeat;
-                    }
+                for i in 0..num_layers.min(num_layers * repeats.len()) {
+                    style.background_layers[num_layers - 1 - i].repeat =
+                        parse_background_repeat(repeats[i % repeats.len()]);
                 }
             }
             "background-origin" => {
-                // Same reversal logic as background-size
+                // Same reversal and repetition as background-size
                 let origins: Vec<&str> = split_by_comma(value);
                 let num_layers = style.background_layers.len();
-                for (i, origin_str) in origins.iter().enumerate() {
-                    let origin = parse_background_origin(origin_str);
-                    let layer_idx = num_layers.saturating_sub(i + 1);
-                    if layer_idx < num_layers {
-                        style.background_layers[layer_idx].origin = origin;
-                    }
+                for i in 0..num_layers.min(num_layers * origins.len()) {
+                    style.background_layers[num_layers - 1 - i].origin =
+                        parse_background_origin(origins[i % origins.len()]);
                 }
             }
             // `font` shorthand (css-fonts-4 §3.9):
