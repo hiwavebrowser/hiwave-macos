@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<!-- Reduced repro: external svg <use href="file.svg#id">. Notes: tech8_external_svg_use.md -->
+<!-- Serve over http:// (python3 -m http.server); Chrome refuses external <use> from file://. -->
+<html><body style="margin:0"><style>svg { position: absolute; left: 0; width: 40px; height: 40px; }</style>
+<!-- A (cloudflare.com nav): same-origin sprite, plain href, 2nd symbol by id. Probe (20,20). -->
+<svg style="top:0" viewBox="0 0 20 20"><use href="svg_use_sprite.svg#icon"/></svg>
+<!-- B (caranddriver.com arrows): same file with a ?embed query, plain href. Probe (20,70). -->
+<svg style="top:50px" viewBox="0 0 20 20"><use href="svg_use_sprite.svg?embed#icon"/></svg>
+<!-- C (caranddriver.com, most icons): data-href copied to href by script. Probe (20,120). -->
+<svg style="top:100px" viewBox="0 0 20 20"><use data-href="svg_use_sprite.svg?embed#icon"/></svg>
+<script>for (const u of document.querySelectorAll('use[data-href]')) u.setAttribute('href', u.dataset.href);</script>
+</body></html>
