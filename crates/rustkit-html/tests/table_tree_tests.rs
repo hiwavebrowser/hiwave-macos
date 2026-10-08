@@ -450,3 +450,19 @@ fn table_inside_p_closes_the_p() {
         r#"p("before"), table(tbody(tr(td("a")))), "after""#
     );
 }
+
+#[test]
+fn text_in_fostered_element_stays_in_it_when_a_row_starts() {
+    assert_eq!(
+        body("<table><tr><div>x<td>a</td></tr></table>"),
+        r#"div("x"), table(tbody(tr(td("a"))))"#
+    );
+}
+
+#[test]
+fn hidden_input_in_table_stays_in_table() {
+    assert_eq!(
+        body("<table><input type=hidden><tr><td>a</td></tr></table>"),
+        r#"table(input, tbody(tr(td("a"))))"#
+    );
+}
