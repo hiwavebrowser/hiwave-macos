@@ -1,5 +1,5 @@
 {
-  "description": "Real-site board, 25 sites: the pinned top 20 (realsite-top20.json, same order) plus five Pete added on 2026-10-06 (chrono24, cargurus, autotrader, cars, bringatrailer). Scored out of 75 with its own trend file; the first 20 are also reported as the /60 board so the trend stays comparable. Pinned list \u2014 change it only with a dated note in trench/BASELINE-realsite.md, never to make the number move.",
+  "description": "Real-site board, 25 sites: the pinned top 20 (realsite-top20.json, same order) plus five Pete added on 2026-10-06 (chrono24, cargurus, autotrader, cars, bringatrailer). On 2026-10-08 Pete added simonwillison (simonwillison.net/tags/browser-challenge/), 26 sites. Scored out of 78 (3 per site) with its own trend file; the first 20 are also reported as the /60 board so the trend stays comparable. Pinned list \u2014 change it only with a dated note in trench/BASELINE-realsite.md, never to make the number move.",
   "viewport": {
     "width": 1280,
     "height": 800
@@ -104,6 +104,10 @@
     {
       "id": "bringatrailer",
       "url": "https://bringatrailer.com/"
+    },
+    {
+      "id": "simonwillison",
+      "url": "https://simonwillison.net/tags/browser-challenge/"
     }
   ]
 }
