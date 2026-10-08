@@ -984,14 +984,31 @@ fn layout_flex_container_at(
         // stretched before its children flowed and survives step 11.
         if cross_axis == Axis::Vertical {
             for item in &mut line.items {
-                if item.has_explicit_cross_size
-                    || resolved_align(item.align_self, style.align_items) != AlignItems::Stretch
-                {
+                if item.has_explicit_cross_size {
                     continue;
                 }
-                let target = (line.cross_size - item.cross_margin_start - item.cross_margin_end)
-                    .max(item.min_cross_size)
-                    .min(item.max_cross_size);
+                // An item that is not stretched has the same problem with
+                // its own `min-height`: step 5 floored `cross_size` by it,
+                // step 11 wrote the flow height over the box, and nothing
+                // put the minimum back (16 for `min-height: 32px` under
+                // `align-items: flex-start`, Chromium 32). Only an authored
+                // minimum counts here: without one `min_cross_size` is the
+                // one-line content floor, which is not a size to grow to.
+                let target = if resolved_align(item.align_self, style.align_items)
+                    == AlignItems::Stretch
+                {
+                    line.cross_size - item.cross_margin_start - item.cross_margin_end
+                } else if resolve_length(
+                    item.layout_box,
+                    &item.layout_box.style.min_height,
+                    definite_inner_cross.unwrap_or(0.0),
+                ) > 0.0
+                {
+                    item.min_cross_size
+                } else {
+                    continue;
+                };
+                let target = target.max(item.min_cross_size).min(item.max_cross_size);
                 let content_height = (target - item.cross_pb()).max(0.0);
                 if content_height > item.layout_box.dimensions.content.height {
                     item.cross_size = target;
