@@ -23,6 +23,7 @@ pub mod intrinsic_cache;
 pub mod margin_collapse;
 pub mod multicol;
 pub mod scroll;
+pub mod table;
 pub mod text;
 
 #[cfg(test)]
@@ -48,6 +49,9 @@ mod replaced_size_unit_tests;
 
 #[cfg(test)]
 mod shaped_run_tests;
+
+#[cfg(test)]
+mod table_layout_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
@@ -1569,6 +1573,9 @@ pub struct LayoutBox {
     /// block (the viewport), so `html, body { height: 100% }` keeps body at
     /// the viewport's height while an `auto` html makes body's `100%` auto.
     pub root_element_height: Option<Length>,
+    /// `colspan` / `rowspan` of a table cell (and `span` of a column or
+    /// column group), from the HTML attributes. 1×1 for every other box.
+    pub table_span: table::TableSpan,
 }
 
 impl LayoutBox {
@@ -1597,6 +1604,7 @@ impl LayoutBox {
             text_flow_first_offset: None,
             percent_height_is_auto: false,
             root_element_height: None,
+            table_span: table::TableSpan::default(),
         }
     }
 

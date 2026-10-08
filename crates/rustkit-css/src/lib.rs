@@ -1098,6 +1098,19 @@ pub enum Display {
     Grid,
     InlineGrid,
     None,
+    /// `table`: a block-level table wrapper (CSS 2.1 §17.2).
+    Table,
+    /// `inline-table`: an atomic inline-level table.
+    InlineTable,
+    TableRowGroup,
+    TableHeaderGroup,
+    TableFooterGroup,
+    TableRow,
+    TableCell,
+    TableCaption,
+    /// Columns and column groups are never rendered; they only carry widths.
+    TableColumn,
+    TableColumnGroup,
 }
 
 impl Display {
@@ -1133,6 +1146,22 @@ impl Display {
             self,
             Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
         )
+    }
+
+    /// `table` or `inline-table`: the box that runs table layout.
+    pub fn is_table(self) -> bool {
+        false
+    }
+
+    /// `table-row-group`, `table-header-group` or `table-footer-group`.
+    pub fn is_table_row_group(self) -> bool {
+        false
+    }
+
+    /// Any table-internal display (row group, row, cell, caption, column,
+    /// column group): a box that only makes sense inside a table.
+    pub fn is_table_internal(self) -> bool {
+        false
     }
 }
 
@@ -2017,6 +2046,14 @@ pub enum LineBreak {
     Anywhere,
 }
 
+/// `border-collapse` (CSS 2.1 §17.6). Inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderCollapse {
+    #[default]
+    Separate,
+    Collapse,
+}
+
 /// Vertical alignment.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VerticalAlign {
@@ -2508,6 +2545,12 @@ pub struct ComputedStyle {
     pub line_break: LineBreak,
     pub vertical_align: VerticalAlign,
     pub writing_mode: WritingMode,
+
+    // Tables (CSS 2.1 §17). Both inherit.
+    /// `border-spacing` as (horizontal, vertical) px. Lengths are absolute
+    /// at computed-value time, so they are stored resolved.
+    pub border_spacing: (f32, f32),
+    pub border_collapse: BorderCollapse,
     pub direction: Direction,
 
     // Positioning offsets
@@ -2728,6 +2771,8 @@ impl ComputedStyle {
             direction: parent.direction,
             writing_mode: parent.writing_mode,
             visibility: parent.visibility,
+            border_spacing: parent.border_spacing,
+            border_collapse: parent.border_collapse,
 
             // Text decoration is NOT inherited (each element sets its own)
             text_decoration_line: TextDecorationLine::NONE,
@@ -3570,6 +3615,12 @@ fn split_css_function_args(args: &str) -> Vec<&str> {
     result
 }
 
+/// Parse `border-spacing`: one length for both axes, or horizontal then
+/// vertical (CSS 2.1 §17.6.1). Negative lengths and percentages are invalid.
+pub fn parse_border_spacing(_value: &str) -> Option<(Length, Length)> {
+    None
+}
+
 /// Parse display value.
 ///
 /// Besides the legacy single keywords, this takes css-display-3's
@@ -3675,7 +3726,6 @@ mod tests {
             ("none", Some(Display::None)),
             // Unsupported or invalid: still ignored.
             ("contents", None),
-            ("table", None),
             ("block block", None),
             ("flex list-item", None),
             ("block wobble", None),
@@ -3684,6 +3734,95 @@ mod tests {
         for (value, want) in cases {
             assert_eq!(parse_display(value), *want, "display: {value:?}");
         }
+    }
+
+    #[test]
+    fn display_takes_the_table_keywords() {
+        let cases: &[(&str, Display)] = &[
+            ("table", Display::Table),
+            ("inline-table", Display::InlineTable),
+            ("table-row-group", Display::TableRowGroup),
+            ("table-header-group", Display::TableHeaderGroup),
+            ("table-footer-group", Display::TableFooterGroup),
+            ("table-row", Display::TableRow),
+            ("table-cell", Display::TableCell),
+            ("table-caption", Display::TableCaption),
+            ("table-column", Display::TableColumn),
+            ("table-column-group", Display::TableColumnGroup),
+            ("TABLE-CELL", Display::TableCell),
+            // css-display-3 two-value forms.
+            ("block table", Display::Table),
+            ("inline table", Display::InlineTable),
+            ("table inline", Display::InlineTable),
+        ];
+        for (value, want) in cases {
+            assert_eq!(parse_display(value), Some(*want), "display: {value:?}");
+        }
+        for bad in ["table-cell inline", "table table", "table list-item", "table-rows"] {
+            assert_eq!(parse_display(bad), None, "display: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn table_display_predicates() {
+        assert!(Display::Table.is_table() && Display::InlineTable.is_table());
+        assert!(!Display::TableCell.is_table());
+        assert!(Display::InlineTable.is_inline_level());
+        assert!(Display::InlineTable.is_atomic_inline());
+        assert!(!Display::Table.is_inline_level());
+        for d in [
+            Display::TableRowGroup,
+            Display::TableHeaderGroup,
+            Display::TableFooterGroup,
+        ] {
+            assert!(d.is_table_row_group(), "{d:?}");
+        }
+        assert!(!Display::TableRow.is_table_row_group());
+        for d in [
+            Display::TableRowGroup,
+            Display::TableRow,
+            Display::TableCell,
+            Display::TableCaption,
+            Display::TableColumn,
+            Display::TableColumnGroup,
+        ] {
+            assert!(d.is_table_internal(), "{d:?}");
+            assert!(!d.is_inline_level(), "{d:?}");
+        }
+        assert!(!Display::Table.is_table_internal());
+        assert!(!Display::Block.is_table_internal());
+    }
+
+    #[test]
+    fn border_spacing_takes_one_or_two_lengths() {
+        assert_eq!(
+            parse_border_spacing("2px"),
+            Some((Length::Px(2.0), Length::Px(2.0)))
+        );
+        assert_eq!(
+            parse_border_spacing("10px 4px"),
+            Some((Length::Px(10.0), Length::Px(4.0)))
+        );
+        assert_eq!(parse_border_spacing("0"), Some((Length::Zero, Length::Zero)));
+        assert_eq!(
+            parse_border_spacing(" 0.2em 0 "),
+            Some((Length::Em(0.2), Length::Zero))
+        );
+        // Negative lengths, percentages, keywords and three values are invalid.
+        for bad in ["-1px", "10%", "auto", "1px 2px 3px", "", "red"] {
+            assert_eq!(parse_border_spacing(bad), None, "border-spacing: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn border_spacing_and_collapse_inherit() {
+        let mut parent = ComputedStyle::new();
+        parent.border_spacing = (3.0, 4.0);
+        parent.border_collapse = BorderCollapse::Collapse;
+        let child = ComputedStyle::inherit_from(&parent);
+        assert_eq!(child.border_spacing, (3.0, 4.0));
+        assert_eq!(child.border_collapse, BorderCollapse::Collapse);
+        assert_eq!(ComputedStyle::new().border_spacing, (0.0, 0.0));
     }
 
     #[test]
