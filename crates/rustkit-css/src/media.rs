@@ -110,7 +110,7 @@ fn feature_matches(feature: &str, width: f32, height: f32) -> bool {
             let Some(actual) = actual_value(base, width, height) else {
                 return false;
             };
-            let Some(wanted) = parse_value(base, v) else {
+            let Some(wanted) = parse_value(base, v, width, height) else {
                 return false;
             };
             compare(actual, wanted, prefix)
@@ -153,9 +153,9 @@ fn actual_value(base: &str, width: f32, height: f32) -> Option<f32> {
     }
 }
 
-fn parse_value(base: &str, v: &str) -> Option<f32> {
+fn parse_value(base: &str, v: &str, width: f32, height: f32) -> Option<f32> {
     match base {
-        "width" | "height" => parse_length(v),
+        "width" | "height" => parse_length(v, width, height),
         "aspect-ratio" => match v.split_once('/') {
             Some((a, b)) => Some(parse_number(a)? / parse_number(b)?),
             None => parse_number(v),
@@ -175,15 +175,39 @@ fn parse_value(base: &str, v: &str) -> Option<f32> {
     }
 }
 
-/// px, em/rem (16px, the initial font size), or unitless 0.
-fn parse_length(v: &str) -> Option<f32> {
+/// A length in px: unitless 0, an absolute unit, em/rem (16px, the initial
+/// font size, whatever the page sets), a viewport unit, or `calc()`,
+/// `min()`, `max()`, `clamp()` over those. A percentage is not a length here.
+fn parse_length(v: &str, width: f32, height: f32) -> Option<f32> {
     let v = v.trim();
-    if let Some(n) = v.strip_suffix("px") {
-        parse_number(n)
-    } else if let Some(n) = v.strip_suffix("rem").or_else(|| v.strip_suffix("em")) {
-        Some(parse_number(n)? * 16.0)
-    } else {
-        parse_number(v).filter(|n| *n == 0.0)
+    if v.contains('%') {
+        return None;
+    }
+    if let Some(n) = parse_number(v) {
+        return Some(n).filter(|n| *n == 0.0);
+    }
+    const ABSOLUTE: [(&str, f32); 6] = [
+        ("in", 96.0),
+        ("cm", 96.0 / 2.54),
+        ("mm", 96.0 / 25.4),
+        ("pt", 96.0 / 72.0),
+        ("pc", 16.0),
+        ("q", 96.0 / 101.6),
+    ];
+    for (unit, px) in ABSOLUTE {
+        if let Some(n) = v.strip_suffix(unit).and_then(parse_number) {
+            return Some(n * px);
+        }
+    }
+    // A bare number inside a math function (`calc(10)`) is not a length.
+    let has_unit = v
+        .as_bytes()
+        .windows(2)
+        .any(|w| w[0].is_ascii_digit() && w[1].is_ascii_alphabetic());
+    match crate::parse_length(v)? {
+        crate::Length::Auto | crate::Length::FitContent => None,
+        _ if !has_unit => None,
+        length => Some(length.to_px_with_viewport(16.0, 16.0, 0.0, width, height)),
     }
 }
 
@@ -235,7 +259,7 @@ fn range_matches(feature: &str, width: f32, height: f32) -> bool {
         if p == name {
             Some(actual)
         } else {
-            parse_value(&name, p)
+            parse_value(&name, p, width, height)
         }
     };
     ops.iter().enumerate().all(|(i, op)| {
