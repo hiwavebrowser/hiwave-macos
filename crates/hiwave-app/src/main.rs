@@ -525,15 +525,17 @@ fn load_report_page(content: &impl ContentWebViewOps) {
 /// accidentally removed when the #95 diagnostic line was replaced with wiring.
 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
 fn wheel_burst_started() -> bool {
+    // `None` until the first wheel event: a clock started at that event made
+    // the first burst of a session look like the middle of one, and it was
+    // never logged.
     thread_local! {
-        static LAST_WHEEL: std::cell::Cell<std::time::Instant> =
-            std::cell::Cell::new(std::time::Instant::now());
+        static LAST_WHEEL: std::cell::Cell<Option<std::time::Instant>> =
+            const { std::cell::Cell::new(None) };
     }
     LAST_WHEEL.with(|t| {
         let now = std::time::Instant::now();
-        let gap = now.duration_since(t.get());
-        t.set(now);
-        gap > std::time::Duration::from_millis(500)
+        t.replace(Some(now))
+            .is_none_or(|last| now.duration_since(last) > std::time::Duration::from_millis(500))
     })
 }
 
