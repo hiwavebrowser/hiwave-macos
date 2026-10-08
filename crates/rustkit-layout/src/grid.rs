@@ -3552,7 +3552,7 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
 /// `width: 12.25rem` is as explicit as `196px`, but the contribution arms only
 /// matched `Px`, so it fell through to the content estimate and a
 /// `min-content` track (wikipedia's page-tools column) came out too narrow.
-fn is_font_or_viewport_relative(l: &Length) -> bool {
+pub(crate) fn is_font_or_viewport_relative(l: &Length) -> bool {
     matches!(
         l,
         Length::Em(_) | Length::Rem(_) | Length::Vw(_) | Length::Vh(_) | Length::Vmin(_) | Length::Vmax(_)
