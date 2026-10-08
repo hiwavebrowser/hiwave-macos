@@ -481,13 +481,16 @@ impl JsRuntime {
             let deadline = self.deadline.clone();
             let native = unsafe {
                 NativeFunction::from_closure(move |_this, args, _context| {
-                    let now = std::time::Instant::now();
-                    if let Some(at) = deadline.at.get().filter(|at| now >= *at) {
+                    // No deadline (the default): the clock is not read.
+                    let passed = deadline.at.get().and_then(|at| {
+                        let now = std::time::Instant::now();
+                        (now >= at).then(|| now - at)
+                    });
+                    if let Some(late) = passed {
                         // Logged here, at the first refusal, and not only
                         // by whoever started the script: if the stack then
                         // takes long to unwind, the log still says when.
                         if !deadline.hit.replace(true) {
-                            let late = now - at;
                             deadline.late.set(Some(late));
                             tracing::warn!(
                                 late_ms = late.as_millis() as u64,
