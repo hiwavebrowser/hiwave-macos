@@ -432,8 +432,11 @@ pub struct Renderer {
     /// Stack of 2D transform matrices and their origins.
     /// Each entry is (matrix [a,b,c,d,e,f], origin (x,y)).
     transform_stack: Vec<([f32; 6], (f32, f32))>,
-    /// Open `PushOpacity` scopes.
+    /// Open `PushOpacity` scopes on the paths that fade per command.
     opacity_scopes: OpacityScopes,
+    /// Layer textures for opacity scopes, by nesting depth.
+    opacity_layer_pool: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    opacity_layer_size: (u32, u32),
 
     // Caches
     texture_cache: TextureCache,
@@ -702,6 +705,8 @@ impl Renderer {
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
             opacity_scopes: OpacityScopes::default(),
+            opacity_layer_pool: Vec::new(),
+            opacity_layer_size: (0, 0),
             texture_cache,
             glyph_cache,
             texture_bind_group_layout,
@@ -1414,15 +1419,44 @@ impl Renderer {
             // painting above in-flow text per CSS 2.1 Appendix E — would be
             // drawn UNDER that text. Flush first so paint follows command
             // order (same discipline as the GPU-gradient path).
-            let mut flushed_mid_stream = false;
+            //
+            // An opacity scope is drawn into a layer of its own and the
+            // layer is laid over what is under it, faded: the group is
+            // faded as one picture (CSS Color 4 §4), so a child over its
+            // parent's background does not show the background through.
+            // Past `MAX_OPACITY_LAYERS` scopes in one list the scopes fall
+            // back to fading each command (see `OpacityScopes`).
+            let layered = commands
+                .iter()
+                .filter(|cmd| matches!(cmd, DisplayCommand::PushOpacity(_)))
+                .count()
+                <= MAX_OPACITY_LAYERS;
+            let mut cleared = false;
+            let mut layers: Vec<(wgpu::TextureView, f32)> = Vec::new();
             for cmd in commands {
+                if layered {
+                    match cmd {
+                        DisplayCommand::PushOpacity(alpha) => {
+                            self.begin_opacity_layer(target, &mut layers, *alpha, &mut cleared)?;
+                            continue;
+                        }
+                        DisplayCommand::PopOpacity => {
+                            self.end_opacity_layer(target, &mut layers, &mut cleared)?;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 if self.solid_fill_occludes_batched_glyphs(cmd) {
-                    self.flush_batches_to(target, !flushed_mid_stream)?;
-                    flushed_mid_stream = true;
+                    self.flush_mid_stream(target, &layers, &mut cleared)?;
                 }
                 self.process_command(cmd);
             }
-            if flushed_mid_stream {
+            // A list that ends inside a scope still shows what it drew.
+            while !layers.is_empty() {
+                self.end_opacity_layer(target, &mut layers, &mut cleared)?;
+            }
+            if cleared {
                 self.flush_batches_to(target, false)?;
             } else {
                 self.flush_to(target)?;
@@ -1975,6 +2009,206 @@ impl Renderer {
 
         // Draw the blurred result back to the render target at the specified rect
         self.draw_filtered_texture_to(&filter_view_a, render_target, rect);
+    }
+
+    fn has_batched(&self) -> bool {
+        !(self.color_vertices.is_empty()
+            && self.texture_vertices.is_empty()
+            && self.image_vertices.is_empty()
+            && self.color_glyph_vertices.is_empty())
+    }
+
+    /// Draw the batches now, into the innermost open opacity layer or, with
+    /// none open, into `base` (cleared to the page's white the first time).
+    fn flush_mid_stream(
+        &mut self,
+        base: &wgpu::TextureView,
+        layers: &[(wgpu::TextureView, f32)],
+        cleared: &mut bool,
+    ) -> Result<(), RendererError> {
+        match layers.last() {
+            Some((layer, _)) => {
+                let layer = layer.clone();
+                self.flush_batches_to(&layer, false)
+            }
+            None => {
+                let had = self.has_batched();
+                self.flush_batches_to(base, !*cleared)?;
+                *cleared |= had;
+                Ok(())
+            }
+        }
+    }
+
+    /// `PushOpacity`: what is batched belongs under the group, so it is
+    /// drawn first; then the group draws into a fresh transparent layer.
+    fn begin_opacity_layer(
+        &mut self,
+        base: &wgpu::TextureView,
+        layers: &mut Vec<(wgpu::TextureView, f32)>,
+        alpha: f32,
+        cleared: &mut bool,
+    ) -> Result<(), RendererError> {
+        self.flush_mid_stream(base, layers, cleared)?;
+        let layer = self.opacity_layer_view(layers.len());
+        self.clear_transparent(&layer);
+        layers.push((layer, alpha.clamp(0.0, 1.0)));
+        Ok(())
+    }
+
+    /// `PopOpacity`: finish the group's layer and lay it, faded, over the
+    /// layer below it or over `base`.
+    fn end_opacity_layer(
+        &mut self,
+        base: &wgpu::TextureView,
+        layers: &mut Vec<(wgpu::TextureView, f32)>,
+        cleared: &mut bool,
+    ) -> Result<(), RendererError> {
+        let Some((layer, alpha)) = layers.pop() else {
+            return Ok(());
+        };
+        self.flush_batches_to(&layer, false)?;
+        match layers.last() {
+            Some((below, _)) => self.composite_opacity_layer(&layer, below, alpha, false),
+            None => {
+                self.composite_opacity_layer(&layer, base, alpha, !*cleared);
+                *cleared = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// The layer texture for the opacity scope at nesting `depth`, the size
+    /// of the viewport and in the surface format so every pipeline draws
+    /// into it. Kept between frames; all are dropped when the size changes.
+    fn opacity_layer_view(&mut self, depth: usize) -> wgpu::TextureView {
+        if self.opacity_layer_size != self.viewport_size {
+            self.opacity_layer_pool.clear();
+            self.opacity_layer_size = self.viewport_size;
+        }
+        while self.opacity_layer_pool.len() <= depth {
+            let (width, height) = self.viewport_size;
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Opacity Layer Texture"),
+                size: wgpu::Extent3d {
+                    width: width.max(1),
+                    height: height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.surface_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.opacity_layer_pool.push((texture, view));
+        }
+        self.opacity_layer_pool[depth].1.clone()
+    }
+
+    fn clear_transparent(&self, target: &wgpu::TextureView) {
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Opacity Layer Clear Encoder"),
+        });
+        {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Opacity Layer Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Lay `layer` over `target`, faded by `alpha`. Drawing source-over
+    /// into a transparent layer leaves premultiplied colour in it, so the
+    /// layer goes through the premultiplied pipeline with every channel
+    /// scaled.
+    fn composite_opacity_layer(
+        &self,
+        layer: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        alpha: f32,
+        clear: bool,
+    ) {
+        let (vw, vh) = self.viewport_size;
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Opacity Layer Bind Group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(layer),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
+                },
+            ],
+        });
+
+        let color = [alpha; 4];
+        let vertices = [
+            TextureVertex { position: [0.0, 0.0], tex_coords: [0.0, 0.0], color },
+            TextureVertex { position: [vw as f32, 0.0], tex_coords: [1.0, 0.0], color },
+            TextureVertex { position: [vw as f32, vh as f32], tex_coords: [1.0, 1.0], color },
+            TextureVertex { position: [0.0, vh as f32], tex_coords: [0.0, 1.0], color },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Opacity Layer Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Opacity Layer Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Opacity Layer Composite Encoder"),
+        });
+        {
+            let load = if clear {
+                wgpu::LoadOp::Clear(wgpu::Color::WHITE)
+            } else {
+                wgpu::LoadOp::Load
+            };
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Opacity Layer Composite Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            render_pass.set_pipeline(&self.color_glyph_pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Copy the intermediate texture to the final target.
@@ -6275,6 +6509,11 @@ struct ClipEntry {
     /// inside every one of them.
     rounded: Vec<(Rect, rustkit_layout::BorderRadius)>,
 }
+
+/// The most opacity scopes one display list may hold and still have each
+/// drawn as a layer of its own: a layer costs a pass over the viewport and
+/// two flushes of the batches.
+const MAX_OPACITY_LAYERS: usize = 256;
 
 /// How many vertices each of the four batches holds, in the order colour,
 /// glyph, colour glyph, image.

@@ -7180,10 +7180,10 @@ pub enum DisplayCommand {
     /// Color 4 §4 `opacity`, strictly between 0 and 1: a box at 0 emits
     /// nothing and a box at 1 needs no scope). Scopes nest and multiply.
     ///
-    /// The painter fades each command in the scope, which is the group
-    /// opacity the spec asks for only where the group's own paint does not
-    /// overlap itself: a child over its parent's background shows the
-    /// background through it.
+    /// The group is to be faded as one picture: a child over its parent's
+    /// background does not show the background through it. A painter that
+    /// cannot draw the scope into a layer of its own fades each command
+    /// instead, which differs only where the group's paint overlaps itself.
     PushOpacity(f32),
     /// End the innermost opacity scope.
     PopOpacity,
