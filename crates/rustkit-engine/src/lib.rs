@@ -834,6 +834,19 @@ pub struct LivePump {
     pub next_timer_ms: Option<u64>,
 }
 
+/// The one line that says a script was stopped by the execution deadline
+/// (`EngineConfig::interrupt_scripts_at_budget`): which script, how long it
+/// had run, and how long it ran on past the budget before the host call
+/// that ended it. The window is frozen for all of `elapsed_ms`.
+fn log_script_stopped(source: &str, elapsed_ms: u64, late: Option<std::time::Duration>) {
+    warn!(
+        %source,
+        elapsed_ms,
+        late_ms = late.map(|late| late.as_millis() as u64).unwrap_or(0),
+        "Script stopped at the script budget"
+    );
+}
+
 /// Classify a `<script>` element. `None` for data blocks
 /// (`application/ld+json`, `text/template`, ...), which are not scripts.
 fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
@@ -3687,14 +3700,18 @@ impl Engine {
                 }
             };
             // Stopped by the execution deadline, whatever it then reported.
+            let elapsed_ms = started.elapsed().as_millis() as u64;
             let outcome = match bindings.take_deadline_hit() {
-                true => ScriptOutcome::OverBudget,
+                true => {
+                    log_script_stopped(&source, elapsed_ms, bindings.take_deadline_overrun());
+                    ScriptOutcome::OverBudget
+                }
                 false => outcome,
             };
             ScriptRecord {
                 source,
                 bytes,
-                elapsed_ms: started.elapsed().as_millis() as u64,
+                elapsed_ms,
                 outcome,
             }
         };
@@ -3847,14 +3864,18 @@ impl Engine {
                 };
                 // Stopped by the execution deadline: over budget, and its
                 // element hears neither `load` nor `error`.
+                let elapsed_ms = module_started.elapsed().as_millis() as u64;
                 let (outcome, event) = match bindings.take_deadline_hit() {
-                    true => (ScriptOutcome::OverBudget, None),
+                    true => {
+                        log_script_stopped(&label, elapsed_ms, bindings.take_deadline_overrun());
+                        (ScriptOutcome::OverBudget, None)
+                    }
                     false => (outcome, event),
                 };
                 log.push(ScriptRecord {
                     source: label,
                     bytes: text.len(),
-                    elapsed_ms: module_started.elapsed().as_millis() as u64,
+                    elapsed_ms,
                     outcome,
                 });
                 if let Some(event) = event {

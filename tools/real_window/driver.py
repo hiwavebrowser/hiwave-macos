@@ -705,6 +705,12 @@ class Driver:
         # The window is frozen while the script runs, so the budget is also
         # the longest freeze a page can cause: it must not creep back up.
         self.expect(c, "the window was not held much past the 15 s budget", took < 25, "%.0f s" % took)
+        # The log says so itself: which script, how long the window was held.
+        stopped = self.app.wait_log(r"Script stopped at the script budget source=(\S+) elapsed_ms=(\d+) late_ms=(\d+)",
+                                    2, running.end())
+        self.expect(c, "the app log names the stopped script and how long it ran",
+                    bool(stopped) and 10000 < int(stopped.group(2)) < 25000,
+                    stopped.group(0) if stopped else "no 'Script stopped at the script budget' line")
         time.sleep(1.0)
         frame = self.frame(c, "after", [GREEN])
         if frame is None:

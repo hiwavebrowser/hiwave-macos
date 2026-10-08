@@ -143,6 +143,8 @@ impl Default for JsRuntimeConfig {
 struct ExecutionDeadline {
     at: std::cell::Cell<Option<std::time::Instant>>,
     hit: std::cell::Cell<bool>,
+    /// How long after `at` the first refused host call came.
+    late: std::cell::Cell<Option<std::time::Duration>>,
 }
 
 /// JavaScript runtime that wraps the underlying engine.
@@ -348,12 +350,20 @@ impl JsRuntime {
     pub fn set_execution_deadline(&mut self, at: Option<std::time::Instant>) {
         self.deadline.at.set(at);
         self.deadline.hit.set(false);
+        self.deadline.late.set(None);
     }
 
     /// Whether the deadline has stopped a host call since it was last set
     /// or asked about.
     pub fn take_deadline_hit(&mut self) -> bool {
         self.deadline.hit.replace(false)
+    }
+
+    /// How long after the deadline the host call that stopped script came,
+    /// once per stop. Script is only stopped where it calls the host, so
+    /// this is the time it ran on past its budget.
+    pub fn take_deadline_overrun(&mut self) -> Option<std::time::Duration> {
+        self.deadline.late.take()
     }
 
     #[cfg(feature = "boa")]
@@ -471,8 +481,22 @@ impl JsRuntime {
             let deadline = self.deadline.clone();
             let native = unsafe {
                 NativeFunction::from_closure(move |_this, args, _context| {
-                    if deadline.at.get().is_some_and(|at| std::time::Instant::now() >= at) {
-                        deadline.hit.set(true);
+                    // No deadline (the default): the clock is not read.
+                    let passed = deadline.at.get().and_then(|at| {
+                        let now = std::time::Instant::now();
+                        (now >= at).then(|| now - at)
+                    });
+                    if let Some(late) = passed {
+                        // Logged here, at the first refusal, and not only
+                        // by whoever started the script: if the stack then
+                        // takes long to unwind, the log still says when.
+                        if !deadline.hit.replace(true) {
+                            deadline.late.set(Some(late));
+                            tracing::warn!(
+                                late_ms = late.as_millis() as u64,
+                                "Script budget spent: host calls are refused until the script has unwound"
+                            );
+                        }
                         // Boa's runtime-limit errors are the ones script
                         // cannot catch, and it has none for time; `hit`
                         // says which limit this was.
@@ -741,6 +765,19 @@ mod tests {
         assert_eq!(calls.get(), 6);
         assert!(runtime.take_deadline_hit());
         assert!(!runtime.take_deadline_hit());
+
+        // The stop comes where script next calls the host, and says how
+        // late that was: this script computes for a while first.
+        runtime.set_execution_deadline(Some(std::time::Instant::now()));
+        assert_eq!(runtime.take_deadline_overrun(), None);
+        let busy = "var t = Date.now(); [1].forEach(function () { while (Date.now() - t < 30) {} host(); });";
+        assert!(runtime.evaluate_script(busy).is_err());
+        let late = runtime.take_deadline_overrun().expect("the stop reports how late it came");
+        // `Date.now()` counts whole milliseconds, so the 30 ms loop is a
+        // little under 30 ms of wall clock.
+        assert!(late >= Duration::from_millis(20), "{late:?}");
+        assert_eq!(runtime.take_deadline_overrun(), None);
+        assert!(runtime.take_deadline_hit());
 
         // Lifted: the runtime runs script again, and nothing was caught.
         runtime.set_execution_deadline(None);
