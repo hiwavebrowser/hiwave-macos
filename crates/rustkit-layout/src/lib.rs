@@ -38,6 +38,9 @@ mod min_max_height_unit_tests;
 mod percent_height_definite_tests;
 
 #[cfg(test)]
+mod replaced_size_unit_tests;
+
+#[cfg(test)]
 mod shaped_run_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
