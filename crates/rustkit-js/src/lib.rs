@@ -137,6 +137,14 @@ impl Default for JsRuntimeConfig {
     }
 }
 
+/// A wall-clock time after which the host stops answering script (see
+/// [`JsRuntime::set_execution_deadline`]), and whether that has happened.
+#[derive(Default)]
+struct ExecutionDeadline {
+    at: std::cell::Cell<Option<std::time::Instant>>,
+    hit: std::cell::Cell<bool>,
+}
+
 /// JavaScript runtime that wraps the underlying engine.
 pub struct JsRuntime {
     #[cfg(feature = "boa")]
@@ -151,6 +159,7 @@ pub struct JsRuntime {
     console_handler: Option<Arc<ConsoleHandler>>,
     timers: Arc<Mutex<HashMap<TimerId, PendingTimer>>>,
     globals: HashMap<String, JsValue>,
+    deadline: std::rc::Rc<ExecutionDeadline>,
 }
 
 impl JsRuntime {
@@ -191,6 +200,7 @@ impl JsRuntime {
             console_handler: None,
             timers: Arc::new(Mutex::new(HashMap::new())),
             globals: HashMap::new(),
+            deadline: std::rc::Rc::default(),
         };
 
         // Set up built-in APIs
@@ -328,6 +338,24 @@ impl JsRuntime {
         let _ = max_iterations;
     }
 
+    /// Stop script that is still running at `at`: from then on every host
+    /// function fails, before it does anything, with an error the script
+    /// cannot catch, so the whole call stack unwinds to whoever started
+    /// it. `None` lifts it. Boa has no wall-clock interrupt of its own and
+    /// the loop limit counts loop statements only; a script inside nested
+    /// `forEach` callbacks is stopped by this and by nothing else. Script
+    /// that never calls the host is not stopped.
+    pub fn set_execution_deadline(&mut self, at: Option<std::time::Instant>) {
+        self.deadline.at.set(at);
+        self.deadline.hit.set(false);
+    }
+
+    /// Whether the deadline has stopped a host call since it was last set
+    /// or asked about.
+    pub fn take_deadline_hit(&mut self) -> bool {
+        self.deadline.hit.replace(false)
+    }
+
     #[cfg(feature = "boa")]
     fn drain_console(&mut self) -> Vec<(LogLevel, String)> {
         use boa_engine::Source;
@@ -440,8 +468,16 @@ impl JsRuntime {
             // SAFETY: `HostFunction` only ever sees and returns the
             // crate's own `JsValue`, which holds no GC-managed data, so the
             // closure captures nothing the collector would need to trace.
+            let deadline = self.deadline.clone();
             let native = unsafe {
                 NativeFunction::from_closure(move |_this, args, _context| {
+                    if deadline.at.get().is_some_and(|at| std::time::Instant::now() >= at) {
+                        deadline.hit.set(true);
+                        // Boa's runtime-limit errors are the ones script
+                        // cannot catch, and it has none for time; `hit`
+                        // says which limit this was.
+                        return Err(boa_engine::error::RuntimeLimitError::LoopIteration.into());
+                    }
                     let args: Vec<JsValue> = args.iter().map(from_boa_value).collect();
                     Ok(to_boa_value(function(&args)))
                 })
@@ -669,6 +705,48 @@ mod tests {
         runtime.clear_timer(id1);
         let timers = runtime.get_due_timers();
         assert_eq!(timers.len(), 1);
+    }
+
+    #[test]
+    fn past_the_execution_deadline_a_host_call_unwinds_script_that_cannot_catch_it() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let seen = calls.clone();
+        runtime
+            .register_host_function(
+                "host",
+                0,
+                Box::new(move |_| {
+                    seen.set(seen.get() + 1);
+                    JsValue::Undefined
+                }),
+            )
+            .unwrap();
+        runtime
+            .evaluate_script("var reached = [], caught = false;")
+            .unwrap();
+        let spin = "[1, 2, 3].forEach(function (n) { try { host(); } catch (e) { caught = true; } reached.push(n); });";
+
+        // No deadline, and one that has not come: the host answers.
+        runtime.evaluate_script(spin).unwrap();
+        runtime.set_execution_deadline(Some(std::time::Instant::now() + Duration::from_secs(60)));
+        runtime.evaluate_script(spin).unwrap();
+        assert_eq!(calls.get(), 6);
+        assert!(!runtime.take_deadline_hit());
+
+        // Past it: the first host call ends the script, through the
+        // `forEach` and the `try`, before the host function runs.
+        runtime.set_execution_deadline(Some(std::time::Instant::now()));
+        assert!(runtime.evaluate_script(spin).is_err());
+        assert_eq!(calls.get(), 6);
+        assert!(runtime.take_deadline_hit());
+        assert!(!runtime.take_deadline_hit());
+
+        // Lifted: the runtime runs script again, and nothing was caught.
+        runtime.set_execution_deadline(None);
+        let result = runtime.evaluate_script("host(); caught === false && reached.length === 6").unwrap();
+        assert!(matches!(result, JsValue::Boolean(true)), "{result:?}");
+        assert_eq!(calls.get(), 7);
     }
 
     #[test]

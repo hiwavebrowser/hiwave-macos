@@ -620,7 +620,8 @@ pub struct EngineConfig {
     /// Wall-clock budget for a page's scripts on the load path, fetching
     /// and running together. Once spent, unfetched and unstarted scripts
     /// are recorded as over budget (a script already running is bounded by
-    /// the loop-iteration limit, not by this). Scripts run after every
+    /// the loop-iteration limit, and by this only with
+    /// `interrupt_scripts_at_budget`). Scripts run after every
     /// subresource today, so this comes out of the page's load time.
     pub script_budget_ms: u64,
     /// How far the page's virtual timer clock runs after `load`.
@@ -648,8 +649,9 @@ pub struct EngineConfig {
     /// Optional replay proxy URL (test-only, for deterministic HAR replay).
     pub replay_proxy: Option<Url>,
     /// Stop a page script that is still running when `script_budget_ms` is
-    /// spent, at its next call into the host (any DOM or window API), with
-    /// an error the script cannot catch. Off by default: the board is
+    /// spent, at its next call into the host (a read or write of the
+    /// document: most DOM methods; a property the bindings keep in script
+    /// is not one), with an error the script cannot catch. Off by default: the board is
     /// measured with scripts that run to their end, and a script cut at
     /// the budget is a different frame. The live app turns it on, where a
     /// script that does not end is a window that does not answer.
@@ -3573,7 +3575,13 @@ impl Engine {
             },
             None => return,
         };
+        // The budget is read between scripts; with the switch on it also
+        // ends the script that is running when it is spent.
+        if self.config.interrupt_scripts_at_budget {
+            bindings.set_execution_deadline(Some(std::time::Instant::now() + budget));
+        }
         self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log).await;
+        bindings.set_execution_deadline(None);
         if let Some(view) = self.views.get_mut(&id) {
             log.append(&mut view.script_log);
             view.script_log = log;
@@ -3641,6 +3649,11 @@ impl Engine {
                     poisoned.set(true);
                     ScriptOutcome::Threw("JS engine panic".into())
                 }
+            };
+            // Stopped by the execution deadline, whatever it then reported.
+            let outcome = match bindings.take_deadline_hit() {
+                true => ScriptOutcome::OverBudget,
+                false => outcome,
             };
             ScriptRecord {
                 source,
@@ -3795,6 +3808,12 @@ impl Engine {
                             ),
                         }
                     }
+                };
+                // Stopped by the execution deadline: over budget, and its
+                // element hears neither `load` nor `error`.
+                let (outcome, event) = match bindings.take_deadline_hit() {
+                    true => (ScriptOutcome::OverBudget, None),
+                    false => (outcome, event),
                 };
                 log.push(ScriptRecord {
                     source: label,
@@ -14212,6 +14231,13 @@ impl EngineBuilder {
     /// (`EngineConfig::script_budget_ms`).
     pub fn script_budget_ms(mut self, ms: u64) -> Self {
         self.config.script_budget_ms = ms;
+        self
+    }
+
+    /// Stop a script still running when the budget is spent
+    /// (`EngineConfig::interrupt_scripts_at_budget`).
+    pub fn interrupt_scripts_at_budget(mut self, interrupt: bool) -> Self {
+        self.config.interrupt_scripts_at_budget = interrupt;
         self
     }
 
@@ -27801,7 +27827,7 @@ again();
     // statement, so the loop-iteration limit never counted it, and the
     // budget was only read between scripts: the live app stopped answering.
     const SPIN: &str = "var spun = 0; var row = new Array(1500).fill(0);
-row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 0) { document.title; } }); });";
+row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 0) { document.getElementById('p'); } }); });";
 
     #[test]
     fn a_script_still_running_at_the_budget_is_stopped_at_its_next_host_call() {
@@ -27847,8 +27873,8 @@ row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 
     // The board's frames are taken with scripts that run to their end.
     #[test]
     fn without_the_switch_a_script_runs_on_past_the_budget() {
-        let page = "<html><head><script>var spun = 0; var row = new Array(700).fill(0);
-row.forEach(function () { row.forEach(function () { spun++; document.title; }); });</script>
+        let page = "<html><head><script>var spun = 0; var row = new Array(150).fill(0);
+row.forEach(function () { row.forEach(function () { spun++; document.getElementById('p'); }); });</script>
 <script>var after = true;</script></head><body><p>alive</p></body></html>";
         let port = serve(vec![("/", "text/html", page.to_string())]);
         let config = EngineConfig {
@@ -27859,7 +27885,7 @@ row.forEach(function () { row.forEach(function () { spun++; document.title; }); 
         let (mut engine, view, _) = load_timed(config, port);
         let log = engine.script_log(view).unwrap();
         assert_eq!(log[0].outcome, ScriptOutcome::Ran, "{log:#?}");
-        assert_eq!(engine.execute_script(view, "spun").unwrap(), "Number(490000.0)");
+        assert_eq!(engine.execute_script(view, "spun").unwrap(), "Number(22500.0)");
     }
 
     #[test]

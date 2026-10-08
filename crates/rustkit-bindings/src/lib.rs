@@ -1266,6 +1266,18 @@ impl DomBindings {
             .set_loop_iteration_limit(max_iterations);
     }
 
+    /// Stop script still running at `at` at its next host call (see
+    /// [`JsRuntime::set_execution_deadline`]); `None` lifts it.
+    pub fn set_execution_deadline(&self, at: Option<std::time::Instant>) {
+        self.runtime.borrow_mut().set_execution_deadline(at);
+    }
+
+    /// Whether the execution deadline has stopped script since it was
+    /// last set or asked about.
+    pub fn take_deadline_hit(&self) -> bool {
+        self.runtime.borrow_mut().take_deadline_hit()
+    }
+
     /// Bound the number of microtask job iterations allowed per turn (see
     /// [`JsRuntime::set_max_job_iterations`]).
     pub fn set_max_job_iterations(&self, max_iterations: u64) {
