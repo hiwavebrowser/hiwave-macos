@@ -21,13 +21,8 @@
 </head>
 <body>
 <div class="content">
-  <table class="infobox">
-    <tr><th>Developer</th><td>Various</td></tr>
-    <tr><th>Initial release</th><td>1990</td></tr>
-    <tr><th>Written in</th><td>C, C++, Rust</td></tr>
-    <tr><th>Platform</th><td>Cross-platform</td></tr>
-    <tr><th>Type</th><td>Web browser</td></tr>
-  </table>
+  <!-- Rows are deliberately written with no whitespace between them: on develop the parser does not close a table whose rows are separated by whitespace (separate bug, see PR #619 review), which would put the paragraphs inside the table. -->
+  <table class="infobox"><tr><th>Developer</th><td>Various</td></tr><tr><th>Initial release</th><td>1990</td></tr><tr><th>Written in</th><td>C, C++, Rust</td></tr><tr><th>Platform</th><td>Cross-platform</td></tr><tr><th>Type</th><td>Web browser</td></tr></table>
   <p>A web browser is an application for accessing websites. When a user
   requests a web page from a particular website, the browser retrieves its
   files from a web server and then displays the page on the user's screen.
