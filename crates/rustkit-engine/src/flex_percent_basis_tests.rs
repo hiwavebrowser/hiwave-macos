@@ -48,6 +48,8 @@ fn a_percentage_basis_in_an_auto_height_column_is_content() {
         ("flex:1", "1000"),
         ("flex:1 1 0%;overflow:hidden", "1000"),
         ("flex:0 1 50%;overflow:hidden", "1000"),
+        ("flex:1 1;overflow:hidden", "1000"),
+        ("flex-grow:1;flex-basis:0%;overflow:hidden", "1000"),
     ] {
         let (mut engine, view, _server) = load(&page(wrapper));
         assert_eq!(
@@ -78,4 +80,14 @@ fn a_percentage_basis_in_a_definite_height_column_is_resolved() {
     let fixed = page("flex:1;overflow:hidden").replace("min-height:100vh", "height:200px");
     let (mut engine, view, _server) = load(&fixed);
     assert_eq!(read(&mut engine, view, "document.getElementById('w').offsetHeight"), "150");
+}
+
+/// A basis written as a length is a length: `0` and `0px` are not `0%`.
+#[test]
+fn a_zero_length_basis_in_an_auto_height_column_stays_zero() {
+    for wrapper in ["flex:1 1 0;overflow:hidden", "flex:1 1 0px;overflow:hidden"] {
+        let (mut engine, view, _server) = load(&page(wrapper));
+        assert_eq!(read(&mut engine, view, "document.getElementById('w').offsetHeight"), "150", "{wrapper}");
+        assert_eq!(read(&mut engine, view, "document.getElementById('foot').offsetTop"), "180", "{wrapper}");
+    }
 }

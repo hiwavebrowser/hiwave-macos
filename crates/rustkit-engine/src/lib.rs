@@ -8568,7 +8568,12 @@ impl Engine {
                         style.flex_grow = grow;
                         if parts.len() == 1 {
                             style.flex_shrink = 1.0;
-                            style.flex_basis = rustkit_css::FlexBasis::Length(0.0);
+                            // The basis left out is `0%`, not `0px`
+                            // (css-flexbox-1 §7.1.1): the same in a row or
+                            // a definite column, and `content` in an
+                            // auto-height column, where a percentage has
+                            // nothing to resolve against.
+                            style.flex_basis = rustkit_css::FlexBasis::Percent(0.0);
                         }
                     }
                 }
@@ -8576,7 +8581,7 @@ impl Engine {
                     match parts[1].parse::<f32>() {
                         Ok(shrink) => {
                             style.flex_shrink = shrink;
-                            style.flex_basis = rustkit_css::FlexBasis::Length(0.0);
+                            style.flex_basis = rustkit_css::FlexBasis::Percent(0.0);
                         }
                         Err(_) => {
                             style.flex_shrink = 1.0;
@@ -27049,9 +27054,12 @@ mod cascade_wire_tests {
         assert_eq!(s.flex_shrink, 1.0);
         assert_eq!(
             s.flex_basis,
-            rustkit_css::FlexBasis::Length(0.0),
-            "flex: 1 must zero the basis or the container is not divided"
+            rustkit_css::FlexBasis::Percent(0.0),
+            "flex: 1 must zero the basis or the container is not divided; the zero is 0%"
         );
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "flex", "1 1");
+        assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Percent(0.0));
     }
 
     #[test]
