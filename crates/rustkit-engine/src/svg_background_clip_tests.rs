@@ -95,6 +95,45 @@ fn a_circle_across_the_edge_does_not_paint_past_it() {
     assert!(painted > 0, "the half inside the box is painted: {commands:?}");
 }
 
+/// The furthest right any command paints, strokes at their full width.
+fn right_edge(commands: &[DisplayCommand]) -> f32 {
+    let reach = |points: &[(f32, f32)], half: f32| points.iter().map(|p| p.0 + half).fold(f32::MIN, f32::max);
+    commands
+        .iter()
+        .map(|command| match command {
+            DisplayCommand::FillPolygon { points, .. } => reach(points, 0.0),
+            DisplayCommand::Polyline { points, width, .. } | DisplayCommand::StrokePolygon { points, width, .. } => {
+                reach(points, width * 0.5)
+            }
+            DisplayCommand::Line { x1, x2, width, .. } => x1.max(*x2) + width * 0.5,
+            DisplayCommand::FillRect { rect, .. } | DisplayCommand::FillEllipse { rect, .. } => rect.x + rect.width,
+            DisplayCommand::StrokeRect { rect, width, .. } => rect.x + rect.width + width * 0.5,
+            DisplayCommand::FillCircle { cx, radius, .. } => cx + radius,
+            DisplayCommand::StrokeCircle { cx, radius, width, .. } => cx + radius + width * 0.5,
+            _ => f32::MIN,
+        })
+        .fold(f32::MIN, f32::max)
+}
+
+#[test]
+fn a_stroke_across_the_edge_is_cut_at_it() {
+    // The sheet's neighbours of the icon a box shows are often strokes: the
+    // portal's wordmark box painted a ring and a burst of rays from the
+    // icons beside it in the sheet, whole.
+    for (what, shape) in [
+        ("line", r##"<line x1="0" y1="30" x2="40" y2="30" stroke="#0000ff" stroke-width="4"/>"##),
+        ("polyline", r##"<polyline points="5,25 40,25 40,35" fill="none" stroke="#0000ff" stroke-width="2"/>"##),
+        ("path", r##"<path d="M5 25 L40 35" fill="none" stroke="#0000ff" stroke-width="2"/>"##),
+        ("ring", r##"<circle cx="20" cy="30" r="8" fill="none" stroke="#0000ff" stroke-width="6"/>"##),
+        ("ellipse", r##"<ellipse cx="20" cy="30" rx="9" ry="4" fill="#0000ff"/>"##),
+    ] {
+        let commands = lower_icon(shape);
+        assert!(commands.len() > 2, "{what}: the part inside the box is painted");
+        let edge = right_edge(&commands);
+        assert!(edge <= 120.01, "{what}: paints to x = {edge}, past the box's 120: {commands:?}");
+    }
+}
+
 /// CSS Backgrounds 3 §3.10: a property with fewer values than there are
 /// layers repeats its list. The portal's sprite is the second of two images
 /// (`linear-gradient(transparent, transparent), url(sprite.svg)`, the old
