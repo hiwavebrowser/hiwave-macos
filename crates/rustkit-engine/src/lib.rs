@@ -475,8 +475,28 @@ struct FetchedImages {
     svgs: Vec<(String, rustkit_svg::SvgDocument)>,
 }
 
+/// What a view's last presented frame was drawn from: the frame is drawn
+/// again when any of it no longer holds.
+struct PresentedFrame {
+    /// `ViewState::frame_generation` of the display list it drew.
+    generation: u64,
+    scroll_offset: (f32, f32),
+    surface: (u32, u32),
+    /// Images the display list names that were not in the cache yet.
+    missing_images: Vec<Url>,
+    at: std::time::Instant,
+}
+
+/// A frame older than this is drawn again at the next wake, changed or
+/// not, so that an input to the frame this bookkeeping does not know about
+/// costs a second of staleness and not a stuck window.
+const PRESENTED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+
 struct ViewState {
     id: EngineViewId,
+    /// Counts the display lists this view has been given.
+    frame_generation: u64,
+    presented: Option<PresentedFrame>,
     viewhost_id: ViewId,
     url: Option<Url>,
     title: Option<String>,
@@ -1465,6 +1485,8 @@ impl Engine {
             document: None,
             layout: None,
             display_list: None,
+            frame_generation: 0,
+            presented: None,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -1542,6 +1564,8 @@ impl Engine {
             document: None,
             layout: None,
             display_list: None,
+            frame_generation: 0,
+            presented: None,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -1628,6 +1652,8 @@ impl Engine {
             document: None,
             layout: None,
             display_list: None,
+            frame_generation: 0,
+            presented: None,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -4828,6 +4854,7 @@ impl Engine {
             bindings.set_computed_styles(computed);
         }
         view.display_list = Some(display_list);
+        view.frame_generation += 1;
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
         // Re-clamp: a relayout can shrink the document (or a navigation can
         // replace it) while the user is scrolled past the new maximum, which
@@ -12588,8 +12615,42 @@ impl Engine {
 
     /// Render all views.
     pub fn render_all_views(&mut self) {
+        self.render_views(false);
+    }
+
+    /// Render the views whose frame would differ from the one they last
+    /// presented, and return how many were drawn. This is the call for an
+    /// event loop that wakes for more than the page (a mouse move, the
+    /// browser's own UI): executing a display list of a few hundred
+    /// thousand commands at every wake held a core for as long as anything
+    /// moved.
+    pub fn render_changed_views(&mut self) -> usize {
+        self.render_views(true)
+    }
+
+    /// Whether the frame `id` last presented is still the frame a render
+    /// would draw: the same display list, scroll offset and surface size,
+    /// no image arrived that it was drawn without, and not older than
+    /// `PRESENTED_FRAME_MAX_AGE`.
+    fn frame_is_current(&self, id: EngineViewId) -> bool {
+        let Some(view) = self.views.get(&id) else { return false };
+        let Some(frame) = view.presented.as_ref() else { return false };
+        frame.generation == view.frame_generation
+            && frame.scroll_offset == view.scroll_offset
+            && view.pending_resize.is_none()
+            && self.compositor.get_surface_size(view.viewhost_id).ok() == Some(frame.surface)
+            && !frame.missing_images.iter().any(|url| self.image_manager.is_cached(url))
+            && frame.at.elapsed() < PRESENTED_FRAME_MAX_AGE
+    }
+
+    fn render_views(&mut self, only_changed: bool) -> usize {
         let view_ids: Vec<_> = self.views.keys().copied().collect();
+        let mut drawn = 0;
         for id in view_ids {
+            if only_changed && self.frame_is_current(id) {
+                continue;
+            }
+            drawn += 1;
             match self.render(id) {
                 Ok(()) => {
                     if self.render_failing.remove(&id) {
@@ -12609,13 +12670,7 @@ impl Engine {
                 }
             }
         }
-    }
-
-    /// Render the views whose frame would differ from the one they last
-    /// presented. Returns how many were drawn.
-    pub fn render_changed_views(&mut self) -> usize {
-        self.render_all_views();
-        self.views.len()
+        drawn
     }
 
     /// Capture a frame from a view to a PPM file.
@@ -13365,6 +13420,14 @@ impl Engine {
             renderer.set_viewport_size(surface_width, surface_height);
         }
 
+        // What this frame is drawn from, kept when it has been presented.
+        let (generation, frame_scroll) = self
+            .views
+            .get(&id)
+            .map(|v| (v.frame_generation, v.scroll_offset))
+            .unwrap_or_default();
+        let mut missing_images = Vec::new();
+
         // Upload images from cache to renderer before drawing
         // Need to re-borrow view here to get display_list
         if let Some(view) = self.views.get(&id) {
@@ -13372,9 +13435,16 @@ impl Engine {
                 // Clone commands to break the borrow on self.views
                 let commands = display_list.commands.clone();
                 // Borrow is dropped when scope ends
-                self.upload_display_list_images(&commands);
+                missing_images = self.upload_display_list_images(&commands);
             }
         }
+        let presented = PresentedFrame {
+            generation,
+            scroll_offset: frame_scroll,
+            surface: (surface_width, surface_height),
+            missing_images,
+            at: std::time::Instant::now(),
+        };
 
         // Re-get display_list reference for rendering
         let display_list = self.views.get(&id).and_then(|v| v.display_list.as_ref());
@@ -13465,6 +13535,9 @@ impl Engine {
             self.compositor.present(output);
         }
 
+        if let Some(view) = self.views.get_mut(&id) {
+            view.presented = Some(presented);
+        }
         Ok(())
     }
 
@@ -13473,13 +13546,17 @@ impl Engine {
     /// This scans the display list for BackgroundImage and Image commands and ensures
     /// any cached images are uploaded to the GPU before rendering.
     /// For data: URLs, images are loaded synchronously on-demand.
-    fn upload_display_list_images(&mut self, commands: &[rustkit_layout::DisplayCommand]) {
+    ///
+    /// Returns the network images the list names that are not in the cache
+    /// yet: the frame is drawn without them.
+    fn upload_display_list_images(&mut self, commands: &[rustkit_layout::DisplayCommand]) -> Vec<Url> {
         use std::collections::HashSet;
         use std::time::Duration;
 
+        let mut missing = Vec::new();
         // Early exit if no renderer
         let Some(renderer) = &mut self.renderer else {
-            return;
+            return missing;
         };
 
         // Collect unique image URLs from display list
@@ -13517,7 +13594,7 @@ impl Engine {
                 Some(cached)
             } else if parsed_url.scheme() == "data" {
                 // For data: URLs, load synchronously since they don't require network
-                match self.image_manager.load_blocking(parsed_url) {
+                match self.image_manager.load_blocking(parsed_url.clone()) {
                     Ok(img) => Some(img),
                     Err(e) => {
                         tracing::warn!(?e, %url, "Failed to decode data URL image");
@@ -13526,6 +13603,7 @@ impl Engine {
                 }
             } else {
                 // Image not cached and not a data: URL - it will render when loaded
+                missing.push(parsed_url.clone());
                 None
             };
 
@@ -13548,6 +13626,7 @@ impl Engine {
                 tracing::debug!(%url_str, "Uploaded image to renderer");
             }
         }
+        missing
     }
 
     /// Execute JavaScript in a view.

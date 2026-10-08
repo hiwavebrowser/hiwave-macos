@@ -89,6 +89,13 @@ fn content_engine_builder() -> EngineBuilder {
         .interrupt_scripts_at_budget(true)
 }
 
+/// `HIWAVE_RENDER_EVERY_WAKE=1`: draw at every wake of the event loop,
+/// changed or not (see [`RustKitView::render`]).
+fn render_every_wake() -> bool {
+    static EVERY_WAKE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EVERY_WAKE.get_or_init(|| std::env::var("HIWAVE_RENDER_EVERY_WAKE").is_ok_and(|v| v == "1"))
+}
+
 impl RustKitView {
     /// Create a new RustKit view.
     pub fn new(window: &Window, bounds: Bounds) -> HiWaveResult<Self> {
@@ -190,7 +197,15 @@ impl RustKitView {
         next.map(|wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN))
     }
 
-    /// Render the view (call this in the event loop).
+    /// Render the view if its frame would differ from the one on screen
+    /// (call this in the event loop).
+    ///
+    /// The loop wakes for every mouse move and every message from the
+    /// browser's own UI. Until 2026-10-08 each wake executed the page's
+    /// whole display list (2.2 million commands on the Wikipedia portal),
+    /// which held a core long after a page had loaded. A frame is still
+    /// drawn again once it is a second old. `HIWAVE_RENDER_EVERY_WAKE=1`
+    /// is the old behaviour, for telling a stale frame from a wrong one.
     pub fn render(&self) {
         let mut engine = self.engine.borrow_mut();
         // The live turn lays out a resized view; without a live runtime
@@ -200,7 +215,11 @@ impl RustKitView {
                 debug!(error = %e, "layout after a resize failed");
             }
         }
-        engine.render_all_views();
+        if render_every_wake() {
+            engine.render_all_views();
+        } else {
+            engine.render_changed_views();
+        }
     }
 
     /// Go back in this view's navigation history.

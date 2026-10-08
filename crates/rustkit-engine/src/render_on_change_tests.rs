@@ -30,8 +30,8 @@ fn load() -> (Engine, EngineViewId, crate::script_net_tests::Server, tokio::runt
 #[test]
 fn a_view_is_drawn_again_only_when_its_frame_would_differ() {
     let (mut engine, view, server, rt) = load();
-    assert_eq!(engine.render_changed_views(), 1, "the first frame");
-    assert_eq!(engine.render_changed_views(), 0, "nothing changed since");
+    // The load presented its frame.
+    assert_eq!(engine.render_changed_views(), 0, "nothing changed since the load");
     assert_eq!(engine.render_changed_views(), 0);
 
     // A scroll moves the frame.
@@ -44,20 +44,25 @@ fn a_view_is_drawn_again_only_when_its_frame_would_differ() {
     assert!(!engine.scroll_view(view, 0.0, 50.0).unwrap());
     assert_eq!(engine.render_changed_views(), 0, "a scroll against the edge");
 
-    // Script writes to the page: a new layout, a new frame.
+    // Script writes to the page: the new layout presents its own frame,
+    // and that is the frame on record.
+    let presented = |engine: &Engine| engine.views[&view].presented.as_ref().unwrap().generation;
+    let before = presented(&engine);
     engine
         .execute_script(view, "document.getElementById('tall').style.background = 'red'")
         .unwrap();
-    assert_eq!(engine.render_changed_views(), 1, "after a script's write");
+    assert!(presented(&engine) > before, "a script's write was laid out and presented");
     assert_eq!(engine.render_changed_views(), 0);
 
-    // A new size.
+    // A new size: drawn at every wake until the live turn has laid it out.
+    let before = presented(&engine);
     engine
         .set_view_bounds(view, Bounds { x: 0, y: 0, width: 500, height: 200 })
         .unwrap();
     assert_eq!(engine.render_changed_views(), 1, "the surface has a new size");
+    assert_eq!(engine.render_changed_views(), 1, "and no layout for it yet");
     rt.block_on(engine.pump_live(view, 0));
-    assert_eq!(engine.render_changed_views(), 1, "and then a new layout");
+    assert!(presented(&engine) > before, "the live turn laid it out and presented it");
     assert_eq!(engine.render_changed_views(), 0);
 
     // An image the frame was drawn without arrives in the cache.
