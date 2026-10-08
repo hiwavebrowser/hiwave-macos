@@ -3607,6 +3607,30 @@ mod tests {
     }
 
     #[test]
+    fn test_nested_svg_clips_to_its_viewport() {
+        // `overflow` is `hidden` on a nested <svg> by the UA sheet (SVG 2
+        // §8.2): in a sprite sheet an icon drawn past its own viewport must
+        // not show in its neighbour's. `overflow="visible"` lifts it.
+        let sheet = |overflow: &str| {
+            let doc = SvgDocument::parse(&format!(
+                r##"<svg width="100" height="100">
+                    <svg x="10" y="10" width="20" height="20" viewBox="0 0 20 20"{overflow}>
+                        <rect x="-10" y="5" width="100" height="5" fill="#ff0000"/>
+                        <rect x="0" y="50" width="5" height="5" fill="#00ff00"/>
+                    </svg>
+                </svg>"##
+            ))
+            .expect("parse");
+            fill_rects(&doc.render(0.0, 0.0, 100.0, 100.0))
+        };
+        assert_eq!(sheet(""), vec![(10.0, 15.0, 20.0, 5.0, (255, 0, 0))]);
+        assert_eq!(
+            sheet(r#" overflow="visible""#),
+            vec![(0.0, 15.0, 100.0, 5.0, (255, 0, 0)), (10.0, 60.0, 5.0, 5.0, (0, 255, 0))]
+        );
+    }
+
+    #[test]
     fn test_use_instantiates_a_symbol_into_the_use_viewport() {
         // The sprite-sheet idiom (cnn, reddit, shopify, youtube): a <symbol>
         // with its own viewBox, drawn by a <use> that sets x/y/width/height.
