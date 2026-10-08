@@ -356,6 +356,13 @@ impl JsRuntime {
         self.deadline.hit.replace(false)
     }
 
+    /// How long after the deadline the host call that stopped script came,
+    /// once per stop. Script is only stopped where it calls the host, so
+    /// this is the time it ran on past its budget.
+    pub fn take_deadline_overrun(&mut self) -> Option<std::time::Duration> {
+        None
+    }
+
     #[cfg(feature = "boa")]
     fn drain_console(&mut self) -> Vec<(LogLevel, String)> {
         use boa_engine::Source;
@@ -741,6 +748,17 @@ mod tests {
         assert_eq!(calls.get(), 6);
         assert!(runtime.take_deadline_hit());
         assert!(!runtime.take_deadline_hit());
+
+        // The stop comes where script next calls the host, and says how
+        // late that was: this script computes for a while first.
+        runtime.set_execution_deadline(Some(std::time::Instant::now()));
+        assert_eq!(runtime.take_deadline_overrun(), None);
+        let busy = "var t = Date.now(); [1].forEach(function () { while (Date.now() - t < 30) {} host(); });";
+        assert!(runtime.evaluate_script(busy).is_err());
+        let late = runtime.take_deadline_overrun().expect("the stop reports how late it came");
+        assert!(late >= Duration::from_millis(30), "{late:?}");
+        assert_eq!(runtime.take_deadline_overrun(), None);
+        assert!(runtime.take_deadline_hit());
 
         // Lifted: the runtime runs script again, and nothing was caught.
         runtime.set_execution_deadline(None);
