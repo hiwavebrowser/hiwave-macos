@@ -85,6 +85,12 @@ struct Args {
     #[arg(long)]
     timer_horizon_ms: Option<u64>,
 
+    /// Wall-clock budget for the page's scripts in milliseconds (default: 5000, the
+    /// engine's and the board's). The live app runs pages at 60000; a capture taken
+    /// with another budget is not comparable with the board and must be labelled.
+    #[arg(long)]
+    script_budget_ms: Option<u64>,
+
     /// Enable verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -1025,6 +1031,9 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     let mut config = EngineConfig::for_parity_testing();
     if let Some(horizon) = args.timer_horizon_ms {
         config.timer_horizon_ms = horizon;
+    }
+    if let Some(budget) = args.script_budget_ms {
+        config.script_budget_ms = budget;
     }
     config.replay_proxy = replay_proxy;
     config
