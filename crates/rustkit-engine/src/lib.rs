@@ -173,6 +173,8 @@ mod script_net_engine_tests;
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
+#[cfg(test)]
+mod content_string_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
