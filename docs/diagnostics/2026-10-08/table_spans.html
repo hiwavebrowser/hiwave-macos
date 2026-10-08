@@ -1,0 +1,27 @@
+<!doctype html>
+<!--
+  #626 reduced page: colspan and rowspan.
+  What Chrome shows: a 3-column, 3-row grid with 0 border-spacing.
+    row 1: A (red, rowspan=2, 60px wide, spans rows 1-2) | B (green,
+           colspan=2, spans columns 2-3)
+    row 2: [A continues] | C (blue) | D (yellow)
+    row 3: E (purple, colspan=3, the full width of the table)
+  Columns: 60, 80, 40 px; table 180 px wide. Rows 30, 30, 30 px; A is 60
+  tall, E is 180 wide. C sits directly under the left part of B, D under
+  its right part. No gaps, no overlaps.
+  Broken (pre-#626 RustKit): five full-width bars stacked vertically.
+-->
+<html><head><style>
+  body { margin: 8px; }
+  table { border-spacing: 0; }
+  td { padding: 0; height: 30px; }
+  .a { background: #e33; width: 60px; } .b { background: #3c3; }
+  .c { background: #36e; width: 80px; } .d { background: #ec3; width: 40px; }
+  .e { background: #94c; }
+</style></head><body>
+<table>
+  <tr><td class="a" rowspan="2"></td><td class="b" colspan="2"></td></tr>
+  <tr><td class="c"></td><td class="d"></td></tr>
+  <tr><td class="e" colspan="3"></td></tr>
+</table>
+</body></html>
