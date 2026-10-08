@@ -702,6 +702,12 @@ class Driver:
         if not m:
             return
         self.expect(c, "the script was given its budget before it was stopped", took > 40, "%.0f s" % took)
+        # The log says so itself: which script, how long the window was held.
+        stopped = self.app.wait_log(r"Script stopped at the script budget source=(\S+) elapsed_ms=(\d+) late_ms=(\d+)",
+                                    2, running.end())
+        self.expect(c, "the app log names the stopped script and how long it ran",
+                    bool(stopped) and 40000 < int(stopped.group(2)) < 90000,
+                    stopped.group(0) if stopped else "no 'Script stopped at the script budget' line")
         time.sleep(1.0)
         frame = self.frame(c, "after", [GREEN])
         if frame is None:
