@@ -197,6 +197,8 @@ mod grid_item_abspos_tests;
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
+#[cfg(test)]
+mod table_engine_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -4950,6 +4952,10 @@ impl Engine {
         let s = &child.style;
         parent.display.is_flex()
             || parent.display.is_grid()
+            // An empty row, cell or column still takes its place in the
+            // table grid (a `<col width>` has no content at all).
+            || s.display.is_table()
+            || s.display.is_table_internal()
             || nonzero(&s.margin_top)
             || nonzero(&s.margin_bottom)
             || nonzero(&s.min_height)
@@ -5140,6 +5146,7 @@ impl Engine {
                 Display::Inline | Display::InlineBlock => Display::Block,
                 Display::InlineFlex => Display::Flex,
                 Display::InlineGrid => Display::Grid,
+                Display::InlineTable => Display::Table,
                 d => d,
             };
         }
@@ -5975,6 +5982,7 @@ impl Engine {
                         }
                         rustkit_css::Display::InlineFlex => rustkit_css::Display::Flex,
                         rustkit_css::Display::InlineGrid => rustkit_css::Display::Grid,
+                        rustkit_css::Display::InlineTable => rustkit_css::Display::Table,
                         other => other,
                     };
                 }
@@ -6441,6 +6449,9 @@ impl Engine {
                 // This is what lets a click resolve to an element (focus,
                 // form editing, event dispatch) instead of just a rectangle.
                 layout_box.node_id = Some(node.id.raw());
+                if let Some(span) = table_span_of(&tag_lower, attributes) {
+                    layout_box.table_span = span;
+                }
 
                 // Carry caret position onto the box when this element is the
                 // focused text control, so the painter can draw the caret and
@@ -6541,6 +6552,7 @@ impl Engine {
                 let share_parent = StyleShareParent::enter(children_parent_style, share_id);
                 // Match sharing keys a child's matches on its ancestor chain.
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
+                let table_hints = TableHintScope::enter(&tag_lower, attributes);
                 for (child_index, child) in child_nodes.iter().enumerate() {
                     let child_path = Self::child_selector_path(
                         selector_path,
@@ -6616,6 +6628,7 @@ impl Engine {
                         Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     }
                 }
+                drop(table_hints);
                 drop(share_chain);
                 drop(share_parent);
 
@@ -6727,6 +6740,11 @@ impl Engine {
                 layout_box
                     .children
                     .retain(|c| !matches!(&c.box_type, BoxType::Text(t) if t.is_empty()));
+
+                // CSS 2.1 §17.2.1: anonymous rows, cells and tables around
+                // misparented table boxes among this element's children
+                // (theirs are already fixed).
+                rustkit_layout::table::fixup_table_children(&mut layout_box);
 
                 layout_box
             }
@@ -7058,6 +7076,7 @@ impl Engine {
                 }
                 rustkit_css::Display::InlineFlex => rustkit_css::Display::Flex,
                 rustkit_css::Display::InlineGrid => rustkit_css::Display::Grid,
+                rustkit_css::Display::InlineTable => rustkit_css::Display::Table,
                 other => other,
             };
         }
@@ -7173,6 +7192,9 @@ impl Engine {
             style.line_break = parent.line_break;
             style.text_transform = parent.text_transform;
             style.visibility = parent.visibility;
+            // css-tables: both inherit.
+            style.border_spacing = parent.border_spacing;
+            style.border_collapse = parent.border_collapse;
         }
 
         // Apply tag-specific default styles (user-agent stylesheet)
@@ -7451,26 +7473,56 @@ impl Engine {
             "label" => {
                 style.display = rustkit_css::Display::Inline;
             }
-            // Table elements
+            // Table elements (HTML §15.3.8, Chrome's html.css). Layout is
+            // rustkit-layout's table.rs (CSS 2.1 chapter 17, first slice).
             "table" => {
-                style.display = rustkit_css::Display::Block; // Should be table
-                                                             // border-collapse: separate (not implemented)
+                style.display = rustkit_css::Display::Table;
+                style.border_collapse = rustkit_css::BorderCollapse::Separate;
+                style.border_spacing = (2.0, 2.0);
+                // A table's `width` is its border-box width in every browser.
+                style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+                style.text_indent = rustkit_css::Length::Zero;
             }
             "caption" => {
-                style.display = rustkit_css::Display::Block; // Should be table-caption
+                style.display = rustkit_css::Display::TableCaption;
+                style.text_align = rustkit_css::TextAlign::Center;
             }
             "thead" | "tbody" | "tfoot" => {
-                style.display = rustkit_css::Display::Block; // Should be table-row-group
+                style.display = match &*lower_tag(tag_name) {
+                    "thead" => rustkit_css::Display::TableHeaderGroup,
+                    "tfoot" => rustkit_css::Display::TableFooterGroup,
+                    _ => rustkit_css::Display::TableRowGroup,
+                };
+                style.vertical_align = rustkit_css::VerticalAlign::Middle;
             }
-            "tr" => {
-                style.display = rustkit_css::Display::Block; // Should be table-row
+            "tr" | "td" | "th" => {
+                style.display = if &*lower_tag(tag_name) == "tr" {
+                    rustkit_css::Display::TableRow
+                } else {
+                    rustkit_css::Display::TableCell
+                };
+                // `vertical-align: inherit`: a cell aligns as its row and
+                // row group say (middle unless an author says otherwise).
+                if let Some(parent) = parent_style {
+                    style.vertical_align = parent.vertical_align;
+                }
+                if &*lower_tag(tag_name) != "tr" {
+                    let one = rustkit_css::Length::Px(1.0);
+                    style.padding_top = one.clone();
+                    style.padding_right = one.clone();
+                    style.padding_bottom = one.clone();
+                    style.padding_left = one;
+                }
+                if &*lower_tag(tag_name) == "th" {
+                    style.font_weight = rustkit_css::FontWeight::BOLD;
+                    style.text_align = rustkit_css::TextAlign::Center;
+                }
             }
-            "th" => {
-                style.display = rustkit_css::Display::Block; // Should be table-cell
-                style.font_weight = rustkit_css::FontWeight::BOLD;
+            "col" => {
+                style.display = rustkit_css::Display::TableColumn;
             }
-            "td" => {
-                style.display = rustkit_css::Display::Block; // Should be table-cell
+            "colgroup" => {
+                style.display = rustkit_css::Display::TableColumnGroup;
             }
             // Media
             "img" => {
@@ -7658,17 +7710,25 @@ impl Engine {
             _ => matching_rules.as_slice(),
         };
 
+        // HTML presentational hints for tables (HTML §15.3.8): declarations
+        // that sit above the UA defaults and below every author rule.
+        let hints = table_presentational_hints(&lower_tag(tag_name), attributes);
+        for (property, value) in &hints {
+            self.apply_style_property(&mut style, property, value);
+        }
+
         // Style sharing: everything below reads only the parent's style, the
-        // tag, the matched rules in this order, the inline style and whether
-        // a UA rule hid the element. An earlier element with the same five
-        // already has this style. Only under the build's own rule index,
-        // whose rule numbers the key holds.
+        // tag, the matched rules in this order, the inline style, the
+        // presentational hints and whether a UA rule hid the element. An
+        // earlier element with the same six already has this style. Only
+        // under the build's own rule index, whose rule numbers the key holds.
         let share = match (index.is_some(), parent_style) {
             (true, Some(parent)) => style_share_lookup(parent, || StyleShareKey {
                 parent: 0,
                 tag: tag_name.to_string(),
                 rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
                 inline: attributes.get("style").cloned(),
+                hints: hints.clone(),
                 ua_hidden: style.display == rustkit_css::Display::None,
             }),
             _ => StyleShared::Untracked,
@@ -8073,6 +8133,9 @@ impl Engine {
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
             "line-break" => style.line_break = parent.line_break,
             "visibility" => style.visibility = parent.visibility,
+            "border-spacing" => style.border_spacing = parent.border_spacing,
+            "border-collapse" => style.border_collapse = parent.border_collapse,
+            "vertical-align" => style.vertical_align = parent.vertical_align,
             "background-color" => style.background_color = parent.background_color,
             "border-color" => {
                 style.border_top_color = parent.border_top_color;
@@ -8766,6 +8829,22 @@ impl Engine {
                     style.aspect_ratio = Some(ratio);
                 }
             }
+            "border-spacing" => {
+                // CSS 2.1 §17.6.1. Lengths are absolute at computed-value
+                // time; `em` takes the font size as cascaded so far.
+                if let Some((h, v)) = rustkit_css::parse_border_spacing(value) {
+                    let font = match style.font_size {
+                        rustkit_css::Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    style.border_spacing = (h.to_px(font, 16.0, 0.0), v.to_px(font, 16.0, 0.0));
+                }
+            }
+            "border-collapse" => match value.trim().to_ascii_lowercase().as_str() {
+                "separate" => style.border_collapse = rustkit_css::BorderCollapse::Separate,
+                "collapse" => style.border_collapse = rustkit_css::BorderCollapse::Collapse,
+                _ => {}
+            },
             "vertical-align" => {
                 // Sixth parsed-but-never-applied property found this week
                 // (text-align, background-clip, inheritance, bold system
@@ -29041,7 +29120,207 @@ struct StyleShareKey {
     tag: String,
     rules: Vec<(usize, (usize, usize, usize))>,
     inline: Option<String>,
+    /// Presentational hints (`table_presentational_hints`).
+    hints: Vec<(&'static str, String)>,
     ua_hidden: bool,
+}
+
+// ==================== Table presentational hints ====================
+
+/// The enclosing table's attributes that cells take hints from
+/// (`cellpadding`, `border`), innermost table last. Pushed while a
+/// `<table>`'s children are built (`TableHintScope`).
+#[derive(Debug, Clone, Copy, Default)]
+struct TableCellHints {
+    cellpadding: Option<u32>,
+    border: bool,
+}
+
+thread_local! {
+    static TABLE_HINTS: std::cell::RefCell<Vec<TableCellHints>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keeps a `<table>`'s cell hints on `TABLE_HINTS` while its subtree builds.
+struct TableHintScope(bool);
+
+impl TableHintScope {
+    fn enter(tag: &str, attributes: &HashMap<String, String>) -> Self {
+        if tag != "table" {
+            return TableHintScope(false);
+        }
+        let hints = TableCellHints {
+            cellpadding: attributes.get("cellpadding").and_then(|v| parse_html_non_negative_integer(v)),
+            border: table_border_attribute(attributes).is_some_and(|n| n > 0),
+        };
+        TABLE_HINTS.with(|h| h.borrow_mut().push(hints));
+        TableHintScope(true)
+    }
+}
+
+impl Drop for TableHintScope {
+    fn drop(&mut self) {
+        if self.0 {
+            TABLE_HINTS.with(|h| {
+                h.borrow_mut().pop();
+            });
+        }
+    }
+}
+
+/// HTML's "rules for parsing non-negative integers": leading white space,
+/// an optional `+`, then digits; anything after them is ignored.
+fn parse_html_non_negative_integer(value: &str) -> Option<u32> {
+    let v = value.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let v = v.strip_prefix('+').unwrap_or(v);
+    let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    Some(digits.parse::<u64>().map_or(u32::MAX, |n| n.min(u32::MAX as u64) as u32))
+}
+
+/// HTML's "rules for parsing dimension values", as a CSS length: `N` is
+/// px, `N%` a percentage. `None` when there is no number, or when the
+/// value is zero and `ignore_zero` (HTML maps `width` "ignoring zero").
+fn html_dimension(value: &str, ignore_zero: bool) -> Option<String> {
+    let v = value.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let end = v
+        .char_indices()
+        .find(|&(i, c)| !(c.is_ascii_digit() || (c == '.' && i > 0)))
+        .map_or(v.len(), |(i, _)| i);
+    let number: f32 = v[..end].trim_end_matches('.').parse().ok()?;
+    if ignore_zero && number == 0.0 {
+        return None;
+    }
+    Some(if v[end..].starts_with('%') {
+        format!("{number}%")
+    } else {
+        format!("{number}px")
+    })
+}
+
+/// The `border` attribute of a table: its integer value, or 1 when it is
+/// present but not a number (`<table border>`), as HTML maps it.
+fn table_border_attribute(attributes: &HashMap<String, String>) -> Option<u32> {
+    attributes
+        .get("border")
+        .map(|v| parse_html_non_negative_integer(v).unwrap_or(1))
+}
+
+/// A legacy colour attribute (`bgcolor`): a CSS colour, or bare hex digits
+/// as old pages write them (`bgcolor="ffcc00"`).
+fn html_legacy_color(value: &str) -> String {
+    let v = value.trim();
+    if matches!(v.len(), 3 | 6) && v.chars().all(|c| c.is_ascii_hexdigit()) {
+        format!("#{v}")
+    } else {
+        v.to_string()
+    }
+}
+
+/// The presentational hints (HTML §15.3.8, "Tables") of a table element, as
+/// CSS declarations. Only the attributes real tables use are mapped:
+/// `width`, `height`, `border`, `cellpadding`, `cellspacing`, `align` on
+/// `<table>`; `width`, `height`, `align`, `valign`, `bgcolor` on cells (and
+/// the enclosing table's `cellpadding` and `border`); `width` on `<col>` and
+/// `<colgroup>`. `colspan`, `rowspan` and `span` are not style: the box
+/// builder copies them to `LayoutBox::table_span`.
+fn table_presentational_hints(
+    tag: &str,
+    attributes: &HashMap<String, String>,
+) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let attr = |name: &str| attributes.get(name).map(|v| v.trim());
+    match tag {
+        "table" => {
+            if let Some(w) = attr("width").and_then(|v| html_dimension(v, true)) {
+                out.push(("width", w));
+            }
+            if let Some(h) = attr("height").and_then(|v| html_dimension(v, false)) {
+                out.push(("height", h));
+            }
+            if let Some(n) = attr("cellspacing").and_then(parse_html_non_negative_integer) {
+                out.push(("border-spacing", format!("{n}px")));
+            }
+            if let Some(n) = table_border_attribute(attributes).filter(|&n| n > 0) {
+                out.push(("border-width", format!("{n}px")));
+                out.push(("border-style", "outset".to_string()));
+                out.push(("border-color", "gray".to_string()));
+            }
+            match attr("align").map(|v| v.to_ascii_lowercase()).as_deref() {
+                Some("left") => out.push(("float", "left".to_string())),
+                Some("right") => out.push(("float", "right".to_string())),
+                Some("center") => {
+                    out.push(("margin-left", "auto".to_string()));
+                    out.push(("margin-right", "auto".to_string()));
+                }
+                _ => {}
+            }
+        }
+        "td" | "th" => {
+            let table = TABLE_HINTS.with(|h| h.borrow().last().copied());
+            if let Some(n) = table.and_then(|t| t.cellpadding) {
+                out.push(("padding", format!("{n}px")));
+            }
+            if table.is_some_and(|t| t.border) {
+                out.push(("border-width", "1px".to_string()));
+                out.push(("border-style", "inset".to_string()));
+                out.push(("border-color", "gray".to_string()));
+            }
+            if let Some(w) = attr("width").and_then(|v| html_dimension(v, true)) {
+                out.push(("width", w));
+            }
+            if let Some(h) = attr("height").and_then(|v| html_dimension(v, false)) {
+                out.push(("height", h));
+            }
+            let align = match attr("align").map(|v| v.to_ascii_lowercase()).as_deref() {
+                Some("left") => Some("left"),
+                Some("right") => Some("right"),
+                Some("center") | Some("middle") => Some("center"),
+                Some("justify") => Some("justify"),
+                _ => None,
+            };
+            if let Some(a) = align {
+                out.push(("text-align", a.to_string()));
+            }
+            let valign = match attr("valign").map(|v| v.to_ascii_lowercase()).as_deref() {
+                Some(v @ ("top" | "middle" | "bottom" | "baseline")) => Some(v.to_string()),
+                _ => None,
+            };
+            if let Some(v) = valign {
+                out.push(("vertical-align", v));
+            }
+            if let Some(c) = attr("bgcolor").filter(|v| !v.is_empty()) {
+                out.push(("background-color", html_legacy_color(c)));
+            }
+        }
+        "col" | "colgroup" => {
+            if let Some(w) = attr("width").and_then(|v| html_dimension(v, true)) {
+                out.push(("width", w));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// `colspan` / `rowspan` of a cell, `span` of a column or column group
+/// (HTML §4.9.11): non-negative integers; `colspan` and `span` of 0 are 1,
+/// `rowspan="0"` spans to the end of the row group (resolved in layout).
+fn table_span_of(tag: &str, attributes: &HashMap<String, String>) -> Option<rustkit_layout::table::TableSpan> {
+    let int = |name: &str| attributes.get(name).and_then(|v| parse_html_non_negative_integer(v));
+    match tag {
+        "td" | "th" => Some(rustkit_layout::table::TableSpan {
+            colspan: int("colspan").unwrap_or(1).max(1),
+            rowspan: int("rowspan").unwrap_or(1),
+        }),
+        "col" | "colgroup" => Some(rustkit_layout::table::TableSpan {
+            colspan: int("span").unwrap_or(1).max(1),
+            rowspan: 1,
+        }),
+        _ => None,
+    }
 }
 
 /// What `style_share_lookup` found for one element.
@@ -30564,6 +30843,7 @@ mod style_share_tests {
             tag: "p".to_string(),
             rules: Vec::new(),
             inline: None,
+            hints: Vec::new(),
             ua_hidden: false,
         };
 
@@ -30597,6 +30877,7 @@ mod style_share_tests {
                 tag: tag.to_string(),
                 rules: Vec::new(),
                 inline: None,
+                hints: Vec::new(),
                 ua_hidden: false,
             }
         };
