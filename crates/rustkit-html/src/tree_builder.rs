@@ -1128,14 +1128,28 @@ impl<S: TreeSink> TreeBuilder<S> {
 
     fn handle_in_table(&mut self, token: Token) -> ParseResult<()> {
         match &token {
-            Token::Character(ch) if ch.is_whitespace() => {
-                // Switch to InTableText mode to accumulate whitespace
-                self.original_mode = Some(InsertionMode::InTable);
+            // §13.2.6.4.9: a character token while the current node is a
+            // table, tbody, tfoot, thead or tr starts "in table text". The
+            // original insertion mode is the mode that dispatched here: "in
+            // table body" and "in row" fall through to this handler, and
+            // returning to "in table" instead made the next <tr> open a new
+            // tbody (#621).
+            Token::Character(ch)
+                if matches!(
+                    self.current_node_name(),
+                    Some("table" | "tbody" | "tfoot" | "thead" | "tr")
+                ) =>
+            {
+                self.original_mode = Some(self.mode);
                 self.mode = InsertionMode::InTableText;
-                self.pending_table_chars.push(*ch);
+                if *ch != '\0' {
+                    self.pending_table_chars.push(*ch);
+                }
             }
             Token::Character(_) => {
-                // Non-whitespace character - foster parent it
+                // Anything else: "in body" with foster parenting enabled.
+                // The current node is not a table element here (e.g. a
+                // fostered <div>), so the text goes into it.
                 self.foster_parenting = true;
                 self.handle_in_body(token)?;
                 self.foster_parenting = false;
@@ -1256,7 +1270,8 @@ impl<S: TreeSink> TreeBuilder<S> {
             _ => {
                 // Process pending characters
                 let chars: Vec<char> = std::mem::take(&mut self.pending_table_chars);
-                let has_non_whitespace = chars.iter().any(|c| !c.is_whitespace());
+                // "ASCII whitespace": tab, LF, FF, CR, space.
+                let has_non_whitespace = chars.iter().any(|c| !c.is_ascii_whitespace());
 
                 if has_non_whitespace {
                     // Foster parent all characters
