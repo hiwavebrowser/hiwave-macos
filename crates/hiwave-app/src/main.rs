@@ -537,6 +537,25 @@ fn wheel_burst_started() -> bool {
     })
 }
 
+// The real-window driver's h6 check reads "wheel burst started" from the app
+// log after the first wheel it sends to a freshly launched app.
+#[cfg(all(
+    test,
+    target_os = "macos",
+    feature = "rustkit",
+    not(feature = "webview-fallback")
+))]
+mod wheel_burst_tests {
+    use super::wheel_burst_started;
+
+    #[test]
+    fn the_first_wheel_after_launch_starts_a_burst_and_the_next_event_does_not() {
+        // The clock is per thread, so this test thread is a fresh launch.
+        assert!(wheel_burst_started(), "the first wheel event after launch starts a burst");
+        assert!(!wheel_burst_started(), "an event right behind it belongs to the same burst");
+    }
+}
+
 fn is_new_tab_url(url: &str) -> bool {
     url == "about:blank" || url == NEW_TAB_URL || url.starts_with("data:text/html")
 }
