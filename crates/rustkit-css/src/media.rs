@@ -342,6 +342,56 @@ mod tests {
         assert!(!m("(min-aspect-ratio: 16/9)", w, h));
     }
 
+    /// A length in a media feature may be a math function or carry any
+    /// length unit. Every row is what the oracle Chromium (143) answers from
+    /// `matchMedia` at 1280x800; the first four are en.wikipedia.org's.
+    #[test]
+    fn math_functions_and_other_units_in_a_feature_length() {
+        let (w, h) = (1280.0, 800.0);
+        assert!(m("(min-width: calc(639px))", w, h));
+        assert!(!m("(max-width: calc(1119px))", w, h));
+        assert!(!m("(max-width: calc(639px))", w, h));
+        assert!(m("screen and (min-width: calc(639px)) and (max-width: calc(1679px))", w, h));
+        assert!(m("(min-width: calc(1280px))", w, h));
+        assert!(!m("(min-width: calc(1280px + 1px))", w, h));
+        assert!(m("(max-width: calc(1281px - 1px))", w, h));
+        assert!(!m("(max-width: calc(640px - 1px))", w, h));
+        assert!(m("(min-width: calc(40em + 1px))", w, h));
+        assert!(m("(min-width: calc(80em))", w, h));
+        assert!(!m("(min-width: calc(80em + 1px))", w, h));
+        assert!(m("(min-width: calc(2 * 640px))", w, h));
+        assert!(!m("(min-width: calc(2 * 640.5px))", w, h));
+        assert!(m("(min-width: min(1000px, 2000px))", w, h));
+        assert!(!m("(min-width: max(1000px, 2000px))", w, h));
+        assert!(!m("(min-width: clamp(100px, 1300px, 1290px))", w, h));
+        assert!(m("(min-width: 100vw)", w, h));
+        assert!(!m("(min-width: 101vw)", w, h));
+        assert!(m("(min-height: 100vh)", w, h));
+        assert!(m("(min-width: calc(50vw + 640px))", w, h));
+        assert!(!m("(min-width: calc(50vw + 641px))", w, h));
+        assert!(m("(width >= calc(1000px + 280px))", w, h));
+        assert!(!m("(width > calc(1000px + 280px))", w, h));
+        assert!(m("(calc(600px) <= width < calc(1280px + 1px))", w, h));
+        assert!(m("(min-height: calc(799px + 1px))", w, h));
+        assert!(!m("(max-height: calc(100px * 7))", w, h));
+        assert!(m("(min-width: CALC(639PX))", w, h));
+        assert!(m("(min-width: calc( 639px ))", w, h));
+        assert!(m("(min-width: 1in)", w, h));
+        assert!(!m("(min-width: 14in)", w, h));
+        assert!(m("(min-width: 960pt)", w, h));
+        assert!(!m("(min-width: 961pt)", w, h));
+        assert!(m("(min-width: 33.8cm)", w, h));
+        assert!(!m("(min-width: 33.9cm)", w, h));
+        // Not lengths: a percentage, a bare number other than 0.
+        assert!(!m("(min-width: calc(50%))", w, h));
+        assert!(!m("(min-width: calc(10))", w, h));
+        assert!(!m("(min-width: 10)", w, h));
+        // Narrower viewports, where the `max-` forms are the ones that hold.
+        assert!(m("(max-width: calc(1119px))", 1000.0, h));
+        assert!(m("(max-width: calc(639px))", 600.0, h));
+        assert!(!m("(min-width: calc(639px))", 600.0, h));
+    }
+
     #[test]
     fn environment_features_match_the_pinned_chrome() {
         let (w, h) = (1280.0, 800.0);
