@@ -6894,6 +6894,178 @@ pub fn tint_mask_commands(commands: &mut [DisplayCommand], color: Color) {
     }
 }
 
+/// What of `command` is inside `clip` (both in document space), appended
+/// to `out`.
+///
+/// The renderer clips quads against its clip stack, not polygons, circles
+/// or strokes, so the `PushClip` around a vector background held nothing
+/// in: a box showing one icon of a sprite sheet painted the whole sheet,
+/// and carried every command of it into every frame (wikipedia.org's
+/// portal: 21 boxes, 1.67 million commands). A command wholly inside is
+/// kept as it is and one wholly outside is dropped. One across the edge
+/// becomes the polygons the renderer would draw for it (a quad per stroke
+/// segment, 48 sides to a circle), each cut at the edge.
+pub fn clip_vector_command(
+    command: DisplayCommand,
+    clip: Rect,
+    out: &mut Vec<DisplayCommand>,
+) {
+    use DisplayCommand as C;
+    const SIDES: usize = 48;
+
+    let (left, top, right, bottom) = (clip.x, clip.y, clip.x + clip.width, clip.y + clip.height);
+    let misses = |b: (f32, f32, f32, f32)| b.2 <= left || b.0 >= right || b.3 <= top || b.1 >= bottom;
+    let within = |b: (f32, f32, f32, f32)| b.0 >= left && b.2 <= right && b.1 >= top && b.3 <= bottom;
+    let bounds = |points: &[(f32, f32)], half: f32| {
+        points.iter().fold(
+            (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY),
+            |(x0, y0, x1, y1), &(x, y)| (x0.min(x - half), y0.min(y - half), x1.max(x + half), y1.max(y + half)),
+        )
+    };
+    let around = |cx: f32, cy: f32, rx: f32, ry: f32| -> Vec<(f32, f32)> {
+        (0..SIDES)
+            .map(|i| {
+                let angle = i as f32 / SIDES as f32 * std::f32::consts::TAU;
+                (cx + rx * angle.cos(), cy + ry * angle.sin())
+            })
+            .collect()
+    };
+    // A filled polygon, cut.
+    let fill = |points: Vec<(f32, f32)>, color, out: &mut Vec<C>| {
+        let b = bounds(&points, 0.0);
+        if points.is_empty() || misses(b) {
+            return;
+        }
+        let points = if within(b) { points } else { clip_polygon(points, clip) };
+        if points.len() >= 3 {
+            out.push(C::FillPolygon { points, color });
+        }
+    };
+    // The segments of a stroke, each as the quad the renderer draws for it.
+    let stroke = |points: &[(f32, f32)], color, width: f32, out: &mut Vec<C>| {
+        for pair in points.windows(2) {
+            let ((x1, y1), (x2, y2)) = (pair[0], pair[1]);
+            let (dx, dy) = (x2 - x1, y2 - y1);
+            let length = (dx * dx + dy * dy).sqrt();
+            if length > 0.0 {
+                let (nx, ny) = (-dy / length * width * 0.5, dx / length * width * 0.5);
+                let quad = vec![(x1 + nx, y1 + ny), (x2 + nx, y2 + ny), (x2 - nx, y2 - ny), (x1 - nx, y1 - ny)];
+                fill(quad, color, out);
+            }
+        }
+    };
+    // Whole, gone, or neither.
+    let place = |b: (f32, f32, f32, f32)| if misses(b) { None } else { Some(within(b)) };
+
+    match command {
+        C::FillPolygon { points, color } => fill(points, color, out),
+        C::FillRect { rect, color } => {
+            let (x0, y0) = (rect.x.max(left), rect.y.max(top));
+            let (x1, y1) = ((rect.x + rect.width).min(right), (rect.y + rect.height).min(bottom));
+            if x1 > x0 && y1 > y0 {
+                out.push(C::FillRect {
+                    rect: Rect::new(x0, y0, x1 - x0, y1 - y0),
+                    color,
+                });
+            }
+        }
+        C::FillCircle { cx, cy, radius, color } => {
+            match place((cx - radius, cy - radius, cx + radius, cy + radius)) {
+                Some(true) => out.push(command),
+                Some(false) => fill(around(cx, cy, radius, radius), color, out),
+                None => {}
+            }
+        }
+        C::FillEllipse { rect, color } => {
+            match place((rect.x, rect.y, rect.x + rect.width, rect.y + rect.height)) {
+                Some(true) => out.push(command),
+                Some(false) => {
+                    let (rx, ry) = (rect.width * 0.5, rect.height * 0.5);
+                    fill(around(rect.x + rx, rect.y + ry, rx, ry), color, out);
+                }
+                None => {}
+            }
+        }
+        C::StrokeCircle { cx, cy, radius, color, width } => {
+            let outer = radius + width * 0.5;
+            match place((cx - outer, cy - outer, cx + outer, cy + outer)) {
+                Some(true) => out.push(command),
+                Some(false) => {
+                    // The annulus r ± w/2, a quad per side.
+                    let inner = (radius - width * 0.5).max(0.0);
+                    let (ring_out, ring_in) = (around(cx, cy, outer, outer), around(cx, cy, inner, inner));
+                    for i in 0..SIDES {
+                        let j = (i + 1) % SIDES;
+                        fill(vec![ring_out[i], ring_out[j], ring_in[j], ring_in[i]], color, out);
+                    }
+                }
+                None => {}
+            }
+        }
+        C::Line { x1, y1, x2, y2, color, width } => match place(bounds(&[(x1, y1), (x2, y2)], width * 0.5)) {
+            Some(true) => out.push(command),
+            Some(false) => stroke(&[(x1, y1), (x2, y2)], color, width, out),
+            None => {}
+        },
+        C::Polyline { ref points, color, width } => match place(bounds(points, width * 0.5)) {
+            Some(true) => out.push(command),
+            Some(false) => stroke(points, color, width, out),
+            None => {}
+        },
+        C::StrokePolygon { ref points, color, width } => match place(bounds(points, width * 0.5)) {
+            Some(true) => out.push(command),
+            Some(false) => {
+                let mut closed = points.clone();
+                closed.extend(points.first().copied());
+                stroke(&closed, color, width, out);
+            }
+            None => {}
+        },
+        // Kept whole when any of it may be inside.
+        C::StrokeRect { rect, width, .. } => {
+            let half = width * 0.5;
+            if !misses((rect.x - half, rect.y - half, rect.x + rect.width + half, rect.y + rect.height + half)) {
+                out.push(command);
+            }
+        }
+        other => out.push(other),
+    }
+}
+
+/// The part of the polygon `points` inside `clip` (Sutherland-Hodgman, one
+/// pass per edge of the rectangle). A convex polygon stays convex.
+pub fn clip_polygon(points: Vec<(f32, f32)>, clip: Rect) -> Vec<(f32, f32)> {
+    let edges = [
+        (true, clip.x, true),
+        (true, clip.x + clip.width, false),
+        (false, clip.y, true),
+        (false, clip.y + clip.height, false),
+    ];
+    let mut output = points;
+    for (vertical, bound, keep_from) in edges {
+        let input = std::mem::take(&mut output);
+        let Some(&last) = input.last() else {
+            break;
+        };
+        let along = |p: (f32, f32)| if vertical { p.0 } else { p.1 };
+        let inside = |p: (f32, f32)| if keep_from { along(p) >= bound } else { along(p) <= bound };
+        let mut previous = last;
+        for &current in &input {
+            if inside(current) != inside(previous) {
+                let t = (bound - along(previous)) / (along(current) - along(previous));
+                let x = previous.0 + (current.0 - previous.0) * t;
+                let y = previous.1 + (current.1 - previous.1) * t;
+                output.push(if vertical { (bound, y) } else { (x, bound) });
+            }
+            if inside(current) {
+                output.push(current);
+            }
+            previous = current;
+        }
+    }
+    output
+}
+
 /// Where each copy of a background image goes: the tiles intersecting
 /// `container` for an image of `image_width` x `image_height`, sized by
 /// `size`, placed by `position` (0-1 per axis) plus `offset` px and laid
