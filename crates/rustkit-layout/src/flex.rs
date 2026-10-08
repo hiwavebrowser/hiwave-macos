@@ -236,8 +236,38 @@ fn inner_main_from_spec(container: &LayoutBox, raw: f32) -> f32 {
 /// block, and every caller passes the container's own box in its place, so
 /// resolving one here would be resolving it against the wrong number.
 fn definite_inner_main_size(container: &LayoutBox) -> Option<f32> {
-    match container.style.height {
-        Length::Px(v) => Some(inner_main_from_spec(container, v)),
+    definite_height_px(container, &container.style.height)
+        .map(|v| inner_main_from_spec(container, v))
+}
+
+/// Whether a length has a percentage anywhere in it.
+fn has_percentage(l: &Length) -> bool {
+    match l {
+        Length::Percent(_) => true,
+        Length::Calc(sum) => sum.percent != 0.0,
+        Length::Min(pair) | Length::Max(pair) => has_percentage(&pair.0) || has_percentage(&pair.1),
+        Length::Clamp(t) => has_percentage(&t.0) || has_percentage(&t.1) || has_percentage(&t.2),
+        _ => false,
+    }
+}
+
+/// A specified `height` that is definite without the containing block, in
+/// pixels as written (the border box under `box-sizing: border-box`): `px`,
+/// the font-relative and viewport units, and `calc()`, `min()`, `max()` and
+/// `clamp()` over those. Only `px` used to count, so a flex container with
+/// `height: 3rem` (Tailwind's `h-12`) aligned its items in a height it never
+/// had: `align-items: center` and `flex-end` left them at the top, and
+/// `stretch` left an auto item 0 tall.
+fn definite_height_px(b: &LayoutBox, l: &Length) -> Option<f32> {
+    match l {
+        Length::Px(v) => Some(*v),
+        Length::Auto | Length::FitContent | Length::Percent(_) => None,
+        l if crate::grid::is_font_or_viewport_relative(l) => Some(b.length_to_px(l, 0.0)),
+        Length::Calc(_) | Length::Min(_) | Length::Max(_) | Length::Clamp(_)
+            if !has_percentage(l) =>
+        {
+            Some(b.length_to_px(l, 0.0))
+        }
         _ => None,
     }
 }
@@ -452,12 +482,20 @@ fn layout_flex_container_at(
                     + container.dimensions.border.horizontal(),
             ),
         };
-        match spec {
-            Length::Px(v) => {
+        // On the vertical axis a font-relative or viewport height is as
+        // definite as a pixel one. The horizontal axis reads `px` only, as
+        // before: a width in another unit takes the arm below.
+        let spec_px = match (cross_axis, spec) {
+            (_, Length::Px(v)) => Some(*v),
+            (Axis::Vertical, l) => definite_height_px(container, l),
+            _ => None,
+        };
+        match spec_px {
+            Some(v) => {
                 if container.style.box_sizing == rustkit_css::BoxSizing::BorderBox {
                     Some((v - pb).max(0.0))
                 } else {
-                    Some(*v)
+                    Some(v)
                 }
             }
             // `container_cross_size` is the CONTAINING BLOCK's content size,
@@ -467,7 +505,7 @@ fn layout_flex_container_at(
             // number stretches every child past the container by exactly its
             // own edges. That is #81's defect inverted: items grew by their
             // padding instead of shrinking by it.
-            _ if container_cross_size > 0.0 => {
+            None if container_cross_size > 0.0 => {
                 let own_edges = match cross_axis {
                     Axis::Horizontal => {
                         container.dimensions.margin.horizontal()
@@ -482,7 +520,7 @@ fn layout_flex_container_at(
                 };
                 Some((container_cross_size - own_edges).max(0.0))
             }
-            _ => None,
+            None => None,
         }
     } else {
         None
@@ -1300,7 +1338,9 @@ fn layout_flex_container_at(
                         container_box.content.height,
                     ))
                 }
-                _ => None,
+                // The font-relative and viewport units, and the comparison
+                // functions over them: lengths like `px`.
+                ref l => definite_height_px(container, l),
             };
             match explicit {
                 Some(h) => {
@@ -1359,9 +1399,9 @@ fn layout_flex_container_at(
             let pb = container.dimensions.padding.vertical() + container.dimensions.border.vertical();
             let is_bb = container.style.box_sizing == rustkit_css::BoxSizing::BorderBox;
             let inner_from_spec = |raw: f32| if is_bb { (raw - pb).max(0.0) } else { raw };
-            match container.style.height {
-                Length::Px(v) => inner_from_spec(v),
-                _ => {
+            match definite_height_px(container, &container.style.height) {
+                Some(v) => inner_from_spec(v),
+                None => {
                     let min = match container.style.min_height {
                         Length::Px(px) => inner_from_spec(px),
                         Length::Vh(vh) => inner_from_spec(vh / 100.0 * container.viewport.1),
