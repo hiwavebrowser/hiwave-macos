@@ -94,3 +94,40 @@ fn a_circle_across_the_edge_does_not_paint_past_it() {
     }
     assert!(painted > 0, "the half inside the box is painted: {commands:?}");
 }
+
+/// CSS Backgrounds 3 §3.10: a property with fewer values than there are
+/// layers repeats its list. The portal's sprite is the second of two images
+/// (`linear-gradient(transparent, transparent), url(sprite.svg)`, the old
+/// SVG-support test) under one `background-repeat` and one
+/// `background-position`: both reached the gradient only, so every icon box
+/// showed the sheet's top left corner, tiled.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_short_value_list_is_repeated_over_the_layers() {
+    let engine = Engine::new(EngineConfig::default()).expect("engine");
+    let sheet = Stylesheet::parse(
+        ".sprite { background-image: linear-gradient(transparent, transparent), url(sheet.svg); \
+                   background-repeat: no-repeat; background-origin: content-box } \
+         .wordmark { background-position: 0 -203px; background-size: 176px 811px }",
+    )
+    .expect("sheet");
+    let mut attributes = HashMap::new();
+    attributes.insert("class".to_string(), "sprite wordmark".to_string());
+    let style = engine.compute_style_for_element(
+        "span",
+        &attributes,
+        std::slice::from_ref(&sheet),
+        &HashMap::new(),
+        &[],
+        &[],
+        SiblingContext::SOLE,
+        None,
+    );
+    assert_eq!(style.background_layers.len(), 2);
+    for layer in &style.background_layers {
+        assert_eq!(layer.repeat, rustkit_css::BackgroundRepeat::NoRepeat, "{:?}", layer.image);
+        assert_eq!(layer.position, parse_background_position("0 -203px"), "{:?}", layer.image);
+        assert_eq!(layer.size, parse_background_size("176px 811px"), "{:?}", layer.image);
+        assert_eq!(layer.origin, rustkit_css::BackgroundOrigin::ContentBox, "{:?}", layer.image);
+    }
+}
