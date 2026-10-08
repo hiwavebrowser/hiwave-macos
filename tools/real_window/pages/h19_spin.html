@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H19 a script that does not end</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  img { display: block; width: 400px; height: 200px; margin: 10px; }
+</style>
+<!-- ebay.com, 2026-10-08: a script inside nested forEach callbacks ran for
+     minutes on the window's thread. No loop statement, so the loop limit does
+     not count it. This one would take hours; it reads the document as it goes. -->
+<p id="p">The script below does not end by itself.</p>
+<img src="/img/00ff00.png" alt="">
+<script>
+  var spun = 0;
+  var row = new Array(100000).fill(0);
+  row.forEach(function () {
+    row.forEach(function () {
+      spun++;
+      if (spun % 4096 === 0) { document.getElementById('p'); }
+    });
+  });
+</script>

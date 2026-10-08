@@ -683,7 +683,32 @@ class Driver:
             (self.out / ("%s.inline.app.log" % c)).write_text(self.app.log_text())
         self.close_page()
 
-    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav"]
+    def h19_spin(self):
+        """H19: a script that does not end is stopped at the app's script budget (60 s) and the page is shown."""
+        c = "h19_spin"
+        if not self.open_page(c, "h19_spin.html"):
+            return
+        self.expect(c, "the app asked for the page's image", self.fixture.wait("/img/00ff00.png", 10, self.since))
+        # The app's start page finishes a navigation of its own first.
+        running = self.app.wait_log(r"Running page script", 10)
+        self.expect(c, "the engine started the page's script", bool(running))
+        if not running:
+            return
+        started = time.time()
+        m = self.app.wait_log(r"Navigation finished", 90, running.end())
+        took = time.time() - started
+        self.expect(c, "the load finished within 90 s of the script's start", bool(m),
+                    "%.0f s; app alive: %s" % (took, self.app.alive()))
+        if not m:
+            return
+        self.expect(c, "the script was given its budget before it was stopped", took > 40, "%.0f s" % took)
+        time.sleep(1.0)
+        frame = self.frame(c, "after", [GREEN])
+        if frame is None:
+            return self.not_run(c, "the window shows the page's green image", self.why_not("Screen Recording"))
+        self.expect(c, "the window shows the page's green image", frame[GREEN] > 2000, str(frame))
+
+    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
