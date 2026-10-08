@@ -85,6 +85,12 @@ struct Args {
     #[arg(long)]
     timer_horizon_ms: Option<u64>,
 
+    /// Wall-clock budget for the page's scripts in milliseconds (default: 5000, the
+    /// engine's and the board's). The live app runs pages at 60000; a capture taken
+    /// with another budget is not comparable with the board and must be labelled.
+    #[arg(long)]
+    script_budget_ms: Option<u64>,
+
     /// Enable verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -321,14 +327,8 @@ fn run_capture(args: &Args) -> CaptureResult {
         None => None,
     };
 
-    let mut config = EngineConfig::for_parity_testing();
-    if let Some(horizon) = args.timer_horizon_ms {
-        config.timer_horizon_ms = horizon;
-    }
-    config.replay_proxy = replay_proxy;
-
     let engine_result = EngineBuilder::new()
-        .with_config(config)
+        .with_config(capture_config(&args, replay_proxy))
         .user_agent(user_agent)
         .javascript_enabled(url.is_some() || args.actions.is_some())
         .build();
@@ -1025,10 +1025,57 @@ fn analyze_layout_json(json_str: &str) -> Option<LayoutStats> {
     Some(stats)
 }
 
+/// The engine configuration a capture runs with: the parity defaults, plus
+/// whatever the command line overrides.
+fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
+    let mut config = EngineConfig::for_parity_testing();
+    if let Some(horizon) = args.timer_horizon_ms {
+        config.timer_horizon_ms = horizon;
+    }
+    if let Some(budget) = args.script_budget_ms {
+        config.script_budget_ms = budget;
+    }
+    config.replay_proxy = replay_proxy;
+    config
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn parsed(extra: &[&str]) -> Args {
+        let mut argv = vec!["parity-capture", "--url", "https://example.test/"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("the command line parses")
+    }
+
+    // The board is measured at the engine's 5 s script budget, and the live
+    // app runs pages at 60 s (#573). `--script-budget-ms` lets one labelled
+    // run be taken at the app's budget; without the flag nothing changes.
+    #[test]
+    fn the_script_budget_is_the_engines_default_without_the_flag() {
+        let config = capture_config(&parsed(&[]), None);
+        assert_eq!(config.script_budget_ms, 5_000);
+        assert_eq!(
+            config.script_budget_ms,
+            EngineConfig::for_parity_testing().script_budget_ms
+        );
+        assert_eq!(
+            config.timer_horizon_ms,
+            EngineConfig::for_parity_testing().timer_horizon_ms
+        );
+    }
+
+    #[test]
+    fn the_script_budget_flag_sets_the_engines_script_budget_and_nothing_else() {
+        let config = capture_config(&parsed(&["--script-budget-ms", "60000"]), None);
+        assert_eq!(config.script_budget_ms, 60_000);
+        assert_eq!(
+            config.timer_horizon_ms,
+            EngineConfig::for_parity_testing().timer_horizon_ms
+        );
+    }
 
     fn write_file(dir: &Path, rel: &str, content: &str) {
         let path = dir.join(rel);
