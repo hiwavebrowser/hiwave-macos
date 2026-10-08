@@ -9606,6 +9606,25 @@ impl Engine {
         view.nav_generation
     }
 
+    /// Whether a `<style>` or `<link>` found in the tree is one the page
+    /// has. With scripting on, the contents of `<noscript>` are text (HTML
+    /// 13.2.6.4.4, 13.2.6.4.7) and so hold no sheet; our parser builds the
+    /// elements regardless, so the collectors leave them out here. Google's
+    /// results page hides everything from such a sheet.
+    fn sheet_element_counts(&self, element: &Rc<Node>) -> bool {
+        if !self.config.javascript_enabled {
+            return true;
+        }
+        let mut ancestor = element.parent();
+        while let Some(node) = ancestor {
+            if node.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("noscript")) {
+                return false;
+            }
+            ancestor = node.parent();
+        }
+        true
+    }
+
     /// Extract CSS text from <style> elements in the document.
     fn extract_stylesheets(&self, document: &Document) -> Vec<Stylesheet> {
         let mut stylesheets = Vec::new();
@@ -9614,6 +9633,10 @@ impl Engine {
         let style_elements = document.get_elements_by_tag_name("style");
 
         for style_el in style_elements {
+            if !self.sheet_element_counts(&style_el) {
+                continue;
+            }
+
             // Get text content
             let mut css_text = String::new();
             for child in style_el.children() {
@@ -9650,6 +9673,9 @@ impl Engine {
         let link_elements = document.get_elements_by_tag_name("link");
 
         for link_el in link_elements {
+            if !self.sheet_element_counts(&link_el) {
+                continue;
+            }
             if let NodeType::Element { attributes, .. } = &link_el.node_type {
                 // Check if this is a stylesheet link
                 let rel = attributes.get("rel").map(|s| s.to_lowercase());
@@ -34091,6 +34117,115 @@ mod ua_hidden_tests {
             "<body><div hidden class=show>author</div></body></html>",
         ));
         assert_eq!(text, "author");
+    }
+}
+
+// With scripting on, the contents of `<noscript>` are text, not elements
+// (HTML 13.2.6.4.4 and 13.2.6.4.7), so a `<style>` or `<link rel=stylesheet>`
+// written there is no sheet. Our parser builds the elements either way, and
+// the sheet collectors took them: google's results page ships
+// `<noscript><style>table,div,span,p{display:none}</style></noscript>` and
+// painted nothing at all (hand test H14).
+#[cfg(all(test, feature = "headless"))]
+mod noscript_style_tests {
+    use super::*;
+
+    fn painted_by(mut engine: Engine, html: &str) -> String {
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        let list = engine.views[&view].display_list.as_ref().expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn painted(html: &str) -> String {
+        painted_by(Engine::new(EngineConfig::default()).expect("engine"), html)
+    }
+
+    #[test]
+    fn a_style_in_a_head_noscript_is_not_a_sheet_when_scripting_is_on() {
+        let text = painted(concat!(
+            "<html><head><noscript><style>div,p{display:none}</style></noscript></head>",
+            "<body><div><p>shown</p></div></body></html>",
+        ));
+        assert_eq!(text, "shown");
+    }
+
+    #[test]
+    fn a_style_in_a_body_noscript_is_not_a_sheet_when_scripting_is_on() {
+        let text = painted(concat!(
+            "<html><body><noscript><style>div,p{display:none}</style></noscript>",
+            "<div><p>shown</p></div></body></html>",
+        ));
+        assert_eq!(text, "shown");
+    }
+
+    #[test]
+    fn a_style_nested_deeper_in_a_noscript_is_not_a_sheet_either() {
+        let text = painted(concat!(
+            "<html><body><noscript><div><style>p{display:none}</style></div></noscript>",
+            "<p>shown</p></body></html>",
+        ));
+        assert_eq!(text, "shown");
+    }
+
+    #[test]
+    fn a_style_outside_a_noscript_still_applies() {
+        let text = painted(concat!(
+            "<html><head><noscript><style>p{display:none}</style></noscript>",
+            "<style>.gone{display:none}</style></head>",
+            "<body><p>shown</p><div class=gone>gone</div></body></html>",
+        ));
+        assert_eq!(text, "shown");
+    }
+
+    #[test]
+    fn a_noscript_style_is_a_sheet_when_scripting_is_off() {
+        let engine = EngineBuilder::new().javascript_enabled(false).build().expect("engine");
+        let text = painted_by(
+            engine,
+            concat!(
+                "<html><head><noscript><style>.gone{display:none}</style></noscript></head>",
+                "<body><p>shown</p><div class=gone>gone</div></body></html>",
+            ),
+        );
+        assert_eq!(text, "shown");
+    }
+
+    fn sheet_links(engine: &Engine, html: &str) -> Vec<String> {
+        let document = Document::parse_html(html).expect("parse");
+        let base = Url::parse("https://example.test/").expect("url");
+        engine
+            .discover_external_stylesheets(&document, Some(&base))
+            .iter()
+            .map(|u| u.path().to_string())
+            .collect()
+    }
+
+    const LINKS: &str = concat!(
+        "<html><head><link rel=stylesheet href=/a.css>",
+        "<noscript><link rel=stylesheet href=/noscript.css></noscript></head>",
+        "<body><noscript><link rel=stylesheet href=/body.css></noscript></body></html>",
+    );
+
+    #[test]
+    fn a_stylesheet_link_in_a_noscript_is_not_fetched_when_scripting_is_on() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        assert_eq!(sheet_links(&engine, LINKS), ["/a.css"]);
+    }
+
+    #[test]
+    fn a_stylesheet_link_in_a_noscript_is_fetched_when_scripting_is_off() {
+        let engine = EngineBuilder::new().javascript_enabled(false).build().expect("engine");
+        assert_eq!(sheet_links(&engine, LINKS), ["/a.css", "/noscript.css", "/body.css"]);
     }
 }
 
