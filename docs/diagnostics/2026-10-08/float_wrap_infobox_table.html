@@ -1,0 +1,43 @@
+<!doctype html>
+<!-- Chrome: the green table sits at the top right; the paragraph lines beside it end at its left edge (16px gap) and lines below it run the full width; no text is ever drawn under the table (the pale paragraph backgrounds do run behind it, which is correct). -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>H19 float wrap: infobox table</title>
+<style>
+  body { margin: 0; font: 16px/1.6 Arial, sans-serif; background: #fff; color: #000; }
+  .content { width: 600px; margin: 20px; }
+  table.infobox {
+    float: right;
+    width: 240px;
+    margin: 0 0 16px 16px;
+    background: #2ca02c;
+    color: #fff;
+    border-spacing: 4px;
+  }
+  table.infobox th, table.infobox td { text-align: left; padding: 4px; }
+  p { margin: 0 0 8px; background: #fff3c4; }
+</style>
+</head>
+<body>
+<div class="content">
+  <table class="infobox">
+    <tr><th>Developer</th><td>Various</td></tr>
+    <tr><th>Initial release</th><td>1990</td></tr>
+    <tr><th>Written in</th><td>C, C++, Rust</td></tr>
+    <tr><th>Platform</th><td>Cross-platform</td></tr>
+    <tr><th>Type</th><td>Web browser</td></tr>
+  </table>
+  <p>A web browser is an application for accessing websites. When a user
+  requests a web page from a particular website, the browser retrieves its
+  files from a web server and then displays the page on the user's screen.
+  Browsers run on a range of devices, including desktops, laptops, tablets,
+  and smartphones.</p>
+  <p>The first web browser, called WorldWideWeb, was created in 1990. It was
+  later renamed Nexus to avoid confusion with the World Wide Web itself.
+  Many browsers followed, and the browser wars of the late 1990s and the
+  2000s shaped the web as it is used today. Modern browsers share a set of
+  standards, so a page written once looks the same in all of them.</p>
+</div>
+</body>
+</html>
