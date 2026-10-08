@@ -1057,15 +1057,24 @@ mod tests {
     fn the_script_budget_is_the_engines_default_without_the_flag() {
         let config = capture_config(&parsed(&[]), None);
         assert_eq!(config.script_budget_ms, 5_000);
-        assert_eq!(config.script_budget_ms, EngineConfig::for_parity_testing().script_budget_ms);
-        assert_eq!(config.timer_horizon_ms, EngineConfig::for_parity_testing().timer_horizon_ms);
+        assert_eq!(
+            config.script_budget_ms,
+            EngineConfig::for_parity_testing().script_budget_ms
+        );
+        assert_eq!(
+            config.timer_horizon_ms,
+            EngineConfig::for_parity_testing().timer_horizon_ms
+        );
     }
 
     #[test]
     fn the_script_budget_flag_sets_the_engines_script_budget_and_nothing_else() {
         let config = capture_config(&parsed(&["--script-budget-ms", "60000"]), None);
         assert_eq!(config.script_budget_ms, 60_000);
-        assert_eq!(config.timer_horizon_ms, EngineConfig::for_parity_testing().timer_horizon_ms);
+        assert_eq!(
+            config.timer_horizon_ms,
+            EngineConfig::for_parity_testing().timer_horizon_ms
+        );
     }
 
     fn write_file(dir: &Path, rel: &str, content: &str) {
