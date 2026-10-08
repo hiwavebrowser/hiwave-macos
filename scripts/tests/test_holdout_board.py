@@ -77,7 +77,8 @@ class TestHoldoutBoard(unittest.TestCase):
         holdout = json.loads((REPO / "websuite" / "realsite-holdout20.json").read_text(encoding="utf-8"))
 
         self.assertEqual(top25["viewport"], top20["viewport"])
-        self.assertEqual(len(top25["sites"]), 25)
+        # The pinned 20 plus the sites Pete has added since (five on 2026-10-06, one on 2026-10-08).
+        self.assertGreaterEqual(len(top25["sites"]), 25)
         self.assertEqual(top25["sites"][:20], top20["sites"])
         ids = [s["id"] for s in top25["sites"]]
         self.assertEqual(len(ids), len(set(ids)))
