@@ -143,6 +143,8 @@ impl Default for JsRuntimeConfig {
 struct ExecutionDeadline {
     at: std::cell::Cell<Option<std::time::Instant>>,
     hit: std::cell::Cell<bool>,
+    /// How long after `at` the first refused host call came.
+    late: std::cell::Cell<Option<std::time::Duration>>,
 }
 
 /// JavaScript runtime that wraps the underlying engine.
@@ -348,6 +350,7 @@ impl JsRuntime {
     pub fn set_execution_deadline(&mut self, at: Option<std::time::Instant>) {
         self.deadline.at.set(at);
         self.deadline.hit.set(false);
+        self.deadline.late.set(None);
     }
 
     /// Whether the deadline has stopped a host call since it was last set
@@ -360,7 +363,7 @@ impl JsRuntime {
     /// once per stop. Script is only stopped where it calls the host, so
     /// this is the time it ran on past its budget.
     pub fn take_deadline_overrun(&mut self) -> Option<std::time::Duration> {
-        None
+        self.deadline.late.take()
     }
 
     #[cfg(feature = "boa")]
@@ -478,8 +481,19 @@ impl JsRuntime {
             let deadline = self.deadline.clone();
             let native = unsafe {
                 NativeFunction::from_closure(move |_this, args, _context| {
-                    if deadline.at.get().is_some_and(|at| std::time::Instant::now() >= at) {
-                        deadline.hit.set(true);
+                    let now = std::time::Instant::now();
+                    if let Some(at) = deadline.at.get().filter(|at| now >= *at) {
+                        // Logged here, at the first refusal, and not only
+                        // by whoever started the script: if the stack then
+                        // takes long to unwind, the log still says when.
+                        if !deadline.hit.replace(true) {
+                            let late = now - at;
+                            deadline.late.set(Some(late));
+                            tracing::warn!(
+                                late_ms = late.as_millis() as u64,
+                                "Script budget spent: host calls are refused until the script has unwound"
+                            );
+                        }
                         // Boa's runtime-limit errors are the ones script
                         // cannot catch, and it has none for time; `hit`
                         // says which limit this was.
