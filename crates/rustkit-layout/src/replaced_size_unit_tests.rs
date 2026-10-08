@@ -203,7 +203,11 @@ fn pixel_and_percentage_sizes_are_unchanged() {
         || replaced(24.0, fill),
         (400.0, 400.0),
     );
-    assert_size("img at its natural size", || replaced(20.0, |_| {}), (20.0, 20.0));
+    assert_size(
+        "img at its natural size",
+        || replaced(20.0, |_| {}),
+        (20.0, 20.0),
+    );
     assert_size(
         "img { max-width: 10px }",
         || replaced(20.0, |s| s.max_width = Length::Px(10.0)),
