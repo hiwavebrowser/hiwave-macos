@@ -1576,6 +1576,11 @@ pub struct LayoutBox {
     /// `colspan` / `rowspan` of a table cell (and `span` of a column or
     /// column group), from the HTML attributes. 1×1 for every other box.
     pub table_span: table::TableSpan,
+    /// On a table box: the caption height table.rs moved the border box
+    /// down by, and the top margin it wrote, so a pass that re-lays out the
+    /// contents without recomputing the box (flex relayout) does not shift
+    /// it twice.
+    pub(crate) table_caption_shift: Option<(f32, f32)>,
 }
 
 impl LayoutBox {
@@ -1605,6 +1610,7 @@ impl LayoutBox {
             percent_height_is_auto: false,
             root_element_height: None,
             table_span: table::TableSpan::default(),
+            table_caption_shift: None,
         }
     }
 
@@ -4001,9 +4007,11 @@ impl LayoutBox {
                     // function is handed the flow parent. That only matters
                     // when it clamps, i.e. when max-content exceeds `available`.
                     shrink_to_fit_content_width(self, available)
-                } else if self.float != Float::None {
+                } else if self.float != Float::None || self.style.display.is_table() {
                     // CSS 2.1 §10.3.5: a float with width:auto shrinks to
                     // fit; filling the line would leave nothing beside it.
+                    // An auto-width table does too (§17.5.2.2: its max-content
+                    // width, clamped to the containing block).
                     shrink_to_fit_content_width(self, available)
                 } else {
                     // Fill available space (CSS 2.1 §10.3.3)
@@ -4209,6 +4217,9 @@ impl LayoutBox {
     }
 
     fn layout_block_children(&mut self, definite_height: Option<f32>) {
+        if self.style.display.is_table() {
+            return table::layout_table_contents(self);
+        }
         let mut cursor_y = 0.0;
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
@@ -4993,6 +5004,9 @@ impl LayoutBox {
         float_context: &mut FloatContext,
         definite_height: Option<f32>,
     ) {
+        if self.style.display.is_table() {
+            return table::layout_table_contents(self);
+        }
         let mut cursor_y = 0.0;
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
@@ -5580,6 +5594,11 @@ impl LayoutBox {
         let border_bottom = self.dimensions.border.bottom;
         let padding_border_height = padding_top + padding_bottom + border_top + border_bottom;
         let is_border_box = self.style.box_sizing == BoxSizing::BorderBox;
+        let table_rows_height = self
+            .style
+            .display
+            .is_table()
+            .then_some(self.dimensions.content.height);
 
         // Lifted out of the match so the arm below can read the sum without
         // borrowing `self.style` across the assignment to `self.dimensions`.
@@ -5750,6 +5769,11 @@ impl LayoutBox {
         };
         if self.dimensions.content.height > max_height {
             self.dimensions.content.height = max_height;
+        }
+        // A table's specified height is a minimum (CSS 2.1 §17.5.3): its
+        // rows, laid out by table.rs before this runs, are never cut.
+        if let Some(rows) = table_rows_height {
+            self.dimensions.content.height = self.dimensions.content.height.max(rows);
         }
     }
 

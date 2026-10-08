@@ -849,8 +849,163 @@ fn a_wikipedia_shaped_infobox() {
         }
         close(
             rect(t).height,
-            1.0 + 3.0 + 20.0 + 3.0 * 18.0 + 1.0,
+            // Border, five spacings around four rows, the rows, border.
+            1.0 + 5.0 * 3.0 + 20.0 + 3.0 * 15.0 + 1.0,
             "table height",
         );
+    }
+}
+
+// ------------------------------------------- intrinsic sizing, more cases
+
+#[test]
+fn a_table_inside_an_inline_block_sizes_it() {
+    let ib = bx(
+        Display::InlineBlock,
+        vec![table(vec![row(vec![cell(50.0, 20.0), cell(30.0, 20.0)])])],
+    );
+    for b in layout(bx(Display::Block, vec![ib]), 400.0) {
+        let ib = &b.children[0];
+        close(rect(ib).width, 80.0, "inline-block width");
+        cell_at(&ib.children[0], 1, (50.0, 0.0, 30.0, 20.0));
+    }
+}
+
+#[test]
+fn an_inline_table_sits_on_the_line_beside_an_inline_block() {
+    let mut it = table(vec![row(vec![cell(50.0, 20.0), cell(30.0, 20.0)])]);
+    it.style.display = Display::InlineTable;
+    for b in layout(
+        bx(Display::Block, vec![inline_block(40.0, 20.0), it]),
+        400.0,
+    ) {
+        let t = &b.children[1];
+        close(rect(t).x, 40.0, "inline-table x");
+        close(rect(t).width, 80.0, "inline-table width");
+        close(rect(cells(t)[1]).x, 90.0, "second cell x");
+    }
+}
+
+/// Known gap: flex places an item from its STYLE margins after laying out
+/// its children, so the caption height table.rs adds to the top margin is
+/// lost and the caption lands above the flex line. Captioned tables as flex
+/// items are left to a later slice.
+#[test]
+#[ignore = "captioned table as a flex item: flex re-places the item by its style margins"]
+fn a_captioned_table_in_a_flex_row_is_shifted_once() {
+    let t = table(vec![
+        bx(Display::TableCaption, vec![block(40.0, 30.0)]),
+        row(vec![cell(50.0, 20.0)]),
+    ]);
+    let mut flex = bx(Display::Flex, vec![t]);
+    flex.style.width = Length::Px(400.0);
+    for f in layout(flex, 400.0) {
+        let t = &f.children[0];
+        close(rect(&t.children[0]).y, 0.0, "caption y");
+        cell_at(t, 0, (0.0, 30.0, 50.0, 20.0));
+        close(rect(&f).height, 50.0, "flex container height");
+    }
+}
+
+#[test]
+fn a_floated_tables_width_is_its_columns_not_the_line() {
+    let mut t = min_max_table();
+    t.float = Float::Left;
+    t.style.float = Float::Left;
+    for b in layout(bx(Display::Block, vec![t]), 1000.0) {
+        close(rect(&b.children[0]).width, 300.0, "max-content");
+    }
+    let mut t = min_max_table();
+    t.float = Float::Left;
+    t.style.float = Float::Left;
+    for b in layout(bx(Display::Block, vec![t]), 195.0) {
+        close(rect(&b.children[0]).width, 195.0, "clamped to the line");
+    }
+}
+
+// ------------------------------------------------- heights and the rest
+
+#[test]
+fn a_taller_table_height_grows_the_rows() {
+    let mut t = table(vec![
+        row(vec![cell(50.0, 20.0)]),
+        row(vec![cell(50.0, 20.0)]),
+    ]);
+    t.style.height = Length::Px(100.0);
+    for t in layout(t, 400.0) {
+        close(rect(&t).height, 100.0, "table height");
+        cell_at(&t, 0, (0.0, 0.0, 50.0, 50.0));
+        cell_at(&t, 1, (0.0, 50.0, 50.0, 50.0));
+    }
+}
+
+#[test]
+fn a_shorter_table_height_does_not_cut_the_rows() {
+    let mut t = table(vec![
+        row(vec![cell(50.0, 20.0)]),
+        row(vec![cell(50.0, 20.0)]),
+    ]);
+    t.style.height = Length::Px(10.0);
+    for t in layout(t, 400.0) {
+        close(rect(&t).height, 40.0, "table height");
+    }
+}
+
+#[test]
+fn border_collapse_is_approximated_by_zero_spacing() {
+    let mut t = spaced(
+        table(vec![row(vec![cell(50.0, 20.0), cell(30.0, 20.0)])]),
+        5.0,
+        5.0,
+    );
+    t.style.border_collapse = rustkit_css::BorderCollapse::Collapse;
+    for t in layout(t, 400.0) {
+        cell_at(&t, 0, (0.0, 0.0, 50.0, 20.0));
+        cell_at(&t, 1, (50.0, 0.0, 30.0, 20.0));
+    }
+}
+
+#[test]
+fn vertical_align_baseline_falls_back_to_top() {
+    let mut c = cell(30.0, 20.0);
+    c.style.vertical_align = VerticalAlign::Baseline;
+    for t in layout(table(vec![row(vec![cell(50.0, 60.0), c])]), 400.0) {
+        close(rect(&cells(&t)[1].children[0]).y, 0.0, "baseline content y");
+    }
+}
+
+#[test]
+fn rowspan_zero_and_overlong_rowspans_stop_at_their_row_group() {
+    let t = table(vec![
+        bx(
+            Display::TableRowGroup,
+            vec![
+                row(vec![span(cell(30.0, 20.0), 1, 0), cell(40.0, 20.0)]),
+                row(vec![cell(40.0, 20.0)]),
+            ],
+        ),
+        bx(
+            Display::TableRowGroup,
+            vec![row(vec![cell(30.0, 20.0), cell(40.0, 20.0)])],
+        ),
+    ]);
+    for t in layout(t, 400.0) {
+        // rowspan=0 covers both rows of the first group, no more.
+        cell_at(&t, 0, (0.0, 0.0, 30.0, 40.0));
+        cell_at(&t, 2, (30.0, 20.0, 40.0, 20.0));
+        // The second group starts again at column 0.
+        cell_at(&t, 3, (0.0, 40.0, 30.0, 20.0));
+    }
+}
+
+#[test]
+fn a_cell_in_a_short_row_leaves_the_missing_slots_empty() {
+    let t = table(vec![
+        row(vec![cell(50.0, 20.0), cell(30.0, 20.0), cell(20.0, 20.0)]),
+        row(vec![cell(10.0, 20.0)]),
+    ]);
+    for t in layout(t, 400.0) {
+        close(rect(&t).width, 100.0, "three columns");
+        cell_at(&t, 3, (0.0, 20.0, 50.0, 20.0));
     }
 }
