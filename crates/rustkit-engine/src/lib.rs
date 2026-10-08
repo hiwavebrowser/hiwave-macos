@@ -175,6 +175,8 @@ mod script_module_tests;
 mod script_fresh_layout_tests;
 #[cfg(test)]
 mod content_string_tests;
+#[cfg(test)]
+mod html_element_ancestor_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
