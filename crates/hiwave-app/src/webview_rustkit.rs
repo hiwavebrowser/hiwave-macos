@@ -69,7 +69,13 @@ pub struct RustKitView {
 /// what parity-capture and the board keep; a person waits longer than a
 /// capture does, and YouTube's 10.8 MB base module alone ran past 5 s and
 /// left the page white (Pete, 2026-10-06).
-const LIVE_SCRIPT_BUDGET_MS: u64 = 60_000;
+///
+/// 15 s, down from 60 s (Pete, 2026-10-08): scripts run on the window's
+/// thread, so a script that never yields freezes the window until this
+/// budget is spent (#616 stops it at its next host call only then). ebay's
+/// new module graph held the window for the full minute. Nothing loaded in
+/// the hand tests of 2026-10-08 needed more than about 8 s.
+const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
 
 /// The engine builder for content views, before the shield is attached.
 fn content_engine_builder() -> EngineBuilder {
@@ -87,6 +93,13 @@ fn content_engine_builder() -> EngineBuilder {
         // the window's thread, and ebay.com's module graph held it for
         // minutes (Pete had to kill the app, 2026-10-08).
         .interrupt_scripts_at_budget(true)
+}
+
+/// `HIWAVE_RENDER_EVERY_WAKE=1`: draw at every wake of the event loop,
+/// changed or not (see [`RustKitView::render`]).
+fn render_every_wake() -> bool {
+    static EVERY_WAKE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EVERY_WAKE.get_or_init(|| std::env::var("HIWAVE_RENDER_EVERY_WAKE").is_ok_and(|v| v == "1"))
 }
 
 impl RustKitView {
@@ -190,7 +203,15 @@ impl RustKitView {
         next.map(|wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN))
     }
 
-    /// Render the view (call this in the event loop).
+    /// Render the view if its frame would differ from the one on screen
+    /// (call this in the event loop).
+    ///
+    /// The loop wakes for every mouse move and every message from the
+    /// browser's own UI. Until 2026-10-08 each wake executed the page's
+    /// whole display list (2.2 million commands on the Wikipedia portal),
+    /// which held a core long after a page had loaded. A frame is still
+    /// drawn again once it is a second old. `HIWAVE_RENDER_EVERY_WAKE=1`
+    /// is the old behaviour, for telling a stale frame from a wrong one.
     pub fn render(&self) {
         let mut engine = self.engine.borrow_mut();
         // The live turn lays out a resized view; without a live runtime
@@ -200,7 +221,11 @@ impl RustKitView {
                 debug!(error = %e, "layout after a resize failed");
             }
         }
-        engine.render_all_views();
+        if render_every_wake() {
+            engine.render_all_views();
+        } else {
+            engine.render_changed_views();
+        }
     }
 
     /// Go back in this view's navigation history.
@@ -648,7 +673,7 @@ mod tests {
     #[test]
     fn content_views_get_the_live_script_budget() {
         let builder = content_engine_builder();
-        assert_eq!(builder.config().script_budget_ms, 60_000);
+        assert_eq!(builder.config().script_budget_ms, 15_000);
         // Only the script budget is raised: the virtual timer clock and
         // the engine's own default (parity-capture, the board) stay at 5 s.
         assert_eq!(builder.config().timer_horizon_ms, 5_000);
