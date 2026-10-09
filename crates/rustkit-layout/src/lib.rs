@@ -3803,25 +3803,19 @@ impl LayoutBox {
     /// (e.g. `left: -100%` off-canvas shimmer overlays) need the containing
     /// block, so they resolve here at apply time from the computed style.
     ///
-    /// Viewport units and math functions resolve here too: the transfer
-    /// drops them, so `top: -100vh` read as `auto` and linkedin's skip link
+    /// Viewport units and math functions resolve here too (and any length
+    /// the transfer did not pre-resolve): the transfer drops them, so `top: -100vh` read as `auto` and linkedin's skip link
     /// (`.-top-[100vh]`, parked a viewport above the page until focused)
     /// sat at its static position over the header.
     pub(crate) fn resolved_offsets(&self, containing_block: &Dimensions) -> PositionOffsets {
         let resolve = |pre: Option<f32>, st: &Option<Length>, basis: f32| {
             pre.or(match st {
                 Some(Length::Percent(p)) => Some(p / 100.0 * basis),
-                Some(
-                    l @ (Length::Vw(_)
-                    | Length::Vh(_)
-                    | Length::Vmin(_)
-                    | Length::Vmax(_)
-                    | Length::Calc(_)
-                    | Length::Min(_)
-                    | Length::Max(_)
-                    | Length::Clamp(_)),
-                ) => Some(self.length_to_px(l, basis)),
-                _ => None,
+                Some(Length::Auto | Length::FitContent) | None => None,
+                // Every other length, `px`/`em`/`rem` included: a box the
+                // transfer did not pre-resolve (one built by layout's own
+                // callers) took `top: 20px` for `auto` and `top: 2vw` for 20.
+                Some(l) => Some(self.length_to_px(l, basis)),
             })
         };
         PositionOffsets {

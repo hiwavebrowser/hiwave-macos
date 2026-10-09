@@ -356,7 +356,6 @@ cells! {
     block_child_max_height: |l| block_child(max_height, l);
     block_child_padding: |l| block_child(padding, l);
     block_child_margin: |l| block_child(margin, l);
-    #[ignore = "W7-A: resolved_offsets reads only units the engine leaves unresolved; px/em/rem in style are dropped, lib.rs:3810"]
     absolute_box_top_left: |l| positioned(Position::Absolute, l);
     relative_box_top_left: |l| positioned(Position::Relative, l);
 
