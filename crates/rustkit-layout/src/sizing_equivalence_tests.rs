@@ -92,9 +92,10 @@ fn check(cell: &str, build: impl Fn(Length) -> LayoutBox) {
                 ));
                 continue;
             }
-            let first = got.iter().zip(&want).find(|((_, g), (_, w))| {
-                g.iter().zip(w).any(|(a, b)| (a - b).abs() >= 0.01)
-            });
+            let first = got
+                .iter()
+                .zip(&want)
+                .find(|((_, g), (_, w))| g.iter().zip(w).any(|(a, b)| (a - b).abs() >= 0.01));
             if let Some(((path, g), (_, w))) = first {
                 wrong.push(format!(
                     "{css} (collapse = {collapse}): box {path}\n    got  {g:?}\n    {ref_css} {w:?}"
@@ -205,7 +206,8 @@ fn block_child(prop: Prop, l: Length) -> LayoutBox {
 
 /// `top`/`left` on a box positioned against a 300x200 relative parent.
 fn positioned(position: Position, l: Length) -> LayoutBox {
-    let mut cb = LayoutBox::with_position(BoxType::Block, styled(Display::Block), Position::Relative);
+    let mut cb =
+        LayoutBox::with_position(BoxType::Block, styled(Display::Block), Position::Relative);
     cb.style.position = rustkit_css::Position::Relative;
     cb.style.width = Length::Px(300.0);
     cb.style.height = Length::Px(200.0);
@@ -295,7 +297,8 @@ fn shrink_to_fit(prop: Prop, l: Length) -> LayoutBox {
     );
     stf.position = Position::Absolute;
     stf.style.position = rustkit_css::Position::Absolute;
-    let mut cb = LayoutBox::with_position(BoxType::Block, styled(Display::Block), Position::Relative);
+    let mut cb =
+        LayoutBox::with_position(BoxType::Block, styled(Display::Block), Position::Relative);
     cb.style.position = rustkit_css::Position::Relative;
     cb.children = vec![stf];
     cb
