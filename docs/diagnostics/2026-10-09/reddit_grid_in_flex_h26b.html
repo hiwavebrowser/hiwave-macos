@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><title>H26b reddit feed column: auto-width grid inside a flex row</title>
+<style>
+body { margin: 0; }
+#x { display: flex; width: 700px; }
+#m { display: grid; gap: 24px; grid-template-columns: minmax(0, 756px) minmax(0, 316px); }
+#a { height: 60px; background: #9cf; } #b { height: 60px; background: #fc9; }
+</style>
+<div id="x"><div id="m"><div id="a">feed</div><div id="b">sidebar</div></div></div>
