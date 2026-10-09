@@ -38,6 +38,6 @@ Variants (RustKit, pixels at (300,100) / (180,60)):
 | | Chromium 148 (`/n/all-categories`) | RustKit (home) |
 |---|---|---|
 | header icons (`svg.icon` with `<use>`) | chevron 12x12 at (915,18), notification 20x20 at (1172,14), cart 20x20 at (1220,13), search 16x16 at (279,71), camera 16x16 at (801,71); all with no width/height/viewBox attributes, computed size from CSS | 65 `svg` layout boxes, only 3 of them 40px or larger (the logo 117x48, the QR code 71x71, and the `body > svg` sprite at 300x150); the icon boxes are the right small size |
-| painted icon extents | the layout sizes above | 64 groups of `fill_polygon` ops, about 60 of them **75-150px wide and 110-135px tall**: magnifier (330,115)-(440,178), camera (929,89)-(1079,220), bell/cart (1201,24)-(1369,159), play button (1033,392)-(1146,523), and a row of 113x131 icons at y=1561 spaced 261px apart (the carousel arrows and badges) |
+| painted icon extents | the layout sizes above | 64 groups of `fill_polygon` ops, about 60 of them **75-150px wide and 110-135px tall**: magnifier (330,115)-(440,178), camera (929,89)-(1079,220), bell/cart (1201,24)-(1369,159), play button (1033,392)-(1146,523), and a row of 113x131 icons at y=1561 spaced 261px apart |
 
-The same screenshot shows the black icons over the header nav ("Electronics", "Toys", "Advanced") and the hero, which is what Pete saw.
+In the RustKit frame the black icons overlap the header nav labels ("Electronics", "Toys", "Advanced") and extend below the header.
