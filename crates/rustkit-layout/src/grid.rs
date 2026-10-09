@@ -250,6 +250,12 @@ impl<'a> GridItem<'a> {
             l if is_font_or_viewport_relative(l) => {
                 return self.layout_box.length_to_px(l, container_height) + margins;
             }
+            Length::Calc(sum) if sum.percent == 0.0 || container_height > 0.0 => {
+                return self
+                    .layout_box
+                    .length_to_px(&style.height, container_height)
+                    + margins;
+            }
             _ => {}
         }
 
@@ -290,8 +296,9 @@ impl<'a> GridItem<'a> {
         // Padding contribution (rem against the 16px root, not the item's
         // own font size — see the placement pass).
         let style = &self.layout_box.style;
-        let padding_top = style.padding_top.to_px(font_size, 16.0, 0.0);
-        let padding_bottom = style.padding_bottom.to_px(font_size, 16.0, 0.0);
+        // Through `length_to_px` for the viewport: `to_px` took `2vw` for 0.
+        let padding_top = self.layout_box.length_to_px(&style.padding_top, 0.0);
+        let padding_bottom = self.layout_box.length_to_px(&style.padding_bottom, 0.0);
 
         let text_content = if text_lines > 0 {
             line_height_px * text_lines as f32
@@ -1717,7 +1724,7 @@ pub fn layout_grid_container(
             let contribution = match (fragment, blocks) {
                 (Some(fragment), Some((mut border_box, content_block))) => {
                     let item_style = &item.layout_box.style;
-                    if let Length::Px(min_h) = item_style.min_height {
+                    if let Some(min_h) = definite_len(&item.layout_box, &item_style.min_height) {
                         let floor = if item_style.box_sizing == BoxSizing::BorderBox {
                             min_h
                         } else {
@@ -1945,16 +1952,16 @@ pub fn layout_grid_container(
                 let mut margins = crate::MarginCollapseContext::new();
                 let mut floats = crate::FloatContext::new();
                 child.layout_block_children_with_collapse(&mut margins, &mut floats, None);
-                let cap = match child.style.max_height {
-                    Length::Px(max_h) if child.style.box_sizing == BoxSizing::BorderBox => {
+                let cap = match definite_len(child, &child.style.max_height) {
+                    Some(max_h) if child.style.box_sizing == BoxSizing::BorderBox => {
                         let pb = child.dimensions.padding.top
                             + child.dimensions.padding.bottom
                             + child.dimensions.border.top
                             + child.dimensions.border.bottom;
                         (max_h - pb).max(0.0)
                     }
-                    Length::Px(max_h) => max_h,
-                    _ => f32::INFINITY,
+                    Some(max_h) => max_h,
+                    None => f32::INFINITY,
                 };
                 let content_height = child.dimensions.content.height.min(cap);
                 if let Some(slot) = real_heights.get_mut(item_idx) {
@@ -2423,7 +2430,7 @@ pub fn layout_grid_container(
                             _ => None,
                         };
                         let is_border_box = child.style.box_sizing == BoxSizing::BorderBox;
-                        if let Length::Px(h) = child.style.height {
+                        if let Some(h) = definite_len(child, &child.style.height) {
                             let border_box = if is_border_box { h } else { h + pb };
                             // Not the taller of the two: content that
                             // overflows a fixed height does not size the row.
@@ -2433,16 +2440,19 @@ pub fn layout_grid_container(
                         // row (three lines under `max-height: 24px` make a
                         // 24px row, and overflow it); `min-height` then
                         // floors it.
-                        if let Length::Px(max_h) = child.style.max_height {
+                        if let Some(max_h) = definite_len(child, &child.style.max_height) {
                             let cap = if is_border_box { max_h } else { max_h + pb };
                             wanted = wanted.map(|w| w.min(cap));
                         }
-                        if let Length::Px(min_h) = child.style.min_height {
+                        if let Some(min_h) = definite_len(child, &child.style.min_height) {
                             let floor = if is_border_box { min_h } else { min_h + pb };
                             wanted = Some(floor.max(wanted.unwrap_or(0.0)));
                         }
-                        if !matches!(child.style.height, Length::Px(_) | Length::Auto)
-                            || !matches!(child.style.min_height, Length::Px(_) | Length::Auto)
+                        let sized_or_auto = |l: &Length| {
+                            matches!(l, Length::Auto) || definite_len(child, l).is_some()
+                        };
+                        if !sized_or_auto(&child.style.height)
+                            || !sized_or_auto(&child.style.min_height)
                         {
                             // A percentage or other relative block size: the
                             // estimate and the flow disagree on what it
@@ -2959,10 +2969,10 @@ pub fn layout_grid_container(
                 if let Some(mut height) = content {
                     let is_border_box = child.style.box_sizing == BoxSizing::BorderBox;
                     let own = if is_border_box { pb } else { 0.0 };
-                    if let Length::Px(max_h) = child.style.max_height {
+                    if let Some(max_h) = definite_len(child, &child.style.max_height) {
                         height = height.min((max_h - own).max(0.0));
                     }
-                    if let Length::Px(min_h) = child.style.min_height {
+                    if let Some(min_h) = definite_len(child, &child.style.min_height) {
                         height = height.max((min_h - own).max(0.0));
                     }
                     child.dimensions.content.height = height;
@@ -3616,6 +3626,19 @@ pub(crate) fn replaced_min_content_width_in_row(layout_box: &LayoutBox, row_heig
         .map(|w| w + horizontal_padding_border(&layout_box.style))
 }
 
+/// A block-axis length that needs no base, in px: `px`, font-relative,
+/// viewport-relative, and a `calc()` without a percentage. The row sizing
+/// passes read `Length::Px` alone, so `min-height: 1.25rem` on a grid item
+/// floored nothing and `max-height: 2vw` capped nothing.
+fn definite_len(b: &LayoutBox, l: &Length) -> Option<f32> {
+    match l {
+        Length::Px(v) => Some(*v),
+        Length::Calc(sum) if sum.percent == 0.0 => Some(b.length_to_px(l, 0.0)),
+        l if is_font_or_viewport_relative(l) => Some(b.length_to_px(l, 0.0)),
+        _ => None,
+    }
+}
+
 /// A length that is definite at track-sizing time without a containing block:
 /// font-relative (`em`, `rem`) or viewport-relative. An item's
 /// `width: 12.25rem` is as explicit as `196px`, but the contribution arms only
@@ -4262,11 +4285,8 @@ fn place_item_in_area(child: &mut LayoutBox, rect: &Rect, container_style: &Comp
     // padding came out 2·(rem·(16 − font)) short in both axes
     // (new_tab's .shortcut rows 57 for Chrome's 60, kbd x 387 for
     // 389).
-    let font_size = match child.style.font_size {
-        Length::Px(px) => px,
-        _ => 16.0,
-    };
-    let px = |l: &Length, against: f32| l.to_px(font_size, 16.0, against);
+    // `length_to_px` for the viewport as well: `to_px` took `2vw` for 0.
+    let px = |l: &Length, against: f32| child.length_to_px(l, against);
     let padding_left = px(&child.style.padding_left, border_box_width);
     let padding_right = px(&child.style.padding_right, border_box_width);
     let padding_top = px(&child.style.padding_top, border_box_height);
@@ -4348,10 +4368,11 @@ fn apply_justify_self(
         // which is the size this helper returns.
         Length::Auto if align != JustifySelf::Stretch => estimate_max_content_width(child)
             .min(cell_width.max(estimate_min_content_width(child))),
-        Length::Auto => cell_width,
+        Length::Auto | Length::FitContent => cell_width,
         Length::Px(w) => w,
         Length::Percent(p) => cell_width * p / 100.0,
-        _ => cell_width,
+        // Every other length: `1.25rem` or `2vw` fell to the cell width.
+        ref l => child.length_to_px(l, cell_width),
     };
     let stretched = align == JustifySelf::Stretch && !has_explicit_width;
     let child_width = if stretched { cell_width } else { child_width };
@@ -4364,11 +4385,16 @@ fn apply_justify_self(
     // `width` (box-sizing decides what it covers) and a border box for
     // `auto`, so a content-box bound on an auto width gets the item's px
     // padding and border added.
+    // Every length that needs no base, not px alone: a `1.25rem` bound was
+    // no bound at all. Percentages stay as they were (unread).
+    let definite = |l: &Length| match l {
+        Length::Auto | Length::FitContent | Length::Percent(_) => None,
+        Length::Calc(sum) if sum.percent != 0.0 => None,
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => None,
+        l => Some(child.length_to_px(l, 0.0)),
+    };
     let own = {
-        let px = |l: &Length| match l {
-            Length::Px(v) => *v,
-            _ => 0.0,
-        };
+        let px = |l: &Length| definite(l).unwrap_or(0.0);
         let pb = px(&child.style.padding_left)
             + px(&child.style.padding_right)
             + px(&child.style.border_left_width)
@@ -4380,10 +4406,10 @@ fn apply_justify_self(
         }
     };
     let mut child_width = child_width;
-    if let Length::Px(max_w) = child.style.max_width {
+    if let Some(max_w) = definite(&child.style.max_width) {
         child_width = child_width.min(max_w + own);
     }
-    if let Length::Px(min_w) = child.style.min_width {
+    if let Some(min_w) = definite(&child.style.min_width) {
         child_width = child_width.max(min_w + own);
     }
 

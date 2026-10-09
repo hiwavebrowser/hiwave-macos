@@ -27,6 +27,9 @@ pub mod table;
 pub mod text;
 
 #[cfg(test)]
+mod box_opacity_tests;
+
+#[cfg(test)]
 mod flex_container_height_unit_tests;
 
 #[cfg(test)]
@@ -55,6 +58,9 @@ mod replaced_transferred_width_tests;
 
 #[cfg(test)]
 mod shaped_run_tests;
+
+#[cfg(test)]
+mod sizing_equivalence_tests;
 
 #[cfg(test)]
 mod table_layout_tests;
@@ -2794,19 +2800,38 @@ impl LayoutBox {
         // on every box except the `auto` one.
         let cb_width = containing_block.content.width;
         {
+            // Through `length_to_px`, which knows the box's font size and the
+            // viewport: `to_px(16.0, 16.0, ..)` took `2vw` padding for 0.
+            let px = |l: &Length| self.length_to_px(l, cb_width);
+            let edges = |t, r, b, l| EdgeSizes {
+                top: px(t),
+                right: px(r),
+                bottom: px(b),
+                left: px(l),
+            };
+            let st = &self.style;
+            let margin = edges(
+                &st.margin_top,
+                &st.margin_right,
+                &st.margin_bottom,
+                &st.margin_left,
+            );
+            let border = edges(
+                &st.border_top_width,
+                &st.border_right_width,
+                &st.border_bottom_width,
+                &st.border_left_width,
+            );
+            let padding = edges(
+                &st.padding_top,
+                &st.padding_right,
+                &st.padding_bottom,
+                &st.padding_left,
+            );
             let d = &mut self.dimensions;
-            d.margin.left = self.style.margin_left.to_px(16.0, 16.0, cb_width);
-            d.margin.right = self.style.margin_right.to_px(16.0, 16.0, cb_width);
-            d.margin.top = self.style.margin_top.to_px(16.0, 16.0, cb_width);
-            d.margin.bottom = self.style.margin_bottom.to_px(16.0, 16.0, cb_width);
-            d.border.left = self.style.border_left_width.to_px(16.0, 16.0, cb_width);
-            d.border.right = self.style.border_right_width.to_px(16.0, 16.0, cb_width);
-            d.border.top = self.style.border_top_width.to_px(16.0, 16.0, cb_width);
-            d.border.bottom = self.style.border_bottom_width.to_px(16.0, 16.0, cb_width);
-            d.padding.left = self.style.padding_left.to_px(16.0, 16.0, cb_width);
-            d.padding.right = self.style.padding_right.to_px(16.0, 16.0, cb_width);
-            d.padding.top = self.style.padding_top.to_px(16.0, 16.0, cb_width);
-            d.padding.bottom = self.style.padding_bottom.to_px(16.0, 16.0, cb_width);
+            d.margin = margin;
+            d.border = border;
+            d.padding = padding;
         }
         let horizontal_decoration = self.dimensions.border.left
             + self.dimensions.border.right
@@ -3855,25 +3880,19 @@ impl LayoutBox {
     /// (e.g. `left: -100%` off-canvas shimmer overlays) need the containing
     /// block, so they resolve here at apply time from the computed style.
     ///
-    /// Viewport units and math functions resolve here too: the transfer
-    /// drops them, so `top: -100vh` read as `auto` and linkedin's skip link
+    /// Viewport units and math functions resolve here too (and any length
+    /// the transfer did not pre-resolve): the transfer drops them, so `top: -100vh` read as `auto` and linkedin's skip link
     /// (`.-top-[100vh]`, parked a viewport above the page until focused)
     /// sat at its static position over the header.
     pub(crate) fn resolved_offsets(&self, containing_block: &Dimensions) -> PositionOffsets {
         let resolve = |pre: Option<f32>, st: &Option<Length>, basis: f32| {
             pre.or(match st {
                 Some(Length::Percent(p)) => Some(p / 100.0 * basis),
-                Some(
-                    l @ (Length::Vw(_)
-                    | Length::Vh(_)
-                    | Length::Vmin(_)
-                    | Length::Vmax(_)
-                    | Length::Calc(_)
-                    | Length::Min(_)
-                    | Length::Max(_)
-                    | Length::Clamp(_)),
-                ) => Some(self.length_to_px(l, basis)),
-                _ => None,
+                Some(Length::Auto | Length::FitContent) | None => None,
+                // Every other length, `px`/`em`/`rem` included: a box the
+                // transfer did not pre-resolve (one built by layout's own
+                // callers) took `top: 20px` for `auto` and `top: 2vw` for 20.
+                Some(l) => Some(self.length_to_px(l, basis)),
             })
         };
         PositionOffsets {
@@ -6409,6 +6428,16 @@ impl LayoutBox {
                     specified
                 };
             }
+            // The other viewport units are lengths like `vh`: they fell to
+            // the `auto` arm, so `height: 2vw` was content-sized.
+            Length::Vw(_) | Length::Vmin(_) | Length::Vmax(_) => {
+                let specified = self.length_to_px(&self.style.height, 0.0);
+                self.dimensions.content.height = if is_border_box {
+                    (specified - padding_border_height).max(0.0)
+                } else {
+                    specified
+                };
+            }
             _ => {
                 // Auto or Zero - content.height was set by layout_block_children
                 // But if aspect-ratio is set and we have a width, calculate height from it
@@ -7247,6 +7276,17 @@ pub enum DisplayCommand {
     },
     /// Pop a transform matrix.
     PopTransform,
+    /// Fade everything up to the matching `PopOpacity` by this factor (CSS
+    /// Color 4 §4 `opacity`, strictly between 0 and 1: a box at 0 emits
+    /// nothing and a box at 1 needs no scope). Scopes nest and multiply.
+    ///
+    /// The group is to be faded as one picture: a child over its parent's
+    /// background does not show the background through it. A painter that
+    /// cannot draw the scope into a layer of its own fades each command
+    /// instead, which differs only where the group's paint overlaps itself.
+    PushOpacity(f32),
+    /// End the innermost opacity scope.
+    PopOpacity,
 
     /// Draw text with a gradient fill (for background-clip: text effect).
     GradientText {
@@ -8154,6 +8194,16 @@ impl DisplayList {
 
     /// Render a stacking context with proper z-ordering.
     fn render_stacking_context(&mut self, layout_box: &LayoutBox, parent_z: i32, layer: &mut u32) {
+        // `opacity` fades the box and its whole subtree as one group, and
+        // at 0 the group paints nothing (it still takes its space and its
+        // hits). Until 2026-10-08 only the image command carried it, so a
+        // `div` at `opacity: 0` painted solid: google.com's search box
+        // glow and every hover overlay that waits at 0.
+        let opacity = Self::group_opacity(layout_box);
+        if opacity <= 0.0 {
+            return;
+        }
+
         let z_index = if layout_box.position != Position::Static {
             layout_box.z_index
         } else {
@@ -8200,6 +8250,11 @@ impl DisplayList {
                 z_index,
                 rect: layout_box.dimensions.border_box(),
             });
+        }
+
+        let fades = opacity < 1.0;
+        if fades {
+            self.commands.push(DisplayCommand::PushOpacity(opacity));
         }
 
         // Check if this box has a transform
@@ -8330,6 +8385,10 @@ impl DisplayList {
             self.commands.push(DisplayCommand::PopTransform);
         }
 
+        if fades {
+            self.commands.push(DisplayCommand::PopOpacity);
+        }
+
         if creates_context {
             self.commands.push(DisplayCommand::PopStackingContext);
         }
@@ -8349,6 +8408,31 @@ impl DisplayList {
                 }
             }
             self.escapable_clips = outer;
+        }
+    }
+
+    /// The `opacity` this box fades its subtree by. A text run is not an
+    /// element: its style is its parent's, copied (a pseudo-element's text
+    /// child clones the whole pseudo style), so the value on it is the
+    /// parent's own and applying it would fade the text twice.
+    fn group_opacity(layout_box: &LayoutBox) -> f32 {
+        if matches!(layout_box.box_type, BoxType::Text(_)) {
+            return 1.0;
+        }
+        // Keyframe animations are parsed and not run. The fade-in idiom
+        // (`opacity: 0; animation: appear 1s forwards`) would leave its
+        // content invisible for good, so a box that names an animation is
+        // not faded, as no box was before opacity was painted. Remove when
+        // the engine runs animations.
+        let animation = layout_box.style.animation_name.trim();
+        if !animation.is_empty() && !animation.eq_ignore_ascii_case("none") {
+            return 1.0;
+        }
+        let opacity = layout_box.style.opacity;
+        if opacity.is_nan() {
+            1.0
+        } else {
+            opacity.clamp(0.0, 1.0)
         }
     }
 

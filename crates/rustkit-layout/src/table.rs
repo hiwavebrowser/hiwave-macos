@@ -376,32 +376,29 @@ fn at_mut<'a>(b: &'a mut LayoutBox, path: &[usize]) -> &'a mut LayoutBox {
 
 /// A length that resolves without a containing block, in px. Percentages
 /// (and anything else needing a base) are `None`: percentage widths on
-/// cells and columns are treated as `auto` in this slice.
-fn absolute_px(l: &Length, style: &ComputedStyle) -> Option<f32> {
-    let font = match style.font_size {
-        Length::Px(px) => px,
-        _ => 16.0,
-    };
+/// cells and columns are treated as `auto` in this slice. Resolved through
+/// `length_to_px` like the rest of layout; this matched `px`, `em` and `rem`
+/// only, so a `2vw` or `calc(1em + 4px)` cell width or height was `auto`.
+fn absolute_px(l: &Length, b: &LayoutBox) -> Option<f32> {
     match l {
-        Length::Px(v) => Some(*v),
-        Length::Zero => Some(0.0),
-        Length::Em(v) => Some(v * font),
-        Length::Rem(v) => Some(v * 16.0),
-        _ => None,
+        Length::Auto | Length::FitContent | Length::Percent(_) => None,
+        Length::Calc(sum) if sum.percent != 0.0 => None,
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => None,
+        other => Some(b.length_to_px(other, 0.0)),
     }
 }
 
-fn horizontal_margins(style: &ComputedStyle) -> f32 {
-    absolute_px(&style.margin_left, style).unwrap_or(0.0)
-        + absolute_px(&style.margin_right, style).unwrap_or(0.0)
+fn horizontal_margins(b: &LayoutBox) -> f32 {
+    absolute_px(&b.style.margin_left, b).unwrap_or(0.0)
+        + absolute_px(&b.style.margin_right, b).unwrap_or(0.0)
 }
 
 /// A specified `width`, as a border-box figure.
-fn specified_border_box_width(style: &ComputedStyle) -> Option<f32> {
-    let w = absolute_px(&style.width, style)?;
-    Some(match style.box_sizing {
+fn specified_border_box_width(b: &LayoutBox) -> Option<f32> {
+    let w = absolute_px(&b.style.width, b)?;
+    Some(match b.style.box_sizing {
         BoxSizing::BorderBox => w,
-        BoxSizing::ContentBox => w + crate::grid::horizontal_padding_border(style),
+        BoxSizing::ContentBox => w + crate::grid::horizontal_padding_border(&b.style),
     })
 }
 
@@ -422,7 +419,7 @@ fn spacing(style: &ComputedStyle) -> (f32, f32) {
 /// border-box width. A specified width is the cell's preferred width, and a
 /// minimum unless its content cannot fit (CSS 2.1 §17.5.2.2 step 1).
 fn cell_widths(cell: &LayoutBox) -> (f32, f32, Option<f32>) {
-    match specified_border_box_width(&cell.style) {
+    match specified_border_box_width(cell) {
         Some(w) => {
             // `own_min_content_width` answers the specified width itself;
             // the content's minimum is read from the children instead.
@@ -430,7 +427,7 @@ fn cell_widths(cell: &LayoutBox) -> (f32, f32, Option<f32>) {
             let content_min = cell
                 .children
                 .iter()
-                .map(|c| crate::grid::estimate_min_content_width(c) + horizontal_margins(&c.style))
+                .map(|c| crate::grid::estimate_min_content_width(c) + horizontal_margins(c))
                 .fold(0.0f32, f32::max)
                 + pb;
             let min = content_min.max(w);
@@ -458,7 +455,7 @@ struct Column {
 fn column_widths_from_cols(t: &LayoutBox) -> Vec<Option<f32>> {
     let mut out = Vec::new();
     let mut push = |b: &LayoutBox, inherited: Option<f32>| {
-        let w = specified_border_box_width(&b.style).or(inherited);
+        let w = specified_border_box_width(b).or(inherited);
         for _ in 0..b.table_span.colspan.clamp(1, MAX_COLSPAN) {
             out.push(w);
         }
@@ -467,7 +464,7 @@ fn column_widths_from_cols(t: &LayoutBox) -> Vec<Option<f32>> {
         match role(c) {
             Display::TableColumn => push(c, None),
             Display::TableColumnGroup => {
-                let group_w = specified_border_box_width(&c.style);
+                let group_w = specified_border_box_width(c);
                 if c.children.is_empty() {
                     push(c, None);
                 } else {
@@ -619,11 +616,11 @@ pub(crate) fn table_intrinsic_widths(t: &LayoutBox) -> (f32, f32) {
     let pb = crate::grid::horizontal_padding_border(&t.style);
     let extra = pb + track_spacing(grid.cols, hs);
     let caption_min = captions(t)
-        .map(|c| crate::grid::own_min_content_width(c) + horizontal_margins(&c.style))
+        .map(|c| crate::grid::own_min_content_width(c) + horizontal_margins(c))
         .fold(0.0f32, f32::max);
     let min = (cols.iter().map(|c| c.min).sum::<f32>() + extra).max(caption_min);
     let max = (cols.iter().map(|c| c.max).sum::<f32>() + extra).max(min);
-    match specified_border_box_width(&t.style) {
+    match specified_border_box_width(t) {
         Some(w) => (w.max(min), w.max(min)),
         None => (min, max),
     }
@@ -686,7 +683,7 @@ pub(crate) fn layout_table_contents(t: &mut LayoutBox) {
     let cols = measure_columns(t, &grid, hs);
     let spacing_h = track_spacing(grid.cols, hs);
     let caption_min = captions(t)
-        .map(|c| crate::grid::own_min_content_width(c) + horizontal_margins(&c.style))
+        .map(|c| crate::grid::own_min_content_width(c) + horizontal_margins(c))
         .fold(0.0f32, f32::max);
     let table_min = (cols.iter().map(|c| c.min).sum::<f32>() + spacing_h + pb_h).max(caption_min);
     let used = (d.content.width + pb_h).max(table_min);
@@ -722,7 +719,7 @@ pub(crate) fn layout_table_contents(t: &mut LayoutBox) {
         t.table_caption_shift = Some((t.dimensions.margin.top, caption_height));
     }
 
-    let specified_height = absolute_px(&style.height, &style).map(|h| match style.box_sizing {
+    let specified_height = absolute_px(&style.height, t).map(|h| match style.box_sizing {
         BoxSizing::BorderBox => (h - pb_v).max(0.0),
         BoxSizing::ContentBox => h,
     });
@@ -771,7 +768,7 @@ fn layout_grid(
     let mut heights = vec![0.0f32; rows];
     for (r, path) in grid.rows.iter().enumerate() {
         let row = at(t, path);
-        if let Some(h) = absolute_px(&row.style.height, &row.style) {
+        if let Some(h) = absolute_px(&row.style.height, row) {
             heights[r] = h;
         }
     }
@@ -899,11 +896,10 @@ fn layout_cell(cell: &mut LayoutBox, x: f32, y: f32, width: f32) -> f32 {
     let d = &cell.dimensions;
     let pb_v = d.padding.vertical() + d.border.vertical();
     let content = d.border_box().height;
-    let specified =
-        absolute_px(&cell.style.height, &cell.style).map(|h| match cell.style.box_sizing {
-            BoxSizing::BorderBox => h,
-            BoxSizing::ContentBox => h + pb_v,
-        });
+    let specified = absolute_px(&cell.style.height, cell).map(|h| match cell.style.box_sizing {
+        BoxSizing::BorderBox => h,
+        BoxSizing::ContentBox => h + pb_v,
+    });
     content.max(specified.unwrap_or(0.0))
 }
 

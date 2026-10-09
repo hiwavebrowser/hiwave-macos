@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8"><title>H24 css-sized svg use paints at 300x150 scale</title>
+<style>
+body { margin: 0; font: 14px sans-serif; }
+.icon { display: inline-block; width: 24px; height: 24px; fill: #000; vertical-align: middle; }
+#attr { width: 24px; height: 24px; }
+</style>
+<svg style="position: absolute; width: 0px; height: 0px;"><defs></defs>
+  <symbol viewBox="0 0 16 16" id="icon-sq"><rect x="0" y="0" width="16" height="16"/></symbol></svg>
+<div style="margin: 50px 0 0 50px">css-sized (eBay): <svg id="css" class="icon" aria-hidden="true"><use href="#icon-sq"/></svg></div>
+<div style="margin: 150px 0 0 50px">attr-sized (control): <svg id="attr" class="icon" width="24" height="24"><use href="#icon-sq"/></svg></div>
