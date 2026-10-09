@@ -259,6 +259,12 @@ fn has_percentage(l: &Length) -> bool {
 /// had: `align-items: center` and `flex-end` left them at the top, and
 /// `stretch` left an auto item 0 tall.
 fn definite_height_px(b: &LayoutBox, l: &Length) -> Option<f32> {
+    definite_px(b, l)
+}
+
+/// A specified length that is definite without the containing block, in
+/// pixels as written: the rule of `definite_height_px`, for either axis.
+pub(crate) fn definite_px(b: &LayoutBox, l: &Length) -> Option<f32> {
     match l {
         Length::Px(v) => Some(*v),
         Length::Auto | Length::FitContent | Length::Percent(_) => None,

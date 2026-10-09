@@ -3111,8 +3111,10 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
 
     let padding_border = horizontal_padding_border(style);
 
-    // An explicit pixel width fixes the contribution regardless of content.
-    if let Length::Px(w) = style.width {
+    // An explicit width fixes the contribution regardless of content, in
+    // any unit that is definite without the containing block (until
+    // 2026-10-08 only in px: see the same arm in `own_max_content_width`).
+    if let Some(w) = crate::flex::definite_px(layout_box, &style.width) {
         return match style.box_sizing {
             BoxSizing::BorderBox => w,
             BoxSizing::ContentBox => w + padding_border,
@@ -3438,7 +3440,12 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
 
     let padding_border = horizontal_padding_border(style);
 
-    if let Length::Px(w) = style.width {
+    // The box's own width, in any unit that is definite without the
+    // containing block. Until 2026-10-08 only a px width counted: a
+    // `1.25rem` icon (Tailwind's `w-5`, wikipedia's `.vector-icon`)
+    // contributed its content, usually nothing, so the inline-flex row
+    // around it was sized without it and flex-shrink squeezed the icon.
+    if let Some(w) = crate::flex::definite_px(layout_box, &style.width) {
         return match style.box_sizing {
             BoxSizing::BorderBox => w,
             BoxSizing::ContentBox => w + padding_border,

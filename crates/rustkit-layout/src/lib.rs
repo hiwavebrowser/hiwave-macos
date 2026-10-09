@@ -14007,6 +14007,51 @@ mod tests {
         );
     }
 
+    /// An item's own `width` fixed its contribution only when written in
+    /// px. en.wikipedia.org's `.vector-icon { width: calc(var(--font-size-
+    /// medium, 1rem) + 4px); min-width: 10px }` sits in an `inline-flex`
+    /// label: the label was sized without the icon's 20px, and flex-shrink
+    /// then squeezed the icon to its min-width (Chromium 143: 20 x 20). A
+    /// reduced page gave 15px for `1.25rem`, `calc(1rem + 4px)` and the
+    /// `var()` form, and 20px for `20px`.
+    #[test]
+    fn a_width_in_any_definite_unit_fixes_the_contribution() {
+        let twenty = [
+            Length::Px(20.0),
+            Length::Rem(1.25),
+            Length::Em(1.25),
+            Length::Vw(2.0),
+            Length::Calc(Box::new(rustkit_css::CalcSum { px: 4.0, rem: 1.0, ..Default::default() })),
+            Length::Max(Box::new((Length::Rem(1.25), Length::Px(10.0)))),
+        ];
+        for width in twenty {
+            let mut c = n69_flex_row(&[30.0], Length::Zero);
+            c.set_viewport(1000.0, 800.0);
+            let mut icon = ComputedStyle::new();
+            icon.width = width.clone();
+            icon.min_width = Length::Px(10.0);
+            let mut icon = LayoutBox::new(BoxType::Block, icon);
+            icon.set_viewport(1000.0, 800.0);
+            c.children.insert(0, icon);
+            let (max, min) = (crate::grid::own_max_content_width(&c), crate::grid::own_min_content_width(&c));
+            assert!((max - 50.0).abs() < 0.01, "{width:?}: max-content 20 + 30 = 50, got {max}");
+            assert!((min - 50.0).abs() < 0.01, "{width:?}: min-content 20 + 30 = 50, got {min}");
+        }
+        // A percentage has nothing to resolve against here and stays
+        // content-sized (css-sizing-3 §5.2.1): an empty box contributes 0.
+        for width in [
+            Length::Percent(50.0),
+            Length::Calc(Box::new(rustkit_css::CalcSum { px: 4.0, percent: 50.0, ..Default::default() })),
+        ] {
+            let mut c = n69_flex_row(&[30.0], Length::Zero);
+            let mut item = ComputedStyle::new();
+            item.width = width.clone();
+            c.children.insert(0, LayoutBox::new(BoxType::Block, item));
+            let max = crate::grid::own_max_content_width(&c);
+            assert!((max - 30.0).abs() < 0.01, "{width:?}: stays content-sized, got {max}");
+        }
+    }
+
     #[test]
     fn an_em_gap_resolves_against_the_containers_own_font_size() {
         // Discriminates em from rem: at a 20px font size `0.5em` is 10, while
