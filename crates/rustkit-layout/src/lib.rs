@@ -57,6 +57,9 @@ mod replaced_size_unit_tests;
 mod shaped_run_tests;
 
 #[cfg(test)]
+mod sizing_equivalence_tests;
+
+#[cfg(test)]
 mod table_layout_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
@@ -2794,19 +2797,38 @@ impl LayoutBox {
         // on every box except the `auto` one.
         let cb_width = containing_block.content.width;
         {
+            // Through `length_to_px`, which knows the box's font size and the
+            // viewport: `to_px(16.0, 16.0, ..)` took `2vw` padding for 0.
+            let px = |l: &Length| self.length_to_px(l, cb_width);
+            let edges = |t, r, b, l| EdgeSizes {
+                top: px(t),
+                right: px(r),
+                bottom: px(b),
+                left: px(l),
+            };
+            let st = &self.style;
+            let margin = edges(
+                &st.margin_top,
+                &st.margin_right,
+                &st.margin_bottom,
+                &st.margin_left,
+            );
+            let border = edges(
+                &st.border_top_width,
+                &st.border_right_width,
+                &st.border_bottom_width,
+                &st.border_left_width,
+            );
+            let padding = edges(
+                &st.padding_top,
+                &st.padding_right,
+                &st.padding_bottom,
+                &st.padding_left,
+            );
             let d = &mut self.dimensions;
-            d.margin.left = self.style.margin_left.to_px(16.0, 16.0, cb_width);
-            d.margin.right = self.style.margin_right.to_px(16.0, 16.0, cb_width);
-            d.margin.top = self.style.margin_top.to_px(16.0, 16.0, cb_width);
-            d.margin.bottom = self.style.margin_bottom.to_px(16.0, 16.0, cb_width);
-            d.border.left = self.style.border_left_width.to_px(16.0, 16.0, cb_width);
-            d.border.right = self.style.border_right_width.to_px(16.0, 16.0, cb_width);
-            d.border.top = self.style.border_top_width.to_px(16.0, 16.0, cb_width);
-            d.border.bottom = self.style.border_bottom_width.to_px(16.0, 16.0, cb_width);
-            d.padding.left = self.style.padding_left.to_px(16.0, 16.0, cb_width);
-            d.padding.right = self.style.padding_right.to_px(16.0, 16.0, cb_width);
-            d.padding.top = self.style.padding_top.to_px(16.0, 16.0, cb_width);
-            d.padding.bottom = self.style.padding_bottom.to_px(16.0, 16.0, cb_width);
+            d.margin = margin;
+            d.border = border;
+            d.padding = padding;
         }
         let horizontal_decoration = self.dimensions.border.left
             + self.dimensions.border.right
@@ -3784,25 +3806,19 @@ impl LayoutBox {
     /// (e.g. `left: -100%` off-canvas shimmer overlays) need the containing
     /// block, so they resolve here at apply time from the computed style.
     ///
-    /// Viewport units and math functions resolve here too: the transfer
-    /// drops them, so `top: -100vh` read as `auto` and linkedin's skip link
+    /// Viewport units and math functions resolve here too (and any length
+    /// the transfer did not pre-resolve): the transfer drops them, so `top: -100vh` read as `auto` and linkedin's skip link
     /// (`.-top-[100vh]`, parked a viewport above the page until focused)
     /// sat at its static position over the header.
     pub(crate) fn resolved_offsets(&self, containing_block: &Dimensions) -> PositionOffsets {
         let resolve = |pre: Option<f32>, st: &Option<Length>, basis: f32| {
             pre.or(match st {
                 Some(Length::Percent(p)) => Some(p / 100.0 * basis),
-                Some(
-                    l @ (Length::Vw(_)
-                    | Length::Vh(_)
-                    | Length::Vmin(_)
-                    | Length::Vmax(_)
-                    | Length::Calc(_)
-                    | Length::Min(_)
-                    | Length::Max(_)
-                    | Length::Clamp(_)),
-                ) => Some(self.length_to_px(l, basis)),
-                _ => None,
+                Some(Length::Auto | Length::FitContent) | None => None,
+                // Every other length, `px`/`em`/`rem` included: a box the
+                // transfer did not pre-resolve (one built by layout's own
+                // callers) took `top: 20px` for `auto` and `top: 2vw` for 20.
+                Some(l) => Some(self.length_to_px(l, basis)),
             })
         };
         PositionOffsets {
@@ -6332,6 +6348,16 @@ impl LayoutBox {
             }
             Length::Rem(rem) => {
                 let specified = rem * 16.0; // Root font size
+                self.dimensions.content.height = if is_border_box {
+                    (specified - padding_border_height).max(0.0)
+                } else {
+                    specified
+                };
+            }
+            // The other viewport units are lengths like `vh`: they fell to
+            // the `auto` arm, so `height: 2vw` was content-sized.
+            Length::Vw(_) | Length::Vmin(_) | Length::Vmax(_) => {
+                let specified = self.length_to_px(&self.style.height, 0.0);
                 self.dimensions.content.height = if is_border_box {
                     (specified - padding_border_height).max(0.0)
                 } else {
