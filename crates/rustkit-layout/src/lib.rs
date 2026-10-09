@@ -51,6 +51,9 @@ mod percent_height_definite_tests;
 mod replaced_size_unit_tests;
 
 #[cfg(test)]
+mod replaced_transferred_width_tests;
+
+#[cfg(test)]
 mod shaped_run_tests;
 
 #[cfg(test)]
