@@ -181,9 +181,14 @@ export async function captureBaseline(htmlPath, outputDir, width, height) {
         });
         
         // Layout rect
+        // `id` / `className` are additive (tools/element_diff reads them when
+        // present); the selector above stays the join key. SVG elements
+        // expose className as an SVGAnimatedString, hence the attribute read.
         results.rects.push({
           selector,
           tag,
+          id: el.id || null,
+          className: (typeof el.className === 'string' ? el.className : el.getAttribute('class')) || null,
           rect: {
             x: rect.x,
             y: rect.y,
