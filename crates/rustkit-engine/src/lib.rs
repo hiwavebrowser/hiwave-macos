@@ -13168,6 +13168,8 @@ impl Engine {
                     "origin": { "x": origin.0, "y": origin.1 }
                 }),
                 Cmd::PopTransform => serde_json::json!({ "op": "pop_transform" }),
+                Cmd::PushOpacity(alpha) => serde_json::json!({ "op": "push_opacity", "opacity": alpha }),
+                Cmd::PopOpacity => serde_json::json!({ "op": "pop_opacity" }),
                 // Not yet modelled: form controls, carets, focus rings, and
                 // the SVG primitives. Named and dumped rather than dropped.
                 other => serde_json::json!({
