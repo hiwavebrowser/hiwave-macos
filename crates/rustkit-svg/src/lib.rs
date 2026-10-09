@@ -1929,7 +1929,9 @@ impl SvgPath {
     }
 
     /// Convert path to line segments, flattening curves to
-    /// `FLATTEN_TOLERANCE_PX` in the path's own units.
+    /// `FLATTEN_TOLERANCE_PX` in the path's own units. That is only right for
+    /// a path drawn at 1:1; one in a small viewBox drawn large comes out
+    /// coarse, so a caller that knows its scale uses `to_line_segments_within`.
     pub fn to_line_segments(&self) -> Vec<Vec<(f32, f32)>> {
         self.to_line_segments_within(FLATTEN_TOLERANCE_PX)
     }
@@ -2567,8 +2569,11 @@ fn parse_flag<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> O
     }
 }
 
-/// How far, in device pixels, a flattened curve may stray from the true one.
-const FLATTEN_TOLERANCE_PX: f32 = 0.25;
+/// How far, in CSS pixels, a flattened curve may stray from the true one.
+/// The polygon sits inside its curve, so this is ink lost on every convex
+/// edge: 0.1 keeps a 16 px icon dot within 3% of its area, and is 0.2
+/// physical px on a 2x display (this crate doesn't see the scale factor).
+const FLATTEN_TOLERANCE_PX: f32 = 0.1;
 
 /// The most line segments one curve or arc flattens to, however big it's drawn.
 const MAX_CURVE_STEPS: usize = 256;
@@ -4122,7 +4127,7 @@ mod tests {
                     .collect();
                 let device = (cx * scale, cy * scale, rx * scale, ry * scale);
                 let sag = worst_sag(&outline, device);
-                assert!(sag <= 0.3, "scale {scale}: sags {sag} px off the curve");
+                assert!(sag <= 0.15, "scale {scale}: sags {sag} px off the curve");
                 let r = rx.min(ry) * scale;
                 let floor = (std::f32::consts::PI / (1.0 - FLATTEN_TOLERANCE_PX / r).acos()).floor()
                     as usize;
