@@ -207,6 +207,8 @@ mod grid_item_lone_text_tests;
 mod grid_item_min_max_tests;
 #[cfg(test)]
 mod table_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod ws_beside_block_replaced_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -4965,6 +4967,22 @@ impl Engine {
     /// adjacent inline-level siblings). Mirrors the layout-side flows_inline
     /// gate in rustkit-layout's block child loop.
     fn is_inline_level_box(b: &LayoutBox) -> bool {
+        // An image or a control is inline-level by its `display`, like any
+        // other box: at `display: block` (or flex, grid, table) it starts a
+        // block of its own and the white space beside it is at a line edge.
+        // Counting every one as inline kept an 18px line between Wikipedia's
+        // two block logo images. A floated or absolutely positioned one
+        // keeps the old answer: it is not on the line at all, and the spaces
+        // on its two sides are not handled here.
+        let replaced = matches!(b.box_type, BoxType::Image { .. } | BoxType::FormControl(_));
+        let in_flow = b.style.float == rustkit_css::Float::None
+            && !matches!(
+                b.style.position,
+                rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+            );
+        if replaced && in_flow && !b.style.display.is_inline_level() {
+            return false;
+        }
         matches!(
             b.box_type,
             BoxType::Text(_) | BoxType::Image { .. } | BoxType::FormControl(_)
