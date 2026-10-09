@@ -660,7 +660,11 @@ impl ViewState {
         if stats.relayouts == 0 {
             return;
         }
-        let url = self.url.as_ref().map(|u| u.as_str()).unwrap_or("");
+        let url = self
+            .url
+            .as_ref()
+            .map(relayout_cause::summary_url)
+            .unwrap_or_default();
         info!(
             "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1}",
             url,

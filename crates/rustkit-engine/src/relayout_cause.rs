@@ -43,7 +43,9 @@ pub enum RelayoutCause {
     /// A click, mouse, key or form-submit event's listeners changed the DOM,
     /// or an edit changed a control's value.
     Input,
-    /// Anything else, named.
+    /// Anything else, named. The name is also the key it is counted under,
+    /// so it must come from a fixed set of literals, never be built at run
+    /// time.
     Other(&'static str),
 }
 
@@ -209,6 +211,20 @@ impl RelayoutStats {
     }
 }
 
+/// The document URL as the navigation summary logs it: origin and path,
+/// never the query or fragment (they can carry tokens). An opaque origin
+/// (`about:`, `data:`) logs its scheme and the first 32 characters of its
+/// path.
+pub(crate) fn summary_url(url: &url::Url) -> String {
+    match url.origin() {
+        origin if origin.is_tuple() => format!("{}{}", origin.ascii_serialization(), url.path()),
+        _ => {
+            let path: String = url.path().chars().take(32).collect();
+            format!("{}:{}", url.scheme(), path)
+        }
+    }
+}
+
 thread_local! {
     /// Whether the last `build_layout_from_document` on this thread took the
     /// kept box tree instead of walking the DOM. The engine is single
@@ -227,6 +243,20 @@ pub(crate) fn last_build_reused_tree() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_summary_url_drops_the_query_and_fragment() {
+        let url = |s: &str| summary_url(&url::Url::parse(s).unwrap());
+        assert_eq!(
+            url("https://example.com:8443/a/b?token=secret#frag"),
+            "https://example.com:8443/a/b"
+        );
+        assert_eq!(url("about:blank"), "about:blank");
+        assert_eq!(
+            url("data:text/html,<p>a long inline document body here</p>"),
+            "data:text/html,<p>a long inline docum"
+        );
+    }
 
     #[test]
     fn first_cause_is_kept_and_kinds_are_counted() {
