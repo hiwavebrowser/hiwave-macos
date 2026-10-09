@@ -133,6 +133,27 @@ fn a_border_box_height_crosses_the_ratio_as_its_content_height() {
     assert!(close(max, WORDMARK_WIDTH), "max-content {max}");
 }
 
+/// `img { max-width: 100% }`: the minimum contribution is 0 (css-sizing-3
+/// §5.2.2), so the flex item around it can shrink and the image with it.
+/// Chrome 148: a 100x50 image in a `<div>` item of a 60px row is 60 x 30.
+#[test]
+fn a_percentage_max_width_makes_the_minimum_contribution_zero() {
+    let mut img = wordmark();
+    img.style.height = Length::Auto;
+    img.style.max_width = Length::Percent(100.0);
+    assert!(close(crate::grid::estimate_min_content_width(&img), 0.0));
+    assert!(close(crate::grid::estimate_max_content_width(&img), 514.0));
+}
+
+#[test]
+fn a_pixel_max_width_caps_both_contributions() {
+    let mut img = wordmark();
+    img.style.height = Length::Auto;
+    img.style.max_width = Length::Px(200.0);
+    assert!(close(crate::grid::estimate_min_content_width(&img), 200.0));
+    assert!(close(crate::grid::estimate_max_content_width(&img), 200.0));
+}
+
 /// Pins: a width the page gave is still the answer, and a box with no
 /// natural size contributes what it did.
 #[test]

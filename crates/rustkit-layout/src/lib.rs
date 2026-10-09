@@ -2954,6 +2954,46 @@ impl LayoutBox {
         self.dimensions.content.height = height;
     }
 
+    /// The content width of a replaced box whose `width` is `auto`, where no
+    /// containing block works it out (`layout_image_in` does that for a box
+    /// in flow): a flex base size and a min/max-content contribution. A
+    /// definite height crosses the natural ratio (css-sizing-4 "transferred
+    /// size"); with no height it is the natural width. `None` for a box
+    /// that is not replaced, has no natural width, or whose width the page
+    /// gave.
+    ///
+    /// The flex pass and the width estimators each read `natural_width`
+    /// alone, or nothing: reddit's wordmark (`<svg viewBox="0 0 514 149"
+    /// style="height: 22px">`) was 514 wide as a row item and 0 wide to the
+    /// flex link around it, for Chrome's 75.89.
+    pub(crate) fn replaced_auto_content_width(&self) -> Option<f32> {
+        let BoxType::Image {
+            natural_width,
+            natural_height,
+            ..
+        } = &self.box_type
+        else {
+            return None;
+        };
+        if !matches!(self.style.width, Length::Auto) || *natural_width <= 0.0 {
+            return None;
+        }
+        let s = &self.style;
+        let vertical_decoration = [&s.padding_top, &s.padding_bottom, &s.border_top_width, &s.border_bottom_width]
+            .iter()
+            .map(|l| self.length_to_px(l, 0.0))
+            .sum();
+        let height = replaced_content_size(
+            self.replaced_length(&s.height, None),
+            vertical_decoration,
+            s.box_sizing == BoxSizing::BorderBox,
+        );
+        Some(match height {
+            Some(h) if *natural_height > 0.0 => h * natural_width / natural_height,
+            _ => *natural_width,
+        })
+    }
+
     /// A specified size on a replaced element in pixels, or `None` for
     /// `auto`. `percent_base` is what a percentage refers to; `None` means
     /// that base is indefinite, and a percentage of it is `auto` (`none` for a

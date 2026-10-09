@@ -2815,7 +2815,9 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
             natural_height,
             ..
         } => match main_axis {
-            Axis::Horizontal => *natural_width,
+            // A given height decides the width through the ratio; the
+            // natural width is for an image with neither.
+            Axis::Horizontal => layout_box.replaced_auto_content_width().unwrap_or(*natural_width),
             Axis::Vertical => *natural_height,
         },
         crate::BoxType::Inline | crate::BoxType::Block | crate::BoxType::AnonymousBlock => {
