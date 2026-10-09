@@ -188,6 +188,8 @@ mod flex_percent_basis_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
+mod nav_state_reset_tests;
+#[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
@@ -635,6 +637,47 @@ struct ViewState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
+}
+
+impl ViewState {
+    /// Drops what belonged to the last document. Both load paths call
+    /// this where they store the new one, before anything is laid out.
+    fn reset_for_new_document(&mut self) {
+        // A new document invalidates every per-node side table. NodeId is
+        // PER-DOCUMENT (each Document restarts its counter at 1), so a
+        // surviving entry keyed by raw id 4 would be read as the NEW page's
+        // node 4: the previous page's typed text painted into a fresh
+        // control, with first-focus seeding skipped because the key already
+        // exists. The old doc comment claimed reload dropped this map; it
+        // did not, and asserting a lifetime the code does not implement is
+        // how a silent correctness bug hides in plain sight.
+        // (Prometheus, #110 R1 must-fix.)
+        self.edit_states.clear();
+        self.checked_states.clear();
+        self.focused_node = None;
+        self.hovered_node = None;
+        self.hover_chain.clear();
+        self.active_chain.clear();
+        self.rule_reads.get_mut().take();
+        self.pointer_restyle = false;
+        self.pointer_at = None;
+        self.primary_button_down = false;
+        self.press_target = None;
+        self.press_settled_focus = false;
+        self.compat_mouse_suppressed = false;
+        self.script_log.clear();
+        self.script_policy = None;
+        // The last document's requests are nobody's now.
+        self.live_requests.clear();
+        self.live_images.clear();
+        // The last document's sheets, before the first layout of this one.
+        // `load_subresources` assigns the new document's when they have
+        // been fetched, which is after a document that links none has been
+        // laid out; and `load_html` fetches nothing at all.
+        self.external_stylesheets.clear();
+        self.initial_layout_deferred = false;
+        self.images_attempted.clear();
+    }
 }
 
 /// Engine configuration.
@@ -4189,33 +4232,7 @@ impl Engine {
         view.title = title.clone();
         view.header_referrer_policy = header_referrer_policy;
         view.http_status = Some(status.as_u16());
-        // A new document invalidates every per-node side table. NodeId is
-        // PER-DOCUMENT (each Document restarts its counter at 1), so a
-        // surviving entry keyed by raw id 4 would be read as the NEW page's
-        // node 4: the previous page's typed text painted into a fresh
-        // control, with first-focus seeding skipped because the key already
-        // exists. The old doc comment claimed reload dropped this map; it
-        // did not, and asserting a lifetime the code does not implement is
-        // how a silent correctness bug hides in plain sight.
-        // (Prometheus, #110 R1 must-fix.)
-        view.edit_states.clear();
-        view.checked_states.clear();
-        view.focused_node = None;
-        view.hovered_node = None;
-        view.hover_chain.clear();
-        view.active_chain.clear();
-        view.rule_reads.get_mut().take();
-        view.pointer_restyle = false;
-        view.pointer_at = None;
-        view.primary_button_down = false;
-        view.press_target = None;
-        view.press_settled_focus = false;
-        view.compat_mouse_suppressed = false;
-        view.script_log.clear();
-        view.script_policy = None;
-        // The last document's requests are nobody's now.
-        view.live_requests.clear();
-        view.live_images.clear();
+        view.reset_for_new_document();
 
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
@@ -4442,26 +4459,6 @@ impl Engine {
 
         info!(?id, len = html.len(), "Loading HTML content");
 
-        // This is a NEW document, and load_html deliberately fetches no
-        // subresources — so nothing downstream will ever overwrite the
-        // stylesheets a previous document left on this view. Clearing here
-        // is what stops inline content from silently inheriting the last
-        // navigated page's CSS.
-        //
-        // This is the second door onto the same leak as the one fixed in
-        // load_subresources: that one carried stale CSS forward when the new
-        // document had no <link>; this one carried it forward whenever the
-        // new document arrived via load_html at all. Closing one and not the
-        // other would leave the bug reachable by the shorter route.
-        if !view.external_stylesheets.is_empty() {
-            debug!(
-                ?id,
-                dropped = view.external_stylesheets.len(),
-                "Clearing previous document's external stylesheets for inline load"
-            );
-            view.external_stylesheets.clear();
-        }
-
         // Use a synthetic about:blank URL for inline content
         // SAFETY: "about:blank" is a constant URL that will always parse successfully
         let url = Url::parse("about:blank").unwrap();
@@ -4508,33 +4505,7 @@ impl Engine {
         view.title = title.clone();
         view.header_referrer_policy = None;
         view.http_status = None;
-        // A new document invalidates every per-node side table. NodeId is
-        // PER-DOCUMENT (each Document restarts its counter at 1), so a
-        // surviving entry keyed by raw id 4 would be read as the NEW page's
-        // node 4: the previous page's typed text painted into a fresh
-        // control, with first-focus seeding skipped because the key already
-        // exists. The old doc comment claimed reload dropped this map; it
-        // did not, and asserting a lifetime the code does not implement is
-        // how a silent correctness bug hides in plain sight.
-        // (Prometheus, #110 R1 must-fix.)
-        view.edit_states.clear();
-        view.checked_states.clear();
-        view.focused_node = None;
-        view.hovered_node = None;
-        view.hover_chain.clear();
-        view.active_chain.clear();
-        view.rule_reads.get_mut().take();
-        view.pointer_restyle = false;
-        view.pointer_at = None;
-        view.primary_button_down = false;
-        view.press_target = None;
-        view.press_settled_focus = false;
-        view.compat_mouse_suppressed = false;
-        view.script_log.clear();
-        view.script_policy = None;
-        // The last document's requests are nobody's now.
-        view.live_requests.clear();
-        view.live_images.clear();
+        view.reset_for_new_document();
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
