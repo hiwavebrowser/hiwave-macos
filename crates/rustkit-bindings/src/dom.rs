@@ -1204,6 +1204,25 @@ const WRAPPERS_JS: &str = r#"
             }
             elementProtos[tag] = made[name].prototype;
         });
+        // There is no canvas drawing and no media playback here, and a page
+        // must be able to find that out the way it asks: a canvas has no
+        // context of any kind, and a media element is one with nothing to
+        // play. Without the methods the question itself threw (github.com's
+        // `getContext("webgl")` and `video.load()`, each in an effect).
+        made.HTMLCanvasElement.prototype.getContext = function getContext() { return null; };
+        var media = HTMLMediaElement.prototype;
+        ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'].forEach(function (k, i) {
+            HTMLMediaElement[k] = media[k] = i;
+        });
+        media.load = function load() {};
+        media.pause = function pause() {};
+        media.canPlayType = function canPlayType() { return ''; };
+        media.play = function play() {
+            return Promise.reject(new g.DOMException('The element has no supported sources.', 'NotSupportedError'));
+        };
+        [['paused', true], ['ended', false], ['readyState', 0], ['currentTime', 0], ['duration', NaN]].forEach(function (p) {
+            Object.defineProperty(media, p[0], { value: p[1], writable: true, enumerable: true, configurable: true });
+        });
         // Interface objects with no element of their own here: the checks
         // `x instanceof HTMLUnknownElement` / `SVGElement` still need a RHS.
         iface('HTMLUnknownElement', HTMLElement);
