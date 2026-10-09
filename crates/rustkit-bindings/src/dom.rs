@@ -21,7 +21,7 @@
 //! (attributes, text) go through `Document::replace_node_data`, which keeps
 //! the NodeId, so wrappers and the identity cache are untouched by them.
 
-use crate::{inner_text, DomDirty};
+use crate::{inner_text, DomDirty, MutationKind, ScriptMutations};
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::{Cell, RefCell};
@@ -504,6 +504,52 @@ fn trace_dirty(host: &DomHost, args: &[JsValue], bucket: DomDirty) {
     tracing::trace!(op = string_arg(args, 1).unwrap_or(""), %tag, connected, %detail, ?bucket, "DOM write dirtied the page");
 }
 
+/// The kind of a dirtying `write` op, for the relayout cause log.
+fn write_kind(args: &[JsValue]) -> MutationKind {
+    match string_arg(args, 1) {
+        Some("setAttr" | "removeAttr")
+            if string_arg(args, 3).is_some_and(|name| name.eq_ignore_ascii_case("style")) =>
+        {
+            MutationKind::Style
+        }
+        Some("setAttr" | "removeAttr") => MutationKind::Attribute,
+        Some("setText" | "setInnerText") => MutationKind::Text,
+        _ => MutationKind::ChildList,
+    }
+}
+
+/// `tag#id` of the node at `args[index]` (the tag alone without an id,
+/// empty for a non-element or a stale id): the relayout log's node label.
+fn node_label(host: &DomHost, args: &[JsValue], index: usize) -> String {
+    let Some(node) = host.node_at(args, index) else {
+        return String::new();
+    };
+    let NodeType::Element {
+        tag_name,
+        attributes,
+        ..
+    } = &node.node_type
+    else {
+        return String::new();
+    };
+    match attributes.get("id") {
+        Some(id) if !id.is_empty() => format!("{tag_name}#{id}"),
+        _ => tag_name.clone(),
+    }
+}
+
+/// Record a write that dirtied the page (`bucket` not `Clean`).
+fn note_mutation(
+    mutations: &RefCell<ScriptMutations>,
+    bucket: DomDirty,
+    kind: MutationKind,
+    label: impl FnOnce() -> String,
+) {
+    if bucket != DomDirty::Clean {
+        mutations.borrow_mut().record(kind, label);
+    }
+}
+
 /// `value(gen, id[, v])`: a text control's value (HTML §4.10.5.4, value
 /// mode "value"). With `v` a string, sets it; with `v` null, resets the
 /// control to its default (form reset). Answers the value, or null when
@@ -810,6 +856,7 @@ pub(crate) fn install(
     runtime: &mut JsRuntime,
     host: &SharedDomHost,
     dirty: &Rc<Cell<DomDirty>>,
+    mutations: &Rc<RefCell<ScriptMutations>>,
 ) -> Result<(), JsError> {
     // `__rustkit_dom_resolve(base, relative)`: the absolute URL `relative`
     // names against `base`, or null when either does not parse. Backs the
@@ -1001,12 +1048,16 @@ pub(crate) fn install(
 
     let h = host.clone();
     let d = dirty.clone();
+    let m = mutations.clone();
     runtime.register_host_function(
         "__rustkit_dom_mutate",
         5,
         Box::new(move |args| match mutate(&h.borrow(), args) {
             Ok(()) => {
                 trace_dirty(&h.borrow(), args, DomDirty::Style);
+                note_mutation(&m, DomDirty::Style, MutationKind::ChildList, || {
+                    node_label(&h.borrow(), args, 2)
+                });
                 // Pin §3.3: a structure insert/remove/move restyles.
                 d.set(d.get().max(DomDirty::Style));
                 JsValue::Null
@@ -1019,12 +1070,16 @@ pub(crate) fn install(
     // to throw; anything else is the result (a new node's id, or null).
     let h = host.clone();
     let d = dirty.clone();
+    let m = mutations.clone();
     runtime.register_host_function(
         "__rustkit_dom_write",
         5,
         Box::new(move |args| match write(&h.borrow(), args) {
             Ok((result, bucket)) => {
                 trace_dirty(&h.borrow(), args, bucket);
+                note_mutation(&m, bucket, write_kind(args), || {
+                    node_label(&h.borrow(), args, 2)
+                });
                 d.set(d.get().max(bucket));
                 result
             }
@@ -1034,11 +1089,15 @@ pub(crate) fn install(
 
     let h = host.clone();
     let d = dirty.clone();
+    let m = mutations.clone();
     runtime.register_host_function(
         "__rustkit_dom_value",
         3,
         Box::new(move |args| {
             let (result, bucket) = control_value(&mut h.borrow_mut(), args);
+            note_mutation(&m, bucket, MutationKind::FormValue, || {
+                node_label(&h.borrow(), args, 1)
+            });
             d.set(d.get().max(bucket));
             result
         }),
@@ -1046,11 +1105,15 @@ pub(crate) fn install(
 
     let h = host.clone();
     let d = dirty.clone();
+    let m = mutations.clone();
     runtime.register_host_function(
         "__rustkit_dom_checked",
         3,
         Box::new(move |args| {
             let bucket = control_checked(&mut h.borrow_mut(), args);
+            note_mutation(&m, bucket, MutationKind::FormValue, || {
+                node_label(&h.borrow(), args, 1)
+            });
             d.set(d.get().max(bucket));
             JsValue::Null
         }),
@@ -2764,7 +2827,7 @@ const WRAPPERS_JS: &str = r#"
 
 #[cfg(test)]
 mod tests {
-    use crate::{DomBindings, DomDirty};
+    use crate::{DomBindings, DomDirty, MutationKind};
     use rustkit_dom::Document;
     use rustkit_js::{JsRuntime, JsValue};
     use std::rc::Rc;
@@ -3054,5 +3117,70 @@ mod tests {
             .unwrap();
         assert_eq!(eval_string(&b, "document.getElementById('i').value"), "ab");
         assert!(b.take_value_writes().is_empty());
+    }
+
+    // The relayout cause log: each dirtying write is counted by kind and
+    // the first one names its node; a write that changes nothing is not.
+    #[test]
+    fn dirtying_writes_are_tallied_by_kind_with_the_first_node() {
+        let (b, _doc) = bound(PAGE);
+        assert!(b.take_script_mutations().is_empty());
+        b.evaluate(
+            "var m = document.getElementById('main'); \
+             m.className = 'box';",
+        )
+        .unwrap();
+        assert!(
+            b.take_script_mutations().is_empty(),
+            "an attribute set to its value is not a write"
+        );
+        b.evaluate(
+            "var m = document.getElementById('main'); \
+             m.setAttribute('data-x', '1'); \
+             m.style.color = 'red'; \
+             m.appendChild(document.createElement('span')); \
+             document.getElementById('outside').textContent = 'changed'; \
+             m.setAttribute('data-y', '2');",
+        )
+        .unwrap();
+        let tally = b.take_script_mutations();
+        assert_eq!(
+            tally.first,
+            Some((MutationKind::Attribute, "div#main".to_string()))
+        );
+        assert_eq!(tally.count(MutationKind::Attribute), 2);
+        assert_eq!(tally.count(MutationKind::Style), 1);
+        assert_eq!(tally.count(MutationKind::ChildList), 1);
+        assert_eq!(tally.count(MutationKind::Text), 1);
+        assert_eq!(tally.count(MutationKind::FormValue), 0);
+        assert_eq!(tally.total(), 5);
+        assert!(b.take_script_mutations().is_empty(), "taking resets it");
+        // The dirty bucket is unchanged by the tally.
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
+    #[test]
+    fn first_write_names_a_node_without_an_id_by_tag() {
+        let (b, _doc) = bound(PAGE);
+        b.evaluate("document.getElementById('outside').firstChild.data = 'Bye';")
+            .unwrap();
+        let tally = b.take_script_mutations();
+        // A text node's own write has no element to name.
+        assert_eq!(tally.first, Some((MutationKind::Text, String::new())));
+        b.evaluate("document.body.innerHTML = '<i>x</i>';").unwrap();
+        assert_eq!(
+            b.take_script_mutations().first,
+            Some((MutationKind::ChildList, "body".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_new_document_drops_the_previous_tally() {
+        let (b, _doc) = bound(PAGE);
+        b.evaluate("document.getElementById('main').setAttribute('data-x', '1');")
+            .unwrap();
+        b.set_document(Rc::new(Document::parse_html("<p>x</p>").unwrap()))
+            .unwrap();
+        assert!(b.take_script_mutations().is_empty());
     }
 }

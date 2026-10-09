@@ -529,6 +529,87 @@ pub enum DomDirty {
     Style,
 }
 
+/// Which kind of script DOM write dirtied the page. Diagnostics only: the
+/// engine logs it as the cause of the relayout that follows, and nothing
+/// decides on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MutationKind {
+    /// An attribute other than `style` set or removed.
+    Attribute,
+    /// A node inserted, removed or moved, or an element's children replaced
+    /// (`innerHTML`).
+    ChildList,
+    /// Text content (`textContent`, `innerText`, a text node's data).
+    Text,
+    /// The `style` attribute (`element.style.x = ...` writes through it).
+    Style,
+    /// A form control's value or checkedness.
+    FormValue,
+}
+
+impl MutationKind {
+    /// Every kind, in a fixed order (the order counts are kept and logged in).
+    pub const ALL: [MutationKind; 5] = [
+        MutationKind::Attribute,
+        MutationKind::ChildList,
+        MutationKind::Text,
+        MutationKind::Style,
+        MutationKind::FormValue,
+    ];
+
+    /// The snake_case name the relayout log uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MutationKind::Attribute => "attribute",
+            MutationKind::ChildList => "child_list",
+            MutationKind::Text => "text",
+            MutationKind::Style => "style",
+            MutationKind::FormValue => "form_value",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The script DOM writes that dirtied the page since the last take: the
+/// first one (its kind and node) and a count per kind. Kept beside
+/// `DomDirty`, marked by the same writes, taken by the engine when it takes
+/// the dirty bucket.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScriptMutations {
+    /// The first dirtying write: its kind and its node as `tag#id` (`tag`
+    /// alone without an id; empty for a non-element).
+    pub first: Option<(MutationKind, String)>,
+    counts: [u32; 5],
+}
+
+impl ScriptMutations {
+    /// Record one dirtying write. `node` is only called for the first one.
+    pub fn record(&mut self, kind: MutationKind, node: impl FnOnce() -> String) {
+        if self.first.is_none() {
+            self.first = Some((kind, node()));
+        }
+        let count = &mut self.counts[kind.index()];
+        *count = count.saturating_add(1);
+    }
+
+    /// How many writes of `kind` were recorded.
+    pub fn count(&self, kind: MutationKind) -> u32 {
+        self.counts[kind.index()]
+    }
+
+    /// Every write recorded, of any kind.
+    pub fn total(&self) -> u32 {
+        self.counts.iter().sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.first.is_none()
+    }
+}
+
 /// DOM bindings context.
 pub struct DomBindings {
     runtime: RefCell<JsRuntime>,
@@ -541,6 +622,8 @@ pub struct DomBindings {
     /// Pending invalidation from script DOM writes (see `DomDirty`).
     /// Shared with the tree-write host functions, which mark it.
     dirty: Rc<Cell<DomDirty>>,
+    /// What the writes behind `dirty` were (see `ScriptMutations`).
+    mutations: Rc<RefCell<ScriptMutations>>,
     /// The scroll offset script reads and writes (see `web_scroll`).
     scroll: web_scroll::SharedScroll,
 }
@@ -556,7 +639,8 @@ impl DomBindings {
         Self::inject_globals(&mut runtime)?;
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(Cell::new(DomDirty::Clean));
-        dom::install(&mut runtime, &dom_host, &dirty)?;
+        let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
+        dom::install(&mut runtime, &dom_host, &dirty, &mutations)?;
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
@@ -600,6 +684,7 @@ impl DomBindings {
             dom_host,
             _ipc_queue: RefCell::new(Vec::new()),
             dirty,
+            mutations,
             scroll,
         })
     }
@@ -614,6 +699,13 @@ impl DomBindings {
     /// `Clean`. The engine calls this once when script settles.
     pub fn take_dirty(&self) -> DomDirty {
         self.dirty.replace(DomDirty::Clean)
+    }
+
+    /// The writes that dirtied the page since the last call (what, not how
+    /// much to redo: that is `take_dirty`), which are reset. Diagnostics
+    /// only. A `mark_dirty` from the embedder records nothing here.
+    pub fn take_script_mutations(&self) -> ScriptMutations {
+        self.mutations.take()
     }
 
     /// The `<input>`/`<textarea>` values script set since the last call, as
@@ -1175,6 +1267,7 @@ impl DomBindings {
         // new one gets a full layout of its own.
         self.window.borrow_mut().document = Some(document.clone());
         self.dirty.set(DomDirty::Clean);
+        self.mutations.take();
 
         // Sync to JS
         let title = document.title().unwrap_or_default();
