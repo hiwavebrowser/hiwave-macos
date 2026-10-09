@@ -1013,6 +1013,15 @@ pub(crate) fn install(
         }),
     )?;
 
+    // Whether script has written to the DOM since the engine last took the
+    // mark, i.e. whether the published geometry is stale and a layout is owed.
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_dirty",
+        0,
+        Box::new(move |_| JsValue::Boolean(d.get() != DomDirty::Clean)),
+    )?;
+
     let h = host.clone();
     let d = dirty.clone();
     runtime.register_host_function(
