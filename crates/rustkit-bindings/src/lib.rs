@@ -2292,6 +2292,75 @@ mod tests {
         assert_eq!(bindings.advance_timers(60, 100).unwrap(), 6);
     }
 
+    /// Chromium 143, a `requestAnimationFrame` loop across a task that holds
+    /// the thread 600 ms: no callback during it, then 9 and 8 in the next two
+    /// 100 ms (7 to 10 at rest). It owes one frame for the time, not 37.
+    #[test]
+    fn a_live_turn_runs_one_round_of_animation_frames_however_long_it_took() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let read = |js: &str| match bindings.evaluate(js).unwrap() {
+            JsValue::String(s) => s,
+            other => panic!("{other:?}"),
+        };
+        bindings
+            .evaluate(
+                "var stamps = [], log = [];
+                 function loop(ts) { stamps.push(ts); requestAnimationFrame(loop); }
+                 requestAnimationFrame(loop);",
+            )
+            .unwrap();
+        assert_eq!(bindings.advance_timers(600, 1000).unwrap(), 1);
+        // The callback is told the time of the frame it runs in.
+        assert_eq!(read("stamps.join(',')"), "600");
+        // The loop asked for the frame after this one.
+        assert_eq!(bindings.next_timer_delay(), Some(16));
+        assert_eq!(bindings.advance_timers(10, 1000).unwrap(), 0);
+        assert_eq!(bindings.advance_timers(6, 1000).unwrap(), 1);
+        assert_eq!(read("stamps.join(',')"), "600,616");
+
+        // The turn's timers all run, and before its frame; a frame one of
+        // them asks for is in the turn's round.
+        bindings
+            .evaluate(
+                "setInterval(function () { log.push('t'); }, 100);
+                 setTimeout(function () { requestAnimationFrame(function () { log.push('f'); }); }, 50);",
+            )
+            .unwrap();
+        assert_eq!(bindings.advance_timers(300, 1000).unwrap(), 6);
+        assert_eq!(read("log.join(',')"), "t,t,t,f");
+        assert_eq!(read("String(stamps.length)"), "3");
+
+        // A callback cancelled by an earlier one of the same round does not
+        // run, and one asked for inside the round waits for the next.
+        bindings
+            .evaluate(
+                "log = [];
+                 var second;
+                 requestAnimationFrame(function () {
+                     log.push('a');
+                     cancelAnimationFrame(second);
+                     requestAnimationFrame(function () { log.push('c'); });
+                 });
+                 second = requestAnimationFrame(function () { log.push('b'); });",
+            )
+            .unwrap();
+        bindings.advance_timers(1000, 1000).unwrap();
+        assert_eq!(read("log.join(',')"), "a");
+        bindings.advance_timers(16, 1000).unwrap();
+        assert_eq!(read("log.join(',')"), "a,c");
+    }
+
+    /// The load's clock is virtual and has no frames of its own: a
+    /// `requestAnimationFrame` loop there is a 16 ms timer, as before.
+    #[test]
+    fn the_load_clock_still_runs_animation_frames_as_16ms_timers() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate("var n = 0; function loop() { n++; requestAnimationFrame(loop); } requestAnimationFrame(loop);")
+            .unwrap();
+        assert_eq!(bindings.run_timers(160, 1000).unwrap(), 10);
+    }
+
     #[test]
     fn timers_run_in_due_order_on_a_virtual_clock() {
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
