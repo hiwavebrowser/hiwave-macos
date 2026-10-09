@@ -1371,6 +1371,32 @@ impl Renderer {
         commands: &[DisplayCommand],
         target: &wgpu::TextureView,
     ) -> Result<(), RendererError> {
+        let resets = self.glyph_cache.resets();
+        self.execute_once(commands, target)?;
+        if self.glyph_cache.resets() == resets {
+            return Ok(());
+        }
+        // The glyph atlas filled up and started over while this frame was
+        // being built. Text batched before that samples the glyphs written
+        // over its own since: "static" over a page opened after others.
+        // Build the frame again: every glyph it needs is now placed after
+        // the reset, as long as one frame's glyphs fit in the atlas.
+        let resets = self.glyph_cache.resets();
+        self.execute_once(commands, target)?;
+        if self.glyph_cache.resets() != resets {
+            tracing::warn!(
+                commands = commands.len(),
+                "One frame's glyphs do not fit in the glyph atlas: some of its text is drawn wrong"
+            );
+        }
+        Ok(())
+    }
+
+    fn execute_once(
+        &mut self,
+        commands: &[DisplayCommand],
+        target: &wgpu::TextureView,
+    ) -> Result<(), RendererError> {
         // Clear batches
         self.color_vertices.clear();
         self.color_indices.clear();
