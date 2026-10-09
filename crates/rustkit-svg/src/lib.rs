@@ -4009,34 +4009,50 @@ mod tests {
     /// text-converted-to-paths tagline: 28 "o"-like glyphs, each an outer cubic loop
     /// and a reversed inner one (its counter), drawn under nonzero.
     fn glyph_line_svg() -> String {
-        // A 4-cubic ellipse about (cx, cy); `cw` picks the direction.
-        fn ellipse(cx: f32, cy: f32, rx: f32, ry: f32, cw: bool) -> String {
-            let k = 0.5523;
-            let (kx, ky) = (rx * k, ry * k);
-            let s = if cw { 1.0 } else { -1.0 };
-            format!(
-                "M{x0} {cy} C{x0} {a} {b} {top} {cx} {top} C{c} {top} {x1} {a} {x1} {cy} \
-                 C{x1} {d} {c} {bot} {cx} {bot} C{b} {bot} {x0} {d} {x0} {cy} Z ",
-                x0 = cx - s * rx,
-                x1 = cx + s * rx,
-                a = cy - ky,
-                b = cx - s * kx,
-                c = cx + s * kx,
-                d = cy + ky,
-                top = cy - ry,
-                bot = cy + ry,
-            )
-        }
-        let mut d = String::new();
-        for i in 0..28 {
-            // Glyphs differ a little, as real letters do, so their vertices
-            // don't land on the same rows.
-            let (cx, cy) = (90.0 + 175.0 * i as f32, 200.0 + (i % 7) as f32 * 3.0);
-            let (rx, ry) = (80.0 - (i % 3) as f32 * 4.0, 180.0 - (i % 5) as f32 * 7.0);
-            d.push_str(&ellipse(cx, cy, rx, ry, true));
-            d.push_str(&ellipse(cx, cy, rx - 35.0, ry - 50.0, false));
-        }
+        let d: String = glyph_line()
+            .iter()
+            .map(|&(cx, cy, rx, ry)| {
+                glyph_ellipse(cx, cy, rx, ry, true)
+                    + &glyph_ellipse(cx, cy, rx - 35.0, ry - 50.0, false)
+            })
+            .collect();
         format!(r##"<svg viewBox="0 0 5000 400"><path d="{d}" fill="#000"/></svg>"##)
+    }
+
+    /// Each glyph's outer ellipse `(cx, cy, rx, ry)`; its counter is 35 x 50
+    /// smaller in radius. Glyphs differ a little, as real letters do, so
+    /// their vertices don't land on the same rows.
+    fn glyph_line() -> Vec<(f32, f32, f32, f32)> {
+        (0..28)
+            .map(|i| {
+                let (cx, cy) = (90.0 + 175.0 * i as f32, 200.0 + (i % 7) as f32 * 3.0);
+                (
+                    cx,
+                    cy,
+                    80.0 - (i % 3) as f32 * 4.0,
+                    180.0 - (i % 5) as f32 * 7.0,
+                )
+            })
+            .collect()
+    }
+
+    /// A 4-cubic ellipse about (cx, cy); `cw` picks the direction.
+    fn glyph_ellipse(cx: f32, cy: f32, rx: f32, ry: f32, cw: bool) -> String {
+        let k = 0.5523;
+        let (kx, ky) = (rx * k, ry * k);
+        let s = if cw { 1.0 } else { -1.0 };
+        format!(
+            "M{x0} {cy} C{x0} {a} {b} {top} {cx} {top} C{c} {top} {x1} {a} {x1} {cy} \
+             C{x1} {d} {c} {bot} {cx} {bot} C{b} {bot} {x0} {d} {x0} {cy} Z ",
+            x0 = cx - s * rx,
+            x1 = cx + s * rx,
+            a = cy - ky,
+            b = cx - s * kx,
+            c = cx + s * kx,
+            d = cy + ky,
+            top = cy - ry,
+            bot = cy + ry,
+        )
     }
 
     fn fill_polygons(commands: &[DisplayCommand]) -> Vec<&Vec<(f32, f32)>> {
@@ -4064,7 +4080,142 @@ mod tests {
         let commands = doc.render(0.0, 0.0, 139.0, 9.0);
         let polys = fill_polygons(&commands);
         assert!(!polys.is_empty(), "the glyphs must still paint");
-        assert!(polys.len() <= 2_000, "{} fill polygons for a 139 x 9 px shape", polys.len());
+        assert!(
+            polys.len() <= 2_000,
+            "{} fill polygons for a 139 x 9 px shape",
+            polys.len()
+        );
+    }
+
+    /// The most any point of `points`' chords (closing one included) sits
+    /// off the ellipse `(cx, cy, rx, ry)`, all in device pixels: the chord
+    /// midpoints are where a flattened curve sags furthest.
+    fn worst_sag(points: &[(f32, f32)], (cx, cy, rx, ry): (f32, f32, f32, f32)) -> f32 {
+        (0..points.len())
+            .map(|i| {
+                let (a, b) = (points[i], points[(i + 1) % points.len()]);
+                let (x, y) = ((a.0 + b.0) * 0.5 - cx, (a.1 + b.1) * 0.5 - cy);
+                let rho = ((x / rx).powi(2) + (y / ry).powi(2)).sqrt();
+                (1.0 - rho).abs() * rx.max(ry)
+            })
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn test_path_drawn_large_keeps_its_curves_smooth() {
+        // The tagline's glyphs at 1000 px wide (a 0.2 scale) and at the
+        // viewBox's own 5000 px: each flattened outline stays within the
+        // device tolerance of its ellipse (plus the 4-cubic approximation's
+        // own ~0.03%), and keeps at least as many points as a circle of the
+        // glyph's smaller radius needs to stay within it.
+        for scale in [0.2_f32, 1.0] {
+            for (cx, cy, rx, ry) in glyph_line() {
+                let path = SvgPath {
+                    commands: SvgPath::parse(&glyph_ellipse(cx, cy, rx, ry, true)),
+                    ..Default::default()
+                };
+                let outline: Vec<(f32, f32)> = path
+                    .to_line_segments_within(FLATTEN_TOLERANCE_PX / scale)
+                    .concat()
+                    .into_iter()
+                    .map(|(x, y)| (x * scale, y * scale))
+                    .collect();
+                let device = (cx * scale, cy * scale, rx * scale, ry * scale);
+                let sag = worst_sag(&outline, device);
+                assert!(sag <= 0.3, "scale {scale}: sags {sag} px off the curve");
+                let r = rx.min(ry) * scale;
+                let floor = (std::f32::consts::PI / (1.0 - FLATTEN_TOLERANCE_PX / r).acos()).floor()
+                    as usize;
+                assert!(
+                    outline.len() >= floor,
+                    "scale {scale}: {} points, a radius-{r} circle needs {floor}",
+                    outline.len()
+                );
+            }
+        }
+        // And the 1000 px drawing has more points than the 139 px one.
+        let path = SvgPath {
+            commands: SvgPath::parse(&glyph_ellipse(90.0, 200.0, 80.0, 180.0, true)),
+            ..Default::default()
+        };
+        let points = |scale: f32| {
+            path.to_line_segments_within(FLATTEN_TOLERANCE_PX / scale)
+                .concat()
+                .len()
+        };
+        assert!(
+            points(0.2) >= 2 * points(9.0 / 400.0),
+            "{} vs {}",
+            points(0.2),
+            points(9.0 / 400.0)
+        );
+    }
+
+    #[test]
+    fn test_small_glyph_line_fill_covers_the_glyphs_once() {
+        // The 139 x 9 px drawing (scale 9 / 400) still fills each ring once,
+        // leaves the counters and the gaps empty, and covers the rings' area.
+        let scale = 9.0 / 400.0;
+        let doc = SvgDocument::parse(&glyph_line_svg()).expect("parse");
+        let commands = doc.render(0.0, 0.0, 139.0, 9.0);
+        let polys = fill_polygons(&commands);
+
+        // Area: every piece is convex and they don't overlap, so their sum
+        // is the coverage. The true rings are pi * (rx * ry - counter); a
+        // polygon inside a curve to 0.25 px loses about 1% at this size
+        // (develop covered 351.0 px^2 here, this 347.4, exact 351.5).
+        let area: f32 = polys.iter().map(|p| polygon_area(p)).sum();
+        let exact: f32 = glyph_line()
+            .iter()
+            .map(|&(_, _, rx, ry)| {
+                std::f32::consts::PI * (rx * ry - (rx - 35.0) * (ry - 50.0)) * scale * scale
+            })
+            .sum();
+        assert!(
+            (area - exact).abs() <= exact * 0.02,
+            "covers {area} px^2, the rings are {exact}"
+        );
+
+        // Points: on a 0.2 px grid, a point clearly inside a ring is painted
+        // exactly once and every other clear point not at all. A point within
+        // 0.3 px of an edge may go either way (0.25 px tolerance).
+        let (mut inside, mut outside) = (0, 0);
+        for gy in 0..45 {
+            for gx in 0..600 {
+                // Off the vertex rows, where two pieces share an edge.
+                let p = (gx as f32 * 0.2 + 0.1037, gy as f32 * 0.2 + 0.0913);
+                let mut clear = true;
+                let mut in_ring = false;
+                for &(cx, cy, rx, ry) in &glyph_line() {
+                    let (dx, dy) = (p.0 - cx * scale, p.1 - cy * scale);
+                    let rho = |rx: f32, ry: f32| {
+                        ((dx / (rx * scale)).powi(2) + (dy / (ry * scale)).powi(2)).sqrt()
+                    };
+                    let (outer, inner) = (rho(rx, ry), rho(rx - 35.0, ry - 50.0));
+                    if (outer - 1.0).abs() * rx.min(ry) * scale < 0.3
+                        || (inner - 1.0).abs() * (rx - 35.0).min(ry - 50.0) * scale < 0.3
+                    {
+                        clear = false;
+                    }
+                    in_ring |= outer < 1.0 && inner > 1.0;
+                }
+                if !clear {
+                    continue;
+                }
+                let hits = fan_coverage(&commands, p);
+                if in_ring {
+                    inside += 1;
+                    assert_eq!(hits, 1, "{p:?} is in a ring");
+                } else {
+                    outside += 1;
+                    assert_eq!(hits, 0, "{p:?} is outside every ring");
+                }
+            }
+        }
+        assert!(
+            inside > 100 && outside > 1000,
+            "{inside} inside, {outside} outside"
+        );
     }
 
     #[test]
