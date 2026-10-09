@@ -187,6 +187,8 @@ mod resize_coalesce_tests;
 mod flex_percent_basis_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
+#[cfg(test)]
+mod ancestor_attribute_tests;
 #[cfg(all(test, feature = "headless"))]
 mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -6478,7 +6480,14 @@ impl Engine {
                 let classes = element_classes(attributes);
                 let id = attributes.get("id").cloned();
                 let mut child_ancestors: Vec<Ancestor> = Vec::with_capacity(ancestors.len() + 1);
-                child_ancestors.push(Rc::new((tag_lower.to_string(), classes, id, None)));
+                // With the attributes an ancestor compound reads, so that
+                // `[data-x] > .y` and `.a:not([hidden]) .y` are tested
+                // against this element and not passed by every parent.
+                let carried = match active_rule_index(stylesheets) {
+                    Some(ix) => ix.reads.ancestor_entry_attributes(attributes),
+                    None => attributes.clone(),
+                };
+                child_ancestors.push(Rc::new((tag_lower.to_string(), classes, id, Some(Rc::new(carried)))));
                 child_ancestors.extend(ancestors.iter().cloned());
 
                 // Check for ::before pseudo-element
@@ -29425,8 +29434,9 @@ struct MatchShare {
     entries: HashMap<MatchShareKey, Rc<MatchShareEntry>>,
     /// Chain ids by content: the rest of the chain's id, then the nearest
     /// ancestor's tag, classes and id (the id only when a selector names
-    /// it). The empty chain is 0.
-    chain_ids: HashMap<(u64, String, Vec<String>, Option<String>), u64>,
+    /// it) and the attributes an ancestor compound reads. The empty chain
+    /// is 0.
+    chain_ids: HashMap<(u64, String, Vec<String>, Option<String>, Vec<(String, MatchKeyValue)>), u64>,
     /// The enclosing elements whose children are being built, innermost
     /// last: the address and length of the ancestor slice their children
     /// are matched against, and its chain id.
@@ -29459,6 +29469,11 @@ struct SelectorReads {
     /// every element ran `match_attribute_selector` over the selector text
     /// for each of them, 14% of wikipedia's build with sharing on.
     attribute_tests: HashMap<String, Vec<(&'static str, String)>>,
+    /// Attribute names some ancestor compound reads (`[data-x] > .y`,
+    /// `.a:not([hidden]) .y`). An element's entry in its descendants'
+    /// ancestor chain carries these of its attributes, and chains that
+    /// differ in them do not share matches.
+    ancestor_attributes: std::collections::HashSet<String>,
     /// Where the sheets read `:hover` and `:active`.
     hover: PointerReads,
     active: PointerReads,
@@ -29555,9 +29570,47 @@ impl SelectorReads {
 
     fn note_ancestor(&mut self, compound: &AncestorCompound) {
         self.ids.extend(compound.id.iter().cloned());
-        for alternative in compound.any_of.iter().flatten() {
-            self.note_ancestor(alternative);
+        for attr in &compound.attrs {
+            let name = SelectorMatcher::attr_selector_name(attr).to_string();
+            if let Some((op, value)) = SelectorMatcher::attr_selector_test(attr) {
+                let tests = self.attribute_tests.entry(name.clone()).or_default();
+                if !tests.iter().any(|(o, v)| *o == op && v == value) {
+                    tests.push((op, value.to_string()));
+                }
+            }
+            self.ancestor_attributes.insert(name);
         }
+        for inner in compound.any_of.iter().flatten().chain(&compound.none_of) {
+            self.note_ancestor(inner);
+        }
+    }
+
+    /// The attributes of `attributes` an ancestor compound can read, for
+    /// the element's entry in its descendants' chain.
+    fn ancestor_entry_attributes(&self, attributes: &HashMap<String, String>) -> HashMap<String, String> {
+        if self.ancestor_attributes.is_empty() {
+            return HashMap::new();
+        }
+        attributes
+            .iter()
+            .filter(|(name, _)| self.ancestor_attributes.contains(*name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    }
+
+    /// What a chain id holds of its nearest ancestor's attributes: those
+    /// an ancestor compound reads, each as far as a selector can read it.
+    fn chain_attributes(&self, attributes: Option<&HashMap<String, String>>) -> Vec<(String, MatchKeyValue)> {
+        let Some(attributes) = attributes.filter(|_| !self.ancestor_attributes.is_empty()) else {
+            return Vec::new();
+        };
+        let mut held: Vec<(String, MatchKeyValue)> = attributes
+            .iter()
+            .filter(|(name, _)| self.ancestor_attributes.contains(*name))
+            .map(|(name, value)| (name.clone(), self.keyed_value(name, value)))
+            .collect();
+        held.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        held
     }
 
     fn note_subject(&mut self, subject: &SubjectCompound) -> bool {
@@ -29724,11 +29777,12 @@ impl MatchShareChain {
             let fresh = share.next_chain;
             let id = match rest.filter(|_| child_chain.len() == parent_chain.len() + 1) {
                 Some(rest) => {
-                    let (tag, classes, id, _) = &**nearest;
+                    let (tag, classes, id, attributes) = &**nearest;
                     let named = id.clone().filter(|id| ix.reads.ids.contains(id));
+                    let read = ix.reads.chain_attributes(attributes.as_deref());
                     *share
                         .chain_ids
-                        .entry((rest, tag.clone(), classes.clone(), named))
+                        .entry((rest, tag.clone(), classes.clone(), named, read))
                         .or_insert(fresh)
                 }
                 None => fresh,
