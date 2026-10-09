@@ -13,11 +13,11 @@ The site's `body` is `display: flex; flex-direction: column; min-height: 100vh`,
 (`body.smallhead div#wrapper { padding: 15px 0 }`). In a column flex container `margin: 0 auto` on an item
 auto-centers it on the cross (horizontal) axis. Chromium centers `#wrapper` at x=170 (a 170px gutter each side at 1280).
 RustKit resolves the item's auto margins to 0 and puts it at x=0, so the content is flush against the left edge.
-The same page with `body` as a plain block, or the same item in a row flex container, is not affected the same way
+The same item in a block `body`, or on the main axis of a row flex container, matches Chromium
 (see controls), so the defect is cross-axis `auto` margins on a flex item in a column container.
 It is not `padding`, `margin` on `body`, or `max-width`; none of those are involved.
 
-## Reduced page (800 is not used; viewport 1280x800)
+## Reduced page, 1280x800
 
 | | Chromium 148 | RustKit `f54103d9` |
 |---|---|---|
@@ -29,12 +29,12 @@ It is not `padding`, `margin` on `body`, or `max-width`; none of those are invol
 | **pixel (200,200)** (left of where the wrapper should be) | **255,255,255** | **153,204,153** (wrapper green) |
 | **pixel (600,200)** (inside the centered wrapper) | **153,204,153** | **255,255,255** |
 
-Controls (RustKit, same file with one change; Chromium also centers these):
+Controls (same file with one change, `#wrapper` rect):
 
-| Variant | RustKit `#wrapper` rect |
-|---|---|
-| `body` as `display: block` (remove `display:flex; flex-direction:column`) | **490,18 300x80**, centered |
-| `flex-direction: row` | 91.06,0 888.94x80 (auto margins absorb free space on the main axis; width is not the 300px asked, unrelated to this finding) |
+| Variant | Chromium | RustKit |
+|---|---|---|
+| `body` as `display: block` (remove `display: flex; flex-direction: column`) | 490,18 300x80 | 490,18 300x80 (matches) |
+| `flex-direction: row` (main-axis auto margins) | 91.06,0 888.94x800 | 91.06,0 888.94x80 (x and width match; height differs, not this finding) |
 
 ## Live page snapshot, 1280x800
 
