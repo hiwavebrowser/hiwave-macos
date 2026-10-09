@@ -342,7 +342,7 @@ impl RustKitView {
     pub fn relayout(&self) {
         let mut engine = self.engine.borrow_mut();
         if let Some(view_id) = self.view_id {
-            if let Err(e) = engine.relayout(view_id) {
+            if let Err(e) = engine.relayout_for(view_id, rustkit_engine::RelayoutCause::Input) {
                 debug!(error = %e, "relayout after edit failed");
             }
         }
