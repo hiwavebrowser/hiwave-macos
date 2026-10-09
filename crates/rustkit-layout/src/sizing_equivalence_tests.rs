@@ -12,9 +12,16 @@
 //! whatever `20px` does, the other spellings must do the same. Each case runs
 //! through both entry points, `layout` and `layout_with_collapse`.
 //!
-//! Not here, because `rustkit-engine` resolves them to `px` before layout ever
-//! sees them (`FlexBasis`, `TrackSize` and `border_spacing` carry no unit):
-//! `flex-basis`, `grid-template-columns` track sizes and `border-spacing`.
+//! NOT covered: `flex-basis`, `grid-template-columns` track sizes and
+//! `border-spacing`. `FlexBasis`, `TrackSize` and `border_spacing` carry no
+//! unit, so layout only ever sees px; `rustkit-engine` converts them, and
+//! (read, not tested) its converters look like the same defect: `em`, `vw`
+//! and mixed `calc()` become `auto`, or 0 for `border-spacing`. They need
+//! engine-side equivalence tests.
+//!
+//! `calc(16px + 4px)` folds to `Length::Px(20.0)` at parse time, so that
+//! spelling only guards the parser's folding; `calc(1em + 4px)` is the one
+//! that exercises `Length::Calc`.
 
 use super::*;
 use crate::table::fixup_table_boxes;
@@ -386,7 +393,7 @@ cells! {
     grid_item_min_height: |l| grid_item(min_height, l);
     grid_item_max_height: |l| grid_item(max_height, l);
     grid_item_padding: |l| grid_item(padding, l);
-    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
+    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3611"]
     grid_item_margin: |l| grid_item(margin, l);
     grid_container_gap: grid_gap;
 
@@ -407,44 +414,44 @@ cells! {
     inline_block_max_width: |l| inline_block(max_width, l);
     inline_block_min_height: |l| inline_block(min_height, l);
     inline_block_max_height: |l| inline_block(max_height, l);
-    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
+    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3611"]
     inline_block_padding: |l| inline_block(padding, l);
     inline_block_margin: |l| inline_block(margin, l);
 
-    #[ignore = "W7-A: own_max_content_width takes a px width only, grid.rs:3441 (draft PR #622 fixes it)"]
+    #[ignore = "W7-A: own_max_content_width takes a px width only, grid.rs:3451 (draft PR #622 fixes it)"]
     shrink_to_fit_child_width: |l| shrink_to_fit(width, l);
     shrink_to_fit_child_height: |l| shrink_to_fit(height, l);
     shrink_to_fit_child_min_width: |l| shrink_to_fit(min_width, l);
     shrink_to_fit_child_max_width: |l| shrink_to_fit(max_width, l);
     shrink_to_fit_child_min_height: |l| shrink_to_fit(min_height, l);
     shrink_to_fit_child_max_height: |l| shrink_to_fit(max_height, l);
-    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
+    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3611"]
     shrink_to_fit_child_padding: |l| shrink_to_fit(padding, l);
-    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
+    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3611"]
     shrink_to_fit_child_margin: |l| shrink_to_fit(margin, l);
 
-    #[ignore = "W7-A: own_max_content_width takes a px width only, grid.rs:3441 (draft PR #622 fixes it)"]
+    #[ignore = "W7-A: own_max_content_width takes a px width only, grid.rs:3451 (draft PR #622 fixes it)"]
     float_child_width: |l| float(width, l);
     float_child_height: |l| float(height, l);
     float_child_min_width: |l| float(min_width, l);
     float_child_max_width: |l| float(max_width, l);
     float_child_min_height: |l| float(min_height, l);
     float_child_max_height: |l| float(max_height, l);
-    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
+    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3611"]
     float_child_padding: |l| float(padding, l);
-    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
+    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3611"]
     float_child_margin: |l| float(margin, l);
 
-    #[ignore = "W7-A: own_max_content_width takes a px width only, grid.rs:3441 (draft PR #622 fixes it)"]
+    #[ignore = "W7-A: own_max_content_width takes a px width only, grid.rs:3451 (draft PR #622 fixes it)"]
     content_sized_flex_item_width: |l| content_sized_flex(width, l);
     content_sized_flex_item_height: |l| content_sized_flex(height, l);
     content_sized_flex_item_min_width: |l| content_sized_flex(min_width, l);
     content_sized_flex_item_max_width: |l| content_sized_flex(max_width, l);
     content_sized_flex_item_min_height: |l| content_sized_flex(min_height, l);
     content_sized_flex_item_max_height: |l| content_sized_flex(max_height, l);
-    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
+    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3611"]
     content_sized_flex_item_padding: |l| content_sized_flex(padding, l);
-    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
+    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3611"]
     content_sized_flex_item_margin: |l| content_sized_flex(margin, l);
 
     table_cell_width: |l| table_cell(width, l);
@@ -453,6 +460,6 @@ cells! {
     table_cell_max_width: |l| table_cell(max_width, l);
     table_cell_min_height: |l| table_cell(min_height, l);
     table_cell_max_height: |l| table_cell(max_height, l);
-    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
+    #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3611"]
     table_cell_padding: |l| table_cell(padding, l);
 }
