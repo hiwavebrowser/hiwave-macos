@@ -1694,8 +1694,8 @@ impl Engine {
     /// Create a headless view for offscreen rendering (testing/CI mode).
     ///
     /// This creates a view without requiring a window, perfect for unit tests
-    /// and CI environments. Requires the "headless" feature flag.
-    #[cfg(feature = "headless")]
+    /// and CI environments. Available to unit tests and with the "headless" feature.
+    #[cfg(any(test, feature = "headless"))]
     pub fn create_headless_view(&mut self, bounds: Bounds) -> Result<EngineViewId, EngineError> {
         let id = EngineViewId::new();
         let viewhost_id = ViewId::new();
@@ -30839,8 +30839,9 @@ mod style_share_tests {
         let stored = |ancestors: &[Ancestor]| {
             let _chain = MatchShareChain::enter(&sheets, &[], ancestors);
             // Another slice than the scope's, equal or not, is not keyed.
+            let other_slice = ancestors.to_vec();
             assert!(matches!(
-                match_share_lookup(&ix, "li", &none, ancestors),
+                match_share_lookup(&ix, "li", &none, &other_slice),
                 MatchShared::Untracked
             ));
             match match_share_lookup(&ix, "li", &none, ancestors) {
