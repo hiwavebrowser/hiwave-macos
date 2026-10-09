@@ -4161,9 +4161,10 @@ mod tests {
         let polys = fill_polygons(&commands);
 
         // Area: every piece is convex and they don't overlap, so their sum
-        // is the coverage. The true rings are pi * (rx * ry - counter); a
-        // polygon inside a curve to 0.25 px loses about 1% at this size
-        // (develop covered 351.0 px^2 here, this 347.4, exact 351.5).
+        // is the coverage. The true rings are pi * (rx * ry - counter). Both
+        // outlines are inscribed, so the ring loses ink outside and gains it
+        // in the counter; at a 0.1 px tolerance the net is about -2% here
+        // (develop covered 351.0 px^2, this 344.9, exact 351.5).
         let area: f32 = polys.iter().map(|p| polygon_area(p)).sum();
         let exact: f32 = glyph_line()
             .iter()
@@ -4172,13 +4173,13 @@ mod tests {
             })
             .sum();
         assert!(
-            (area - exact).abs() <= exact * 0.02,
+            (area - exact).abs() <= exact * 0.03,
             "covers {area} px^2, the rings are {exact}"
         );
 
         // Points: on a 0.2 px grid, a point clearly inside a ring is painted
         // exactly once and every other clear point not at all. A point within
-        // 0.3 px of an edge may go either way (0.25 px tolerance).
+        // 0.3 px of an edge may go either way.
         let (mut inside, mut outside) = (0, 0);
         for gy in 0..45 {
             for gx in 0..600 {
@@ -4219,10 +4220,32 @@ mod tests {
     }
 
     #[test]
+    fn test_icon_dot_keeps_its_ink() {
+        // A filled r=4 dot in a 24-unit icon, drawn 16 px (r = 2.67 px): the
+        // commonest small curve on a page. Flattened polygons sit inside
+        // their curves, so a coarse tolerance shrinks the dot (0.25 px cost
+        // it 10%, 0.1 px costs 2.6%); keep it within 4% of the true area.
+        let doc = SvgDocument::parse(
+            r##"<svg viewBox="0 0 24 24"><path d="M8 12 C8 9.8 9.8 8 12 8 C14.2 8 16 9.8 16 12 C16 14.2 14.2 16 12 16 C9.8 16 8 14.2 8 12 Z" fill="#000"/></svg>"##,
+        )
+        .expect("parse");
+        let commands = doc.render(0.0, 0.0, 16.0, 16.0);
+        let area: f32 = fill_polygons(&commands)
+            .iter()
+            .map(|p| polygon_area(p))
+            .sum();
+        let r = 4.0 * 16.0 / 24.0;
+        let exact = std::f32::consts::PI * r * r;
+        assert!(
+            (area - exact).abs() <= exact * 0.04,
+            "the dot covers {area} px^2, a circle of radius {r} is {exact}"
+        );
+    }
+
+    #[test]
     fn test_svg_document_parse() {
         let svg = r#"<svg viewBox="0 0 100 100"><rect x="10" y="10" width="80" height="80" fill="red"/></svg>"#;
         let doc = SvgDocument::parse(svg).unwrap();
         assert!(doc.view_box.is_some());
     }
 }
-
