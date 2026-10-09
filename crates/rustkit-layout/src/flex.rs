@@ -6202,4 +6202,158 @@ mod windows_flex_pins {
             "definite-height child must not stretch: {fixed_h}"
         );
     }
+
+    /// A flex container of `direction` in a 1000 x 400 containing block,
+    /// 200 tall when `definite_height`, holding `children`, laid out.
+    fn auto_margin_container(
+        direction: FlexDirection,
+        definite_height: bool,
+        children: Vec<ComputedStyle>,
+    ) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = direction;
+        if definite_height {
+            style.height = Length::Px(200.0);
+        }
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        for cs in children {
+            container.children.push(LayoutBox::new(BoxType::Block, cs));
+        }
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1000.0, 400.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+        container
+    }
+
+    fn sized(width: f32, height: f32) -> ComputedStyle {
+        let mut cs = ComputedStyle::new();
+        cs.width = Length::Px(width);
+        cs.height = Length::Px(height);
+        cs
+    }
+
+    /// H25 (simonwillison.net): `body { display: flex; flex-direction: column }`
+    /// with `#wrapper { width: 940px; margin: 0 auto }`. The auto margins were
+    /// resolved to 0 and the wrapper sat at x=0; Chrome 148 centres it
+    /// (docs/diagnostics/2026-10-09/simonwillison_gutter_h25.html: 300px in
+    /// 1280 at x=490).
+    #[test]
+    fn column_item_with_auto_side_margins_is_centred() {
+        let mut cs = sized(300.0, 50.0);
+        cs.margin_left = Length::Auto;
+        cs.margin_right = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Column, false, vec![cs]);
+
+        let item = &container.children[0].dimensions;
+        assert!(
+            (item.content.x - 350.0).abs() < 0.5,
+            "a 300px item with `margin: 0 auto` in a 1000px column is at x=350, got {}",
+            item.content.x
+        );
+        assert!((item.content.width - 300.0).abs() < 0.5);
+        assert!((item.margin.left - 350.0).abs() < 0.5);
+        assert!((item.margin.right - 350.0).abs() < 0.5);
+    }
+
+    /// One auto cross margin takes all of the free space.
+    #[test]
+    fn column_item_with_one_auto_side_margin_is_pushed_across() {
+        let mut cs = sized(300.0, 50.0);
+        cs.margin_left = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Column, false, vec![cs]);
+
+        let x = container.children[0].dimensions.content.x;
+        assert!((x - 700.0).abs() < 0.5, "margin-left: auto puts it at x=700, got {x}");
+    }
+
+    /// css-flexbox-1 §8.1: an auto cross margin wins over `align-self`, so the
+    /// item is not stretched either. Its width stays its own, not the row's.
+    #[test]
+    fn column_item_with_auto_side_margins_is_not_stretched() {
+        let mut cs = ComputedStyle::new();
+        cs.height = Length::Px(50.0);
+        cs.margin_left = Length::Auto;
+        cs.margin_right = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Column, false, vec![cs]);
+
+        let w = container.children[0].dimensions.content.width;
+        assert!(w < 999.0, "an auto-margin item keeps its fit-content width, got {w}");
+    }
+
+    /// The main axis: `margin-left: auto` on a row item takes the line's free
+    /// space before `justify-content` sees any (the "push the last nav item
+    /// to the right" idiom).
+    #[test]
+    fn row_item_with_auto_left_margin_takes_the_free_space() {
+        let mut pushed = sized(100.0, 50.0);
+        pushed.margin_left = Length::Auto;
+        let container = auto_margin_container(
+            FlexDirection::Row,
+            false,
+            vec![sized(100.0, 50.0), pushed],
+        );
+
+        let x0 = container.children[0].dimensions.content.x;
+        let x1 = container.children[1].dimensions.content.x;
+        assert!(x0.abs() < 0.5, "the first item stays at the start, got {x0}");
+        assert!((x1 - 900.0).abs() < 0.5, "margin-left: auto puts it at x=900, got {x1}");
+    }
+
+    /// Auto margins on both main sides centre the item, whatever
+    /// `justify-content` says.
+    #[test]
+    fn row_item_with_auto_side_margins_is_centred() {
+        let mut cs = sized(100.0, 50.0);
+        cs.margin_left = Length::Auto;
+        cs.margin_right = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Row, false, vec![cs]);
+
+        let x = container.children[0].dimensions.content.x;
+        assert!((x - 450.0).abs() < 0.5, "`margin: 0 auto` centres at x=450, got {x}");
+    }
+
+    /// The cross axis of a row: `margin: auto 0` centres a 50px item in a
+    /// 200px container.
+    #[test]
+    fn row_item_with_auto_block_margins_is_centred_vertically() {
+        let mut cs = sized(100.0, 50.0);
+        cs.margin_top = Length::Auto;
+        cs.margin_bottom = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Row, true, vec![cs]);
+
+        let y = container.children[0].dimensions.content.y;
+        assert!((y - 75.0).abs() < 0.5, "`margin: auto 0` centres at y=75, got {y}");
+    }
+
+    /// The main axis of a column: `margin-top: auto` pushes the footer to the
+    /// bottom of a definite-height column.
+    #[test]
+    fn column_item_with_auto_top_margin_is_pushed_to_the_end() {
+        let mut footer = sized(100.0, 50.0);
+        footer.margin_top = Length::Auto;
+        let container = auto_margin_container(
+            FlexDirection::Column,
+            true,
+            vec![sized(100.0, 50.0), footer],
+        );
+
+        let y = container.children[1].dimensions.content.y;
+        assert!((y - 150.0).abs() < 0.5, "margin-top: auto puts it at y=150, got {y}");
+    }
+
+    /// No free space, no auto margin: an item wider than the container
+    /// overflows at the end, it is not pulled back by a negative margin.
+    #[test]
+    fn auto_margins_are_zero_when_the_item_overflows() {
+        let mut cs = sized(1200.0, 50.0);
+        cs.margin_left = Length::Auto;
+        cs.margin_right = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Column, false, vec![cs]);
+
+        let x = container.children[0].dimensions.content.x;
+        assert!(x.abs() < 0.5, "an overflowing item starts at x=0, got {x}");
+    }
 }
