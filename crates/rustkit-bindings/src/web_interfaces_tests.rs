@@ -53,6 +53,45 @@ fn elements_are_instances_of_their_tags_interface() {
     assert_eq!(ev(&b, "var t1; try { new HTMLAnchorElement(); t1 = 'no throw'; } catch (e) { t1 = e.name + ':' + e.message; } t1"), "TypeError:Illegal constructor");
 }
 
+/// github.com's landing page asks `canvas.getContext("webgl")` to see whether
+/// it may show its 3D scene and calls `video.load()` on its hero video, both
+/// in effects. Each threw "not a callable function", an error boundary caught
+/// it and mounted the whole page again, on every turn of the live loop.
+///
+/// Chromium 143: `getContext('nope')` is null; on a `<video>` with no source
+/// `load()` and `pause()` return undefined, `paused` is true, `readyState` 0,
+/// `canPlayType('x/y')` "", `currentTime` 0, `duration` NaN, `ended` false,
+/// and `play()` returns a promise that rejects with a DOMException.
+#[test]
+fn a_canvas_has_no_context_and_a_media_element_plays_nothing_without_throwing() {
+    let b = bound();
+    b.evaluate("document.body.innerHTML = '<canvas id=\"c\"></canvas><video id=\"v\"></video><audio id=\"au2\"></audio>';").unwrap();
+    assert_eq!(
+        ev(&b, "var c = document.getElementById('c'); String([typeof c.getContext, c.getContext('webgl'), c.getContext('2d'), document.createElement('canvas').getContext('experimental-webgl')].join())"),
+        "function,,,"
+    );
+    // The page's own check, as written.
+    assert_eq!(
+        ev(&b, "var e = document.createElement('canvas'), t = e.getContext('webgl') || e.getContext('experimental-webgl'); String(!!(t && t instanceof WebGLRenderingContext))"),
+        "false"
+    );
+    assert_eq!(
+        ev(&b, "var v = document.getElementById('v'); String([typeof v.load, v.load(), typeof v.pause, v.pause(), v.paused, v.readyState, JSON.stringify(v.canPlayType('video/mp4')), v.currentTime, v.duration, v.ended].join())"),
+        "function,,function,,true,0,\"\",0,NaN,false"
+    );
+    assert_eq!(
+        ev(&b, "String([HTMLMediaElement.HAVE_NOTHING, HTMLMediaElement.HAVE_METADATA, HTMLMediaElement.HAVE_CURRENT_DATA, HTMLMediaElement.HAVE_FUTURE_DATA, HTMLMediaElement.HAVE_ENOUGH_DATA, v.HAVE_CURRENT_DATA].join())"),
+        "0,1,2,3,4,2"
+    );
+    // An <audio> and a created element answer the same; a <div> has none of it.
+    assert_eq!(
+        ev(&b, "String([typeof document.getElementById('au2').play, document.createElement('video').paused, typeof document.createElement('div').play, typeof document.createElement('div').getContext].join())"),
+        "function,true,undefined,undefined"
+    );
+    b.evaluate("var played = 'pending', p = v.play(); p.then(function () { played = 'resolved'; }, function (e) { played = e.name + ':' + (e instanceof DOMException); });").unwrap();
+    assert_eq!(ev(&b, "Object.prototype.toString.call(p) + ' ' + played"), "[object Promise] NotSupportedError:true");
+}
+
 #[test]
 fn event_subclasses_extend_event_with_their_init_members() {
     let b = bound();
