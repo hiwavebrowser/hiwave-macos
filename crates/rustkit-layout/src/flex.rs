@@ -753,8 +753,7 @@ fn layout_flex_container_at(
                         && wrap == FlexWrap::NoWrap
                         && definite_inner_cross.is_some()
                         && !item.has_explicit_cross_size
-                        && resolved_align(item.align_self, style.align_items)
-                            == AlignItems::Stretch;
+                        && item.stretches(style.align_items);
                     // A `min-height` floor counts: steps 4–10 already grew
                     // the items into it (`min-height: 100dvh` columns, x's
                     // layout), and Chrome 148 lays their contents out at
@@ -864,12 +863,17 @@ fn layout_flex_container_at(
                     // `height: 100%` block in a stretched item of a 44px row
                     // leave the item at 44), where every other item still
                     // grows to its flow as it did.
+                    //
+                    // `stretches()` and not `align-self` alone: an item with
+                    // an auto cross margin is not stretched (§9.4.11), so a
+                    // vertically centred card's `height: 50%` child sees an
+                    // indefinite height and the card stays as tall as its
+                    // flow.
                     let percent_child = has_percent_height_child(item.layout_box);
                     let stretched = cross_axis == Axis::Vertical
                         && wrap == FlexWrap::NoWrap
                         && !item.has_explicit_cross_size
-                        && resolved_align(item.align_self, style.align_items)
-                            == AlignItems::Stretch;
+                        && item.stretches(style.align_items);
                     let stretch_target = definite_inner_cross
                         .filter(|_| percent_child && stretched)
                         .map(|cross| {
@@ -1273,6 +1277,8 @@ fn layout_flex_container_at(
                 );
                 for item in &mut line.items {
                     if item.main_margin_auto != (false, false) {
+                        // Top and bottom: this step only runs for a
+                        // vertical main axis.
                         let m = &mut item.layout_box.dimensions.margin;
                         (m.top, m.bottom) = (item.main_margin_start, item.main_margin_end);
                     }
