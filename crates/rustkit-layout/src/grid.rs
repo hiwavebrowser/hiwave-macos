@@ -4285,10 +4285,11 @@ fn apply_justify_self(
         // which is the size this helper returns.
         Length::Auto if align != JustifySelf::Stretch => estimate_max_content_width(child)
             .min(cell_width.max(estimate_min_content_width(child))),
-        Length::Auto => cell_width,
+        Length::Auto | Length::FitContent => cell_width,
         Length::Px(w) => w,
         Length::Percent(p) => cell_width * p / 100.0,
-        _ => cell_width,
+        // Every other length: `1.25rem` or `2vw` fell to the cell width.
+        ref l => child.length_to_px(l, cell_width),
     };
     let stretched = align == JustifySelf::Stretch && !has_explicit_width;
     let child_width = if stretched { cell_width } else { child_width };
@@ -4301,11 +4302,16 @@ fn apply_justify_self(
     // `width` (box-sizing decides what it covers) and a border box for
     // `auto`, so a content-box bound on an auto width gets the item's px
     // padding and border added.
+    // Every length that needs no base, not px alone: a `1.25rem` bound was
+    // no bound at all. Percentages stay as they were (unread).
+    let definite = |l: &Length| match l {
+        Length::Auto | Length::FitContent | Length::Percent(_) => None,
+        Length::Calc(sum) if sum.percent != 0.0 => None,
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => None,
+        l => Some(child.length_to_px(l, 0.0)),
+    };
     let own = {
-        let px = |l: &Length| match l {
-            Length::Px(v) => *v,
-            _ => 0.0,
-        };
+        let px = |l: &Length| definite(l).unwrap_or(0.0);
         let pb = px(&child.style.padding_left)
             + px(&child.style.padding_right)
             + px(&child.style.border_left_width)
@@ -4317,10 +4323,10 @@ fn apply_justify_self(
         }
     };
     let mut child_width = child_width;
-    if let Length::Px(max_w) = child.style.max_width {
+    if let Some(max_w) = definite(&child.style.max_width) {
         child_width = child_width.min(max_w + own);
     }
-    if let Length::Px(min_w) = child.style.min_width {
+    if let Some(min_w) = definite(&child.style.min_width) {
         child_width = child_width.max(min_w + own);
     }
 
