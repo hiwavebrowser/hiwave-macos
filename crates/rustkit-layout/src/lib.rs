@@ -54,6 +54,9 @@ mod replaced_size_unit_tests;
 mod shaped_run_tests;
 
 #[cfg(test)]
+mod sizing_equivalence_tests;
+
+#[cfg(test)]
 mod table_layout_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
