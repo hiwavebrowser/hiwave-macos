@@ -385,7 +385,6 @@ cells! {
     grid_item_max_width: |l| grid_item(max_width, l);
     grid_item_min_height: |l| grid_item(min_height, l);
     grid_item_max_height: |l| grid_item(max_height, l);
-    #[ignore = "W7-A: grid padding estimate uses to_px with no viewport, grid.rs:293"]
     grid_item_padding: |l| grid_item(padding, l);
     #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
     grid_item_margin: |l| grid_item(margin, l);

@@ -296,8 +296,9 @@ impl<'a> GridItem<'a> {
         // Padding contribution (rem against the 16px root, not the item's
         // own font size — see the placement pass).
         let style = &self.layout_box.style;
-        let padding_top = style.padding_top.to_px(font_size, 16.0, 0.0);
-        let padding_bottom = style.padding_bottom.to_px(font_size, 16.0, 0.0);
+        // Through `length_to_px` for the viewport: `to_px` took `2vw` for 0.
+        let padding_top = self.layout_box.length_to_px(&style.padding_top, 0.0);
+        let padding_bottom = self.layout_box.length_to_px(&style.padding_bottom, 0.0);
 
         let text_content = if text_lines > 0 {
             line_height_px * text_lines as f32
@@ -4221,11 +4222,8 @@ fn place_item_in_area(child: &mut LayoutBox, rect: &Rect, container_style: &Comp
     // padding came out 2·(rem·(16 − font)) short in both axes
     // (new_tab's .shortcut rows 57 for Chrome's 60, kbd x 387 for
     // 389).
-    let font_size = match child.style.font_size {
-        Length::Px(px) => px,
-        _ => 16.0,
-    };
-    let px = |l: &Length, against: f32| l.to_px(font_size, 16.0, against);
+    // `length_to_px` for the viewport as well: `to_px` took `2vw` for 0.
+    let px = |l: &Length, against: f32| child.length_to_px(l, against);
     let padding_left = px(&child.style.padding_left, border_box_width);
     let padding_right = px(&child.style.padding_right, border_box_width);
     let padding_top = px(&child.style.padding_top, border_box_height);
