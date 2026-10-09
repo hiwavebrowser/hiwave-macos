@@ -187,6 +187,8 @@ mod resize_coalesce_tests;
 mod flex_percent_basis_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
+#[cfg(test)]
+mod ancestor_attribute_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
