@@ -454,9 +454,7 @@ cells! {
     #[ignore = "W7-A: intrinsic_len_px resolves vw against a hard-coded 800x600 viewport, grid.rs:3588"]
     content_sized_flex_item_margin: |l| content_sized_flex(margin, l);
 
-    #[ignore = "W7-A: table absolute_px resolves px/em/rem only, table.rs:380"]
     table_cell_width: |l| table_cell(width, l);
-    #[ignore = "W7-A: table absolute_px resolves px/em/rem only, table.rs:380"]
     table_cell_height: |l| table_cell(height, l);
     table_cell_min_width: |l| table_cell(min_width, l);
     table_cell_max_width: |l| table_cell(max_width, l);
