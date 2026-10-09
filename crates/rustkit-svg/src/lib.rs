@@ -70,6 +70,11 @@ pub struct SvgDocument {
     /// depends on that viewport: a root with no viewBox that holds a
     /// `<use>`. See `for_viewport`.
     viewport_source: Option<(std::sync::Arc<str>, (f32, f32))>,
+    /// The last document `for_viewport` read, with its size. One element
+    /// draws its document at one size, relayout after relayout, and a
+    /// tiled background draws every tile at one size, so the last answer
+    /// is nearly always the next one.
+    sized: std::sync::Arc<std::sync::Mutex<Option<(f32, f32, std::sync::Arc<SvgDocument>)>>>,
 }
 
 impl SvgDocument {
@@ -83,6 +88,7 @@ impl SvgDocument {
             defs: HashMap::new(),
             stretch: false,
             viewport_source: None,
+            sized: Default::default(),
         }
     }
 
@@ -226,7 +232,10 @@ impl SvgDocument {
     /// markup is parsed, and the instances are built then, so a document
     /// drawn at another size than it was read for is read again. `None`
     /// when the size is the one it was read for or nothing depends on it.
-    fn for_viewport(&self, width: f32, height: f32) -> Option<SvgDocument> {
+    ///
+    /// The markup of an SVG image is the whole file and a background draws
+    /// it once per tile, so the answer for the last size is kept.
+    fn for_viewport(&self, width: f32, height: f32) -> Option<std::sync::Arc<SvgDocument>> {
         // The engine gives an SVG image a viewBox after parsing; with one,
         // the render rect only scales.
         if self.view_box.is_some() {
@@ -237,7 +246,15 @@ impl SvgDocument {
         if same || !(width > 0.0 && height > 0.0) {
             return None;
         }
-        Self::parse_in(xml, Some((width, height))).ok()
+        let mut last = self.sized.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((w, h, doc)) = last.as_ref() {
+            if (w - width).abs() < 0.01 && (h - height).abs() < 0.01 {
+                return Some(doc.clone());
+            }
+        }
+        let doc = std::sync::Arc::new(Self::parse_in(xml, Some((width, height))).ok()?);
+        *last = Some((width, height, doc.clone()));
+        Some(doc)
     }
 
     /// Render to display commands with `currentColor` resolving to black —
@@ -3846,6 +3863,23 @@ mod tests {
             vec![(0.0, 0.0, 48.0, 48.0, (0, 0, 0))],
             "at a CSS size"
         );
+    }
+
+    #[test]
+    fn test_a_root_without_a_viewbox_is_read_again_once_per_size() {
+        // A background draws its document once per tile, up to 2500 of
+        // them, all one size: the second render at a size reuses the
+        // document the first one read.
+        let doc = SvgDocument::parse(CSS_SIZED_ICON).expect("parse");
+        let first = doc.for_viewport(24.0, 24.0).expect("24x24 is not the size it was read for");
+        let again = doc.for_viewport(24.0, 24.0).expect("still not");
+        assert!(std::sync::Arc::ptr_eq(&first, &again), "the same size is not read twice");
+        let other = doc.for_viewport(16.0, 16.0).expect("another size");
+        assert!(!std::sync::Arc::ptr_eq(&first, &other));
+        assert_eq!(fill_rects(&doc.render(0.0, 0.0, 16.0, 16.0)), vec![(0.0, 0.0, 16.0, 16.0, (0, 0, 0))]);
+        assert_eq!(fill_rects(&doc.render(0.0, 0.0, 24.0, 24.0)), vec![(0.0, 0.0, 24.0, 24.0, (0, 0, 0))]);
+        // The size it was read for needs no second document.
+        assert!(doc.for_viewport(300.0, 150.0).is_none());
     }
 
     #[test]
