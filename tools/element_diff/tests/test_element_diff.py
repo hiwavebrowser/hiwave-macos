@@ -231,11 +231,60 @@ def test_first_non_ancestor_skips_wrappers_with_bad_descendants():
     assert s["first_over_threshold_non_ancestor"]["path"] == "body > div > p"
 
 
-def test_is_ancestor_path():
-    assert ed.is_ancestor_path("html > body", "body > div")
-    assert ed.is_ancestor_path("body > div", "body > div > p")
-    assert not ed.is_ancestor_path("body > div", "body > divx")
-    assert not ed.is_ancestor_path("#a", "body > div")
+def test_first_non_ancestor_sees_through_id_wrapper():
+    # #wrapper is over threshold only because the p inside it is.
+    ours = ours_doc(box("html > body", 0, 0, 400, 100, children=[
+        box("#wrapper", 0, 0, 400, 100, tag="div", children=[
+            box("body > div:nth-of-type(1) > p", 0, 0, 400, 100),
+        ]),
+    ]))
+    chrome = chrome_doc(
+        chrome_el("html > body", 0, 0, 400, 120),
+        chrome_el("#wrapper", 0, 0, 400, 120, tag="div", id="wrapper"),
+        chrome_el("body > div:nth-of-type(1) > p", 0, 0, 400, 120),
+    )
+    s = ed.compare(ours, chrome)["summary"]
+    assert s["first_over_threshold_non_ancestor"]["path"] == "body > div:nth-of-type(1) > p"
+
+
+def test_first_non_ancestor_counts_id_descendant():
+    # #leaf is the culprit; its plain-path parent must not be reported.
+    ours = ours_doc(box("html > body", 0, 0, 400, 100, children=[
+        box("body > div.card", 0, 0, 400, 100, children=[box("#leaf", 0, 0, 400, 100, tag="p")]),
+    ]))
+    chrome = chrome_doc(
+        chrome_el("html > body", 0, 0, 400, 120),
+        chrome_el("body > div.card", 0, 0, 400, 120),
+        chrome_el("#leaf", 0, 0, 400, 120, tag="p", id="leaf"),
+    )
+    s = ed.compare(ours, chrome)["summary"]
+    assert s["first_over_threshold_non_ancestor"]["path"] == "#leaf"
+
+
+def test_first_non_ancestor_ignores_unrelated_later_elements():
+    # main is wrong with a clean subtree; a later unrelated aside is also wrong.
+    ours = ours_doc(box("html > body", 0, 0, 400, 300, children=[
+        box("body > main", 0, 10, 400, 100, children=[box("body > main > p", 0, 10, 400, 20)]),
+        box("body > aside", 0, 200, 400, 50),
+    ]))
+    chrome = chrome_doc(
+        chrome_el("html > body", 0, 0, 400, 300),
+        chrome_el("body > main", 0, 0, 400, 110),
+        chrome_el("body > main > p", 0, 10, 400, 20),
+        chrome_el("body > aside", 0, 210, 400, 50),
+    )
+    s = ed.compare(ours, chrome)["summary"]
+    assert s["first_over_threshold_non_ancestor"]["path"] == "body > main"
+
+
+def test_svg_shapes_are_not_joined():
+    svg = box("#icon", 0, 0, 24, 24, tag="svg", type="image", children=[
+        {"type": "svg_shape", "tag": "rect", "selector": "#icon > rect",
+         "border_box": {"x": 0, "y": 0, "width": 24, "height": 24}},
+    ])
+    ours, skipped = ed.load_ours(ours_doc(svg))
+    assert [o["selector"] for o in ours] == ["#icon"] and skipped == 1
+    assert ed._id_key({"selector": "#icon > rect"}) is None
 
 
 def test_worst_is_ranked_by_area_and_capped():

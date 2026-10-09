@@ -60,8 +60,10 @@ rotating hero) show up as unmatched or shifted elements and are not engine
 defects.
 
 `element_rects.mjs` also accepts an html file path instead of a URL; it then
-uses the fixture context from `capture_baseline.mjs`, so its selectors match
-the committed baseline exactly.
+uses the fixture context and settle from `capture_baseline.mjs`
+(`networkidle`, then 50ms), so its selectors match the committed baseline
+exactly. URLs use `realsite.mjs`'s context: `load`, then the given settle
+(default 1500ms).
 
 ## Options
 
@@ -92,6 +94,9 @@ A key that occurs more than once on either side is never used to pair; those
 go in `ambiguous`. Boxes without an element (anonymous, text) are ignored, and
 our boxes Chrome's capture would have dropped (a `script`/`style`/... tag, or
 zero width and height) are counted as `ours_skipped`, not `ours_only`.
+SVG shape entries (`type: "svg_shape"`) are skipped the same way: the engine
+keys them under the `<svg>`'s own selector (`#icon > rect`), a form Chrome
+never emits, so joining them could only produce phantom `ours_only` rows.
 
 ## What the numbers mean
 
@@ -119,7 +124,9 @@ banner above a 1px error on an icon, and a big shift of anything above both.
 - `first_over_threshold_non_ancestor` — the first wrong element none of whose
   descendants are wrong. The literal first is usually `body` or a wrapper
   whose height is off because something inside it is; this one is usually
-  where the error enters. Start here.
+  where the error enters. Start here. Ancestry comes from our layout tree,
+  not from selector strings, so `#id` elements (whose selector carries no
+  path) count correctly as both ancestors and descendants.
 - `worst` — the 20 worst by `area_error`
 - `text_backend`, `text_metrics_font_derived`, and `warning` when our capture's
   text advances came from the non-font stub (Linux builds): every

@@ -45,7 +45,7 @@ import math
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -121,13 +121,27 @@ def _rect(raw: Dict[str, Any]) -> Dict[str, float]:
 
 def walk(node: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
     """Depth-first, children in order: document order for in-flow content."""
-    yield node
+    for box, _ in walk_with_parents(node):
+        yield box
+
+
+def walk_with_parents(
+    node: Dict[str, Any], parents: Tuple[int, ...] = ()
+) -> Iterator[Tuple[Dict[str, Any], Tuple[int, ...]]]:
+    """Depth-first walk yielding (box, ids of every ancestor box)."""
+    yield node, parents
     for child in node.get("children") or []:
-        yield from walk(child)
+        yield from walk_with_parents(child, parents + (id(node),))
 
 
 def load_ours(doc: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
-    """RustKit element boxes as [{selector, tag, rect, order}], plus skipped count.
+    """RustKit element boxes as [{selector, tag, rect, order, ancestors}],
+    plus skipped count.
+
+    ``ancestors`` is the set of ``order`` values of the kept element boxes
+    above this one in the layout TREE. Ancestry is taken from the tree, never
+    from selector strings: getSelector emits a bare ``#id`` for any element
+    with an id, which carries no path at all.
 
     Boxes with no selector (anonymous, text) have no element and are not
     elements. Boxes Chrome's capture would have dropped — a skipped tag, or
@@ -136,10 +150,17 @@ def load_ours(doc: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
     """
     root = doc.get("root", doc)
     out: List[Dict[str, Any]] = []
+    order_of_box: Dict[int, int] = {}
     skipped = 0
-    for box in walk(root):
+    for box, parents in walk_with_parents(root):
         selector = box.get("selector")
         if not selector:
+            continue
+        # An SVG shape is not a CSS box, and the engine prefixes its selector
+        # with the <svg>'s own key (`#icon > rect`), a form Chrome never emits.
+        # Joining on it can only produce a phantom `ours_only`.
+        if box.get("type") == "svg_shape":
+            skipped += 1
             continue
         rect = border_box(box)
         if rect is None:
@@ -150,7 +171,11 @@ def load_ours(doc: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
         if tag in CHROME_SKIPPED_TAGS or (r["w"] == 0 and r["h"] == 0):
             skipped += 1
             continue
-        out.append({"selector": selector, "tag": tag, "rect": r, "order": len(out)})
+        ancestors = frozenset(order_of_box[p] for p in parents if p in order_of_box)
+        order_of_box[id(box)] = len(out)
+        out.append(
+            {"selector": selector, "tag": tag, "rect": r, "order": len(out), "ancestors": ancestors}
+        )
     return out, skipped
 
 
@@ -188,7 +213,7 @@ def load_chrome(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _id_key(entry: Dict[str, Any]) -> Optional[str]:
     sel = entry["selector"]
-    if sel.startswith("#"):
+    if sel.startswith("#") and " > " not in sel:
         return sel[1:]
     ident = entry.get("id")
     return ident or None
@@ -296,20 +321,9 @@ def element_record(key: str, o: Dict[str, Any], c: Dict[str, Any]) -> Dict[str, 
     }
 
 
-def is_ancestor_path(ancestor: str, descendant: str) -> bool:
-    """Whether one getSelector chain is a strict ancestor of another.
-
-    ``html > body`` is the root of every body-relative chain. An ``#id``
-    selector carries no ancestry, so it is never claimed as an ancestor.
-    """
-    if ancestor.startswith("#") or descendant.startswith("#"):
-        return False
-    if ancestor == "html > body":
-        return descendant != ancestor
-    return descendant.startswith(ancestor + " > ")
-
-
-def first_non_ancestor(over: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def first_non_ancestor(
+    over: List[Dict[str, Any]], is_ancestor: Callable[[str, str], bool]
+) -> Optional[Dict[str, Any]]:
     """First over-threshold element (document order) with no over-threshold
     descendant.
 
@@ -318,7 +332,7 @@ def first_non_ancestor(over: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     first element whose own subtree is clean is where the error enters.
     """
     for i, e in enumerate(over):
-        if not any(is_ancestor_path(e["path"], d["path"]) for d in over[i + 1 :]):
+        if not any(is_ancestor(e["path"], d["path"]) for d in over[i + 1 :]):
             return e
     return None
 
@@ -338,7 +352,13 @@ def compare(
     within = [e for e in elements if e["max_error"] <= tolerance]
     over = [e for e in elements if e["max_error"] > threshold]
     first = over[0] if over else None  # elements are in Chrome document order
-    leaf = first_non_ancestor(over)
+    # Ancestry of matched elements, from our layout tree. Matched paths are
+    # unique (pairs are 1:1 and Chrome's selectors are unique per page).
+    ours_by_path = {c["selector"]: o for _, o, c in pairs}
+    leaf = first_non_ancestor(
+        over,
+        lambda a, d: ours_by_path[a]["order"] in ours_by_path[d]["ancestors"],
+    )
     ranked = sorted(
         (e for e in elements if e["area_error"] > 0),
         key=lambda e: (-e["area_error"], -e["max_error"]),
