@@ -1620,6 +1620,13 @@ fn create_flex_item<'a>(
             get_intrinsic_main_size(layout_box, main_axis) + main_pb
         }
         FlexBasis::Length(len) => spec_main_to_border_box(len),
+        // A percentage of an indefinite main size is `content`
+        // (css-flexbox-1 §7.2.3): `flex: 1` (a basis of 0%) in an
+        // auto-height column is as tall as what it holds.
+        FlexBasis::Percent(_) if !main_is_definite => {
+            main_size_from_content = content_sized_box;
+            get_intrinsic_main_size(layout_box, main_axis) + main_pb
+        }
         FlexBasis::Percent(pct) => spec_main_to_border_box(pct / 100.0 * container_main),
     };
 

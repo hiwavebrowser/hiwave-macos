@@ -684,7 +684,7 @@ class Driver:
         self.close_page()
 
     def h19_spin(self):
-        """H19: a script that does not end is stopped at the app's script budget (60 s) and the page is shown."""
+        """H19: a script that does not end is stopped at the app's script budget (15 s) and the page is shown."""
         c = "h19_spin"
         if not self.open_page(c, "h19_spin.html"):
             return
@@ -695,13 +695,22 @@ class Driver:
         if not running:
             return
         started = time.time()
-        m = self.app.wait_log(r"Navigation finished", 90, running.end())
+        m = self.app.wait_log(r"Navigation finished", 45, running.end())
         took = time.time() - started
-        self.expect(c, "the load finished within 90 s of the script's start", bool(m),
+        self.expect(c, "the load finished within 45 s of the script's start", bool(m),
                     "%.0f s; app alive: %s" % (took, self.app.alive()))
         if not m:
             return
-        self.expect(c, "the script was given its budget before it was stopped", took > 40, "%.0f s" % took)
+        self.expect(c, "the script was given its budget before it was stopped", took > 10, "%.0f s" % took)
+        # The window is frozen while the script runs, so the budget is also
+        # the longest freeze a page can cause: it must not creep back up.
+        self.expect(c, "the window was not held much past the 15 s budget", took < 25, "%.0f s" % took)
+        # The log says so itself: which script, how long the window was held.
+        stopped = self.app.wait_log(r"Script stopped at the script budget source=(\S+) elapsed_ms=(\d+) late_ms=(\d+)",
+                                    2, running.end())
+        self.expect(c, "the app log names the stopped script and how long it ran",
+                    bool(stopped) and 10000 < int(stopped.group(2)) < 25000,
+                    stopped.group(0) if stopped else "no 'Script stopped at the script budget' line")
         time.sleep(1.0)
         frame = self.frame(c, "after", [GREEN])
         if frame is None:

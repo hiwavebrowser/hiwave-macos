@@ -1,0 +1,26 @@
+<!doctype html>
+<!--
+  #626 reduced page: a 2x2 table.
+  What Chrome shows: one table at the top left, 2px border-spacing, a 2px
+  black table border. Two rows of two cells: the top row is red | green,
+  the bottom row blue | yellow. Each cell is 1px padding + a 1px black
+  border around a 100x40 (left column) or 60x40 (right column) box, so
+  the columns are 104 and 64 px wide (border box) and line up across rows.
+  Table border box: 2 + 2 + 104 + 2 + 64 + 2 + 2 = 178 px wide,
+  2 + 2 + 44 + 2 + 44 + 2 + 2 = 98 px tall.
+  Broken (pre-#626 RustKit): four full-width bars stacked vertically.
+-->
+<html><head><style>
+  body { margin: 8px; font: 14px Arial, sans-serif; }
+  table { border: 2px solid black; }
+  td { border: 1px solid black; padding: 1px; }
+  b { display: block; height: 40px; }
+  .w { width: 100px; } .n { width: 60px; }
+  .r { background: #e33; } .g { background: #3c3; }
+  .b { background: #36e; } .y { background: #ec3; }
+</style></head><body>
+<table>
+  <tr><td class="r"><b class="w"></b></td><td class="g"><b class="n"></b></td></tr>
+  <tr><td class="b"><b class="w"></b></td><td class="y"><b class="n"></b></td></tr>
+</table>
+</body></html>

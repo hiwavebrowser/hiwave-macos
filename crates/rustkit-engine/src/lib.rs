@@ -177,10 +177,18 @@ mod script_fresh_layout_tests;
 mod content_string_tests;
 #[cfg(test)]
 mod html_element_ancestor_tests;
+#[cfg(test)]
+mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod resize_coalesce_tests;
+#[cfg(all(test, feature = "headless"))]
+mod flex_percent_basis_tests;
+#[cfg(all(test, feature = "headless"))]
+mod render_on_change_tests;
+#[cfg(all(test, feature = "headless"))]
+mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -193,6 +201,8 @@ mod grid_item_abspos_tests;
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
+#[cfg(test)]
+mod table_engine_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -382,7 +392,9 @@ fn svg_background_commands(
     let mut commands = vec![rustkit_layout::DisplayCommand::PushClip(rect)];
     for tile in tiles {
         // A standalone SVG document: `currentColor` is the initial black.
-        commands.extend(svg.render(tile.x, tile.y, tile.width, tile.height));
+        for command in svg.render(tile.x, tile.y, tile.width, tile.height) {
+            rustkit_layout::clip_vector_command(command, rect, &mut commands);
+        }
     }
     commands.push(rustkit_layout::DisplayCommand::PopClip);
     commands
@@ -473,8 +485,28 @@ struct FetchedImages {
     svgs: Vec<(String, rustkit_svg::SvgDocument)>,
 }
 
+/// What a view's last presented frame was drawn from: the frame is drawn
+/// again when any of it no longer holds.
+struct PresentedFrame {
+    /// `ViewState::frame_generation` of the display list it drew.
+    generation: u64,
+    scroll_offset: (f32, f32),
+    surface: (u32, u32),
+    /// Images the display list names that were not in the cache yet.
+    missing_images: Vec<Url>,
+    at: std::time::Instant,
+}
+
+/// A frame older than this is drawn again at the next wake, changed or
+/// not, so that an input to the frame this bookkeeping does not know about
+/// costs a second of staleness and not a stuck window.
+const PRESENTED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+
 struct ViewState {
     id: EngineViewId,
+    /// Counts the display lists this view has been given.
+    frame_generation: u64,
+    presented: Option<PresentedFrame>,
     viewhost_id: ViewId,
     url: Option<Url>,
     title: Option<String>,
@@ -603,6 +635,47 @@ struct ViewState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
+}
+
+impl ViewState {
+    /// Drops what belonged to the last document. Both load paths call
+    /// this where they store the new one, before anything is laid out.
+    fn reset_for_new_document(&mut self) {
+        // A new document invalidates every per-node side table. NodeId is
+        // PER-DOCUMENT (each Document restarts its counter at 1), so a
+        // surviving entry keyed by raw id 4 would be read as the NEW page's
+        // node 4: the previous page's typed text painted into a fresh
+        // control, with first-focus seeding skipped because the key already
+        // exists. The old doc comment claimed reload dropped this map; it
+        // did not, and asserting a lifetime the code does not implement is
+        // how a silent correctness bug hides in plain sight.
+        // (Prometheus, #110 R1 must-fix.)
+        self.edit_states.clear();
+        self.checked_states.clear();
+        self.focused_node = None;
+        self.hovered_node = None;
+        self.hover_chain.clear();
+        self.active_chain.clear();
+        self.rule_reads.get_mut().take();
+        self.pointer_restyle = false;
+        self.pointer_at = None;
+        self.primary_button_down = false;
+        self.press_target = None;
+        self.press_settled_focus = false;
+        self.compat_mouse_suppressed = false;
+        self.script_log.clear();
+        self.script_policy = None;
+        // The last document's requests are nobody's now.
+        self.live_requests.clear();
+        self.live_images.clear();
+        // The last document's sheets, before the first layout of this one.
+        // `load_subresources` assigns the new document's when they have
+        // been fetched, which is after a document that links none has been
+        // laid out; and `load_html` fetches nothing at all.
+        self.external_stylesheets.clear();
+        self.initial_layout_deferred = false;
+        self.images_attempted.clear();
+    }
 }
 
 /// Engine configuration.
@@ -804,6 +877,19 @@ pub struct LivePump {
     /// Milliseconds until the page's next timer is due. `None`: it has none,
     /// and the loop can sleep until the next input.
     pub next_timer_ms: Option<u64>,
+}
+
+/// The one line that says a script was stopped by the execution deadline
+/// (`EngineConfig::interrupt_scripts_at_budget`): which script, how long it
+/// had run, and how long it ran on past the budget before the host call
+/// that ended it. The window is frozen for all of `elapsed_ms`.
+fn log_script_stopped(source: &str, elapsed_ms: u64, late: Option<std::time::Duration>) {
+    warn!(
+        %source,
+        elapsed_ms,
+        late_ms = late.map(|late| late.as_millis() as u64).unwrap_or(0),
+        "Script stopped at the script budget"
+    );
 }
 
 /// Classify a `<script>` element. `None` for data blocks
@@ -1463,6 +1549,8 @@ impl Engine {
             document: None,
             layout: None,
             display_list: None,
+            frame_generation: 0,
+            presented: None,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -1540,6 +1628,8 @@ impl Engine {
             document: None,
             layout: None,
             display_list: None,
+            frame_generation: 0,
+            presented: None,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -1626,6 +1716,8 @@ impl Engine {
             document: None,
             layout: None,
             display_list: None,
+            frame_generation: 0,
+            presented: None,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -3653,14 +3745,18 @@ impl Engine {
                 }
             };
             // Stopped by the execution deadline, whatever it then reported.
+            let elapsed_ms = started.elapsed().as_millis() as u64;
             let outcome = match bindings.take_deadline_hit() {
-                true => ScriptOutcome::OverBudget,
+                true => {
+                    log_script_stopped(&source, elapsed_ms, bindings.take_deadline_overrun());
+                    ScriptOutcome::OverBudget
+                }
                 false => outcome,
             };
             ScriptRecord {
                 source,
                 bytes,
-                elapsed_ms: started.elapsed().as_millis() as u64,
+                elapsed_ms,
                 outcome,
             }
         };
@@ -3813,14 +3909,18 @@ impl Engine {
                 };
                 // Stopped by the execution deadline: over budget, and its
                 // element hears neither `load` nor `error`.
+                let elapsed_ms = module_started.elapsed().as_millis() as u64;
                 let (outcome, event) = match bindings.take_deadline_hit() {
-                    true => (ScriptOutcome::OverBudget, None),
+                    true => {
+                        log_script_stopped(&label, elapsed_ms, bindings.take_deadline_overrun());
+                        (ScriptOutcome::OverBudget, None)
+                    }
                     false => (outcome, event),
                 };
                 log.push(ScriptRecord {
                     source: label,
                     bytes: text.len(),
-                    elapsed_ms: module_started.elapsed().as_millis() as u64,
+                    elapsed_ms,
                     outcome,
                 });
                 if let Some(event) = event {
@@ -4130,33 +4230,7 @@ impl Engine {
         view.title = title.clone();
         view.header_referrer_policy = header_referrer_policy;
         view.http_status = Some(status.as_u16());
-        // A new document invalidates every per-node side table. NodeId is
-        // PER-DOCUMENT (each Document restarts its counter at 1), so a
-        // surviving entry keyed by raw id 4 would be read as the NEW page's
-        // node 4: the previous page's typed text painted into a fresh
-        // control, with first-focus seeding skipped because the key already
-        // exists. The old doc comment claimed reload dropped this map; it
-        // did not, and asserting a lifetime the code does not implement is
-        // how a silent correctness bug hides in plain sight.
-        // (Prometheus, #110 R1 must-fix.)
-        view.edit_states.clear();
-        view.checked_states.clear();
-        view.focused_node = None;
-        view.hovered_node = None;
-        view.hover_chain.clear();
-        view.active_chain.clear();
-        view.rule_reads.get_mut().take();
-        view.pointer_restyle = false;
-        view.pointer_at = None;
-        view.primary_button_down = false;
-        view.press_target = None;
-        view.press_settled_focus = false;
-        view.compat_mouse_suppressed = false;
-        view.script_log.clear();
-        view.script_policy = None;
-        // The last document's requests are nobody's now.
-        view.live_requests.clear();
-        view.live_images.clear();
+        view.reset_for_new_document();
 
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
@@ -4383,26 +4457,6 @@ impl Engine {
 
         info!(?id, len = html.len(), "Loading HTML content");
 
-        // This is a NEW document, and load_html deliberately fetches no
-        // subresources — so nothing downstream will ever overwrite the
-        // stylesheets a previous document left on this view. Clearing here
-        // is what stops inline content from silently inheriting the last
-        // navigated page's CSS.
-        //
-        // This is the second door onto the same leak as the one fixed in
-        // load_subresources: that one carried stale CSS forward when the new
-        // document had no <link>; this one carried it forward whenever the
-        // new document arrived via load_html at all. Closing one and not the
-        // other would leave the bug reachable by the shorter route.
-        if !view.external_stylesheets.is_empty() {
-            debug!(
-                ?id,
-                dropped = view.external_stylesheets.len(),
-                "Clearing previous document's external stylesheets for inline load"
-            );
-            view.external_stylesheets.clear();
-        }
-
         // Use a synthetic about:blank URL for inline content
         // SAFETY: "about:blank" is a constant URL that will always parse successfully
         let url = Url::parse("about:blank").unwrap();
@@ -4449,33 +4503,7 @@ impl Engine {
         view.title = title.clone();
         view.header_referrer_policy = None;
         view.http_status = None;
-        // A new document invalidates every per-node side table. NodeId is
-        // PER-DOCUMENT (each Document restarts its counter at 1), so a
-        // surviving entry keyed by raw id 4 would be read as the NEW page's
-        // node 4: the previous page's typed text painted into a fresh
-        // control, with first-focus seeding skipped because the key already
-        // exists. The old doc comment claimed reload dropped this map; it
-        // did not, and asserting a lifetime the code does not implement is
-        // how a silent correctness bug hides in plain sight.
-        // (Prometheus, #110 R1 must-fix.)
-        view.edit_states.clear();
-        view.checked_states.clear();
-        view.focused_node = None;
-        view.hovered_node = None;
-        view.hover_chain.clear();
-        view.active_chain.clear();
-        view.rule_reads.get_mut().take();
-        view.pointer_restyle = false;
-        view.pointer_at = None;
-        view.primary_button_down = false;
-        view.press_target = None;
-        view.press_settled_focus = false;
-        view.compat_mouse_suppressed = false;
-        view.script_log.clear();
-        view.script_policy = None;
-        // The last document's requests are nobody's now.
-        view.live_requests.clear();
-        view.live_images.clear();
+        view.reset_for_new_document();
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -4826,6 +4854,7 @@ impl Engine {
             bindings.set_computed_styles(computed);
         }
         view.display_list = Some(display_list);
+        view.frame_generation += 1;
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
         // Re-clamp: a relayout can shrink the document (or a navigation can
         // replace it) while the user is scrolled past the new maximum, which
@@ -4917,6 +4946,10 @@ impl Engine {
         let s = &child.style;
         parent.display.is_flex()
             || parent.display.is_grid()
+            // An empty row, cell or column still takes its place in the
+            // table grid (a `<col width>` has no content at all).
+            || s.display.is_table()
+            || s.display.is_table_internal()
             || nonzero(&s.margin_top)
             || nonzero(&s.margin_bottom)
             || nonzero(&s.min_height)
@@ -5107,6 +5140,7 @@ impl Engine {
                 Display::Inline | Display::InlineBlock => Display::Block,
                 Display::InlineFlex => Display::Flex,
                 Display::InlineGrid => Display::Grid,
+                Display::InlineTable => Display::Table,
                 d => d,
             };
         }
@@ -5942,6 +5976,7 @@ impl Engine {
                         }
                         rustkit_css::Display::InlineFlex => rustkit_css::Display::Flex,
                         rustkit_css::Display::InlineGrid => rustkit_css::Display::Grid,
+                        rustkit_css::Display::InlineTable => rustkit_css::Display::Table,
                         other => other,
                     };
                 }
@@ -6408,6 +6443,9 @@ impl Engine {
                 // This is what lets a click resolve to an element (focus,
                 // form editing, event dispatch) instead of just a rectangle.
                 layout_box.node_id = Some(node.id.raw());
+                if let Some(span) = table_span_of(&tag_lower, attributes) {
+                    layout_box.table_span = span;
+                }
 
                 // Carry caret position onto the box when this element is the
                 // focused text control, so the painter can draw the caret and
@@ -6508,6 +6546,7 @@ impl Engine {
                 let share_parent = StyleShareParent::enter(children_parent_style, share_id);
                 // Match sharing keys a child's matches on its ancestor chain.
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
+                let table_hints = TableHintScope::enter(&tag_lower, attributes);
                 for (child_index, child) in child_nodes.iter().enumerate() {
                     let child_path = Self::child_selector_path(
                         selector_path,
@@ -6583,6 +6622,7 @@ impl Engine {
                         Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     }
                 }
+                drop(table_hints);
                 drop(share_chain);
                 drop(share_parent);
 
@@ -6694,6 +6734,11 @@ impl Engine {
                 layout_box
                     .children
                     .retain(|c| !matches!(&c.box_type, BoxType::Text(t) if t.is_empty()));
+
+                // CSS 2.1 §17.2.1: anonymous rows, cells and tables around
+                // misparented table boxes among this element's children
+                // (theirs are already fixed).
+                rustkit_layout::table::fixup_table_children(&mut layout_box);
 
                 layout_box
             }
@@ -7025,6 +7070,7 @@ impl Engine {
                 }
                 rustkit_css::Display::InlineFlex => rustkit_css::Display::Flex,
                 rustkit_css::Display::InlineGrid => rustkit_css::Display::Grid,
+                rustkit_css::Display::InlineTable => rustkit_css::Display::Table,
                 other => other,
             };
         }
@@ -7140,6 +7186,9 @@ impl Engine {
             style.line_break = parent.line_break;
             style.text_transform = parent.text_transform;
             style.visibility = parent.visibility;
+            // css-tables: both inherit.
+            style.border_spacing = parent.border_spacing;
+            style.border_collapse = parent.border_collapse;
         }
 
         // Apply tag-specific default styles (user-agent stylesheet)
@@ -7418,26 +7467,56 @@ impl Engine {
             "label" => {
                 style.display = rustkit_css::Display::Inline;
             }
-            // Table elements
+            // Table elements (HTML §15.3.8, Chrome's html.css). Layout is
+            // rustkit-layout's table.rs (CSS 2.1 chapter 17, first slice).
             "table" => {
-                style.display = rustkit_css::Display::Block; // Should be table
-                                                             // border-collapse: separate (not implemented)
+                style.display = rustkit_css::Display::Table;
+                style.border_collapse = rustkit_css::BorderCollapse::Separate;
+                style.border_spacing = (2.0, 2.0);
+                // A table's `width` is its border-box width in every browser.
+                style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+                style.text_indent = rustkit_css::Length::Zero;
             }
             "caption" => {
-                style.display = rustkit_css::Display::Block; // Should be table-caption
+                style.display = rustkit_css::Display::TableCaption;
+                style.text_align = rustkit_css::TextAlign::Center;
             }
             "thead" | "tbody" | "tfoot" => {
-                style.display = rustkit_css::Display::Block; // Should be table-row-group
+                style.display = match &*lower_tag(tag_name) {
+                    "thead" => rustkit_css::Display::TableHeaderGroup,
+                    "tfoot" => rustkit_css::Display::TableFooterGroup,
+                    _ => rustkit_css::Display::TableRowGroup,
+                };
+                style.vertical_align = rustkit_css::VerticalAlign::Middle;
             }
-            "tr" => {
-                style.display = rustkit_css::Display::Block; // Should be table-row
+            "tr" | "td" | "th" => {
+                style.display = if &*lower_tag(tag_name) == "tr" {
+                    rustkit_css::Display::TableRow
+                } else {
+                    rustkit_css::Display::TableCell
+                };
+                // `vertical-align: inherit`: a cell aligns as its row and
+                // row group say (middle unless an author says otherwise).
+                if let Some(parent) = parent_style {
+                    style.vertical_align = parent.vertical_align;
+                }
+                if &*lower_tag(tag_name) != "tr" {
+                    let one = rustkit_css::Length::Px(1.0);
+                    style.padding_top = one.clone();
+                    style.padding_right = one.clone();
+                    style.padding_bottom = one.clone();
+                    style.padding_left = one;
+                }
+                if &*lower_tag(tag_name) == "th" {
+                    style.font_weight = rustkit_css::FontWeight::BOLD;
+                    style.text_align = rustkit_css::TextAlign::Center;
+                }
             }
-            "th" => {
-                style.display = rustkit_css::Display::Block; // Should be table-cell
-                style.font_weight = rustkit_css::FontWeight::BOLD;
+            "col" => {
+                style.display = rustkit_css::Display::TableColumn;
             }
-            "td" => {
-                style.display = rustkit_css::Display::Block; // Should be table-cell
+            "colgroup" => {
+                style.display = rustkit_css::Display::TableColumnGroup;
             }
             // Media
             "img" => {
@@ -7625,17 +7704,25 @@ impl Engine {
             _ => matching_rules.as_slice(),
         };
 
+        // HTML presentational hints for tables (HTML §15.3.8): declarations
+        // that sit above the UA defaults and below every author rule.
+        let hints = table_presentational_hints(&lower_tag(tag_name), attributes);
+        for (property, value) in &hints {
+            self.apply_style_property(&mut style, property, value);
+        }
+
         // Style sharing: everything below reads only the parent's style, the
-        // tag, the matched rules in this order, the inline style and whether
-        // a UA rule hid the element. An earlier element with the same five
-        // already has this style. Only under the build's own rule index,
-        // whose rule numbers the key holds.
+        // tag, the matched rules in this order, the inline style, the
+        // presentational hints and whether a UA rule hid the element. An
+        // earlier element with the same six already has this style. Only
+        // under the build's own rule index, whose rule numbers the key holds.
         let share = match (index.is_some(), parent_style) {
             (true, Some(parent)) => style_share_lookup(parent, || StyleShareKey {
                 parent: 0,
                 tag: tag_name.to_string(),
                 rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
                 inline: attributes.get("style").cloned(),
+                hints: hints.clone(),
                 ua_hidden: style.display == rustkit_css::Display::None,
             }),
             _ => StyleShared::Untracked,
@@ -8040,6 +8127,9 @@ impl Engine {
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
             "line-break" => style.line_break = parent.line_break,
             "visibility" => style.visibility = parent.visibility,
+            "border-spacing" => style.border_spacing = parent.border_spacing,
+            "border-collapse" => style.border_collapse = parent.border_collapse,
+            "vertical-align" => style.vertical_align = parent.vertical_align,
             "background-color" => style.background_color = parent.background_color,
             "border-color" => {
                 style.border_top_color = parent.border_top_color;
@@ -8205,53 +8295,44 @@ impl Engine {
                 // CSS order: first size applies to first (topmost) layer
                 // Our array: index 0 is bottommost, last index is topmost
                 // So we need to apply in reverse order
+                // A list shorter than the layers repeats (CSS Backgrounds 3
+                // §3.10); values past the last layer are not used. Until
+                // 2026-10-08 a single value reached the top layer only, and
+                // one too many overwrote the bottom layer.
                 let sizes: Vec<&str> = split_by_comma(value);
                 let num_layers = style.background_layers.len();
-                for (i, size_str) in sizes.iter().enumerate() {
-                    let size = parse_background_size(size_str);
+                for i in 0..num_layers.min(num_layers * sizes.len()) {
                     // Map CSS index to our reversed array: CSS[0] -> layers[n-1]
-                    let layer_idx = num_layers.saturating_sub(i + 1);
-                    if layer_idx < num_layers {
-                        style.background_layers[layer_idx].size = size;
-                    }
+                    style.background_layers[num_layers - 1 - i].size = parse_background_size(sizes[i % sizes.len()]);
                 }
             }
             "background-position" => {
                 // Can be comma-separated for multiple layers
-                // Same reversal logic as background-size
+                // Same reversal and repetition as background-size
                 let positions: Vec<&str> = split_by_comma(value);
                 let num_layers = style.background_layers.len();
-                for (i, pos_str) in positions.iter().enumerate() {
-                    let position = parse_background_position(pos_str);
-                    let layer_idx = num_layers.saturating_sub(i + 1);
-                    if layer_idx < num_layers {
-                        style.background_layers[layer_idx].position = position;
-                    }
+                for i in 0..num_layers.min(num_layers * positions.len()) {
+                    style.background_layers[num_layers - 1 - i].position =
+                        parse_background_position(positions[i % positions.len()]);
                 }
             }
             "background-repeat" => {
                 // Can be comma-separated for multiple layers
-                // Same reversal logic as background-size
+                // Same reversal and repetition as background-size
                 let repeats: Vec<&str> = split_by_comma(value);
                 let num_layers = style.background_layers.len();
-                for (i, repeat_str) in repeats.iter().enumerate() {
-                    let repeat = parse_background_repeat(repeat_str);
-                    let layer_idx = num_layers.saturating_sub(i + 1);
-                    if layer_idx < num_layers {
-                        style.background_layers[layer_idx].repeat = repeat;
-                    }
+                for i in 0..num_layers.min(num_layers * repeats.len()) {
+                    style.background_layers[num_layers - 1 - i].repeat =
+                        parse_background_repeat(repeats[i % repeats.len()]);
                 }
             }
             "background-origin" => {
-                // Same reversal logic as background-size
+                // Same reversal and repetition as background-size
                 let origins: Vec<&str> = split_by_comma(value);
                 let num_layers = style.background_layers.len();
-                for (i, origin_str) in origins.iter().enumerate() {
-                    let origin = parse_background_origin(origin_str);
-                    let layer_idx = num_layers.saturating_sub(i + 1);
-                    if layer_idx < num_layers {
-                        style.background_layers[layer_idx].origin = origin;
-                    }
+                for i in 0..num_layers.min(num_layers * origins.len()) {
+                    style.background_layers[num_layers - 1 - i].origin =
+                        parse_background_origin(origins[i % origins.len()]);
                 }
             }
             // `font` shorthand (css-fonts-4 §3.9):
@@ -8571,7 +8652,12 @@ impl Engine {
                         style.flex_grow = grow;
                         if parts.len() == 1 {
                             style.flex_shrink = 1.0;
-                            style.flex_basis = rustkit_css::FlexBasis::Length(0.0);
+                            // The basis left out is `0%`, not `0px`
+                            // (css-flexbox-1 §7.1.1): the same in a row or
+                            // a definite column, and `content` in an
+                            // auto-height column, where a percentage has
+                            // nothing to resolve against.
+                            style.flex_basis = rustkit_css::FlexBasis::Percent(0.0);
                         }
                     }
                 }
@@ -8579,7 +8665,7 @@ impl Engine {
                     match parts[1].parse::<f32>() {
                         Ok(shrink) => {
                             style.flex_shrink = shrink;
-                            style.flex_basis = rustkit_css::FlexBasis::Length(0.0);
+                            style.flex_basis = rustkit_css::FlexBasis::Percent(0.0);
                         }
                         Err(_) => {
                             style.flex_shrink = 1.0;
@@ -8742,6 +8828,22 @@ impl Engine {
                     style.aspect_ratio = Some(ratio);
                 }
             }
+            "border-spacing" => {
+                // CSS 2.1 §17.6.1. Lengths are absolute at computed-value
+                // time; `em` takes the font size as cascaded so far.
+                if let Some((h, v)) = rustkit_css::parse_border_spacing(value) {
+                    let font = match style.font_size {
+                        rustkit_css::Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    style.border_spacing = (h.to_px(font, 16.0, 0.0), v.to_px(font, 16.0, 0.0));
+                }
+            }
+            "border-collapse" => match value.trim().to_ascii_lowercase().as_str() {
+                "separate" => style.border_collapse = rustkit_css::BorderCollapse::Separate,
+                "collapse" => style.border_collapse = rustkit_css::BorderCollapse::Collapse,
+                _ => {}
+            },
             "vertical-align" => {
                 // Sixth parsed-but-never-applied property found this week
                 // (text-align, background-clip, inheritance, bold system
@@ -12586,8 +12688,42 @@ impl Engine {
 
     /// Render all views.
     pub fn render_all_views(&mut self) {
+        self.render_views(false);
+    }
+
+    /// Render the views whose frame would differ from the one they last
+    /// presented, and return how many were drawn. This is the call for an
+    /// event loop that wakes for more than the page (a mouse move, the
+    /// browser's own UI): executing a display list of a few hundred
+    /// thousand commands at every wake held a core for as long as anything
+    /// moved.
+    pub fn render_changed_views(&mut self) -> usize {
+        self.render_views(true)
+    }
+
+    /// Whether the frame `id` last presented is still the frame a render
+    /// would draw: the same display list, scroll offset and surface size,
+    /// no image arrived that it was drawn without, and not older than
+    /// `PRESENTED_FRAME_MAX_AGE`.
+    fn frame_is_current(&self, id: EngineViewId) -> bool {
+        let Some(view) = self.views.get(&id) else { return false };
+        let Some(frame) = view.presented.as_ref() else { return false };
+        frame.generation == view.frame_generation
+            && frame.scroll_offset == view.scroll_offset
+            && view.pending_resize.is_none()
+            && self.compositor.get_surface_size(view.viewhost_id).ok() == Some(frame.surface)
+            && !frame.missing_images.iter().any(|url| self.image_manager.is_cached(url))
+            && frame.at.elapsed() < PRESENTED_FRAME_MAX_AGE
+    }
+
+    fn render_views(&mut self, only_changed: bool) -> usize {
         let view_ids: Vec<_> = self.views.keys().copied().collect();
+        let mut drawn = 0;
         for id in view_ids {
+            if only_changed && self.frame_is_current(id) {
+                continue;
+            }
+            drawn += 1;
             match self.render(id) {
                 Ok(()) => {
                     if self.render_failing.remove(&id) {
@@ -12607,6 +12743,7 @@ impl Engine {
                 }
             }
         }
+        drawn
     }
 
     /// Capture a frame from a view to a PPM file.
@@ -13356,6 +13493,14 @@ impl Engine {
             renderer.set_viewport_size(surface_width, surface_height);
         }
 
+        // What this frame is drawn from, kept when it has been presented.
+        let (generation, frame_scroll) = self
+            .views
+            .get(&id)
+            .map(|v| (v.frame_generation, v.scroll_offset))
+            .unwrap_or_default();
+        let mut missing_images = Vec::new();
+
         // Upload images from cache to renderer before drawing
         // Need to re-borrow view here to get display_list
         if let Some(view) = self.views.get(&id) {
@@ -13363,9 +13508,16 @@ impl Engine {
                 // Clone commands to break the borrow on self.views
                 let commands = display_list.commands.clone();
                 // Borrow is dropped when scope ends
-                self.upload_display_list_images(&commands);
+                missing_images = self.upload_display_list_images(&commands);
             }
         }
+        let presented = PresentedFrame {
+            generation,
+            scroll_offset: frame_scroll,
+            surface: (surface_width, surface_height),
+            missing_images,
+            at: std::time::Instant::now(),
+        };
 
         // Re-get display_list reference for rendering
         let display_list = self.views.get(&id).and_then(|v| v.display_list.as_ref());
@@ -13456,6 +13608,9 @@ impl Engine {
             self.compositor.present(output);
         }
 
+        if let Some(view) = self.views.get_mut(&id) {
+            view.presented = Some(presented);
+        }
         Ok(())
     }
 
@@ -13464,13 +13619,17 @@ impl Engine {
     /// This scans the display list for BackgroundImage and Image commands and ensures
     /// any cached images are uploaded to the GPU before rendering.
     /// For data: URLs, images are loaded synchronously on-demand.
-    fn upload_display_list_images(&mut self, commands: &[rustkit_layout::DisplayCommand]) {
+    ///
+    /// Returns the network images the list names that are not in the cache
+    /// yet: the frame is drawn without them.
+    fn upload_display_list_images(&mut self, commands: &[rustkit_layout::DisplayCommand]) -> Vec<Url> {
         use std::collections::HashSet;
         use std::time::Duration;
 
+        let mut missing = Vec::new();
         // Early exit if no renderer
         let Some(renderer) = &mut self.renderer else {
-            return;
+            return missing;
         };
 
         // Collect unique image URLs from display list
@@ -13508,7 +13667,7 @@ impl Engine {
                 Some(cached)
             } else if parsed_url.scheme() == "data" {
                 // For data: URLs, load synchronously since they don't require network
-                match self.image_manager.load_blocking(parsed_url) {
+                match self.image_manager.load_blocking(parsed_url.clone()) {
                     Ok(img) => Some(img),
                     Err(e) => {
                         tracing::warn!(?e, %url, "Failed to decode data URL image");
@@ -13517,6 +13676,7 @@ impl Engine {
                 }
             } else {
                 // Image not cached and not a data: URL - it will render when loaded
+                missing.push(parsed_url.clone());
                 None
             };
 
@@ -13539,6 +13699,7 @@ impl Engine {
                 tracing::debug!(%url_str, "Uploaded image to renderer");
             }
         }
+        missing
     }
 
     /// Execute JavaScript in a view.
@@ -27052,9 +27213,12 @@ mod cascade_wire_tests {
         assert_eq!(s.flex_shrink, 1.0);
         assert_eq!(
             s.flex_basis,
-            rustkit_css::FlexBasis::Length(0.0),
-            "flex: 1 must zero the basis or the container is not divided"
+            rustkit_css::FlexBasis::Percent(0.0),
+            "flex: 1 must zero the basis or the container is not divided; the zero is 0%"
         );
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "flex", "1 1");
+        assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Percent(0.0));
     }
 
     #[test]
@@ -28958,7 +29122,207 @@ struct StyleShareKey {
     tag: String,
     rules: Vec<(usize, (usize, usize, usize))>,
     inline: Option<String>,
+    /// Presentational hints (`table_presentational_hints`).
+    hints: Vec<(&'static str, String)>,
     ua_hidden: bool,
+}
+
+// ==================== Table presentational hints ====================
+
+/// The enclosing table's attributes that cells take hints from
+/// (`cellpadding`, `border`), innermost table last. Pushed while a
+/// `<table>`'s children are built (`TableHintScope`).
+#[derive(Debug, Clone, Copy, Default)]
+struct TableCellHints {
+    cellpadding: Option<u32>,
+    border: bool,
+}
+
+thread_local! {
+    static TABLE_HINTS: std::cell::RefCell<Vec<TableCellHints>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keeps a `<table>`'s cell hints on `TABLE_HINTS` while its subtree builds.
+struct TableHintScope(bool);
+
+impl TableHintScope {
+    fn enter(tag: &str, attributes: &HashMap<String, String>) -> Self {
+        if tag != "table" {
+            return TableHintScope(false);
+        }
+        let hints = TableCellHints {
+            cellpadding: attributes.get("cellpadding").and_then(|v| parse_html_non_negative_integer(v)),
+            border: table_border_attribute(attributes).is_some_and(|n| n > 0),
+        };
+        TABLE_HINTS.with(|h| h.borrow_mut().push(hints));
+        TableHintScope(true)
+    }
+}
+
+impl Drop for TableHintScope {
+    fn drop(&mut self) {
+        if self.0 {
+            TABLE_HINTS.with(|h| {
+                h.borrow_mut().pop();
+            });
+        }
+    }
+}
+
+/// HTML's "rules for parsing non-negative integers": leading white space,
+/// an optional `+`, then digits; anything after them is ignored.
+fn parse_html_non_negative_integer(value: &str) -> Option<u32> {
+    let v = value.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let v = v.strip_prefix('+').unwrap_or(v);
+    let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    Some(digits.parse::<u64>().map_or(u32::MAX, |n| n.min(u32::MAX as u64) as u32))
+}
+
+/// HTML's "rules for parsing dimension values", as a CSS length: `N` is
+/// px, `N%` a percentage. `None` when there is no number, or when the
+/// value is zero and `ignore_zero` (HTML maps `width` "ignoring zero").
+fn html_dimension(value: &str, ignore_zero: bool) -> Option<String> {
+    let v = value.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let end = v
+        .char_indices()
+        .find(|&(i, c)| !(c.is_ascii_digit() || (c == '.' && i > 0)))
+        .map_or(v.len(), |(i, _)| i);
+    let number: f32 = v[..end].trim_end_matches('.').parse().ok()?;
+    if ignore_zero && number == 0.0 {
+        return None;
+    }
+    Some(if v[end..].starts_with('%') {
+        format!("{number}%")
+    } else {
+        format!("{number}px")
+    })
+}
+
+/// The `border` attribute of a table: its integer value, or 1 when it is
+/// present but not a number (`<table border>`), as HTML maps it.
+fn table_border_attribute(attributes: &HashMap<String, String>) -> Option<u32> {
+    attributes
+        .get("border")
+        .map(|v| parse_html_non_negative_integer(v).unwrap_or(1))
+}
+
+/// A legacy colour attribute (`bgcolor`): a CSS colour, or bare hex digits
+/// as old pages write them (`bgcolor="ffcc00"`).
+fn html_legacy_color(value: &str) -> String {
+    let v = value.trim();
+    if matches!(v.len(), 3 | 6) && v.chars().all(|c| c.is_ascii_hexdigit()) {
+        format!("#{v}")
+    } else {
+        v.to_string()
+    }
+}
+
+/// The presentational hints (HTML §15.3.8, "Tables") of a table element, as
+/// CSS declarations. Only the attributes real tables use are mapped:
+/// `width`, `height`, `border`, `cellpadding`, `cellspacing`, `align` on
+/// `<table>`; `width`, `height`, `align`, `valign`, `bgcolor` on cells (and
+/// the enclosing table's `cellpadding` and `border`); `width` on `<col>` and
+/// `<colgroup>`. `colspan`, `rowspan` and `span` are not style: the box
+/// builder copies them to `LayoutBox::table_span`.
+fn table_presentational_hints(
+    tag: &str,
+    attributes: &HashMap<String, String>,
+) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let attr = |name: &str| attributes.get(name).map(|v| v.trim());
+    match tag {
+        "table" => {
+            if let Some(w) = attr("width").and_then(|v| html_dimension(v, true)) {
+                out.push(("width", w));
+            }
+            if let Some(h) = attr("height").and_then(|v| html_dimension(v, false)) {
+                out.push(("height", h));
+            }
+            if let Some(n) = attr("cellspacing").and_then(parse_html_non_negative_integer) {
+                out.push(("border-spacing", format!("{n}px")));
+            }
+            if let Some(n) = table_border_attribute(attributes).filter(|&n| n > 0) {
+                out.push(("border-width", format!("{n}px")));
+                out.push(("border-style", "outset".to_string()));
+                out.push(("border-color", "gray".to_string()));
+            }
+            match attr("align").map(|v| v.to_ascii_lowercase()).as_deref() {
+                Some("left") => out.push(("float", "left".to_string())),
+                Some("right") => out.push(("float", "right".to_string())),
+                Some("center") => {
+                    out.push(("margin-left", "auto".to_string()));
+                    out.push(("margin-right", "auto".to_string()));
+                }
+                _ => {}
+            }
+        }
+        "td" | "th" => {
+            let table = TABLE_HINTS.with(|h| h.borrow().last().copied());
+            if let Some(n) = table.and_then(|t| t.cellpadding) {
+                out.push(("padding", format!("{n}px")));
+            }
+            if table.is_some_and(|t| t.border) {
+                out.push(("border-width", "1px".to_string()));
+                out.push(("border-style", "inset".to_string()));
+                out.push(("border-color", "gray".to_string()));
+            }
+            if let Some(w) = attr("width").and_then(|v| html_dimension(v, true)) {
+                out.push(("width", w));
+            }
+            if let Some(h) = attr("height").and_then(|v| html_dimension(v, false)) {
+                out.push(("height", h));
+            }
+            let align = match attr("align").map(|v| v.to_ascii_lowercase()).as_deref() {
+                Some("left") => Some("left"),
+                Some("right") => Some("right"),
+                Some("center") | Some("middle") => Some("center"),
+                Some("justify") => Some("justify"),
+                _ => None,
+            };
+            if let Some(a) = align {
+                out.push(("text-align", a.to_string()));
+            }
+            let valign = match attr("valign").map(|v| v.to_ascii_lowercase()).as_deref() {
+                Some(v @ ("top" | "middle" | "bottom" | "baseline")) => Some(v.to_string()),
+                _ => None,
+            };
+            if let Some(v) = valign {
+                out.push(("vertical-align", v));
+            }
+            if let Some(c) = attr("bgcolor").filter(|v| !v.is_empty()) {
+                out.push(("background-color", html_legacy_color(c)));
+            }
+        }
+        "col" | "colgroup" => {
+            if let Some(w) = attr("width").and_then(|v| html_dimension(v, true)) {
+                out.push(("width", w));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// `colspan` / `rowspan` of a cell, `span` of a column or column group
+/// (HTML §4.9.11): non-negative integers; `colspan` and `span` of 0 are 1,
+/// `rowspan="0"` spans to the end of the row group (resolved in layout).
+fn table_span_of(tag: &str, attributes: &HashMap<String, String>) -> Option<rustkit_layout::table::TableSpan> {
+    let int = |name: &str| attributes.get(name).and_then(|v| parse_html_non_negative_integer(v));
+    match tag {
+        "td" | "th" => Some(rustkit_layout::table::TableSpan {
+            colspan: int("colspan").unwrap_or(1).max(1),
+            rowspan: int("rowspan").unwrap_or(1),
+        }),
+        "col" | "colgroup" => Some(rustkit_layout::table::TableSpan {
+            colspan: int("span").unwrap_or(1).max(1),
+            rowspan: 1,
+        }),
+        _ => None,
+    }
 }
 
 /// What `style_share_lookup` found for one element.
@@ -30481,6 +30845,7 @@ mod style_share_tests {
             tag: "p".to_string(),
             rules: Vec::new(),
             inline: None,
+            hints: Vec::new(),
             ua_hidden: false,
         };
 
@@ -30514,6 +30879,7 @@ mod style_share_tests {
                 tag: tag.to_string(),
                 rules: Vec::new(),
                 inline: None,
+                hints: Vec::new(),
                 ua_hidden: false,
             }
         };

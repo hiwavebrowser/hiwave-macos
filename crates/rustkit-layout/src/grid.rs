@@ -3105,6 +3105,9 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     if let BoxType::Text(text) = &layout_box.box_type {
         return text_min_content_width(text, style);
     }
+    if style.display.is_table() {
+        return crate::table::table_intrinsic_widths(layout_box).0;
+    }
 
     let padding_border = horizontal_padding_border(style);
 
@@ -3428,6 +3431,9 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
     }
     if let BoxType::Text(text) = &layout_box.box_type {
         return text_max_content_width(text, style);
+    }
+    if style.display.is_table() {
+        return crate::table::table_intrinsic_widths(layout_box).1;
     }
 
     let padding_border = horizontal_padding_border(style);

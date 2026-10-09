@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<!-- H19 float-wrap shape (e): a float followed by an overflow:hidden block (a new BFC that sits beside the float, narrowed). View at 800x600, DPR 1. Notes: h19_float_wrap_before.md -->
+<html><head><style>
+  body { margin: 8px; width: 784px; font: 16px/20px Menlo, monospace; color: #000; }
+  p { margin: 0 0 10px; }
+  #float { float: left; width: 200px; height: 160px; margin: 0 16px 8px 0; background: #939; }
+  .bfc { overflow: hidden; background: #eee; }
+</style></head><body>
+<div id="float"></div>
+<div class="bfc" id="bfc"><p id="p1">A web browser is an application for accessing websites. When a user requests a web page from a particular website, the browser retrieves its files from a web server and then displays the page on the screen. Browsers can also display content stored on the local file system. The purpose of a browser is to fetch content and display it on the device of the user. This process begins when the user types a URL into the address bar. Virtually all URLs on the Web start with either http or https, which means they are retrieved with the Hypertext Transfer Protocol.</p></div>
+</body></html>

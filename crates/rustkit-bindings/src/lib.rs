@@ -1278,6 +1278,12 @@ impl DomBindings {
         self.runtime.borrow_mut().take_deadline_hit()
     }
 
+    /// How long past the deadline the stopped script ran before the host
+    /// call that ended it (see [`JsRuntime::take_deadline_overrun`]).
+    pub fn take_deadline_overrun(&self) -> Option<std::time::Duration> {
+        self.runtime.borrow_mut().take_deadline_overrun()
+    }
+
     /// Bound the number of microtask job iterations allowed per turn (see
     /// [`JsRuntime::set_max_job_iterations`]).
     pub fn set_max_job_iterations(&self, max_iterations: u64) {

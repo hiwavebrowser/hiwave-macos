@@ -1,0 +1,39 @@
+<!doctype html>
+<!--
+  #626 reduced page: a Wikipedia-shaped infobox floated right of two
+  paragraphs.
+  What Chrome shows (800px wide viewport): the infobox at the right edge,
+  22em = 308px wide (font-size 14px; border-box width), 3px border-spacing,
+  a 1px grey border. Its first row is one purple header cell spanning both
+  columns. Below it three rows: a pale-orange key cell on the left and a
+  pale-cyan value cell on the right; the key cells all start at the same x
+  and the value cells all start at the same x. The two paragraphs wrap to
+  the LEFT of the infobox (their lines stop short of it), and the second
+  paragraph continues full width once it passes the infobox's bottom.
+  Broken (pre-#626 RustKit): the cells stack as full-width bars inside a
+  308px block, keys above values.
+-->
+<html><head><style>
+  body { margin: 8px; font: 14px Arial, sans-serif; width: 784px; }
+  .infobox { float: right; width: 22em; border: 1px solid #a2a9b1;
+             border-spacing: 3px; margin: 0 0 8px 12px; background: #f8f9fa; }
+  .infobox th.head { background: #c8b6e2; text-align: center; padding: 4px; }
+  .infobox th { background: #fde2c4; text-align: left; padding: 2px 4px; }
+  .infobox td { background: #c9f0f4; padding: 2px 4px; }
+  p { margin: 0 0 10px; }
+</style></head><body>
+<table class="infobox">
+  <tr><th class="head" colspan="2">Example river</th></tr>
+  <tr><th>Country</th><td>Somewhere</td></tr>
+  <tr><th>Length</th><td>1,234 km (767 mi)</td></tr>
+  <tr><th>Source</th><td>A lake in the hills</td></tr>
+</table>
+<p>The first paragraph sits to the left of the infobox. It is long enough to
+wrap over several lines, and every one of those lines stops before the
+infobox, because the infobox is a float and these are line boxes beside it.</p>
+<p>The second paragraph also starts beside the infobox. Its text keeps going
+for a while, line after line, so that it runs past the bottom of the infobox;
+from there on its lines use the full width of the body again, as Chrome
+lays them out. More words, more words, more words, more words, more words,
+more words, more words, more words, more words, more words, more words.</p>
+</body></html>

@@ -1098,6 +1098,19 @@ pub enum Display {
     Grid,
     InlineGrid,
     None,
+    /// `table`: a block-level table wrapper (CSS 2.1 §17.2).
+    Table,
+    /// `inline-table`: an atomic inline-level table.
+    InlineTable,
+    TableRowGroup,
+    TableHeaderGroup,
+    TableFooterGroup,
+    TableRow,
+    TableCell,
+    TableCaption,
+    /// Columns and column groups are never rendered; they only carry widths.
+    TableColumn,
+    TableColumnGroup,
 }
 
 impl Display {
@@ -1115,7 +1128,11 @@ impl Display {
     pub fn is_inline_level(self) -> bool {
         matches!(
             self,
-            Display::Inline | Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+            Display::Inline
+                | Display::InlineBlock
+                | Display::InlineFlex
+                | Display::InlineGrid
+                | Display::InlineTable
         )
     }
 
@@ -1131,8 +1148,35 @@ impl Display {
     pub fn is_atomic_inline(self) -> bool {
         matches!(
             self,
-            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid | Display::InlineTable
         )
+    }
+
+    /// `table` or `inline-table`: the box that runs table layout.
+    pub fn is_table(self) -> bool {
+        matches!(self, Display::Table | Display::InlineTable)
+    }
+
+    /// `table-row-group`, `table-header-group` or `table-footer-group`.
+    pub fn is_table_row_group(self) -> bool {
+        matches!(
+            self,
+            Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup
+        )
+    }
+
+    /// Any table-internal display (row group, row, cell, caption, column,
+    /// column group): a box that only makes sense inside a table.
+    pub fn is_table_internal(self) -> bool {
+        self.is_table_row_group()
+            || matches!(
+                self,
+                Display::TableRow
+                    | Display::TableCell
+                    | Display::TableCaption
+                    | Display::TableColumn
+                    | Display::TableColumnGroup
+            )
     }
 }
 
@@ -2017,6 +2061,14 @@ pub enum LineBreak {
     Anywhere,
 }
 
+/// `border-collapse` (CSS 2.1 §17.6). Inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderCollapse {
+    #[default]
+    Separate,
+    Collapse,
+}
+
 /// Vertical alignment.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VerticalAlign {
@@ -2508,6 +2560,12 @@ pub struct ComputedStyle {
     pub line_break: LineBreak,
     pub vertical_align: VerticalAlign,
     pub writing_mode: WritingMode,
+
+    // Tables (CSS 2.1 §17). Both inherit.
+    /// `border-spacing` as (horizontal, vertical) px. Lengths are absolute
+    /// at computed-value time, so they are stored resolved.
+    pub border_spacing: (f32, f32),
+    pub border_collapse: BorderCollapse,
     pub direction: Direction,
 
     // Positioning offsets
@@ -2728,6 +2786,8 @@ impl ComputedStyle {
             direction: parent.direction,
             writing_mode: parent.writing_mode,
             visibility: parent.visibility,
+            border_spacing: parent.border_spacing,
+            border_collapse: parent.border_collapse,
 
             // Text decoration is NOT inherited (each element sets its own)
             text_decoration_line: TextDecorationLine::NONE,
@@ -3570,6 +3630,29 @@ fn split_css_function_args(args: &str) -> Vec<&str> {
     result
 }
 
+/// Parse `border-spacing`: one length for both axes, or horizontal then
+/// vertical (CSS 2.1 §17.6.1). Negative lengths and percentages are invalid.
+pub fn parse_border_spacing(value: &str) -> Option<(Length, Length)> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    let one = |v: &str| -> Option<Length> {
+        match parse_length(v)? {
+            Length::Zero => Some(Length::Zero),
+            Length::Px(n) | Length::Em(n) | Length::Rem(n) if n < 0.0 => None,
+            l @ (Length::Px(_) | Length::Em(_) | Length::Rem(_)) => Some(l),
+            l @ (Length::Vw(_) | Length::Vh(_) | Length::Vmin(_) | Length::Vmax(_)) => Some(l),
+            _ => None,
+        }
+    };
+    match parts.as_slice() {
+        [h] => {
+            let h = one(h)?;
+            Some((h.clone(), h))
+        }
+        [h, v] => Some((one(h)?, one(v)?)),
+        _ => None,
+    }
+}
+
 /// Parse display value.
 ///
 /// Besides the legacy single keywords, this takes css-display-3's
@@ -3577,8 +3660,9 @@ fn split_css_function_args(args: &str) -> Vec<&str> {
 /// `inline flex`, `block flow list-item`, ...), which were dropped before, so
 /// the element kept its previous display. `flow-root` lays out as a block
 /// (its new formatting context only matters for floats and margin collapse);
-/// `list-item` lays out as its outer display, with no marker. `contents`,
-/// `table*` and `ruby` stay unsupported (`None`).
+/// `list-item` lays out as its outer display, with no marker. The CSS 2.1
+/// table keywords (and `block table` / `inline table`) map to the table
+/// variants. `contents` and `ruby` stay unsupported (`None`).
 pub fn parse_display(value: &str) -> Option<Display> {
     let value = value.trim().to_lowercase();
     match value.as_str() {
@@ -3590,13 +3674,23 @@ pub fn parse_display(value: &str) -> Option<Display> {
         "grid" => return Some(Display::Grid),
         "inline-grid" => return Some(Display::InlineGrid),
         "none" => return Some(Display::None),
+        "table" => return Some(Display::Table),
+        "inline-table" => return Some(Display::InlineTable),
+        "table-row-group" => return Some(Display::TableRowGroup),
+        "table-header-group" => return Some(Display::TableHeaderGroup),
+        "table-footer-group" => return Some(Display::TableFooterGroup),
+        "table-row" => return Some(Display::TableRow),
+        "table-cell" => return Some(Display::TableCell),
+        "table-caption" => return Some(Display::TableCaption),
+        "table-column" => return Some(Display::TableColumn),
+        "table-column-group" => return Some(Display::TableColumnGroup),
         _ => {}
     }
     let (mut outer, mut inner, mut list_item) = (None, None, false);
     for token in value.split_whitespace() {
         match token {
             "block" | "inline" if outer.is_none() => outer = Some(token),
-            "flow" | "flow-root" | "flex" | "grid" if inner.is_none() => inner = Some(token),
+            "flow" | "flow-root" | "flex" | "grid" | "table" if inner.is_none() => inner = Some(token),
             "list-item" if !list_item => list_item = true,
             _ => return None,
         }
@@ -3614,6 +3708,8 @@ pub fn parse_display(value: &str) -> Option<Display> {
         (true, "flex") => Display::InlineFlex,
         (false, "grid") => Display::Grid,
         (true, "grid") => Display::InlineGrid,
+        (false, "table") => Display::Table,
+        (true, "table") => Display::InlineTable,
         (true, "flow-root") => Display::InlineBlock,
         (true, _) => Display::Inline,
         (false, _) => Display::Block,
@@ -3675,7 +3771,6 @@ mod tests {
             ("none", Some(Display::None)),
             // Unsupported or invalid: still ignored.
             ("contents", None),
-            ("table", None),
             ("block block", None),
             ("flex list-item", None),
             ("block wobble", None),
@@ -3684,6 +3779,95 @@ mod tests {
         for (value, want) in cases {
             assert_eq!(parse_display(value), *want, "display: {value:?}");
         }
+    }
+
+    #[test]
+    fn display_takes_the_table_keywords() {
+        let cases: &[(&str, Display)] = &[
+            ("table", Display::Table),
+            ("inline-table", Display::InlineTable),
+            ("table-row-group", Display::TableRowGroup),
+            ("table-header-group", Display::TableHeaderGroup),
+            ("table-footer-group", Display::TableFooterGroup),
+            ("table-row", Display::TableRow),
+            ("table-cell", Display::TableCell),
+            ("table-caption", Display::TableCaption),
+            ("table-column", Display::TableColumn),
+            ("table-column-group", Display::TableColumnGroup),
+            ("TABLE-CELL", Display::TableCell),
+            // css-display-3 two-value forms.
+            ("block table", Display::Table),
+            ("inline table", Display::InlineTable),
+            ("table inline", Display::InlineTable),
+        ];
+        for (value, want) in cases {
+            assert_eq!(parse_display(value), Some(*want), "display: {value:?}");
+        }
+        for bad in ["table-cell inline", "table table", "table list-item", "table-rows"] {
+            assert_eq!(parse_display(bad), None, "display: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn table_display_predicates() {
+        assert!(Display::Table.is_table() && Display::InlineTable.is_table());
+        assert!(!Display::TableCell.is_table());
+        assert!(Display::InlineTable.is_inline_level());
+        assert!(Display::InlineTable.is_atomic_inline());
+        assert!(!Display::Table.is_inline_level());
+        for d in [
+            Display::TableRowGroup,
+            Display::TableHeaderGroup,
+            Display::TableFooterGroup,
+        ] {
+            assert!(d.is_table_row_group(), "{d:?}");
+        }
+        assert!(!Display::TableRow.is_table_row_group());
+        for d in [
+            Display::TableRowGroup,
+            Display::TableRow,
+            Display::TableCell,
+            Display::TableCaption,
+            Display::TableColumn,
+            Display::TableColumnGroup,
+        ] {
+            assert!(d.is_table_internal(), "{d:?}");
+            assert!(!d.is_inline_level(), "{d:?}");
+        }
+        assert!(!Display::Table.is_table_internal());
+        assert!(!Display::Block.is_table_internal());
+    }
+
+    #[test]
+    fn border_spacing_takes_one_or_two_lengths() {
+        assert_eq!(
+            parse_border_spacing("2px"),
+            Some((Length::Px(2.0), Length::Px(2.0)))
+        );
+        assert_eq!(
+            parse_border_spacing("10px 4px"),
+            Some((Length::Px(10.0), Length::Px(4.0)))
+        );
+        assert_eq!(parse_border_spacing("0"), Some((Length::Zero, Length::Zero)));
+        assert_eq!(
+            parse_border_spacing(" 0.2em 0 "),
+            Some((Length::Em(0.2), Length::Zero))
+        );
+        // Negative lengths, percentages, keywords and three values are invalid.
+        for bad in ["-1px", "10%", "auto", "1px 2px 3px", "", "red"] {
+            assert_eq!(parse_border_spacing(bad), None, "border-spacing: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn border_spacing_and_collapse_inherit() {
+        let mut parent = ComputedStyle::new();
+        parent.border_spacing = (3.0, 4.0);
+        parent.border_collapse = BorderCollapse::Collapse;
+        let child = ComputedStyle::inherit_from(&parent);
+        assert_eq!(child.border_spacing, (3.0, 4.0));
+        assert_eq!(child.border_collapse, BorderCollapse::Collapse);
+        assert_eq!(ComputedStyle::new().border_spacing, (0.0, 0.0));
     }
 
     #[test]
