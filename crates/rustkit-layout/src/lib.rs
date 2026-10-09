@@ -39,6 +39,9 @@ mod flex_resolve_tests;
 mod float_line_wrap_tests;
 
 #[cfg(test)]
+mod flex_auto_margin_relayout_tests;
+
+#[cfg(test)]
 mod flex_item_min_height_tests;
 
 #[cfg(test)]
