@@ -380,13 +380,10 @@ cells! {
     column_flex_container_gap: |l| flex_gap(Column, l);
 
     grid_item_width: |l| grid_item(width, l);
-    #[ignore = "W7-A: grid row sizing reads px height/min/max-height only, grid.rs:2436"]
     grid_item_height: |l| grid_item(height, l);
     grid_item_min_width: |l| grid_item(min_width, l);
     grid_item_max_width: |l| grid_item(max_width, l);
-    #[ignore = "W7-A: grid row sizing reads px height/min/max-height only, grid.rs:2436"]
     grid_item_min_height: |l| grid_item(min_height, l);
-    #[ignore = "W7-A: grid row sizing reads px height/min/max-height only, grid.rs:2436"]
     grid_item_max_height: |l| grid_item(max_height, l);
     #[ignore = "W7-A: grid padding estimate uses to_px with no viewport, grid.rs:293"]
     grid_item_padding: |l| grid_item(padding, l);

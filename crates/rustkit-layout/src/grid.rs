@@ -250,6 +250,12 @@ impl<'a> GridItem<'a> {
             l if is_font_or_viewport_relative(l) => {
                 return self.layout_box.length_to_px(l, container_height) + margins;
             }
+            Length::Calc(sum) if sum.percent == 0.0 || container_height > 0.0 => {
+                return self
+                    .layout_box
+                    .length_to_px(&style.height, container_height)
+                    + margins;
+            }
             _ => {}
         }
 
@@ -1717,7 +1723,7 @@ pub fn layout_grid_container(
             let contribution = match (fragment, blocks) {
                 (Some(fragment), Some((mut border_box, content_block))) => {
                     let item_style = &item.layout_box.style;
-                    if let Length::Px(min_h) = item_style.min_height {
+                    if let Some(min_h) = definite_len(&item.layout_box, &item_style.min_height) {
                         let floor = if item_style.box_sizing == BoxSizing::BorderBox {
                             min_h
                         } else {
@@ -1945,16 +1951,16 @@ pub fn layout_grid_container(
                 let mut margins = crate::MarginCollapseContext::new();
                 let mut floats = crate::FloatContext::new();
                 child.layout_block_children_with_collapse(&mut margins, &mut floats, None);
-                let cap = match child.style.max_height {
-                    Length::Px(max_h) if child.style.box_sizing == BoxSizing::BorderBox => {
+                let cap = match definite_len(child, &child.style.max_height) {
+                    Some(max_h) if child.style.box_sizing == BoxSizing::BorderBox => {
                         let pb = child.dimensions.padding.top
                             + child.dimensions.padding.bottom
                             + child.dimensions.border.top
                             + child.dimensions.border.bottom;
                         (max_h - pb).max(0.0)
                     }
-                    Length::Px(max_h) => max_h,
-                    _ => f32::INFINITY,
+                    Some(max_h) => max_h,
+                    None => f32::INFINITY,
                 };
                 let content_height = child.dimensions.content.height.min(cap);
                 if let Some(slot) = real_heights.get_mut(item_idx) {
@@ -2423,7 +2429,7 @@ pub fn layout_grid_container(
                             _ => None,
                         };
                         let is_border_box = child.style.box_sizing == BoxSizing::BorderBox;
-                        if let Length::Px(h) = child.style.height {
+                        if let Some(h) = definite_len(child, &child.style.height) {
                             let border_box = if is_border_box { h } else { h + pb };
                             // Not the taller of the two: content that
                             // overflows a fixed height does not size the row.
@@ -2433,16 +2439,19 @@ pub fn layout_grid_container(
                         // row (three lines under `max-height: 24px` make a
                         // 24px row, and overflow it); `min-height` then
                         // floors it.
-                        if let Length::Px(max_h) = child.style.max_height {
+                        if let Some(max_h) = definite_len(child, &child.style.max_height) {
                             let cap = if is_border_box { max_h } else { max_h + pb };
                             wanted = wanted.map(|w| w.min(cap));
                         }
-                        if let Length::Px(min_h) = child.style.min_height {
+                        if let Some(min_h) = definite_len(child, &child.style.min_height) {
                             let floor = if is_border_box { min_h } else { min_h + pb };
                             wanted = Some(floor.max(wanted.unwrap_or(0.0)));
                         }
-                        if !matches!(child.style.height, Length::Px(_) | Length::Auto)
-                            || !matches!(child.style.min_height, Length::Px(_) | Length::Auto)
+                        let sized_or_auto = |l: &Length| {
+                            matches!(l, Length::Auto) || definite_len(child, l).is_some()
+                        };
+                        if !sized_or_auto(&child.style.height)
+                            || !sized_or_auto(&child.style.min_height)
                         {
                             // A percentage or other relative block size: the
                             // estimate and the flow disagree on what it
@@ -2959,10 +2968,10 @@ pub fn layout_grid_container(
                 if let Some(mut height) = content {
                     let is_border_box = child.style.box_sizing == BoxSizing::BorderBox;
                     let own = if is_border_box { pb } else { 0.0 };
-                    if let Length::Px(max_h) = child.style.max_height {
+                    if let Some(max_h) = definite_len(child, &child.style.max_height) {
                         height = height.min((max_h - own).max(0.0));
                     }
-                    if let Length::Px(min_h) = child.style.min_height {
+                    if let Some(min_h) = definite_len(child, &child.style.min_height) {
                         height = height.max((min_h - own).max(0.0));
                     }
                     child.dimensions.content.height = height;
@@ -3551,6 +3560,19 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
     max_contribution = max_contribution.max(inline_run);
 
     max_contribution + padding_border
+}
+
+/// A block-axis length that needs no base, in px: `px`, font-relative,
+/// viewport-relative, and a `calc()` without a percentage. The row sizing
+/// passes read `Length::Px` alone, so `min-height: 1.25rem` on a grid item
+/// floored nothing and `max-height: 2vw` capped nothing.
+fn definite_len(b: &LayoutBox, l: &Length) -> Option<f32> {
+    match l {
+        Length::Px(v) => Some(*v),
+        Length::Calc(sum) if sum.percent == 0.0 => Some(b.length_to_px(l, 0.0)),
+        l if is_font_or_viewport_relative(l) => Some(b.length_to_px(l, 0.0)),
+        _ => None,
+    }
 }
 
 /// A length that is definite at track-sizing time without a containing block:
