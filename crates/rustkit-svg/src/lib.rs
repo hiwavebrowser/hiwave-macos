@@ -66,6 +66,10 @@ pub struct SvgDocument {
     /// (`preserveAspectRatio="none"`) instead of uniformly. Set by the
     /// engine for an SVG image whose viewBox it synthesized, as Blink does.
     pub stretch: bool,
+    /// The markup and the viewport it was read for, kept when the paint
+    /// depends on that viewport: a root with no viewBox that holds a
+    /// `<use>`. See `for_viewport`.
+    viewport_source: Option<(std::sync::Arc<str>, (f32, f32))>,
 }
 
 impl SvgDocument {
@@ -78,11 +82,19 @@ impl SvgDocument {
             height: None,
             defs: HashMap::new(),
             stretch: false,
+            viewport_source: None,
         }
     }
 
     /// Parse SVG from XML string.
     pub fn parse(xml: &str) -> Result<Self, SvgError> {
+        Self::parse_in(xml, None)
+    }
+
+    /// `parse`, with the root's viewport given by the caller where the root
+    /// has no viewBox (`used_viewport`), in place of its size attributes
+    /// and the 300x150 default.
+    fn parse_in(xml: &str, used_viewport: Option<(f32, f32)>) -> Result<Self, SvgError> {
         let mut doc = Self::new();
         // Simple XML-like parser
         let xml = xml.trim();
@@ -132,12 +144,15 @@ impl SvgDocument {
         let mut servers = HashMap::new();
         // The root's user units: what the percentages of a nested viewport
         // and of a `<use>` resolve against.
-        let viewport = doc.view_box.map(|vb| (vb.width, vb.height)).unwrap_or_else(|| {
+        let viewport = doc.view_box.map(|vb| (vb.width, vb.height)).or(used_viewport).unwrap_or_else(|| {
             (
                 doc.width.map(|w| w.to_px(300.0)).unwrap_or(300.0),
                 doc.height.map(|h| h.to_px(150.0)).unwrap_or(150.0),
             )
         });
+        if doc.view_box.is_none() && xml.contains("<use") {
+            doc.viewport_source = Some((xml.into(), viewport));
+        }
         // The root's own tag is read above: what is parsed here is its
         // content, so an `<svg>` met there is a nested one. Markup after its
         // close tag (the sprite sheet the engine appends) never paints; it
@@ -202,6 +217,29 @@ impl SvgDocument {
         (width, height)
     }
 
+    /// This document read again for a `width` x `height` viewport, when that
+    /// changes what it paints.
+    ///
+    /// A root with no viewBox has no user units of its own: its viewport is
+    /// the box it is drawn in (the CSS size of an inline `<svg>`), and a
+    /// `<use>` of a `<symbol>` fills that. The size is not known when the
+    /// markup is parsed, and the instances are built then, so a document
+    /// drawn at another size than it was read for is read again. `None`
+    /// when the size is the one it was read for or nothing depends on it.
+    fn for_viewport(&self, width: f32, height: f32) -> Option<SvgDocument> {
+        // The engine gives an SVG image a viewBox after parsing; with one,
+        // the render rect only scales.
+        if self.view_box.is_some() {
+            return None;
+        }
+        let (xml, read_for) = self.viewport_source.as_ref()?;
+        let same = (read_for.0 - width).abs() < 0.01 && (read_for.1 - height).abs() < 0.01;
+        if same || !(width > 0.0 && height > 0.0) {
+            return None;
+        }
+        Self::parse_in(xml, Some((width, height))).ok()
+    }
+
     /// Render to display commands with `currentColor` resolving to black —
     /// the initial value of CSS `color`, which is what a standalone SVG
     /// document (an `<img src=*.svg>`) sees.
@@ -223,6 +261,9 @@ impl SvgDocument {
         height: f32,
         current_color: Color,
     ) -> Vec<DisplayCommand> {
+        if let Some(sized) = self.for_viewport(width, height) {
+            return sized.render_with_color(x, y, width, height, current_color);
+        }
         let mut commands = Vec::new();
         // Apply viewBox transform if present
         let transform = if let Some(vb) = &self.view_box {
@@ -3805,6 +3846,19 @@ mod tests {
             vec![(0.0, 0.0, 48.0, 48.0, (0, 0, 0))],
             "at a CSS size"
         );
+    }
+
+    #[test]
+    fn test_a_viewbox_given_after_parsing_is_kept() {
+        // What the engine does for an SVG image with absolute sizes and no
+        // viewBox: the 24x24 drawing is scaled into the 48px box, not read
+        // again for a 48px viewport without it.
+        let mut doc = SvgDocument::parse(&CSS_SIZED_ICON.replace(r#"class="icon""#, r#"width="24" height="24""#))
+            .expect("parse");
+        doc.view_box = Some(ViewBox { min_x: 0.0, min_y: 0.0, width: 24.0, height: 24.0 });
+        doc.stretch = true;
+        let rects = fill_rects(&doc.render(0.0, 0.0, 48.0, 12.0));
+        assert_eq!(rects, vec![(0.0, 0.0, 48.0, 12.0, (0, 0, 0))]);
     }
 
     #[test]
