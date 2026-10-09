@@ -271,3 +271,50 @@ fn click_on_a_submit_or_reset_button_acts_on_its_form() {
     );
     assert!(b.take_submit_requests().is_empty());
 }
+
+// HTML §4.10.3: `form.submit()` skips validation and the `submit` event, but
+// still asks the engine to navigate. The macOS+headless engine suite covers
+// the embedder hand-off; this pins the bindings contract on every host.
+#[test]
+fn form_submit_notes_without_an_event_and_skips_validation() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var f = document.getElementById('f'), seen = []; \
+             f.addEventListener('submit', function () { seen.push('submit'); }); \
+             var q = document.getElementById('q'); q.value = ''; q.required = true; \
+             f.submit(); seen.join(',') + '|' + f.checkValidity()"
+        ),
+        "|false"
+    );
+    let requests = b.take_submit_requests();
+    assert_eq!(requests.len(), 1, "connected form.submit() asks the engine");
+    assert_eq!(requests[0].1, None, "submit() carries no submitter");
+
+    // A cancelled requestSubmit must not leave a note; submit() still can.
+    assert_eq!(
+        ev(
+            &b,
+            "var f = document.getElementById('f'), q = document.getElementById('q'), n = 0; \
+             q.required = false; q.value = 'ok'; \
+             f.addEventListener('submit', function (e) { n++; e.preventDefault(); }); \
+             f.requestSubmit(); [n, f.checkValidity()].join(',')"
+        ),
+        "1,true"
+    );
+    assert!(b.take_submit_requests().is_empty());
+    ev(&b, "document.getElementById('f').submit(); 0");
+    assert_eq!(b.take_submit_requests().len(), 1);
+
+    // A disconnected form notes nothing (HTML §4.10.3 "if not connected").
+    assert_eq!(
+        ev(
+            &b,
+            "var orphan = document.createElement('form'); orphan.action = '/x'; \
+             orphan.submit(); orphan.isConnected"
+        ),
+        "false"
+    );
+    assert!(b.take_submit_requests().is_empty());
+}
