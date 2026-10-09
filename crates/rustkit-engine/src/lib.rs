@@ -8320,49 +8320,41 @@ impl Engine {
                 style.mask.apply(property, value, &parse_gradient);
             }
             "background-size" => {
-                // Can be comma-separated for multiple layers
-                // CSS order: first size applies to first (topmost) layer
-                // Our array: index 0 is bottommost, last index is topmost
-                // So we need to apply in reverse order
-                // A list shorter than the layers repeats (CSS Backgrounds 3
-                // §3.10); values past the last layer are not used. Until
-                // 2026-10-08 a single value reached the top layer only, and
-                // one too many overwrote the bottom layer.
+                // CSS order: first size applies to first (topmost) layer.
+                // Our array is bottom-first. A short list repeats; values
+                // past the last layer are unused (CSS Backgrounds 3 §3.10).
                 let sizes: Vec<&str> = split_by_comma(value);
-                let num_layers = style.background_layers.len();
-                for i in 0..num_layers.min(num_layers * sizes.len()) {
-                    // Map CSS index to our reversed array: CSS[0] -> layers[n-1]
-                    style.background_layers[num_layers - 1 - i].size = parse_background_size(sizes[i % sizes.len()]);
-                }
+                zip_background_layer_values(
+                    &mut style.background_layers,
+                    &sizes,
+                    |layer, size| layer.size = parse_background_size(size),
+                );
             }
             "background-position" => {
-                // Can be comma-separated for multiple layers
-                // Same reversal and repetition as background-size
                 let positions: Vec<&str> = split_by_comma(value);
-                let num_layers = style.background_layers.len();
-                for i in 0..num_layers.min(num_layers * positions.len()) {
-                    style.background_layers[num_layers - 1 - i].position =
-                        parse_background_position(positions[i % positions.len()]);
-                }
+                zip_background_layer_values(
+                    &mut style.background_layers,
+                    &positions,
+                    |layer, position| {
+                        layer.position = parse_background_position(position);
+                    },
+                );
             }
             "background-repeat" => {
-                // Can be comma-separated for multiple layers
-                // Same reversal and repetition as background-size
                 let repeats: Vec<&str> = split_by_comma(value);
-                let num_layers = style.background_layers.len();
-                for i in 0..num_layers.min(num_layers * repeats.len()) {
-                    style.background_layers[num_layers - 1 - i].repeat =
-                        parse_background_repeat(repeats[i % repeats.len()]);
-                }
+                zip_background_layer_values(
+                    &mut style.background_layers,
+                    &repeats,
+                    |layer, repeat| layer.repeat = parse_background_repeat(repeat),
+                );
             }
             "background-origin" => {
-                // Same reversal and repetition as background-size
                 let origins: Vec<&str> = split_by_comma(value);
-                let num_layers = style.background_layers.len();
-                for i in 0..num_layers.min(num_layers * origins.len()) {
-                    style.background_layers[num_layers - 1 - i].origin =
-                        parse_background_origin(origins[i % origins.len()]);
-                }
+                zip_background_layer_values(
+                    &mut style.background_layers,
+                    &origins,
+                    |layer, origin| layer.origin = parse_background_origin(origin),
+                );
             }
             // `font` shorthand (css-fonts-4 §3.9):
             //   [ <style> || <variant> || <weight> || <stretch> ]? <size> [ / <line-height> ]? <family>
@@ -14916,6 +14908,146 @@ fn selects_the_root(selector: &str) -> bool {
 }
 
 // ==================== Background Layer Parsing ====================
+
+/// Assign a comma-separated background longhand list onto our bottom-first
+/// `layers` in CSS order (index 0 = topmost). CSS Backgrounds 3 §3.10: a
+/// list shorter than the layers repeats; values past the last layer are
+/// not used. Until 2026-10-08 a single value reached the top layer only,
+/// and one too many overwrote the bottom layer (wikipedia.org's sprite
+/// sheet under one `background-position` / `no-repeat`).
+fn zip_background_layer_values<V>(
+    layers: &mut [rustkit_css::BackgroundLayer],
+    values: &[V],
+    mut assign: impl FnMut(&mut rustkit_css::BackgroundLayer, &V),
+) {
+    if layers.is_empty() || values.is_empty() {
+        return;
+    }
+    let n = layers.len();
+    for i in 0..n {
+        assign(&mut layers[n - 1 - i], &values[i % values.len()]);
+    }
+}
+
+#[cfg(test)]
+mod background_layer_list_tests {
+    use super::*;
+    use rustkit_css::BackgroundPositionValue::{Percent, Px};
+    use rustkit_css::{
+        BackgroundLayer, BackgroundOrigin, BackgroundPosition, BackgroundRepeat, BackgroundSize,
+    };
+
+    fn n_layers(n: usize) -> Vec<BackgroundLayer> {
+        (0..n).map(|_| BackgroundLayer::default()).collect()
+    }
+
+    /// wikipedia.org's portal: two background images, one position / size /
+    /// no-repeat / content-box origin. Both layers must take those values.
+    #[test]
+    fn a_short_value_list_repeats_over_every_layer() {
+        let mut layers = n_layers(2);
+        zip_background_layer_values(&mut layers, &["no-repeat"], |layer, repeat| {
+            layer.repeat = parse_background_repeat(repeat);
+        });
+        zip_background_layer_values(&mut layers, &["0 -203px"], |layer, position| {
+            layer.position = parse_background_position(position);
+        });
+        zip_background_layer_values(&mut layers, &["176px 811px"], |layer, size| {
+            layer.size = parse_background_size(size);
+        });
+        zip_background_layer_values(&mut layers, &["content-box"], |layer, origin| {
+            layer.origin = parse_background_origin(origin);
+        });
+        for (i, layer) in layers.iter().enumerate() {
+            assert_eq!(layer.repeat, BackgroundRepeat::NoRepeat, "layer {i}");
+            assert_eq!(
+                layer.position,
+                BackgroundPosition {
+                    x: Px(0.0),
+                    y: Px(-203.0)
+                },
+                "layer {i}"
+            );
+            assert_eq!(
+                layer.size,
+                BackgroundSize::Explicit {
+                    width: Some(176.0),
+                    height: Some(811.0)
+                },
+                "layer {i}"
+            );
+            assert_eq!(layer.origin, BackgroundOrigin::ContentBox, "layer {i}");
+        }
+    }
+
+    /// CSS index 0 is the topmost layer (last in our bottom-first array).
+    #[test]
+    fn css_order_maps_onto_the_bottom_first_array() {
+        let mut layers = n_layers(2);
+        zip_background_layer_values(
+            &mut layers,
+            &["repeat-x", "no-repeat"],
+            |layer, repeat| layer.repeat = parse_background_repeat(repeat),
+        );
+        zip_background_layer_values(
+            &mut layers,
+            &["50% 0", "10px 100%"],
+            |layer, position| layer.position = parse_background_position(position),
+        );
+        assert_eq!(layers[1].repeat, BackgroundRepeat::RepeatX, "topmost");
+        assert_eq!(layers[1].position.x, Percent(0.5));
+        assert_eq!(layers[0].repeat, BackgroundRepeat::NoRepeat, "bottommost");
+        assert_eq!(&layers[0].position.x, &Px(10.0));
+        assert_eq!(&layers[0].position.y, &Percent(1.0));
+    }
+
+    /// Three layers and two values: the list cycles; a third value would not.
+    #[test]
+    fn a_list_cycles_and_values_past_the_last_layer_are_unused() {
+        let mut layers = n_layers(3);
+        zip_background_layer_values(
+            &mut layers,
+            &["contain", "10px"],
+            |layer, size| layer.size = parse_background_size(size),
+        );
+        assert_eq!(layers[2].size, BackgroundSize::Contain, "CSS[0] top");
+        assert_eq!(
+            layers[1].size,
+            BackgroundSize::Explicit {
+                width: Some(10.0),
+                height: None
+            },
+            "CSS[1]"
+        );
+        assert_eq!(layers[0].size, BackgroundSize::Contain, "CSS[2] = sizes[0]");
+
+        let mut layers = n_layers(2);
+        zip_background_layer_values(
+            &mut layers,
+            &["cover", "contain", "auto"],
+            |layer, size| layer.size = parse_background_size(size),
+        );
+        assert_eq!(layers[1].size, BackgroundSize::Cover, "CSS[0]");
+        assert_eq!(layers[0].size, BackgroundSize::Contain, "CSS[1]");
+        // "auto" is past the last layer and must not overwrite the bottom.
+    }
+
+    #[test]
+    fn an_empty_list_or_no_layers_changes_nothing() {
+        let mut layers = n_layers(1);
+        layers[0].repeat = BackgroundRepeat::NoRepeat;
+        zip_background_layer_values(&mut layers, &[] as &[&str], |layer, repeat| {
+            layer.repeat = parse_background_repeat(repeat);
+        });
+        assert_eq!(layers[0].repeat, BackgroundRepeat::NoRepeat);
+
+        let mut empty: Vec<BackgroundLayer> = Vec::new();
+        zip_background_layer_values(&mut empty, &["no-repeat"], |layer, repeat| {
+            layer.repeat = parse_background_repeat(repeat);
+        });
+        assert!(empty.is_empty());
+    }
+}
 
 /// Parse `object-position` (CSS Images 3 §5.6; the `<position>` grammar
 /// background-position uses) into a fraction of the free space per axis
