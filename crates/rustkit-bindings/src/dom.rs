@@ -518,8 +518,28 @@ fn write_kind(args: &[JsValue]) -> MutationKind {
     }
 }
 
+/// The most characters of a tag name or an id the node label keeps.
+const LABEL_PART_MAX: usize = 48;
+
+/// `part` as the relayout log may print it: at most `LABEL_PART_MAX`
+/// characters (an ellipsis marks the cut) and no control characters (each
+/// becomes `?`). The page chooses its ids, so the log line it lands in must
+/// not grow with them or take a newline from them.
+fn label_part(part: &str) -> String {
+    let mut out: String = part
+        .chars()
+        .take(LABEL_PART_MAX)
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    if part.chars().nth(LABEL_PART_MAX).is_some() {
+        out.push('…');
+    }
+    out
+}
+
 /// `tag#id` of the node at `args[index]` (the tag alone without an id,
-/// empty for a non-element or a stale id): the relayout log's node label.
+/// empty for a non-element or a stale id): the relayout log's node label,
+/// each part clipped by `label_part`.
 fn node_label(host: &DomHost, args: &[JsValue], index: usize) -> String {
     let Some(node) = host.node_at(args, index) else {
         return String::new();
@@ -533,8 +553,8 @@ fn node_label(host: &DomHost, args: &[JsValue], index: usize) -> String {
         return String::new();
     };
     match attributes.get("id") {
-        Some(id) if !id.is_empty() => format!("{tag_name}#{id}"),
-        _ => tag_name.clone(),
+        Some(id) if !id.is_empty() => format!("{}#{}", label_part(tag_name), label_part(id)),
+        _ => label_part(tag_name),
     }
 }
 
@@ -3182,5 +3202,24 @@ mod tests {
         b.set_document(Rc::new(Document::parse_html("<p>x</p>").unwrap()))
             .unwrap();
         assert!(b.take_script_mutations().is_empty());
+    }
+
+    // The page picks its ids: the label the relayout log prints is clipped
+    // and carries no control characters, so a page cannot flood or forge it.
+    #[test]
+    fn a_long_or_multiline_id_is_clipped_in_the_label() {
+        let (b, _doc) = bound(PAGE);
+        b.evaluate(
+            "var m = document.getElementById('main'); \
+             m.id = 'x\\nINFO forged ' + 'a'.repeat(100000);",
+        )
+        .unwrap();
+        b.take_script_mutations();
+        b.evaluate("m.setAttribute('data-n', '1');").unwrap();
+        let (_, label) = b.take_script_mutations().first.expect("a write");
+        assert!(!label.chars().any(char::is_control), "{label:?}");
+        assert!(label.starts_with("div#x?INFO forged aaa"), "{label:?}");
+        assert!(label.ends_with('…'), "{label:?}");
+        assert_eq!(label.chars().count(), "div#".len() + 48 + 1);
     }
 }

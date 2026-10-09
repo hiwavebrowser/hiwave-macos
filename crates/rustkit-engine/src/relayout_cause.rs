@@ -211,17 +211,21 @@ impl RelayoutStats {
     }
 }
 
-/// The document URL as the navigation summary logs it: origin and path,
-/// never the query or fragment (they can carry tokens). An opaque origin
-/// (`about:`, `data:`) logs its scheme and the first 32 characters of its
-/// path.
+/// The document URL as the navigation summary logs it: origin and path for
+/// a network URL, never its query or fragment (they can carry tokens).
+/// `about:` keeps the first 32 characters of its path; any other scheme
+/// (`file:`, `data:`, `blob:`, ...) logs the scheme alone, since its path
+/// can be a local path, a whole document or another URL.
 pub(crate) fn summary_url(url: &url::Url) -> String {
-    match url.origin() {
-        origin if origin.is_tuple() => format!("{}{}", origin.ascii_serialization(), url.path()),
-        _ => {
-            let path: String = url.path().chars().take(32).collect();
-            format!("{}:{}", url.scheme(), path)
+    match url.scheme() {
+        "http" | "https" | "ws" | "wss" => {
+            format!("{}{}", url.origin().ascii_serialization(), url.path())
         }
+        "about" => {
+            let path: String = url.path().chars().take(32).collect();
+            format!("about:{path}")
+        }
+        scheme => format!("{scheme}:"),
     }
 }
 
@@ -254,8 +258,10 @@ mod tests {
         assert_eq!(url("about:blank"), "about:blank");
         assert_eq!(
             url("data:text/html,<p>a long inline document body here</p>"),
-            "data:text/html,<p>a long inline docum"
+            "data:"
         );
+        assert_eq!(url("file:///Users/someone/page.html"), "file:");
+        assert_eq!(url("blob:https://a.example/0b5e-uuid"), "blob:");
     }
 
     #[test]
