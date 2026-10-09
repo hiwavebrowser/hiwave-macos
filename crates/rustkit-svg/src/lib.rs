@@ -477,6 +477,14 @@ impl Transform2D {
         }
     }
 
+    /// The most this transform stretches any direction: its largest
+    /// singular value.
+    pub fn max_scale(&self) -> f32 {
+        let sum = self.a * self.a + self.b * self.b + self.c * self.c + self.d * self.d;
+        let det = self.a * self.d - self.b * self.c;
+        ((sum + (sum * sum - 4.0 * det * det).max(0.0).sqrt()) * 0.5).sqrt()
+    }
+
     /// Transform a point.
     pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
         (
@@ -891,6 +899,11 @@ const MAX_CROSSING_CHECKS: usize = 2_000_000;
 /// most triangles) goes through as-is, and anything else (concave outlines,
 /// holes, self-crossings, several subpaths) is swept into horizontal
 /// trapezoids, each inside under `rule`.
+///
+/// A contour winds zero outside its own x-range, so contours are first
+/// split into clusters whose x-ranges don't overlap and each cluster is
+/// filled on its own: a line of glyphs isn't cut into bands at every
+/// vertex of every other glyph. The fill is the same under either rule.
 fn fill_contours(
     contours: &[Vec<(f32, f32)>],
     rule: FillRule,
@@ -917,10 +930,45 @@ fn fill_contours(
         .filter(|c| c.len() >= 3)
         .collect();
 
-    match contours.as_slice() {
+    // Clusters of contours whose x-ranges overlap, left to right.
+    let mut spans: Vec<(f32, f32, usize)> = contours
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let (x, _, w, _) = bounds_of(c.iter());
+            (x, x + w, i)
+        })
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut checks = 0usize;
+    let mut cluster: Vec<&[(f32, f32)]> = Vec::new();
+    let mut right = f32::NEG_INFINITY;
+    for &(lo, hi, i) in &spans {
+        if lo >= right && !cluster.is_empty() {
+            fill_cluster(&cluster, rule, color, &mut checks, commands);
+            cluster.clear();
+        }
+        cluster.push(&contours[i]);
+        right = right.max(hi);
+    }
+    fill_cluster(&cluster, rule, color, &mut checks, commands);
+}
+
+/// Fill contours that may overlap, sharing `checks` with the rest of the fill.
+fn fill_cluster(
+    contours: &[&[(f32, f32)]],
+    rule: FillRule,
+    color: Color,
+    checks: &mut usize,
+    commands: &mut Vec<DisplayCommand>,
+) {
+    match contours {
         [] => return,
         [only] if is_convex(only) => {
-            commands.push(DisplayCommand::FillPolygon { points: only.clone(), color });
+            commands.push(DisplayCommand::FillPolygon {
+                points: only.to_vec(),
+                color,
+            });
             return;
         }
         _ => {}
@@ -940,7 +988,7 @@ fn fill_contours(
         }
     }
     let mut edges: Vec<Edge> = Vec::new();
-    for c in &contours {
+    for c in contours {
         for i in 0..c.len() {
             let (a, b) = (c[i], c[(i + 1) % c.len()]);
             if a.1 == b.1 {
@@ -961,15 +1009,14 @@ fn fill_contours(
     // Band boundaries: every vertex y, plus every y where two edges cross,
     // so inside one band the edges keep their left-to-right order.
     let mut ys: Vec<f32> = edges.iter().flat_map(|e| [e.y0, e.y1]).collect();
-    let mut checks = 0usize;
     'crossings: for i in 0..edges.len() {
         let a = &edges[i];
         for b in &edges[i + 1..] {
             if b.y0 >= a.y1 {
                 break;
             }
-            checks += 1;
-            if checks > MAX_CROSSING_CHECKS {
+            *checks += 1;
+            if *checks > MAX_CROSSING_CHECKS {
                 break 'crossings;
             }
             let (lo, hi) = (a.y0.max(b.y0), a.y1.min(b.y1));
@@ -1939,8 +1986,18 @@ impl SvgPath {
         commands
     }
 
-    /// Convert path to line segments.
+    /// Convert path to line segments, flattening curves to
+    /// `FLATTEN_TOLERANCE_PX` in the path's own units. That is only right for
+    /// a path drawn at 1:1; one in a small viewBox drawn large comes out
+    /// coarse, so a caller that knows its scale uses `to_line_segments_within`.
     pub fn to_line_segments(&self) -> Vec<Vec<(f32, f32)>> {
+        self.to_line_segments_within(FLATTEN_TOLERANCE_PX)
+    }
+
+    /// Convert path to line segments, flattening every curve and arc so no
+    /// point of it strays more than `tolerance` (in the path's own units)
+    /// from the flattened outline.
+    pub fn to_line_segments_within(&self, tolerance: f32) -> Vec<Vec<(f32, f32)>> {
         let mut segments = Vec::new();
         let mut current_segment = Vec::new();
         let mut current_pos = (0.0_f32, 0.0_f32);
@@ -2009,7 +2066,13 @@ impl SvgPath {
                     last_quad = None;
                 }
                 PathCommand::CubicTo(x1, y1, x2, y2, x, y) => {
-                    let points = cubic_bezier_points(current_pos, (*x1, *y1), (*x2, *y2), (*x, *y), 20);
+                    let points = cubic_bezier_points(
+                        current_pos,
+                        (*x1, *y1),
+                        (*x2, *y2),
+                        (*x, *y),
+                        tolerance,
+                    );
                     current_segment.extend(points);
                     current_pos = (*x, *y);
                     last_cubic = Some((*x2, *y2));
@@ -2019,14 +2082,15 @@ impl SvgPath {
                     let (x1, y1) = (current_pos.0 + dx1, current_pos.1 + dy1);
                     let (x2, y2) = (current_pos.0 + dx2, current_pos.1 + dy2);
                     let (x, y) = (current_pos.0 + dx, current_pos.1 + dy);
-                    let points = cubic_bezier_points(current_pos, (x1, y1), (x2, y2), (x, y), 20);
+                    let points =
+                        cubic_bezier_points(current_pos, (x1, y1), (x2, y2), (x, y), tolerance);
                     current_segment.extend(points);
                     current_pos = (x, y);
                     last_cubic = Some((x2, y2));
                     last_quad = None;
                 }
                 PathCommand::QuadTo(x1, y1, x, y) => {
-                    let points = quad_bezier_points(current_pos, (*x1, *y1), (*x, *y), 20);
+                    let points = quad_bezier_points(current_pos, (*x1, *y1), (*x, *y), tolerance);
                     current_segment.extend(points);
                     current_pos = (*x, *y);
                     last_quad = Some((*x1, *y1));
@@ -2035,7 +2099,7 @@ impl SvgPath {
                 PathCommand::QuadToRel(dx1, dy1, dx, dy) => {
                     let (x1, y1) = (current_pos.0 + dx1, current_pos.1 + dy1);
                     let (x, y) = (current_pos.0 + dx, current_pos.1 + dy);
-                    let points = quad_bezier_points(current_pos, (x1, y1), (x, y), 20);
+                    let points = quad_bezier_points(current_pos, (x1, y1), (x, y), tolerance);
                     current_segment.extend(points);
                     current_pos = (x, y);
                     last_quad = Some((x1, y1));
@@ -2067,7 +2131,13 @@ impl SvgPath {
                         _ => unreachable!(),
                     };
                     let c1 = reflect(last_cubic, current_pos);
-                    current_segment.extend(cubic_bezier_points(current_pos, c1, (x2, y2), (x, y), 20));
+                    current_segment.extend(cubic_bezier_points(
+                        current_pos,
+                        c1,
+                        (x2, y2),
+                        (x, y),
+                        tolerance,
+                    ));
                     current_pos = (x, y);
                     last_cubic = Some((x2, y2));
                     last_quad = None;
@@ -2079,7 +2149,7 @@ impl SvgPath {
                         _ => unreachable!(),
                     };
                     let c1 = reflect(last_quad, current_pos);
-                    current_segment.extend(quad_bezier_points(current_pos, c1, (x, y), 20));
+                    current_segment.extend(quad_bezier_points(current_pos, c1, (x, y), tolerance));
                     current_pos = (x, y);
                     last_quad = Some(c1);
                     last_cubic = None;
@@ -2092,7 +2162,16 @@ impl SvgPath {
                         }
                         _ => unreachable!(),
                     };
-                    current_segment.extend(arc_points(current_pos, rx, ry, angle, large_arc, sweep, (x, y)));
+                    current_segment.extend(arc_points(
+                        current_pos,
+                        rx,
+                        ry,
+                        angle,
+                        large_arc,
+                        sweep,
+                        (x, y),
+                        tolerance,
+                    ));
                     current_pos = (x, y);
                     last_cubic = None;
                     last_quad = None;
@@ -2117,7 +2196,9 @@ impl SvgPath {
             return;
         }
 
-        let outlines = self.to_line_segments();
+        // Flatten to a device-pixel tolerance: a path authored in a big
+        // viewBox and drawn small needs few steps per curve.
+        let outlines = self.to_line_segments_within(FLATTEN_TOLERANCE_PX / transform.max_scale());
         let subpaths: Vec<Vec<(f32, f32)>> = outlines
             .iter()
             .map(|segment| segment.iter().map(|(x, y)| transform.apply(*x, *y)).collect())
@@ -2546,8 +2627,47 @@ fn parse_flag<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> O
     }
 }
 
-/// Generate points along a cubic bezier curve.
-fn cubic_bezier_points(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), segments: usize) -> Vec<(f32, f32)> {
+/// How far, in CSS pixels, a flattened curve may stray from the true one.
+/// The polygon sits inside its curve, so this is ink lost on every convex
+/// edge: 0.1 keeps a 16 px icon dot within 3% of its area, and is 0.2
+/// physical px on a 2x display (this crate doesn't see the scale factor).
+const FLATTEN_TOLERANCE_PX: f32 = 0.1;
+
+/// The most line segments one curve or arc flattens to, however big it's drawn.
+const MAX_CURVE_STEPS: usize = 256;
+
+/// Steps that keep a Bézier of degree `degree` within `tolerance` of its
+/// chords, from the largest second difference of its control points
+/// (Wang's formula: n = sqrt(degree * (degree - 1) / 8 * dd / tolerance)).
+/// A NaN or infinite input (a degenerate transform) falls to one step.
+fn bezier_steps(degree: f32, dd: f32, tolerance: f32) -> usize {
+    let n = (degree * (degree - 1.0) / 8.0 * dd / tolerance)
+        .sqrt()
+        .ceil();
+    if n.is_finite() {
+        (n as usize).clamp(1, MAX_CURVE_STEPS)
+    } else if n.is_nan() {
+        1
+    } else {
+        MAX_CURVE_STEPS
+    }
+}
+
+/// The length of `a - 2b + c`.
+fn second_difference(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
+    (a.0 - 2.0 * b.0 + c.0).hypot(a.1 - 2.0 * b.1 + c.1)
+}
+
+/// Generate points along a cubic bezier curve, within `tolerance` of it.
+fn cubic_bezier_points(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    p3: (f32, f32),
+    tolerance: f32,
+) -> Vec<(f32, f32)> {
+    let dd = second_difference(p0, p1, p2).max(second_difference(p1, p2, p3));
+    let segments = bezier_steps(3.0, dd, tolerance);
     let mut points = Vec::with_capacity(segments);
     
     for i in 1..=segments {
@@ -2588,6 +2708,7 @@ fn arc_points(
     large_arc: bool,
     sweep: bool,
     p1: (f32, f32),
+    tolerance: f32,
 ) -> Vec<(f32, f32)> {
     if p0 == p1 {
         return Vec::new();
@@ -2640,8 +2761,18 @@ fn arc_points(
         delta += std::f64::consts::TAU;
     }
 
-    // About one point per 11.25 degrees, as fine as the 20-step beziers.
-    let steps = ((delta.abs() / (std::f64::consts::PI / 16.0)).ceil() as usize).max(2);
+    // Each step's chord sags r * (1 - cos(step / 2)) from the arc; keep
+    // that within `tolerance` of the larger radius.
+    let sag = (f64::from(tolerance) / rx.max(ry)).min(1.0);
+    let step = 2.0 * (1.0 - sag).acos();
+    let steps = (delta.abs() / step).ceil();
+    let steps = if steps.is_finite() {
+        (steps as usize).clamp(2, MAX_CURVE_STEPS)
+    } else if steps.is_nan() {
+        2
+    } else {
+        MAX_CURVE_STEPS
+    };
     let mut points = Vec::with_capacity(steps);
     for i in 1..steps {
         let (sin_t, cos_t) = (theta1 + delta * i as f64 / steps as f64).sin_cos();
@@ -2654,8 +2785,14 @@ fn arc_points(
     points
 }
 
-/// Generate points along a quadratic bezier curve.
-fn quad_bezier_points(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), segments: usize) -> Vec<(f32, f32)> {
+/// Generate points along a quadratic bezier curve, within `tolerance` of it.
+fn quad_bezier_points(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    tolerance: f32,
+) -> Vec<(f32, f32)> {
+    let segments = bezier_steps(2.0, second_difference(p0, p1, p2), tolerance);
     let mut points = Vec::with_capacity(segments);
     
     for i in 1..=segments {
@@ -4012,6 +4149,243 @@ mod tests {
         assert_eq!(points[2], (50.0, 60.0));
     }
 
+    /// A line of glyph-like outlines in a large viewBox, the shape of a
+    /// text-converted-to-paths tagline: 28 "o"-like glyphs, each an outer cubic loop
+    /// and a reversed inner one (its counter), drawn under nonzero.
+    fn glyph_line_svg() -> String {
+        let d: String = glyph_line()
+            .iter()
+            .map(|&(cx, cy, rx, ry)| {
+                glyph_ellipse(cx, cy, rx, ry, true)
+                    + &glyph_ellipse(cx, cy, rx - 35.0, ry - 50.0, false)
+            })
+            .collect();
+        format!(r##"<svg viewBox="0 0 5000 400"><path d="{d}" fill="#000"/></svg>"##)
+    }
+
+    /// Each glyph's outer ellipse `(cx, cy, rx, ry)`; its counter is 35 x 50
+    /// smaller in radius. Glyphs differ a little, as real letters do, so
+    /// their vertices don't land on the same rows.
+    fn glyph_line() -> Vec<(f32, f32, f32, f32)> {
+        (0..28)
+            .map(|i| {
+                let (cx, cy) = (90.0 + 175.0 * i as f32, 200.0 + (i % 7) as f32 * 3.0);
+                (
+                    cx,
+                    cy,
+                    80.0 - (i % 3) as f32 * 4.0,
+                    180.0 - (i % 5) as f32 * 7.0,
+                )
+            })
+            .collect()
+    }
+
+    /// A 4-cubic ellipse about (cx, cy); `cw` picks the direction.
+    fn glyph_ellipse(cx: f32, cy: f32, rx: f32, ry: f32, cw: bool) -> String {
+        let k = 0.5523;
+        let (kx, ky) = (rx * k, ry * k);
+        let s = if cw { 1.0 } else { -1.0 };
+        format!(
+            "M{x0} {cy} C{x0} {a} {b} {top} {cx} {top} C{c} {top} {x1} {a} {x1} {cy} \
+             C{x1} {d} {c} {bot} {cx} {bot} C{b} {bot} {x0} {d} {x0} {cy} Z ",
+            x0 = cx - s * rx,
+            x1 = cx + s * rx,
+            a = cy - ky,
+            b = cx - s * kx,
+            c = cx + s * kx,
+            d = cy + ky,
+            top = cy - ry,
+            bot = cy + ry,
+        )
+    }
+
+    fn fill_polygons(commands: &[DisplayCommand]) -> Vec<&Vec<(f32, f32)>> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::FillPolygon { points, .. } => Some(points),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_large_viewbox_path_drawn_small_stays_cheap() {
+        // Wikipedia's tagline: text converted to paths in a big viewBox,
+        // drawn about 139 x 9 CSS px. Curves must be flattened to a device
+        // tolerance, not 20 steps each in user units, and glyphs that don't
+        // share any x must not cut each other's fill into bands.
+        //
+        // The bound: 139 x 9 is 1,251 device pixels. A fill needs at most a
+        // handful of pieces per pixel row per glyph; 2,000 primitives (about
+        // 1.6 per device pixel, ~70 per 9 px glyph) is generous for that
+        // and still two orders of magnitude under the old output.
+        let doc = SvgDocument::parse(&glyph_line_svg()).expect("parse");
+        let commands = doc.render(0.0, 0.0, 139.0, 9.0);
+        let polys = fill_polygons(&commands);
+        assert!(!polys.is_empty(), "the glyphs must still paint");
+        assert!(
+            polys.len() <= 2_000,
+            "{} fill polygons for a 139 x 9 px shape",
+            polys.len()
+        );
+    }
+
+    /// The most any point of `points`' chords (closing one included) sits
+    /// off the ellipse `(cx, cy, rx, ry)`, all in device pixels: the chord
+    /// midpoints are where a flattened curve sags furthest.
+    fn worst_sag(points: &[(f32, f32)], (cx, cy, rx, ry): (f32, f32, f32, f32)) -> f32 {
+        (0..points.len())
+            .map(|i| {
+                let (a, b) = (points[i], points[(i + 1) % points.len()]);
+                let (x, y) = ((a.0 + b.0) * 0.5 - cx, (a.1 + b.1) * 0.5 - cy);
+                let rho = ((x / rx).powi(2) + (y / ry).powi(2)).sqrt();
+                (1.0 - rho).abs() * rx.max(ry)
+            })
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn test_path_drawn_large_keeps_its_curves_smooth() {
+        // The tagline's glyphs at 1000 px wide (a 0.2 scale) and at the
+        // viewBox's own 5000 px: each flattened outline stays within the
+        // device tolerance of its ellipse (plus the 4-cubic approximation's
+        // own ~0.03%), and keeps at least as many points as a circle of the
+        // glyph's smaller radius needs to stay within it.
+        for scale in [0.2_f32, 1.0] {
+            for (cx, cy, rx, ry) in glyph_line() {
+                let path = SvgPath {
+                    commands: SvgPath::parse(&glyph_ellipse(cx, cy, rx, ry, true)),
+                    ..Default::default()
+                };
+                let outline: Vec<(f32, f32)> = path
+                    .to_line_segments_within(FLATTEN_TOLERANCE_PX / scale)
+                    .concat()
+                    .into_iter()
+                    .map(|(x, y)| (x * scale, y * scale))
+                    .collect();
+                let device = (cx * scale, cy * scale, rx * scale, ry * scale);
+                let sag = worst_sag(&outline, device);
+                assert!(sag <= 0.15, "scale {scale}: sags {sag} px off the curve");
+                let r = rx.min(ry) * scale;
+                let floor = (std::f32::consts::PI / (1.0 - FLATTEN_TOLERANCE_PX / r).acos()).floor()
+                    as usize;
+                assert!(
+                    outline.len() >= floor,
+                    "scale {scale}: {} points, a radius-{r} circle needs {floor}",
+                    outline.len()
+                );
+            }
+        }
+        // And the 1000 px drawing has more points than the 139 px one.
+        let path = SvgPath {
+            commands: SvgPath::parse(&glyph_ellipse(90.0, 200.0, 80.0, 180.0, true)),
+            ..Default::default()
+        };
+        let points = |scale: f32| {
+            path.to_line_segments_within(FLATTEN_TOLERANCE_PX / scale)
+                .concat()
+                .len()
+        };
+        assert!(
+            points(0.2) >= 2 * points(9.0 / 400.0),
+            "{} vs {}",
+            points(0.2),
+            points(9.0 / 400.0)
+        );
+    }
+
+    #[test]
+    fn test_small_glyph_line_fill_covers_the_glyphs_once() {
+        // The 139 x 9 px drawing (scale 9 / 400) still fills each ring once,
+        // leaves the counters and the gaps empty, and covers the rings' area.
+        let scale = 9.0 / 400.0;
+        let doc = SvgDocument::parse(&glyph_line_svg()).expect("parse");
+        let commands = doc.render(0.0, 0.0, 139.0, 9.0);
+        let polys = fill_polygons(&commands);
+
+        // Area: every piece is convex and they don't overlap, so their sum
+        // is the coverage. The true rings are pi * (rx * ry - counter). Both
+        // outlines are inscribed, so the ring loses ink outside and gains it
+        // in the counter; at a 0.1 px tolerance the net is about -2% here
+        // (develop covered 351.0 px^2, this 344.9, exact 351.5).
+        let area: f32 = polys.iter().map(|p| polygon_area(p)).sum();
+        let exact: f32 = glyph_line()
+            .iter()
+            .map(|&(_, _, rx, ry)| {
+                std::f32::consts::PI * (rx * ry - (rx - 35.0) * (ry - 50.0)) * scale * scale
+            })
+            .sum();
+        assert!(
+            (area - exact).abs() <= exact * 0.03,
+            "covers {area} px^2, the rings are {exact}"
+        );
+
+        // Points: on a 0.2 px grid, a point clearly inside a ring is painted
+        // exactly once and every other clear point not at all. A point within
+        // 0.3 px of an edge may go either way.
+        let (mut inside, mut outside) = (0, 0);
+        for gy in 0..45 {
+            for gx in 0..600 {
+                // Off the vertex rows, where two pieces share an edge.
+                let p = (gx as f32 * 0.2 + 0.1037, gy as f32 * 0.2 + 0.0913);
+                let mut clear = true;
+                let mut in_ring = false;
+                for &(cx, cy, rx, ry) in &glyph_line() {
+                    let (dx, dy) = (p.0 - cx * scale, p.1 - cy * scale);
+                    let rho = |rx: f32, ry: f32| {
+                        ((dx / (rx * scale)).powi(2) + (dy / (ry * scale)).powi(2)).sqrt()
+                    };
+                    let (outer, inner) = (rho(rx, ry), rho(rx - 35.0, ry - 50.0));
+                    if (outer - 1.0).abs() * rx.min(ry) * scale < 0.3
+                        || (inner - 1.0).abs() * (rx - 35.0).min(ry - 50.0) * scale < 0.3
+                    {
+                        clear = false;
+                    }
+                    in_ring |= outer < 1.0 && inner > 1.0;
+                }
+                if !clear {
+                    continue;
+                }
+                let hits = fan_coverage(&commands, p);
+                if in_ring {
+                    inside += 1;
+                    assert_eq!(hits, 1, "{p:?} is in a ring");
+                } else {
+                    outside += 1;
+                    assert_eq!(hits, 0, "{p:?} is outside every ring");
+                }
+            }
+        }
+        assert!(
+            inside > 100 && outside > 1000,
+            "{inside} inside, {outside} outside"
+        );
+    }
+
+    #[test]
+    fn test_icon_dot_keeps_its_ink() {
+        // A filled r=4 dot in a 24-unit icon, drawn 16 px (r = 2.67 px): the
+        // commonest small curve on a page. Flattened polygons sit inside
+        // their curves, so a coarse tolerance shrinks the dot (0.25 px cost
+        // it 10%, 0.1 px costs 2.6%); keep it within 4% of the true area.
+        let doc = SvgDocument::parse(
+            r##"<svg viewBox="0 0 24 24"><path d="M8 12 C8 9.8 9.8 8 12 8 C14.2 8 16 9.8 16 12 C16 14.2 14.2 16 12 16 C9.8 16 8 14.2 8 12 Z" fill="#000"/></svg>"##,
+        )
+        .expect("parse");
+        let commands = doc.render(0.0, 0.0, 16.0, 16.0);
+        let area: f32 = fill_polygons(&commands)
+            .iter()
+            .map(|p| polygon_area(p))
+            .sum();
+        let r = 4.0 * 16.0 / 24.0;
+        let exact = std::f32::consts::PI * r * r;
+        assert!(
+            (area - exact).abs() <= exact * 0.04,
+            "the dot covers {area} px^2, a circle of radius {r} is {exact}"
+        );
+    }
+
     #[test]
     fn test_svg_document_parse() {
         let svg = r#"<svg viewBox="0 0 100 100"><rect x="10" y="10" width="80" height="80" fill="red"/></svg>"#;
@@ -4019,4 +4393,3 @@ mod tests {
         assert!(doc.view_box.is_some());
     }
 }
-
