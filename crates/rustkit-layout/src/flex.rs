@@ -101,6 +101,11 @@ pub struct FlexItem<'a> {
     /// Outer margin on cross axis end.
     pub cross_margin_end: f32,
 
+    /// Which margins are `auto`, as (start, end) per axis. An auto margin is
+    /// 0 until the free space on its axis is handed out (css-flexbox-1 §8.1).
+    pub main_margin_auto: (bool, bool),
+    pub cross_margin_auto: (bool, bool),
+
     /// Whether the item has an explicit cross size (not auto).
     /// If true, stretch should not apply per CSS spec.
     pub has_explicit_cross_size: bool,
@@ -142,6 +147,32 @@ pub struct FlexItem<'a> {
 }
 
 impl<'a> FlexItem<'a> {
+    /// Whether `align-self: stretch` applies. An auto cross margin takes the
+    /// free space first, so such an item keeps its own cross size (§8.1,
+    /// §9.4.11: "neither of its cross-axis margins are auto").
+    fn stretches(&self, align_items: AlignItems) -> bool {
+        resolved_align(self.align_self, align_items) == AlignItems::Stretch
+            && self.cross_margin_auto == (false, false)
+    }
+
+    /// Give back what the auto margins took. Free space is handed to them
+    /// after the sizes are resolved (§9.7 and §9.4 treat an auto margin as
+    /// 0), so every pass that sizes again starts from this.
+    fn clear_auto_margins(&mut self) {
+        if self.main_margin_auto.0 {
+            self.main_margin_start = 0.0;
+        }
+        if self.main_margin_auto.1 {
+            self.main_margin_end = 0.0;
+        }
+        if self.cross_margin_auto.0 {
+            self.cross_margin_start = 0.0;
+        }
+        if self.cross_margin_auto.1 {
+            self.cross_margin_end = 0.0;
+        }
+    }
+
     /// Get outer main size (target + margins).
     pub fn outer_main_size(&self) -> f32 {
         self.target_main_size + self.main_margin_start + self.main_margin_end
@@ -696,6 +727,14 @@ fn layout_flex_container_at(
         wrap == FlexWrap::WrapReverse,
         container_origin,
     );
+    // The boxes carry the auto margins' shares now. Step 11 sizes lines and
+    // items again from the items' outer sizes, and a share left in them
+    // counted as content: a `min-height: 200px` column with a `margin-top:
+    // auto` footer came out 234 tall, and a definite one shrank its items to
+    // make room for the margin. The passes below hand the shares out again.
+    for item in lines.iter_mut().flat_map(|l| l.items.iter_mut()) {
+        item.clear_auto_margins();
+    }
 
     // 11. Recursively layout children of flex items (important for nested flex containers)
     // After flex positioning, each item's dimensions are set, so we can use them as containing blocks
@@ -714,8 +753,7 @@ fn layout_flex_container_at(
                         && wrap == FlexWrap::NoWrap
                         && definite_inner_cross.is_some()
                         && !item.has_explicit_cross_size
-                        && resolved_align(item.align_self, style.align_items)
-                            == AlignItems::Stretch;
+                        && item.stretches(style.align_items);
                     // A `min-height` floor counts: steps 4–10 already grew
                     // the items into it (`min-height: 100dvh` columns, x's
                     // layout), and Chrome 148 lays their contents out at
@@ -825,12 +863,17 @@ fn layout_flex_container_at(
                     // `height: 100%` block in a stretched item of a 44px row
                     // leave the item at 44), where every other item still
                     // grows to its flow as it did.
+                    //
+                    // `stretches()` and not `align-self` alone: an item with
+                    // an auto cross margin is not stretched (§9.4.11), so a
+                    // vertically centred card's `height: 50%` child sees an
+                    // indefinite height and the card stays as tall as its
+                    // flow.
                     let percent_child = has_percent_height_child(item.layout_box);
                     let stretched = cross_axis == Axis::Vertical
                         && wrap == FlexWrap::NoWrap
                         && !item.has_explicit_cross_size
-                        && resolved_align(item.align_self, style.align_items)
-                            == AlignItems::Stretch;
+                        && item.stretches(style.align_items);
                     let stretch_target = definite_inner_cross
                         .filter(|_| percent_child && stretched)
                         .map(|cross| {
@@ -1032,9 +1075,7 @@ fn layout_flex_container_at(
                 // `align-items: flex-start`, Chromium 32). Only an authored
                 // minimum counts here: without one `min_cross_size` is the
                 // one-line content floor, which is not a size to grow to.
-                let target = if resolved_align(item.align_self, style.align_items)
-                    == AlignItems::Stretch
-                {
+                let target = if item.stretches(style.align_items) {
                     line.cross_size - item.cross_margin_start - item.cross_margin_end
                 } else if resolve_length(
                     item.layout_box,
@@ -1085,6 +1126,13 @@ fn layout_flex_container_at(
         }
         align_cross_axis(line, style.align_items);
         for item in &mut line.items {
+            if item.cross_margin_auto != (false, false) {
+                let m = &mut item.layout_box.dimensions.margin;
+                match cross_axis {
+                    Axis::Vertical => (m.top, m.bottom) = (item.cross_margin_start, item.cross_margin_end),
+                    Axis::Horizontal => (m.left, m.right) = (item.cross_margin_start, item.cross_margin_end),
+                }
+            }
             // New absolute border-box cross position, converted to a content
             // rect delta; main-axis positions are unchanged, so shifting the
             // already-laid-out subtree is sufficient.
@@ -1228,6 +1276,12 @@ fn layout_flex_container_at(
                     direction.is_reverse(),
                 );
                 for item in &mut line.items {
+                    if item.main_margin_auto != (false, false) {
+                        // Top and bottom: this step only runs for a
+                        // vertical main axis.
+                        let m = &mut item.layout_box.dimensions.margin;
+                        (m.top, m.bottom) = (item.main_margin_start, item.main_margin_end);
+                    }
                     let d = &item.layout_box.dimensions;
                     let new_content_y =
                         container_origin.1 + item.main_position + d.padding.top + d.border.top;
@@ -1557,6 +1611,17 @@ fn create_flex_item<'a>(
         ),
     };
 
+    let is_auto = |l: &Length| matches!(l, Length::Auto);
+    let (main_margin_auto, cross_margin_auto) = {
+        let s = &layout_box.style;
+        let horizontal = (is_auto(&s.margin_left), is_auto(&s.margin_right));
+        let vertical = (is_auto(&s.margin_top), is_auto(&s.margin_bottom));
+        match main_axis {
+            Axis::Horizontal => (horizontal, vertical),
+            Axis::Vertical => (vertical, horizontal),
+        }
+    };
+
     // Padding and border were resolved onto dimensions by the block
     // pre-pass that runs before flex (layout_block_with_definite_height),
     // so read them from there. All flex sizes below are border-box: a
@@ -1813,6 +1878,8 @@ fn create_flex_item<'a>(
         main_margin_end,
         cross_margin_start,
         cross_margin_end,
+        main_margin_auto,
+        cross_margin_auto,
         has_explicit_cross_size,
         explicit_cross_size,
         main_pb_start,
@@ -2063,8 +2130,7 @@ fn calculate_cross_sizes(
             // keeps its fit-content width, which the already-laid-out width is
             // not. See `fit_content_cross_width` for what was wrong with it and
             // `SCOPE` below for why a stretching item is left alone.
-            None if cross_axis == Axis::Horizontal
-                && resolved_align(item.align_self, align_items) != AlignItems::Stretch =>
+            None if cross_axis == Axis::Horizontal && !item.stretches(align_items) =>
             {
                 let available = (container_cross
                     - item.cross_margin_start
@@ -2095,11 +2161,9 @@ fn calculate_cross_sizes(
 
     // PASS 2: Apply stretch behavior based on container sizing
     for (i, item) in line.items.iter_mut().enumerate() {
-        let align = resolved_align(item.align_self, align_items);
-
         // Per CSS spec: stretch only applies if cross size is "auto"
         // Items with explicit height/width should NOT be stretched
-        if align == AlignItems::Stretch && !item.has_explicit_cross_size {
+        if item.stretches(align_items) && !item.has_explicit_cross_size {
             // Determine the stretch target based on container cross size
             let stretch_target = if has_definite_cross_size {
                 // Container has definite height - stretch to fill container
@@ -2490,9 +2554,42 @@ fn distribute_main_axis(
         return;
     }
 
+    // This runs again when a column is redistributed, so the share an auto
+    // margin took last time is given back first.
+    for item in &mut line.items {
+        if item.main_margin_auto.0 {
+            item.main_margin_start = 0.0;
+        }
+        if item.main_margin_auto.1 {
+            item.main_margin_end = 0.0;
+        }
+    }
+
     let total_item_size: f32 = line.items.iter().map(|i| i.outer_main_size()).sum();
     let total_gaps = main_gap * (line.items.len().saturating_sub(1)) as f32;
     let free_space = (container_main - total_item_size - total_gaps).max(0.0);
+
+    // §8.1/§9.5.12: positive free space goes to the auto margins in equal
+    // shares, before `justify-content`, which then has nothing to place.
+    let auto_margins: usize = line
+        .items
+        .iter()
+        .map(|i| i.main_margin_auto.0 as usize + i.main_margin_auto.1 as usize)
+        .sum();
+    let free_space = if auto_margins > 0 && free_space > 0.0 {
+        let share = free_space / auto_margins as f32;
+        for item in &mut line.items {
+            if item.main_margin_auto.0 {
+                item.main_margin_start = share;
+            }
+            if item.main_margin_auto.1 {
+                item.main_margin_end = share;
+            }
+        }
+        0.0
+    } else {
+        free_space
+    };
 
     let (initial_offset, spacing) = match justify_content {
         JustifyContent::FlexStart => (0.0, main_gap),
@@ -2548,6 +2645,30 @@ fn align_cross_axis(line: &mut FlexLine, align_items: AlignItems) {
                 AlignSelf::Stretch => AlignItems::Stretch,
             }
         };
+
+        // §8.1/§9.6.13: an auto cross margin takes the free space, and
+        // `align-self` then has none to work with. Run twice per layout
+        // (before and after the items are flowed), so start from 0.
+        let (auto_start, auto_end) = item.cross_margin_auto;
+        if auto_start || auto_end {
+            if auto_start {
+                item.cross_margin_start = 0.0;
+            }
+            if auto_end {
+                item.cross_margin_end = 0.0;
+            }
+            let outer = item.cross_size + item.cross_margin_start + item.cross_margin_end;
+            let free = (line.cross_size - outer).max(0.0);
+            let share = if auto_start && auto_end { free / 2.0 } else { free };
+            if auto_start {
+                item.cross_margin_start = share;
+            }
+            if auto_end {
+                item.cross_margin_end = share;
+            }
+            item.cross_position = item.cross_margin_start;
+            continue;
+        }
 
         let outer_cross = item.cross_size + item.cross_margin_start + item.cross_margin_end;
         let free_space = (line.cross_size - outer_cross).max(0.0);
@@ -6201,5 +6322,159 @@ mod windows_flex_pins {
             (fixed_h - 30.0).abs() < 0.5,
             "definite-height child must not stretch: {fixed_h}"
         );
+    }
+
+    /// A flex container of `direction` in a 1000 x 400 containing block,
+    /// 200 tall when `definite_height`, holding `children`, laid out.
+    fn auto_margin_container(
+        direction: FlexDirection,
+        definite_height: bool,
+        children: Vec<ComputedStyle>,
+    ) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = direction;
+        if definite_height {
+            style.height = Length::Px(200.0);
+        }
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        for cs in children {
+            container.children.push(LayoutBox::new(BoxType::Block, cs));
+        }
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1000.0, 400.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+        container
+    }
+
+    fn sized(width: f32, height: f32) -> ComputedStyle {
+        let mut cs = ComputedStyle::new();
+        cs.width = Length::Px(width);
+        cs.height = Length::Px(height);
+        cs
+    }
+
+    /// H25 (simonwillison.net): `body { display: flex; flex-direction: column }`
+    /// with `#wrapper { width: 940px; margin: 0 auto }`. The auto margins were
+    /// resolved to 0 and the wrapper sat at x=0; Chrome 148 centres it
+    /// (docs/diagnostics/2026-10-09/simonwillison_gutter_h25.html: 300px in
+    /// 1280 at x=490).
+    #[test]
+    fn column_item_with_auto_side_margins_is_centred() {
+        let mut cs = sized(300.0, 50.0);
+        cs.margin_left = Length::Auto;
+        cs.margin_right = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Column, false, vec![cs]);
+
+        let item = &container.children[0].dimensions;
+        assert!(
+            (item.content.x - 350.0).abs() < 0.5,
+            "a 300px item with `margin: 0 auto` in a 1000px column is at x=350, got {}",
+            item.content.x
+        );
+        assert!((item.content.width - 300.0).abs() < 0.5);
+        assert!((item.margin.left - 350.0).abs() < 0.5);
+        assert!((item.margin.right - 350.0).abs() < 0.5);
+    }
+
+    /// One auto cross margin takes all of the free space.
+    #[test]
+    fn column_item_with_one_auto_side_margin_is_pushed_across() {
+        let mut cs = sized(300.0, 50.0);
+        cs.margin_left = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Column, false, vec![cs]);
+
+        let x = container.children[0].dimensions.content.x;
+        assert!((x - 700.0).abs() < 0.5, "margin-left: auto puts it at x=700, got {x}");
+    }
+
+    /// css-flexbox-1 §8.1: an auto cross margin wins over `align-self`, so the
+    /// item is not stretched either. Its width stays its own, not the row's.
+    #[test]
+    fn column_item_with_auto_side_margins_is_not_stretched() {
+        let mut cs = ComputedStyle::new();
+        cs.height = Length::Px(50.0);
+        cs.margin_left = Length::Auto;
+        cs.margin_right = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Column, false, vec![cs]);
+
+        let w = container.children[0].dimensions.content.width;
+        assert!(w < 999.0, "an auto-margin item keeps its fit-content width, got {w}");
+    }
+
+    /// The main axis: `margin-left: auto` on a row item takes the line's free
+    /// space before `justify-content` sees any (the "push the last nav item
+    /// to the right" idiom).
+    #[test]
+    fn row_item_with_auto_left_margin_takes_the_free_space() {
+        let mut pushed = sized(100.0, 50.0);
+        pushed.margin_left = Length::Auto;
+        let container = auto_margin_container(
+            FlexDirection::Row,
+            false,
+            vec![sized(100.0, 50.0), pushed],
+        );
+
+        let x0 = container.children[0].dimensions.content.x;
+        let x1 = container.children[1].dimensions.content.x;
+        assert!(x0.abs() < 0.5, "the first item stays at the start, got {x0}");
+        assert!((x1 - 900.0).abs() < 0.5, "margin-left: auto puts it at x=900, got {x1}");
+    }
+
+    /// Auto margins on both main sides centre the item, whatever
+    /// `justify-content` says.
+    #[test]
+    fn row_item_with_auto_side_margins_is_centred() {
+        let mut cs = sized(100.0, 50.0);
+        cs.margin_left = Length::Auto;
+        cs.margin_right = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Row, false, vec![cs]);
+
+        let x = container.children[0].dimensions.content.x;
+        assert!((x - 450.0).abs() < 0.5, "`margin: 0 auto` centres at x=450, got {x}");
+    }
+
+    /// The cross axis of a row: `margin: auto 0` centres a 50px item in a
+    /// 200px container.
+    #[test]
+    fn row_item_with_auto_block_margins_is_centred_vertically() {
+        let mut cs = sized(100.0, 50.0);
+        cs.margin_top = Length::Auto;
+        cs.margin_bottom = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Row, true, vec![cs]);
+
+        let y = container.children[0].dimensions.content.y;
+        assert!((y - 75.0).abs() < 0.5, "`margin: auto 0` centres at y=75, got {y}");
+    }
+
+    /// The main axis of a column: `margin-top: auto` pushes the footer to the
+    /// bottom of a definite-height column.
+    #[test]
+    fn column_item_with_auto_top_margin_is_pushed_to_the_end() {
+        let mut footer = sized(100.0, 50.0);
+        footer.margin_top = Length::Auto;
+        let container = auto_margin_container(
+            FlexDirection::Column,
+            true,
+            vec![sized(100.0, 50.0), footer],
+        );
+
+        let y = container.children[1].dimensions.content.y;
+        assert!((y - 150.0).abs() < 0.5, "margin-top: auto puts it at y=150, got {y}");
+    }
+
+    /// No free space, no auto margin: an item wider than the container
+    /// overflows at the end, it is not pulled back by a negative margin.
+    #[test]
+    fn auto_margins_are_zero_when_the_item_overflows() {
+        let mut cs = sized(1200.0, 50.0);
+        cs.margin_left = Length::Auto;
+        cs.margin_right = Length::Auto;
+        let container = auto_margin_container(FlexDirection::Column, false, vec![cs]);
+
+        let x = container.children[0].dimensions.content.x;
+        assert!(x.abs() < 0.5, "an overflowing item starts at x=0, got {x}");
     }
 }
