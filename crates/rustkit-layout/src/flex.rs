@@ -101,6 +101,11 @@ pub struct FlexItem<'a> {
     /// Outer margin on cross axis end.
     pub cross_margin_end: f32,
 
+    /// Which margins are `auto`, as (start, end) per axis. An auto margin is
+    /// 0 until the free space on its axis is handed out (css-flexbox-1 §8.1).
+    pub main_margin_auto: (bool, bool),
+    pub cross_margin_auto: (bool, bool),
+
     /// Whether the item has an explicit cross size (not auto).
     /// If true, stretch should not apply per CSS spec.
     pub has_explicit_cross_size: bool,
@@ -142,6 +147,14 @@ pub struct FlexItem<'a> {
 }
 
 impl<'a> FlexItem<'a> {
+    /// Whether `align-self: stretch` applies. An auto cross margin takes the
+    /// free space first, so such an item keeps its own cross size (§8.1,
+    /// §9.4.11: "neither of its cross-axis margins are auto").
+    fn stretches(&self, align_items: AlignItems) -> bool {
+        resolved_align(self.align_self, align_items) == AlignItems::Stretch
+            && self.cross_margin_auto == (false, false)
+    }
+
     /// Get outer main size (target + margins).
     pub fn outer_main_size(&self) -> f32 {
         self.target_main_size + self.main_margin_start + self.main_margin_end
@@ -1032,9 +1045,7 @@ fn layout_flex_container_at(
                 // `align-items: flex-start`, Chromium 32). Only an authored
                 // minimum counts here: without one `min_cross_size` is the
                 // one-line content floor, which is not a size to grow to.
-                let target = if resolved_align(item.align_self, style.align_items)
-                    == AlignItems::Stretch
-                {
+                let target = if item.stretches(style.align_items) {
                     line.cross_size - item.cross_margin_start - item.cross_margin_end
                 } else if resolve_length(
                     item.layout_box,
@@ -1557,6 +1568,17 @@ fn create_flex_item<'a>(
         ),
     };
 
+    let is_auto = |l: &Length| matches!(l, Length::Auto);
+    let (main_margin_auto, cross_margin_auto) = {
+        let s = &layout_box.style;
+        let horizontal = (is_auto(&s.margin_left), is_auto(&s.margin_right));
+        let vertical = (is_auto(&s.margin_top), is_auto(&s.margin_bottom));
+        match main_axis {
+            Axis::Horizontal => (horizontal, vertical),
+            Axis::Vertical => (vertical, horizontal),
+        }
+    };
+
     // Padding and border were resolved onto dimensions by the block
     // pre-pass that runs before flex (layout_block_with_definite_height),
     // so read them from there. All flex sizes below are border-box: a
@@ -1813,6 +1835,8 @@ fn create_flex_item<'a>(
         main_margin_end,
         cross_margin_start,
         cross_margin_end,
+        main_margin_auto,
+        cross_margin_auto,
         has_explicit_cross_size,
         explicit_cross_size,
         main_pb_start,
@@ -2063,8 +2087,7 @@ fn calculate_cross_sizes(
             // keeps its fit-content width, which the already-laid-out width is
             // not. See `fit_content_cross_width` for what was wrong with it and
             // `SCOPE` below for why a stretching item is left alone.
-            None if cross_axis == Axis::Horizontal
-                && resolved_align(item.align_self, align_items) != AlignItems::Stretch =>
+            None if cross_axis == Axis::Horizontal && !item.stretches(align_items) =>
             {
                 let available = (container_cross
                     - item.cross_margin_start
@@ -2095,11 +2118,9 @@ fn calculate_cross_sizes(
 
     // PASS 2: Apply stretch behavior based on container sizing
     for (i, item) in line.items.iter_mut().enumerate() {
-        let align = resolved_align(item.align_self, align_items);
-
         // Per CSS spec: stretch only applies if cross size is "auto"
         // Items with explicit height/width should NOT be stretched
-        if align == AlignItems::Stretch && !item.has_explicit_cross_size {
+        if item.stretches(align_items) && !item.has_explicit_cross_size {
             // Determine the stretch target based on container cross size
             let stretch_target = if has_definite_cross_size {
                 // Container has definite height - stretch to fill container
@@ -2490,9 +2511,42 @@ fn distribute_main_axis(
         return;
     }
 
+    // This runs again when a column is redistributed, so the share an auto
+    // margin took last time is given back first.
+    for item in &mut line.items {
+        if item.main_margin_auto.0 {
+            item.main_margin_start = 0.0;
+        }
+        if item.main_margin_auto.1 {
+            item.main_margin_end = 0.0;
+        }
+    }
+
     let total_item_size: f32 = line.items.iter().map(|i| i.outer_main_size()).sum();
     let total_gaps = main_gap * (line.items.len().saturating_sub(1)) as f32;
     let free_space = (container_main - total_item_size - total_gaps).max(0.0);
+
+    // §8.1/§9.5.12: positive free space goes to the auto margins in equal
+    // shares, before `justify-content`, which then has nothing to place.
+    let auto_margins: usize = line
+        .items
+        .iter()
+        .map(|i| i.main_margin_auto.0 as usize + i.main_margin_auto.1 as usize)
+        .sum();
+    let free_space = if auto_margins > 0 && free_space > 0.0 {
+        let share = free_space / auto_margins as f32;
+        for item in &mut line.items {
+            if item.main_margin_auto.0 {
+                item.main_margin_start = share;
+            }
+            if item.main_margin_auto.1 {
+                item.main_margin_end = share;
+            }
+        }
+        0.0
+    } else {
+        free_space
+    };
 
     let (initial_offset, spacing) = match justify_content {
         JustifyContent::FlexStart => (0.0, main_gap),
@@ -2548,6 +2602,30 @@ fn align_cross_axis(line: &mut FlexLine, align_items: AlignItems) {
                 AlignSelf::Stretch => AlignItems::Stretch,
             }
         };
+
+        // §8.1/§9.6.13: an auto cross margin takes the free space, and
+        // `align-self` then has none to work with. Run twice per layout
+        // (before and after the items are flowed), so start from 0.
+        let (auto_start, auto_end) = item.cross_margin_auto;
+        if auto_start || auto_end {
+            if auto_start {
+                item.cross_margin_start = 0.0;
+            }
+            if auto_end {
+                item.cross_margin_end = 0.0;
+            }
+            let outer = item.cross_size + item.cross_margin_start + item.cross_margin_end;
+            let free = (line.cross_size - outer).max(0.0);
+            let share = if auto_start && auto_end { free / 2.0 } else { free };
+            if auto_start {
+                item.cross_margin_start = share;
+            }
+            if auto_end {
+                item.cross_margin_end = share;
+            }
+            item.cross_position = item.cross_margin_start;
+            continue;
+        }
 
         let outer_cross = item.cross_size + item.cross_margin_start + item.cross_margin_end;
         let free_space = (line.cross_size - outer_cross).max(0.0);
