@@ -164,9 +164,15 @@ use rustkit_layout::{
 };
 use std::borrow::Cow;
 use std::cell::Cell;
+mod relayout_cause;
+use relayout_cause::PendingCauses;
+pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
+pub use rustkit_bindings::MutationKind;
 mod script_net;
 #[cfg(test)]
 mod script_net_tests;
+#[cfg(all(test, feature = "headless"))]
+mod relayout_cause_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -641,9 +647,38 @@ struct ViewState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
+    /// Causes noted since the last relayout (see `relayout_cause`).
+    relayout_pending: PendingCauses,
+    /// Relayouts since the current document was committed, by cause.
+    relayout_stats: RelayoutStats,
 }
 
 impl ViewState {
+    /// Log the outgoing document's relayout totals and start counting
+    /// afresh. Both load paths call this before they store the new URL.
+    fn summarize_relayouts_for_navigation(&mut self) {
+        let stats = std::mem::take(&mut self.relayout_stats);
+        self.relayout_pending = PendingCauses::default();
+        if stats.relayouts == 0 {
+            return;
+        }
+        let url = self
+            .url
+            .as_ref()
+            .map(relayout_cause::summary_url)
+            .unwrap_or_default();
+        info!(
+            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1}",
+            url,
+            stats.relayouts,
+            stats.by_first_cause,
+            stats.by_cause,
+            stats.mutations,
+            stats.trees_reused,
+            stats.total_ms
+        );
+    }
+
     /// Drops what belonged to the last document. Both load paths call
     /// this where they store the new one, before anything is laid out.
     fn reset_for_new_document(&mut self) {
@@ -1588,6 +1623,8 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            relayout_pending: PendingCauses::default(),
+            relayout_stats: RelayoutStats::default(),
         };
 
         self.views.insert(id, view_state);
@@ -1667,6 +1704,8 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            relayout_pending: PendingCauses::default(),
+            relayout_stats: RelayoutStats::default(),
         };
 
         let id = view_state.id;
@@ -1755,6 +1794,8 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            relayout_pending: PendingCauses::default(),
+            relayout_stats: RelayoutStats::default(),
         };
 
         self.views.insert(id, view_state);
@@ -1878,7 +1919,7 @@ impl Engine {
             .document
             .is_some()
         {
-            self.relayout(id)?;
+            self.relayout_for(id, RelayoutCause::Resize)?;
         }
 
         if let Some(view) = self.views.get_mut(&id) {
@@ -1956,7 +1997,7 @@ impl Engine {
             }
         }
         if changed {
-            self.flush_script_dom_writes(id)?;
+            self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll))?;
         }
 
         Ok(changed)
@@ -2066,7 +2107,7 @@ impl Engine {
             }
         });
         if told.is_some() {
-            if let Err(e) = self.flush_script_dom_writes(id) {
+            if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::HoverOrFocus)) {
                 debug!(?id, error = %e, "relayout after focus events failed");
             }
         }
@@ -2364,7 +2405,7 @@ impl Engine {
             };
             self.fire_mouse(id, target, event_type, &data);
         }
-        if let Err(e) = self.flush_script_dom_writes(id) {
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::HoverOrFocus)) {
             debug!(?id, error = %e, "relayout after a mouse move failed");
         }
         self.settle_pointer_restyle(id);
@@ -2482,7 +2523,7 @@ impl Engine {
             ..Default::default()
         };
         let not_cancelled = self.fire_mouse(id, target, "click", &data);
-        if let Err(e) = self.flush_script_dom_writes(id) {
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
             debug!(?id, error = %e, "relayout after a click failed");
         }
         not_cancelled
@@ -2716,7 +2757,7 @@ impl Engine {
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
                 bindings.notify_scrolled();
             }
-            if let Err(e) = self.flush_script_dom_writes(id) {
+            if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll)) {
                 debug!(?id, ?e, "relayout after a fragment scroll failed");
             }
         }
@@ -2832,7 +2873,7 @@ impl Engine {
             ..Default::default()
         };
         let not_cancelled = self.fire_mouse(id, target, event_type, &data);
-        if let Err(e) = self.flush_script_dom_writes(id) {
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
             debug!(?id, error = %e, "relayout after mouse event failed");
         }
         not_cancelled
@@ -2979,7 +3020,7 @@ impl Engine {
             });
         }
 
-        match self.flush_script_dom_writes(id) {
+        match self.flush_script_dom_writes(id, Some(RelayoutCause::Timer)) {
             // Or the resize above already did.
             Ok(relaid_out) => out.relaid_out |= relaid_out,
             Err(e) => debug!(?id, error = %e, "relayout after a live turn failed"),
@@ -3008,7 +3049,7 @@ impl Engine {
         }
         if arrived > 0 {
             info!(count = arrived, "Loaded images added by live page scripts");
-            match self.relayout(id) {
+            match self.relayout_for(id, RelayoutCause::ImageLoaded { count: arrived }) {
                 Ok(()) => out.relaid_out = true,
                 Err(e) => debug!(?id, error = %e, "relayout after live images failed"),
             }
@@ -3075,7 +3116,7 @@ impl Engine {
                     debug!(?id, error = %e, "input listener threw");
                 }
             }
-            if let Err(e) = self.flush_script_dom_writes(id) {
+            if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
                 debug!(?id, error = %e, "relayout after input event failed");
             }
         }
@@ -3162,7 +3203,7 @@ impl Engine {
             debug!(?id, error = %e, "implicit submission threw");
         }
         let request = bindings.take_submit_requests().pop();
-        if let Err(e) = self.flush_script_dom_writes(id) {
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
             debug!(?id, error = %e, "relayout after implicit submission failed");
         }
         let (form, submitter) = request?;
@@ -3227,7 +3268,7 @@ impl Engine {
             debug!(?id, event_type, error = %e, "key listener threw");
             true
         });
-        if let Err(e) = self.flush_script_dom_writes(id) {
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
             debug!(?id, error = %e, "relayout after key event failed");
         }
         not_cancelled
@@ -4231,6 +4272,7 @@ impl Engine {
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
+        view.summarize_relayouts_for_navigation();
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
@@ -4332,7 +4374,7 @@ impl Engine {
             false => None,
         };
         if !defer {
-            self.relayout(id)?;
+            self.relayout_for(id, RelayoutCause::InitialLoad)?;
         }
 
         // Load external resources (stylesheets, images, fonts), and fetch
@@ -4370,7 +4412,7 @@ impl Engine {
             if let Some(view) = self.views.get_mut(&id) {
                 view.initial_layout_deferred = false;
             }
-            self.relayout(id)?;
+            self.relayout_for(id, RelayoutCause::InitialLoad)?;
         }
 
         // Subresource loading awaited the network too: a stop during a
@@ -4404,7 +4446,7 @@ impl Engine {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
             }
-            self.flush_script_dom_writes(id)?;
+            self.flush_script_dom_writes(id, None)?;
 
             // Images were discovered before the scripts ran. One more pass
             // fetches what the scripts added, and lays out again only if
@@ -4414,7 +4456,7 @@ impl Engine {
                 Ok(count) => {
                     info!(count, "Loaded images added by page scripts");
                     if !self.nav_superseded(id, generation) {
-                        self.relayout(id)?;
+                        self.relayout_for(id, RelayoutCause::ImageLoaded { count })?;
                     }
                 }
                 Err(e) => warn!(?e, "Failed to load images added by page scripts"),
@@ -4504,6 +4546,7 @@ impl Engine {
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
+        view.summarize_relayouts_for_navigation();
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
@@ -4555,7 +4598,7 @@ impl Engine {
         self.load_local_web_fonts(id);
 
         // Layout and render
-        self.relayout(id)?;
+        self.relayout_for(id, RelayoutCause::InitialLoad)?;
 
         // Finish navigation
         let view = self
@@ -4583,6 +4626,31 @@ impl Engine {
         Ok(())
     }
 
+    /// Record why the next relayout of `id` happens. Causes noted before one
+    /// relayout accumulate: the first is kept, and each kind is counted.
+    /// Diagnostics only: noting never lays anything out.
+    pub fn note_relayout_cause(&mut self, id: EngineViewId, cause: RelayoutCause) {
+        if let Some(view) = self.views.get_mut(&id) {
+            view.relayout_pending.note(cause);
+        }
+    }
+
+    /// [`Engine::relayout`] with its cause.
+    pub fn relayout_for(
+        &mut self,
+        id: EngineViewId,
+        cause: RelayoutCause,
+    ) -> Result<(), EngineError> {
+        self.note_relayout_cause(id, cause);
+        self.relayout(id)
+    }
+
+    /// The view's relayouts since its current document was committed, by
+    /// cause.
+    pub fn relayout_stats(&self, id: EngineViewId) -> Option<&RelayoutStats> {
+        self.views.get(&id).map(|v| &v.relayout_stats)
+    }
+
     /// Re-layout a view.
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     /// Rebuild layout and repaint a view.
@@ -4590,9 +4658,55 @@ impl Engine {
     /// Public so the shell can refresh after an edit changes a form
     /// control's value — the value lives in engine-side edit state, so
     /// nothing else would trigger a rebuild.
+    ///
+    /// Logs one `relayout cause=...` line with what was noted since the
+    /// last relayout (see [`Engine::note_relayout_cause`]); nothing noted
+    /// is `other(unattributed)`.
     pub fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("relayout", ?id).entered();
+        let started = std::time::Instant::now();
 
+        // A pending pointer restyle is covered by this build, whoever asked.
+        let mut causes = match self.views.get_mut(&id) {
+            Some(view) => {
+                if view.pointer_restyle {
+                    view.relayout_pending.note(RelayoutCause::HoverOrFocus);
+                }
+                std::mem::take(&mut view.relayout_pending)
+            }
+            None => PendingCauses::default(),
+        };
+        if causes.is_empty() {
+            causes.note(RelayoutCause::Other("unattributed"));
+        }
+        relayout_cause::set_last_build_reused_tree(false);
+
+        self.relayout_uncounted(id)?;
+
+        let took_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let tree_reused = relayout_cause::last_build_reused_tree();
+        let cause = causes
+            .first
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        info!(
+            ?id,
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1}",
+            cause,
+            causes.counts,
+            causes.mutations,
+            tree_reused,
+            took_ms
+        );
+        if let Some(view) = self.views.get_mut(&id) {
+            view.relayout_stats.record(&causes, tree_reused, took_ms);
+        }
+        Ok(())
+    }
+
+    /// The relayout itself: build, lay out, paint.
+    fn relayout_uncounted(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         // This build reads the hovered and pressed chains as they are now.
         if let Some(view) = self.views.get_mut(&id) {
             view.pointer_restyle = false;
@@ -5228,6 +5342,7 @@ impl Engine {
         let traced = self.style_trace.borrow().is_some();
         if !traced && !self.building_view_has_edits() {
             if let Some(tree) = self.reused_tree(&memo_key) {
+                relayout_cause::set_last_build_reused_tree(true);
                 if let Some(started) = parse_started {
                     let ms = started.elapsed().as_secs_f64() * 1000.0;
                     info!(
@@ -10664,6 +10779,15 @@ impl Engine {
 
         // A deferred first layout happens here even if every sheet failed.
         if count > 0 || had_previous || fonts_loaded > 0 || deferred {
+            if deferred {
+                self.note_relayout_cause(id, RelayoutCause::InitialLoad);
+            }
+            if count > 0 || had_previous {
+                self.note_relayout_cause(id, RelayoutCause::StylesheetLoaded);
+            }
+            if fonts_loaded > 0 {
+                self.note_relayout_cause(id, RelayoutCause::FontLoaded);
+            }
             self.relayout(id)?;
         }
 
@@ -10672,7 +10796,7 @@ impl Engine {
         if image_count > 0 {
             info!(count = image_count, "Loaded images");
             // Trigger repaint for images
-            self.relayout(id)?;
+            self.relayout_for(id, RelayoutCause::ImageLoaded { count: image_count })?;
         }
 
         Ok(())
@@ -13749,7 +13873,7 @@ impl Engine {
         // A script that threw may still have written to the DOM before it
         // did, so the flush runs either way.
         let result = bindings.evaluate(script);
-        self.flush_script_dom_writes(id)?;
+        self.flush_script_dom_writes(id, None)?;
         let result = result.map_err(|e| EngineError::JsError(e.to_string()))?;
 
         Ok(format!("{:?}", result))
@@ -13760,8 +13884,16 @@ impl Engine {
     /// once when script settles; `relayout` rebuilds style and layout in
     /// full, so both `DomDirty` buckets take the same path for now. Returns
     /// whether it laid out.
-    fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
-        let mut laid = self.flush_script_dom_writes_once(id)?;
+    ///
+    /// `trigger` is what ran the script (a scroll, a timer, an input
+    /// event), recorded with the writes as the relayout's cause; `None`
+    /// records the writes alone.
+    fn flush_script_dom_writes(
+        &mut self,
+        id: EngineViewId,
+        trigger: Option<RelayoutCause>,
+    ) -> Result<bool, EngineError> {
+        let mut laid = self.flush_script_dom_writes_once(id, trigger.clone())?;
         // Observers report from the layout as it now stands. A callback that
         // changes the page gets one more flush and one more report, bounded.
         for _ in 0..3 {
@@ -13775,18 +13907,26 @@ impl Engine {
                 break;
             }
             bindings.mark_dirty(DomDirty::Layout);
-            laid |= self.flush_script_dom_writes_once(id)?;
+            if let Some(trigger) = trigger.clone() {
+                self.note_relayout_cause(id, trigger);
+            }
+            self.note_relayout_cause(id, RelayoutCause::ObserverCallback);
+            laid |= self.flush_script_dom_writes_once(id, None)?;
         }
         // The focused control paints its caret, so a focus script moved is
         // a relayout.
         if self.follow_script_focus(id) {
-            self.relayout(id)?;
+            self.relayout_for(id, RelayoutCause::HoverOrFocus)?;
             laid = true;
         }
         Ok(laid)
     }
 
-    fn flush_script_dom_writes_once(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+    fn flush_script_dom_writes_once(
+        &mut self,
+        id: EngineViewId,
+        trigger: Option<RelayoutCause>,
+    ) -> Result<bool, EngineError> {
         let Some(view) = self.views.get_mut(&id) else {
             return Ok(false);
         };
@@ -13804,6 +13944,8 @@ impl Engine {
             return Ok(scrolled);
         }
         debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
+        let writes = bindings.take_script_mutations();
+        view.relayout_pending.note_script(trigger, writes);
         self.relayout(id).map(|_| true)
     }
 
@@ -13858,9 +14000,13 @@ impl Engine {
     /// layout per call, none when nothing changed.
     fn refresh_layout_for_script(&mut self, id: EngineViewId, bindings: &DomBindings) {
         let dirty = bindings.take_dirty();
+        let writes = bindings.take_script_mutations();
         if let Some(view) = self.views.get_mut(&id) {
             Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
             Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
+            if dirty != DomDirty::Clean {
+                view.relayout_pending.note_script(None, writes);
+            }
         }
         if dirty == DomDirty::Clean {
             return;
