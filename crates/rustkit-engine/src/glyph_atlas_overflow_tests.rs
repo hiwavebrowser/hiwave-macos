@@ -60,11 +60,21 @@ fn a_frame_that_fills_the_atlas_draws_its_earlier_text_right() {
         .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 100 })
         .expect("view");
 
+    let resets = |engine: &mut Engine| engine.renderer.as_mut().expect("renderer").glyph_cache().resets();
     let first = frame(&mut engine, view, &page(&[200.0, 196.0, 192.0, 188.0, 184.0]), "first");
+    assert_eq!(resets(&mut engine), 0, "the first page fits");
     let second = frame(&mut engine, view, &page(&[198.0, 194.0, 190.0, 186.0, 182.0]), "second");
+    assert_eq!(resets(&mut engine), 1, "the second page filled the atlas once, and fitted when built again");
 
     assert!(first.iter().any(|b| *b < 128), "the line is drawn");
     let differing = first.iter().zip(&second).filter(|(a, b)| a != b).count();
     assert_eq!(first.len(), second.len());
     assert_eq!(differing, 0, "bytes of the shared line that differ in the frame that filled the atlas");
+
+    // And in the frames after it. The atlas is emptied when it starts
+    // over: the last round's pixels, left between the new glyphs, were
+    // sampled at the edges of every glyph drawn from then on.
+    let third = frame(&mut engine, view, &page(&[200.0, 196.0, 192.0, 188.0, 184.0]), "third");
+    let differing = first.iter().zip(&third).filter(|(a, b)| a != b).count();
+    assert_eq!(differing, 0, "bytes of the shared line that differ in a later frame");
 }
