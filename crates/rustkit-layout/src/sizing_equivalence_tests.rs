@@ -406,9 +406,7 @@ cells! {
     img_max_width: |l| image(40.0, |s, l| s.max_width = l, l);
     img_min_height: |l| image(10.0, |s, l| s.min_height = l, l);
     img_max_height: |l| image(40.0, |s, l| s.max_height = l, l);
-    #[ignore = "W7-A: replaced-element margin/padding use to_px with no viewport, lib.rs:2798"]
     img_padding: |l| image(40.0, padding, l);
-    #[ignore = "W7-A: replaced-element margin/padding use to_px with no viewport, lib.rs:2798"]
     img_margin: |l| image(40.0, margin, l);
 
     inline_block_width: |l| inline_block(width, l);

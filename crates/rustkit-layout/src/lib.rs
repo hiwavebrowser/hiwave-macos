@@ -2794,19 +2794,38 @@ impl LayoutBox {
         // on every box except the `auto` one.
         let cb_width = containing_block.content.width;
         {
+            // Through `length_to_px`, which knows the box's font size and the
+            // viewport: `to_px(16.0, 16.0, ..)` took `2vw` padding for 0.
+            let px = |l: &Length| self.length_to_px(l, cb_width);
+            let edges = |t, r, b, l| EdgeSizes {
+                top: px(t),
+                right: px(r),
+                bottom: px(b),
+                left: px(l),
+            };
+            let st = &self.style;
+            let margin = edges(
+                &st.margin_top,
+                &st.margin_right,
+                &st.margin_bottom,
+                &st.margin_left,
+            );
+            let border = edges(
+                &st.border_top_width,
+                &st.border_right_width,
+                &st.border_bottom_width,
+                &st.border_left_width,
+            );
+            let padding = edges(
+                &st.padding_top,
+                &st.padding_right,
+                &st.padding_bottom,
+                &st.padding_left,
+            );
             let d = &mut self.dimensions;
-            d.margin.left = self.style.margin_left.to_px(16.0, 16.0, cb_width);
-            d.margin.right = self.style.margin_right.to_px(16.0, 16.0, cb_width);
-            d.margin.top = self.style.margin_top.to_px(16.0, 16.0, cb_width);
-            d.margin.bottom = self.style.margin_bottom.to_px(16.0, 16.0, cb_width);
-            d.border.left = self.style.border_left_width.to_px(16.0, 16.0, cb_width);
-            d.border.right = self.style.border_right_width.to_px(16.0, 16.0, cb_width);
-            d.border.top = self.style.border_top_width.to_px(16.0, 16.0, cb_width);
-            d.border.bottom = self.style.border_bottom_width.to_px(16.0, 16.0, cb_width);
-            d.padding.left = self.style.padding_left.to_px(16.0, 16.0, cb_width);
-            d.padding.right = self.style.padding_right.to_px(16.0, 16.0, cb_width);
-            d.padding.top = self.style.padding_top.to_px(16.0, 16.0, cb_width);
-            d.padding.bottom = self.style.padding_bottom.to_px(16.0, 16.0, cb_width);
+            d.margin = margin;
+            d.border = border;
+            d.padding = padding;
         }
         let horizontal_decoration = self.dimensions.border.left
             + self.dimensions.border.right
