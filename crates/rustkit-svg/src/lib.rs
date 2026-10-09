@@ -419,6 +419,14 @@ impl Transform2D {
         }
     }
 
+    /// The most this transform stretches any direction: its largest
+    /// singular value.
+    pub fn max_scale(&self) -> f32 {
+        let sum = self.a * self.a + self.b * self.b + self.c * self.c + self.d * self.d;
+        let det = self.a * self.d - self.b * self.c;
+        ((sum + (sum * sum - 4.0 * det * det).max(0.0).sqrt()) * 0.5).sqrt()
+    }
+
     /// Transform a point.
     pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
         (
@@ -833,6 +841,11 @@ const MAX_CROSSING_CHECKS: usize = 2_000_000;
 /// most triangles) goes through as-is, and anything else (concave outlines,
 /// holes, self-crossings, several subpaths) is swept into horizontal
 /// trapezoids, each inside under `rule`.
+///
+/// A contour winds zero outside its own x-range, so contours are first
+/// split into clusters whose x-ranges don't overlap and each cluster is
+/// filled on its own: a line of glyphs isn't cut into bands at every
+/// vertex of every other glyph. The fill is the same under either rule.
 fn fill_contours(
     contours: &[Vec<(f32, f32)>],
     rule: FillRule,
@@ -859,10 +872,45 @@ fn fill_contours(
         .filter(|c| c.len() >= 3)
         .collect();
 
-    match contours.as_slice() {
+    // Clusters of contours whose x-ranges overlap, left to right.
+    let mut spans: Vec<(f32, f32, usize)> = contours
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let (x, _, w, _) = bounds_of(c.iter());
+            (x, x + w, i)
+        })
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut checks = 0usize;
+    let mut cluster: Vec<&[(f32, f32)]> = Vec::new();
+    let mut right = f32::NEG_INFINITY;
+    for &(lo, hi, i) in &spans {
+        if lo >= right && !cluster.is_empty() {
+            fill_cluster(&cluster, rule, color, &mut checks, commands);
+            cluster.clear();
+        }
+        cluster.push(&contours[i]);
+        right = right.max(hi);
+    }
+    fill_cluster(&cluster, rule, color, &mut checks, commands);
+}
+
+/// Fill contours that may overlap, sharing `checks` with the rest of the fill.
+fn fill_cluster(
+    contours: &[&[(f32, f32)]],
+    rule: FillRule,
+    color: Color,
+    checks: &mut usize,
+    commands: &mut Vec<DisplayCommand>,
+) {
+    match contours {
         [] => return,
         [only] if is_convex(only) => {
-            commands.push(DisplayCommand::FillPolygon { points: only.clone(), color });
+            commands.push(DisplayCommand::FillPolygon {
+                points: only.to_vec(),
+                color,
+            });
             return;
         }
         _ => {}
@@ -882,7 +930,7 @@ fn fill_contours(
         }
     }
     let mut edges: Vec<Edge> = Vec::new();
-    for c in &contours {
+    for c in contours {
         for i in 0..c.len() {
             let (a, b) = (c[i], c[(i + 1) % c.len()]);
             if a.1 == b.1 {
@@ -903,15 +951,14 @@ fn fill_contours(
     // Band boundaries: every vertex y, plus every y where two edges cross,
     // so inside one band the edges keep their left-to-right order.
     let mut ys: Vec<f32> = edges.iter().flat_map(|e| [e.y0, e.y1]).collect();
-    let mut checks = 0usize;
     'crossings: for i in 0..edges.len() {
         let a = &edges[i];
         for b in &edges[i + 1..] {
             if b.y0 >= a.y1 {
                 break;
             }
-            checks += 1;
-            if checks > MAX_CROSSING_CHECKS {
+            *checks += 1;
+            if *checks > MAX_CROSSING_CHECKS {
                 break 'crossings;
             }
             let (lo, hi) = (a.y0.max(b.y0), a.y1.min(b.y1));
@@ -1881,8 +1928,16 @@ impl SvgPath {
         commands
     }
 
-    /// Convert path to line segments.
+    /// Convert path to line segments, flattening curves to
+    /// `FLATTEN_TOLERANCE_PX` in the path's own units.
     pub fn to_line_segments(&self) -> Vec<Vec<(f32, f32)>> {
+        self.to_line_segments_within(FLATTEN_TOLERANCE_PX)
+    }
+
+    /// Convert path to line segments, flattening every curve and arc so no
+    /// point of it strays more than `tolerance` (in the path's own units)
+    /// from the flattened outline.
+    pub fn to_line_segments_within(&self, tolerance: f32) -> Vec<Vec<(f32, f32)>> {
         let mut segments = Vec::new();
         let mut current_segment = Vec::new();
         let mut current_pos = (0.0_f32, 0.0_f32);
@@ -1951,7 +2006,13 @@ impl SvgPath {
                     last_quad = None;
                 }
                 PathCommand::CubicTo(x1, y1, x2, y2, x, y) => {
-                    let points = cubic_bezier_points(current_pos, (*x1, *y1), (*x2, *y2), (*x, *y), 20);
+                    let points = cubic_bezier_points(
+                        current_pos,
+                        (*x1, *y1),
+                        (*x2, *y2),
+                        (*x, *y),
+                        tolerance,
+                    );
                     current_segment.extend(points);
                     current_pos = (*x, *y);
                     last_cubic = Some((*x2, *y2));
@@ -1961,14 +2022,15 @@ impl SvgPath {
                     let (x1, y1) = (current_pos.0 + dx1, current_pos.1 + dy1);
                     let (x2, y2) = (current_pos.0 + dx2, current_pos.1 + dy2);
                     let (x, y) = (current_pos.0 + dx, current_pos.1 + dy);
-                    let points = cubic_bezier_points(current_pos, (x1, y1), (x2, y2), (x, y), 20);
+                    let points =
+                        cubic_bezier_points(current_pos, (x1, y1), (x2, y2), (x, y), tolerance);
                     current_segment.extend(points);
                     current_pos = (x, y);
                     last_cubic = Some((x2, y2));
                     last_quad = None;
                 }
                 PathCommand::QuadTo(x1, y1, x, y) => {
-                    let points = quad_bezier_points(current_pos, (*x1, *y1), (*x, *y), 20);
+                    let points = quad_bezier_points(current_pos, (*x1, *y1), (*x, *y), tolerance);
                     current_segment.extend(points);
                     current_pos = (*x, *y);
                     last_quad = Some((*x1, *y1));
@@ -1977,7 +2039,7 @@ impl SvgPath {
                 PathCommand::QuadToRel(dx1, dy1, dx, dy) => {
                     let (x1, y1) = (current_pos.0 + dx1, current_pos.1 + dy1);
                     let (x, y) = (current_pos.0 + dx, current_pos.1 + dy);
-                    let points = quad_bezier_points(current_pos, (x1, y1), (x, y), 20);
+                    let points = quad_bezier_points(current_pos, (x1, y1), (x, y), tolerance);
                     current_segment.extend(points);
                     current_pos = (x, y);
                     last_quad = Some((x1, y1));
@@ -2009,7 +2071,13 @@ impl SvgPath {
                         _ => unreachable!(),
                     };
                     let c1 = reflect(last_cubic, current_pos);
-                    current_segment.extend(cubic_bezier_points(current_pos, c1, (x2, y2), (x, y), 20));
+                    current_segment.extend(cubic_bezier_points(
+                        current_pos,
+                        c1,
+                        (x2, y2),
+                        (x, y),
+                        tolerance,
+                    ));
                     current_pos = (x, y);
                     last_cubic = Some((x2, y2));
                     last_quad = None;
@@ -2021,7 +2089,7 @@ impl SvgPath {
                         _ => unreachable!(),
                     };
                     let c1 = reflect(last_quad, current_pos);
-                    current_segment.extend(quad_bezier_points(current_pos, c1, (x, y), 20));
+                    current_segment.extend(quad_bezier_points(current_pos, c1, (x, y), tolerance));
                     current_pos = (x, y);
                     last_quad = Some(c1);
                     last_cubic = None;
@@ -2034,7 +2102,16 @@ impl SvgPath {
                         }
                         _ => unreachable!(),
                     };
-                    current_segment.extend(arc_points(current_pos, rx, ry, angle, large_arc, sweep, (x, y)));
+                    current_segment.extend(arc_points(
+                        current_pos,
+                        rx,
+                        ry,
+                        angle,
+                        large_arc,
+                        sweep,
+                        (x, y),
+                        tolerance,
+                    ));
                     current_pos = (x, y);
                     last_cubic = None;
                     last_quad = None;
@@ -2059,7 +2136,9 @@ impl SvgPath {
             return;
         }
 
-        let outlines = self.to_line_segments();
+        // Flatten to a device-pixel tolerance: a path authored in a big
+        // viewBox and drawn small needs few steps per curve.
+        let outlines = self.to_line_segments_within(FLATTEN_TOLERANCE_PX / transform.max_scale());
         let subpaths: Vec<Vec<(f32, f32)>> = outlines
             .iter()
             .map(|segment| segment.iter().map(|(x, y)| transform.apply(*x, *y)).collect())
@@ -2488,8 +2567,44 @@ fn parse_flag<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> O
     }
 }
 
-/// Generate points along a cubic bezier curve.
-fn cubic_bezier_points(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), segments: usize) -> Vec<(f32, f32)> {
+/// How far, in device pixels, a flattened curve may stray from the true one.
+const FLATTEN_TOLERANCE_PX: f32 = 0.25;
+
+/// The most line segments one curve or arc flattens to, however big it's drawn.
+const MAX_CURVE_STEPS: usize = 256;
+
+/// Steps that keep a Bézier of degree `degree` within `tolerance` of its
+/// chords, from the largest second difference of its control points
+/// (Wang's formula: n = sqrt(degree * (degree - 1) / 8 * dd / tolerance)).
+/// A NaN or infinite input (a degenerate transform) falls to one step.
+fn bezier_steps(degree: f32, dd: f32, tolerance: f32) -> usize {
+    let n = (degree * (degree - 1.0) / 8.0 * dd / tolerance)
+        .sqrt()
+        .ceil();
+    if n.is_finite() {
+        (n as usize).clamp(1, MAX_CURVE_STEPS)
+    } else if n.is_nan() {
+        1
+    } else {
+        MAX_CURVE_STEPS
+    }
+}
+
+/// The length of `a - 2b + c`.
+fn second_difference(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
+    (a.0 - 2.0 * b.0 + c.0).hypot(a.1 - 2.0 * b.1 + c.1)
+}
+
+/// Generate points along a cubic bezier curve, within `tolerance` of it.
+fn cubic_bezier_points(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    p3: (f32, f32),
+    tolerance: f32,
+) -> Vec<(f32, f32)> {
+    let dd = second_difference(p0, p1, p2).max(second_difference(p1, p2, p3));
+    let segments = bezier_steps(3.0, dd, tolerance);
     let mut points = Vec::with_capacity(segments);
     
     for i in 1..=segments {
@@ -2530,6 +2645,7 @@ fn arc_points(
     large_arc: bool,
     sweep: bool,
     p1: (f32, f32),
+    tolerance: f32,
 ) -> Vec<(f32, f32)> {
     if p0 == p1 {
         return Vec::new();
@@ -2582,8 +2698,18 @@ fn arc_points(
         delta += std::f64::consts::TAU;
     }
 
-    // About one point per 11.25 degrees, as fine as the 20-step beziers.
-    let steps = ((delta.abs() / (std::f64::consts::PI / 16.0)).ceil() as usize).max(2);
+    // Each step's chord sags r * (1 - cos(step / 2)) from the arc; keep
+    // that within `tolerance` of the larger radius.
+    let sag = (f64::from(tolerance) / rx.max(ry)).min(1.0);
+    let step = 2.0 * (1.0 - sag).acos();
+    let steps = (delta.abs() / step).ceil();
+    let steps = if steps.is_finite() {
+        (steps as usize).clamp(2, MAX_CURVE_STEPS)
+    } else if steps.is_nan() {
+        2
+    } else {
+        MAX_CURVE_STEPS
+    };
     let mut points = Vec::with_capacity(steps);
     for i in 1..steps {
         let (sin_t, cos_t) = (theta1 + delta * i as f64 / steps as f64).sin_cos();
@@ -2596,8 +2722,14 @@ fn arc_points(
     points
 }
 
-/// Generate points along a quadratic bezier curve.
-fn quad_bezier_points(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), segments: usize) -> Vec<(f32, f32)> {
+/// Generate points along a quadratic bezier curve, within `tolerance` of it.
+fn quad_bezier_points(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    tolerance: f32,
+) -> Vec<(f32, f32)> {
+    let segments = bezier_steps(2.0, second_difference(p0, p1, p2), tolerance);
     let mut points = Vec::with_capacity(segments);
     
     for i in 1..=segments {
