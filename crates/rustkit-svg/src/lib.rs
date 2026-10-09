@@ -3766,6 +3766,57 @@ mod tests {
         assert_eq!(rects, vec![(6.0, 5.0, 40.0, 40.0, (0, 128, 0))]);
     }
 
+    /// ebay's icon (H24): `<svg class="icon"><use href="#icon-..."></svg>`,
+    /// no width, height or viewBox, sized 24px by CSS. The viewport of such
+    /// a root is the box it is drawn in, so the symbol fills 24x24 (Chrome
+    /// 148 on docs/diagnostics/2026-10-09/ebay_icon_bg_h24.html). It was
+    /// read for the 300x150 default and painted 150x150 at x=75.
+    const CSS_SIZED_ICON: &str = r##"<svg class="icon"><use href="#sq"></use></svg><defs><symbol viewBox="0 0 16 16" id="sq"><rect x="0" y="0" width="16" height="16" fill="#000000"></rect></symbol></defs>"##;
+
+    #[test]
+    fn test_use_in_a_root_without_a_viewbox_fills_the_box_it_is_drawn_in() {
+        let doc = SvgDocument::parse(CSS_SIZED_ICON).expect("parse");
+        let rects = fill_rects(&doc.render(100.0, 50.0, 24.0, 24.0));
+        assert_eq!(rects, vec![(100.0, 50.0, 24.0, 24.0, (0, 0, 0))]);
+    }
+
+    #[test]
+    fn test_use_in_a_root_without_a_viewbox_keeps_the_symbols_ratio() {
+        // `xMidYMid meet` in a 48x24 box: 24x24, centred.
+        let doc = SvgDocument::parse(CSS_SIZED_ICON).expect("parse");
+        let rects = fill_rects(&doc.render(0.0, 0.0, 48.0, 24.0));
+        assert_eq!(rects, vec![(12.0, 0.0, 24.0, 24.0, (0, 0, 0))]);
+    }
+
+    #[test]
+    fn test_use_in_a_root_with_size_attributes_follows_the_css_size() {
+        // The attributes are the size only until CSS says otherwise: the
+        // viewport is the used box (Chrome 148: a width="24" height="24"
+        // icon under `width: 48px; height: 48px` paints 48x48).
+        let doc = SvgDocument::parse(&CSS_SIZED_ICON.replace(r#"class="icon""#, r#"width="24" height="24""#))
+            .expect("parse");
+        assert_eq!(
+            fill_rects(&doc.render(0.0, 0.0, 24.0, 24.0)),
+            vec![(0.0, 0.0, 24.0, 24.0, (0, 0, 0))],
+            "at its attribute size"
+        );
+        assert_eq!(
+            fill_rects(&doc.render(0.0, 0.0, 48.0, 48.0)),
+            vec![(0.0, 0.0, 48.0, 48.0, (0, 0, 0))],
+            "at a CSS size"
+        );
+    }
+
+    #[test]
+    fn test_a_root_viewbox_still_decides_the_scale_of_a_use() {
+        // Pin: with a viewBox the user units are fixed and the render rect
+        // only scales them, as before.
+        let doc = SvgDocument::parse(&CSS_SIZED_ICON.replace(r#"class="icon""#, r#"viewBox="0 0 16 16""#))
+            .expect("parse");
+        let rects = fill_rects(&doc.render(0.0, 0.0, 24.0, 24.0));
+        assert_eq!(rects, vec![(0.0, 0.0, 24.0, 24.0, (0, 0, 0))]);
+    }
+
     #[test]
     fn test_transform_identity() {
         let t = Transform2D::identity();
