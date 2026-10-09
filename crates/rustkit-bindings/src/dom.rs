@@ -487,6 +487,23 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
     }
 }
 
+/// Diagnostic (`RUST_LOG=rustkit_bindings::dom=trace`): the write that
+/// dirtied the page, and whether its node (the parent, for a tree write) is
+/// in the document at all.
+fn trace_dirty(host: &DomHost, args: &[JsValue], bucket: DomDirty) {
+    if bucket == DomDirty::Clean || !tracing::enabled!(tracing::Level::TRACE) {
+        return;
+    }
+    let node = host.node_at(args, 2);
+    let connected = match (&node, args.first().and_then(|g| host.document_for(g))) {
+        (Some(node), Some(document)) => is_connected(node, document),
+        _ => false,
+    };
+    let tag = node.as_ref().and_then(|n| n.tag_name()).unwrap_or("").to_string();
+    let detail: String = string_arg(args, 3).unwrap_or("").chars().take(48).collect();
+    tracing::trace!(op = string_arg(args, 1).unwrap_or(""), %tag, connected, %detail, ?bucket, "DOM write dirtied the page");
+}
+
 /// `value(gen, id[, v])`: a text control's value (HTML §4.10.5.4, value
 /// mode "value"). With `v` a string, sets it; with `v` null, resets the
 /// control to its default (form reset). Answers the value, or null when
@@ -989,6 +1006,7 @@ pub(crate) fn install(
         5,
         Box::new(move |args| match mutate(&h.borrow(), args) {
             Ok(()) => {
+                trace_dirty(&h.borrow(), args, DomDirty::Style);
                 // Pin §3.3: a structure insert/remove/move restyles.
                 d.set(d.get().max(DomDirty::Style));
                 JsValue::Null
@@ -1006,6 +1024,7 @@ pub(crate) fn install(
         5,
         Box::new(move |args| match write(&h.borrow(), args) {
             Ok((result, bucket)) => {
+                trace_dirty(&h.borrow(), args, bucket);
                 d.set(d.get().max(bucket));
                 result
             }

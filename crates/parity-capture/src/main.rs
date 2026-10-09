@@ -97,6 +97,13 @@ struct Args {
     #[arg(long)]
     interrupt_scripts: bool,
 
+    /// After a URL load, turn the live loop as the app does for this many
+    /// milliseconds of real time (timers, script requests, relayouts) and
+    /// report what the turns did as `live_stats`. Off by default; a frame
+    /// taken with it is not comparable with the board.
+    #[arg(long)]
+    live_ms: Option<u64>,
+
     /// Enable verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -117,6 +124,8 @@ struct CaptureResult {
     layout_stats: Option<LayoutStats>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     script_stats: Option<ScriptStats>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    live_stats: Option<LiveStats>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     elapsed_ms: Option<u64>,
     error: Option<String>,
@@ -201,6 +210,7 @@ impl CaptureResult {
             display_list_path: None,
             layout_stats: None,
             script_stats: None,
+            live_stats: None,
             elapsed_ms: None,
             error: None,
             captures: None,
@@ -225,6 +235,65 @@ struct ScriptStats {
     over_budget: u32,
     bytes: u64,
     elapsed_ms: u64,
+}
+
+/// What the live loop did after the load (`--live-ms`).
+#[derive(Serialize, Deserialize, Default)]
+struct LiveStats {
+    /// Real time the loop was given.
+    wall_ms: u64,
+    /// Of it, time spent inside turns: the window thread's time in the app.
+    busy_ms: u64,
+    turns: u32,
+    timer_callbacks: u64,
+    requests: u64,
+    relayouts: u32,
+    /// The page had no timer set and nothing in flight when the loop ended.
+    idle_at_end: bool,
+}
+
+/// The app's pacing (`hiwave-app` `process_events`): a turn when the next
+/// timer is due or a request is out, never sooner than the last turn took.
+fn run_live(
+    rt: &tokio::runtime::Runtime,
+    engine: &mut rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    live_ms: u64,
+) -> LiveStats {
+    const MIN_LIVE_TURN: Duration = Duration::from_millis(4);
+    const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
+    let limit = Duration::from_millis(live_ms);
+    let began = Instant::now();
+    let mut clock = began;
+    let mut stats = LiveStats::default();
+    tracing::info!(live_ms, "Live loop started");
+    loop {
+        let started = Instant::now();
+        let elapsed_ms = started.duration_since(clock).as_millis() as u64;
+        clock += Duration::from_millis(elapsed_ms);
+        let turn = rt.block_on(engine.pump_live(view_id, elapsed_ms));
+        stats.turns += 1;
+        stats.timer_callbacks += turn.timers_ran as u64;
+        stats.requests += turn.requests as u64;
+        stats.relayouts += turn.relaid_out as u32;
+        stats.busy_ms += started.elapsed().as_millis() as u64;
+        let timer = turn.next_timer_ms.map(Duration::from_millis);
+        let next = if turn.in_flight > 0 {
+            Some(timer.map_or(LIVE_REQUEST_POLL, |t| t.min(LIVE_REQUEST_POLL)))
+        } else {
+            timer
+        };
+        stats.idle_at_end = next.is_none();
+        let left = limit.saturating_sub(began.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        // An idle page still gets its time: in the app only input wakes it.
+        let wait = next.map_or(left, |wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN));
+        std::thread::sleep(wait.min(left));
+    }
+    stats.wall_ms = began.elapsed().as_millis() as u64;
+    stats
 }
 
 #[derive(Serialize, Deserialize)]
@@ -394,6 +463,9 @@ fn run_capture(args: &Args) -> CaptureResult {
                     error!("Failed to write script log: {:?}", e);
                 }
             }
+        }
+        if let Some(live_ms) = args.live_ms {
+            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
         }
     } else if let Some(html) = html_content {
         if let Err(e) = engine.load_html(view_id, &html) {
@@ -1055,6 +1127,14 @@ mod tests {
         let mut argv = vec!["parity-capture", "--url", "https://example.test/"];
         argv.extend_from_slice(extra);
         Args::try_parse_from(argv).expect("the command line parses")
+    }
+
+    // The live loop is the app's, not the board's: a capture turns it only
+    // when asked.
+    #[test]
+    fn the_live_loop_is_turned_only_when_asked() {
+        assert_eq!(parsed(&[]).live_ms, None);
+        assert_eq!(parsed(&["--live-ms", "20000"]).live_ms, Some(20_000));
     }
 
     // The board is measured at the engine's 5 s script budget, and the live
