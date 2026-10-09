@@ -172,3 +172,164 @@ fn a_given_width_and_an_unloaded_image_are_as_before() {
     };
     assert!(close(crate::grid::estimate_max_content_width(&unloaded), 0.0));
 }
+
+// ---- Review of #659: the height that crosses the ratio is the USED height.
+// `min-height` and `max-height` bound it (CSS 2.1 §10.4, §10.7), and a
+// percentage resolves against the flex container's definite cross size. The
+// first version read `height` alone, so `.logo img { max-height: 22px }`
+// answered its natural 514 as a minimum and could no longer shrink. Every
+// number is Chromium 143's on the same shape (natural 514 x 149).
+
+/// The 514 x 149 picture with only the style `set` gives it.
+fn picture(set: impl FnOnce(&mut ComputedStyle)) -> LayoutBox {
+    let mut b = wordmark();
+    b.style.height = Length::Auto;
+    set(&mut b.style);
+    b
+}
+
+fn row(width: f32, height: Option<f32>, children: Vec<LayoutBox>) -> LayoutBox {
+    let mut b = flex_box(children);
+    b.style.width = Length::Px(width);
+    if let Some(h) = height {
+        b.style.height = Length::Px(h);
+    }
+    b
+}
+
+fn size(b: &LayoutBox) -> (f32, f32) {
+    (b.dimensions.content.width, b.dimensions.content.height)
+}
+
+#[test]
+fn a_max_height_crosses_the_ratio() {
+    let img = picture(|s| s.max_height = Length::Px(22.0));
+    let row = laid_out(row(300.0, None, vec![img]));
+    let (w, h) = size(&row.children[0]);
+    assert!(
+        close(w, WORDMARK_WIDTH) && close(h, 22.0),
+        "max-height 22 in a 300 row: {w} x {h}, Chromium has 75.9 x 22"
+    );
+}
+
+#[test]
+fn a_max_height_picture_leaves_its_sibling_in_the_row() {
+    let img = picture(|s| s.max_height = Length::Px(22.0));
+    let mut sibling = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+    sibling.style.width = Length::Px(250.0);
+    sibling.style.height = Length::Px(10.0);
+    let row = laid_out(row(300.0, None, vec![img, sibling]));
+    let (w, _) = size(&row.children[0]);
+    let s = &row.children[1].dimensions.content;
+    assert!(close(w, WORDMARK_WIDTH), "the picture is {w} wide, Chromium has 75.9");
+    assert!(
+        close(s.x, WORDMARK_WIDTH) && close(s.width, 300.0 - WORDMARK_WIDTH),
+        "the sibling is at x {} and {} wide, Chromium has 75.9 and 224.1",
+        s.x,
+        s.width
+    );
+}
+
+#[test]
+fn a_max_height_bounds_both_contributions() {
+    let img = picture(|s| s.max_height = Length::Px(22.0));
+    let max = crate::grid::estimate_max_content_width(&img);
+    let min = crate::grid::estimate_min_content_width(&img);
+    assert!(close(max, WORDMARK_WIDTH), "max-content {max}");
+    assert!(close(min, WORDMARK_WIDTH), "min-content {min}");
+}
+
+#[test]
+fn a_percentage_height_resolves_against_the_rows_definite_height() {
+    let img = picture(|s| s.height = Length::Percent(100.0));
+    let row = laid_out(row(300.0, Some(60.0), vec![img]));
+    let (w, h) = size(&row.children[0]);
+    assert!(
+        close(w, 60.0 * 514.0 / 149.0) && close(h, 60.0),
+        "height 100% in a 300 x 60 row: {w} x {h}, Chromium has 207 x 60"
+    );
+}
+
+#[test]
+fn a_percentage_max_height_resolves_against_the_rows_definite_height() {
+    let img = picture(|s| s.max_height = Length::Percent(100.0));
+    let row = laid_out(row(300.0, Some(60.0), vec![img]));
+    let (w, h) = size(&row.children[0]);
+    assert!(
+        close(w, 60.0 * 514.0 / 149.0) && close(h, 60.0),
+        "max-height 100% in a 300 x 60 row: {w} x {h}, Chromium has 207 x 60"
+    );
+}
+
+/// With no base to resolve it, a percentage height does not make the natural
+/// width a minimum: the estimators answer what they did before this PR.
+#[test]
+fn an_unresolved_percentage_height_does_not_raise_the_minimum() {
+    let img = picture(|s| s.height = Length::Percent(100.0));
+    let min = crate::grid::estimate_min_content_width(&img);
+    assert!(min < 1.0, "min-content {min}");
+    let img = picture(|s| s.max_height = Length::Percent(100.0));
+    let min = crate::grid::estimate_min_content_width(&img);
+    assert!(min < 1.0, "min-content {min}");
+}
+
+#[test]
+fn a_min_height_above_the_height_crosses_the_ratio() {
+    let img = picture(|s| {
+        s.height = Length::Px(22.0);
+        s.min_height = Length::Px(40.0);
+    });
+    let row = laid_out(row(600.0, None, vec![img]));
+    let (w, h) = size(&row.children[0]);
+    assert!(
+        close(w, 40.0 * 514.0 / 149.0) && close(h, 40.0),
+        "height 22, min-height 40: {w} x {h}, Chromium has 138 x 40"
+    );
+}
+
+#[test]
+fn a_min_height_above_the_natural_height_crosses_the_ratio() {
+    let img = picture(|s| s.min_height = Length::Px(200.0));
+    let row = laid_out(row(900.0, None, vec![img]));
+    let (w, h) = size(&row.children[0]);
+    assert!(
+        close(w, 200.0 * 514.0 / 149.0) && close(h, 200.0),
+        "min-height 200: {w} x {h}, Chromium has 689.9 x 200"
+    );
+}
+
+/// Pins, both from Chromium: a height with a `max-width` or a `min-width`
+/// keeps the height (§10.4, the height is specified).
+#[test]
+fn a_height_with_a_max_or_min_width_keeps_the_height() {
+    let img = picture(|s| {
+        s.height = Length::Px(22.0);
+        s.max_width = Length::Px(50.0);
+    });
+    let row_a = laid_out(row(300.0, None, vec![img]));
+    let (w, h) = size(&row_a.children[0]);
+    assert!(close(w, 50.0) && close(h, 22.0), "max-width 50: {w} x {h}");
+    let img = picture(|s| {
+        s.height = Length::Px(22.0);
+        s.min_width = Length::Px(100.0);
+    });
+    let row_b = laid_out(row(300.0, None, vec![img]));
+    let (w, h) = size(&row_b.children[0]);
+    assert!(close(w, 100.0) && close(h, 22.0), "min-width 100: {w} x {h}");
+}
+
+/// The change the first version made without saying so, pinned: a picture
+/// with no size given is its natural width as a row item and does not
+/// shrink. Chromium has 1000 x 500 for a 1000 x 500 picture in a 300 row.
+#[test]
+fn a_natural_sized_picture_does_not_shrink_in_a_row() {
+    let mut img = picture(|_| {});
+    img.box_type = BoxType::Image {
+        url: "picture".to_string(),
+        natural_width: 1000.0,
+        natural_height: 500.0,
+    };
+    let row = laid_out(row(300.0, None, vec![img]));
+    let (w, h) = size(&row.children[0]);
+    assert!(close(w, 1000.0) && close(h, 500.0), "{w} x {h}, Chromium has 1000 x 500");
+}
