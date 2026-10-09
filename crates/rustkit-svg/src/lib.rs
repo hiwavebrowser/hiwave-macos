@@ -3873,6 +3873,68 @@ mod tests {
         assert_eq!(points[2], (50.0, 60.0));
     }
 
+    /// A line of glyph-like outlines in a large viewBox, the shape of a
+    /// text-converted-to-paths tagline: 28 "o"-like glyphs, each an outer cubic loop
+    /// and a reversed inner one (its counter), drawn under nonzero.
+    fn glyph_line_svg() -> String {
+        // A 4-cubic ellipse about (cx, cy); `cw` picks the direction.
+        fn ellipse(cx: f32, cy: f32, rx: f32, ry: f32, cw: bool) -> String {
+            let k = 0.5523;
+            let (kx, ky) = (rx * k, ry * k);
+            let s = if cw { 1.0 } else { -1.0 };
+            format!(
+                "M{x0} {cy} C{x0} {a} {b} {top} {cx} {top} C{c} {top} {x1} {a} {x1} {cy} \
+                 C{x1} {d} {c} {bot} {cx} {bot} C{b} {bot} {x0} {d} {x0} {cy} Z ",
+                x0 = cx - s * rx,
+                x1 = cx + s * rx,
+                a = cy - ky,
+                b = cx - s * kx,
+                c = cx + s * kx,
+                d = cy + ky,
+                top = cy - ry,
+                bot = cy + ry,
+            )
+        }
+        let mut d = String::new();
+        for i in 0..28 {
+            // Glyphs differ a little, as real letters do, so their vertices
+            // don't land on the same rows.
+            let (cx, cy) = (90.0 + 175.0 * i as f32, 200.0 + (i % 7) as f32 * 3.0);
+            let (rx, ry) = (80.0 - (i % 3) as f32 * 4.0, 180.0 - (i % 5) as f32 * 7.0);
+            d.push_str(&ellipse(cx, cy, rx, ry, true));
+            d.push_str(&ellipse(cx, cy, rx - 35.0, ry - 50.0, false));
+        }
+        format!(r##"<svg viewBox="0 0 5000 400"><path d="{d}" fill="#000"/></svg>"##)
+    }
+
+    fn fill_polygons(commands: &[DisplayCommand]) -> Vec<&Vec<(f32, f32)>> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::FillPolygon { points, .. } => Some(points),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_large_viewbox_path_drawn_small_stays_cheap() {
+        // Wikipedia's tagline: text converted to paths in a big viewBox,
+        // drawn about 139 x 9 CSS px. Curves must be flattened to a device
+        // tolerance, not 20 steps each in user units, and glyphs that don't
+        // share any x must not cut each other's fill into bands.
+        //
+        // The bound: 139 x 9 is 1,251 device pixels. A fill needs at most a
+        // handful of pieces per pixel row per glyph; 2,000 primitives (about
+        // 1.6 per device pixel, ~70 per 9 px glyph) is generous for that
+        // and still two orders of magnitude under the old output.
+        let doc = SvgDocument::parse(&glyph_line_svg()).expect("parse");
+        let commands = doc.render(0.0, 0.0, 139.0, 9.0);
+        let polys = fill_polygons(&commands);
+        assert!(!polys.is_empty(), "the glyphs must still paint");
+        assert!(polys.len() <= 2_000, "{} fill polygons for a 139 x 9 px shape", polys.len());
+    }
+
     #[test]
     fn test_svg_document_parse() {
         let svg = r#"<svg viewBox="0 0 100 100"><rect x="10" y="10" width="80" height="80" fill="red"/></svg>"#;
