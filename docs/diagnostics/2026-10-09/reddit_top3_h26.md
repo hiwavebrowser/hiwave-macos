@@ -5,7 +5,7 @@ Docs only, no engine code. Site: `https://www.reddit.com/` (logged out home).
 - **Measured:** develop `f54103d9`, RustKit `parity-capture --profile parity`, 1280x800, DPR 1 for the reduced pages and the live page.
 - **Oracle:** pinned Chrome for Testing 148.0.7778.216, headless, same viewport.
 - **Live load:** reddit first answers with a JS challenge page (an inline script that fills a form and calls `requestSubmit()`); parity-capture does not follow that submit, so a plain `--url https://www.reddit.com/` shows only the spinner interstitial. For the layout work the challenge-solved URL that Chromium reached was given to RustKit (`--url` with the `?solution=...&js_challenge=1&jsc_token=...` query it ended on), which renders the real page.
-- **Frames:** kept in the private renders repo, not here. Region comparison below is from those frames.
+- **Frames:** the two full frames (Chromium and RustKit, 1280x800) are kept in the private renders repo, not here; the region table below is from them and from DOM rects.
 
 ## Live page, region by region (Chromium vs RustKit)
 
@@ -20,7 +20,7 @@ Docs only, no engine code. Site: `https://www.reddit.com/` (logged out home).
 | header search / Sign Up / Log In | search 240-688 px, two buttons at the right | search at x=40-485, striped/garbled boxes where the buttons and menu are (two `rounded_rect` ops 40px tall and **2019px / 1551px wide**) |
 | sort bar text | "Best", "Everywhere" only | extra text "Open sort options", "Everywhere", "Change view" painted, overlapping the first post |
 
-Frame at (125,150): Chromium is the white-grey login panel, RustKit shows the feed card. The post cards, thumbnails and the Halloween image render, but sit in the wrong columns.
+In the RustKit frame the post cards, thumbnails and images render, but sit in the wrong columns.
 
 ## The three defects, each with a reduced page
 
