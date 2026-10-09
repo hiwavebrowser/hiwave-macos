@@ -23,7 +23,7 @@ Paths are relative to the repository root. Line numbers are for `f54103d`.
 | shield worker | `crates/hiwave-app/src/shield_adapter.rs:305-333` | owns the `AdBlocker`; answers filter queries over mpsc |
 | WebKit's own processes | (system) | the chrome, shelf and inspector WKWebViews' content |
 
-There is no rayon and no multi-thread tokio runtime in `hiwave-app`. tokio is `rt` + `time` only (`crates/hiwave-app/Cargo.toml:73`). `rustkit-net` and `rustkit-http` create no threads or runtimes. The h2 connection driver is a `tokio::spawn` onto whichever runtime is current (`crates/rustkit-http/src/lib.rs:525`).
+There is no rayon and no multi-thread tokio runtime in `hiwave-app`. tokio is `rt` + `time` only (`crates/hiwave-app/Cargo.toml:73`). `rustkit-net` creates no threads or runtimes. `rustkit-http`'s async client creates none either; its blocking `ClientBuilder::build` builds a current-thread runtime (`crates/rustkit-http/src/lib.rs:1281`), and nothing outside `rustkit-http` uses that blocking client (grep for `rustkit_http::blocking`). The h2 connection driver is a `tokio::spawn` onto whichever runtime is current (`crates/rustkit-http/src/lib.rs:525`).
 
 ### 1.2 Everything RustKit does, it does on the window thread
 
@@ -41,7 +41,7 @@ There is no rayon and no multi-thread tokio runtime in `hiwave-app`. tokio is `r
 | **Load** `load_url_blocking`: builds a fresh current-thread runtime and runs `rt.block_on(engine.load_url(..))` | `webview_rustkit.rs:515-547` (block at `:538-542`) | per-fetch timeouts; the script budget **15 s** (`LIVE_SCRIPT_BUDGET_MS`, `webview_rustkit.rs:78`); interrupt at host calls (`:95`). A load is network, parse, subresources, scripts, load-time timers and layout. The comment at `main.rs:1615-1631` measured it at "minutes, on a heavy page in a debug build". |
 | Callers of the load | `Navigate` (`main.rs:2536` → `content_webview_enum.rs:30` → `webview_rustkit.rs:464-488`); back, forward and reload (`main.rs:2563`, `:2587`, `:2611` → `webview_rustkit.rs:238-278`) | as above |
 | `load_html_internal` | `webview_rustkit.rs:425-434`; used by new tab, about and report pages (`main.rs:504-515`, `:2470`, `:2640`, `:4236`) | parse + scripts, no network |
-| **Live turn** `process_events`: `runtime.block_on(engine.pump_live(..))` | `webview_rustkit.rs:180-204`; called at `main.rs:2327` and `:2450` | **no wall-clock bound on script.** Up to `MAX_LIVE_TIMER_CALLBACKS` = 1000 callbacks (`crates/rustkit-engine/src/lib.rs:767`); network polled ≤ 2 ms (`LIVE_NETWORK_SLICE`, `lib.rs:781`); dynamic `import()` up to `LIVE_NETWORK_BUDGET` = 2 s (`lib.rs:773`); Boa loop limit 10M iterations per frame (`lib.rs:711`) |
+| **Live turn** `process_events`: `runtime.block_on(engine.pump_live(..))` | `webview_rustkit.rs:180-204`; called at `main.rs:2327` and `:2450` | **no wall-clock bound on script.** Up to `MAX_LIVE_TIMER_CALLBACKS` = 1000 callbacks (`crates/rustkit-engine/src/lib.rs:767`); network polled ≤ 2 ms (`LIVE_NETWORK_SLICE`, `lib.rs:781`); dynamic `import()` up to `LIVE_NETWORK_BUDGET` = 2 s (`lib.rs:773`); Boa loop limit 10M iterations per frame (field `lib.rs:711`, value `lib.rs:750`) |
 | **Input dispatch**: `click_at_point`, `mouse_down/move/leave`, `handle_text_key`, `handle_key_up`, `submit_focused_form`, `focus_at_point`, `scroll_view` | `main.rs:2335-2447` → `webview_rustkit.rs:285-422` → engine `lib.rs:1924-3146` | **no wall-clock bound.** Each one runs page listeners synchronously (`fire_mouse` `lib.rs:2842`, `fire_key` `lib.rs:3184`) and then lays out |
 | `relayout` after an edit | `main.rs:2201`, `:2238`, `:2429` → `lib.rs:4591` | full layout of the page |
 | **Render** | `webview_rustkit.rs:215-229` → `render_changed_views` (`lib.rs:12711`) → `render` (`lib.rs:13466`): `get_surface_texture`, `renderer.execute(commands)`, `compositor.present` | display-list size. Wikipedia's portal is 2.2M commands (`webview_rustkit.rs:206-214`); only changed frames are drawn since 2026-10-08 |
@@ -186,10 +186,36 @@ The same questions are answered for each option:
 
 **Terminating a runaway, common to all options.** A thread does not stop a loop. Rust cannot kill a thread, and Boa cannot be paused. Every option ends a runaway with the same two mechanisms:
 
-- **T1, host-call refusal.** This is #616's check (`rustkit-js/src/lib.rs:481-504`). It must change from an `Instant` in an `Rc` to an **`Arc<AtomicU64>` interrupt word** that another thread can set: 0 = run, nonzero = stop reason. It should also be armed on every live turn, input dispatch and `execute_script`, not only on the load.
-- **T2, VM interrupt (needs patched Boa).** Read the same `Arc<AtomicU64>` (or a deadline `Instant` stored next to it) in `check_runtime_limits` and `IncrementLoopIteration`, and return `RuntimeLimitError` when it is set. This is about 30 lines in a vendored `third_party/boa_engine`. The cost is one relaxed atomic load per call and per loop back-edge.
+- **T1, host-call refusal.** This is #616's check (`rustkit-js/src/lib.rs:481-504`). It keeps its local wall-clock deadline (`Rc<ExecutionDeadline>`, `:140-148`) and additionally reads the shared **interrupt word** defined below. It is armed on every live turn, input dispatch and `execute_script`, not only on the load.
+- **T2, VM interrupt (needs patched Boa).** `check_runtime_limits` and `IncrementLoopIteration` read the same interrupt word and return `RuntimeLimitError` when it targets the running turn. This is about 30 lines in a vendored `third_party/boa_engine`. The cost is one relaxed atomic load per call and per loop back-edge.
 
 These two stop everything except a single long native call. What the options differ in is **who is frozen until T1/T2 fire, and who sets the word**.
+
+**Interrupt word: lifecycle (shared by every option).** One `Arc<PageControl>` per page (Send + Sync, atomics only):
+
+```rust
+struct PageControl {
+    turn: AtomicU64,          // id of the turn running now; 0 = idle. Ids only grow.
+    turn_started_ms: AtomicU64,
+    interrupt: AtomicU64,     // a turn id to stop, or ALL (u64::MAX); 0 = none
+    cancel_nav: AtomicU64,    // a nav_generation to cancel; 0 = none
+}
+```
+
+- **Turn ids, not a flag.** The page thread starts every unit of script work (a load, a live turn, one input dispatch, one eval) by taking the next turn id, storing it in `turn` and `turn_started_ms`, and telling its own `JsRuntime` the id (`set_turn(id)`; for T2 this writes the id into Boa's `RuntimeLimits`, which the page thread owns). T1 and T2 stop the script when `interrupt == current turn` or `interrupt == ALL`.
+- **No check-then-act race.** The watchdog reads `turn` = N, sees it over budget, and stores `interrupt = N`. If turn N ended between the read and the store, the store is harmless: the next turn is N+1 and does not match. No compare-and-swap is needed, and **a turn-targeted value is never cleared**: it goes stale on its own.
+- **`ALL`** means "this page runs no more script". It is set by the user's "Stop scripts on this page" (the busy bar, open question 2) and by Close. The page thread clears it (stores 0) **only when a new document commits** (`load_url_with_disposition` installs new bindings), so a navigation, and only a navigation, re-enables script.
+- **Merge with `ExecutionDeadline`.** `ExecutionDeadline` stays the page thread's own clock (the load's 15 s budget, set and lifted by the page thread exactly as at `rustkit-engine/src/lib.rs:3678-3682`). It gains a field `control: Option<Arc<PageControl>>` plus a `Cell<u64>` with the current turn, and the host-function check becomes `deadline passed || word matches`. `hit`/`late` reporting (`take_deadline_hit`, `log_script_stopped`) is reused for both, with the reason recorded (`OverBudget`, `Watchdog`, `UserStop`).
+
+**Load cancellation (needed for Stop during a load).** The interrupt word ends **one script**; a load is many scripts, subresources and layout inside one `load_url` future that holds `&mut Engine`, and `PageCmd::Stop` would wait in the channel behind it. Dropping that future is not safe: `run_page_scripts` takes `view.bindings` out (`lib.rs:3670`) and puts it back only after the await (`lib.rs:3683-3686`). So the load is cancelled **cooperatively, from inside**, and is never dropped:
+
+1. The window thread stores `cancel_nav = g` (the view's current `nav_generation`, which the page thread publishes with each `LoadState` event) and `interrupt = current turn`.
+2. `nav_superseded` (`lib.rs:9689`), already checked after every await of the load (`lib.rs:4144` … `4420`), also returns true when `cancel_nav == nav_generation`.
+3. The same check is added **between scripts** in `run_page_scripts_with`, at the point where the budget is already read (`lib.rs:3821`), and between subresource phases. A cancelled load marks the remaining scripts as not run, the way `OverBudget` does today.
+4. In-flight fetches race a `tokio::sync::Notify` (Send) in the `timeout_at` already wrapped around them (`lib.rs:3582-3635`, `10291`, `10457`, `10505`, `10818`). The socket is dropped with the future; the loader needs no new cancellation API for that.
+5. The load then **returns** through its existing superseded path, so `run_page_scripts` restores `view.bindings` normally. The page thread then handles the queued `PageCmd::Stop` and runs `Engine::stop` (`lib.rs:9657`) for the `NavigationFailed` event and state.
+
+This lands as its own step (M3b, section 6), testable in the engine before any thread exists, because the cancel is set from another thread through an `Arc`.
 
 ### Option A: a page thread per tab; the window thread owns input, chrome and presentation
 
@@ -212,7 +238,7 @@ These two stop everything except a single long native call. What the options dif
 - **`PageEngine`, per page thread.** It holds `views` (`ViewState`: DOM, bindings, layout, display list), `loader`, `image_manager`, `font_loader`, `svg_cache` and the style trace.
 - **`Presenter`, on the window thread.** It holds `viewhost`, `compositor` and `renderer`.
 
-`RustKitView` stops holding `RefCell<Engine>`. It holds a `PageHandle { tx: Sender<PageCmd>, interrupt: Arc<AtomicU64>, turn_started: Arc<AtomicU64>, view: ViewId }`.
+`RustKitView` stops holding `RefCell<Engine>`. It holds a `PageHandle { tx: Sender<PageCmd>, control: Arc<PageControl>, view: ViewId }`.
 
 **Send vs confined.**
 
@@ -230,7 +256,13 @@ These two stop everything except a single long native call. What the options dif
 3. The window thread stores the latest commit per view and drops older ones.
 4. On `MainEventsCleared` it renders the **front** view's latest commit with today's code path (`lib.rs:13466-13625`): get texture, execute, present.
 
-Scroll is applied by the presenter as the `PushTransform` it already wraps (`lib.rs:13589-13600`). The window thread can therefore scroll a busy page's last frame immediately, and the page thread is told the new offset (scroll events, lazy content). This is responsive scrolling for free.
+Scroll is applied by the presenter as the `PushTransform` it already wraps (`lib.rs:13589-13600`). That makes window-thread scrolling of a busy page's last frame possible, but it gives the offset two writers (the presenter, and the page's `scrollTo`/relayout). The rule:
+
+- **The page thread is the only owner of the scroll offset.** Every commit carries the offset it was laid out at and `scroll_ack`, the `seq` of the last wheel input it consumed.
+- **The presenter only predicts.** It keeps the wheel deltas it has forwarded with `seq > scroll_ack` and draws `committed offset + unacknowledged deltas`, clamped to the committed content size. When a commit arrives, acknowledged deltas are dropped.
+- **So the page wins.** A `scrollTo` in the page shows up in the committed offset, and only the user's input that the page has not seen yet is added on top, as in Chrome's compositor scrolling.
+
+Until the step that adds this (M9b, section 6), wheel input goes to the page thread like any other input and the presenter draws the committed offset only.
 
 **How input reaches the page (fixes #575 by design).**
 
@@ -246,9 +278,10 @@ Scroll is applied by the presenter as the `PushTransform` it already wraps (`lib
 
 **Runaway after load, then switch, stop and close.**
 
-- **Watchdog.** The window thread does not run page code, so it stays responsive. The page thread stores `turn_started` (ms since start) when a turn begins and 0 when it ends. Each wake, the window thread compares it against the budget: 15 s during load and `LIVE_TURN_BUDGET` after (open question 2). Past the budget it sets the interrupt word, and T1/T2 unwind the script.
-- **Stop.** The window thread **sets the interrupt word immediately**, then sends `Stop`. The page unwinds at its next call or loop back-edge (T2), or its next host call (T1 alone). Then `Engine::stop` runs on the page thread, which is now possible because nothing else holds `&mut`.
-- **Close tab.** The window thread removes the view from the presenter and the NSView from the window, which is instant for the user. It sets the interrupt word, sends `Close` and drops the `Sender`. The page thread exits when its loop sees the closed channel.
+- **Watchdog.** The window thread does not run page code, so it stays responsive. Each wake, it reads `PageControl.turn` and `turn_started_ms` and compares them against the budget: 15 s during a load and `LIVE_TURN_BUDGET` after (open question 2). Past the budget it stores `interrupt = turn` (lifecycle above), and T1/T2 unwind that script only.
+- **Stop during a load.** The window thread stores `cancel_nav` and `interrupt = turn` at once, then sends `Stop`. The running script unwinds (T2, or T1 at its next host call), the load sees `cancel_nav` at its next check and returns through its superseded path, and then `Stop` is handled (load cancellation, above).
+- **Stop after load.** There is no load to cancel. The window thread stores `interrupt = turn`, which ends the running script. If the page keeps starting new runaway turns (a `setInterval` spin), the busy bar offers "Stop scripts on this page", which stores `ALL` until the next navigation.
+- **Close tab.** The window thread removes the view from the presenter and the NSView from the window, which is instant for the user. It stores `cancel_nav` and `interrupt = ALL`, sends `Close` and drops the `Sender`. The page thread exits when its loop sees the closed channel.
   - **Abandonment.** If the thread does not acknowledge within 2 s (a single long native call), it is **abandoned**: detached, logged, and its CPU use reported. Rust cannot kill it; only a process boundary can (open question 4).
 - **Switch tab.** This is a presentation change on the window thread. It never waits on any page.
 
@@ -402,55 +435,65 @@ D is A's end state, with these changes:
 
 Each step lands alone and leaves the app working. They are ordered smallest-first where dependencies allow. Real-window checks extend `tools/real_window/driver.py`. Its README notes that input-posting checks have not run on a granted seat yet (`tools/real_window/README.md`, status 2026-10-05), so each step's input checks are also hand-test items until the driver's input path is proven.
 
-New fixture used below: **`h20_spin_after_load.html`** loads, paints green, and 3 s later starts a `setTimeout` callback that spins inside nested `forEach`. A variant, `h20b`, spins in a bare `while(true){}`. A second tab holds `h1_late.html`, which ticks once a second.
+New fixtures used below. **`h20_spin_after_load.html`** loads, paints green, and 3 s later starts a `setTimeout` callback that spins inside nested `forEach` and **calls the host on every iteration** (`document.getElementById`, the probe #616's tests use), so T1 alone can stop it. **`h20b`** spins after load in pure script: a bare `while(true){}` inside a `forEach` callback, with no host calls, so only T2 (M1) stops it. A second tab holds `h1_late.html`, which ticks once a second.
 
 | # | step | what changes | proves it | size | Phase X order |
 |---|---|---|---|---|---|
-| **M0** | Deadline on every script entry | `set_execution_deadline` armed in `pump_live`, `fire_mouse`/`fire_key` dispatch and `execute_script`, with `LIVE_TURN_BUDGET` (open question 2); `run_jobs` keeps its count bound. Single thread still. | Engine tests: a timer callback spinning in `forEach` after load is stopped and recorded `OverBudget`; the page's other timers still run. Real window: `h20` loads, then the window answers a chrome click (tab switch) within `LIVE_TURN_BUDGET` + 1 s of the spin starting. | S | any time; before everything else here |
-| **M1** | Boa VM interrupt (T2) | Vendored `third_party/boa_engine` 0.22.0, patch ≈30 lines: an `Option<Arc<AtomicU64>>` in `RuntimeLimits`, checked in `check_runtime_limits` (`vm/mod.rs:1017`) and `IncrementLoopIteration` (`loop_ops.rs:14`). `JsRuntime::set_interrupt(Arc<AtomicU64>)`; T1 reads the same word. Remove the stale `boa_gc`/`boa_parser` patches. | rustkit-js tests: `while(true){}`, pure `forEach` spin and a recursion-free reducer all stop within 50 ms of the word being set **from another thread**; `try/catch` is not entered; the runtime is usable afterwards. Benchmark: the parity board's script-heavy cases are within noise. Real window: `h20b` (no host calls) is stopped at the budget. | S | any time |
+| **M0** | Deadline on every script entry | `set_execution_deadline` armed in `pump_live`, `fire_mouse`/`fire_key` dispatch and `execute_script`, with `LIVE_TURN_BUDGET` (open question 2); `run_jobs` keeps its count bound. Single thread still: this bounds the freeze, it does not remove it. | Engine tests: a timer callback spinning in `forEach` with host calls after load is stopped and recorded `OverBudget`; the page's other timers still run. Real window: `h20` (host calls) loads, then the window answers a chrome click within `LIVE_TURN_BUDGET` + 1 s of the spin starting. `h20b` is **not** expected to pass here; it is M1's proof. | S | any time; before everything else here |
+| **M1** | Boa VM interrupt (T2) + `PageControl` | Vendored `third_party/boa_engine` 0.22.0, patch ≈30 lines: `RuntimeLimits` gains `interrupt: Option<Arc<AtomicU64>>` and `turn: u64`, checked in `check_runtime_limits` (`vm/mod.rs:1017`) and `IncrementLoopIteration` (`loop_ops.rs:14`) as `word == turn \|\| word == ALL`. `PageControl` (section 3) is introduced; `ExecutionDeadline` gains the `control` link and the turn cell; `JsRuntime::set_turn(id)`. Remove the stale `boa_gc`/`boa_parser` patches. | rustkit-js tests: `while(true){}`, a pure `forEach` spin and a recursion-free reducer all stop within 50 ms of the word being set **from another thread**; `try/catch` is not entered; the runtime is usable afterwards; **a word naming turn N does not stop turn N+1**; `ALL` stops every turn until cleared. Benchmark: the parity board's script-heavy cases are within noise. Real window: `h20b` (no host calls) is stopped at `LIVE_TURN_BUDGET`. | S | any time |
 | **M2** | Ordered, view-tagged input queue (#575) | One `InputEvent{seq, at, view, kind}` queue in `rustkit-viewhost/src/macos.rs` replaces the three statics; `RustKitContentView` carries its `ViewId`; `main.rs:2335-2447` drains in `seq` order and drops events for a missing view; adjacent-only coalescing. | Unit: click after a wheel burst is delivered after it; key typed before a click is delivered before it; a wheel queued for view 1 is dropped once view 1 is gone. Real window: `h6` scroll, then a tab switch mid-flick does not move the new tab. | M | before Phase X step 3 (the view host takes over this queue) |
 | **M3** | Split `Engine` into `PageEngine` + `Presenter`, same thread | Presenter = viewhost + compositor + renderer + surfaces; PageEngine produces `FrameCommit`; `render` consumes commits; `assert_send::<FrameCommit>()`, `::<ResourceLoader>()` etc. as compile-time tests **on macOS**; one wgpu device per process. | Whole engine test suite; the 26-case parity campaign shows identical `diffPixels` A/B; the app draws the same frames. | L | before Phase X step 2 (the chrome document needs `PageEngine` without its own GPU device) |
-| **M4** | `PageThread` with one content thread (B shape) | `RustKitView` becomes a `PageHandle` (Sender, interrupt word, turn stamp). Load, live turns, input, eval and stop all run on the content thread with a **persistent** tokio current-thread runtime, so the h2 driver survives across loads. The window thread runs the watchdog and wakes through `EventLoopProxy`. Stop sets the interrupt word, then calls `Engine::stop`. Behind `HIWAVE_CONTENT_THREAD=1`, then default after one hand-test day. | Real window: (1) **`h19_spin` during load**: chrome clicks and window drag answer within 100 ms throughout; **Stop** ends the spin within 1 s; (2) **`h20` after load**: Stop ends it within 1 s; **close the tab** removes it within 100 ms and the app's CPU drops within 2 s; switching to the `h1` tab shows its last frame within 100 ms. Every `h1`–`h16` check stays PASS. | L | after Phase X step 1 (fewer cfg branches); before Phase X step 2 |
-| **M5** | One view per tab, retained | Each tab owns a `ViewId` + NSView inside the content thread; tab switch shows/hides instead of `Navigate` (`main.rs:797-819`); background-tab cap with discard (open question 3). | Real window: switch A→B→A does not re-request A's page (fixture request log); form text typed in A survives the switch; the cap discards the oldest and it reloads on activation. | M | after M4; any Phase X order |
-| **M6** | One page thread per tab (A shape) | `PageThread` per tab; shared `Arc<ResourceLoader>`/`FontLoader`; abandonment after 2 s without an acknowledgement. | Real window: `h20` in tab A spinning; tab B (`h1`) **keeps ticking in the request log during the spin**; switch to B and click works; Stop in A ends the spin; close A while spinning: the tab disappears at once and the thread exits or is reported abandoned. | L | after M5; before Phase X step 3 (the view host is built against the final shape) |
+| **M3b** | Cooperative load cancel | `PageControl.cancel_nav`; `nav_superseded` (`lib.rs:9689`) also reads it; the same check between scripts in `run_page_scripts_with` (`lib.rs:3821`) and between subresource phases; in-flight fetches race a `Notify`; the load returns through its superseded path, never dropped (section 3, load cancellation). Single thread still. | Engine test: a load with a host-calling spin script, five more scripts and twenty slow subresources; another thread sets `cancel_nav` and `interrupt` at 200 ms; `load_url` returns within 1 s; none of the five later scripts ran; no subresource request started after the cancel (fixture log); `view.bindings` is present and a new navigation of the same view loads and runs script. | M | before M4 |
+| **M4** | `PageThread` with one content thread (B shape) | `RustKitView` becomes a `PageHandle` (Sender, `Arc<PageControl>`). Load, live turns, input, eval and stop run on the content thread with one **persistent** tokio current-thread runtime: the live loop's `LiveFuture`s must be polled by the same runtime on every turn (`script_net.rs:139-140`), and a runtime per load (`webview_rustkit.rs:525`) goes away. The synchronous queries become messages: `link_at_point` (`main.rs:2139`), `has_focused_element` (`:2165`, `:2427`) and `form_submit_url` (`:2181`, `:2421`) turn into page-side decisions reported as `PageEvent::NavigateRequested` / `Focused`, and `handle_text_key`'s scroll fallback moves into the page thread. The window thread runs the watchdog and wakes through `EventLoopProxy`. Stop = `cancel_nav` + `interrupt`, then `PageCmd::Stop`. Still **one shared view**, so tab switch and close are still a `Navigate` (`main.rs:783-819`), now cancellable. Behind `HIWAVE_CONTENT_THREAD=1`, then default after one hand-test day. | Real window: (1) **`h19_spin` during load**: chrome clicks, typing in the URL bar and window drag answer within 100 ms throughout; **Stop** ends the load within 1 s (no further script or subresource requests in the fixture log); (2) **`h20` after load**: Stop ends the spin within 1 s and the page's later timers still run; (3) **close the spinning tab**: it leaves the tab strip within 100 ms, the spin ends within 1 s, and the next tab's load begins within 1 s (request log). Every `h1`–`h16` check stays PASS. Tab switch to a retained frame is **not** claimed here (M5). | L | after M3b and Phase X step 1 (fewer cfg branches); before Phase X step 2 |
+| **M5** | One view per tab, retained | Each tab owns a `ViewId`: its `ViewState` (DOM, JS, layout) lives on the content thread, and its NSView, surface and last `FrameCommit` live in the window thread's Presenter (2.4, 2.5). Tab switch shows/hides instead of `Navigate` (`main.rs:797-819`); background-tab cap with discard (open question 3). | Real window: switch A→B→A does not re-request A's page (fixture request log); form text typed in A survives the switch; the cap discards the oldest and it reloads on activation; **with `h20` spinning in A, switching to the `h1` tab B shows B's last frame within 100 ms** (B stays inert until A's spin is interrupted: one content thread). | M | after M4; any Phase X order |
+| **M6** | One page thread per tab (A shape) | `PageThread` per tab, each with its own `PageControl` and runtime; shared `Arc<ResourceLoader>`/`FontLoader`; a new tab gets a new thread; abandonment after 2 s without an acknowledgement. | Real window: `h20` in tab A spinning; tab B (`h1`) **keeps ticking in the request log during the spin**; switch to B and click works; open a new tab and load a fixture page in it during the spin; a page held 20 s by the fixture server in tab A while tab B scrolls and runs find-in-page; Stop in A ends the spin; close A while spinning: the tab disappears at once and the thread exits or is reported abandoned. | L | after M5; before Phase X step 3 (the view host is built against the final shape) |
 | **M7** | Chrome document as a page thread (= Phase X step 2) | `HIWAVE_RUSTKIT_CHROME=1`: the chrome HTML runs in a RustKit `PageThread` with `ChromeEvent`/`ChromeCmd`; native accelerators for stop/close/next tab/quit wired on the window thread. | With the flag: all M4/M6 real-window checks pass using **keyboard accelerators only**, and again by clicking the RustKit-drawn tab strip and stop button; a chrome script forced to spin (test hook) does not stop Cmd+W or page scrolling. | L | is Phase X step 2 |
 | **M8** | `ViewHostMac` replaces `TaoHost` on macOS (= Phase X step 3) | `WindowHost` trait; macOS run loop, `WakeHandle`, window events, IME and the settings window move to `rustkit-viewhost`; main-thread markers. Windows and Linux keep `TaoHost`. | All earlier real-window checks on macOS without tao in the macOS dependency graph (`cargo tree -p hiwave-app --target aarch64-apple-darwin -i tao` is empty); Windows and Linux CI builds unchanged. | L | is Phase X step 3; requires M2, M4, M7 |
 | **M9** (optional) | Render thread | Encode+present off the main thread using explicit-extent configure (2.4); the window thread only routes. | Wikipedia portal: input-to-scroll latency is measured before and after; no surface panic; resize has no tearing in the hand test. | M | after M8 |
+| **M9b** (optional) | Predicted scrolling on the window thread | The presenter draws `committed offset + unacknowledged wheel deltas` (section 3A, scroll rule); commits carry `scroll_ack`. | Real window: with `h20` spinning in the front tab, a wheel flick moves its last frame within one frame; after the spin ends, a page `scrollTo` during a flick lands where the page put it plus the later deltas only. | M | after M6 |
 
-Phase X step 1 (delete `webview-fallback`) is independent of M0–M3 and should land before M4. Phase X step 4 (wry leaves) comes after M7 has been default for a release and M8 has landed. On Windows and Linux, wry remains wherever they still use it for content.
+Phase X step 1 (delete `webview-fallback`) is independent of M0–M3b and should land before M4. Phase X step 4 (wry leaves) comes after M7 has been default for a release and M8 has landed. On Windows and Linux, wry remains wherever they still use it for content.
 
 ---
 
 ## 7. Acceptance tests (user tasks)
 
-Each is run in the built app on macOS, by hand and, where the driver can, by `tools/real_window`.
+Each is run in the built app on macOS, by hand and, where the driver can, by `tools/real_window`. Each names the step at which it first passes; before that step it is expected to fail.
 
 1. **Runaway after load, then tab switch.**
    - Setup: open the `h1` tick page in tab 1 and the `h20` spin page in tab 2.
    - Wait until tab 2 starts spinning (its fixture beacons).
    - Click tab 1 within 1 s: it appears within 100 ms and keeps ticking.
+   - First passes: shows within 100 ms at **M5**; keeps ticking during the spin at **M6**.
 2. **Stop a runaway.**
    - In the spinning tab, press the stop button (and, separately, Esc / Cmd+.).
    - The spin ends within 1 s. The page stays on screen, scrollable and clickable, and its later timers still run.
+   - First passes: **M4** (the stop button; Esc / Cmd+. need their menu items, M7 at the latest).
 3. **Close a runaway tab.**
    - In the spinning tab, press Cmd+W (and, separately, the tab's close button).
    - The tab is gone within 100 ms, and the app's CPU returns to idle within 2 s.
+   - First passes: **M4**.
 4. **Runaway during load.**
    - Load `h19_spin`.
    - While it spins: type in the URL bar, open a new tab, navigate it to a fixture page, and drag the window. Every action responds within 100 ms.
+   - First passes: typing and dragging at **M4**; the new tab's page loading during the spin at **M6** (until then it waits behind the spin on the one content thread).
 5. **Pure-script spin.**
    - Repeat tasks 2 and 3 on `h20b` (`while(true){}`, no host calls).
    - Same results.
+   - First passes: **M4** (needs M1, which lands earlier).
 6. **Slow network does not freeze the browser.**
    - Load a page whose HTML the fixture server holds for 20 s.
    - Switch tabs, open the shelf, and use find-in-page in another tab during the wait.
+   - First passes: switching and the shelf at **M5**; find-in-page in the other tab (it runs in that page) at **M6**.
 7. **Input order and identity.**
    - On a page logging events: scroll then click, type then click. The page log shows the arrival order.
    - Flick-scroll tab A and switch to tab B mid-flick: B does not move.
+   - First passes: **M2**.
 8. **Everyday pages unchanged.**
    - The `h1`–`h16` checks PASS.
    - The 26-case parity campaign is identical A/B.
    - Wikipedia, YouTube and eBay load and are usable.
+   - Holds at every step.
 9. **Phase X shape, once M7 and M8 are in.**
    - Repeat tasks 1–7 with `HIWAVE_RUSTKIT_CHROME=1` on a macOS build whose dependency graph has no tao.
 
