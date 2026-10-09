@@ -6338,6 +6338,16 @@ impl LayoutBox {
                     specified
                 };
             }
+            // The other viewport units are lengths like `vh`: they fell to
+            // the `auto` arm, so `height: 2vw` was content-sized.
+            Length::Vw(_) | Length::Vmin(_) | Length::Vmax(_) => {
+                let specified = self.length_to_px(&self.style.height, 0.0);
+                self.dimensions.content.height = if is_border_box {
+                    (specified - padding_border_height).max(0.0)
+                } else {
+                    specified
+                };
+            }
             _ => {
                 // Auto or Zero - content.height was set by layout_block_children
                 // But if aspect-ratio is set and we have a width, calculate height from it

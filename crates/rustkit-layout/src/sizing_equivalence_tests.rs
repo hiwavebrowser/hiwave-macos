@@ -346,7 +346,6 @@ use FlexDirection::{Column, Row};
 
 cells! {
     block_child_width: |l| block_child(width, l);
-    #[ignore = "W7-A: the block height has no vw/vmin/vmax arm and takes them for auto, lib.rs:6341"]
     block_child_height: |l| block_child(height, l);
     block_child_min_width: |l| block_child(min_width, l);
     block_child_max_width: |l| block_child(max_width, l);
@@ -410,7 +409,6 @@ cells! {
     img_margin: |l| image(40.0, margin, l);
 
     inline_block_width: |l| inline_block(width, l);
-    #[ignore = "W7-A: the block height has no vw/vmin/vmax arm and takes them for auto, lib.rs:6341"]
     inline_block_height: |l| inline_block(height, l);
     inline_block_min_width: |l| inline_block(min_width, l);
     inline_block_max_width: |l| inline_block(max_width, l);
@@ -422,7 +420,6 @@ cells! {
 
     #[ignore = "W7-A: own_max_content_width takes a px width only, grid.rs:3441 (draft PR #622 fixes it)"]
     shrink_to_fit_child_width: |l| shrink_to_fit(width, l);
-    #[ignore = "W7-A: the block height has no vw/vmin/vmax arm and takes them for auto, lib.rs:6341"]
     shrink_to_fit_child_height: |l| shrink_to_fit(height, l);
     shrink_to_fit_child_min_width: |l| shrink_to_fit(min_width, l);
     shrink_to_fit_child_max_width: |l| shrink_to_fit(max_width, l);
@@ -435,7 +432,6 @@ cells! {
 
     #[ignore = "W7-A: own_max_content_width takes a px width only, grid.rs:3441 (draft PR #622 fixes it)"]
     float_child_width: |l| float(width, l);
-    #[ignore = "W7-A: the block height has no vw/vmin/vmax arm and takes them for auto, lib.rs:6341"]
     float_child_height: |l| float(height, l);
     float_child_min_width: |l| float(min_width, l);
     float_child_max_width: |l| float(max_width, l);
@@ -448,7 +444,6 @@ cells! {
 
     #[ignore = "W7-A: own_max_content_width takes a px width only, grid.rs:3441 (draft PR #622 fixes it)"]
     content_sized_flex_item_width: |l| content_sized_flex(width, l);
-    #[ignore = "W7-A: the block height has no vw/vmin/vmax arm and takes them for auto, lib.rs:6341"]
     content_sized_flex_item_height: |l| content_sized_flex(height, l);
     content_sized_flex_item_min_width: |l| content_sized_flex(min_width, l);
     content_sized_flex_item_max_width: |l| content_sized_flex(max_width, l);
