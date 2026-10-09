@@ -128,3 +128,67 @@ fn auto_margins_in_the_reverse_directions() {
     let xs: Vec<f32> = row.children.iter().map(|c| c.dimensions.content.x).collect();
     assert!((xs[0] - 900.0).abs() < 0.5 && (xs[1] - 800.0).abs() < 0.5, "row-reverse: {xs:?}");
 }
+
+fn centred_item(children: Vec<LayoutBox>) -> LayoutBox {
+    let mut item = block(None, children);
+    item.style.width = Length::Px(60.0);
+    item.style.margin_top = Length::Auto;
+    item.style.margin_bottom = Length::Auto;
+    item
+}
+
+/// §9.4.11 stretches an item only when neither cross-axis margin is auto, so
+/// a vertically centred card is not stretched and its percentage-height child
+/// sees an indefinite height. The second reviewer's input on #657: the block
+/// arm of step 11 decided "stretched" from `align-self` alone and laid the
+/// card out 200 tall.
+#[test]
+fn an_auto_cross_margin_item_with_a_percent_height_child_is_not_stretched() {
+    let mut half = block(None, vec![]);
+    half.style.height = Length::Percent(50.0);
+    let card = centred_item(vec![block(Some(20.0), vec![]), half]);
+    let mut row = flex(FlexDirection::Row, vec![card]);
+    row.style.height = Length::Px(200.0);
+
+    let row = laid_out(row);
+    let (y, h) = y_and_height(&row.children[0]);
+    assert!(
+        (h - 20.0).abs() < 0.5 && (y - 90.0).abs() < 0.5,
+        "the card is 20 tall, centred at y=90: y {y}, height {h}"
+    );
+    let m = &row.children[0].dimensions.margin;
+    assert!(
+        (m.top - 90.0).abs() < 0.5 && (m.bottom - 90.0).abs() < 0.5,
+        "margins {} / {}",
+        m.top,
+        m.bottom
+    );
+}
+
+/// The control from the same review: without the percentage child the card
+/// was already right.
+#[test]
+fn an_auto_cross_margin_item_without_a_percent_height_child_is_centred() {
+    let card = centred_item(vec![block(Some(20.0), vec![])]);
+    let mut row = flex(FlexDirection::Row, vec![card]);
+    row.style.height = Length::Px(200.0);
+
+    let row = laid_out(row);
+    let (y, h) = y_and_height(&row.children[0]);
+    assert!((h - 20.0).abs() < 0.5 && (y - 90.0).abs() < 0.5, "y {y}, height {h}");
+}
+
+/// The same card as a nested flex container (step 11's other arm): its
+/// height is its content's, not the row's.
+#[test]
+fn an_auto_cross_margin_nested_flex_item_is_not_stretched() {
+    let mut card = centred_item(vec![block(Some(20.0), vec![])]);
+    card.style.display = Display::Flex;
+    card.style.flex_direction = FlexDirection::Column;
+    let mut row = flex(FlexDirection::Row, vec![card]);
+    row.style.height = Length::Px(200.0);
+
+    let row = laid_out(row);
+    let (y, h) = y_and_height(&row.children[0]);
+    assert!((h - 20.0).abs() < 0.5 && (y - 90.0).abs() < 0.5, "y {y}, height {h}");
+}
