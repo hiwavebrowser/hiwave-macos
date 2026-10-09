@@ -203,6 +203,8 @@ mod grid_item_lone_text_tests;
 mod grid_item_min_max_tests;
 #[cfg(test)]
 mod table_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod ws_beside_block_replaced_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
