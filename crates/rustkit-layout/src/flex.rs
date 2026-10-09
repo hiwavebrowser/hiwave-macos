@@ -155,6 +155,24 @@ impl<'a> FlexItem<'a> {
             && self.cross_margin_auto == (false, false)
     }
 
+    /// Give back what the auto margins took. Free space is handed to them
+    /// after the sizes are resolved (§9.7 and §9.4 treat an auto margin as
+    /// 0), so every pass that sizes again starts from this.
+    fn clear_auto_margins(&mut self) {
+        if self.main_margin_auto.0 {
+            self.main_margin_start = 0.0;
+        }
+        if self.main_margin_auto.1 {
+            self.main_margin_end = 0.0;
+        }
+        if self.cross_margin_auto.0 {
+            self.cross_margin_start = 0.0;
+        }
+        if self.cross_margin_auto.1 {
+            self.cross_margin_end = 0.0;
+        }
+    }
+
     /// Get outer main size (target + margins).
     pub fn outer_main_size(&self) -> f32 {
         self.target_main_size + self.main_margin_start + self.main_margin_end
@@ -709,6 +727,14 @@ fn layout_flex_container_at(
         wrap == FlexWrap::WrapReverse,
         container_origin,
     );
+    // The boxes carry the auto margins' shares now. Step 11 sizes lines and
+    // items again from the items' outer sizes, and a share left in them
+    // counted as content: a `min-height: 200px` column with a `margin-top:
+    // auto` footer came out 234 tall, and a definite one shrank its items to
+    // make room for the margin. The passes below hand the shares out again.
+    for item in lines.iter_mut().flat_map(|l| l.items.iter_mut()) {
+        item.clear_auto_margins();
+    }
 
     // 11. Recursively layout children of flex items (important for nested flex containers)
     // After flex positioning, each item's dimensions are set, so we can use them as containing blocks
@@ -1096,6 +1122,13 @@ fn layout_flex_container_at(
         }
         align_cross_axis(line, style.align_items);
         for item in &mut line.items {
+            if item.cross_margin_auto != (false, false) {
+                let m = &mut item.layout_box.dimensions.margin;
+                match cross_axis {
+                    Axis::Vertical => (m.top, m.bottom) = (item.cross_margin_start, item.cross_margin_end),
+                    Axis::Horizontal => (m.left, m.right) = (item.cross_margin_start, item.cross_margin_end),
+                }
+            }
             // New absolute border-box cross position, converted to a content
             // rect delta; main-axis positions are unchanged, so shifting the
             // already-laid-out subtree is sufficient.
@@ -1239,6 +1272,10 @@ fn layout_flex_container_at(
                     direction.is_reverse(),
                 );
                 for item in &mut line.items {
+                    if item.main_margin_auto != (false, false) {
+                        let m = &mut item.layout_box.dimensions.margin;
+                        (m.top, m.bottom) = (item.main_margin_start, item.main_margin_end);
+                    }
                     let d = &item.layout_box.dimensions;
                     let new_content_y =
                         container_origin.1 + item.main_position + d.padding.top + d.border.top;
