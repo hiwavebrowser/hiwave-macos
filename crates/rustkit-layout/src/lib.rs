@@ -2956,17 +2956,23 @@ impl LayoutBox {
 
     /// The content width of a replaced box whose `width` is `auto`, where no
     /// containing block works it out (`layout_image_in` does that for a box
-    /// in flow): a flex base size and a min/max-content contribution. A
-    /// definite height crosses the natural ratio (css-sizing-4 "transferred
-    /// size"); with no height it is the natural width. `None` for a box
-    /// that is not replaced, has no natural width, or whose width the page
-    /// gave.
+    /// in flow): a flex base size and a min/max-content contribution. The
+    /// USED height crosses the natural ratio (css-sizing-4 "transferred
+    /// size"): `height` bounded by `max-height` and then `min-height`, or
+    /// the natural height bounded the same way (CSS 2.1 §10.4, §10.7). A
+    /// box whose height nothing changes is its natural width. `None` for a
+    /// box that is not replaced, has no natural width, or whose width the
+    /// page gave.
+    ///
+    /// `percent_height_base` is what a percentage `height`, `min-height` or
+    /// `max-height` refers to, when the caller knows it: a flex container's
+    /// definite cross size. With `None` a percentage counts as `auto`.
     ///
     /// The flex pass and the width estimators each read `natural_width`
     /// alone, or nothing: reddit's wordmark (`<svg viewBox="0 0 514 149"
     /// style="height: 22px">`) was 514 wide as a row item and 0 wide to the
     /// flex link around it, for Chrome's 75.89.
-    pub(crate) fn replaced_auto_content_width(&self) -> Option<f32> {
+    pub(crate) fn replaced_auto_content_width(&self, percent_height_base: Option<f32>) -> Option<f32> {
         let BoxType::Image {
             natural_width,
             natural_height,
@@ -2983,15 +2989,40 @@ impl LayoutBox {
             .iter()
             .map(|l| self.length_to_px(l, 0.0))
             .sum();
-        let height = replaced_content_size(
-            self.replaced_length(&s.height, None),
-            vertical_decoration,
-            s.box_sizing == BoxSizing::BorderBox,
-        );
-        Some(match height {
-            Some(h) if *natural_height > 0.0 => h * natural_width / natural_height,
-            _ => *natural_width,
+        if *natural_height <= 0.0 {
+            return Some(*natural_width);
+        }
+        let content_height = |length: &Length| {
+            replaced_content_size(
+                self.replaced_length(length, percent_height_base),
+                vertical_decoration,
+                s.box_sizing == BoxSizing::BorderBox,
+            )
+        };
+        // §10.7: the maximum first, then the minimum, so the minimum wins.
+        let bounded = |h: f32| {
+            let h = content_height(&s.max_height).map_or(h, |max| h.min(max));
+            content_height(&s.min_height).map_or(h, |min| h.max(min))
+        };
+        let used_height = bounded(content_height(&s.height).unwrap_or(*natural_height));
+        Some(if (used_height - natural_height).abs() < 0.005 {
+            *natural_width
+        } else {
+            used_height * natural_width / natural_height
         })
+    }
+
+    /// Whether `height`, `min-height` or `max-height` is a percentage that
+    /// `replaced_auto_content_width` could not resolve. Its answer is then
+    /// the natural width, which is right for a size the box may still be
+    /// given and wrong as a minimum: `header { display: flex; height: 60px }
+    /// img { height: 100% }` could not shrink below its natural 514.
+    pub(crate) fn replaced_height_percentage_is_unresolved(&self, percent_height_base: Option<f32>) -> bool {
+        let s = &self.style;
+        percent_height_base.is_none()
+            && [&s.height, &s.min_height, &s.max_height]
+                .iter()
+                .any(|l| matches!(l, Length::Percent(_)))
     }
 
     /// A specified size on a replaced element in pixels, or `None` for

@@ -1609,7 +1609,7 @@ fn create_flex_item<'a>(
             if main_size_is_auto(main_length, explicit_size, main_is_definite) {
                 // Get intrinsic size for replaced elements (form controls, images)
                 main_size_from_content = content_sized_box;
-                get_intrinsic_main_size(layout_box, main_axis) + main_pb
+                get_intrinsic_main_size(layout_box, main_axis, definite_inner_cross) + main_pb
             } else {
                 spec_main_to_border_box(explicit_size)
             }
@@ -1617,7 +1617,7 @@ fn create_flex_item<'a>(
         FlexBasis::Content => {
             // Use content size - for replaced elements, use intrinsic size
             main_size_from_content = content_sized_box;
-            get_intrinsic_main_size(layout_box, main_axis) + main_pb
+            get_intrinsic_main_size(layout_box, main_axis, definite_inner_cross) + main_pb
         }
         FlexBasis::Length(len) => spec_main_to_border_box(len),
         // A percentage of an indefinite main size is `content`
@@ -1625,7 +1625,7 @@ fn create_flex_item<'a>(
         // auto-height column is as tall as what it holds.
         FlexBasis::Percent(_) if !main_is_definite => {
             main_size_from_content = content_sized_box;
-            get_intrinsic_main_size(layout_box, main_axis) + main_pb
+            get_intrinsic_main_size(layout_box, main_axis, definite_inner_cross) + main_pb
         }
         FlexBasis::Percent(pct) => spec_main_to_border_box(pct / 100.0 * container_main),
     };
@@ -1706,7 +1706,10 @@ fn create_flex_item<'a>(
         spec_main_to_border_box(css_min_main)
     } else if specified_min_is_auto && main_overflow_is_visible {
         let content_min = match main_axis {
-            Axis::Horizontal => crate::grid::estimate_min_content_width(layout_box),
+            Axis::Horizontal => {
+                crate::grid::replaced_min_content_width_in_row(layout_box, definite_inner_cross)
+                    .unwrap_or_else(|| crate::grid::estimate_min_content_width(layout_box))
+            }
             // No min-content HEIGHT estimator exists yet. Returning 0.0 keeps
             // the previous behaviour on the vertical main axis rather than
             // inventing a number — stated so the gap is visible instead of
@@ -2792,7 +2795,7 @@ fn content_border_height(b: &LayoutBox) -> f32 {
 }
 
 /// Get the intrinsic main size for replaced elements (form controls, images).
-fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f32 {
+fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis, definite_cross: Option<f32>) -> f32 {
     let box_type = &layout_box.box_type;
     let style = &layout_box.style;
     let font_size = match style.font_size {
@@ -2815,9 +2818,12 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
             natural_height,
             ..
         } => match main_axis {
-            // A given height decides the width through the ratio; the
-            // natural width is for an image with neither.
-            Axis::Horizontal => layout_box.replaced_auto_content_width().unwrap_or(*natural_width),
+            // The used height decides the width through the ratio; the
+            // natural width is for an image whose height nothing sets. A
+            // percentage height is a percentage of the row's definite one.
+            Axis::Horizontal => layout_box
+                .replaced_auto_content_width(definite_cross)
+                .unwrap_or(*natural_width),
             Axis::Vertical => *natural_height,
         },
         crate::BoxType::Inline | crate::BoxType::Block | crate::BoxType::AnonymousBlock => {

@@ -3121,7 +3121,7 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
 
     // A replaced box has no children to walk: its contribution is its own
     // width, which the walk below read as 0.
-    if let Some(w) = replaced_content_contribution(layout_box, true) {
+    if let Some(w) = replaced_content_contribution(layout_box, true, None) {
         return w + padding_border;
     }
 
@@ -3453,7 +3453,7 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
 
     // A replaced box has no children to walk: its contribution is its own
     // width, which the walk below read as 0.
-    if let Some(w) = replaced_content_contribution(layout_box, false) {
+    if let Some(w) = replaced_content_contribution(layout_box, false, None) {
         return w + padding_border;
     }
 
@@ -3571,8 +3571,19 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
 /// §5.2.2, a "compressible" replaced element. `img { max-width: 100% }` in a
 /// 60px flex row is 60 wide in Chrome 148, where a natural-width minimum
 /// would hold its item at 100.
-fn replaced_content_contribution(layout_box: &LayoutBox, min_content: bool) -> Option<f32> {
-    let width = layout_box.replaced_auto_content_width()?;
+///
+/// `percent_height_base` is as for `replaced_auto_content_width`. A minimum
+/// is `None` while a percentage height is unresolved: the caller's older
+/// answer stands, where the natural width would stop the box shrinking.
+fn replaced_content_contribution(
+    layout_box: &LayoutBox,
+    min_content: bool,
+    percent_height_base: Option<f32>,
+) -> Option<f32> {
+    let width = layout_box.replaced_auto_content_width(percent_height_base)?;
+    if min_content && layout_box.replaced_height_percentage_is_unresolved(percent_height_base) {
+        return None;
+    }
     let style = &layout_box.style;
     Some(match &style.max_width {
         Length::Percent(_) if min_content => 0.0,
@@ -3590,6 +3601,19 @@ fn replaced_content_contribution(layout_box: &LayoutBox, min_content: bool) -> O
             }
         }
     })
+}
+
+/// The min-content width (border box) of a replaced flex item whose row has
+/// a definite height: percentages of that height are resolved, which the
+/// estimators cannot do. `None` for any other box and for a row whose height
+/// is not known; `estimate_min_content_width` answers those.
+pub(crate) fn replaced_min_content_width_in_row(layout_box: &LayoutBox, row_height: Option<f32>) -> Option<f32> {
+    row_height?;
+    if layout_box.style.display == Display::None || matches!(layout_box.style.width, Length::Px(_)) {
+        return None;
+    }
+    replaced_content_contribution(layout_box, true, row_height)
+        .map(|w| w + horizontal_padding_border(&layout_box.style))
 }
 
 /// A length that is definite at track-sizing time without a containing block:
