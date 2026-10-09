@@ -424,12 +424,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         });
     };
 
-    function schedule(cb, ms, args, repeat) {
+    function schedule(cb, ms, args, repeat, frame) {
         var delay = Number(ms) || 0;
         if (delay < 0) delay = 0;
         var id = nextId++;
         timers.push({ id: id, seq: id, due: now + delay, cb: cb, args: args,
-                      every: repeat ? Math.max(delay, 1) : 0 });
+                      every: repeat ? Math.max(delay, 1) : 0, frame: !!frame });
         return id;
     }
     function clearTimer(id) {
@@ -446,7 +446,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.clearTimeout = clearTimer;
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
-        return schedule(function () { cb(now); }, 16, [], false);
+        return schedule(function () { cb(now); }, 16, [], false, true);
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
@@ -454,14 +454,23 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         Promise.resolve().then(function () { try { cb(); } catch (e) { report(e); } });
     };
 
+    function call(timer) {
+        try {
+            if (typeof timer.cb === 'function') timer.cb.apply(window, timer.args);
+            else (0, eval)(String(timer.cb));
+        } catch (e) { report(e); }
+    }
     // Run due timers in (due, scheduling) order until the virtual clock
-    // would pass `horizon` ms or `max` callbacks have run.
-    window.__rustkit_run_timers = function (horizon, max) {
+    // would pass `horizon` ms or `max` callbacks have run. The load's clock
+    // has no frames, so an animation frame there is a 16 ms timer; the live
+    // loop keeps them for its one round a turn (`timersOnly`).
+    function runTimers(horizon, max, timersOnly) {
         var ran = 0;
         while (ran < max) {
             var best = -1;
             for (var i = 0; i < timers.length; i++) {
                 var t = timers[i];
+                if (timersOnly && t.frame) continue;
                 if (best < 0 || t.due < timers[best].due ||
                     (t.due === timers[best].due && t.seq < timers[best].seq)) best = i;
             }
@@ -471,22 +480,40 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             if (timer.every) { timer.due += timer.every; timer.seq = nextId++; }
             else timers.splice(best, 1);
             ran++;
-            try {
-                if (typeof timer.cb === 'function') timer.cb.apply(window, timer.args);
-                else (0, eval)(String(timer.cb));
-            } catch (e) { report(e); }
+            call(timer);
         }
         return ran;
+    }
+    window.__rustkit_run_timers = function (horizon, max) {
+        return runTimers(horizon, max, false);
     };
     // The live loop's clock: `delta` ms of real time have passed. Run what
     // came due and leave the clock there, so a timer set next (by a click,
     // say) counts from now and not from the last callback. With callbacks
     // still owed (the cap), the clock stays behind and the next turn
     // catches up.
+    //
+    // A turn is one frame however long it took: after its timers, the
+    // animation frame callbacks that are due run once, at the turn's time.
+    // One asked for during the round is due a frame later. (As 16 ms timers
+    // a turn of 3 s ran 187 of them back to back.)
     window.__rustkit_advance_timers = function (delta, max) {
         var target = now + delta;
-        var ran = window.__rustkit_run_timers(target, max);
-        if (ran < max && now < target) now = target;
+        var ran = runTimers(target, max, true);
+        if (ran >= max) return ran;
+        if (now < target) now = target;
+        var round = [];
+        for (var i = 0; i < timers.length; i++) {
+            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
+        }
+        for (var j = 0; j < round.length && ran < max; j++) {
+            // Cancelled by an earlier callback of the round.
+            var at = timers.indexOf(round[j]);
+            if (at < 0) continue;
+            timers.splice(at, 1);
+            ran++;
+            call(round[j]);
+        }
         return ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
@@ -2290,6 +2317,76 @@ mod tests {
         assert_eq!(bindings.next_timer_delay(), Some(10));
         assert_eq!(bindings.advance_timers(0, 100).unwrap(), 0);
         assert_eq!(bindings.advance_timers(60, 100).unwrap(), 6);
+    }
+
+    /// Chromium 143, a `requestAnimationFrame` loop across a task that holds
+    /// the thread 600 ms: no callback during it, then 9 and 8 in the next two
+    /// 100 ms (7 to 10 at rest). It owes one frame for the time, not 37.
+    #[test]
+    fn a_live_turn_runs_one_round_of_animation_frames_however_long_it_took() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let read = |js: &str| match bindings.evaluate(js).unwrap() {
+            JsValue::String(s) => s,
+            other => panic!("{other:?}"),
+        };
+        bindings
+            .evaluate(
+                "var stamps = [], log = [];
+                 function loop(ts) { stamps.push(ts); requestAnimationFrame(loop); }
+                 requestAnimationFrame(loop);",
+            )
+            .unwrap();
+        assert_eq!(bindings.advance_timers(600, 1000).unwrap(), 1);
+        // The callback is told the time of the frame it runs in.
+        assert_eq!(read("stamps.join(',')"), "600");
+        // The loop asked for the frame after this one.
+        assert_eq!(bindings.next_timer_delay(), Some(16));
+        assert_eq!(bindings.advance_timers(10, 1000).unwrap(), 0);
+        assert_eq!(bindings.advance_timers(6, 1000).unwrap(), 1);
+        assert_eq!(read("stamps.join(',')"), "600,616");
+
+        // The turn's timers all run, and before its frame; a frame one of
+        // them asks for is in the turn's round.
+        bindings
+            .evaluate(
+                "var every = setInterval(function () { log.push('t'); }, 100);
+                 setTimeout(function () { requestAnimationFrame(function () { log.push('f'); }); }, 50);",
+            )
+            .unwrap();
+        assert_eq!(bindings.advance_timers(300, 1000).unwrap(), 6);
+        assert_eq!(read("log.join(',')"), "t,t,t,f");
+        assert_eq!(read("String(stamps.length)"), "3");
+
+        // A callback cancelled by an earlier one of the same round does not
+        // run, and one asked for inside the round waits for the next.
+        bindings
+            .evaluate(
+                "clearInterval(every);
+                 log = [];
+                 var second;
+                 requestAnimationFrame(function () {
+                     log.push('a');
+                     cancelAnimationFrame(second);
+                     requestAnimationFrame(function () { log.push('c'); });
+                 });
+                 second = requestAnimationFrame(function () { log.push('b'); });",
+            )
+            .unwrap();
+        bindings.advance_timers(1000, 1000).unwrap();
+        assert_eq!(read("log.join(',')"), "a");
+        bindings.advance_timers(16, 1000).unwrap();
+        assert_eq!(read("log.join(',')"), "a,c");
+    }
+
+    /// The load's clock is virtual and has no frames of its own: a
+    /// `requestAnimationFrame` loop there is a 16 ms timer, as before.
+    #[test]
+    fn the_load_clock_still_runs_animation_frames_as_16ms_timers() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate("var n = 0; function loop() { n++; requestAnimationFrame(loop); } requestAnimationFrame(loop);")
+            .unwrap();
+        assert_eq!(bindings.run_timers(160, 1000).unwrap(), 10);
     }
 
     #[test]
