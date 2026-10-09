@@ -188,6 +188,8 @@ mod flex_percent_basis_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
+mod glyph_atlas_overflow_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
