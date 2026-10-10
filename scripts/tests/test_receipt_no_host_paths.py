@@ -98,6 +98,26 @@ class TestReceiptNoHostPaths(unittest.TestCase):
         self.assert_clean(out)
         self.assertEqual(json.loads(out)["note"], "bins at parity-capture and scripts/receipt.py; see ab_table.txt.")
 
+    def test_note_text_that_is_not_a_host_path_is_left_alone(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import receipt
+        for t in ["quiet board 27/60 and/or 32/78, ratio 1.5/2.5",
+                  "see https://github.com/hiwavebrowser/hiwave-macos/pull/660 and /search?q=x",
+                  "git@github.com:hiwavebrowser/hiwave-macos.git",
+                  "./rel/x.txt ../up/y.txt a/b/c"]:
+            self.assertEqual(receipt.public_text(t, REPO), t)
+
+    def test_other_spellings_of_a_host_path_in_the_note(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import receipt
+        home = Path.home()
+        for t, want in [(r"built at C:\Users\pete\hiwave\target\parity\parity-capture.exe.", "built at parity-capture.exe."),
+                        ("D:/a/b.txt, then", "b.txt, then"),
+                        (f"file://{home}/frames/y.html", "y.html"),
+                        ("~/zz-not-a-repo/a/b.txt", "b.txt"),
+                        (f"dir {home}/bins/ (and {home}/x/c.txt)", "dir bins (and c.txt)")]:
+            self.assertEqual(receipt.public_text(t, REPO), want)
+
     def test_markdown_output_is_clean_too(self):
         out = run_receipt("--markdown", "--binary", str(self.binary), "--runs", str(self.run_file))
         self.assert_clean(out)
