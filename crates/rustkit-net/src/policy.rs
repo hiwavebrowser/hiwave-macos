@@ -54,7 +54,7 @@ pub struct ScriptRequest {
     /// Only consulted for the CORS credentials rules: nothing is ever sent.
     pub credentials: CredentialsMode,
     pub redirect: RedirectMode,
-    /// `Fetch` or `Xhr`; anything else is treated as `Fetch`.
+    /// `Fetch`, `Xhr` or `Script` (module loads); anything else is treated as `Fetch`.
     pub destination: RequestDestination,
 }
 
@@ -101,6 +101,14 @@ pub struct ScriptResponse {
     pub redirected: bool,
 }
 
+/// A fetched module script: the URL it ended at (its identity, and the base
+/// for its own imports) and its UTF-8 source.
+#[derive(Debug, Clone)]
+pub struct ModuleSource {
+    pub final_url: Url,
+    pub source: String,
+}
+
 /// Why a request was refused. Script sees an error event / `TypeError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Denial {
@@ -121,7 +129,13 @@ pub enum Denial {
     BudgetExhausted,
     /// The shield (EasyList) blocked it, exactly as it blocks a subresource.
     Shield,
+    /// A module script whose response is not a JavaScript MIME type.
+    BadMime(String),
+    /// A module script whose response is not 2xx.
+    BadStatus(u16),
     Network(String),
+    /// The page navigated away or the script aborted the request.
+    Cancelled,
 }
 
 impl std::fmt::Display for Denial {
@@ -160,6 +174,33 @@ impl Default for FetchLimits {
     }
 }
 
+/// Cancels one request: XHR `abort()`, a fetch `AbortSignal`. Clones share
+/// the signal; cancelling is idempotent and works from any thread.
+#[derive(Clone)]
+pub struct CancelToken {
+    tx: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Default for CancelToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self { tx: Arc::new(tokio::sync::watch::channel(false).0) }
+    }
+
+    pub fn cancel(&self) {
+        self.tx.send_replace(true);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.tx.borrow()
+    }
+}
+
 /// The policy for one page. Share it behind an `Arc`; it holds the page's
 /// request counters and preflight cache.
 pub struct FetchPolicy {
@@ -168,6 +209,7 @@ pub struct FetchPolicy {
     csp: Option<ContentSecurityPolicy>,
     limits: FetchLimits,
     total: AtomicUsize,
+    cancel: tokio::sync::watch::Sender<bool>,
     page_slots: Arc<Semaphore>,
     origin_slots: Mutex<HashMap<String, Arc<Semaphore>>>,
     preflight: Mutex<HashMap<String, PreflightEntry>>,
@@ -194,6 +236,31 @@ const SAFELISTED_RESPONSE_HEADERS: [&str; 7] = [
 ];
 
 /// Request headers a script may not set; the engine owns them.
+/// The JavaScript MIME types (WHATWG MIME Sniffing §4.6): the essence only,
+/// parameters ignored, ASCII case-insensitive.
+fn is_javascript_mime(content_type: &str) -> bool {
+    let essence = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    matches!(
+        essence.as_str(),
+        "application/ecmascript"
+            | "application/javascript"
+            | "application/x-ecmascript"
+            | "application/x-javascript"
+            | "text/ecmascript"
+            | "text/javascript"
+            | "text/javascript1.0"
+            | "text/javascript1.1"
+            | "text/javascript1.2"
+            | "text/javascript1.3"
+            | "text/javascript1.4"
+            | "text/javascript1.5"
+            | "text/jscript"
+            | "text/livescript"
+            | "text/x-ecmascript"
+            | "text/x-javascript"
+    )
+}
+
 fn is_forbidden_request_header(name: &str) -> bool {
     matches!(
         name,
@@ -343,6 +410,7 @@ impl FetchPolicy {
             page_origin: Origin::from_url(&page_url),
             csp,
             total: AtomicUsize::new(0),
+            cancel: tokio::sync::watch::channel(false).0,
             page_slots: Arc::new(Semaphore::new(limits.max_in_flight_per_page)),
             origin_slots: Mutex::new(HashMap::new()),
             preflight: Mutex::new(HashMap::new()),
@@ -353,8 +421,64 @@ impl FetchPolicy {
         }
     }
 
+    /// Cancel every request this policy has in flight or queued, and refuse
+    /// any later one with `Denial::Cancelled`. Idempotent, any thread.
+    pub fn cancel(&self) {
+        self.cancel.send_replace(true);
+    }
+
+    /// True once [`cancel`](Self::cancel) has been called.
+    pub fn is_cancelled(&self) -> bool {
+        *self.cancel.borrow()
+    }
+
     /// Run one request to completion under the policy.
+    ///
+    /// Racing the whole request against [`cancel`](Self::cancel) is what
+    /// closes the socket: dropping the in-flight future drops its connection
+    /// and releases its queue slots.
     pub async fn execute(
+        &self,
+        loader: &ResourceLoader,
+        req: ScriptRequest,
+    ) -> Result<ScriptResponse, Denial> {
+        self.execute_raced(loader, req, None).await
+    }
+
+    /// [`execute`](Self::execute) that `token` can also end. An aborted
+    /// request closes only its own connection and frees its queue slots; the
+    /// rest of the page's requests are untouched.
+    pub async fn execute_cancellable(
+        &self,
+        loader: &ResourceLoader,
+        req: ScriptRequest,
+        token: &CancelToken,
+    ) -> Result<ScriptResponse, Denial> {
+        self.execute_raced(loader, req, Some(token)).await
+    }
+
+    async fn execute_raced(
+        &self,
+        loader: &ResourceLoader,
+        req: ScriptRequest,
+        token: Option<&CancelToken>,
+    ) -> Result<ScriptResponse, Denial> {
+        let mut page = self.cancel.subscribe();
+        let mut own = token.map(|t| t.tx.subscribe());
+        tokio::select! {
+            biased;
+            _ = async { let _ = page.wait_for(|c| *c).await; } => Err(Denial::Cancelled),
+            _ = async {
+                match own.as_mut() {
+                    Some(rx) => { let _ = rx.wait_for(|c| *c).await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => Err(Denial::Cancelled),
+            r = self.execute_governed(loader, req) => r,
+        }
+    }
+
+    async fn execute_governed(
         &self,
         loader: &ResourceLoader,
         req: ScriptRequest,
@@ -390,6 +514,35 @@ impl FetchPolicy {
         }
     }
 
+    /// Fetch one module script (static import, `<script type=module src>`).
+    ///
+    /// Module fetches are always CORS-mode with same-origin credentials (and
+    /// cookies are never sent), go through the same budgets, per-hop vet,
+    /// shield and CSP (`script-src`) as every other governed request, and
+    /// must answer 2xx with a JavaScript MIME type. `referrer` is the
+    /// importing module's URL; it is not sent (Referer is page-scoped).
+    pub async fn fetch_module(
+        &self,
+        loader: &ResourceLoader,
+        specifier_url: &Url,
+        _referrer: &Url,
+    ) -> Result<ModuleSource, Denial> {
+        let mut req = ScriptRequest::get(specifier_url.clone());
+        req.destination = RequestDestination::Script;
+        let r = self.execute(loader, req).await?;
+        if !(200..300).contains(&r.status) {
+            return Err(Denial::BadStatus(r.status));
+        }
+        let ty = header_str(&r.headers, "content-type").unwrap_or("");
+        if !is_javascript_mime(ty) {
+            return Err(Denial::BadMime(ty.to_string()));
+        }
+        // Modules are always UTF-8, whatever the charset label says.
+        let text = String::from_utf8_lossy(&r.body);
+        let source = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
+        Ok(ModuleSource { final_url: r.url, source })
+    }
+
     fn validate_shape(&self, req: &ScriptRequest) -> Result<(), Denial> {
         if matches!(req.method.as_str(), "CONNECT" | "TRACE" | "TRACK") {
             return Err(Denial::BadRequest(format!("forbidden method {}", req.method)));
@@ -416,33 +569,38 @@ impl FetchPolicy {
         !self.page_origin.same_origin(&Origin::from_url(url))
     }
 
-    fn check_url(&self, url: &Url, first_hop: bool) -> Result<(), Denial> {
+    fn check_url(&self, url: &Url, first_hop: bool, dest: RequestDestination) -> Result<(), Denial> {
         match url.scheme() {
             "http" | "https" => {}
             "data" if first_hop => return Ok(()),
             s => return Err(Denial::Scheme(s.to_string())),
         }
-        if check_mixed_content(&self.page_url, url, MixedContentType::Fetch) != MixedContentResult::Allowed {
+        let is_script = dest == RequestDestination::Script;
+        let mixed = if is_script { MixedContentType::Script } else { MixedContentType::Fetch };
+        if check_mixed_content(&self.page_url, url, mixed) != MixedContentResult::Allowed {
             return Err(Denial::MixedContent);
         }
         if let Some(csp) = &self.csp {
-            if !self.csp_allows_connect(csp, url) {
+            let directive = if is_script { CspDirective::ScriptSrc } else { CspDirective::ConnectSrc };
+            if !self.csp_allows(csp, directive, url) {
                 return Err(Denial::Csp);
             }
         }
         Ok(())
     }
 
-    /// `connect-src` including the sources `security.rs` cannot evaluate
-    /// without a document origin: `'self'` and `*`.
-    fn csp_allows_connect(&self, csp: &ContentSecurityPolicy, url: &Url) -> bool {
-        let Some(sources) = csp.get_sources(CspDirective::ConnectSrc) else {
+    /// `connect-src` (fetch/XHR) or `script-src` (module loads), including the
+    /// sources `security.rs` cannot evaluate without a document origin:
+    /// `'self'` and `*`.
+    fn csp_allows(&self, csp: &ContentSecurityPolicy, directive: CspDirective, url: &Url) -> bool {
+        let Some(sources) = csp.get_sources(directive) else {
             return true;
         };
         let same = !self.is_cross_origin(url);
         sources.iter().any(|s| match s {
             CspSource::Self_ => same,
             CspSource::Host(h) if h == "*" => matches!(url.scheme(), "http" | "https"),
+            _ if directive == CspDirective::ScriptSrc => csp.allows_script(Some(url), false, None, None),
             _ => csp.allows_connect(url),
         })
     }
@@ -459,7 +617,9 @@ impl FetchPolicy {
         let with_credentials = req.credentials == CredentialsMode::Include;
         let mut headers = HeaderMap::new();
         for (n, v) in req.headers.iter() {
-            if !is_forbidden_request_header(n.as_str()) {
+            let no_cors_blocked = req.mode == RequestMode::NoCors
+                && !is_safelisted_request_header(n.as_str(), v.to_str().unwrap_or(""));
+            if !is_forbidden_request_header(n.as_str()) && !no_cors_blocked {
                 headers.append(n.clone(), v.clone());
             }
         }
@@ -474,7 +634,7 @@ impl FetchPolicy {
         let mut redirected = false;
 
         loop {
-            self.check_url(&hop.url, redirects == 0)?;
+            self.check_url(&hop.url, redirects == 0, req.destination)?;
             let is_data = hop.url.scheme() == "data";
             let cross = !is_data && self.is_cross_origin(&hop.url);
             if cross && req.mode == RequestMode::SameOrigin {
@@ -600,6 +760,7 @@ impl FetchPolicy {
         request.body = hop.body.clone();
         request.destination = match req.destination {
             RequestDestination::Xhr => RequestDestination::Xhr,
+            RequestDestination::Script => RequestDestination::Script,
             _ => RequestDestination::Fetch,
         };
         request.credentials = CredentialsMode::Omit;
@@ -800,11 +961,17 @@ mod tests {
         hits: Arc<AtomicUsize>,
         seen: Arc<Mutex<Vec<Seen>>>,
         peak: Arc<AtomicUsize>,
+        closed: Arc<AtomicUsize>,
     }
 
     impl Server {
         fn hits(&self) -> usize {
             self.hits.load(Ordering::SeqCst)
+        }
+        /// Connections the client hung up on while the server was still
+        /// holding its response.
+        fn closed(&self) -> usize {
+            self.closed.load(Ordering::SeqCst)
         }
         fn seen(&self) -> Vec<Seen> {
             self.seen.lock().unwrap().clone()
@@ -836,12 +1003,13 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let peak = Arc::new(AtomicUsize::new(0));
         let live = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicUsize::new(0));
         let handler = Arc::new(handler);
-        let (h, sn, pk) = (hits.clone(), seen.clone(), peak.clone());
+        let (h, sn, pk, cl) = (hits.clone(), seen.clone(), peak.clone(), closed.clone());
         tokio::spawn(async move {
             while let Ok((mut s, _)) = l.accept().await {
                 h.fetch_add(1, Ordering::SeqCst);
-                let (sn, pk, live, handler) = (sn.clone(), pk.clone(), live.clone(), handler.clone());
+                let (sn, pk, live, handler, cl) = (sn.clone(), pk.clone(), live.clone(), handler.clone(), cl.clone());
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
                     let mut chunk = [0u8; 4096];
@@ -880,7 +1048,16 @@ mod tests {
                     let now = live.fetch_add(1, Ordering::SeqCst) + 1;
                     pk.fetch_max(now, Ordering::SeqCst);
                     if !delay.is_zero() {
-                        tokio::time::sleep(delay).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            n = s.read(&mut chunk) => {
+                                if matches!(n, Ok(0) | Err(_)) {
+                                    live.fetch_sub(1, Ordering::SeqCst);
+                                    cl.fetch_add(1, Ordering::SeqCst);
+                                    return;
+                                }
+                            }
+                        }
                     }
                     let reply = handler(&seen_req);
                     live.fetch_sub(1, Ordering::SeqCst);
@@ -889,7 +1066,7 @@ mod tests {
                 });
             }
         });
-        Server { port, hits, seen, peak }
+        Server { port, hits, seen, peak, closed }
     }
 
     async fn serve(handler: impl Fn(&Seen) -> Vec<u8> + Send + Sync + 'static) -> Server {
@@ -1223,6 +1400,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_no_cors_request_never_carries_a_non_safelisted_header() {
+        // The Request guard in script is the first line; this is the boundary
+        // that must hold even if script lets one through (no preflight runs
+        // for no-cors, so nothing else would stop Authorization at the wire).
+        let s = serve(|_| resp(200, &[("Content-Type", "text/plain")], b"ok")).await;
+        let p = allow_ports(page("http://page.test/"), &[s.port]);
+        let l = loader();
+        let mk = |ct: &str| {
+            let mut req = ScriptRequest::get(s.url("/"));
+            req.mode = RequestMode::NoCors;
+            req.method = Method::POST;
+            req.body = Some(Bytes::from_static(b"a=1"));
+            for (k, v) in [
+                ("authorization", "Bearer s3cret"),
+                ("x-custom", "1"),
+                ("range", "bytes=0-9"),
+                ("accept", "text/html"),
+                ("accept-language", "en"),
+                ("content-type", ct),
+            ] {
+                req.headers.insert(k, HeaderValue::from_str(v).unwrap());
+            }
+            req
+        };
+        p.execute(&l, mk("application/json")).await.expect("opaque");
+        p.execute(&l, mk("text/plain;charset=UTF-8")).await.expect("opaque");
+        let seen = s.seen();
+        assert_eq!(seen.len(), 2);
+        for r in &seen {
+            for h in ["authorization", "x-custom", "range"] {
+                assert!(!r.headers.contains_key(h), "{h} reached the wire on a no-cors request");
+            }
+            assert_eq!(r.headers.get("accept").map(String::as_str), Some("text/html"));
+        }
+        assert!(
+            !seen[0].headers.contains_key("content-type"),
+            "a non-safelisted Content-Type reached the wire on a no-cors request"
+        );
+        assert_eq!(
+            seen[1].headers.get("content-type").map(String::as_str),
+            Some("text/plain;charset=UTF-8")
+        );
+    }
+
+    #[tokio::test]
     async fn script_never_sees_set_cookie() {
         let s = serve(|_| resp(200, &[("Set-Cookie", "a=b"), ("Content-Type", "text/plain")], b"hi")).await;
         let p = FetchPolicy::for_page(s.url("/page"), None);
@@ -1281,6 +1503,203 @@ mod tests {
         }
         assert_eq!(s.hits(), 5);
         assert!(s.peak.load(Ordering::SeqCst) <= 2, "more than 2 in flight to one origin: {}", s.peak.load(Ordering::SeqCst));
+    }
+
+    // ---- cancellation (Z2-C5): navigating away must close the sockets ---------
+
+    async fn wait_until(mut f: impl FnMut() -> bool) {
+        for _ in 0..300 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_an_in_flight_request_and_closes_its_socket() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<FetchPolicy>();
+        let s = serve_with(Duration::from_secs(30), |_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"late")).await;
+        let p = Arc::new(allow_ports(page("http://page.test/"), &[s.port]));
+        let l = Arc::new(loader());
+        let task = {
+            let (p, l, url) = (p.clone(), l.clone(), s.url("/slow"));
+            tokio::spawn(async move { p.execute(&l, ScriptRequest::get(url)).await })
+        };
+        wait_until(|| s.seen().len() == 1).await;
+        assert_eq!(s.seen().len(), 1, "the request never reached the server");
+        let started = Instant::now();
+        let canceller = p.clone();
+        std::thread::spawn(move || canceller.cancel()).join().unwrap();
+        assert_eq!(task.await.unwrap().unwrap_err(), Denial::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(2), "cancel did not return promptly");
+        wait_until(|| s.closed() == 1).await;
+        assert_eq!(s.closed(), 1, "the connection stayed open after cancel");
+        assert!(p.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_also_ends_requests_queued_behind_the_in_flight_cap() {
+        let s = serve_with(Duration::from_secs(30), |_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"late")).await;
+        let limits = FetchLimits { max_in_flight_per_origin: 1, ..FetchLimits::default() };
+        let p = Arc::new(allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s.port],
+        ));
+        let l = Arc::new(loader());
+        let mut tasks = Vec::new();
+        for i in 0..3 {
+            let (p, l, url) = (p.clone(), l.clone(), s.url(&format!("/{i}")));
+            tasks.push(tokio::spawn(async move { p.execute(&l, ScriptRequest::get(url)).await }));
+        }
+        wait_until(|| s.seen().len() == 1).await;
+        p.cancel();
+        for t in tasks {
+            assert_eq!(t.await.unwrap().unwrap_err(), Denial::Cancelled);
+        }
+        wait_until(|| s.closed() == 1).await;
+        assert_eq!(s.hits(), 1, "a queued request connected after cancel");
+        assert_eq!(s.closed(), 1);
+    }
+
+    #[tokio::test]
+    async fn after_cancel_every_call_is_refused_at_once_without_spending_the_budget() {
+        let s = serve(|_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"ok")).await;
+        let limits = FetchLimits { max_total_requests: 2, ..FetchLimits::default() };
+        let p = allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s.port],
+        );
+        let l = loader();
+        p.execute(&l, ScriptRequest::get(s.url("/a"))).await.expect("before cancel");
+        p.cancel();
+        p.cancel();
+        for i in 0..5 {
+            let r = p.execute(&l, ScriptRequest::get(s.url(&format!("/{i}")))).await;
+            assert_eq!(r.unwrap_err(), Denial::Cancelled, "call {i}");
+        }
+        let m = p.fetch_module(&l, &s.url("/m.js"), &s.url("/")).await;
+        assert_eq!(m.unwrap_err(), Denial::Cancelled);
+        assert_eq!(s.hits(), 1, "a request connected after cancel");
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_an_in_flight_module_fetch() {
+        let s = serve_with(Duration::from_secs(30), |_| resp(200, &[("Access-Control-Allow-Origin", "*"), ("Content-Type", "text/javascript")], b"export {}")).await;
+        let p = Arc::new(allow_ports(page("http://page.test/"), &[s.port]));
+        let l = Arc::new(loader());
+        let task = {
+            let (p, l, url) = (p.clone(), l.clone(), s.url("/m.js"));
+            tokio::spawn(async move { p.fetch_module(&l, &url, &url).await })
+        };
+        wait_until(|| s.seen().len() == 1).await;
+        p.cancel();
+        assert_eq!(task.await.unwrap().unwrap_err(), Denial::Cancelled);
+        wait_until(|| s.closed() == 1).await;
+        assert_eq!(s.closed(), 1);
+    }
+
+    #[tokio::test]
+    async fn aborting_one_request_closes_only_its_socket_and_frees_its_slot() {
+        // Request 0 is slow and holds the only origin slot; request 1 queues
+        // behind it. Aborting 0 must close 0's socket and let 1 through.
+        let s = serve_with(Duration::from_millis(400), |r| {
+            resp(200, &[("Access-Control-Allow-Origin", "*")], r.path.as_bytes())
+        })
+        .await;
+        let limits = FetchLimits { max_in_flight_per_origin: 1, ..FetchLimits::default() };
+        let p = Arc::new(allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s.port],
+        ));
+        let l = Arc::new(loader());
+        let (t0, t1) = (CancelToken::new(), CancelToken::new());
+        let first = {
+            let (p, l, t, url) = (p.clone(), l.clone(), t0.clone(), s.url("/0"));
+            tokio::spawn(async move { p.execute_cancellable(&l, ScriptRequest::get(url), &t).await })
+        };
+        wait_until(|| s.seen().len() == 1).await;
+        let second = {
+            let (p, l, t, url) = (p.clone(), l.clone(), t1.clone(), s.url("/1"));
+            tokio::spawn(async move { p.execute_cancellable(&l, ScriptRequest::get(url), &t).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let aborter = t0.clone();
+        std::thread::spawn(move || aborter.cancel()).join().unwrap();
+        assert_eq!(first.await.unwrap().unwrap_err(), Denial::Cancelled);
+        let r = second.await.unwrap().expect("the queued request got the freed slot");
+        assert_eq!(&r.body[..], b"/1");
+        assert_eq!(s.closed(), 1, "the aborted request's socket stayed open");
+        assert!(t0.is_cancelled() && !t1.is_cancelled());
+        assert!(!p.is_cancelled(), "aborting a request must not cancel the page");
+    }
+
+    #[tokio::test]
+    async fn a_queued_request_aborted_before_it_connects_never_connects() {
+        let s = serve_with(Duration::from_secs(30), |_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"late")).await;
+        let limits = FetchLimits { max_in_flight_per_origin: 1, ..FetchLimits::default() };
+        let p = Arc::new(allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s.port],
+        ));
+        let l = Arc::new(loader());
+        let holder = {
+            let (p, l, url) = (p.clone(), l.clone(), s.url("/hold"));
+            tokio::spawn(async move { p.execute(&l, ScriptRequest::get(url)).await })
+        };
+        wait_until(|| s.seen().len() == 1).await;
+        let token = CancelToken::new();
+        let queued = {
+            let (p, l, t, url) = (p.clone(), l.clone(), token.clone(), s.url("/queued"));
+            tokio::spawn(async move { p.execute_cancellable(&l, ScriptRequest::get(url), &t).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token.cancel();
+        assert_eq!(queued.await.unwrap().unwrap_err(), Denial::Cancelled);
+        assert_eq!(s.hits(), 1, "the aborted queued request connected");
+        p.cancel();
+        assert_eq!(holder.await.unwrap().unwrap_err(), Denial::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn an_already_aborted_token_is_refused_at_once_without_spending_the_budget() {
+        let s = serve(|_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"ok")).await;
+        let limits = FetchLimits { max_total_requests: 1, ..FetchLimits::default() };
+        let p = allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s.port],
+        );
+        let l = loader();
+        let token = CancelToken::new();
+        token.cancel();
+        token.cancel();
+        for _ in 0..3 {
+            let r = p.execute_cancellable(&l, ScriptRequest::get(s.url("/x")), &token).await;
+            assert_eq!(r.unwrap_err(), Denial::Cancelled);
+        }
+        assert_eq!(s.hits(), 0);
+        let live = CancelToken::new();
+        let ok = p.execute_cancellable(&l, ScriptRequest::get(s.url("/y")), &live).await;
+        assert!(ok.is_ok(), "an aborted token spent the page's request budget: {ok:?}");
+    }
+
+    #[tokio::test]
+    async fn a_page_cancel_also_ends_requests_that_carry_a_token() {
+        let s = serve_with(Duration::from_secs(30), |_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"late")).await;
+        let p = Arc::new(allow_ports(page("http://page.test/"), &[s.port]));
+        let l = Arc::new(loader());
+        let token = CancelToken::new();
+        let task = {
+            let (p, l, t, url) = (p.clone(), l.clone(), token.clone(), s.url("/"));
+            tokio::spawn(async move { p.execute_cancellable(&l, ScriptRequest::get(url), &t).await })
+        };
+        wait_until(|| s.seen().len() == 1).await;
+        p.cancel();
+        assert_eq!(task.await.unwrap().unwrap_err(), Denial::Cancelled);
+        wait_until(|| s.closed() == 1).await;
+        assert_eq!(s.closed(), 1);
+        assert!(!token.is_cancelled());
     }
 
     // ---- §7.8: the shield ---------------------------------------------------
@@ -1440,5 +1859,223 @@ mod tests {
         assert!(allows("http://127.0.0.1:8000/", "http://127.0.0.1:8000/x", "93.184.216.34:8000"));
         // A named intranet page is a public page.
         assert!(!allows("http://intranet.corp/", "http://intranet.corp/", "10.1.2.3:80"));
+    }
+
+    // ---- C2: module scripts ----------------------------------------------------
+
+    const JS: &str = "text/javascript";
+
+    async fn module(p: &FetchPolicy, l: &ResourceLoader, url: &Url) -> Result<ModuleSource, Denial> {
+        p.fetch_module(l, url, &Url::parse("http://page.test/app.js").unwrap()).await
+    }
+
+    #[tokio::test]
+    async fn a_same_origin_module_with_a_javascript_type_loads() {
+        let s = serve(|_| resp(200, &[("Content-Type", "text/javascript; charset=utf-8")], b"export const a = 1;")).await;
+        let p = FetchPolicy::for_page(s.url("/index.html"), None);
+        let m = module(&p, &loader(), &s.url("/m.js")).await.expect("module");
+        assert_eq!(m.source, "export const a = 1;");
+        assert_eq!(m.final_url, s.url("/m.js"));
+        assert_eq!(s.seen()[0].headers.get("origin"), None, "same-origin GET carries no Origin");
+    }
+
+    #[tokio::test]
+    async fn every_javascript_mime_type_is_accepted_and_nothing_else() {
+        let l = loader();
+        for ty in [
+            "text/javascript", "application/javascript", "application/x-javascript", "text/ecmascript",
+            "application/ecmascript", "text/jscript", "text/x-javascript", "TEXT/JavaScript; charset=UTF-8",
+            "application/javascript ; foo=bar",
+        ] {
+            let s = serve(move |_| resp(200, &[("Content-Type", ty)], b"1")).await;
+            let p = FetchPolicy::for_page(s.url("/"), None);
+            assert!(module(&p, &l, &s.url("/m.js")).await.is_ok(), "{ty} must be accepted");
+        }
+        for ty in [
+            "text/html", "text/plain", "application/json", "text/css", "image/png", "application/octet-stream",
+            "text/javascriptx", "application/javascript+json", "text/", "javascript", "",
+        ] {
+            let s = serve(move |_| resp(200, &[("Content-Type", ty)], b"export {}")).await;
+            let p = FetchPolicy::for_page(s.url("/"), None);
+            let r = module(&p, &l, &s.url("/m.js")).await;
+            assert!(matches!(r, Err(Denial::BadMime(_))), "{ty:?} must be refused: {r:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_module_with_no_content_type_is_refused() {
+        let s = serve(|_| resp(200, &[], b"export {}")).await;
+        let p = FetchPolicy::for_page(s.url("/"), None);
+        let r = module(&p, &loader(), &s.url("/m.js")).await;
+        assert!(matches!(r, Err(Denial::BadMime(_))), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn a_module_that_is_not_2xx_is_refused_even_with_a_javascript_body() {
+        let l = loader();
+        for status in [404u16, 500, 403, 401] {
+            let s = serve(move |_| resp(status, &[("Content-Type", JS)], b"export {}")).await;
+            let p = FetchPolicy::for_page(s.url("/"), None);
+            let r = module(&p, &l, &s.url("/m.js")).await;
+            assert_eq!(r.unwrap_err(), Denial::BadStatus(status), "status {status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_module_strips_a_bom_and_decodes_utf8_regardless_of_charset_label() {
+        let mut body = vec![0xEF, 0xBB, 0xBF];
+        body.extend_from_slice("export const s = '\u{e9}';".as_bytes());
+        let s = serve(move |_| resp(200, &[("Content-Type", "text/javascript; charset=iso-8859-1")], &body)).await;
+        let p = FetchPolicy::for_page(s.url("/"), None);
+        let m = module(&p, &loader(), &s.url("/m.js")).await.unwrap();
+        assert_eq!(m.source, "export const s = '\u{e9}';");
+    }
+
+    #[tokio::test]
+    async fn a_cross_origin_module_needs_cors_and_the_body_is_not_exposed_without_it() {
+        let l = loader();
+        let none = serve(|_| resp(200, &[("Content-Type", JS)], b"export const stolen = 1;")).await;
+        let p = allow_ports(page("http://page.test/"), &[none.port]);
+        let r = module(&p, &l, &none.url("/m.js")).await;
+        assert!(matches!(r, Err(Denial::Cors(_))), "{r:?}");
+
+        let wrong = serve(|_| resp(200, &[("Content-Type", JS), ("Access-Control-Allow-Origin", "http://evil.test")], b"1")).await;
+        let p = allow_ports(page("http://page.test/"), &[wrong.port]);
+        assert!(matches!(module(&p, &l, &wrong.url("/m.js")).await, Err(Denial::Cors(_))));
+
+        let ok = serve(|_| resp(200, &[("Content-Type", JS), ("Access-Control-Allow-Origin", "http://page.test")], b"export {}")).await;
+        let p = allow_ports(page("http://page.test/"), &[ok.port]);
+        let m = module(&p, &l, &ok.url("/m.js")).await.expect("matching ACAO");
+        assert_eq!(m.source, "export {}");
+        assert_eq!(ok.seen()[0].headers.get("origin").map(String::as_str), Some("http://page.test"));
+
+        let star = serve(|_| resp(200, &[("Content-Type", JS), ("Access-Control-Allow-Origin", "*")], b"export {}")).await;
+        let p = allow_ports(page("http://page.test/"), &[star.port]);
+        assert!(module(&p, &l, &star.url("/m.js")).await.is_ok(), "* without credentials");
+    }
+
+    #[tokio::test]
+    async fn a_module_is_never_a_no_cors_opaque_result_and_never_carries_cookies() {
+        let s = serve(|_| resp(200, &[("Content-Type", JS), ("Access-Control-Allow-Origin", "*")], b"export {}")).await;
+        let p = allow_ports(page("http://page.test/"), &[s.port]);
+        let m = module(&p, &loader(), &s.url("/m.js")).await.expect("cors");
+        assert_eq!(m.source, "export {}", "an opaque response would have an empty body");
+        let seen = &s.seen()[0];
+        assert!(!seen.headers.contains_key("cookie") && !seen.headers.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn a_module_cannot_reach_a_private_address_and_no_connection_is_made() {
+        let private = serve(|_| resp(200, &[("Content-Type", JS), ("Access-Control-Allow-Origin", "*")], b"export {}")).await;
+        let p = page("http://example.com/");
+        let l = loader();
+        for target in [
+            format!("http://127.0.0.1:{}/m.js", private.port),
+            format!("http://localhost:{}/m.js", private.port),
+            "http://169.254.169.254/m.js".to_string(),
+            "http://10.0.0.1/m.js".to_string(),
+        ] {
+            let r = module(&p, &l, &Url::parse(&target).unwrap()).await;
+            assert!(matches!(r, Err(Denial::PrivateNetwork(_))), "{target}: {r:?}");
+        }
+        let l = loader().with_resolver(Arc::new(Rebind));
+        let r = module(&p, &l, &Url::parse(&format!("http://rebind.test:{}/m.js", private.port)).unwrap()).await;
+        assert!(matches!(r, Err(Denial::PrivateNetwork(_))), "{r:?}");
+        assert_eq!(private.hits(), 0, "the private server saw a connection");
+    }
+
+    #[tokio::test]
+    async fn a_module_redirect_into_a_private_address_or_a_wrong_type_is_denied_at_the_hop() {
+        let private = serve(|_| resp(200, &[("Content-Type", JS), ("Access-Control-Allow-Origin", "*")], b"export {}")).await;
+        let to = format!("http://127.0.0.1:{}/m.js", private.port);
+        let hop = serve(move |_| resp(302, &[("Location", &to), ("Access-Control-Allow-Origin", "*")], b"")).await;
+        let p = allow_ports(page("http://page.test/"), &[hop.port]);
+        let r = module(&p, &loader(), &hop.url("/m.js")).await;
+        assert!(matches!(r, Err(Denial::PrivateNetwork(_))), "{r:?}");
+        assert_eq!(private.hits(), 0);
+
+        // A redirect that ends on HTML is judged on the FINAL response.
+        let html = serve(|_| resp(200, &[("Content-Type", "text/html"), ("Access-Control-Allow-Origin", "*")], b"<html>")).await;
+        let to = format!("http://127.0.0.1:{}/m.js", html.port);
+        let hop = serve(move |_| resp(302, &[("Location", &to), ("Access-Control-Allow-Origin", "*")], b"")).await;
+        let p = allow_ports(page("http://page.test/"), &[hop.port, html.port]);
+        assert!(matches!(module(&p, &loader(), &hop.url("/m.js")).await, Err(Denial::BadMime(_))));
+    }
+
+    #[tokio::test]
+    async fn a_redirected_module_reports_its_final_url_as_its_identity() {
+        let end = serve(|_| resp(200, &[("Content-Type", JS), ("Access-Control-Allow-Origin", "*")], b"export {}")).await;
+        let to = format!("http://127.0.0.1:{}/final.js", end.port);
+        let hop = serve(move |_| resp(302, &[("Location", &to), ("Access-Control-Allow-Origin", "*")], b"")).await;
+        let p = allow_ports(page("http://page.test/"), &[hop.port, end.port]);
+        let m = module(&p, &loader(), &hop.url("/start.js")).await.unwrap();
+        assert_eq!(m.final_url, end.url("/final.js"));
+    }
+
+    #[tokio::test]
+    async fn module_fetches_obey_mixed_content_the_shield_and_script_src() {
+        // https page -> http module: blocked as mixed content.
+        let s = serve(|_| resp(200, &[("Content-Type", JS), ("Access-Control-Allow-Origin", "*")], b"export {}")).await;
+        let p = allow_ports(page("https://page.test/"), &[s.port]);
+        assert_eq!(module(&p, &loader(), &s.url("/m.js")).await.unwrap_err(), Denial::MixedContent);
+
+        // The shield sees a module exactly as it sees a script.
+        let mut ic = RequestInterceptor::new();
+        ic.add_handler(Arc::new(BlockAds));
+        let l = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(ic)).unwrap();
+        let p = allow_ports(page("http://page.test/"), &[s.port]);
+        assert_eq!(module(&p, &l, &s.url("/ads/m.js")).await.unwrap_err(), Denial::Shield);
+        assert_eq!(s.hits(), 0);
+
+        // script-src, not connect-src, governs modules; 'self' and * work.
+        let csp = |d: &str| ContentSecurityPolicy::parse(d).unwrap();
+        let own = serve(|_| resp(200, &[("Content-Type", JS)], b"export {}")).await;
+        let url = own.url("/m.js");
+        let l = loader();
+        let with = |c: &str| FetchPolicy::for_page(own.url("/index.html"), Some(csp(c)));
+        assert!(module(&with("script-src 'self'"), &l, &url).await.is_ok(), "'self'");
+        assert!(module(&with("script-src *"), &l, &url).await.is_ok(), "*");
+        assert!(module(&with("default-src 'self'"), &l, &url).await.is_ok(), "default-src 'self'");
+        assert_eq!(module(&with("script-src https://cdn.example"), &l, &url).await.unwrap_err(), Denial::Csp);
+        assert_eq!(module(&with("script-src 'none'"), &l, &url).await.unwrap_err(), Denial::Csp);
+        // connect-src must NOT decide a module.
+        assert!(module(&with("connect-src 'none'"), &l, &url).await.is_ok(), "connect-src is irrelevant to modules");
+        // ...and script-src must not decide fetch().
+        let f = with("script-src 'none'").execute(&l, ScriptRequest::get(url.clone())).await;
+        assert!(f.is_ok(), "script-src is irrelevant to fetch(): {f:?}");
+    }
+
+    #[tokio::test]
+    async fn module_fetches_share_the_per_page_budgets() {
+        let s = serve(|_| resp(200, &[("Content-Type", JS)], b"export {}")).await;
+        let limits = FetchLimits { max_total_requests: 2, ..FetchLimits::default() };
+        let p = FetchPolicy::with_limits(s.url("/"), None, limits);
+        let l = loader();
+        assert!(module(&p, &l, &s.url("/a.js")).await.is_ok());
+        assert!(p.execute(&l, ScriptRequest::get(s.url("/b"))).await.is_ok());
+        assert_eq!(module(&p, &l, &s.url("/c.js")).await.unwrap_err(), Denial::BudgetExhausted);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_module_is_refused() {
+        let s = serve(|_| resp(200, &[("Content-Type", JS)], &vec![b'a'; 4096])).await;
+        let limits = FetchLimits { max_response_bytes: 1024, ..FetchLimits::default() };
+        let p = FetchPolicy::with_limits(s.url("/"), None, limits);
+        assert_eq!(module(&p, &loader(), &s.url("/m.js")).await.unwrap_err(), Denial::ResponseTooLarge);
+    }
+
+    #[tokio::test]
+    async fn data_and_non_http_module_urls() {
+        let p = page("http://page.test/");
+        let l = loader();
+        let d = Url::parse("data:text/javascript,export%20const%20x%3D1%3B").unwrap();
+        let m = module(&p, &l, &d).await.expect("data: module");
+        assert_eq!(m.source, "export const x=1;");
+        let bad = Url::parse("data:text/html,%3Cb%3E").unwrap();
+        assert!(matches!(module(&p, &l, &bad).await, Err(Denial::BadMime(_))));
+        for u in ["file:///etc/passwd", "ftp://x.test/m.js", "javascript:alert(1)"] {
+            let r = module(&p, &l, &Url::parse(u).unwrap()).await;
+            assert!(matches!(r, Err(Denial::Scheme(_))), "{u}: {r:?}");
+        }
     }
 }

@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H16 page A</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; }
+  /* The link covers the whole viewport, so a click anywhere in the content
+     area is a click on it and the driver needs no page coordinates. */
+  #l { position: fixed; left: 0; top: 0; right: 0; bottom: 0; background: #ff0000; }
+  form { position: fixed; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden; }
+</style>
+<!-- Five ways from this page to page B. The driver's click on the link is
+     the one a person makes. The other four are started by the page when the
+     server answers a tick with their name, so they run with no input. -->
+<form id="f" action="h16_b.html" method="get">
+  <input name="q" value="test">
+  <button id="s" type="submit" name="from" value="button">Search</button>
+</form>
+<a id="l" href="h16_b.html?from=link"></a>
+<script>
+  var n = 0, started = false;
+  function beacon(name) { return fetch('/beacon?' + name).then(function (r) { return r.text(); }); }
+  var routes = {
+    click: function () { document.getElementById('l').click(); },
+    assign: function () { location.href = 'h16_b.html?from=assign'; },
+    button: function () { document.getElementById('s').click(); },
+    submit: function () { document.getElementById('f').submit(); }
+  };
+  setInterval(function () {
+    n += 1;
+    beacon('h16-a-tick-' + n).then(function (reply) {
+      if (started || !routes[reply]) { return; }
+      started = true;
+      beacon('h16-a-start-' + reply);
+      routes[reply]();
+    }, function () {});
+  }, 200);
+</script>

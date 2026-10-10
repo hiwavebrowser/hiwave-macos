@@ -43,7 +43,7 @@
 use bytemuck::{Pod, Zeroable};
 use hashbrown::HashMap;
 use rustkit_css::Color;
-use rustkit_layout::{BackgroundRepeat, BackgroundSize, DisplayCommand, Rect};
+use rustkit_layout::{BackgroundRepeat, BackgroundSize, DisplayCommand, ObjectFit, Rect};
 use std::sync::Arc;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -168,6 +168,27 @@ pub struct CachedTexture {
     pub bind_group: wgpu::BindGroup,
     pub width: u32,
     pub height: u32,
+}
+
+/// The screen rect and texture coordinates `[u0, v0, u1, v1]` a replaced
+/// image paints with: `object-fit`/`object-position` (CSS Images 3 §5.5,
+/// §5.6) resolved against the texture's intrinsic size, clipped to the
+/// content box. `cover` therefore crops by UV instead of squashing the
+/// whole texture into the box.
+pub(crate) fn image_paint_quad(
+    content_box: Rect,
+    natural: (u32, u32),
+    object_fit: ObjectFit,
+    object_position: (f32, f32),
+    object_position_offset: (f32, f32),
+) -> Option<(Rect, [f32; 4])> {
+    object_fit.paint_quad(
+        content_box,
+        natural.0 as f32,
+        natural.1 as f32,
+        object_position,
+        object_position_offset,
+    )
 }
 
 /// Shrink an RGBA image so neither side exceeds `limit`, keeping its aspect.
@@ -411,6 +432,11 @@ pub struct Renderer {
     /// Stack of 2D transform matrices and their origins.
     /// Each entry is (matrix [a,b,c,d,e,f], origin (x,y)).
     transform_stack: Vec<([f32; 6], (f32, f32))>,
+    /// Open `PushOpacity` scopes on the paths that fade per command.
+    opacity_scopes: OpacityScopes,
+    /// Layer textures for opacity scopes, by nesting depth.
+    opacity_layer_pool: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    opacity_layer_size: (u32, u32),
 
     // Caches
     texture_cache: TextureCache,
@@ -678,6 +704,9 @@ impl Renderer {
             clip_pieces: Vec::new(),
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
+            opacity_scopes: OpacityScopes::default(),
+            opacity_layer_pool: Vec::new(),
+            opacity_layer_size: (0, 0),
             texture_cache,
             glyph_cache,
             texture_bind_group_layout,
@@ -851,6 +880,7 @@ impl Renderer {
     /// Flush current batched vertices to the target without clearing.
     /// Used for incremental rendering when backdrop filters are present.
     fn flush_batches_to(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
+        self.settle_opacity();
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
@@ -961,12 +991,14 @@ impl Renderer {
         self.image_vertices.clear();
         self.image_indices.clear();
         self.image_runs.clear();
+        self.opacity_scopes.rebase();
         Ok(())
     }
 
     /// Flush batched vertices before rendering a GPU gradient.
     /// This ensures correct z-order: batched content renders before the gradient.
     fn flush_batches_for_gradient(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
+        self.settle_opacity();
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
@@ -1099,6 +1131,7 @@ impl Renderer {
         self.image_vertices.clear();
         self.image_indices.clear();
         self.image_runs.clear();
+        self.opacity_scopes.rebase();
         Ok(())
     }
 
@@ -1338,6 +1371,32 @@ impl Renderer {
         commands: &[DisplayCommand],
         target: &wgpu::TextureView,
     ) -> Result<(), RendererError> {
+        let resets = self.glyph_cache.resets();
+        self.execute_once(commands, target)?;
+        if self.glyph_cache.resets() == resets {
+            return Ok(());
+        }
+        // The glyph atlas filled up and started over while this frame was
+        // being built. Text batched before that samples the glyphs written
+        // over its own since: "static" over a page opened after others.
+        // Build the frame again: every glyph it needs is now placed after
+        // the reset, as long as one frame's glyphs fit in the atlas.
+        let resets = self.glyph_cache.resets();
+        self.execute_once(commands, target)?;
+        if self.glyph_cache.resets() != resets {
+            tracing::warn!(
+                commands = commands.len(),
+                "One frame's glyphs do not fit in the glyph atlas: some of its text is drawn wrong"
+            );
+        }
+        Ok(())
+    }
+
+    fn execute_once(
+        &mut self,
+        commands: &[DisplayCommand],
+        target: &wgpu::TextureView,
+    ) -> Result<(), RendererError> {
         // Clear batches
         self.color_vertices.clear();
         self.color_indices.clear();
@@ -1354,6 +1413,7 @@ impl Renderer {
         self.clip_stack.clear();
         self.stacking_contexts.clear();
         self.transform_stack.clear();
+        self.opacity_scopes.clear();
 
         // Check if there are any blur backdrop filters that need GPU processing
         let has_blur_filters = commands.iter().any(|cmd| {
@@ -1385,15 +1445,44 @@ impl Renderer {
             // painting above in-flow text per CSS 2.1 Appendix E — would be
             // drawn UNDER that text. Flush first so paint follows command
             // order (same discipline as the GPU-gradient path).
-            let mut flushed_mid_stream = false;
+            //
+            // An opacity scope is drawn into a layer of its own and the
+            // layer is laid over what is under it, faded: the group is
+            // faded as one picture (CSS Color 4 §4), so a child over its
+            // parent's background does not show the background through.
+            // Past `MAX_OPACITY_LAYERS` scopes in one list the scopes fall
+            // back to fading each command (see `OpacityScopes`).
+            let layered = commands
+                .iter()
+                .filter(|cmd| matches!(cmd, DisplayCommand::PushOpacity(_)))
+                .count()
+                <= MAX_OPACITY_LAYERS;
+            let mut cleared = false;
+            let mut layers: Vec<(wgpu::TextureView, f32)> = Vec::new();
             for cmd in commands {
+                if layered {
+                    match cmd {
+                        DisplayCommand::PushOpacity(alpha) => {
+                            self.begin_opacity_layer(target, &mut layers, *alpha, &mut cleared)?;
+                            continue;
+                        }
+                        DisplayCommand::PopOpacity => {
+                            self.end_opacity_layer(target, &mut layers, &mut cleared)?;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 if self.solid_fill_occludes_batched_glyphs(cmd) {
-                    self.flush_batches_to(target, !flushed_mid_stream)?;
-                    flushed_mid_stream = true;
+                    self.flush_mid_stream(target, &layers, &mut cleared)?;
                 }
                 self.process_command(cmd);
             }
-            if flushed_mid_stream {
+            // A list that ends inside a scope still shows what it drew.
+            while !layers.is_empty() {
+                self.end_opacity_layer(target, &mut layers, &mut cleared)?;
+            }
+            if cleared {
                 self.flush_batches_to(target, false)?;
             } else {
                 self.flush_to(target)?;
@@ -1948,6 +2037,206 @@ impl Renderer {
         self.draw_filtered_texture_to(&filter_view_a, render_target, rect);
     }
 
+    fn has_batched(&self) -> bool {
+        !(self.color_vertices.is_empty()
+            && self.texture_vertices.is_empty()
+            && self.image_vertices.is_empty()
+            && self.color_glyph_vertices.is_empty())
+    }
+
+    /// Draw the batches now, into the innermost open opacity layer or, with
+    /// none open, into `base` (cleared to the page's white the first time).
+    fn flush_mid_stream(
+        &mut self,
+        base: &wgpu::TextureView,
+        layers: &[(wgpu::TextureView, f32)],
+        cleared: &mut bool,
+    ) -> Result<(), RendererError> {
+        match layers.last() {
+            Some((layer, _)) => {
+                let layer = layer.clone();
+                self.flush_batches_to(&layer, false)
+            }
+            None => {
+                let had = self.has_batched();
+                self.flush_batches_to(base, !*cleared)?;
+                *cleared |= had;
+                Ok(())
+            }
+        }
+    }
+
+    /// `PushOpacity`: what is batched belongs under the group, so it is
+    /// drawn first; then the group draws into a fresh transparent layer.
+    fn begin_opacity_layer(
+        &mut self,
+        base: &wgpu::TextureView,
+        layers: &mut Vec<(wgpu::TextureView, f32)>,
+        alpha: f32,
+        cleared: &mut bool,
+    ) -> Result<(), RendererError> {
+        self.flush_mid_stream(base, layers, cleared)?;
+        let layer = self.opacity_layer_view(layers.len());
+        self.clear_transparent(&layer);
+        layers.push((layer, alpha.clamp(0.0, 1.0)));
+        Ok(())
+    }
+
+    /// `PopOpacity`: finish the group's layer and lay it, faded, over the
+    /// layer below it or over `base`.
+    fn end_opacity_layer(
+        &mut self,
+        base: &wgpu::TextureView,
+        layers: &mut Vec<(wgpu::TextureView, f32)>,
+        cleared: &mut bool,
+    ) -> Result<(), RendererError> {
+        let Some((layer, alpha)) = layers.pop() else {
+            return Ok(());
+        };
+        self.flush_batches_to(&layer, false)?;
+        match layers.last() {
+            Some((below, _)) => self.composite_opacity_layer(&layer, below, alpha, false),
+            None => {
+                self.composite_opacity_layer(&layer, base, alpha, !*cleared);
+                *cleared = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// The layer texture for the opacity scope at nesting `depth`, the size
+    /// of the viewport and in the surface format so every pipeline draws
+    /// into it. Kept between frames; all are dropped when the size changes.
+    fn opacity_layer_view(&mut self, depth: usize) -> wgpu::TextureView {
+        if self.opacity_layer_size != self.viewport_size {
+            self.opacity_layer_pool.clear();
+            self.opacity_layer_size = self.viewport_size;
+        }
+        while self.opacity_layer_pool.len() <= depth {
+            let (width, height) = self.viewport_size;
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Opacity Layer Texture"),
+                size: wgpu::Extent3d {
+                    width: width.max(1),
+                    height: height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.surface_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.opacity_layer_pool.push((texture, view));
+        }
+        self.opacity_layer_pool[depth].1.clone()
+    }
+
+    fn clear_transparent(&self, target: &wgpu::TextureView) {
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Opacity Layer Clear Encoder"),
+        });
+        {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Opacity Layer Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Lay `layer` over `target`, faded by `alpha`. Drawing source-over
+    /// into a transparent layer leaves premultiplied colour in it, so the
+    /// layer goes through the premultiplied pipeline with every channel
+    /// scaled.
+    fn composite_opacity_layer(
+        &self,
+        layer: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        alpha: f32,
+        clear: bool,
+    ) {
+        let (vw, vh) = self.viewport_size;
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Opacity Layer Bind Group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(layer),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
+                },
+            ],
+        });
+
+        let color = [alpha; 4];
+        let vertices = [
+            TextureVertex { position: [0.0, 0.0], tex_coords: [0.0, 0.0], color },
+            TextureVertex { position: [vw as f32, 0.0], tex_coords: [1.0, 0.0], color },
+            TextureVertex { position: [vw as f32, vh as f32], tex_coords: [1.0, 1.0], color },
+            TextureVertex { position: [0.0, vh as f32], tex_coords: [0.0, 1.0], color },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Opacity Layer Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Opacity Layer Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Opacity Layer Composite Encoder"),
+        });
+        {
+            let load = if clear {
+                wgpu::LoadOp::Clear(wgpu::Color::WHITE)
+            } else {
+                wgpu::LoadOp::Load
+            };
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Opacity Layer Composite Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            render_pass.set_pipeline(&self.color_glyph_pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
     /// Copy the intermediate texture to the final target.
     fn copy_texture_to_target(
         &self,
@@ -2110,12 +2399,21 @@ impl Renderer {
             DisplayCommand::Image {
                 url,
                 src_rect: _,
-                dest_rect,
-                object_fit: _,
+                dest_rect: _,
+                object_fit,
+                content_box,
+                object_position,
+                object_position_offset,
                 opacity: _,
                 current_color: _,
             } => {
-                self.draw_image(url, *dest_rect);
+                self.draw_image(
+                    url,
+                    *content_box,
+                    *object_fit,
+                    *object_position,
+                    *object_position_offset,
+                );
             }
 
             DisplayCommand::BackgroundImage {
@@ -2123,9 +2421,22 @@ impl Renderer {
                 rect,
                 size,
                 position,
+                offset,
                 repeat,
             } => {
-                self.draw_background_image(url, *rect, size, *position, repeat);
+                self.draw_background_image(url, *rect, size, *position, *offset, repeat);
+            }
+
+            DisplayCommand::MaskedColor {
+                color,
+                url,
+                rect,
+                size,
+                position,
+                offset,
+                repeat,
+            } => {
+                self.draw_masked_color(url, *color, *rect, size, *position, *offset, *repeat);
             }
 
             DisplayCommand::BoxShadow {
@@ -2411,6 +2722,17 @@ impl Renderer {
 
             DisplayCommand::PopTransform => {
                 self.pop_transform();
+            }
+
+            DisplayCommand::PushOpacity(alpha) => {
+                let lens = self.batch_lens();
+                self.opacity_scopes.push(*alpha, lens);
+            }
+
+            DisplayCommand::PopOpacity => {
+                if let Some((alpha, starts)) = self.opacity_scopes.pop() {
+                    self.fade_since(alpha, starts);
+                }
             }
 
             DisplayCommand::GradientText {
@@ -5480,41 +5802,65 @@ impl Renderer {
     }
 
     /// Draw an image.
-    fn draw_image(&mut self, url: &str, rect: Rect) {
-        if self.texture_cache.contains(url) {
-            // `overflow: hidden` clips replaced content like everything else.
-            for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in
-                self.textured_pieces(rect, [0.0, 0.0, 1.0, 1.0])
-            {
-                let color = [1.0, 1.0, 1.0, coverage];
-                self.push_image_quad(
-                    url,
-                    [
-                        TextureVertex {
-                            position: [x0, y0],
-                            tex_coords: [tex[0], tex[1]],
-                            color,
-                        },
-                        TextureVertex {
-                            position: [x1, y1],
-                            tex_coords: [tex[2], tex[1]],
-                            color,
-                        },
-                        TextureVertex {
-                            position: [x2, y2],
-                            tex_coords: [tex[2], tex[3]],
-                            color,
-                        },
-                        TextureVertex {
-                            position: [x3, y3],
-                            tex_coords: [tex[0], tex[3]],
-                            color,
-                        },
-                    ],
-                );
-            }
+    /// Draw an `<img>`-style replaced image into its content box, fitted
+    /// per `object-fit`/`object-position` against the texture's intrinsic
+    /// size (layout may only have had a placeholder size).
+    fn draw_image(
+        &mut self,
+        url: &str,
+        content_box: Rect,
+        object_fit: ObjectFit,
+        object_position: (f32, f32),
+        object_position_offset: (f32, f32),
+    ) {
+        let Some(natural) = self
+            .texture_cache
+            .get(url)
+            .map(|cached| (cached.width, cached.height))
+        else {
+            // If image not loaded, skip (async loading handled elsewhere)
+            return;
+        };
+        let Some((rect, uv)) = image_paint_quad(
+            content_box,
+            natural,
+            object_fit,
+            object_position,
+            object_position_offset,
+        ) else {
+            return;
+        };
+        // `overflow: hidden` clips replaced content like everything else.
+        for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in
+            self.textured_pieces(rect, uv)
+        {
+            let color = [1.0, 1.0, 1.0, coverage];
+            self.push_image_quad(
+                url,
+                [
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [tex[0], tex[1]],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [tex[2], tex[1]],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [tex[2], tex[3]],
+                        color,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [tex[0], tex[3]],
+                        color,
+                    },
+                ],
+            );
         }
-        // If image not loaded, skip (async loading handled elsewhere)
     }
 
     /// Append a quad to the image batch, extending the current run when the
@@ -5540,6 +5886,7 @@ impl Renderer {
         container: Rect,
         size: &BackgroundSize,
         position: (f32, f32),
+        offset: (f32, f32),
         repeat: &BackgroundRepeat,
     ) {
         // Get the texture to retrieve image dimensions
@@ -5554,168 +5901,79 @@ impl Renderer {
             return;
         }
 
-        // Calculate the background image size based on size property
-        let (bg_width, bg_height) = size.compute_size(container, image_width, image_height);
-
-        if bg_width == 0.0 || bg_height == 0.0 {
-            return;
-        }
-
-        // Calculate the starting position based on position property
-        let mut start_x = container.x + (container.width - bg_width) * position.0;
-        let mut start_y = container.y + (container.height - bg_height) * position.1;
-
-        // Adjust size and spacing for space/round modes
-        let mut adjusted_bg_width = bg_width;
-        let mut adjusted_bg_height = bg_height;
-        let mut spacing_x = 0.0_f32;
-        let mut spacing_y = 0.0_f32;
-
-        match repeat {
-            BackgroundRepeat::Space => {
-                // Calculate how many full images fit
-                let fit_count_x = (container.width / bg_width).floor().max(1.0);
-                let fit_count_y = (container.height / bg_height).floor().max(1.0);
-
-                // Calculate spacing to evenly distribute
-                if fit_count_x > 1.0 {
-                    let total_image_width = fit_count_x * bg_width;
-                    let remaining_space_x = container.width - total_image_width;
-                    spacing_x = remaining_space_x / (fit_count_x - 1.0);
-                }
-
-                if fit_count_y > 1.0 {
-                    let total_image_height = fit_count_y * bg_height;
-                    let remaining_space_y = container.height - total_image_height;
-                    spacing_y = remaining_space_y / (fit_count_y - 1.0);
-                }
-
-                // Start at container edge for space mode
-                start_x = container.x;
-                start_y = container.y;
-            }
-            BackgroundRepeat::Round => {
-                // Calculate integer repetitions by rounding
-                let repetitions_x = (container.width / bg_width).round().max(1.0);
-                let repetitions_y = (container.height / bg_height).round().max(1.0);
-
-                // Scale image to fit exactly
-                adjusted_bg_width = container.width / repetitions_x;
-                adjusted_bg_height = container.height / repetitions_y;
-
-                // Start at container edge for round mode
-                start_x = container.x;
-                start_y = container.y;
-            }
-            _ => {}
-        }
-
-        // Determine tiling based on repeat
-        let (tile_x, tile_y) = match repeat {
-            BackgroundRepeat::Repeat => (true, true),
-            BackgroundRepeat::RepeatX => (true, false),
-            BackgroundRepeat::RepeatY => (false, true),
-            BackgroundRepeat::NoRepeat => (false, false),
-            BackgroundRepeat::Space => (true, true),
-            BackgroundRepeat::Round => (true, true),
-        };
-
-        // Generate tile positions
-        if !tile_x && !tile_y {
-            // Single image - draw at the calculated position
-            self.draw_background_image_tile(url, Rect {
-                x: start_x,
-                y: start_y,
-                width: adjusted_bg_width,
-                height: adjusted_bg_height,
-            }, container);
-        } else {
-            // Tiled images
-            let x_start = if tile_x && *repeat != BackgroundRepeat::Space && *repeat != BackgroundRepeat::Round {
-                // Find the leftmost position that's visible (for repeat mode)
-                let tiles_left = ((start_x - container.x) / adjusted_bg_width).ceil() as i32;
-                start_x - (tiles_left as f32 * adjusted_bg_width)
-            } else {
-                start_x
-            };
-
-            let y_start = if tile_y && *repeat != BackgroundRepeat::Space && *repeat != BackgroundRepeat::Round {
-                let tiles_up = ((start_y - container.y) / adjusted_bg_height).ceil() as i32;
-                start_y - (tiles_up as f32 * adjusted_bg_height)
-            } else {
-                start_y
-            };
-
-            let mut y = y_start;
-            while y < container.y + container.height {
-                let mut x = x_start;
-                while x < container.x + container.width {
-                    let tile_rect = Rect {
-                        x,
-                        y,
-                        width: adjusted_bg_width,
-                        height: adjusted_bg_height,
-                    };
-
-                    // Only draw if visible within container
-                    if tile_rect.x + tile_rect.width > container.x
-                        && tile_rect.y + tile_rect.height > container.y
-                        && tile_rect.x < container.x + container.width
-                        && tile_rect.y < container.y + container.height
-                    {
-                        self.draw_background_image_tile(url, tile_rect, container);
-                    }
-
-                    if tile_x {
-                        x += adjusted_bg_width + spacing_x;
-                    } else {
-                        break;
-                    }
-                }
-
-                if tile_y {
-                    y += adjusted_bg_height + spacing_y;
-                } else {
-                    break;
-                }
-            }
+        for (draw_rect, tex) in background_tile_quads(
+            container,
+            size,
+            position,
+            offset,
+            *repeat,
+            image_width,
+            image_height,
+        ) {
+            self.draw_background_image_tile(url, draw_rect, tex, [1.0, 1.0, 1.0, 1.0]);
         }
     }
 
-    /// Draw a single tile of a background image, clipped to the container bounds.
-    fn draw_background_image_tile(&mut self, url: &str, tile_rect: Rect, container: Rect) {
+    /// Paint `color` through the alpha of the mask image at `url`, tiled in
+    /// `container` like a background (CSS Masking 1 §6). The mask texture
+    /// is the image with its colour channels made white (see
+    /// [`mask_alpha_rgba`]): the image pipeline multiplies texel by vertex
+    /// colour, so a white texel of alpha `m` paints `color` at alpha
+    /// `color.a * m`. A vector (SVG) mask never reaches here: the engine
+    /// splices it as recoloured commands.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_masked_color(
+        &mut self,
+        url: &str,
+        color: Color,
+        container: Rect,
+        size: &BackgroundSize,
+        position: (f32, f32),
+        offset: (f32, f32),
+        repeat: BackgroundRepeat,
+    ) {
+        let key = mask_texture_key(url);
+        let (image_width, image_height) = match self.texture_cache.get(&key) {
+            Some(cached) => (cached.width as f32, cached.height as f32),
+            // Not loaded (or not decodable): nothing paints, as Chrome
+            // paints nothing through a mask image that has not loaded.
+            None => return,
+        };
+        if image_width == 0.0 || image_height == 0.0 {
+            return;
+        }
+        let tint = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a,
+        ];
+        for (draw_rect, tex) in background_tile_quads(
+            container,
+            size,
+            position,
+            offset,
+            repeat,
+            image_width,
+            image_height,
+        ) {
+            self.draw_background_image_tile(&key, draw_rect, tex, tint);
+        }
+    }
+
+    /// Draw one tile of a background (or mask) image, already cut to its
+    /// container: `draw_rect` with texture coordinates `tex`, every texel
+    /// multiplied by `tint`.
+    fn draw_background_image_tile(&mut self, url: &str, draw_rect: Rect, tex: [f32; 4], tint: [f32; 4]) {
         if !self.texture_cache.contains(url) {
             return;
         }
 
-        // Clip tile to container bounds
-        let clip_left = (container.x - tile_rect.x).max(0.0);
-        let clip_top = (container.y - tile_rect.y).max(0.0);
-        let clip_right = (tile_rect.x + tile_rect.width - container.x - container.width).max(0.0);
-        let clip_bottom = (tile_rect.y + tile_rect.height - container.y - container.height).max(0.0);
-
-        let draw_rect = Rect {
-            x: tile_rect.x + clip_left,
-            y: tile_rect.y + clip_top,
-            width: tile_rect.width - clip_left - clip_right,
-            height: tile_rect.height - clip_top - clip_bottom,
-        };
-
-        if draw_rect.width <= 0.0 || draw_rect.height <= 0.0 {
-            return;
-        }
-
-        // Calculate texture coordinates for the clipped portion
-        let tex_left = clip_left / tile_rect.width;
-        let tex_top = clip_top / tile_rect.height;
-        let tex_right = 1.0 - clip_right / tile_rect.width;
-        let tex_bottom = 1.0 - clip_bottom / tile_rect.height;
-
         // Then the overflow clip on top of the container clip.
         for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], [tex_left, tex_top, tex_right, tex_bottom], coverage) in
-            self.textured_pieces(draw_rect, [tex_left, tex_top, tex_right, tex_bottom])
+            self.textured_pieces(draw_rect, tex)
         {
-            let color = [1.0, 1.0, 1.0, coverage];
+            let color = [tint[0], tint[1], tint[2], tint[3] * coverage];
             self.push_image_quad(
                 url,
                 [
@@ -5775,6 +6033,24 @@ impl Renderer {
         Ok(())
     }
     
+    /// Upload a decoded raster image (RGBA) for use as a mask image: it is
+    /// stored under [`mask_texture_key`] with its colour made white and its
+    /// alpha kept (`mask-mode: alpha`, the initial for an image).
+    pub fn upload_mask_image(
+        &mut self,
+        url: &str,
+        width: u32,
+        height: u32,
+        rgba_data: &[u8],
+    ) -> Result<(), RendererError> {
+        self.upload_image(&mask_texture_key(url), width, height, &mask_alpha_rgba(rgba_data))
+    }
+
+    /// Whether the mask texture for `url` is uploaded.
+    pub fn has_mask_image(&self, url: &str) -> bool {
+        self.texture_cache.contains(&mask_texture_key(url))
+    }
+
     /// Check if an image is already uploaded.
     pub fn has_image(&self, url: &str) -> bool {
         self.texture_cache.contains(url)
@@ -5860,6 +6136,33 @@ impl Renderer {
             .collect()
     }
 
+
+    fn batch_lens(&self) -> BatchLens {
+        [
+            self.color_vertices.len(),
+            self.texture_vertices.len(),
+            self.color_glyph_vertices.len(),
+            self.image_vertices.len(),
+        ]
+    }
+
+    /// Fade the vertices each batch has gained since `starts` by `alpha`.
+    /// The colour-glyph pipeline blends premultiplied; the others straight.
+    fn fade_since(&mut self, alpha: f32, starts: BatchLens) {
+        fade_straight(self.color_vertices.iter_mut().map(|v| &mut v.color), starts[0], alpha);
+        fade_straight(self.texture_vertices.iter_mut().map(|v| &mut v.color), starts[1], alpha);
+        fade_premultiplied(self.color_glyph_vertices.iter_mut().map(|v| &mut v.color), starts[2], alpha);
+        fade_straight(self.image_vertices.iter_mut().map(|v| &mut v.color), starts[3], alpha);
+    }
+
+    /// Fade what the open opacity scopes have batched so far. Called before
+    /// every draw of the batches.
+    fn settle_opacity(&mut self) {
+        let lens = self.batch_lens();
+        for (alpha, starts) in self.opacity_scopes.settle(lens) {
+            self.fade_since(alpha, starts);
+        }
+    }
 
     /// Push a 2D transform matrix onto the stack.
     fn push_transform(&mut self, matrix: [f32; 6], origin: (f32, f32)) {
@@ -6062,6 +6365,8 @@ impl Renderer {
         self.radial_gradient_queue.clear();
         self.conic_gradient_queue.clear();
 
+        self.settle_opacity();
+
         // Render batched content
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
@@ -6231,6 +6536,81 @@ struct ClipEntry {
     rounded: Vec<(Rect, rustkit_layout::BorderRadius)>,
 }
 
+/// The most opacity scopes one display list may hold and still have each
+/// drawn as a layer of its own: a layer costs a pass over the viewport and
+/// two flushes of the batches.
+const MAX_OPACITY_LAYERS: usize = 256;
+
+/// How many vertices each of the four batches holds, in the order colour,
+/// glyph, colour glyph, image.
+type BatchLens = [usize; 4];
+
+/// The open `PushOpacity` scopes, innermost last.
+///
+/// Draw calls do not know about opacity. A scope remembers where each batch
+/// stood when it opened, and the vertices added since are faded when it
+/// closes; scopes nest, so an inner scope's vertices are faded again by the
+/// outer one, which multiplies the factors. A batch flush in the middle of a
+/// scope fades what the scope has added so far ([`OpacityScopes::settle`])
+/// and the scope carries on from the empty batches.
+///
+/// Pure for the same reason as [`clip_entry_for`]: no device is needed to
+/// test the bookkeeping.
+#[derive(Debug, Default)]
+struct OpacityScopes {
+    scopes: Vec<(f32, BatchLens)>,
+}
+
+impl OpacityScopes {
+    fn clear(&mut self) {
+        self.scopes.clear();
+    }
+
+    fn push(&mut self, alpha: f32, lens: BatchLens) {
+        self.scopes.push((alpha.clamp(0.0, 1.0), lens));
+    }
+
+    /// Close the innermost scope: its factor and where its vertices start.
+    /// `None` for a pop without a push.
+    fn pop(&mut self) -> Option<(f32, BatchLens)> {
+        self.scopes.pop()
+    }
+
+    /// Before the batches are drawn: every open scope's factor and start, to
+    /// be faded now. Afterwards each scope starts at `lens`, so a second
+    /// call before the batches are emptied fades nothing twice.
+    fn settle(&mut self, lens: BatchLens) -> Vec<(f32, BatchLens)> {
+        let due = self.scopes.clone();
+        for scope in &mut self.scopes {
+            scope.1 = lens;
+        }
+        due
+    }
+
+    /// After the batches are emptied: every open scope starts at zero.
+    fn rebase(&mut self) {
+        for scope in &mut self.scopes {
+            scope.1 = [0; 4];
+        }
+    }
+}
+
+/// Fade straight-alpha vertex colours from `start` on.
+fn fade_straight<'a>(colors: impl Iterator<Item = &'a mut [f32; 4]>, start: usize, alpha: f32) {
+    for color in colors.skip(start) {
+        color[3] *= alpha;
+    }
+}
+
+/// Fade premultiplied vertex colours from `start` on: all four channels.
+fn fade_premultiplied<'a>(colors: impl Iterator<Item = &'a mut [f32; 4]>, start: usize, alpha: f32) {
+    for color in colors.skip(start) {
+        for channel in color.iter_mut() {
+            *channel *= alpha;
+        }
+    }
+}
+
 /// The clip entry a `PushClip`/`PushClipRounded` produces on top of `current`.
 ///
 /// Pure so it can be tested: the stack lives on `Renderer`, which needs a wgpu
@@ -6323,6 +6703,61 @@ fn invert_matrix_2d(m: [f32; 6]) -> Option<[f32; 6]> {
     let c = -m[2] * inv_det;
     let d = m[0] * inv_det;
     Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
+}
+
+/// The texture-cache key a mask image is stored under: the same image
+/// used as a mask and as an ordinary image needs two textures, the mask
+/// one white.
+pub fn mask_texture_key(url: &str) -> String {
+    format!("mask-alpha:{url}")
+}
+
+/// `rgba` (straight alpha, 4 bytes a pixel) as a mask texture: every
+/// colour channel 255, alpha kept. Drawn through the image pipeline
+/// (texel times vertex colour) it paints the vertex colour at the mask's
+/// alpha, which is CSS `mask-mode: alpha`.
+pub fn mask_alpha_rgba(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4).flat_map(|px| [255, 255, 255, px[3]]).collect()
+}
+
+/// The quads a background or mask image paints in `container`: each tile
+/// from [`rustkit_layout::background_tiles`] cut to the container, with
+/// the texture coordinates `[left, top, right, bottom]` of the part kept.
+/// Tiles wholly outside the container are dropped.
+pub fn background_tile_quads(
+    container: Rect,
+    size: &BackgroundSize,
+    position: (f32, f32),
+    offset: (f32, f32),
+    repeat: BackgroundRepeat,
+    image_width: f32,
+    image_height: f32,
+) -> Vec<(Rect, [f32; 4])> {
+    rustkit_layout::background_tiles(container, size, position, offset, repeat, image_width, image_height)
+        .into_iter()
+        .filter_map(|tile| {
+            let clip_left = (container.x - tile.x).max(0.0);
+            let clip_top = (container.y - tile.y).max(0.0);
+            let clip_right = (tile.x + tile.width - container.x - container.width).max(0.0);
+            let clip_bottom = (tile.y + tile.height - container.y - container.height).max(0.0);
+            let draw_rect = Rect {
+                x: tile.x + clip_left,
+                y: tile.y + clip_top,
+                width: tile.width - clip_left - clip_right,
+                height: tile.height - clip_top - clip_bottom,
+            };
+            if draw_rect.width <= 0.0 || draw_rect.height <= 0.0 {
+                return None;
+            }
+            let tex = [
+                clip_left / tile.width,
+                clip_top / tile.height,
+                1.0 - clip_right / tile.width,
+                1.0 - clip_bottom / tile.height,
+            ];
+            Some((draw_rect, tex))
+        })
+        .collect()
 }
 
 /// The clip entry a `PushClip`/`PushClipRounded` issued under transform `m`
@@ -6780,7 +7215,7 @@ fn clip_quad_to_rounded(
     }
 
     let mut out = Vec::new();
-    let mut emit_rows = |out: &mut Vec<(Rect, f32)>, from: f32, to: f32| {
+    let emit_rows = |out: &mut Vec<(Rect, f32)>, from: f32, to: f32| {
         let mut y = from;
         while y < to {
             let height = 1.0_f32.min(to - y);
@@ -7096,7 +7531,7 @@ mod tests {
     #[test]
     fn an_oversized_image_is_downscaled_to_the_limit_keeping_its_aspect() {
         // 20x10 solid red, limit 8: longest side becomes 8, the other 4.
-        let data = vec![255u8, 0, 0, 255].repeat(20 * 10);
+        let data = [255u8, 0, 0, 255].repeat(20 * 10);
         let (w, h, px) = super::downscale_rgba_to_fit(20, 10, &data, 8);
         assert_eq!((w, h), (8, 4));
         assert_eq!(px.len(), 8 * 4 * 4);
@@ -7110,6 +7545,44 @@ mod tests {
         let (w, h, px) = super::downscale_rgba_to_fit(2, 1, &data, 1);
         assert_eq!((w, h), (1, 1));
         assert_eq!(px, vec![128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn a_cover_image_is_cropped_by_uv_not_squashed_into_its_box() {
+        // eBay's hero: a 2.9:1 texture in a 1.4:1 box. Painting the whole
+        // texture ([0, 0, 1, 1]) into the box squashed it.
+        let (rect, uv) = super::image_paint_quad(
+            super::Rect::new(0.0, 0.0, 140.0, 100.0),
+            (290, 100),
+            super::ObjectFit::Cover,
+            (0.5, 0.5),
+            (0.0, 0.0),
+        )
+        .expect("a visible quad");
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (0.0, 0.0, 140.0, 100.0)
+        );
+        let shown = ((uv[2] - uv[0]) * 290.0) / ((uv[3] - uv[1]) * 100.0);
+        assert!((shown - 1.4).abs() < 1e-3, "shown aspect {shown}, uv {uv:?}");
+        assert!((uv[0] - 75.0 / 290.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_fill_image_still_paints_the_whole_texture_over_the_box() {
+        let (rect, uv) = super::image_paint_quad(
+            super::Rect::new(5.0, 6.0, 140.0, 100.0),
+            (290, 100),
+            super::ObjectFit::Fill,
+            (0.5, 0.5),
+            (0.0, 0.0),
+        )
+        .expect("a visible quad");
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (5.0, 6.0, 140.0, 100.0)
+        );
+        assert_eq!(uv, [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -9228,5 +9701,171 @@ mod shaped_run_windows_paint_tests {
         let mut unknown = key(&run, run.glyphs[0].glyph_id);
         unknown.face ^= 0x5a5a;
         assert!(rasterize_run_glyph(&unknown, 24.0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod mask_layer_tests {
+    //! The GPU-free half of `DisplayCommand::MaskedColor`: which texels the
+    //! mask texture holds and where its tiles land. The draw itself needs
+    //! a device and is covered by reading.
+    use super::*;
+
+    fn xywh(r: Rect) -> (f32, f32, f32, f32) {
+        (r.x, r.y, r.width, r.height)
+    }
+
+    #[test]
+    fn a_mask_texture_is_white_with_the_images_alpha() {
+        let rgba = [0, 0, 0, 255, 10, 200, 30, 128, 255, 0, 0, 0];
+        assert_eq!(
+            mask_alpha_rgba(&rgba),
+            vec![255, 255, 255, 255, 255, 255, 255, 128, 255, 255, 255, 0]
+        );
+    }
+
+    #[test]
+    fn the_mask_texture_has_its_own_key() {
+        assert_ne!(mask_texture_key("a.png"), "a.png");
+        assert_eq!(mask_texture_key("a.png"), mask_texture_key("a.png"));
+    }
+
+    #[test]
+    fn the_repro_mask_contained_in_its_box_is_one_full_quad() {
+        // 10x10 mask, `mask-size: contain` in the repro's 50x50 box at (8, 8).
+        let quads = background_tile_quads(
+            Rect::new(8.0, 8.0, 50.0, 50.0),
+            &BackgroundSize::Contain,
+            (0.0, 0.0),
+            (0.0, 0.0),
+            BackgroundRepeat::NoRepeat,
+            10.0,
+            10.0,
+        );
+        let quads: Vec<_> = quads.into_iter().map(|(r, t)| (xywh(r), t)).collect();
+        assert_eq!(quads, vec![((8.0, 8.0, 50.0, 50.0), [0.0, 0.0, 1.0, 1.0])]);
+    }
+
+    #[test]
+    fn a_repeated_mask_tiles_and_the_last_tile_is_cut_to_the_box() {
+        // A 20x20 mask tiled across 50x20: tiles at 0, 20, and half a tile at 40.
+        let quads = background_tile_quads(
+            Rect::new(0.0, 0.0, 50.0, 20.0),
+            &BackgroundSize::Auto,
+            (0.0, 0.0),
+            (0.0, 0.0),
+            BackgroundRepeat::RepeatX,
+            20.0,
+            20.0,
+        );
+        let quads: Vec<_> = quads.into_iter().map(|(r, t)| (xywh(r), t)).collect();
+        assert_eq!(
+            quads,
+            vec![
+                ((0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0, 1.0]),
+                ((20.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0, 1.0]),
+                ((40.0, 0.0, 10.0, 20.0), [0.0, 0.0, 0.5, 1.0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mask_offset_past_the_box_edge_keeps_only_the_inside_part() {
+        // 16x16 at -4px, -8px: the top-left is cut away.
+        let quads = background_tile_quads(
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            &BackgroundSize::Auto,
+            (0.0, 0.0),
+            (-4.0, -8.0),
+            BackgroundRepeat::NoRepeat,
+            16.0,
+            16.0,
+        );
+        let quads: Vec<_> = quads.into_iter().map(|(r, t)| (xywh(r), t)).collect();
+        assert_eq!(quads, vec![((0.0, 0.0, 12.0, 8.0), [0.25, 0.5, 1.0, 1.0])]);
+    }
+}
+
+#[cfg(test)]
+mod opacity_scope_tests {
+    //! `PushOpacity`/`PopOpacity` fade the vertices batched between them.
+    //! The four batches are stood in for by one list of colours; a flush is
+    //! `settle`, emptying the list, `rebase`.
+    use super::*;
+
+    const OPAQUE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+    fn alphas(batch: &[[f32; 4]]) -> Vec<f32> {
+        batch.iter().map(|c| c[3]).collect()
+    }
+
+    fn close(scopes: &mut OpacityScopes, batch: &mut [[f32; 4]]) {
+        let (alpha, starts) = scopes.pop().expect("an open scope");
+        fade_straight(batch.iter_mut(), starts[0], alpha);
+    }
+
+    #[test]
+    fn a_scope_fades_what_was_batched_inside_it_only() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = vec![OPAQUE];
+        scopes.push(0.5, [batch.len(); 4]);
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        batch.push(OPAQUE);
+        assert_eq!(alphas(&batch), [1.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn nested_scopes_multiply() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = Vec::new();
+        scopes.push(0.5, [0; 4]);
+        batch.push(OPAQUE);
+        scopes.push(0.5, [batch.len(); 4]);
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        close(&mut scopes, &mut batch);
+        assert_eq!(alphas(&batch), [0.5, 0.25]);
+    }
+
+    #[test]
+    fn a_flush_inside_a_scope_fades_both_halves_once() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = vec![OPAQUE];
+        scopes.push(0.5, [batch.len(); 4]);
+        batch.push(OPAQUE);
+        scopes.push(0.5, [batch.len(); 4]);
+        batch.push(OPAQUE);
+
+        // The flush: settle, a second settle before the draw (a flush that
+        // calls another), then the batches are emptied.
+        for _ in 0..2 {
+            let lens = [batch.len(); 4];
+            for (alpha, starts) in scopes.settle(lens) {
+                fade_straight(batch.iter_mut(), starts[0], alpha);
+            }
+        }
+        assert_eq!(alphas(&batch), [1.0, 0.5, 0.25], "what was drawn");
+        batch.clear();
+        scopes.rebase();
+
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        batch.push(OPAQUE);
+        close(&mut scopes, &mut batch);
+        batch.push(OPAQUE);
+        assert_eq!(alphas(&batch), [0.25, 0.5, 1.0], "after the flush");
+    }
+
+    #[test]
+    fn a_pop_without_a_push_is_ignored() {
+        assert!(OpacityScopes::default().pop().is_none());
+    }
+
+    #[test]
+    fn premultiplied_colours_fade_on_every_channel() {
+        let mut batch = vec![OPAQUE, [0.8, 0.4, 0.2, 0.8]];
+        fade_premultiplied(batch.iter_mut(), 1, 0.5);
+        assert_eq!(batch, vec![OPAQUE, [0.4, 0.2, 0.1, 0.4]]);
     }
 }

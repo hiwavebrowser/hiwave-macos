@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><title>H26d reddit feed + right sidebar: minmax(0,Xpx) track distribution (escaped class in a media query)</title>
+<style>
+body { margin: 0; }
+#m { display: grid; gap: 24px; width: 917px; }
+.grid-cols-\[minmax\(0\,1fr\)\] { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 960px) {
+  .s\:\[\&\.fixed-sidebar\]\:grid-cols-\[minmax\(0\,756px\)_minmax\(0\,316px\)\].fixed-sidebar { grid-template-columns: minmax(0, 756px) minmax(0, 316px); }
+}
+#a { height: 60px; background: #9cf; } #b { height: 60px; background: #fc9; }
+</style>
+<div id="m" class="grid-cols-[minmax(0,1fr)] fixed-sidebar s:[&.fixed-sidebar]:grid-cols-[minmax(0,756px)_minmax(0,316px)]"><div id="a">feed</div><div id="b">sidebar</div></div>

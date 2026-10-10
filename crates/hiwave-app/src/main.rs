@@ -518,6 +518,46 @@ fn load_report_page(content: &impl ContentWebViewOps) {
     let _ = content.load_html(&report_with_chartjs);
 }
 
+/// True for the first wheel event after a quiet gap, so a flick is visible in
+/// a default-level session log without flooding it (a trackpad flick emits
+/// ~50 events/s; the rest stay trace). One clock for both wheel paths, the
+/// window loop's and the content view's. Restores the diagnosability #100
+/// accidentally removed when the #95 diagnostic line was replaced with wiring.
+#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+fn wheel_burst_started() -> bool {
+    // `None` until the first wheel event: a clock started at that event made
+    // the first burst of a session look like the middle of one, and it was
+    // never logged.
+    thread_local! {
+        static LAST_WHEEL: std::cell::Cell<Option<std::time::Instant>> =
+            const { std::cell::Cell::new(None) };
+    }
+    LAST_WHEEL.with(|t| {
+        let now = std::time::Instant::now();
+        t.replace(Some(now))
+            .is_none_or(|last| now.duration_since(last) > std::time::Duration::from_millis(500))
+    })
+}
+
+// The real-window driver's h6 check reads "wheel burst started" from the app
+// log after the first wheel it sends to a freshly launched app.
+#[cfg(all(
+    test,
+    target_os = "macos",
+    feature = "rustkit",
+    not(feature = "webview-fallback")
+))]
+mod wheel_burst_tests {
+    use super::wheel_burst_started;
+
+    #[test]
+    fn the_first_wheel_after_launch_starts_a_burst_and_the_next_event_does_not() {
+        // The clock is per thread, so this test thread is a fresh launch.
+        assert!(wheel_burst_started(), "the first wheel event after launch starts a burst");
+        assert!(!wheel_burst_started(), "an event right behind it belongs to the same burst");
+    }
+}
+
 fn is_new_tab_url(url: &str) -> bool {
     url == "about:blank" || url == NEW_TAB_URL || url.starts_with("data:text/html")
 }
@@ -1992,10 +2032,16 @@ fn main() {
     // so the current state has to be carried between them.
     let modifiers = std::rc::Rc::new(std::cell::Cell::new(tao::keyboard::ModifiersState::empty()));
     let click_proxy = proxy.clone();
+    // When the content page's next timer is due. The loop sleeps until
+    // input otherwise, and a sleeping loop runs no timers.
+    let live_wake = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        *control_flow = match live_wake.get() {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        };
 
         match event {
             Event::WindowEvent {
@@ -2010,23 +2056,7 @@ fn main() {
                 // MainEventsCleared, which this event wakes.
                 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
-                    // First wheel event after a quiet gap logs at info, so a
-                    // flick is visible in a default-level session log without
-                    // flooding it (a trackpad flick emits ~50 events/s; the
-                    // rest stay trace). Restores the diagnosability #100
-                    // accidentally removed when the #95 diagnostic line was
-                    // replaced with wiring.
-                    thread_local! {
-                        static LAST_WHEEL: std::cell::Cell<std::time::Instant> =
-                            std::cell::Cell::new(std::time::Instant::now());
-                    }
-                    let quiet = LAST_WHEEL.with(|t| {
-                        let now = std::time::Instant::now();
-                        let gap = now.duration_since(t.get());
-                        t.set(now);
-                        gap > std::time::Duration::from_millis(500)
-                    });
-                    if quiet {
+                    if wheel_burst_started() {
                         info!(?delta, "wheel burst started (window loop)");
                     }
                     let (dx, dy) = match delta {
@@ -2178,6 +2208,38 @@ fn main() {
                             return;
                         }
 
+                        // Nothing focused: the page hears the key first
+                        // (its own shortcuts). A cancelled keydown is the
+                        // page's key, not a scroll.
+                        let mods = modifiers.get();
+                        if !mods.super_key() {
+                            let (vk, text) = match &key_event.logical_key {
+                                Key::Escape => (0x1Bu32, String::new()),
+                                Key::Enter => (0x0D, String::new()),
+                                Key::PageUp => (0x21, String::new()),
+                                Key::PageDown => (0x22, String::new()),
+                                Key::End => (0x23, String::new()),
+                                Key::Home => (0x24, String::new()),
+                                Key::ArrowUp => (0x26, String::new()),
+                                Key::ArrowDown => (0x28, String::new()),
+                                Key::Space => (0, " ".to_string()),
+                                Key::Character(c) => (0, c.to_string()),
+                                _ => (0, String::new()),
+                            };
+                            if (vk != 0 || !text.is_empty())
+                                && view.handle_text_key(
+                                    vk,
+                                    &text,
+                                    mods.control_key(),
+                                    mods.shift_key(),
+                                    mods.alt_key(),
+                                )
+                            {
+                                view.relayout();
+                                return;
+                            }
+                        }
+
                         // scroll_by uses wheel sign convention: negative dy
                         // advances the page (natural scrolling).
                         let dy: Option<f32> = match key_event.logical_key {
@@ -2259,6 +2321,10 @@ fn main() {
             Event::MainEventsCleared => {
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    // The page's clock catches up before it hears any input:
+                    // a timer a click sets counts from the click, not from
+                    // the last time the loop woke.
+                    view.process_events();
                     // Clicks come from the content NSView's own handlers in
                     // VIEW-LOCAL coordinates — already viewport space, no
                     // chrome-height/sidebar math and none of its staleness
@@ -2267,25 +2333,59 @@ fn main() {
                     // tao window events (measured with a synthetic
                     // sendEvent:, 2026-08-07).
                     for click in rustkit_viewhost::drain_pending_clicks() {
+                        // The page hears the click before the browser
+                        // acts on it: mousedown on press; mouseup and click
+                        // on release, and only then focus and the link,
+                        // which a listener's preventDefault() cancels. Until
+                        // 2026-10-03 no event reached the page at all, so
+                        // every script-driven control was dead (Z lane I0).
+                        // Where the pointer is, and when it goes: what a
+                        // hover menu or a drag listens for.
+                        match click.input {
+                            rustkit_viewhost::PointerInput::Move => {
+                                view.mouse_move_at_point(click.x as f32, click.y as f32);
+                                continue;
+                            }
+                            rustkit_viewhost::PointerInput::Leave => {
+                                view.mouse_leave();
+                                continue;
+                            }
+                            rustkit_viewhost::PointerInput::Button => {}
+                        }
                         if click.down {
+                            view.mouse_down_at_point(click.x as f32, click.y as f32);
                             continue;
                         }
                         info!(x = click.x, y = click.y, "content click (view-local)");
-                        if let Some(tag) = view.focus_at_point(click.x as f32, click.y as f32) {
+                        let outcome = view.click_at_point(click.x as f32, click.y as f32);
+                        // ENGINE focus is not APPKIT focus: without making
+                        // the content view the window's first responder,
+                        // macOS keeps delivering keys to the chrome WebView
+                        // — observed live as "text entry goes back up to
+                        // the URL bar". Any click on the page takes the
+                        // keyboard, focused element or not: the page's own
+                        // shortcuts are keys with nothing focused.
+                        view.grab_keyboard();
+                        if let Some(tag) = outcome.focused {
                             info!(%tag, "Focused content element");
-                            // ENGINE focus is not APPKIT focus: without
-                            // making the content view the window's first
-                            // responder, macOS keeps delivering keys to the
-                            // chrome WebView — observed live as "text entry
-                            // goes back up to the URL bar". First real
-                            // caller of ViewHost::focus, whose deadlock was
-                            // fixed preemptively in #116.
-                            view.grab_keyboard();
                             view.relayout();
                         }
-                        if let Some(url) = view.link_at_point(click.x as f32, click.y as f32) {
+                        if let Some(url) = outcome.navigate {
                             info!(%url, "Link clicked");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        }
+                    }
+                    // The wheel, from the content view's own `scrollWheel:`.
+                    // The window-loop MouseWheel arm above stays as it was;
+                    // the view consumes the wheel, so only one of the two
+                    // fires for an event. Until 2026-10-06 the wheel reached
+                    // neither in the built app (hand-test item H6).
+                    for scroll in rustkit_viewhost::drain_pending_scrolls() {
+                        if wheel_burst_started() {
+                            info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
+                        }
+                        if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
+                            trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
                         }
                     }
                     for key in rustkit_viewhost::drain_pending_keys() {
@@ -2304,8 +2404,19 @@ fn main() {
                             36 | 76 => (0x0D, ""), // return / keypad enter
                             48 => (0x09, ""),   // tab
                             53 => (0x1B, ""),   // escape
+                            116 => (0x21, ""),  // page up
+                            121 => (0x22, ""),  // page down
+                            126 => (0x26, ""),  // up
+                            125 => (0x28, ""),  // down
                             _ => (0, key.text.as_str()),
                         };
+                        if vk == 0 && text.is_empty() {
+                            continue;
+                        }
+                        if key.up {
+                            view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
+                            continue;
+                        }
                         if vk == 0x0D {
                             if let Some(url) = view.form_submit_url() {
                                 info!(%url, "Form submitted");
@@ -2313,13 +2424,40 @@ fn main() {
                                 continue;
                             }
                         }
-                        if (vk != 0 || !text.is_empty())
-                            && view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt)
-                        {
+                        let focused = view.has_focused_element();
+                        if view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt) {
                             view.relayout();
+                        } else if !focused {
+                            // Nothing focused and the page did not take
+                            // the key: the keys that scroll, as in the
+                            // window-level arm (wheel sign convention).
+                            let dy: Option<f32> = match (vk, text) {
+                                (0x28, _) => Some(-40.0),
+                                (0x26, _) => Some(40.0),
+                                (0x22, _) | (0, " ") => Some(-600.0),
+                                (0x21, _) => Some(600.0),
+                                (0x23, _) => Some(-f32::MAX),
+                                (0x24, _) => Some(f32::MAX),
+                                _ => None,
+                            };
+                            if let Some(dy) = dy {
+                                view.scroll_by(0.0, dy);
+                            }
                         }
                     }
-                    view.process_events();
+                    // Timers that came due, late fetches, and what the
+                    // input above started; then sleep until the next timer.
+                    let sleep = view.process_events();
+                    live_wake.set(sleep.map(|d| std::time::Instant::now() + d));
+                    // A navigation the page started itself: `location.href
+                    // = url`, a script's `link.click()` or `form.submit()`,
+                    // a submit from a timer. Until 2026-10-06 these were
+                    // dropped: only the user's own click on a link or a
+                    // submit button went anywhere (hand tests H14, H16).
+                    if let Some(url) = view.take_script_navigation() {
+                        info!(%url, "Script navigation");
+                        let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                    }
                     view.render();
                 }
             }

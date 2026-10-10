@@ -53,6 +53,45 @@ fn elements_are_instances_of_their_tags_interface() {
     assert_eq!(ev(&b, "var t1; try { new HTMLAnchorElement(); t1 = 'no throw'; } catch (e) { t1 = e.name + ':' + e.message; } t1"), "TypeError:Illegal constructor");
 }
 
+/// github.com's landing page asks `canvas.getContext("webgl")` to see whether
+/// it may show its 3D scene and calls `video.load()` on its hero video, both
+/// in effects. Each threw "not a callable function", an error boundary caught
+/// it and mounted the whole page again, on every turn of the live loop.
+///
+/// Chromium 143: `getContext('nope')` is null; on a `<video>` with no source
+/// `load()` and `pause()` return undefined, `paused` is true, `readyState` 0,
+/// `canPlayType('x/y')` "", `currentTime` 0, `duration` NaN, `ended` false,
+/// and `play()` returns a promise that rejects with a DOMException.
+#[test]
+fn a_canvas_has_no_context_and_a_media_element_plays_nothing_without_throwing() {
+    let b = bound();
+    b.evaluate("document.body.innerHTML = '<canvas id=\"c\"></canvas><video id=\"v\"></video><audio id=\"au2\"></audio>';").unwrap();
+    assert_eq!(
+        ev(&b, "var c = document.getElementById('c'); String([typeof c.getContext, c.getContext('webgl'), c.getContext('2d'), document.createElement('canvas').getContext('experimental-webgl')].join())"),
+        "function,,,"
+    );
+    // The page's own check, as written.
+    assert_eq!(
+        ev(&b, "var e = document.createElement('canvas'), t = e.getContext('webgl') || e.getContext('experimental-webgl'); String(!!(t && t instanceof WebGLRenderingContext))"),
+        "false"
+    );
+    assert_eq!(
+        ev(&b, "var v = document.getElementById('v'); String([typeof v.load, v.load(), typeof v.pause, v.pause(), v.paused, v.readyState, JSON.stringify(v.canPlayType('video/mp4')), v.currentTime, v.duration, v.ended].join())"),
+        "function,,function,,true,0,\"\",0,NaN,false"
+    );
+    assert_eq!(
+        ev(&b, "String([HTMLMediaElement.HAVE_NOTHING, HTMLMediaElement.HAVE_METADATA, HTMLMediaElement.HAVE_CURRENT_DATA, HTMLMediaElement.HAVE_FUTURE_DATA, HTMLMediaElement.HAVE_ENOUGH_DATA, v.HAVE_CURRENT_DATA].join())"),
+        "0,1,2,3,4,2"
+    );
+    // An <audio> and a created element answer the same; a <div> has none of it.
+    assert_eq!(
+        ev(&b, "String([typeof document.getElementById('au2').play, document.createElement('video').paused, typeof document.createElement('div').play, typeof document.createElement('div').getContext].join())"),
+        "function,true,undefined,undefined"
+    );
+    b.evaluate("var played = 'pending', p = v.play(); p.then(function () { played = 'resolved'; }, function (e) { played = e.name + ':' + (e instanceof DOMException); });").unwrap();
+    assert_eq!(ev(&b, "Object.prototype.toString.call(p) + ' ' + played"), "[object Promise] NotSupportedError:true");
+}
+
 #[test]
 fn event_subclasses_extend_event_with_their_init_members() {
     let b = bound();
@@ -114,7 +153,68 @@ fn existing_singletons_get_their_interfaces_and_the_rest_are_interface_only() {
     // Constructors for features the engine does not have stay UNDEFINED, so
     // `typeof Worker` style feature detection keeps working.
     assert_eq!(
-        ev(&b, "[typeof Worker, typeof WebAssembly, typeof Notification, typeof AudioContext, typeof OffscreenCanvas, typeof BroadcastChannel, typeof MessageChannel].join()"),
-        "undefined,undefined,undefined,undefined,undefined,undefined,undefined"
+        ev(&b, "[typeof Worker, typeof WebAssembly, typeof Notification, typeof AudioContext, typeof OffscreenCanvas, typeof BroadcastChannel].join()"),
+        "undefined,undefined,undefined,undefined,undefined,undefined"
     );
 }
+
+#[test]
+fn cdatasection_and_processinginstruction_interfaces_exist() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "[typeof CDATASection, typeof ProcessingInstruction].join()"),
+        "function,function"
+    );
+    assert_eq!(
+        ev(&b, "[CDATASection.prototype instanceof Text, CDATASection.prototype instanceof CharacterData, CDATASection.prototype instanceof Node].join()"),
+        "true,true,true"
+    );
+    assert_eq!(
+        ev(&b, "[ProcessingInstruction.prototype instanceof CharacterData, ProcessingInstruction.prototype instanceof Node].join()"),
+        "true,true"
+    );
+    assert_eq!(
+        ev(&b, "var t1; try { new CDATASection(); t1 = 'no throw'; } catch (e) { t1 = e.name; } t1"),
+        "TypeError"
+    );
+    assert_eq!(
+        ev(&b, "var t2; try { new ProcessingInstruction(); t2 = 'no throw'; } catch (e) { t2 = e.name; } t2"),
+        "TypeError"
+    );
+    // YouTube webcomponents-sd Tag 878 iteration
+    assert_eq!(
+        ev(&b, "['Document','DocumentFragment','Element','Text','Comment','CDATASection','ProcessingInstruction'].every(function(a){ return typeof Object.create(window[a].prototype) === 'object'; })"),
+        "true"
+    );
+}
+
+#[test]
+fn window_inherits_from_window_prototype_and_event_target_prototype() {
+    let b = bound();
+    // 1. Object.getPrototypeOf(window) === Window.prototype
+    assert_eq!(
+        ev(&b, "String(Object.getPrototypeOf(window) === Window.prototype)"),
+        "true"
+    );
+    // 2. window instanceof Window
+    assert_eq!(
+        ev(&b, "String(window instanceof Window)"),
+        "true"
+    );
+    // 3. window instanceof EventTarget
+    assert_eq!(
+        ev(&b, "String(window instanceof EventTarget)"),
+        "true"
+    );
+    // 4. a property defined on EventTarget.prototype is visible on window
+    assert_eq!(
+        ev(&b, "EventTarget.prototype.__custom_test_prop = 'from_event_target'; window.__custom_test_prop"),
+        "from_event_target"
+    );
+    // 5. webcomponents-sd __shady_native_addEventListener pattern works on window
+    assert_eq!(
+        ev(&b, "var called = false; EventTarget.prototype.__shady_native_addEventListener = function() { called = true; }; window.__shady_native_addEventListener('test', function(){}, true); String(called)"),
+        "true"
+    );
+}
+

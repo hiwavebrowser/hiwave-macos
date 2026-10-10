@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8"><title>H25 flex column + margin:0 auto gutter</title>
+<style>
+body { margin: 0; display: flex; flex-direction: column; min-height: 100vh; }
+#bar { background: #639; color: #fff; }
+#wrapper { width: 300px; margin: 0 auto; padding: 15px 0; flex: 1; background: #9c9; }
+#ctl { width: 300px; margin: 0 auto; background: #fc9; }
+</style>
+<div id="bar">bar (stretches)</div>
+<div id="wrapper"><p id="p">wrapper: width 300, margin 0 auto, flex: 1</p></div>
+<div id="ctl">flex item without flex:1</div>

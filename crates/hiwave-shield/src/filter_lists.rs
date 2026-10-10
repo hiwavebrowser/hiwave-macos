@@ -179,10 +179,8 @@ impl FilterListManager {
         let mut updated = 0;
 
         for source in FILTER_LISTS {
-            if self.needs_update(source) {
-                if self.download(source).is_ok() {
-                    updated += 1;
-                }
+            if self.needs_update(source) && self.download(source).is_ok() {
+                updated += 1;
             }
         }
 

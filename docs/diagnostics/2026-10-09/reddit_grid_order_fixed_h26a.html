@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><title>H26a reddit shell: grid-column-start + order, and a fixed grid child</title>
+<style>
+body { margin: 0; }
+#g { display: grid; grid-template-columns: 315px 965px; }
+#sub { grid-column-start: 2; order: 2; height: 100px; background: #9cf; }
+#side { order: -9999; position: fixed; top: 56px; width: 315px; background: #fc9; }
+</style>
+<div id="g"><div id="sub">sub: grid-column-start 2, order 2</div><div id="side">side: position fixed, order -9999</div></div>

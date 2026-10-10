@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H16 page B</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; }
+  #b { position: fixed; left: 0; top: 0; right: 0; bottom: 0; background: #00ff00; }
+</style>
+<!-- Where page A leads. Green over the whole viewport, and a beacon that
+     says this page's script ran and how it was reached. -->
+<div id="b"></div>
+<script>
+  fetch('/beacon?h16-b-ran' + location.search.replace('?', '-')).catch(function () {});
+</script>

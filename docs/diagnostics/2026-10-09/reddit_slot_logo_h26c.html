@@ -1,0 +1,5 @@
+<!doctype html><meta charset="utf-8"><title>H26c reddit header: unassigned slot content painted; svg width from viewBox</title>
+<style>body { margin: 0; font: 14px Arial; } #bar { display: flex; align-items: center; height: 56px; padding: 0 24px; gap: 24px; }</style>
+<div id="bar"><a id="lg" style="display: flex"><svg id="logo" viewBox="0 0 514 149" style="height: 22px"><rect width="514" height="149" fill="#f40"/></svg></a>
+<x-dd id="dd"><div slot="sel" id="sel">Best</div><div slot="tip" id="tip">Open sort options</div></x-dd></div>
+<script>customElements.define('x-dd', class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<slot name="sel"></slot>'; } });</script>
