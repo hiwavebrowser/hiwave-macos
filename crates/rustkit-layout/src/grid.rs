@@ -4105,10 +4105,13 @@ fn size_grid_tracks_filling(
             break;
         }
 
-        // Distribute proportionally, but don't exceed room_to_grow
-        let to_distribute = remaining.min(total_room);
+        // Equal shares, each track stopping at its growth limit; what a
+        // stopped track leaves goes round again (css-grid-1 section 12.6).
+        // Shares in proportion to the room gave `minmax(0, 756px)
+        // minmax(0, 316px)` in a 700px grid with a 24px gap 462 and 214, where Chromium
+        // has 360 and 316 (reddit's feed and sidebar, H26d).
+        let share = remaining.min(total_room) / growable.len() as f32;
         for (i, room) in &growable {
-            let share = (room / total_room) * to_distribute;
             tracks[*i].size += share.min(*room);
         }
 
