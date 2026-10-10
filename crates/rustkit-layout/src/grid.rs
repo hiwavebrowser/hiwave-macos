@@ -472,6 +472,11 @@ impl<'a> GridItem<'a> {
                 self.column_span = *span;
                 // Still needs auto-placement, but with specified span
             }
+            // `auto / span N`: auto-placed, N tracks long (css-grid-1
+            // section 8.3; `grid-column-end: span N` alone is this).
+            (GridLine::Auto, GridLine::Span(span)) => {
+                self.column_span = *span;
+            }
             _ => {
                 // Auto placement for columns
             }
@@ -502,6 +507,11 @@ impl<'a> GridItem<'a> {
             (GridLine::Span(span), _) => {
                 self.row_span = *span;
                 // Still needs auto-placement, but with specified span
+            }
+            // `auto / span N`: auto-placed, N tracks long (css-grid-1
+            // section 8.3; `grid-row-end: span N` alone is this).
+            (GridLine::Auto, GridLine::Span(span)) => {
+                self.row_span = *span;
             }
             _ => {
                 // Auto placement
@@ -562,6 +572,10 @@ impl<'a> GridItem<'a> {
             ((_, _, Some(span)), _) => {
                 self.column_span = span;
             }
+            // Start is auto, end is a span: auto-placed, that many tracks.
+            ((_, true, None), (_, _, Some(span))) => {
+                self.column_span = span;
+            }
             _ => {
                 // Auto placement for columns
             }
@@ -598,6 +612,10 @@ impl<'a> GridItem<'a> {
             }
             // Start is a span
             ((_, _, Some(span)), _) => {
+                self.row_span = span;
+            }
+            // Start is auto, end is a span: auto-placed, that many tracks.
+            ((_, true, None), (_, _, Some(span))) => {
                 self.row_span = span;
             }
             _ => {
