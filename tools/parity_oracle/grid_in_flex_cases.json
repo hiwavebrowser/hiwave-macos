@@ -51,6 +51,21 @@
    "chrome_boxes": "x:0:0:700:60 m:0:0:210:60 a:0:0:100:60 b:110:0:100:60 s:210:0:490:60"
   },
   {
+   "name": "span-by-column-end-in-a-block",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:1000px}#m{display:grid;gap:24px;grid-template-columns:repeat(12,1fr)}#a{grid-column-end:span 12}#b{grid-column:auto / span 6}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:1000:144 m:0:0:1000:144 a:0:0:1000:60 b:0:84:488:60"
+  },
+  {
+   "name": "span-by-column-end-in-a-centred-column",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;flex-direction:column;align-items:center;width:1000px}#m{display:grid;width:100%;gap:24px;grid-template-columns:repeat(12,1fr)}#a{grid-column-end:span 12}#b{grid-column:auto / span 6}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:1000:144 m:0:0:1000:144 a:0:0:1000:60 b:0:84:488:60"
+  },
+  {
+   "name": "span-by-row-end-in-a-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:700px}#m{display:grid;flex:1;gap:10px;grid-template-columns:1fr 1fr;grid-auto-rows:40px}#a{height:auto;grid-row-end:span 2}#b{height:auto}#c{grid-column:2}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div><div id=c>c</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:700:90 m:0:0:700:90 a:0:0:345:90 b:355:0:345:40 c:355:50:345:40"
+  },
+  {
    "name": "control-the-same-grid-in-a-block",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:700px}#m{display:grid;gap:24px;grid-template-columns:400px 276px}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
    "chrome_boxes": "x:0:0:700:60 m:0:0:700:60 a:0:0:400:60 b:424:0:276:60"
