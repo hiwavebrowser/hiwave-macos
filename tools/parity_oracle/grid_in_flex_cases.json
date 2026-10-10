@@ -1,0 +1,60 @@
+{
+ "viewport": [
+  1280,
+  800
+ ],
+ "boxes": "xywh",
+ "cases": [
+  {
+   "name": "reddit-feed-minmax-tracks-auto-width-in-a-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:700px}#m{display:grid;gap:24px;grid-template-columns:minmax(0,756px) minmax(0,316px)}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:700:60 m:0:0:700:60 a:0:0:360:60 b:384:0:316:60"
+  },
+  {
+   "name": "px-tracks-auto-width-in-a-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:900px}#m{display:grid;gap:24px;grid-template-columns:400px 276px}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:900:60 m:0:0:700:60 a:0:0:400:60 b:424:0:276:60"
+  },
+  {
+   "name": "px-tracks-wider-than-the-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:500px}#m{display:grid;gap:24px;grid-template-columns:400px 276px}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:500:60 m:0:0:700:60 a:0:0:400:60 b:424:0:276:60"
+  },
+  {
+   "name": "fr-tracks-auto-width-in-a-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:700px}#m{display:grid;gap:24px;grid-template-columns:1fr 1fr}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:700:60 m:0:0:158:60 a:0:0:67:60 b:91:0:67:60"
+  },
+  {
+   "name": "fr-tracks-flex-1-in-a-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:700px}#m{display:grid;flex:1;gap:24px;grid-template-columns:1fr 2fr}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:700:60 m:0:0:700:60 a:0:0:225:60 b:249:0:451:60"
+  },
+  {
+   "name": "explicit-width-in-a-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:900px}#m{display:grid;width:700px;gap:24px;grid-template-columns:minmax(0,756px) minmax(0,316px)}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:900:60 m:0:0:700:60 a:0:0:360:60 b:384:0:316:60"
+  },
+  {
+   "name": "flex-1-in-a-column",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;flex-direction:column;width:700px}#m{display:grid;flex:1;gap:24px;grid-template-columns:minmax(0,756px) minmax(0,316px)}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:700:60 m:0:0:700:60 a:0:0:360:60 b:384:0:316:60"
+  },
+  {
+   "name": "auto-tracks-in-a-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:700px}#m{display:grid;gap:24px;grid-template-columns:auto auto}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:700:60 m:0:0:130:60 a:0:0:38:60 b:62:0:67:60"
+  },
+  {
+   "name": "beside-a-sibling-in-a-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:700px}#m{display:grid;gap:10px;grid-template-columns:100px 100px}#s{flex:1}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div><div id=s>s</div></div></body></html>",
+   "chrome_boxes": "x:0:0:700:60 m:0:0:210:60 a:0:0:100:60 b:110:0:100:60 s:210:0:490:60"
+  },
+  {
+   "name": "control-the-same-grid-in-a-block",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:700px}#m{display:grid;gap:24px;grid-template-columns:400px 276px}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:700:60 m:0:0:700:60 a:0:0:400:60 b:424:0:276:60"
+  }
+ ],
+ "chrome": "143.0.7499.4"
+}
