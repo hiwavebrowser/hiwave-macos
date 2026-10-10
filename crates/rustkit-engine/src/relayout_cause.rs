@@ -255,13 +255,29 @@ mod tests {
             url("https://example.com:8443/a/b?token=secret#frag"),
             "https://example.com:8443/a/b"
         );
+        assert_eq!(
+            url("http://user:pass@example.com/path?q=1"),
+            "http://example.com/path",
+            "userinfo must not reach the log"
+        );
+        assert_eq!(
+            url("wss://chat.example/socket?token=x"),
+            "wss://chat.example/socket"
+        );
+        assert_eq!(url("ws://chat.example/socket"), "ws://chat.example/socket");
         assert_eq!(url("about:blank"), "about:blank");
+        assert_eq!(
+            url("about:a-very-long-about-path-that-exceeds-thirty-two-chars"),
+            "about:a-very-long-about-path-that-exce",
+            "about: keeps at most 32 path characters"
+        );
         assert_eq!(
             url("data:text/html,<p>a long inline document body here</p>"),
             "data:"
         );
         assert_eq!(url("file:///Users/someone/page.html"), "file:");
         assert_eq!(url("blob:https://a.example/0b5e-uuid"), "blob:");
+        assert_eq!(url("javascript:alert(1)"), "javascript:");
     }
 
     #[test]
