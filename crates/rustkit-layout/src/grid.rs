@@ -3072,6 +3072,93 @@ pub fn layout_grid_container(
     );
 }
 
+/// The min- or max-content width (content box) of a grid container whose
+/// columns are an explicit list of tracks, or `None` for a grid this does
+/// not cover (no column template, a `repeat()`, an item placed by line or
+/// spanning), which keeps the generic walk's answer.
+///
+/// css-grid-1 section 12.1: the tracks are sized under a min-content or a
+/// max-content constraint and the container's width is their sum plus the
+/// gaps. A length track is itself; `minmax(a, b)` is its minimum under
+/// min-content and its maximum under max-content; a content-sized track is
+/// the largest contribution of the items in its column; flexible tracks
+/// share one `fr` size, the largest any of them needs for its items.
+///
+/// The generic walk took the widest child, as if the items were stacked: an
+/// auto-width grid that is a flex item was as wide as its longest word
+/// (reddit's feed, 46px for two columns of up to 756 and 316).
+fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> {
+    let style = &layout_box.style;
+    let template = &style.grid_template_columns;
+    if !style.display.is_grid() || template.tracks.is_empty() || !template.repeats.is_empty() {
+        return None;
+    }
+    let items: Vec<&LayoutBox> = layout_box
+        .children
+        .iter()
+        .filter(|c| {
+            c.style.display != Display::None
+                && !matches!(c.position, crate::Position::Absolute | crate::Position::Fixed)
+                && !is_collapsible_whitespace_only(c)
+        })
+        .collect();
+    let auto_placed = |c: &&LayoutBox| {
+        matches!(c.style.grid_column_start, GridLine::Auto) && matches!(c.style.grid_column_end, GridLine::Auto)
+    };
+    if !items.iter().all(auto_placed) || style.grid_auto_flow != GridAutoFlow::Row {
+        return None;
+    }
+
+    let columns = template.tracks.len();
+    // The largest contribution of the items that auto-placement puts in a
+    // column: item i goes to column i mod n.
+    let content = |column: usize, min: bool| -> f32 {
+        items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % columns == column)
+            .map(|(_, c)| if min { estimate_min_content_width(c) } else { estimate_max_content_width(c) })
+            .fold(0.0f32, f32::max)
+    };
+    let mut total = 0.0f32;
+    // The one `fr` size the flexible tracks share, and their factors' sum.
+    let (mut fr_size, mut fr_sum) = (0.0f32, 0.0f32);
+    for (column, track) in template.tracks.iter().enumerate() {
+        let sized = |size: &TrackSize, min: bool| -> Option<f32> {
+            match size {
+                TrackSize::Px(v) => Some(*v),
+                TrackSize::MinContent => Some(content(column, true)),
+                TrackSize::MaxContent => Some(content(column, false)),
+                TrackSize::Auto | TrackSize::Percent(_) => Some(content(column, min)),
+                TrackSize::FitContent(limit) => Some(content(column, min).min(limit.max(content(column, true)))),
+                _ => None,
+            }
+        };
+        let flexible = |fr: f32, fr_size: &mut f32, fr_sum: &mut f32| {
+            let fr = fr.max(0.0);
+            *fr_sum += fr;
+            // A factor below 1 does not shrink the track under its content.
+            *fr_size = fr_size.max(content(column, min) / fr.max(1.0));
+        };
+        match &track.size {
+            TrackSize::Fr(fr) => flexible(*fr, &mut fr_size, &mut fr_sum),
+            TrackSize::MinMax(low, high) => match high.as_ref() {
+                TrackSize::Fr(fr) => {
+                    total += sized(low, true).unwrap_or(0.0);
+                    flexible(*fr, &mut fr_size, &mut fr_sum);
+                }
+                high => {
+                    let low = sized(low, true).unwrap_or(0.0);
+                    total += if min { low } else { sized(high, false).unwrap_or(low).max(low) };
+                }
+            },
+            size => total += sized(size, min)?,
+        }
+    }
+    let gap = layout_box.length_to_px(&style.column_gap, 0.0);
+    Some(total + fr_size * fr_sum + gap * (columns as f32 - 1.0))
+}
+
 /// Size grid tracks using the track sizing algorithm.
 /// Estimate of a box's min-content (border-box) width.
 ///
@@ -3152,6 +3239,11 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     // specified width still wins.
     if let BoxType::FormControl(control) = &layout_box.box_type {
         return form_control_min_content_width(style, control);
+    }
+
+    // A grid container's width comes from its column tracks.
+    if let Some(w) = grid_columns_content_width(layout_box, true) {
+        return w + padding_border;
     }
 
     // A single-line ROW flex container's min-content main size SUMS its items'
@@ -3482,6 +3574,11 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
     // deliberately NOT added on top of it.
     if let BoxType::FormControl(control) = &layout_box.box_type {
         return crate::form_control_intrinsic_size(style, control).0;
+    }
+
+    // A grid container's width comes from its column tracks.
+    if let Some(w) = grid_columns_content_width(layout_box, false) {
+        return w + padding_border;
     }
 
     // A flex container's max-content main size sums its ITEMS plus
