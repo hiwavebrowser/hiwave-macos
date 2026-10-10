@@ -25411,26 +25411,34 @@ mod edit_state_lifecycle_tests {
     // original code carried a doc comment claiming reload dropped the map;
     // it did not.
 
+    fn first_input(n: &std::rc::Rc<Node>) -> Option<std::rc::Rc<Node>> {
+        if let NodeType::Element { tag_name, .. } = &n.node_type {
+            if tag_name.eq_ignore_ascii_case("input") {
+                return Some(n.clone());
+            }
+        }
+        n.children().iter().find_map(first_input)
+    }
+
+    /// Portable pin of Prometheus #110 R1: typed text must not ride NodeId
+    /// reuse into the next document. Was macOS+headless-only; headless views
+    /// are available to unit tests on every OS now (#646).
     #[test]
-    #[cfg(all(target_os = "macos", feature = "headless"))]
     fn typed_text_does_not_survive_a_navigation_into_the_next_page() {
         let mut engine = Engine::new(EngineConfig::default()).expect("engine");
         let id = engine
-            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            })
             .expect("view");
 
         // Page one: type into a field.
         let doc1 = std::rc::Rc::new(
             Document::parse_html(r#"<html><body><input name="q"></body></html>"#).expect("parse"),
         );
-        fn first_input(n: &std::rc::Rc<Node>) -> Option<std::rc::Rc<Node>> {
-            if let NodeType::Element { tag_name, .. } = &n.node_type {
-                if tag_name.eq_ignore_ascii_case("input") {
-                    return Some(n.clone());
-                }
-            }
-            n.children().iter().find_map(first_input)
-        }
         let input1 = first_input(&doc1.root()).expect("input");
         {
             let view = engine.views.get_mut(&id).expect("view");
@@ -25471,6 +25479,50 @@ mod edit_state_lifecycle_tests {
             "the new page's control must have no inherited value"
         );
         assert_eq!(engine.focused_node(id), None, "focus must not survive either");
+    }
+
+    /// The same NodeId reuse that leaks typed text would also leak a
+    /// checkbox the user flipped: `checked_states` must clear with the
+    /// document, or page B's first control inherits page A's toggle.
+    #[test]
+    fn a_checked_state_does_not_survive_a_navigation_into_the_next_page() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 400,
+                height: 200,
+            })
+            .expect("view");
+
+        let doc1 = std::rc::Rc::new(
+            Document::parse_html(r#"<html><body><input type=checkbox name=a></body></html>"#)
+                .expect("parse"),
+        );
+        let input1 = first_input(&doc1.root()).expect("input");
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.document = Some(doc1);
+            view.checked_states.insert(input1.id.raw(), true);
+        }
+        assert!(engine.views[&id].checked_states.get(&input1.id.raw()) == Some(&true));
+
+        engine
+            .load_html(
+                id,
+                r#"<html><body><input type=checkbox name=b></body></html>"#,
+            )
+            .expect("load_html");
+
+        let doc2 = engine.views.get(&id).unwrap().document.clone().unwrap();
+        let input2 = first_input(&doc2.root()).expect("input");
+        assert_eq!(input2.id.raw(), input1.id.raw(), "NodeId collision precondition");
+        assert!(
+            engine.views[&id].checked_states.is_empty(),
+            "checked_states must not ride into the next document: {:?}",
+            engine.views[&id].checked_states
+        );
     }
 }
 
