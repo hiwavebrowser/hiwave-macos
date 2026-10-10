@@ -904,6 +904,15 @@ fn layout_flex_container_at(
                         // (CSS 2.1 §10.5), not against the item's flow cursor.
                         definite_cross_height.or(fixed_by_flex),
                     );
+                    // A grid container that is a flex item: the flow above
+                    // only measured its items, as the block path's own flow
+                    // does before its grid pass. Without the pass here the
+                    // items stayed stacked as blocks, whatever the tracks
+                    // (reddit's feed: the sidebar under the feed, H26b).
+                    if item.layout_box.style.display.is_grid() {
+                        let inner = item.layout_box.dimensions.content;
+                        crate::grid::layout_grid_container(item.layout_box, inner.width, inner.height);
+                    }
                     // A flex item is a formatting-context root, so its last
                     // in-flow child's bottom margin never collapses through
                     // it (CSS 2.1 §8.3.1) — it stays INSIDE the item. The
