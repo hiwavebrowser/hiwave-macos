@@ -7,6 +7,7 @@
 
 use super::*;
 use rustkit_css::Color;
+use crate::script_net_tests::serve_routes;
 use rustkit_layout::{DisplayCommand, Rect};
 
 const BLACK: Color = Color { r: 0, g: 0, b: 0, a: 1.0 };
@@ -16,6 +17,10 @@ fn frame(commands: &[DisplayCommand], tag: &str) -> Vec<u8> {
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
         .expect("view");
+    capture(&mut engine, view, commands, tag)
+}
+
+fn capture(engine: &mut Engine, view: EngineViewId, commands: &[DisplayCommand], tag: &str) -> Vec<u8> {
     let viewhost_id = engine.views[&view].viewhost_id;
     let path = std::env::temp_dir().join(format!("rustkit-polygon-{tag}-{}.ppm", std::process::id()));
     let renderer = engine.renderer.as_mut().expect("renderer");
@@ -122,4 +127,39 @@ fn with_no_transform_the_shapes_stay_put() {
     );
     assert!(dark(&ppm, 60, 70) && dark(&ppm, 100, 70));
     assert!(!dark(&ppm, 60, 20) && !dark(&ppm, 100, 20));
+}
+
+/// A page with an inline svg path, 60 down a long page. The engine's own
+/// list for it, inside the translate the app's window path puts around a
+/// list when the page is scrolled by 50 (`render_view`): the icon moves
+/// with the block beside it.
+#[test]
+fn an_inline_svg_path_scrolls_with_its_page() {
+    let page = "<html><head><style>body{margin:0} #gap{height:60px} #tall{height:1000px}\
+        #block{position:absolute;left:100px;top:60px;width:40px;height:40px;background:#000}\
+        svg{display:block}</style></head><body><div id=gap></div>\
+        <svg width=40 height=40 viewBox='0 0 40 40'><path d='M0 0L40 0L0 40Z' fill='#000'/></svg>\
+        <div id=block></div><div id=tall></div></body></html>";
+    let server = serve_routes(vec![("/", "text/html", page.to_string())]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+
+    let list = engine.views[&view].display_list.as_ref().expect("display list").commands.clone();
+    assert!(
+        list.iter().any(|c| matches!(c, DisplayCommand::FillPolygon { .. })),
+        "the path is filled as a polygon"
+    );
+
+    let at_top = capture(&mut engine, view, &list, "page-top");
+    assert!(dark(&at_top, 5, 65) && dark(&at_top, 120, 80), "the icon and the block, 60 down");
+
+    let scrolled = capture(&mut engine, view, &under([1.0, 0.0, 0.0, 1.0, 0.0, -50.0], list), "page-scrolled");
+    assert!(dark(&scrolled, 120, 30), "the block is drawn 50 up");
+    assert!(dark(&scrolled, 5, 15), "the icon is drawn 50 up");
+    assert!(!dark(&scrolled, 5, 65), "the icon is not where it was");
 }
