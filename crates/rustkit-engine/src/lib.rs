@@ -24306,8 +24306,11 @@ mod node_identity_tests {
     // Pete's hand tests H14 and H16: a navigation the page starts itself
     // went nowhere in the live app. The engine does not navigate; it hands
     // the URL to whoever asks (`take_script_navigation`), once.
+    //
+    // Portable after #646: headless views are available under `cfg(test)`
+    // on every OS. Was macOS+headless-only; Linux CI never exercised the
+    // script→embedder URL handoff.
     #[test]
-    #[cfg(all(target_os = "macos", feature = "headless"))]
     fn a_navigation_script_starts_is_handed_to_the_embedder() {
         let (mut engine, id) = submit_page();
         let doc = Url::parse("https://example.com/page").unwrap();
@@ -28205,6 +28208,20 @@ row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 
         let log = engine.script_log(view).unwrap();
         assert_eq!(log[0].outcome, ScriptOutcome::OverBudget, "{log:#?}");
         assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+        // #625 freezes elapsed_ms at the stop: the spinning script's freeze
+        // window is the budget plus the short overrun to the next host call.
+        // The second script never starts (budget already spent) so its
+        // elapsed_ms stays near zero.
+        assert!(
+            log[0].elapsed_ms >= 150 && log[0].elapsed_ms < 2_500,
+            "spinning script elapsed_ms should track the freeze window: {:#?}",
+            log[0]
+        );
+        assert!(
+            log[1].elapsed_ms < 50,
+            "a script that never starts must not invent a freeze window: {:#?}",
+            log[1]
+        );
         // The page is still a page: script runs in it again once the load is over.
         assert_eq!(engine.execute_script(view, "typeof after").unwrap(), r#"String("undefined")"#);
         assert_eq!(engine.execute_script(view, "document.title = 'x'; spun > 0").unwrap(), "Boolean(true)");
@@ -28226,6 +28243,16 @@ row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 
         let log = engine.script_log(view).unwrap();
         assert_eq!(log[0].outcome, ScriptOutcome::OverBudget, "{log:#?}");
         assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+        assert!(
+            log[0].elapsed_ms >= 150 && log[0].elapsed_ms < 2_500,
+            "spinning module elapsed_ms should track the freeze window: {:#?}",
+            log[0]
+        );
+        assert!(
+            log[1].elapsed_ms < 50,
+            "a module that never starts must not invent a freeze window: {:#?}",
+            log[1]
+        );
         assert_eq!(engine.execute_script(view, "typeof after").unwrap(), r#"String("undefined")"#);
         assert_eq!(engine.execute_script(view, "document.title = 'x'; 1 + 1").unwrap(), "Number(2.0)");
     }
