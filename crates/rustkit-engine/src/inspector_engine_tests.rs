@@ -213,11 +213,11 @@ fn a_page_load_is_recorded_in_order() {
             "first_layout",
             "first_paint",
             "relayout initial_load",
-            "console Log one 2 @inline#1:2:12",
-            "console Info two @inline#1:3:13",
-            "console Warn three @inline#1:4:13",
-            "console Error four @inline#1:5:14",
-            "console Debug five @inline#1:6:14",
+            "console Log one 2 @inline#1:2:9",
+            "console Info two @inline#1:3:9",
+            "console Warn three @inline#1:4:9",
+            "console Error four @inline#1:5:9",
+            "console Debug five @inline#1:6:9",
             "load_finished over_budget=0",
         ]
     );
@@ -338,10 +338,10 @@ fn a_new_navigation_starts_a_new_page_in_the_same_log() {
         only(&lines, &["navigation_start", "console", "load_finished"]),
         vec![
             "navigation_start /",
-            "console Log first @inline#1:1:12",
+            "console Log first @inline#1:1:9",
             "load_finished over_budget=0",
             "navigation_start /next",
-            "console Log second @inline#1:1:12",
+            "console Log second @inline#1:1:9",
             "load_finished over_budget=0",
         ]
     );
@@ -575,10 +575,10 @@ null.x;
 </script><script>
 Promise.reject(new Error('r'));
 try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
-</script></body></html>";
+</script><script src=\"/ext.js\"></script></body></html>";
     let mut logs = Vec::new();
+    let server = serve(vec![Route::html("/", page), Route::ok("/ext.js", "text/javascript", "undefined.boom;")]);
     for buffer in [false, true] {
-        let server = serve(vec![Route::html("/", page)]);
         let mut config = EngineConfig::default();
         config.inspector.buffer = buffer;
         let mut engine = Engine::new(config).expect("engine");
@@ -596,7 +596,7 @@ try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
     }
     assert_eq!(logs[0], logs[1]);
     assert_eq!(
-        logs[0],
+        logs[0][..2],
         vec![
             (
                 "inline#1".to_string(),
@@ -607,4 +607,175 @@ try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
             ("inline#2".to_string(), ScriptOutcome::Ran),
         ]
     );
+    // An external script runs as `script#n` either way.
+    let (_, ext) = &logs[0][2];
+    assert!(matches!(ext, ScriptOutcome::Threw(text) if text.contains("(script#1:1:")), "{ext:?}");
+}
+
+// ---- Review R1 (#676): modules, handlers, eval, page code, scrubbing ----
+
+/// A module's exception is one `script_error`, with its stack, after what
+/// the module logged, and never an unhandled rejection (the module's
+/// evaluation promise is the engine's own). An inline module is `inline#n`.
+#[test]
+fn a_module_exception_is_one_error_after_its_console_lines() {
+    let page = "<html><body><script type=\"module\">
+var c = 3;
+  console.log('mod-inline-log');
+null.modinl;
+</script><script type=\"module\" src=\"/mod.js\"></script></body></html>";
+    let (engine, view, server) = load_page(
+        EngineConfig::default(),
+        vec![
+            Route::html("/", page),
+            Route::ok("/mod.js", "text/javascript", "var a = 1;\nconsole.log('ext-mod-log');\nvar b = 2;\n  null.modext;\n"),
+        ],
+    );
+    let lines = described(&engine, view, server.port);
+    assert_eq!(
+        only(&lines, &["console", "script_error"]),
+        vec![
+            "console Log mod-inline-log @inline#1:3:11",
+            "script_error TypeError: cannot convert 'null' or 'undefined' to object @inline#1:4:6 script=inline#1 rejection=false",
+            "console Log ext-mod-log @/mod.js:2:9",
+            "script_error TypeError: cannot convert 'null' or 'undefined' to object @/mod.js:4:8 script=/mod.js rejection=false",
+        ]
+    );
+    let summary = InspectorSummary::from_records(&records(&engine, view), &[]);
+    assert_eq!((summary.script_errors, summary.unhandled_rejections), (2, 0));
+    let stacks: Vec<Option<String>> = records(&engine, view)
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::ScriptError { stack, .. } => Some(stack),
+            _ => None,
+        })
+        .collect();
+    assert!(stacks.iter().all(|s| s.is_some()), "every module error has its stack: {stacks:?}");
+}
+
+/// An `on*` attribute's handler and `eval` code are in no named script:
+/// their console calls and errors have no position (never the caller's),
+/// and a handler's error is the script's whose `click()` ran it, recorded
+/// before the next script runs (after that script's own console lines).
+#[test]
+fn handler_and_eval_code_are_never_given_their_callers_position() {
+    let page = "<html><body><button onclick=\"var k=1;
+  console.log('onclick-log'); null.clickboom;\">b</button><script>var btn = document.querySelector('button');
+  btn.click();
+console.log('after-click');
+eval(\"console.log('in-eval')\");
+</script><script>console.log('second-script');</script></body></html>";
+    let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let lines = only(&described(&engine, view, server.port), &["console", "script_error"]);
+    assert_eq!(
+        lines,
+        vec![
+            "console Log onclick-log",
+            "console Log after-click @inline#1:3:9",
+            "console Log in-eval",
+            "script_error TypeError: cannot convert 'null' or 'undefined' to object script=inline#1 rejection=false",
+            "console Log second-script @inline#2:1:9",
+        ]
+    );
+    let all = serde_json::to_string(&records(&engine, view)).unwrap();
+    assert!(!all.contains("eval at"), "{all}");
+}
+
+/// A throw inside `eval` code has no place (Boa names no script for it),
+/// and is not given the `eval` call's; its stack keeps the page's frames.
+#[test]
+fn an_error_thrown_in_eval_code_has_no_borrowed_place() {
+    let page = "<html><body><script>
+var x = 1;
+  eval('null.inEval');
+</script></body></html>";
+    let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let errors = only(&described(&engine, view, server.port), &["script_error"]);
+    assert_eq!(
+        errors,
+        vec!["script_error TypeError: cannot convert 'null' or 'undefined' to object script=inline#1 rejection=false"]
+    );
+    let stack = records(&engine, view)
+        .into_iter()
+        .find_map(|r| match r.event {
+            InspectorEvent::ScriptError { stack, .. } => stack,
+            _ => None,
+        })
+        .unwrap();
+    // The `eval(` call, as Boa places calls (at the `(`).
+    assert_eq!(stack, "    at <main> (inline#1:3:7)");
+}
+
+/// Logging an object runs none of the page's code: the next script sees
+/// what it would have with the Inspector off (and in Chrome).
+#[test]
+fn logging_runs_no_page_code() {
+    let page = "<html><body><script>var n = 0; console.log({ toString() { n += 100; return 'side'; } });
+var p = new Proxy({}, { get() { n += 1; throw new Error('trap'); } }); console.log(p);
+Promise.reject({ toString() { n += 1000; return 'r'; } });</script>
+<script>console.info('n seen by script 2 = ' + n);</script></body></html>";
+    let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let lines = only(&described(&engine, view, server.port), &["console", "script_error"]);
+    assert_eq!(
+        lines,
+        vec![
+            "console Log [object Object] @inline#1:1:20",
+            "console Log [object Object] @inline#1:2:80",
+            "script_error : [object Object] script=inline#1 rejection=true",
+            "console Info n seen by script 2 = 0 @inline#2:1:9",
+        ]
+    );
+}
+
+/// Every URL in error text loses its credentials, query and fragment,
+/// wherever it sits: after a quote, inside brackets, after `=`.
+#[test]
+fn urls_anywhere_in_error_text_are_scrubbed() {
+    let page = "<html><body><script>
+try { throw new Error(\"fetch failed 'https://u:p@h.test/a?token=SECRET1#f' (https://h.test/b?token=SECRET2) url=https://h.test/c?token=SECRET3.\"); } catch (e) { setTimeout(function () { throw e; }, 0); }
+Promise.reject(new Error('reason https://u:p@h.test/d?token=SECRET4'));
+</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let messages: Vec<String> = records(&engine, view)
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::ScriptError { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            "reason https://h.test/d",
+            "fetch failed 'https://h.test/a' (https://h.test/b) url=https://h.test/c.",
+        ]
+    );
+    let all = serde_json::to_string(&records(&engine, view)).unwrap();
+    assert!(!all.contains("SECRET") && !all.contains("u:p@"), "{all}");
+}
+
+/// `responseXML` is null in every browser for a response that is not a
+/// document: reading it there is not an unsupported API.
+#[test]
+fn reading_response_xml_of_a_non_document_is_not_unsupported() {
+    let page = "<html><body><script>
+var x = new XMLHttpRequest(); typeof x.responseXML; x.responseXML === null;
+x.open('GET', '/data.json'); x.onload = function () { for (var i = 0; i < 5; i++) x.responseXML; };
+x.send();
+var y = new XMLHttpRequest(); y.open('GET', '/doc.xml'); y.onload = function () { y.responseXML; y.responseXML; }; y.send();
+</script></body></html>";
+    let (engine, view, server) = load_page(
+        EngineConfig::default(),
+        vec![
+            Route::html("/", page),
+            Route::ok("/data.json", "application/json", "{}"),
+            Route::ok("/doc.xml", "application/xml", "<a/>"),
+        ],
+    );
+    assert_eq!(
+        only(&described(&engine, view, server.port), &["unsupported_api"]),
+        vec!["unsupported_api XMLHttpRequest.responseXML @inline#1:5:100"]
+    );
+    let counts: Vec<u64> = engine.inspector(view).unwrap().unsupported_apis().iter().map(|u| u.count).collect();
+    assert_eq!(counts, vec![2]);
 }

@@ -17,6 +17,8 @@ pub use module::{FetchedModule, ModuleHandle, ModuleState};
 #[cfg(feature = "boa")]
 mod executor;
 #[cfg(feature = "boa")]
+mod describe;
+#[cfg(feature = "boa")]
 mod rejections;
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
@@ -236,6 +238,10 @@ impl JsRuntime {
 
         // Set up built-in APIs
         runtime.setup_console()?;
+        #[cfg(feature = "boa")]
+        {
+            *runtime.rejections.stack_getter.borrow_mut() = describe::stack_getter(&runtime.context);
+        }
 
         debug!("JavaScript runtime initialized");
         Ok(runtime)
@@ -281,9 +287,9 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         {
             use boa_engine::Source;
-            let _ = self
-                .context
-                .eval(Source::from_bytes("console._where = __rustkit_console_where;"));
+            let _ = self.context.eval(Source::from_bytes(
+                "if (console && console.__rustkit_capture) console.__rustkit_capture();",
+            ));
         }
     }
 
@@ -316,32 +322,44 @@ impl JsRuntime {
     fn setup_console(&mut self) -> Result<(), JsError> {
         // Console is set up via evaluate_script with native function bindings
         // For now, we'll inject a simple console object
-        // `_where` (the caller's position) is set only with a handler.
+        // Without a handler each call keeps its arguments (never read). With
+        // one (`__rustkit_capture`, set by `set_console_handler`), the line is
+        // built at the call by `__rustkit_console_format`, which runs none of
+        // the page's code, and the caller's position is noted. The two
+        // natives are taken here, before any page script, so a page that
+        // replaces the globals changes nothing.
         let console_script = r#"
-            var console = {
-                _logs: [],
-                _where: null,
-                log: function() {
-                    this._logs.push({level: 'log', args: Array.from(arguments), at: this._where && this._where()});
-                },
-                info: function() {
-                    this._logs.push({level: 'info', args: Array.from(arguments), at: this._where && this._where()});
-                },
-                warn: function() {
-                    this._logs.push({level: 'warn', args: Array.from(arguments), at: this._where && this._where()});
-                },
-                error: function() {
-                    this._logs.push({level: 'error', args: Array.from(arguments), at: this._where && this._where()});
-                },
-                debug: function() {
-                    this._logs.push({level: 'debug', args: Array.from(arguments), at: this._where && this._where()});
-                },
-                _flush: function() {
-                    var logs = this._logs;
-                    this._logs = [];
-                    return logs;
+            var console = (function () {
+                var where = typeof __rustkit_console_where === 'function' ? __rustkit_console_where : null;
+                var format = typeof __rustkit_console_format === 'function' ? __rustkit_console_format : null;
+                var capturing = false;
+                function method(level) {
+                    return function () {
+                        if (capturing) {
+                            this._logs.push({level: level, msg: format.apply(null, arguments), at: where(false)});
+                        } else {
+                            this._logs.push({level: level, args: Array.from(arguments)});
+                        }
+                    };
                 }
-            };
+                var console = {
+                    _logs: [],
+                    log: method('log'),
+                    info: method('info'),
+                    warn: method('warn'),
+                    error: method('error'),
+                    debug: method('debug'),
+                    _flush: function() {
+                        var logs = this._logs;
+                        this._logs = [];
+                        return logs;
+                    }
+                };
+                Object.defineProperty(console, '__rustkit_capture', {
+                    value: function () { capturing = !!(where && format); }
+                });
+                return console;
+            })();
         "#;
 
         #[cfg(feature = "boa")]
@@ -350,8 +368,15 @@ impl JsRuntime {
             self.context
                 .register_global_callable(
                     js_string!("__rustkit_console_where"),
-                    0,
+                    1,
                     NativeFunction::from_fn_ptr(console_caller_position),
+                )
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            self.context
+                .register_global_callable(
+                    js_string!("__rustkit_console_format"),
+                    0,
+                    NativeFunction::from_fn_ptr(describe::console_format),
                 )
                 .map_err(|e| JsError::ExecutionError(e.to_string()))?;
             self.context
@@ -520,18 +545,22 @@ impl JsRuntime {
                 _ => LogLevel::Log,
             };
 
+            // Built at the call (capturing); else the arguments, described
+            // without running any of the page's code.
+            let built = entry_obj
+                .get(boa_engine::js_string!("msg"), &mut self.context)
+                .ok()
+                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()));
             let mut msg_parts = Vec::new();
-            if let Ok(args_val) = entry_obj.get(boa_engine::js_string!("args"), &mut self.context) {
+            if let Some(built) = built {
+                msg_parts.push(built);
+            } else if let Ok(args_val) = entry_obj.get(boa_engine::js_string!("args"), &mut self.context) {
                 if let Some(args_obj) = args_val.as_object() {
                     if let Ok(args_len_val) = args_obj.get(boa_engine::js_string!("length"), &mut self.context) {
                         let args_count = (args_len_val.as_number().unwrap_or(0.0).max(0.0) as u32).min(MAX_FLUSH_ARGS);
                         for arg_idx in 0..args_count {
                             if let Ok(arg) = args_obj.get(arg_idx, &mut self.context) {
-                                let s = arg
-                                    .to_string(&mut self.context)
-                                    .map(|js_s| js_s.to_std_string_escaped())
-                                    .unwrap_or_else(|_| "[object]".to_string());
-                                msg_parts.push(s);
+                                msg_parts.push(describe::text(&arg, &mut self.context));
                             }
                         }
                     }
@@ -547,6 +576,13 @@ impl JsRuntime {
         }
 
         entries
+    }
+
+    /// Hand the console calls made since the last flush to the handler
+    /// now (module evaluation and job runs do not end in an
+    /// `evaluate_script`, which flushes).
+    pub fn flush_console(&mut self) {
+        self.flush_console_logs();
     }
 
     /// Flush console logs and call handler.
@@ -735,30 +771,32 @@ fn to_boa_value(value: JsValue) -> boa_engine::JsValue {
     }
 }
 
-#[cfg(feature = "boa")]
 /// The path the console object is evaluated under, so its own frames can be
 /// told from its callers'.
 #[cfg(feature = "boa")]
 const CONSOLE_SCRIPT_PATH: &str = "<rustkit console>";
 
-/// `__rustkit_console_where()`: the position of the innermost frame in a
-/// named script other than the console itself (the page code that called
-/// the console, or the bindings function that called this), as
-/// `path\u{1}line\u{1}column`; `undefined` when there is none. Reads the
-/// VM's frames only; runs no script.
+/// `__rustkit_console_where(skipUnnamed)`: the position of the innermost
+/// frame other than the console's own, as `path\u{1}line\u{1}column`.
+/// That frame is the caller; when it is not in a named script (`eval` code,
+/// an `on*` attribute's handler) the answer is `undefined`, never an outer
+/// caller's position. With `skipUnnamed` (the bindings' own unnamed glue
+/// calling this) unnamed frames are passed over instead. Reads the VM's
+/// frames only; runs no script.
 #[cfg(feature = "boa")]
 fn console_caller_position(
     _this: &boa_engine::JsValue,
-    _args: &[boa_engine::JsValue],
+    args: &[boa_engine::JsValue],
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsResult<boa_engine::JsValue> {
     use boa_engine::vm::SourcePath;
+    let skip_unnamed = args.first().is_some_and(|a| a.to_boolean());
     for frame in context.stack_trace() {
         let location = frame.position();
         let path = match &location.path {
             SourcePath::Path(path) => path.to_string_lossy().into_owned(),
-            // The engine's own glue (evaluated unnamed) and `eval` code.
-            _ => continue,
+            _ if skip_unnamed => continue,
+            _ => return Ok(boa_engine::JsValue::undefined()),
         };
         if path == CONSOLE_SCRIPT_PATH {
             continue;
@@ -1153,9 +1191,97 @@ mod tests {
             .evaluate_script("console.log('val:', { toString() { throw new Error('boom'); } });")
             .unwrap();
 
+        // The page's `toString` is never called: an object is its tag.
         let logs = received.lock().unwrap().clone();
         assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0], "val: [object]");
+        assert_eq!(logs[0], "val: [object Object]");
+    }
+
+    /// The line is built at the call, from the values as they are then, and
+    /// none of the page's code runs: not `toString`, not a getter, not a
+    /// Proxy trap, neither at the call nor when the engine drains the log.
+    #[test]
+    fn console_lines_run_no_page_code_and_are_built_at_the_call() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+            recv_clone.lock().unwrap().push(msg.to_string());
+        }));
+        runtime
+            .evaluate_script(
+                "var n = 0;
+                 var o = { toString() { n += 100; return 'side'; } };
+                 var p = new Proxy({}, { get() { n += 1; throw new Error('trap'); } });
+                 var e = new TypeError('bad thing');
+                 var arr = [1, 2];
+                 console.log(o, p, e, arr, Symbol('s'), 12, null, undefined, 'text', 10n);
+                 arr.push(3);",
+            )
+            .unwrap();
+        assert_eq!(
+            received.lock().unwrap().clone(),
+            vec!["[object Object] [object Object] TypeError: bad thing [object Array] Symbol(s) 12 null undefined text 10"]
+        );
+        assert_eq!(runtime.evaluate_script("n").unwrap().is_truthy(), false, "page code ran");
+    }
+
+    /// A page cannot break or redirect the console by overwriting the
+    /// natives it uses.
+    #[test]
+    fn overwriting_the_console_natives_changes_nothing() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+            recv_clone.lock().unwrap().push(msg.to_string());
+        }));
+        runtime
+            .evaluate_script(
+                "__rustkit_console_format = function () { return 'hijacked'; };
+                 __rustkit_console_where = 1; console._where = 1;
+                 console.log('still', 'fine');",
+            )
+            .unwrap();
+        assert_eq!(received.lock().unwrap().clone(), vec!["still fine"]);
+    }
+
+    /// Code with no named script of its own (`eval`) has no position; the
+    /// caller's position is not passed off as its.
+    #[test]
+    fn a_console_call_from_eval_code_has_no_position() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, at| {
+            recv_clone.lock().unwrap().push((msg.to_string(), at.cloned()));
+        }));
+        runtime.evaluate_script_named("1;\neval(\"console.log('in eval')\");", "inline#1").unwrap();
+        assert_eq!(received.lock().unwrap().clone(), vec![("in eval".to_string(), None)]);
+    }
+
+    /// A rejection's reason is described without its `toString` or a
+    /// `stack` getter of the page's.
+    #[test]
+    fn describing_a_rejection_runs_no_page_code() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_rejection_tracking(true);
+        runtime
+            .evaluate_script_named(
+                "var n = 0;
+                 Promise.reject({ toString() { n += 1; return 'x'; } });
+                 var e = new Error('plain');
+                 Object.defineProperty(e, 'stack', { get() { n += 10; return 'fake'; } });
+                 Promise.reject(e);",
+                "inline#1",
+            )
+            .unwrap();
+        let rejections = runtime.take_unhandled_rejections();
+        assert_eq!(rejections.len(), 2);
+        assert_eq!(rejections[0].message, "[object Object]");
+        assert_eq!(rejections[1].message, "Error: plain");
+        assert!(rejections[1].stack.as_deref().unwrap_or("").contains("inline#1:3:"), "the stack is where the error was made: {rejections:?}");
+        assert_eq!(runtime.evaluate_script("n").unwrap().is_truthy(), false, "page code ran");
     }
 
     #[test]

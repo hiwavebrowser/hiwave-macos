@@ -54,24 +54,43 @@ field that is `null` today may hold a value later.
 | `relayout` | `cause` (the value of the `relayout cause=` log line), `took_ms` |
 
 `location` is `null` or `{ "url", "line", "column" }` (1-based). `url` is the
-script's URL, or `inline#n` for the page's n-th `<script>` when it is inline
-(the line then counts from the start of that script's text). Lines and
-columns are the JS engine's (Boa): a call's column is its `(`, a property
-access's is the property name, and an error raised by a name lookup inside an
-anonymous function can carry the function's start instead.
+script's URL, or `inline#n` for the page's n-th `<script>` when it is inline,
+classic or module (the line then counts from the start of that script's text;
+Chrome counts from the start of the document). Lines and columns are the JS
+engine's (Boa), with one correction: a console call is placed at the method's
+name (`console.log(` at `log`), as Chrome places it. Otherwise a call is placed
+at its `(`, a property access at the property name, and an error raised by a
+name lookup inside a function can carry the function's start instead (a Boa
+limitation).
+
+Code that is in no named script has no `location`: `eval` code and the handler
+an `on*` attribute compiles. Their console calls and errors are never given
+the position of the code that called them; an error's `stack` still lists the
+page frames around them.
+
+`message` of a `console` event is built when the call is made and runs none
+of the page's code: strings, numbers and other primitives as they are,
+`Symbol(x)`, an error as `Name: message` from its own data properties, any
+other object as a tag (`[object Object]`, `[object Array]`,
+`[object Function]`). Unhandled rejections are described the same way.
 
 `script` names what ran the code: a script URL, `inline#n`, or the engine
 step (`event:DOMContentLoaded`, `event:load`, `event:resize`,
-`event:<mouse event>`, `timers`, `network`).
+`event:<mouse event>`, `timers`, `network`). An error thrown by a listener
+that a script's own dispatch ran (`button.click()`) is that script's, recorded
+when the script ends (after its console lines). A module's error is recorded
+once, never also as an unhandled rejection.
 
-`stack` holds the page's frames only (`    at name (url:line:col)` lines),
-capped at 4096 characters.
+`stack` holds the page's frames only (`    at name (url:line:col)` lines; no
+native, engine or `eval` frames), capped at 4096 characters.
 
 ### Unsupported APIs
 
 Recorded where the bindings know they do not implement something and page
 script reaches it: `XMLHttpRequest.open(async=false)`,
-`XMLHttpRequest.responseXML`, `CustomElementRegistry.define(extends)`,
+`XMLHttpRequest.responseXML` (read on a finished response whose type is XML,
+or HTML with `responseType = 'document'`: anywhere else it is `null` in
+every browser), `CustomElementRegistry.define(extends)`,
 `ReadableStream.getReader(byob)`, `DOMParser.parseFromString(XML)`. One event
 per member per page; `Inspector::unsupported_apis()` and the summary carry the
 counts. Property reads that fall through to `undefined` are not detected:
@@ -85,7 +104,9 @@ The log is meant to be pasted into public issues and PRs.
   always removed; query and fragment are removed unless
   `InspectorConfig::keep_url_query` (`parity-capture --event-log-keep-query`)
   is set. A `data:` URL becomes `data:<mime>,…`; a `blob:` URL its origin.
-- URLs inside error messages and stacks are scrubbed the same way.
+- URLs inside error messages, rejection reasons and stacks are scrubbed the
+  same way wherever they sit in the text (after a quote, in brackets, after
+  `=`).
 - No request or response header, body, cookie, form value or storage content
   is recorded.
 - Console messages are page-controlled text: capped at 1024 characters and

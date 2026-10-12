@@ -401,12 +401,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // number of instrumented members.
     var unsupported = {};
     var unsupportedKeys = [];
+    var where = typeof __rustkit_console_where === 'function' ? __rustkit_console_where : null;
     window.__rustkit_unsupported = function (iface, member) {
         var key = iface + '.' + member;
         var seen = unsupported[key];
         if (seen) { seen.n++; return; }
         var at = null;
-        try { at = console._where ? console._where() : null; } catch (_) {}
+        try { if (withStacks && where) at = where(true) || null; } catch (_) {}
         unsupported[key] = { i: iface, m: member, n: 1, sent: 0, at: at || null };
         unsupportedKeys.push(key);
     };
@@ -693,6 +694,9 @@ pub struct DomBindings {
     mutations: Rc<RefCell<ScriptMutations>>,
     /// The scroll offset script reads and writes (see `web_scroll`).
     scroll: web_scroll::SharedScroll,
+    /// Diagnostics are on ([`DomBindings::set_error_details`]): reported
+    /// errors carry their stacks after a U+0000.
+    error_details: Cell<bool>,
 }
 
 impl DomBindings {
@@ -753,6 +757,7 @@ impl DomBindings {
             dirty,
             mutations,
             scroll,
+            error_details: Cell::new(false),
         })
     }
 
@@ -1440,10 +1445,16 @@ impl DomBindings {
         self.runtime.borrow_mut().set_console_handler(handler);
     }
 
+    /// Hand pending console calls to the console handler now.
+    pub fn flush_console(&self) {
+        self.runtime.borrow_mut().flush_console();
+    }
+
     /// Diagnostics for an embedder that records them: note unhandled
     /// rejections, and keep the stack of each error a listener or timer
     /// throws ([`take_reported_error_details`](Self::take_reported_error_details)).
     pub fn set_error_details(&self, on: bool) -> Result<(), BindingError> {
+        self.error_details.set(on);
         let mut runtime = self.runtime.borrow_mut();
         runtime.set_rejection_tracking(on);
         runtime.evaluate_script(&format!(
@@ -1770,9 +1781,12 @@ impl DomBindings {
             Ok(JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
             _ => Vec::new(),
         };
+        // Only with details on is a U+0000 the stack's separator; else it is
+        // part of the page's message.
+        let details = self.error_details.get();
         texts
             .into_iter()
-            .map(|text| match text.split_once('\u{0}') {
+            .map(|text| match text.split_once('\u{0}').filter(|_| details) {
                 Some((message, stack)) => (message.to_string(), Some(stack.to_string())),
                 None => (text, None),
             })
@@ -2507,6 +2521,24 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("undefinedFn"), "{errors:?}");
         assert!(bindings.take_reported_errors().is_empty(), "drained");
+    }
+
+    /// A listener's error text keeps a U+0000 of its own unless the stack
+    /// details are on (then U+0000 is the separator).
+    #[test]
+    fn a_nul_in_an_error_message_is_kept_without_details() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate("window.addEventListener('load', function () { throw new Error('a\\u0000b'); });")
+            .unwrap();
+        bindings.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(bindings.take_reported_error_details(), vec![("Error: a\u{0}b".to_string(), None)]);
+
+        bindings.set_error_details(true).unwrap();
+        bindings.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        let details = bindings.take_reported_error_details();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].0, "Error: a");
     }
 
     #[test]

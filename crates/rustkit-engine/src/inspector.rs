@@ -461,7 +461,8 @@ impl Inspector {
 
     /// Engine-made text that can name scripts (an error message, a stack):
     /// each `(path:line:col)` position is shown as [`location`](Self::location)
-    /// shows it, and any other `http(s)` URL in it is scrubbed.
+    /// shows it, and every `http(s)://`, `ws(s)://` or `file://` URL anywhere
+    /// in it (after a quote, a bracket, an `=`) is scrubbed as event URLs are.
     pub fn scrub_text(&self, text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         for (i, line) in text.split('\n').enumerate() {
@@ -472,23 +473,46 @@ impl Inspector {
                 let inner = line[open + 1..].strip_suffix(')')?;
                 let (path, l, c) = parse_position(inner)?;
                 let at = self.location(&path, l, c);
-                Some(format!("{}({}:{}:{})", &line[..open], at.url, at.line, at.column))
+                Some(format!("{}({}:{}:{})", self.scrub_urls(&line[..open]), at.url, at.line, at.column))
             });
             match rewritten {
                 Some(line) => out.push_str(&line),
-                None => {
-                    for (j, word) in line.split(' ').enumerate() {
-                        if j > 0 {
-                            out.push(' ');
-                        }
-                        match word.starts_with("http://") || word.starts_with("https://") {
-                            true => out.push_str(&self.url_text(word)),
-                            false => out.push_str(word),
-                        }
-                    }
-                }
+                None => out.push_str(&self.scrub_urls(line)),
             }
         }
+        out
+    }
+
+    /// Every URL in `text` scrubbed, wherever it starts.
+    fn scrub_urls(&self, text: &str) -> String {
+        const SCHEMES: [&str; 5] = ["https://", "http://", "wss://", "ws://", "file://"];
+        let lower = text.to_ascii_lowercase();
+        let mut out = String::with_capacity(text.len());
+        let mut rest = 0;
+        while rest < text.len() {
+            let next = SCHEMES
+                .iter()
+                .filter_map(|scheme| lower[rest..].find(scheme).map(|i| rest + i))
+                .min();
+            let Some(start) = next else { break };
+            // A URL runs to whitespace, a quote or a bracket; trailing
+            // sentence punctuation is not part of it.
+            let mut end = text[start..]
+                .find(|c: char| c.is_whitespace() || "'\"`<>()[]{}".contains(c))
+                .map(|i| start + i)
+                .unwrap_or(text.len());
+            while end > start && text[..end].ends_with(['.', ',', ';', ':', '!', '?']) {
+                end -= 1;
+            }
+            out.push_str(&text[rest..start]);
+            match Url::parse(&text[start..end]) {
+                Ok(url) => out.push_str(&self.url(&url)),
+                // Not a URL after all: keep the scheme, drop what follows.
+                Err(_) => out.push_str(&text[start..start + text[start..].find("//").map_or(0, |i| i + 2)]),
+            }
+            rest = end;
+        }
+        out.push_str(&text[rest..]);
         out
     }
 
@@ -500,6 +524,13 @@ impl Inspector {
     /// [`url`](Self::url) for text that may not be a URL (a script label
     /// such as `inline#2`, which is kept as it is).
     pub fn url_text(&self, text: &str) -> String {
+        // An inline module runs as `<document>#inline-module-<n>`: it is the
+        // page's n-th `<script>`, as an inline classic script is.
+        if let Some((_, n)) = text.rsplit_once("#inline-module-") {
+            if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) {
+                return format!("inline#{n}");
+            }
+        }
         match Url::parse(text) {
             Ok(url) if matches!(url.scheme(), "http" | "https" | "ws" | "wss" | "file" | "data" | "blob") => {
                 self.url(&url)
