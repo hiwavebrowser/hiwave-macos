@@ -55,6 +55,19 @@ fn a_page_that_stays_still_gets_the_image_its_script_added() {
     assert_eq!(asked, None);
 }
 
+/// A form the page's script submits may be one the embedder does not
+/// follow (only GET is wired), so the page may stay: it keeps its images.
+#[test]
+fn a_page_whose_script_submitted_a_form_still_gets_the_image() {
+    let page = "<html><body><form id=f method=post action=/next><input name=q value=1></form>
+<script>document.getElementById('f').submit();</script>
+<script>var img = document.createElement('img'); img.src = '/slow-added.png'; document.body.appendChild(img);</script>
+</body></html>";
+    let (requests, asked) = load(follows(), page);
+    assert_eq!(requests, 2, "the page and its image");
+    assert_eq!(asked, None, "a POST is not followed");
+}
+
 /// A capture does not follow the page: it shows the page as it was, with
 /// what its scripts added.
 #[test]

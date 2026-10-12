@@ -134,7 +134,7 @@ impl DomHost {
     }
 
     pub(crate) fn navigation_requested(&self) -> bool {
-        !self.navigation_requests.is_empty() || !self.submit_requests.is_empty()
+        !self.navigation_requests.is_empty()
     }
 
     pub(crate) fn take_navigation_requests(&mut self) -> Vec<String> {

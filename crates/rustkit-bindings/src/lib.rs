@@ -757,8 +757,9 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_submit_requests()
     }
 
-    /// Whether script has asked to navigate or to submit a form since the
-    /// requests were last taken. Takes nothing.
+    /// Whether script has asked to navigate to a URL since the requests
+    /// were last taken. Takes nothing. A form submitted by script does not
+    /// count: the embedder may not follow it (only GET is wired).
     pub fn navigation_requested(&self) -> bool {
         self.dom_host.borrow().navigation_requested()
     }
