@@ -12,9 +12,10 @@ and "all tests green" are facts a reader can check, not prose.
 The output goes into public PR bodies and comments, so it carries no path of
 the machine that ran it: a file inside the repository prints repo-relative, any
 other file prints as its basename, and absolute paths in --note, RUSTFLAGS and
-the RUSTKIT_* values get the same treatment. A local-path origin prints as its
-basename, an origin URL loses its credentials, and the machine's name is left
-out. --host-paths keeps all of these as given, for local use only.
+the RUSTKIT_* values get the same treatment. A home directory prints as "~".
+A local-path origin prints as its basename, an origin URL loses its
+credentials and query, and the machine's name is left out. Nothing is written
+to stderr. --host-paths keeps all of these as given, for local use only.
 
 Runs on macOS, Windows and Linux; every field it cannot determine is printed
 as null rather than guessed.
@@ -41,8 +42,23 @@ def sha256(path):
         return None
 
 
+def utc_z(when):
+    """An aware UTC time in the form the receipt has always printed."""
+    return when.replace(tzinfo=None).isoformat() + "Z"
+
+
+# A home directory itself: its last component is an account name.
+HOME_DIR = re.compile(r"(?:[A-Za-z]:)?[\\/](?:Users|home)[\\/][^\\/]+[\\/]?$")
+
+
+def is_home(path):
+    path = str(path)
+    return bool(HOME_DIR.match(path)) or os.path.normpath(path) == os.path.normpath(str(Path.home()))
+
+
 def public_path(path, root):
-    """Repo-relative for a file inside the repository, the basename otherwise."""
+    """Repo-relative for a file inside the repository, "~" for a home
+    directory, the basename otherwise."""
     full = Path(os.path.abspath(str(path)))
     root = Path(root).resolve()
     for cand in (full, full.resolve()):
@@ -50,45 +66,58 @@ def public_path(path, root):
             return cand.relative_to(root).as_posix()
         except ValueError:
             pass
-    return full.name
+    return "~" if is_home(full) else full.name
 
 
 # An absolute path in free text: POSIX with at least one directory (so "/60" and
 # "and/or" are left alone, and the "//host/..." of a URL is not a path), a "~/"
-# path, a Windows drive path or a UNC path. The "/" may follow a one-letter
-# option ("-L/abs"), a ":" ("path:/abs", the entries of a PATH= list) or an "=",
-# but not a word, which is a relative path ("a/b/c") or "${HOME}/x". A path with
-# a space in it is cut at the space.
+# or "~user/" path, a Windows drive path or a UNC path. The "/" may follow an
+# option word ("-L/abs", "-isystem/abs"), a ":" ("path:/abs", the entries of a
+# PATH= list) or an "=", but not any other word, which is a relative path
+# ("a/b/c", "rustkit-layout/src") or "${HOME}/x". A path with a space in it is
+# cut at the space.
 SEG = r"[\w.@+~$-]"
 ABS_PATH = re.compile(
-    r"(?:(?P<flag>(?<![\w-])-[A-Za-z])|(?<![\w./\\~}]))(?P<posix>~?/(?:SEG+/)+SEG*)"
+    r"(?:(?P<flag>(?<![\w-])--?[A-Za-z][\w-]*)|(?<![\w./\\~}]))(?P<posix>~?/(?:SEG+/)+SEG*)"
+    r"|(?P<tilde>(?<![\w./\\~}])~[A-Za-z_][\w.-]*/(?:SEG+/?)*)"
     r"|(?<![A-Za-z])[A-Za-z]:[\\/](?:SEG+[\\/])*SEG*"
     r"|(?<![\w\\/:])\\\\SEG+(?:\\SEG+)+".replace("SEG", SEG))
+# A credential carried as a URL query value.
+SECRET_QUERY = re.compile(r"([?&](?:[\w-]*[_-])?(?:token|key|secret|password|passwd|pwd|auth|signature|sig)=)[^&\s#]+", re.I)
 
 
 def public_text(text, root):
     def one(m):
         tok = m.group("posix") or m.group(0)
         body = tok.rstrip(".")
+        rest = tok[len(body):]
         if m.group("posix"):
-            return (m.group("flag") or "") + public_path(os.path.expanduser(body), root) + tok[len(body):]
-        return re.split(r"[\\/]", body.rstrip("\\/"))[-1] + tok[len(body):]
+            return (m.group("flag") or "") + public_path(os.path.expanduser(body), root) + rest
+        parts = re.split(r"[\\/]", body.rstrip("\\/"))
+        if (m.group("tilde") and len(parts) == 1) or is_home(body):
+            return "~" + rest
+        return parts[-1] + rest
     if not text:
         return text
     text = re.sub(r"(\b[A-Za-z][\w+.-]*://)[^/\s@]*@", r"\1", text.replace("file://", ""))
-    return ABS_PATH.sub(one, text)
+    return ABS_PATH.sub(one, SECRET_QUERY.sub(r"\1REDACTED", text))
 
 
 def public_repo(url):
-    """An origin URL without its credentials; a local-path origin as its basename."""
+    """An origin URL without its credentials or query; an scp-style origin
+    with a path on the remote host as host:basename; a local-path origin as
+    its basename."""
     if not url:
         return url
-    m = re.match(r"([A-Za-z][\w+.-]*)://(?:[^/@]*@)?(.*)", url)
+    m = re.match(r"([A-Za-z][\w+.-]*)://(?:[^/@]*@)?([^?#]*)", url)
     if m and m.group(1).lower() != "file":
         return m.group(1) + "://" + m.group(2)
-    if not m and re.match(r"[\w.-]+@[\w.-]+:", url):
+    local = m.group(2) if m else url
+    scp = None if m else re.match(r"(?:[\w.-]+@)?([\w.-]{2,}):(.*)", url)
+    if scp and not scp.group(2).startswith(("/", "~", "\\")):
         return url
-    return re.split(r"[\\/]", (m.group(2) if m else url).rstrip("\\/"))[-1] or None
+    name = re.split(r"[\\/]", (scp.group(2) if scp else local).rstrip("\\/"))[-1]
+    return (scp.group(1) + ":" + name) if scp else (name or None)
 
 
 def main():
@@ -120,7 +149,7 @@ def main():
     text = (lambda t: t) if a.host_paths else (lambda t: public_text(t, root))
     rec = {
         "work_package": a.package,
-        "base_sha": a.base,
+        "base_sha": text(a.base),
         "candidate_sha": head,
         "dirty_state": dirty,
         "repo": origin if a.host_paths else public_repo(origin),
@@ -128,7 +157,7 @@ def main():
         "cargo_lock_sha256": lock_hash,
         "binary": shown(a.binary) if binary else None,
         "binary_sha256": sha256(binary) if binary else None,
-        "binary_mtime_utc": datetime.datetime.utcfromtimestamp(binary.stat().st_mtime).isoformat() + "Z" if binary and binary.exists() else None,
+        "binary_mtime_utc": utc_z(datetime.datetime.fromtimestamp(binary.stat().st_mtime, datetime.timezone.utc)) if binary and binary.exists() else None,
         "toolchain": toolchain,
         "cargo": cargo,
         "target": target,
@@ -143,7 +172,7 @@ def main():
         "chrome_version": None,
         "campaign": None,
         "raw_runs": [],
-        "utc": datetime.datetime.utcnow().isoformat() + "Z",
+        "utc": utc_z(datetime.datetime.now(datetime.timezone.utc)),
         "note": text(a.note),
     }
     meta = root / "baselines" / "metadata.json"
