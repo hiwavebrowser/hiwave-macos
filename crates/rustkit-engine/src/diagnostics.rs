@@ -952,8 +952,26 @@ fn style_record(
                 let (r, c) = (len(&s.row_gap, false), len(&s.column_gap, false));
                 Some(if r == c { r } else { format!("{r} {c}") })
             }
-            "grid-template-columns" => Some(template(&s.grid_template_columns)),
-            "grid-template-rows" => Some(template(&s.grid_template_rows)),
+            "grid-template-columns" | "grid-template-rows" => {
+                let t = if *p == "grid-template-columns" { &s.grid_template_columns } else { &s.grid_template_rows };
+                if has_line_names(t) {
+                    unavailable.insert(format!("style.{p}"), "line names are not serialised".into());
+                    None
+                } else if !matches!(s.display, Display::Grid | Display::InlineGrid) {
+                    // Not a grid container: getComputedStyle reports the computed list.
+                    Some(template(t))
+                } else {
+                    // A grid container's value is its resolved tracks in px, which
+                    // the engine does not keep. Only an all-px list is already that.
+                    px_template(t).or_else(|| {
+                        unavailable.insert(
+                            format!("style.{p}"),
+                            "a grid container reports resolved px tracks; the engine keeps only the specified list".into(),
+                        );
+                        None
+                    })
+                }
+            }
             "grid-auto-flow" => Some(match s.grid_auto_flow {
                 rustkit_css::GridAutoFlow::Row => "row".into(),
                 rustkit_css::GridAutoFlow::Column => "column".into(),
@@ -990,10 +1008,37 @@ fn style_record(
         };
         m.insert(p, v);
     }
-    if matches!(s.display, Display::Grid | Display::InlineGrid) {
-        notes.push("grid-template-* is the specified track list, not the resolved px getComputedStyle reports".into());
-    }
     m
+}
+
+fn has_line_names(t: &rustkit_css::GridTemplate) -> bool {
+    let named = |defs: &[rustkit_css::TrackDefinition]| defs.iter().any(|d| !d.line_names.is_empty());
+    !t.final_line_names.is_empty()
+        || named(&t.tracks)
+        || t.repeats.iter().any(|(_, r)| match r {
+            rustkit_css::TrackRepeat::Count(_, d)
+            | rustkit_css::TrackRepeat::AutoFill(d)
+            | rustkit_css::TrackRepeat::AutoFit(d) => named(d),
+        })
+}
+
+/// A track list that is px only (fixed repeats expanded), as getComputedStyle
+/// resolves it; `None` for anything that must be resolved by layout, or for
+/// no list at all (Chromium then reports the implicit tracks).
+fn px_template(t: &rustkit_css::GridTemplate) -> Option<String> {
+    let px = |d: &rustkit_css::TrackDefinition| match d.size {
+        TrackSize::Px(p) => Some(css_px(p)),
+        _ => None,
+    };
+    let mut parts: Vec<String> = t.tracks.iter().map(px).collect::<Option<_>>()?;
+    for (at, rep) in t.repeats.iter().rev() {
+        let rustkit_css::TrackRepeat::Count(n, defs) = rep else { return None };
+        let one: Vec<String> = defs.iter().map(px).collect::<Option<_>>()?;
+        let expanded = (0..*n).flat_map(|_| one.iter().cloned());
+        let at = (*at).min(parts.len());
+        parts.splice(at..at, expanded);
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 impl Engine {

@@ -436,7 +436,7 @@ fn grid_templates_that_are_not_all_px_are_unknown() {
         "<html><body style=\"margin:0\">\
          <div id=g style=\"display:grid;width:400px;grid-template-columns:100px 1fr 2fr\"><div>a</div></div>\
          <div id=p style=\"display:grid;grid-template-columns:100px 200px;grid-template-rows:30px\"><div>a</div></div>\
-         <div id=b style=\"grid-template-columns:1fr 2fr\"></div>\
+         <div id=b style=\"height:10px;grid-template-columns:1fr 2fr\"></div>\
          </body></html>",
         800,
         600,
@@ -450,7 +450,8 @@ fn grid_templates_that_are_not_all_px_are_unknown() {
     assert_eq!(p["style"]["grid-template-columns"], "100px 200px");
     assert_eq!(p["style"]["grid-template-rows"], "30px");
     // Not a grid container: getComputedStyle reports the computed (specified) list.
-    assert_eq!(diag(&engine, view, "#b")["style"]["grid-template-columns"], "1fr 2fr");
+    let b = diag(&engine, view, "#b");
+    assert_eq!(b["style"]["grid-template-columns"], "1fr 2fr", "{}", b["unavailable"]);
 }
 
 #[test]
