@@ -376,11 +376,51 @@ const PAGE_LIFECYCLE_JS: &str = r#"
 (function () {
     var errors = [];
     window.__rustkit_errors = errors;
-    function report(e) {
+    // `String(e)`; with the engine's Inspector listening, also the error's
+    // stack after a U+0000 (`take_reported_error_details` splits it off).
+    var withStacks = false;
+    window.__rustkit_error_text = function (e) {
         var msg;
-        try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
-        errors.push(msg);
+        try { msg = String(e); } catch (_) { return '<unprintable exception>'; }
+        if (withStacks && e !== null && typeof e === 'object') {
+            try {
+                var stack = e.stack;
+                if (typeof stack === 'string' && stack) msg += '\u0000' + stack;
+            } catch (_) {}
+        }
+        return msg;
+    };
+    window.__rustkit_errors_with_stacks = function (on) { withStacks = !!on; };
+    function report(e) {
+        errors.push(window.__rustkit_error_text(e));
     }
+
+    // Web API members the bindings know they do not implement, reached by
+    // page script: `interface.member` -> count and the first caller's
+    // position (only while the console notes positions). Bounded by the
+    // number of instrumented members.
+    var unsupported = {};
+    var unsupportedKeys = [];
+    window.__rustkit_unsupported = function (iface, member) {
+        var key = iface + '.' + member;
+        var seen = unsupported[key];
+        if (seen) { seen.n++; return; }
+        var at = null;
+        try { at = console._where ? console._where() : null; } catch (_) {}
+        unsupported[key] = { i: iface, m: member, n: 1, sent: 0, at: at || null };
+        unsupportedKeys.push(key);
+    };
+    window.__rustkit_take_unsupported = function () {
+        var out = [];
+        for (var k = 0; k < unsupportedKeys.length; k++) {
+            var u = unsupported[unsupportedKeys[k]];
+            if (u.n > u.sent) {
+                out.push({ i: u.i, m: u.m, n: u.n - u.sent, at: u.at });
+                u.sent = u.n;
+            }
+        }
+        return JSON.stringify(out);
+    };
 
     function makeEventTarget(target) {
         var listeners = {};
@@ -1385,6 +1425,72 @@ impl DomBindings {
             .map_err(Into::into)
     }
 
+    /// Evaluate a page script as `path` (see
+    /// [`JsRuntime::evaluate_script_named`]).
+    pub fn evaluate_named(&self, script: &str, path: &str) -> Result<JsValue, BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_script_named(script, path)
+            .map_err(Into::into)
+    }
+
+    /// Hand the page's console calls to `handler`, with their positions
+    /// (see [`JsRuntime::set_console_handler`]).
+    pub fn set_console_handler(&self, handler: rustkit_js::ConsoleHandler) {
+        self.runtime.borrow_mut().set_console_handler(handler);
+    }
+
+    /// Diagnostics for an embedder that records them: note unhandled
+    /// rejections, and keep the stack of each error a listener or timer
+    /// throws ([`take_reported_error_details`](Self::take_reported_error_details)).
+    pub fn set_error_details(&self, on: bool) -> Result<(), BindingError> {
+        let mut runtime = self.runtime.borrow_mut();
+        runtime.set_rejection_tracking(on);
+        runtime.evaluate_script(&format!(
+            "if (window.__rustkit_errors_with_stacks) window.__rustkit_errors_with_stacks({on});"
+        ))?;
+        Ok(())
+    }
+
+    /// Promises rejected with no handler since the last call (with
+    /// [`set_error_details`](Self::set_error_details) on).
+    pub fn take_unhandled_rejections(&self) -> Vec<rustkit_js::UnhandledRejection> {
+        self.runtime.borrow_mut().take_unhandled_rejections()
+    }
+
+    /// Unimplemented Web API members page script reached since the last
+    /// call: `(interface, member, times, first caller's position)`.
+    pub fn take_unsupported_apis(&self) -> Vec<(String, String, u64, Option<rustkit_js::ScriptPosition>)> {
+        #[derive(serde::Deserialize)]
+        struct Reached {
+            i: String,
+            m: String,
+            n: u64,
+            at: Option<String>,
+        }
+        let drained = self.runtime.borrow_mut().evaluate_script(
+            "window.__rustkit_take_unsupported ? window.__rustkit_take_unsupported() : '[]'",
+        );
+        let Ok(JsValue::String(json)) = drained else {
+            return Vec::new();
+        };
+        serde_json::from_str::<Vec<Reached>>(&json)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| {
+                let at = r.at.and_then(|at| {
+                    let mut parts = at.split('\u{1}');
+                    Some(rustkit_js::ScriptPosition {
+                        path: parts.next()?.to_string(),
+                        line: parts.next()?.parse().ok()?,
+                        column: parts.next()?.parse().ok()?,
+                    })
+                });
+                (r.i, r.m, r.n, at)
+            })
+            .collect()
+    }
+
     /// Bound every loop a page script runs (see
     /// [`JsRuntime::set_loop_iteration_limit`]).
     pub fn set_loop_iteration_limit(&self, max_iterations: u64) {
@@ -1646,14 +1752,31 @@ impl DomBindings {
     /// Exceptions thrown in listeners and timer callbacks since the last
     /// call, as `String(error)` (`TypeError: x is not a function`).
     pub fn take_reported_errors(&self) -> Vec<String> {
+        self.take_reported_error_details()
+            .into_iter()
+            .map(|(message, _)| message)
+            .collect()
+    }
+
+    /// [`take_reported_errors`](Self::take_reported_errors), each with the
+    /// error's stack when [`set_error_details`](Self::set_error_details) is
+    /// on and it had one.
+    pub fn take_reported_error_details(&self) -> Vec<(String, Option<String>)> {
         let drained = self
             .runtime
             .borrow_mut()
             .evaluate_script("JSON.stringify(window.__rustkit_errors.splice(0))");
-        match drained {
+        let texts: Vec<String> = match drained {
             Ok(JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
             _ => Vec::new(),
-        }
+        };
+        texts
+            .into_iter()
+            .map(|text| match text.split_once('\u{0}') {
+                Some((message, stack)) => (message.to_string(), Some(stack.to_string())),
+                None => (text, None),
+            })
+            .collect()
     }
 
     /// Drain the IPC message queue.

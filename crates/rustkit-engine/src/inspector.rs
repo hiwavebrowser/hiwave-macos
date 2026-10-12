@@ -217,6 +217,9 @@ struct State {
     unsupported: Vec<UnsupportedApiCount>,
     laid_out: bool,
     painted: bool,
+    /// The names page scripts are evaluated under that are not their URL
+    /// (`script#3`), and the URL each stands for (as events show it).
+    aliases: Vec<(String, String)>,
 }
 
 /// A view's recorder and ring buffer. See the module docs.
@@ -242,6 +245,7 @@ impl Inspector {
                 unsupported: Vec::new(),
                 laid_out: false,
                 painted: false,
+                aliases: Vec::new(),
             }),
         })
     }
@@ -366,6 +370,7 @@ impl Inspector {
         state.unsupported.clear();
         state.laid_out = false;
         state.painted = false;
+        state.aliases.clear();
         Self::push_locked(&mut state, InspectorEvent::NavigationStart { url });
     }
 
@@ -431,6 +436,62 @@ impl Inspector {
         Self::push_locked(&mut state, InspectorEvent::UnsupportedApi { interface, member, location });
     }
 
+    /// Page script `url` is evaluated under the name `alias`: positions in
+    /// it are shown with its URL.
+    pub fn alias_script(&self, alias: &str, url: &str) {
+        if !self.is_active() {
+            return;
+        }
+        let url = self.url_text(url);
+        self.state().aliases.push((alias.to_string(), url));
+    }
+
+    /// A position as events show it: the script's URL (an alias resolved,
+    /// a URL scrubbed) or its `inline#n` label.
+    pub fn location(&self, path: &str, line: u32, column: u32) -> SourceLocation {
+        let url = self
+            .state()
+            .aliases
+            .iter()
+            .find(|(alias, _)| alias == path)
+            .map(|(_, url)| url.clone())
+            .unwrap_or_else(|| self.url_text(path));
+        SourceLocation { url, line, column }
+    }
+
+    /// Engine-made text that can name scripts (an error message, a stack):
+    /// each `(path:line:col)` position is shown as [`location`](Self::location)
+    /// shows it, and any other `http(s)` URL in it is scrubbed.
+    pub fn scrub_text(&self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            let rewritten = line.rfind('(').and_then(|open| {
+                let inner = line[open + 1..].strip_suffix(')')?;
+                let (path, l, c) = parse_position(inner)?;
+                let at = self.location(&path, l, c);
+                Some(format!("{}({}:{}:{})", &line[..open], at.url, at.line, at.column))
+            });
+            match rewritten {
+                Some(line) => out.push_str(&line),
+                None => {
+                    for (j, word) in line.split(' ').enumerate() {
+                        if j > 0 {
+                            out.push(' ');
+                        }
+                        match word.starts_with("http://") || word.starts_with("https://") {
+                            true => out.push_str(&self.url_text(word)),
+                            false => out.push_str(word),
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// A URL as events show it (see the module docs).
     pub fn url(&self, url: &Url) -> String {
         scrub_url(url, self.keep_url_query)
@@ -440,8 +501,11 @@ impl Inspector {
     /// such as `inline#2`, which is kept as it is).
     pub fn url_text(&self, text: &str) -> String {
         match Url::parse(text) {
-            Ok(url) => self.url(&url),
-            Err(_) => cap(text, MAX_SHORT_CHARS).0,
+            Ok(url) if matches!(url.scheme(), "http" | "https" | "ws" | "wss" | "file" | "data" | "blob") => {
+                self.url(&url)
+            }
+            // `event:load`, `inline#2`: names, not URLs.
+            _ => cap(text, MAX_SHORT_CHARS).0,
         }
     }
 
@@ -734,5 +798,39 @@ impl InspectorSummary {
                 .insert(format!("{}.{}", api.interface, api.member), api.count);
         }
         summary
+    }
+}
+
+/// What stage a network error failed at, as one word (no host, path or
+/// other detail from the error's own text).
+pub fn net_error_kind(error: &rustkit_net::NetError) -> &'static str {
+    use rustkit_http::HttpError;
+    use rustkit_net::NetError;
+    match error {
+        NetError::Blocked => "policy",
+        NetError::Timeout(_) => "timeout",
+        NetError::Cancelled => "cancelled",
+        NetError::InvalidUrl(_) => "invalid_url",
+        NetError::RequestFailed(_) | NetError::IoError(_) => "network",
+        NetError::HttpError(http) => match http {
+            HttpError::ConnectionFailed(text) => {
+                let text = text.to_ascii_lowercase();
+                if text.contains("no addresses") || text.contains("lookup") || text.contains("resolve")
+                    || text.contains("name or service")
+                {
+                    "dns"
+                } else {
+                    "connect"
+                }
+            }
+            HttpError::IoError(_) => "connect",
+            HttpError::TlsError(_) => "tls",
+            HttpError::Timeout => "timeout",
+            HttpError::AddressDenied(_) => "policy",
+            HttpError::TooManyRedirects => "redirect",
+            HttpError::BodyTooLarge(_) => "over_budget",
+            HttpError::InvalidResponse(_) => "http",
+            HttpError::InvalidUrl(_) | HttpError::UnsupportedScheme(_) => "invalid_url",
+        },
     }
 }

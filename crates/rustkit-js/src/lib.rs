@@ -16,6 +16,8 @@ mod module;
 pub use module::{FetchedModule, ModuleHandle, ModuleState};
 #[cfg(feature = "boa")]
 mod executor;
+#[cfg(feature = "boa")]
+mod rejections;
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
 
@@ -92,8 +94,28 @@ pub enum LogLevel {
     Debug,
 }
 
-/// Console output handler.
-pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str) + Send + Sync>;
+/// Where in a script something happened: the path the script was evaluated
+/// under ([`JsRuntime::evaluate_script_named`], a module's URL) and a
+/// 1-based line and column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptPosition {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// Console output handler: the level, the arguments formatted and joined,
+/// and the calling script's position when the caller was in a named script.
+pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>) + Send + Sync>;
+
+/// A promise rejected with no handler by the end of an evaluation (the
+/// microtask checkpoint): `String(reason)`, and the reason's `stack` when it
+/// is an error that has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnhandledRejection {
+    pub message: String,
+    pub stack: Option<String>,
+}
 
 /// Timer callback.
 pub type TimerCallback = Box<dyn FnOnce() + Send + 'static>;
@@ -162,6 +184,8 @@ pub struct JsRuntime {
     timers: Arc<Mutex<HashMap<TimerId, PendingTimer>>>,
     globals: HashMap<String, JsValue>,
     deadline: std::rc::Rc<ExecutionDeadline>,
+    #[cfg(feature = "boa")]
+    rejections: std::rc::Rc<rejections::RejectionHooks>,
 }
 
 impl JsRuntime {
@@ -182,7 +206,10 @@ impl JsRuntime {
             config.timeout,
         ));
         #[cfg(feature = "boa")]
+        let rejections = std::rc::Rc::new(rejections::RejectionHooks::default());
+        #[cfg(feature = "boa")]
         let mut context = boa_engine::Context::builder()
+            .host_hooks(rejections.clone())
             .module_loader(modules.loader())
             .job_executor(executor.clone())
             .build()
@@ -203,6 +230,8 @@ impl JsRuntime {
             timers: Arc::new(Mutex::new(HashMap::new())),
             globals: HashMap::new(),
             deadline: std::rc::Rc::default(),
+            #[cfg(feature = "boa")]
+            rejections,
         };
 
         // Set up built-in APIs
@@ -245,32 +274,67 @@ impl JsRuntime {
         }
     }
 
-    /// Set the console output handler.
+    /// Set the console output handler. From now on each console call also
+    /// notes where it was called from (one walk of the call stack per call).
     pub fn set_console_handler(&mut self, handler: ConsoleHandler) {
         self.console_handler = Some(Arc::new(handler));
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::Source;
+            let _ = self
+                .context
+                .eval(Source::from_bytes("console._where = __rustkit_console_where;"));
+        }
+    }
+
+    /// Note promises rejected with no handler, for
+    /// [`take_unhandled_rejections`](Self::take_unhandled_rejections). Off
+    /// by default.
+    pub fn set_rejection_tracking(&mut self, on: bool) {
+        #[cfg(feature = "boa")]
+        self.rejections.tracking.set(on);
+        #[cfg(not(feature = "boa"))]
+        let _ = on;
+    }
+
+    /// The promises rejected since the last call that still have no
+    /// handler (with tracking on). Describing a rejection reads its
+    /// reason's `toString` and `stack`, which a page can define.
+    pub fn take_unhandled_rejections(&mut self) -> Vec<UnhandledRejection> {
+        #[cfg(feature = "boa")]
+        {
+            let hooks = self.rejections.clone();
+            hooks.take(&mut self.context)
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            Vec::new()
+        }
     }
 
     /// Set up console API.
     fn setup_console(&mut self) -> Result<(), JsError> {
         // Console is set up via evaluate_script with native function bindings
         // For now, we'll inject a simple console object
+        // `_where` (the caller's position) is set only with a handler.
         let console_script = r#"
             var console = {
                 _logs: [],
+                _where: null,
                 log: function() {
-                    this._logs.push({level: 'log', args: Array.from(arguments)});
+                    this._logs.push({level: 'log', args: Array.from(arguments), at: this._where && this._where()});
                 },
                 info: function() {
-                    this._logs.push({level: 'info', args: Array.from(arguments)});
+                    this._logs.push({level: 'info', args: Array.from(arguments), at: this._where && this._where()});
                 },
                 warn: function() {
-                    this._logs.push({level: 'warn', args: Array.from(arguments)});
+                    this._logs.push({level: 'warn', args: Array.from(arguments), at: this._where && this._where()});
                 },
                 error: function() {
-                    this._logs.push({level: 'error', args: Array.from(arguments)});
+                    this._logs.push({level: 'error', args: Array.from(arguments), at: this._where && this._where()});
                 },
                 debug: function() {
-                    this._logs.push({level: 'debug', args: Array.from(arguments)});
+                    this._logs.push({level: 'debug', args: Array.from(arguments), at: this._where && this._where()});
                 },
                 _flush: function() {
                     var logs = this._logs;
@@ -280,19 +344,54 @@ impl JsRuntime {
             };
         "#;
 
-        self.evaluate_script(console_script)?;
-        Ok(())
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{js_string, NativeFunction, Source};
+            self.context
+                .register_global_callable(
+                    js_string!("__rustkit_console_where"),
+                    0,
+                    NativeFunction::from_fn_ptr(console_caller_position),
+                )
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            self.context
+                .eval(Source::from_bytes(console_script).with_path(std::path::Path::new(CONSOLE_SCRIPT_PATH)))
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            Ok(())
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            self.evaluate_script(console_script)?;
+            Ok(())
+        }
     }
 
     /// Evaluate JavaScript code.
     pub fn evaluate_script(&mut self, source: &str) -> Result<JsValue, JsError> {
+        self.evaluate(source, None)
+    }
+
+    /// Evaluate JavaScript code as the script `path`: error positions,
+    /// stacks and console call sites name it. A `path` that does not parse
+    /// as a URL (`inline#3`) leaves dynamic `import()` resolving against the
+    /// document, as an unnamed script does.
+    pub fn evaluate_script_named(&mut self, source: &str, path: &str) -> Result<JsValue, JsError> {
+        self.evaluate(source, Some(path))
+    }
+
+    fn evaluate(&mut self, source: &str, path: Option<&str>) -> Result<JsValue, JsError> {
         trace!(len = source.len(), "Evaluating script");
 
         #[cfg(feature = "boa")]
         {
             use boa_engine::Source;
 
-            let result = self.context.eval(Source::from_bytes(source));
+            let result = match path {
+                Some(path) => self
+                    .context
+                    .eval(Source::from_bytes(source).with_path(std::path::Path::new(path))),
+                None => self.context.eval(Source::from_bytes(source)),
+            };
             // Promise reactions (`.then`, `await`) are jobs Boa queues but
             // does not run on its own; a page's async code never resumes
             // without this.
@@ -323,6 +422,7 @@ impl JsRuntime {
 
         #[cfg(not(feature = "boa"))]
         {
+            let _ = path;
             Err(JsError::NotInitialized)
         }
     }
@@ -367,7 +467,7 @@ impl JsRuntime {
     }
 
     #[cfg(feature = "boa")]
-    fn drain_console(&mut self) -> Vec<(LogLevel, String)> {
+    fn drain_console(&mut self) -> Vec<(LogLevel, String, Option<ScriptPosition>)> {
         use boa_engine::Source;
 
         // Evaluate console._flush() directly on the context without calling
@@ -438,7 +538,12 @@ impl JsRuntime {
                 }
             }
 
-            entries.push((level, msg_parts.join(" ")));
+            let at = entry_obj
+                .get(boa_engine::js_string!("at"), &mut self.context)
+                .ok()
+                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+                .and_then(|at| parse_position_record(&at));
+            entries.push((level, msg_parts.join(" "), at));
         }
 
         entries
@@ -453,8 +558,8 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         {
             let logs = self.drain_console();
-            for (level, msg) in logs {
-                handler(level, &msg);
+            for (level, msg, at) in logs {
+                handler(level, &msg, at.as_ref());
             }
         }
 
@@ -631,6 +736,51 @@ fn to_boa_value(value: JsValue) -> boa_engine::JsValue {
 }
 
 #[cfg(feature = "boa")]
+/// The path the console object is evaluated under, so its own frames can be
+/// told from its callers'.
+#[cfg(feature = "boa")]
+const CONSOLE_SCRIPT_PATH: &str = "<rustkit console>";
+
+/// `__rustkit_console_where()`: the position of the innermost frame in a
+/// named script other than the console itself (the page code that called
+/// the console, or the bindings function that called this), as
+/// `path\u{1}line\u{1}column`; `undefined` when there is none. Reads the
+/// VM's frames only; runs no script.
+#[cfg(feature = "boa")]
+fn console_caller_position(
+    _this: &boa_engine::JsValue,
+    _args: &[boa_engine::JsValue],
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    use boa_engine::vm::SourcePath;
+    for frame in context.stack_trace() {
+        let location = frame.position();
+        let path = match &location.path {
+            SourcePath::Path(path) => path.to_string_lossy().into_owned(),
+            // The engine's own glue (evaluated unnamed) and `eval` code.
+            _ => continue,
+        };
+        if path == CONSOLE_SCRIPT_PATH {
+            continue;
+        }
+        let Some(position) = location.position else {
+            return Ok(boa_engine::JsValue::undefined());
+        };
+        let record = format!("{path}\u{1}{}\u{1}{}", position.line_number(), position.column_number());
+        return Ok(boa_engine::JsValue::from(boa_engine::JsString::from(record.as_str())));
+    }
+    Ok(boa_engine::JsValue::undefined())
+}
+
+#[cfg(feature = "boa")]
+fn parse_position_record(record: &str) -> Option<ScriptPosition> {
+    let mut parts = record.split('\u{1}');
+    let path = parts.next()?.to_string();
+    let line = parts.next()?.parse().ok()?;
+    let column = parts.next()?.parse().ok()?;
+    Some(ScriptPosition { path, line, column })
+}
+
 fn from_boa_value(value: &boa_engine::JsValue) -> JsValue {
     if value.is_undefined() {
         JsValue::Undefined
@@ -919,7 +1069,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |level, msg| {
+        runtime.set_console_handler(Box::new(move |level, msg, _at| {
             recv_clone.lock().unwrap().push((format!("{level:?}"), msg.to_string()));
         }));
 
@@ -938,11 +1088,64 @@ mod tests {
     }
 
     #[test]
+    fn console_calls_carry_the_named_scripts_position() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, at| {
+            recv_clone.lock().unwrap().push((msg.to_string(), at.cloned()));
+        }));
+        runtime
+            .evaluate_script_named("var a = 1;\nfunction f() {\n  console.log('in f');\n}\nf();", "inline#4")
+            .unwrap();
+        // Unnamed: no position.
+        runtime.evaluate_script("console.log('anonymous')").unwrap();
+        let logs = received.lock().unwrap().clone();
+        assert_eq!(
+            logs,
+            vec![
+                (
+                    "in f".to_string(),
+                    Some(ScriptPosition { path: "inline#4".into(), line: 3, column: 14 })
+                ),
+                ("anonymous".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_named_script_names_itself_in_its_errors() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let err = runtime.evaluate_script_named("1;\n  null.x;", "inline#2").unwrap_err();
+        assert!(err.to_string().contains("(inline#2:2:"), "{err}");
+    }
+
+    #[test]
+    fn unhandled_rejections_are_reported_only_when_tracked_and_unhandled() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.evaluate_script("Promise.reject(new Error('untracked'));").unwrap();
+        assert!(runtime.take_unhandled_rejections().is_empty());
+
+        runtime.set_rejection_tracking(true);
+        runtime
+            .evaluate_script_named(
+                "Promise.reject(new TypeError('lost'));\nPromise.reject(1).catch(function () {});\nvar late = Promise.reject('late'); late.then(null, function () {});",
+                "inline#1",
+            )
+            .unwrap();
+        let rejections = runtime.take_unhandled_rejections();
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!(rejections[0].message, "TypeError: lost");
+        assert!(rejections[0].stack.as_deref().unwrap_or("").contains("inline#1:1:"), "{rejections:?}");
+        assert!(runtime.take_unhandled_rejections().is_empty(), "taken once");
+    }
+
+    #[test]
     fn console_flush_handles_throwing_tostring_gracefully() {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
 
@@ -960,7 +1163,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
 

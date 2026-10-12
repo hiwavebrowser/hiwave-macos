@@ -21,7 +21,7 @@
     if (!document || !g.Element) return;
 
     function report(e) {
-        try { if (g.__rustkit_errors) g.__rustkit_errors.push(String(e)); } catch (_) {}
+        try { if (g.__rustkit_errors) g.__rustkit_errors.push(g.__rustkit_error_text ? g.__rustkit_error_text(e) : String(e)); } catch (_) {}
     }
     function requireCallback(ctor, cb) {
         if (typeof cb !== 'function') {

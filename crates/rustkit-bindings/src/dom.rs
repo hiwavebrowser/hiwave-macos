@@ -2635,7 +2635,7 @@ const WRAPPERS_JS: &str = r#"
             return typeof cb === 'function' ? cb.call(t, event) : cb.handleEvent(event);
         } catch (e) {
             var msg;
-            try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
+            try { msg = g.__rustkit_error_text ? g.__rustkit_error_text(e) : String(e); } catch (_) { msg = '<unprintable exception>'; }
             if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
         }
     }
@@ -2662,7 +2662,7 @@ const WRAPPERS_JS: &str = r#"
                     'with (this.ownerDocument || {}) { with (this) {\n' + src + '\n} }');
             } catch (e) {
                 var msg;
-                try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
+                try { msg = g.__rustkit_error_text ? g.__rustkit_error_text(e) : String(e); } catch (_) { msg = '<unprintable exception>'; }
                 if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
             }
         }
@@ -2807,6 +2807,7 @@ const WRAPPERS_JS: &str = r#"
         type = String(type);
         if (type === 'text/xml' || type === 'application/xml' ||
             type === 'application/xhtml+xml' || type === 'image/svg+xml') {
+            if (g.__rustkit_unsupported) g.__rustkit_unsupported('DOMParser', 'parseFromString(XML)');
             throw new DOMException("Failed to execute 'parseFromString' on 'DOMParser': " +
                 "XML documents are not supported yet.", 'NotSupportedError');
         }

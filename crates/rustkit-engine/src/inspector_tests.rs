@@ -33,6 +33,17 @@ fn the_ring_buffer_drops_the_oldest_and_counts_them() {
     assert!(inspector.snapshot_since(5).records.is_empty());
 }
 
+/// Formatting it is a failure: proves a path did not format.
+struct MustNotFormat;
+
+impl std::fmt::Display for MustNotFormat {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        panic!("formatted a string nobody asked for")
+    }
+}
+
+/// Every recording path returns after one atomic load: no event is built,
+/// no string formatted or copied, the lock is not taken.
 #[test]
 fn when_nothing_listens_no_event_is_built() {
     let inspector = Inspector::new(&InspectorConfig::default());
@@ -41,8 +52,11 @@ fn when_nothing_listens_no_event_is_built() {
     inspector.console(ConsoleLevel::Log, "x", None);
     inspector.laid_out();
     inspector.painted();
+    inspector.relayout(&MustNotFormat, 1.0);
     inspector.unsupported_api("A", "b", 1, None);
-    inspector.navigation_started(None);
+    inspector.alias_script("script#1", "https://a.test/s.js");
+    let url = url::Url::parse("https://a.test/?q=1").unwrap();
+    inspector.navigation_started(Some(&url));
     let snapshot = inspector.snapshot_since(0);
     assert!(snapshot.records.is_empty());
     assert_eq!(snapshot.next_seq, 0);

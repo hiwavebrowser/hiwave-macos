@@ -258,7 +258,7 @@
     var idleId = 0, idleQueue = [], idleTask = null;
     function report(e) {
         var msg;
-        try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
+        try { msg = g.__rustkit_error_text ? g.__rustkit_error_text(e) : String(e); } catch (_) { msg = '<unprintable exception>'; }
         if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
     }
     function unqueue(entry) {

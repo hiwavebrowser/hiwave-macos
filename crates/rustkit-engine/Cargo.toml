@@ -23,6 +23,7 @@ rustkit-layout = { path = "../rustkit-layout" }
 rustkit-js = { path = "../rustkit-js" }
 rustkit-bindings = { path = "../rustkit-bindings" }
 rustkit-net = { path = "../rustkit-net" }
+rustkit-http = { path = "../rustkit-http" }
 rustkit-image = { path = "../rustkit-image" }
 rustkit-svg = { path = "../rustkit-svg" }
 rustkit-renderer = { path = "../rustkit-renderer" }

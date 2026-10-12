@@ -165,6 +165,7 @@ use rustkit_layout::{
 use std::borrow::Cow;
 use std::cell::Cell;
 pub mod inspector;
+mod inspector_glue;
 mod relayout_cause;
 use relayout_cause::PendingCauses;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
@@ -1963,21 +1964,15 @@ impl Engine {
                         )
                     });
                 if let Err(e) = fired {
-                    view.script_log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: "event:resize".into(),
                         bytes: 0,
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(e.to_string()),
-                    });
+                    };
+                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record, None);
                 }
-                for message in bindings.take_reported_errors() {
-                    view.script_log.push(ScriptRecord {
-                        source: "event:resize".into(),
-                        bytes: 0,
-                        elapsed_ms: 0,
-                        outcome: ScriptOutcome::Threw(message),
-                    });
-                }
+                inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
             }
         }
 
@@ -2929,23 +2924,17 @@ impl Engine {
         let not_cancelled = match bindings.fire_mouse_event(target, event_type, data) {
             Ok(not_cancelled) => not_cancelled,
             Err(e) => {
-                view.script_log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: source.clone(),
                     bytes: 0,
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Threw(e.to_string()),
-                });
+                };
+                inspector_glue::log_script(&mut view.script_log, &view.inspector, record, None);
                 true
             }
         };
-        for message in bindings.take_reported_errors() {
-            view.script_log.push(ScriptRecord {
-                source: source.clone(),
-                bytes: 0,
-                elapsed_ms: 0,
-                outcome: ScriptOutcome::Threw(message),
-            });
-        }
+        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source);
         debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
         not_cancelled
     }
@@ -3036,18 +3025,26 @@ impl Engine {
                 }
             }
         }
-        threw.extend(bindings.take_reported_errors().into_iter().map(|message| ("timers", message)));
+        let reported = bindings.take_reported_error_details();
+        inspector_glue::drain_quiet(bindings, &view.inspector, "timers");
         out.next_timer_ms = bindings.next_timer_delay();
-        for (source, message) in threw {
+        let threw = threw
+            .into_iter()
+            .map(|(source, message)| (source, message, None))
+            .chain(reported.into_iter().map(|(message, stack)| ("timers", message, stack)));
+        for (source, message, stack) in threw {
             if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
-                break;
+                // The log is full; the Inspector's buffer bounds itself.
+                inspector_glue::script_error(&view.inspector, &message, stack, false, source);
+                continue;
             }
-            view.script_log.push(ScriptRecord {
+            let record = ScriptRecord {
                 source: source.to_string(),
                 bytes: 0,
                 elapsed_ms: 0,
                 outcome: ScriptOutcome::Threw(message),
-            });
+            };
+            inspector_glue::log_script(&mut view.script_log, &view.inspector, record, stack);
         }
 
         match self.flush_script_dom_writes(id, Some(RelayoutCause::Timer)) {
@@ -3796,6 +3793,7 @@ impl Engine {
         let loader = self.loader.clone();
         let Some(view) = self.views.get(&id) else { return };
         let document_url = view.url.clone();
+        let inspector = view.inspector.clone();
         let view_document = view.document.clone();
         bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         bindings.set_loop_iteration_limit(loop_limit);
@@ -3818,12 +3816,10 @@ impl Engine {
                     runnable.push((label, key, Ok(text), node_id, is_module));
                 }
                 Err(outcome) if is_module => runnable.push((label, 1, Err(outcome), node_id, true)),
-                Err(outcome) => log.push(ScriptRecord {
-                    source: label,
-                    bytes: 0,
-                    elapsed_ms: 0,
-                    outcome,
-                }),
+                Err(outcome) => {
+                    let record = ScriptRecord { source: label, bytes: 0, elapsed_ms: 0, outcome };
+                    inspector_glue::log_script(log, &inspector, record, None);
+                }
             }
         }
         runnable.sort_by_key(|(_, key, _, _, _)| *key);
@@ -3831,9 +3827,10 @@ impl Engine {
         // A panic inside the JS engine leaves its state unknowable: record
         // it and run nothing more on this page.
         let poisoned = Cell::new(false);
-        let run = |source: String, bytes: usize, f: &dyn Fn() -> Result<(), String>| {
+        // `f` is given the source's label.
+        let run = |source: String, bytes: usize, f: &dyn Fn(&str) -> Result<(), String>| {
             let started = std::time::Instant::now();
-            let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&source))) {
                 Ok(Ok(())) => ScriptOutcome::Ran,
                 Ok(Err(message)) => ScriptOutcome::Threw(message),
                 Err(_) => {
@@ -3883,18 +3880,20 @@ impl Engine {
             });
             for text in maps {
                 if let Err(message) = bindings.add_import_map(&text) {
-                    log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: "importmap".into(),
                         bytes: text.len(),
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(format!("import map: {message}")),
-                    });
+                    };
+                    inspector_glue::log_script(log, &inspector, record, None);
                 }
             }
         }
         let _ = bindings.set_ready_state("loading");
         let scripts_started = std::time::Instant::now();
         let modules_fetched = Cell::new(0usize);
+        let mut external_scripts = 0usize;
         for (label, _, source, node_id, is_module) in runnable {
             let text = match source {
                 Ok(text) => text,
@@ -4014,26 +4013,50 @@ impl Engine {
                     }
                     false => (outcome, event),
                 };
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: label,
                     bytes: text.len(),
                     elapsed_ms,
                     outcome,
-                });
+                };
+                inspector_glue::log_script(log, &inspector, record, None);
+                if let Some(ran) = log.last() {
+                    inspector_glue::drain_quiet(bindings, &inspector, &ran.source);
+                }
                 if let Some(event) = event {
                     let _ = bindings.fire_script_event(node_id, event);
                 }
                 continue;
             }
             info!(source = %label, bytes = text.len(), "Running page script");
-            let record = run(label, text.len(), &|| {
+            // The script runs under a name its positions carry: its
+            // `inline#n` label, or for an external one `script#n`, which
+            // the Inspector shows as its URL. Not the URL itself: that would
+            // make it the base of the script's dynamic `import()`s.
+            // (Numbered only for a listening Inspector, which maps the
+            // number back: with nobody listening this allocates nothing.)
+            let external: Option<Cow<str>> = if label.starts_with("inline#") {
+                None
+            } else if inspector.is_active() {
+                external_scripts += 1;
+                let name = format!("script#{external_scripts}");
+                inspector.alias_script(&name, &label);
+                Some(Cow::Owned(name))
+            } else {
+                Some(Cow::Borrowed("script"))
+            };
+            let record = run(label, text.len(), &|label| {
+                let name = external.as_deref().unwrap_or(label);
                 // `document.currentScript` is this element while it runs.
                 let _ = bindings.set_current_script(Some(node_id));
-                let result = bindings.evaluate(&text).map(|_| ()).map_err(strip);
+                let result = bindings.evaluate_named(&text, name).map(|_| ()).map_err(strip);
                 let _ = bindings.set_current_script(None);
                 result
             });
-            log.push(record);
+            inspector_glue::log_script(log, &inspector, record, None);
+            if let Some(ran) = log.last() {
+                inspector_glue::drain_quiet(bindings, &inspector, &ran.source);
+            }
         }
         if poisoned.get() {
             return;
@@ -4079,21 +4102,23 @@ impl Engine {
         let after_scripts = pump(None).await;
         if let Some(found) = after_scripts {
             if found.poisoned {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: "network".into(),
                     bytes: 0,
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Threw("JS engine panic".into()),
-                });
+                };
+                inspector_glue::log_script(log, &inspector, record, None);
                 return;
             }
             for message in found.threw {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: "network".into(),
                     bytes: 0,
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Threw(message),
-                });
+                };
+                inspector_glue::log_script(log, &inspector, record, None);
             }
         }
 
@@ -4129,7 +4154,7 @@ impl Engine {
             self.refresh_layout_for_script(id, bindings);
             info!(%source, "Running page lifecycle step");
             let step_started = std::time::Instant::now();
-            let record = run(source.to_string(), 0, step);
+            let record = run(source.to_string(), 0, &|_| step());
             info!(
                 %source,
                 elapsed_ms = step_started.elapsed().as_millis() as u64,
@@ -4139,7 +4164,7 @@ impl Engine {
             // Only an escaped error (the loop limit, a panic) is worth a
             // record of its own; a clean step is not a script.
             if record.outcome != ScriptOutcome::Ran {
-                log.push(record);
+                inspector_glue::log_script(log, &inspector, record, None);
             }
             if poisoned.get() {
                 return;
@@ -4149,31 +4174,26 @@ impl Engine {
             let timers = (source == "timers").then_some((horizon_ms, MAX_TIMER_CALLBACKS));
             if let Some(found) = pump(timers).await {
                 for message in found.threw {
-                    log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(message),
-                    });
+                    };
+                    inspector_glue::log_script(log, &inspector, record, None);
                 }
                 if found.poisoned {
-                    log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw("JS engine panic".into()),
-                    });
+                    };
+                    inspector_glue::log_script(log, &inspector, record, None);
                     return;
                 }
             }
-            for message in bindings.take_reported_errors() {
-                log.push(ScriptRecord {
-                    source: source.to_string(),
-                    bytes: 0,
-                    elapsed_ms: 0,
-                    outcome: ScriptOutcome::Threw(message),
-                });
-            }
+            inspector_glue::drain_reports(bindings, &inspector, log, source);
         }
     }
 
@@ -4204,6 +4224,16 @@ impl Engine {
 
         info!(?id, %url, replace, "Loading URL");
 
+        // A load still in progress is left for this one.
+        if view.navigation.is_loading() {
+            view.inspector.emit_with(|inspector| InspectorEvent::LoadEndedEarly {
+                url: view.url.as_ref().map(|u| inspector.url(u)),
+                reason: EndReason::NavigatedAway,
+                detail: "another navigation started".into(),
+            });
+        }
+        view.inspector.navigation_started(Some(&url));
+
         // Start navigation
         let request = if replace {
             NavigationRequest::new(url.clone()).with_replace()
@@ -4231,7 +4261,19 @@ impl Engine {
 
         // Fetch the URL
         let request = Request::get(url.clone()).destination(RequestDestination::Document);
-        let response = self.loader.fetch(request).await?;
+        let response = match self.loader.fetch(request).await {
+            Ok(response) => response,
+            Err(e) => {
+                if let Some(view) = self.views.get(&id) {
+                    view.inspector.emit_with(|inspector| InspectorEvent::LoadEndedEarly {
+                        url: Some(inspector.url(&url)),
+                        reason: EndReason::Failed,
+                        detail: inspector::net_error_kind(&e).into(),
+                    });
+                }
+                return Err(e.into());
+            }
+        };
 
         // First await boundary crossed — are we still the current navigation?
         if self.nav_superseded(id, generation) {
@@ -4266,6 +4308,11 @@ impl Engine {
                     .views
                     .get_mut(&id)
                     .ok_or(EngineError::ViewNotFound(id))?;
+                view.inspector.emit_with(|inspector| InspectorEvent::LoadEndedEarly {
+                    url: Some(inspector.url(&url)),
+                    reason: EndReason::Failed,
+                    detail: error.clone(),
+                });
                 view.navigation
                     .fail_navigation(error.clone())
                     .map_err(|e| EngineError::NavigationError(e.to_string()))?;
@@ -4329,6 +4376,11 @@ impl Engine {
         view.header_referrer_policy = header_referrer_policy;
         view.http_status = Some(status.as_u16());
         view.reset_for_new_document();
+        view.inspector.emit_with(|inspector| InspectorEvent::NavigationCommit {
+            url: Some(inspector.url(&url)),
+            status: Some(status.as_u16()),
+        });
+        let inspector = view.inspector.clone();
 
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
@@ -4353,6 +4405,7 @@ impl Engine {
             bindings
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
+            inspector_glue::attach(&bindings, &inspector);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
             // bindings' 800x600 placeholder: pages pick layouts from them.
@@ -4549,6 +4602,15 @@ impl Engine {
             });
         }
 
+        view.inspector.emit_with(|inspector| InspectorEvent::LoadFinished {
+            url: Some(inspector.url(&url)),
+            scripts_over_budget: view
+                .script_log
+                .iter()
+                .filter(|r| r.outcome == ScriptOutcome::OverBudget)
+                .count() as u32,
+        });
+
         let _ = self.event_tx.send(EngineEvent::PageLoaded {
             view_id: id,
             url,
@@ -4573,6 +4635,7 @@ impl Engine {
         // Use a synthetic about:blank URL for inline content
         // SAFETY: "about:blank" is a constant URL that will always parse successfully
         let url = Url::parse("about:blank").unwrap();
+        view.inspector.navigation_started(None);
 
         // Start navigation
         let request = NavigationRequest::new(url.clone());
@@ -4618,6 +4681,8 @@ impl Engine {
         view.header_referrer_policy = None;
         view.http_status = None;
         view.reset_for_new_document();
+        view.inspector.emit(InspectorEvent::NavigationCommit { url: None, status: None });
+        let inspector = view.inspector.clone();
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -4641,6 +4706,7 @@ impl Engine {
             bindings
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
+            inspector_glue::attach(&bindings, &inspector);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
             // bindings' 800x600 placeholder: pages pick layouts from them.
@@ -4681,6 +4747,8 @@ impl Engine {
                 title: title.clone(),
             });
         }
+
+        view.inspector.emit(InspectorEvent::LoadFinished { url: None, scripts_over_budget: 0 });
 
         let _ = self.event_tx.send(EngineEvent::PageLoaded {
             view_id: id,
@@ -4766,6 +4834,7 @@ impl Engine {
         );
         if let Some(view) = self.views.get_mut(&id) {
             view.relayout_stats.record(&causes, tree_reused, took_ms);
+            view.inspector.relayout(&cause, took_ms);
         }
         Ok(())
     }
@@ -5052,6 +5121,7 @@ impl Engine {
         if let Some(bindings) = view.bindings.as_ref() {
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
+        view.inspector.laid_out();
 
         // Render
         self.render(id)?;
@@ -9863,6 +9933,11 @@ impl Engine {
                 // an idle view.
                 if view.navigation.is_loading() {
                     info!(?id, "Navigation stopped");
+                    view.inspector.emit_with(|inspector| InspectorEvent::LoadEndedEarly {
+                        url: view.url.as_ref().map(|u| inspector.url(u)),
+                        reason: EndReason::NavigatedAway,
+                        detail: "stopped".into(),
+                    });
                     let _ = view.navigation.fail_navigation("stopped".to_string());
                     let _ = self.event_tx.send(EngineEvent::NavigationFailed {
                         view_id: id,
@@ -13830,6 +13905,7 @@ impl Engine {
 
         if let Some(view) = self.views.get_mut(&id) {
             view.presented = Some(presented);
+            view.inspector.painted();
         }
         Ok(())
     }

@@ -25,7 +25,7 @@
         var e = new Error(message); e.name = name; return e;
     }
     function report(e) {
-        try { if (g.__rustkit_errors) g.__rustkit_errors.push(String(e)); } catch (_) {}
+        try { if (g.__rustkit_errors) g.__rustkit_errors.push(g.__rustkit_error_text ? g.__rustkit_error_text(e) : String(e)); } catch (_) {}
     }
 
     // ---- bytes <-> base64
@@ -160,6 +160,7 @@
         if (s.responseType !== '' && s.responseType !== 'document') {
             throw domError("Failed to read the 'responseXML' property from 'XMLHttpRequest': The value is only accessible if the object's 'responseType' is '' or 'document' (was '" + s.responseType + "').", 'InvalidStateError');
         }
+        if (g.__rustkit_unsupported) g.__rustkit_unsupported('XMLHttpRequest', 'responseXML');
         return null;
     });
     Object.defineProperty(XMLHttpRequest.prototype, 'responseType', {
@@ -244,6 +245,7 @@
         try { abs = new g.URL(String(url), g.document && g.document.baseURI ? g.document.baseURI : g.location.href).href; }
         catch (_) { throw domError("Failed to execute 'open' on 'XMLHttpRequest': Invalid URL", 'SyntaxError'); }
         if (async !== undefined && !async) {
+            if (g.__rustkit_unsupported) g.__rustkit_unsupported('XMLHttpRequest', 'open(async=false)');
             throw domError("Failed to execute 'open' on 'XMLHttpRequest': synchronous requests are not supported", 'NotSupportedError');
         }
         // open() restarts: abandon anything in flight without events.

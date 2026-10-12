@@ -234,7 +234,7 @@ fn a_throw_names_its_error_script_line_and_column() {
     let lines = described(&engine, view, server.port);
     assert_eq!(
         only(&lines, &["script_error"]),
-        vec!["script_error TypeError: cannot convert 'null' or 'undefined' to object @/app.js:3:3 script=/app.js rejection=false"]
+        vec!["script_error TypeError: cannot convert 'null' or 'undefined' to object @/app.js:3:8 script=/app.js rejection=false"]
     );
     let all = serde_json::to_string(&records(&engine, view)).unwrap();
     assert!(!all.contains("SECRET") && !all.contains("frag"), "{all}");
@@ -256,15 +256,25 @@ Promise.reject(new Error('caught')).catch(function () {});
 #[test]
 fn a_listener_error_names_the_step_that_ran_it_and_where_it_was_written() {
     let page = "<html><body><script>
-window.addEventListener('load', function () {
-  undefinedFunction();
+window.addEventListener('load', function onLoad() {
+  var settings = null;
+  settings.theme;
 });
 </script></body></html>";
     let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
     assert_eq!(
         only(&described(&engine, view, server.port), &["script_error"]),
-        vec!["script_error ReferenceError: undefinedFunction is not defined @inline#1:3:3 script=event:load rejection=false"]
+        vec!["script_error TypeError: cannot convert 'null' or 'undefined' to object @inline#1:4:12 script=event:load rejection=false"]
     );
+    // The stack names the page's frames only, not the engine's own glue.
+    let stack = records(&engine, view)
+        .into_iter()
+        .find_map(|r| match r.event {
+            InspectorEvent::ScriptError { stack, .. } => stack,
+            _ => None,
+        })
+        .expect("a stack");
+    assert_eq!(stack, "    at onLoad (inline#1:4:12)");
 }
 
 #[test]
@@ -279,8 +289,8 @@ try { new DOMParser().parseFromString('<a/>', 'text/xml'); } catch (e) {}
     assert_eq!(
         only(&described(&engine, view, server.port), &["unsupported_api"]),
         vec![
-            "unsupported_api XMLHttpRequest.open(async=false) @inline#1:3:42",
-            "unsupported_api DOMParser.parseFromString(XML) @inline#1:5:39",
+            "unsupported_api XMLHttpRequest.open(async=false) @inline#1:3:34",
+            "unsupported_api DOMParser.parseFromString(XML) @inline#1:5:38",
         ]
     );
     let counts: Vec<(String, u64)> = engine
@@ -301,8 +311,10 @@ try { new DOMParser().parseFromString('<a/>', 'text/xml'); } catch (e) {}
 
 #[test]
 fn scripts_over_the_budget_are_counted_on_load_finished() {
-    let page = "<html><body><script>console.log('a')</script><script>console.log('b')</script></body></html>";
-    let config = EngineConfig { script_budget_ms: 0, ..EngineConfig::default() };
+    // The first script spends the budget; the two after it are not started.
+    let page = "<html><body><script>var t = Date.now(); while (Date.now() - t < 150) {}</script>\
+        <script>console.log('a')</script><script>console.log('b')</script></body></html>";
+    let config = EngineConfig { script_budget_ms: 50, ..EngineConfig::default() };
     let (engine, view, server) = load_page(config, vec![Route::html("/", page)]);
     let lines = described(&engine, view, server.port);
     assert_eq!(only(&lines, &["load_finished", "console"]), vec!["load_finished over_budget=2"]);
@@ -471,7 +483,7 @@ fn the_navigation_url_keeps_its_query_only_when_asked() {
 fn console_messages_are_capped_and_kept_as_text() {
     let page = "<html><body><script>
 console.log('x'.repeat(5000));
-console.log('{\"type\":\"navigation_start\"}\\n<script>alert(1)</script>');
+console.log('{\"type\":\"navigation_start\"}\\n<' + 'script>alert(1)<' + '/script>');
 </script></body></html>";
     let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
     let consoles: Vec<(String, bool)> = records(&engine, view)
@@ -515,4 +527,80 @@ document.getElementById('pw').value = 'TYPEDVALUE';
     for secret in ["COOKIEVALUE", "STOREDVALUE", "TYPEDVALUE", "hunter2", "SETCOOKIEVALUE"] {
         assert!(!all.contains(secret), "{secret} leaked: {all}");
     }
+}
+
+
+// ---- Neighbouring behaviour: what naming the page's scripts must not change ----
+
+/// Page scripts now run under a name (`inline#n`, `script#n`) so positions
+/// can name them. The name is deliberately not a URL: a classic script's
+/// dynamic `import()` must keep resolving against the document, with the
+/// Inspector on or off.
+#[test]
+fn a_classic_scripts_dynamic_import_still_resolves_against_the_document() {
+    let routes = vec![
+        Route::html("/", "<html><body><script src=\"/js/app.js\"></script></body></html>"),
+        Route::ok("/js/app.js", "text/javascript", "import('./mod.js').then(function (m) { window.got = m.v; });"),
+        Route::ok("/mod.js", "text/javascript", "export const v = 'document-relative';"),
+        Route::ok("/js/mod.js", "text/javascript", "export const v = 'script-relative';"),
+    ];
+    for buffer in [false, true] {
+        let server = serve(routes.clone());
+        let mut config = EngineConfig::default();
+        config.inspector.buffer = buffer;
+        let mut engine = Engine::new(config).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+            .expect("view");
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        assert_eq!(
+            engine.execute_script(view, "String(window.got)").unwrap(),
+            r#"String("document-relative")"#,
+            "inspector buffer {buffer}"
+        );
+    }
+}
+
+/// The script log's exception text now names the script where Boa used to
+/// print `unknown`; the board's counts are unchanged (unhandled rejections
+/// and unsupported APIs are Inspector events only, never log records).
+#[test]
+fn the_script_log_counts_are_the_same_with_the_inspector_on_or_off() {
+    let page = "<html><body><script>
+null.x;
+</script><script>
+Promise.reject(new Error('r'));
+try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
+</script></body></html>";
+    let mut logs = Vec::new();
+    for buffer in [false, true] {
+        let server = serve(vec![Route::html("/", page)]);
+        let mut config = EngineConfig::default();
+        config.inspector.buffer = buffer;
+        let mut engine = Engine::new(config).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+            .expect("view");
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        let log: Vec<(String, ScriptOutcome)> = engine
+            .script_log(view)
+            .unwrap()
+            .iter()
+            .map(|r| (r.source.clone(), r.outcome.clone()))
+            .collect();
+        logs.push(log);
+    }
+    assert_eq!(logs[0], logs[1]);
+    assert_eq!(
+        logs[0],
+        vec![
+            (
+                "inline#1".to_string(),
+                ScriptOutcome::Threw(
+                    "TypeError: cannot convert 'null' or 'undefined' to object (inline#1:2:6)\n    at <main> (inline#1:2:6)".into()
+                )
+            ),
+            ("inline#2".to_string(), ScriptOutcome::Ran),
+        ]
+    );
 }
