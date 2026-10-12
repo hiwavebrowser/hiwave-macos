@@ -1444,12 +1444,14 @@ pub fn layout_grid_container(
         }
     };
 
-    // Ensure at least one column and row
+    // Ensure at least one column and row. With no template they are
+    // implicit tracks like any later one, so `grid-auto-rows: 40px` sizes
+    // the first row too (it used to be `auto`: its content).
     if grid.columns.is_empty() {
-        grid.columns.push(GridTrack::implicit(&TrackSize::Auto));
+        grid.columns.push(GridTrack::implicit(&style.grid_auto_columns));
     }
     if grid.rows.is_empty() {
-        grid.rows.push(GridTrack::implicit(&TrackSize::Auto));
+        grid.rows.push(GridTrack::implicit(&style.grid_auto_rows));
     }
 
     // Collect items with placement info

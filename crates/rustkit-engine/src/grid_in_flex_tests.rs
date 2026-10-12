@@ -22,10 +22,6 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
 ///
-/// `span-by-row-end-in-a-row`: the span is right (the item covers both
-/// rows), but the first row is 20 tall, its text, where `grid-auto-rows:
-/// 40px` makes it 40 in Chromium. The second row is 40.
-///
 /// The three below are bing's search box (a textarea that is `height: 100%`
 /// and shares `grid-area: content`, a name no area has, with an `::after`).
 /// Their heights and rows match since the missing name resolves to the first
@@ -61,7 +57,6 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// `percent-height-row-is-not-touched`: a `height: 50%` item of a row that
 /// is 400 tall is 110; Chromium has 200.
 const GAPS: &[&str] = &[
-    "span-by-row-end-in-a-row",
     "percent-height-item-sharing-an-area-in-a-row",
     "bing-textarea-and-its-replica-in-a-row",
     "bing-textarea-and-its-replica-in-a-block",
