@@ -32905,6 +32905,48 @@ mod float_clear_tests {
     }
 }
 
+// An empty block whose only size is `aspect-ratio` (css-sizing-4 §5): its
+// width fills the line and its height follows from the ratio, so it is not
+// an empty block and must stay in the tree. It was dropped as one, with
+// its height and everything below it (nested layout matrix,
+// `aspect-ratio-only-empty-block-dropped`).
+#[cfg(test)]
+mod aspect_ratio_empty_block_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    #[test]
+    fn an_empty_block_sized_by_its_aspect_ratio_keeps_its_box() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(concat!(
+            r#"<body style="margin:0"><div id="o" style="width:600px">"#,
+            r#"<div id="r" style="aspect-ratio:2/1"></div>"#,
+            r#"<div id="n" style="height:5px"></div>"#,
+            r#"</div></body>"#,
+        ))
+        .expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        root.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        });
+        // Chromium 141: #r 600 x 300, #n below it at y 300, #o 305 tall.
+        let r = by_id(&root, "r").expect("#r has a box").dimensions.border_box();
+        assert_eq!((r.width, r.height), (600.0, 300.0));
+        let n = by_id(&root, "n").expect("#n").dimensions.border_box();
+        assert_eq!(n.y, 300.0);
+        let o = by_id(&root, "o").expect("#o").dimensions.border_box();
+        assert_eq!(o.height, 305.0);
+    }
+}
+
 /// Upper bound on the bytes a single `var()` expansion may produce. Real
 /// pages stay far below it (a long box-shadow chain is a few hundred bytes);
 /// it only stops pathological exponential fan-out.
