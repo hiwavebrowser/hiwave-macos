@@ -77,6 +77,8 @@ of a run (about a minute for all checks).
 | `i0a_layout` | I0(a): very expensive layout | `i0a_layout.html?n=150`: 3000 wrapping flex items, every one resized each 700 ms | controls only |
 | `i0a_nav` | I0(a): repeated navigation while loading | `i0a_nav.html?n=1` to `?n=5`: each visit starts the next, then meets a script held 1.5 s and an image held 3 s | controls only |
 | `i0a_close` | I0(a): closing a busy tab | `i0a_spin.html`, then Cmd+W | yes |
+| `h24_svg_scroll` | H24 ebay icons stay put while the page scrolls | `h24_svg_scroll.html`: a cyan svg triangle on the first screen; a polygon, a path and two lines 1500 px down; the page scrolls itself when the driver says so | no (frames) |
+| `fixed_scroll` | `position: fixed` content scrolls away | `fixed_scroll.html`: a magenta bar fixed to the top over three 1500 px bands; the page scrolls itself when the driver says so | no (frames) |
 
 ### The I0(a) checks
 

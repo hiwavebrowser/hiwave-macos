@@ -583,6 +583,61 @@ class Driver:
         # button: 53 in the 2026-10-06 run), so "no red" means "no red band".
         self.expect(c, "the window shows the last band", frame[BLUE] > 1000 and frame[RED] < 500, str(frame))
 
+    def script_scroll(self, c, page, tag, colours):
+        """Open `page`, capture, tell it to scroll itself, capture again.
+        Returns (first frame, scrolled frame), or None when the page did not scroll."""
+        if not self.open_page(c, page):
+            return None
+        self.app.wait_log(r"Navigation finished", 20)
+        self.fixture.wait("beacon?%s-tick-" % tag, 10, self.since)
+        time.sleep(0.8)
+        first = self.frame(c, "top", colours)
+        mark = self.fixture.mark()
+        self.fixture.reply = b"go"
+        got = self.fixture.wait("beacon?%s-at-" % tag, 6, mark)
+        self.fixture.reply = b"ok"
+        seen = self.fixture.seen("beacon?%s-at-" % tag, mark)
+        at = int(seen[0].rsplit("-", 1)[1]) if seen else 0
+        if not self.expect(c, "the page scrolled itself", got and at > 1000, "scrollY %s" % (at if seen else "not reported")):
+            return None
+        time.sleep(0.8)
+        return first, self.frame(c, "scrolled", colours)
+
+    def h24_svg_scroll(self):
+        """H24: inline svg shapes (polygon, path, line) move with the page when it scrolls."""
+        c = "h24_svg_scroll"
+        frames = self.script_scroll(c, "h24_svg_scroll.html", "h24", [CYAN, MAGENTA, BLUE, GREEN])
+        if frames is None:
+            return
+        first, down = frames
+        if first is None or down is None:
+            return self.not_run(c, "the svg shapes leave and enter the window with the page",
+                                self.why_not("Screen Recording"))
+        self.expect(c, "the first screen shows the cyan triangle and none of the lower shapes",
+                    first[CYAN] > 1000 and max(first[MAGENTA], first[BLUE], first[GREEN]) < 500, str(first))
+        self.expect(c, "after the scroll the cyan triangle has left the window", down[CYAN] < 500, str(down))
+        self.expect(c, "after the scroll the polygon is on screen", down[MAGENTA] > 1000, str(down))
+        self.expect(c, "after the scroll the path is on screen", down[BLUE] > 1000, str(down))
+        self.expect(c, "after the scroll the lines are on screen", down[GREEN] > 1000, str(down))
+
+    def fixed_scroll(self):
+        """A position: fixed bar stays at the top of the window while the page scrolls under it."""
+        c = "fixed_scroll"
+        frames = self.script_scroll(c, "fixed_scroll.html", "fixed", [MAGENTA, RED, GREEN])
+        if frames is None:
+            return
+        first, down = frames
+        if first is None or down is None:
+            return self.not_run(c, "the fixed bar is on screen before and after the scroll",
+                                self.why_not("Screen Recording"))
+        self.expect(c, "the first screen shows the bar over the red band",
+                    first[MAGENTA] > 1000 and first[RED] > 1000 and first[GREEN] < 500, str(first))
+        self.expect(c, "after the scroll the green band is on screen", down[GREEN] > 1000, str(down))
+        self.expect(c, "after the scroll the fixed bar is still on screen", down[MAGENTA] > 1000, str(down))
+        if first[MAGENTA] > 1000:
+            ratio = down[MAGENTA] / first[MAGENTA]
+            self.expect(c, "the bar is the same size after the scroll", 0.9 < ratio < 1.1, "area ratio %.2f" % ratio)
+
     def h8(self):
         """H8: a server's error page (a 403 with a body) is shown as the page."""
         c = "h8"
@@ -892,7 +947,8 @@ class Driver:
         self.expect_no_hold(c, "2 s after the tab was closed", log_from)
 
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close"]
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close",
+              "h24_svg_scroll", "fixed_scroll"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

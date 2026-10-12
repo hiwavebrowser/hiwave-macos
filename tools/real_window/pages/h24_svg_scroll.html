@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>H24 inline svg under scroll</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  svg { display: block; }
+  #gap { height: 1100px; }
+  #row { display: flex; }
+  #tail { height: 3000px; }
+</style>
+<!-- Inline svg shapes at two places on a tall page. The first screen holds
+     only the cyan triangle; the magenta polygon, the blue path and the green
+     lines start 1500 px down. When the server answers a beacon with "go" the
+     page scrolls itself there: the cyan triangle must leave the window and
+     the three others must enter it. Shapes that ignore the page's scroll
+     (H24, ebay's icons) leave cyan on screen and the others off it. -->
+<svg id="top" width="400" height="400" viewBox="0 0 400 400">
+  <polygon points="0,0 400,0 200,400" fill="#00ffff"/>
+</svg>
+<div id="gap"></div>
+<div id="row">
+  <svg width="300" height="300" viewBox="0 0 300 300">
+    <polygon points="0,0 300,0 300,300 0,300" fill="#ff00ff"/>
+  </svg>
+  <svg width="300" height="300" viewBox="0 0 300 300">
+    <path d="M0 0 L300 0 L300 300 L0 300 Z" fill="#0000ff"/>
+  </svg>
+  <svg width="300" height="300" viewBox="0 0 300 300">
+    <line x1="0" y1="75" x2="300" y2="75" stroke="#00ff00" stroke-width="100"/>
+    <line x1="0" y1="225" x2="300" y2="225" stroke="#00ff00" stroke-width="100"/>
+  </svg>
+</div>
+<div id="tail"></div>
+<script>
+  var n = 0, scrolled = false;
+  function beacon(name) { return fetch('/beacon?' + name).then(function (r) { return r.text(); }); }
+  setInterval(function () {
+    n += 1;
+    beacon('h24-tick-' + n).then(function (reply) {
+      if (reply !== 'go' || scrolled) { return; }
+      scrolled = true;
+      window.scrollTo(0, 1500);
+      setTimeout(function () { beacon('h24-at-' + Math.round(window.scrollY)); }, 200);
+    }, function () {});
+  }, 200);
+</script>
