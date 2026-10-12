@@ -11,8 +11,9 @@
 //! per-box context (containing block, clip, opacity chain) is rebuilt from
 //! the committed tree each time a record is asked for, so a page that asks
 //! for no diagnostics pays nothing. It runs no script and borrows only the
-//! view's last committed layout and DOM, so it can answer while the page's
-//! script is busy (see `Engine::element_diagnostics`).
+//! view's last committed layout and DOM, so it can answer between script
+//! turns even while the page has script work queued (see
+//! `Engine::element_diagnostics`).
 //!
 //! A field the engine cannot answer is `null` with a reason under
 //! `unavailable`, keyed by the field's path; nothing is silently omitted.
@@ -212,6 +213,8 @@ struct BoxContext<'a> {
     /// Page-space affine of this box's own and its ancestors' transforms
     /// (the painter's, `own_transform_affine`); `None` = untransformed.
     affine: Option<[f32; 6]>,
+    /// The nearest ancestor element box that scrolls its overflow.
+    scroller: Option<&'a LayoutBox>,
 }
 
 #[derive(Clone, Copy)]
@@ -223,6 +226,7 @@ struct Inherited<'a> {
     opacity_layer: bool,
     transform_layer: bool,
     affine: Option<[f32; 6]>,
+    scroller: Option<&'a LayoutBox>,
 }
 
 /// Clip ancestors, nearest first, as a stack-allocated list.
@@ -293,6 +297,7 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
                             opacity_layer,
                             transform_layer,
                             affine,
+                            scroller: inh.scroller,
                         },
                     );
                 }
@@ -311,6 +316,11 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
             opacity_layer,
             transform_layer,
             affine,
+            scroller: if element && (s.overflow_x.is_scrollable() || s.overflow_y.is_scrollable()) {
+                Some(b)
+            } else {
+                inh.scroller
+            },
         };
         let own = ClipLink { clip: b, up: clip };
         let child_clip = if element && clips(b) { Some(&own) } else { clip };
@@ -327,6 +337,7 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
         opacity_layer: false,
         transform_layer: false,
         affine: None,
+        scroller: None,
     };
     walk(root, inh, None, &mut out);
     out
@@ -557,6 +568,7 @@ impl<'a> Builder<'a> {
                     opacity_layer: false,
                     transform_layer: false,
                     affine: None,
+                    scroller: None,
                 });
                 root_stand_in = Some(raw);
             }
@@ -610,7 +622,8 @@ impl<'a> Builder<'a> {
 
         const SHADOW: &str = "shadow trees and slots live in script only (web_shadow.js)";
         let tree = TreeState {
-            in_dom: true,
+            // Reachable from the document: false for an element script removed.
+            in_dom: connected,
             connected,
             in_shadow_tree: if connected { Some(false) } else { None },
             shadow_host: None,
@@ -807,6 +820,14 @@ impl<'a> Builder<'a> {
                 }
             }
             notes.push("containing block and clip ancestry are computed on untransformed boxes".into());
+        }
+        // body's and html's overflow scroll the viewport, which is applied.
+        let scrolls_element = ctx.scroller.and_then(|sc| sc.node_id).is_some_and(|raw| {
+            let tag = self.src.document.get_node(rustkit_dom::NodeId::new(raw)).and_then(|n| element_parts(&n).map(|(t, _)| t));
+            tag.is_some_and(|t| t != "body" && t != "html")
+        });
+        if scrolls_element {
+            notes.push("inside a scroll container: the engine does not apply element scroll offsets, so this is the unscrolled position".into());
         }
         let viewport_border = to_viewport(border, scroll);
         let (vw, vh) = (self.src.viewport.0 as f32, self.src.viewport.1 as f32);
@@ -1209,6 +1230,32 @@ fn px_template(t: &rustkit_css::GridTemplate) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
+/// Brackets, parentheses and quotes close. The shared matcher accepts some
+/// unclosed selectors (`p[`, `div:has(`) and matches nothing, which reads
+/// as "no element"; `querySelector` throws on them.
+fn selector_is_balanced(sel: &str) -> bool {
+    let mut open = Vec::new();
+    let mut quote = None;
+    let mut chars = sel.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (_, '\\') => {
+                if chars.next().is_none() {
+                    return false;
+                }
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '[' | '(') => open.push(c),
+            (None, ']') if open.pop() != Some('[') => return false,
+            (None, ')') if open.pop() != Some('(') => return false,
+            _ => {}
+        }
+    }
+    quote.is_none() && open.is_empty()
+}
+
 impl Engine {
     fn diagnostics_page(&self, view: &ViewState, opts: &DiagnosticsOptions) -> PageInfo {
         let mut unavailable = BTreeMap::new();
@@ -1257,7 +1304,8 @@ impl Engine {
     /// `RefCell`s (children, node map) only for the duration of the call. An
     /// app can therefore call it from the window thread between turns, and it
     /// answers from the last completed layout even while the page has script
-    /// work pending. A selector is matched with the cascade's matcher; an
+    /// work queued. It cannot run DURING a script turn on the same thread:
+    /// script holds `&mut Engine` for the turn. A selector is matched with the cascade's matcher; an
     /// invalid one is an error. A point is in viewport CSS px; one outside
     /// the viewport matches nothing, as `elementFromPoint`.
     pub fn element_diagnostics(
@@ -1283,6 +1331,9 @@ impl Engine {
                 .and_then(|l| l.hit_test(x + src.scroll.0, y + src.scroll.1))
                 .and_then(|hit| hit.node_id)
                 .and_then(|raw| src.document.get_node(rustkit_dom::NodeId::new(raw))),
+            DiagnosticTarget::Selector(sel) if !selector_is_balanced(sel) => {
+                return Err(EngineError::RenderError(format!("invalid selector: {sel}")));
+            }
             DiagnosticTarget::Selector(sel) => {
                 let mut stack = vec![src.document.root().clone()];
                 let mut found = None;
