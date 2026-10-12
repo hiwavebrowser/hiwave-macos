@@ -1,0 +1,144 @@
+{
+ "viewport": [
+  800,
+  600
+ ],
+ "cases": [
+  {
+   "name": "acceptance",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}x-card{display:block;width:400px}.item{height:20px}</style></head><body><div id=top style=\"height:10px\"></div><x-card id=card><div class=item id=a slot=title>A</div><div class=item id=b>B</div><div class=item id=c slot=missing style=\"height:50px\">C</div><div class=item id=d>D</div></x-card><div id=bottom style=\"height:10px\"></div><script>document.getElementById('card').attachShadow({mode:'open'}).innerHTML = \"<style>:host{display:block;padding:5px;border:1px solid}::slotted(.item){margin-left:7px}<\\/style><header id=hdr style=\\\"display:block;height:30px\\\">H<\\/header><section id=titlebox style=\\\"display:block;background:#eee\\\"><slot name=title id=st><\\/slot><\\/section><div id=main style=\\\"width:300px\\\"><slot id=sd><p id=fb style=\\\"margin:0;height:40px\\\">fallback<\\/p><\\/slot><\\/div><slot name=empty id=se><i id=fb2 style=\\\"display:block;height:15px\\\">none<\\/i><\\/slot>\";</script></body></html>",
+   "probes": [
+    [
+     20,
+     25
+    ],
+    [
+     20,
+     55
+    ],
+    [
+     20,
+     80
+    ],
+    [
+     20,
+     100
+    ],
+    [
+     350,
+     100
+    ]
+   ],
+   "chrome_boxes": "top:0:0:800:10 card:0:10:412:117 a:13:46:393:20 b:13:66:293:20 c:0:0:0:0 d:13:86:293:20 bottom:0:127:800:10 hdr:6:16:400:30 titlebox:6:46:400:20 st:0:0:0:0 main:6:66:300:40 sd:0:0:0:0 fb:0:0:0:0 se:0:0:0:0 fb2:6:106:400:15",
+   "chrome_hits": "hdr a b d card"
+  },
+  {
+   "name": "acceptance-mutated",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}x-card{display:block;width:400px}.item{height:20px}</style></head><body><div id=top style=\"height:10px\"></div><x-card id=card><div class=item id=a slot=title>A</div><div class=item id=b>B</div><div class=item id=c slot=missing style=\"height:50px\">C</div><div class=item id=d>D</div></x-card><div id=bottom style=\"height:10px\"></div><script>document.getElementById('card').attachShadow({mode:'open'}).innerHTML = \"<style>:host{display:block;padding:5px;border:1px solid}::slotted(.item){margin-left:7px}<\\/style><header id=hdr style=\\\"display:block;height:30px\\\">H<\\/header><section id=titlebox style=\\\"display:block;background:#eee\\\"><slot name=title id=st><\\/slot><\\/section><div id=main style=\\\"width:300px\\\"><slot id=sd><p id=fb style=\\\"margin:0;height:40px\\\">fallback<\\/p><\\/slot><\\/div><slot name=empty id=se><i id=fb2 style=\\\"display:block;height:15px\\\">none<\\/i><\\/slot>\";</script></body></html>",
+   "script": "var root = document.getElementById('card').shadowRoot; document.getElementById('b').slot = 'title'; root.getElementById('hdr').style.height = '45px'; root.getElementById('main').insertAdjacentHTML('beforeend', '<div id=added style=\"height:12px\"></div>');",
+   "probes": [
+    [
+     20,
+     25
+    ],
+    [
+     20,
+     70
+    ],
+    [
+     20,
+     100
+    ],
+    [
+     20,
+     130
+    ]
+   ],
+   "chrome_boxes": "top:0:0:800:10 card:0:10:412:144 a:13:61:393:20 b:13:81:393:20 c:0:0:0:0 d:13:101:293:20 bottom:0:154:800:10 hdr:6:16:400:45 titlebox:6:61:400:40 st:0:0:0:0 main:6:101:300:32 sd:0:0:0:0 fb:0:0:0:0 added:6:121:300:12 se:0:0:0:0 fb2:6:133:400:15",
+   "chrome_hits": "hdr a b added"
+  },
+  {
+   "name": "unassigned-child-not-rendered",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=host><div id=in slot=x style=\"height:20px\">in</div><div id=out style=\"height:30px\">out</div><span id=text-out>loose</span></div><div id=after style=\"height:5px\"></div><script>document.getElementById('host').attachShadow({mode:'open'}).innerHTML = \"<slot name=x id=sx><\\/slot>\";</script></body></html>",
+   "chrome_boxes": "host:0:0:800:20 in:0:0:800:20 out:0:0:0:0 text-out:0:0:0:0 after:0:20:800:5 sx:0:0:0:0"
+  },
+  {
+   "name": "fallback-content",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=empty-host></div><div id=full-host><div id=given style=\"height:25px\">given</div></div><script>document.getElementById('empty-host').attachShadow({mode:'open'}).innerHTML = \"<slot id=s1><div id=fb1 style=\\\"height:15px\\\">fallback<\\/div><\\/slot>\";</script><script>document.getElementById('full-host').attachShadow({mode:'open'}).innerHTML = \"<slot id=s2><div id=fb2 style=\\\"height:15px\\\">fallback<\\/div><\\/slot>\";</script></body></html>",
+   "chrome_boxes": "empty-host:0:0:800:15 full-host:0:15:800:25 given:0:15:800:25 s1:0:0:0:0 fb1:0:0:800:15 s2:0:0:0:0 fb2:0:0:0:0"
+  },
+  {
+   "name": "named-and-default-slot-order",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=host><div id=f1 slot=first style=\"height:11px\"></div><div id=d1 style=\"height:12px\"></div><div id=f2 slot=first style=\"height:13px\"></div><div id=d2 style=\"height:14px\"></div></div><script>document.getElementById('host').attachShadow({mode:'open'}).innerHTML = \"<div id=top style=\\\"height:5px\\\"><\\/div><slot><\\/slot><div id=mid style=\\\"height:6px\\\"><\\/div><slot name=first><\\/slot><slot name=first id=second-first><div id=second-fallback style=\\\"height:9px\\\"><\\/div><\\/slot>\";</script></body></html>",
+   "chrome_boxes": "host:0:0:800:70 f1:0:37:800:11 d1:0:5:800:12 f2:0:48:800:13 d2:0:17:800:14 top:0:0:800:5 mid:0:31:800:6 second-first:0:0:0:0 second-fallback:0:61:800:9"
+  },
+  {
+   "name": "nested-shadow-hosts",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=outer><div id=light style=\"height:20px\">light</div></div><script>document.getElementById('outer').attachShadow({mode:'open'}).innerHTML = \"<div id=o-pad style=\\\"height:7px\\\"><\\/div><x-inner id=inner style=\\\"display:block;padding-left:9px\\\"><slot id=o-slot><\\/slot><div id=inner-light slot=side style=\\\"height:4px\\\"><\\/div><\\/x-inner>\";</script><script>var inner = document.getElementById('outer').shadowRoot.getElementById('inner'); inner.attachShadow({mode:'open'}).innerHTML = '<div id=i-pad style=\"height:3px\"></div><slot name=side></slot><div style=\"padding-left:2px\"><slot></slot></div>';</script></body></html>",
+   "chrome_boxes": "outer:0:0:800:34 light:11:14:789:20 o-pad:0:0:800:7 inner:0:7:800:27 o-slot:0:0:0:0 inner-light:9:10:791:4 i-pad:9:7:791:3",
+   "probes": [
+    [
+     20,
+     3
+    ],
+    [
+     20,
+     8
+    ],
+    [
+     20,
+     12
+    ],
+    [
+     20,
+     25
+    ]
+   ],
+   "chrome_hits": "o-pad i-pad inner-light light"
+  },
+  {
+   "name": "slot-in-fallback-of-a-slot",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=host><div id=for-b slot=b style=\"height:20px\">b</div></div><script>document.getElementById('host').attachShadow({mode:'open'}).innerHTML = \"<slot name=a id=sa><div id=fa style=\\\"height:8px\\\"><\\/div><slot name=b id=sb><div id=fbb style=\\\"height:99px\\\"><\\/div><\\/slot><\\/slot>\";</script></body></html>",
+   "chrome_boxes": "host:0:0:800:28 for-b:0:8:800:20 sa:0:0:0:0 fa:0:0:800:8 sb:0:0:0:0 fbb:0:0:0:0"
+  },
+  {
+   "name": "slot-is-display-contents",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=host><div id=i1 style=\"width:30px;height:10px\"></div><div id=i2 style=\"width:40px;height:10px\"></div><div id=i3 slot=b style=\"width:50px;height:10px\">x</div></div><script>document.getElementById('host').attachShadow({mode:'open'}).innerHTML = \"<div id=row style=\\\"display:flex\\\"><slot id=s><\\/slot><div id=tail style=\\\"width:20px;height:10px\\\"><\\/div><\\/div><div id=boxed><slot name=b id=sb style=\\\"display:block;padding:4px\\\"><\\/slot><\\/div>\";</script></body></html>",
+   "chrome_boxes": "host:0:0:800:28 i1:0:0:30:10 i2:30:0:40:10 i3:4:14:50:10 row:0:0:800:10 s:0:0:0:0 tail:70:0:20:10 boxed:0:10:800:18 sb:0:10:800:18",
+   "probes": [
+    [
+     10,
+     5
+    ],
+    [
+     40,
+     5
+    ],
+    [
+     75,
+     5
+    ],
+    [
+     10,
+     20
+    ],
+    [
+     100,
+     5
+    ]
+   ],
+   "chrome_hits": "i1 i2 tail i3 row"
+  },
+  {
+   "name": "declarative-shadow-root",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=host><template shadowrootmode=open><div id=dsd-top style=\"height:9px\"></div><slot></slot></template><div id=dl style=\"height:21px\">light</div></div><div id=plain style=\"height:2px\"><template id=tpl><div id=inert style=\"height:50px\"></div></template></div><div id=end style=\"height:3px\"></div></body></html>",
+   "chrome_boxes": "host:0:0:800:30 dl:0:9:800:21 plain:0:30:800:2 tpl:0:0:0:0 end:0:32:800:3 dsd-top:0:0:800:9"
+  },
+  {
+   "name": "inheritance-across-the-boundary",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=host style=\"line-height:40px\"><div id=lt>y</div></div><script>document.getElementById('host').attachShadow({mode:'open'}).innerHTML = \"<div id=sh>x<\\/div><div id=wrap style=\\\"line-height:10px\\\"><slot><\\/slot><\\/div>\";</script></body></html>",
+   "chrome_boxes": "host:0:0:800:50 lt:0:40:800:10 sh:0:0:800:40 wrap:0:40:800:10"
+  }
+ ],
+ "chrome": "141.0.7390.37"
+}

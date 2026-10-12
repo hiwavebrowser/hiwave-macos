@@ -219,6 +219,8 @@ mod grid_item_min_max_tests;
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod ws_beside_block_replaced_tests;
+#[cfg(all(test, feature = "headless"))]
+mod shadow_tree_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -34401,17 +34403,19 @@ mod script_selector_tests {
     // A shadow root's tree answers the engine's selector matcher, and (until the
     // flat tree lands) nothing in it is painted.
     #[test]
-    fn a_shadow_root_answers_queries_and_is_not_painted_yet() {
+    fn a_shadow_root_answers_queries_and_is_painted() {
         let (mut engine, view) = loaded(
-            "<html><head><style>body{margin:0}</style></head><body><div id=h><span slot=x id=a>A</span></div>\n             <p id=out>outside</p></body></html>",
+            "<html><head><style>body{margin:0}</style></head><body><div id=h><span slot=x id=a>A</span><b id=gone>B</b></div>\n             <p id=out>outside</p></body></html>",
         );
-        let before = painted_text(&engine, view);
+        assert_eq!(painted_text(&engine, view), "A B outside");
         let mut js = |s: &str| eval(&mut engine, view, s);
         assert_eq!(
             js("var r = document.getElementById('h').attachShadow({ mode: 'open' }); r.innerHTML = '<p class=c id=p>hi</p><slot name=x></slot>'; [r.querySelectorAll('.c').length, r.querySelector('p').id, r.querySelectorAll('p, slot').length, String(document.querySelector('.c')), r.querySelector('slot').assignedElements()[0].id].join()"),
             "1,p,2,null,a"
         );
-        assert_eq!(painted_text(&engine, view), before, "the shadow tree is not in the rendered tree yet");
+        // The flat tree: the shadow tree, the span through its slot, and not
+        // the <b> no slot takes.
+        assert_eq!(painted_text(&engine, view), "hi A outside");
     }
 
     // getComputedStyle answers from the cascade the painter used.
