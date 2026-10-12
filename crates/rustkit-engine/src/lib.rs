@@ -8952,10 +8952,23 @@ impl Engine {
                 };
             }
             "gap" | "grid-gap" => {
-                // gap shorthand (row-gap column-gap or single value)
-                if let Some(length) = parse_length(value) {
-                    style.row_gap = length.clone();
-                    style.column_gap = length;
+                // `<row-gap> <column-gap>?`: one value sets both. Split at
+                // top-level whitespace so a calc() stays one value; any part
+                // that is no length makes the whole declaration invalid.
+                let parts: Vec<_> = split_top_level_whitespace(value)
+                    .into_iter()
+                    .map(parse_length)
+                    .collect();
+                match parts.as_slice() {
+                    [Some(both)] => {
+                        style.row_gap = both.clone();
+                        style.column_gap = both.clone();
+                    }
+                    [Some(row), Some(column)] => {
+                        style.row_gap = row.clone();
+                        style.column_gap = column.clone();
+                    }
+                    _ => {}
                 }
             }
             "row-gap" => {
