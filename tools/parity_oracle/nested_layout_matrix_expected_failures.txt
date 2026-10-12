@@ -191,7 +191,7 @@ core--table-cell--inline-block--w-50pct--h-50pct       table-cell-percent-height
 core--table-cell--inline-block--w-200px--h-50pct       table-cell-percent-height
 core--table-cell--inline-block--w-max-content--h-50pct table-cell-percent-height
 
-# grid-auto-rows-not-stretched-to-non-px-height: 9
+# grid-auto-rows-not-stretched-to-non-px-height: 10
 core--block--grid--w-auto--h-50pct         grid-auto-rows-not-stretched-to-non-px-height
 core--block--grid--w-50pct--h-50pct        grid-auto-rows-not-stretched-to-non-px-height
 core--block--grid--w-200px--h-50pct        grid-auto-rows-not-stretched-to-non-px-height
@@ -201,14 +201,7 @@ core--grid--grid--w-50pct--h-auto          grid-auto-rows-not-stretched-to-non-p
 core--grid--grid--w-200px--h-auto          grid-auto-rows-not-stretched-to-non-px-height
 core--abspos--grid--w-200px--h-50pct       grid-auto-rows-not-stretched-to-non-px-height
 grid-span--grid--auto-rows-auto            grid-auto-rows-not-stretched-to-non-px-height
-
-# gap-two-value-shorthand-dropped: 6
-gap--block--flex-wrap    gap-two-value-shorthand-dropped
-gap--flex-row--flex-wrap gap-two-value-shorthand-dropped
-gap--flex-col--flex-wrap gap-two-value-shorthand-dropped
-gap--grid--flex-wrap     gap-two-value-shorthand-dropped
-gap--block--grid         gap-two-value-shorthand-dropped
-gap--grid--grid          gap-two-value-shorthand-dropped
+gap--grid--grid                            grid-auto-rows-not-stretched-to-non-px-height
 
 # column-flex-item-stretches-to-outer-width: 5
 core--flex-row--flex-col--w-auto--h-auto         column-flex-item-stretches-to-outer-width
