@@ -25,7 +25,7 @@
 import { chromium } from '../parity_oracle/node_modules/playwright/index.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import {
   createDeterministicContext,
   getDeterministicLaunchOptions,
@@ -104,9 +104,22 @@ function collect([fnSrc, props, maxElements]) {
     for (const c of el.classList) s += `.${c}`;
     return s;
   }
+  // A URL inside a record: no credentials, query or fragment; data: contents
+  // elided; a file: URL as a path relative to the page (never a host path).
+  const pageDir = location.protocol === 'file:' ? location.href.replace(/[^/]*([?#].*)?$/, '') : null;
   function scrubUrl(u) {
     if (/^data:/i.test(u)) return 'data:…';
-    return u.split(/[?#]/)[0];
+    let out = u.split(/[?#]/)[0];
+    if (/^file:/i.test(out)) {
+      return pageDir && out.startsWith(pageDir) ? out.slice(pageDir.length) : out.replace(/^.*\//, '');
+    }
+    try {
+      const parsed = new URL(out);
+      parsed.username = '';
+      parsed.password = '';
+      out = parsed.toString();
+    } catch { /* relative: no authority */ }
+    return out;
   }
   function backgroundImage(v) {
     if (!v || v === 'none') return 'none';
@@ -121,11 +134,10 @@ function collect([fnSrc, props, maxElements]) {
     }
     layers.push(cur.trim());
     return layers.map((l) => {
-      const url = l.match(/^url\(\s*["']?(.*?)["']?\s*\)$/i);
-      if (url) return `url("${scrubUrl(url[1])}")`;
-      const g = l.match(/^((?:repeating-)?(?:linear|radial|conic)-gradient)\(/i);
+      const g = l.match(/^(?:-webkit-|-moz-)?((?:repeating-)?(?:linear|radial|conic)-gradient)\(/i);
       if (g) return `${g[1].toLowerCase()}(…)`;
-      return l;
+      // Every url() token, wherever it sits (image-set(), cross-fade(), ...).
+      return l.replace(/url\(\s*(["']?)(.*?)\1\s*\)/gi, (_, q, u) => `url("${scrubUrl(u)}")`);
     }).join(', ');
   }
   const px = (v) => parseFloat(v) || 0;
@@ -331,7 +343,8 @@ async function main() {
     console.error('usage: chrome_records.mjs <url|html-file> <out.json> [--width W --height H --scale S --settle MS --max-elements N --keep-query]');
     process.exit(2);
   }
-  const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(opts.target);
+  // Anything with a scheme (http:, data:, about:, ...) is a URL; the rest a file.
+  const isUrl = /^[a-z][a-z0-9+.-]+:/i.test(opts.target) && !existsSync(opts.target);
   const fnSrc = extractGetSelectorSource(
     readFileSync(join(__dirname, '..', 'parity_oracle', 'capture_baseline.mjs'), 'utf8'),
   );
@@ -358,11 +371,15 @@ async function main() {
       });
     }
     const page = await context.newPage();
+    let status = null;
     try {
-      await page.goto(url, { waitUntil: isUrl ? 'load' : 'networkidle', timeout: NAV_TIMEOUT_MS });
+      const response = await page.goto(url, { waitUntil: isUrl ? 'load' : 'networkidle', timeout: NAV_TIMEOUT_MS });
+      status = response ? response.status() : null;
     } catch (e) {
       result.nav_error = String(e.message || e).split('\n')[0];
     }
+    // An error status is the server's error page, not the site: no records.
+    if (status !== null && status >= 400) throw new Error(`HTTP ${status}`);
     await page.waitForTimeout(isUrl ? opts.settle : 50);
     const got = await page.evaluate(collect, [fnSrc, STYLE_PROPERTIES, opts.maxElements]);
     const dump = {
@@ -397,6 +414,6 @@ async function main() {
   if (result.status !== 'ok') process.exit(1);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   await main();
 }

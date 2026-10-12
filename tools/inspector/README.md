@@ -64,7 +64,10 @@ loads, so content differences show up as DOM roots and are not engine defects.
 - **Privacy:**
   - the URL loses its query and fragment unless `--keep-query`
   - text is a length only
-  - `background-image` URLs lose their query, and `data:` URLs their contents
+  - every `url(...)` in `background-image` (inside `image-set()` too) loses
+    its credentials, query and fragment, and `data:` URLs lose their
+    contents
+  - a `file:` URL becomes a path relative to the page
   - nothing reads cookies, storage or form values
   - a local file is named by the path as given (pass it repo-relative)
 
@@ -82,7 +85,19 @@ loads, so content differences show up as DOM roots and are not engine defects.
 
 Matching is element_diff's `match()` with its keys, in order: `id`, then
 `path` (the oracle key), then `path_noclass`. A key duplicated on either side
-goes under `matching.ambiguous` and is never paired. Before matching, the
+goes under `matching.ambiguous` and is never paired by key.
+
+Structural keys pair children by position (`:nth-of-type`), so one removed
+or added sibling would shift every later sibling onto its neighbour's
+partner. Under any parent whose children did not pair one-to-one, the
+children are therefore **realigned**:
+- the two child lists are sequence-aligned on (tag, id, classes, text length)
+- within a gap of equal length, same-tag children pair in order (the same
+  element with changed text)
+- each new pair's subtree is realigned the same way
+
+`matching.realigned` counts the pairs this changed, and their `match_key` is
+`aligned`. Before matching, the
 class part of a key is normalised to the first two classes joined by dots.
 The engine mirrors the `getSelector` that captured the committed baselines
 (`div.card featured`); today's `getSelector` writes `div.card.featured`.
@@ -97,7 +112,10 @@ first stage that differs:
   - an extra element (`ours_only`; always a root)
   - a different `tag` or `child_count`
   - a different `text_length` beyond the tolerance
-- **STYLE** compares only properties that can matter for this element:
+- **STYLE** compares only properties that can matter for this element (also:
+  `float`/`clear` are ignored on flex and grid items, `vertical-align` is
+  compared only on inline-level boxes and table cells, and `object-fit` only
+  on replaced elements):
   - **Never compared**, because they are used values that come out of layout:
     `width`, `height`, `margin-*`, `padding-*`, `top/right/bottom/left/inset`.
     Their effect shows up as GEOMETRY.
@@ -113,24 +131,42 @@ first stage that differs:
     - numbers are rounded to 0.01
     - font family lists are compared unquoted and in lower case
   - **Equivalent keywords** are treated as the same value:
-    - `justify-content: normal ≡ flex-start`
+    - `justify-content: normal ≡ flex-start` (not compared on a grid
+      container when either side is `normal`, which behaves as stretch there)
+    - `justify-content`/`align-items`: `start ≡ flex-start`, `end ≡ flex-end`
+      (the engine maps them when it parses)
     - `align-items: normal ≡ stretch`
+    - `z-index: 0 ≡ auto` (the engine stores auto as 0)
     - `text-align: start ≡ left`
     - `font-weight: normal ≡ 400`
-    - gaps: `normal ≡ 0px`
+    - gaps: `normal ≡ 0px`, per value (`normal 5px ≡ 0px 5px`)
     - `min-*: auto ≡ 0px`
     - `display: list-item ≡ block`
     - `transparent ≡ rgba(0, 0, 0, 0)`
-  - **`grid-template-*`** is compared only when both sides are plain px
-    lists. The engine reports the specified tracks; Chromium reports resolved
-    px.
-  - **`transform`** matrices are compared to within 0.01.
+  - **`grid-template-*`** on a grid container is compared only when both
+    sides are plain px lists. The engine has no resolved tracks: it reports
+    the specified list, or `none` for implicit tracks. Chromium reports the
+    resolved px tracks.
+  - **`transform`** matrices are compared to within 0.01. An identity matrix
+    is equal to `none`, and a 2D `matrix3d` to its `matrix`.
+  - **`background-image`** compares a URL's last path segment (Chromium
+    resolves URLs, the engine keeps the specified text) and gradients by
+    kind (`-webkit-` prefix dropped).
 - **GEOMETRY:** `has_box` differs, or the border box (else the content box)
   is off by more than the threshold.
 
-A **divergence root** is a divergent element whose parent does not diverge at
-an *earlier* stage. A child that only differs in GEOMETRY under a
-STYLE-divergent parent is a consequence. A same-stage child stays a root.
+A **divergence root** is a divergent element that no other divergence
+explains. The others are **consequences**: they get `root: false` and
+`attributed_to` (the selector of the element that explains them), and they
+are left out of `roots` and the counts. A divergence is a consequence when:
+
+| rule | example |
+|---|---|
+| its parent diverges at an earlier stage | a box that moved under a STYLE-divergent flex container |
+| GEOMETRY: it only follows its parent. Its shift equals the parent's content-box shift, or that plus the earlier siblings' size changes (or half or all of the parent's width change, for centred or end-aligned content). Its width change is no larger than the parent's, in the same direction, and its height is unchanged. Heights flow up, not down, so a height change is never explained from above. | the flex cells of a narrower row; everything under a body with more padding |
+| STYLE: every differing property is inherited, and equal on both sides to the parent's value | the cards of a section with a different `color` |
+| DOM: it is an ancestor whose only differences are child count and text length, and a DOM root lies below it | the parent of a missing element |
+| GEOMETRY: it is an ancestor whose only difference is its height, and a GEOMETRY root lies below it | `html` and `body`, taller because a paragraph is |
 
 ### Output (`schema: hiwave-inspector-diff/1`)
 
@@ -140,19 +176,27 @@ inputs always give the same bytes.
 | key | contents |
 |---|---|
 | `first` | the first root in document order |
-| `first_innermost` | the first root with no root of the same stage below it. The literal first is often `html` or a wrapper whose height is off because of something inside it; **start here.** |
+| `first_innermost` | the first root with no root of the same stage below it; **start here.** Ancestors that only grow with their content are already consequences, so this is usually the same as `first`. |
 | `roots` | the top 20 roots by `affected_area`. For GEOMETRY that is the area covered by exactly one of the two boxes (element_diff's `mismatch_area`); for DOM and STYLE it is the element's larger box area. |
-| `summary.divergent_elements` | how many elements diverge, roots or not |
+| `summary.divergent_elements` | how many elements diverge, roots or consequences |
 | `summary.roots` | how many roots |
+| `summary.consequences` | how many divergences are explained by another (`divergent_elements - roots`) |
 | `summary.stage_counts` | `{DOM, STYLE, GEOMETRY}`: roots per stage. **This is the per-site "failure cause" the board publishes.** |
 | `summary.style_properties` | STYLE roots counted by property name (one root can count under several) |
 | `summary.geometry_contexts` | GEOMETRY roots by formatting context: `block`, `inline`, `float`, `flex item`, `grid item`, `table cell`, `abspos`, `fixed`, `no box` |
 | `matching` | counts, the `ambiguous` list, and `truncated` (either input hit its element cap) |
 | `page`, `settings` | the two URLs and engines, the viewport, our `text_metrics_font_derived`, the thresholds |
 
-Each root in `first`, `first_innermost` and `roots` carries: `stage`,
-`selector` (Chrome's structural selector), `oracle_key`, `tag`, `match_key`,
-`formatting_context`, `affected_area`, and `fields`. A field is one of:
+Each root in `first`, `first_innermost` and `roots` carries:
+- `stage`
+- `selector` (Chrome's structural selector) and `oracle_key`
+- `tag`
+- `match_key`: `id`, `path`, `path_noclass` or `aligned`; `null` for an extra element
+- `formatting_context`
+- `affected_area`
+- `order`: the position in Chrome's records; `null` for an extra element, which only ours has
+- `root` (always `true` in these lists) and `attributed_to` (`null` for a root)
+- `fields` A field is one of:
 
 - `{property, ours, chrome}` for STYLE
 - `{field, ours, chrome, dx, dy, dw, dh}` for a box
