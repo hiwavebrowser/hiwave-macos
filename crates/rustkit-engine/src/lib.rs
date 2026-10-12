@@ -8954,10 +8954,19 @@ impl Engine {
             "gap" | "grid-gap" => {
                 // `<row-gap> <column-gap>?`: one value sets both. Split at
                 // top-level whitespace so a calc() stays one value; any part
-                // that is no length makes the whole declaration invalid.
+                // that is no length makes the whole declaration invalid. A
+                // gap is a non-negative length: `parse_length` also takes a
+                // negative one and a bare number as px, which CSS rejects
+                // (a unitless zero is the one unitless length).
+                let gap_length = |part: &str| {
+                    let bare_number = part.parse::<f32>().is_ok_and(|v| v != 0.0);
+                    (!part.starts_with('-') && !bare_number)
+                        .then(|| parse_length(part))
+                        .flatten()
+                };
                 let parts: Vec<_> = split_top_level_whitespace(value)
                     .into_iter()
-                    .map(parse_length)
+                    .map(gap_length)
                     .collect();
                 match parts.as_slice() {
                     [Some(both)] => {
