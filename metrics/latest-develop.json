@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-10-05T11:15:23.771312",
-  "commit": "15d2c3a6013e1e70593fa30656670c203a627fd2",
+  "timestamp": "2026-10-12T11:47:36.446561",
+  "commit": "81ef8b34c716dece7804375221d78f3a9dd9083b",
   "branch": "develop",
   "total": 26,
   "passed": 26,
   "failed": 0,
   "not_measured": 0,
   "measured": 26,
-  "average_diff": 1.106607480450864,
+  "average_diff": 1.1066149924700948,
   "worst_case": {
     "name": "article-typography",
     "diff": 4.7859375
@@ -54,8 +54,8 @@
       "instrument_failure": null
     },
     {
-      "name": "css-selectors",
-      "diff": 1.3251041666666665,
+      "name": "card-grid",
+      "diff": 1.34111328125,
       "threshold": 15,
       "passed": true,
       "type": "websuite",
@@ -64,8 +64,8 @@
       "instrument_failure": null
     },
     {
-      "name": "card-grid",
-      "diff": 1.3017578125,
+      "name": "css-selectors",
+      "diff": 1.3251041666666665,
       "threshold": 15,
       "passed": true,
       "type": "websuite",
@@ -84,18 +84,8 @@
       "instrument_failure": null
     },
     {
-      "name": "chrome_rustkit",
-      "diff": 1.12578125,
-      "threshold": 15,
-      "passed": true,
-      "type": "builtins",
-      "error": null,
-      "not_measured": false,
-      "instrument_failure": null
-    },
-    {
       "name": "new_tab",
-      "diff": 1.101953125,
+      "diff": 1.11748046875,
       "threshold": 15,
       "passed": true,
       "type": "builtins",
@@ -106,6 +96,16 @@
     {
       "name": "shelf",
       "diff": 1.0774739583333333,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "chrome_rustkit",
+      "diff": 1.07109375,
       "threshold": 15,
       "passed": true,
       "type": "builtins",
