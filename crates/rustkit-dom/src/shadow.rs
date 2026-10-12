@@ -45,8 +45,10 @@ impl ShadowRootInit {
 pub(crate) enum ShadowLink {
     /// On a host: its shadow root.
     Root(Rc<Node>),
-    /// On a shadow root: its host, and how the root was attached.
-    Host(Weak<Node>, ShadowRootInit),
+    /// On a shadow root: its host, how the root was attached, and whether
+    /// it is still declarative (DOM §4.8 "declarative": made from a
+    /// `<template shadowrootmode>` and not yet taken over by attachShadow).
+    Host(Weak<Node>, ShadowRootInit, bool),
 }
 
 /// DOM §4.2.14 "valid shadow host name": the listed HTML elements and
@@ -108,7 +110,7 @@ impl Node {
     /// This shadow root's host.
     pub fn shadow_host(&self) -> Option<Rc<Node>> {
         match &*self.shadow.borrow() {
-            Some(ShadowLink::Host(host, _)) => host.upgrade(),
+            Some(ShadowLink::Host(host, ..)) => host.upgrade(),
             _ => None,
         }
     }
@@ -116,7 +118,7 @@ impl Node {
     /// How this shadow root was attached; `None` for any other node.
     pub fn shadow_root_init(&self) -> Option<ShadowRootInit> {
         match &*self.shadow.borrow() {
-            Some(ShadowLink::Host(_, init)) => Some(*init),
+            Some(ShadowLink::Host(_, init, _)) => Some(*init),
             _ => None,
         }
     }
@@ -235,20 +237,45 @@ impl Document {
         self.shadow_roots.get() > 0
     }
 
-    /// DOM §4.2.14 attachShadow: give `host` a new, empty shadow root.
-    /// Fails with `InvalidOperation("NotSupportedError")` when `host` is not
-    /// a valid shadow host or already has one.
+    /// DOM §4.2.14 attachShadow: give `host` a new, empty shadow root. A
+    /// host whose root is still declarative and in the same mode gets that
+    /// root back, emptied and no longer declarative. Fails with
+    /// `InvalidOperation("NotSupportedError")` when `host` is not a valid
+    /// shadow host or already has any other root.
     pub fn attach_shadow(
         &self,
         host: &Rc<Node>,
         init: ShadowRootInit,
     ) -> Result<Rc<Node>, DomError> {
-        let valid = host.tag_name().is_some_and(is_valid_shadow_host_name);
-        if !valid || host.shadow.borrow().is_some() {
-            return Err(DomError::InvalidOperation("NotSupportedError".into()));
+        self.attach(host, init, false)
+    }
+
+    fn attach(
+        &self,
+        host: &Rc<Node>,
+        init: ShadowRootInit,
+        declarative: bool,
+    ) -> Result<Rc<Node>, DomError> {
+        let not_supported = || DomError::InvalidOperation("NotSupportedError".into());
+        if !host.tag_name().is_some_and(is_valid_shadow_host_name) {
+            return Err(not_supported());
+        }
+        if let Some(existing) = host.shadow_root() {
+            match &mut *existing.shadow.borrow_mut() {
+                Some(ShadowLink::Host(_, current, still_declarative))
+                    if !declarative && *still_declarative && current.mode == init.mode =>
+                {
+                    *still_declarative = false;
+                }
+                _ => return Err(not_supported()),
+            }
+            for child in existing.children() {
+                child.remove_from_parent();
+            }
+            return Ok(existing);
         }
         let root = self.create_node(NodeType::DocumentFragment);
-        *root.shadow.borrow_mut() = Some(ShadowLink::Host(Rc::downgrade(host), init));
+        *root.shadow.borrow_mut() = Some(ShadowLink::Host(Rc::downgrade(host), init, declarative));
         *host.shadow.borrow_mut() = Some(ShadowLink::Root(root.clone()));
         self.shadow_roots.set(self.shadow_roots.get() + 1);
         Ok(root)
@@ -299,11 +326,11 @@ pub(crate) fn move_link(old: &Rc<Node>, new: &Rc<Node>) {
     let link = old.shadow.borrow_mut().take();
     match &link {
         Some(ShadowLink::Root(root)) => {
-            if let Some(ShadowLink::Host(host, _)) = &mut *root.shadow.borrow_mut() {
+            if let Some(ShadowLink::Host(host, ..)) = &mut *root.shadow.borrow_mut() {
                 *host = Rc::downgrade(new);
             }
         }
-        Some(ShadowLink::Host(host, _)) => {
+        Some(ShadowLink::Host(host, ..)) => {
             if let Some(host) = host.upgrade() {
                 *host.shadow.borrow_mut() = Some(ShadowLink::Root(new.clone()));
             }
@@ -317,17 +344,24 @@ pub(crate) fn move_link(old: &Rc<Node>, new: &Rc<Node>) {
 /// `shadowrootmode`), applied after the parse: each such template whose
 /// parent can host a shadow root and has none yet becomes that parent's
 /// shadow root, its children moving into the root, and the template leaves
-/// the tree. Innermost first, so a nested declarative root is attached
-/// before its host moves into the outer one. Any other template stays an
-/// ordinary template.
+/// the tree. In post-order: a nested declarative root is attached before
+/// its host moves into the outer one, and of two templates on one host the
+/// first in document order takes it, as at its start tag. Any other
+/// template stays an ordinary template. The ids now inside shadow trees
+/// leave the document's id table.
 pub(crate) fn attach_declarative(doc: &Document) {
-    let mut templates = Vec::new();
-    doc.traverse(|n| {
-        if n.tag_name() == Some("template") && n.get_attribute("shadowrootmode").is_some() {
-            templates.push(n.clone());
+    fn post_order(node: &Rc<Node>, out: &mut Vec<Rc<Node>>) {
+        for child in node.children() {
+            post_order(&child, out);
         }
-    });
-    for template in templates.into_iter().rev() {
+        if node.tag_name() == Some("template") && node.get_attribute("shadowrootmode").is_some() {
+            out.push(node.clone());
+        }
+    }
+    let mut templates = Vec::new();
+    post_order(&doc.root, &mut templates);
+    let mut attached = false;
+    for template in templates {
         let mode = match template
             .get_attribute("shadowrootmode")
             .map(str::to_ascii_lowercase)
@@ -344,7 +378,7 @@ pub(crate) fn attach_declarative(doc: &Document) {
             delegates_focus: template.get_attribute("shadowrootdelegatesfocus").is_some(),
             manual_slot_assignment: false,
         };
-        let Ok(root) = doc.attach_shadow(&host, init) else {
+        let Ok(root) = doc.attach(&host, init, true) else {
             continue;
         };
         for child in template.children() {
@@ -352,6 +386,17 @@ pub(crate) fn attach_declarative(doc: &Document) {
             root.append_child(child);
         }
         template.remove_from_parent();
+        attached = true;
+    }
+    if attached {
+        // First in tree order, light tree only, as the parser filled it.
+        let mut by_id = std::collections::HashMap::new();
+        doc.traverse(|n| {
+            if let Some(id) = n.get_attribute("id").filter(|v| !v.is_empty()) {
+                by_id.entry(id.to_string()).or_insert_with(|| n.clone());
+            }
+        });
+        *doc.elements_by_id.borrow_mut() = by_id;
     }
 }
 
@@ -539,12 +584,19 @@ mod tests {
         .unwrap();
         let host = by_id(&doc, "h");
         let declared = host.shadow_root().unwrap();
-        let root = doc.attach_shadow(&host, ShadowRootInit::open()).expect("reuses the declarative root");
+        let root = doc
+            .attach_shadow(&host, ShadowRootInit::open())
+            .expect("reuses the declarative root");
         assert_eq!(root.id, declared.id);
         assert!(root.children().is_empty(), "its children are removed");
-        assert!(doc.attach_shadow(&host, ShadowRootInit::open()).is_err(), "no longer declarative");
+        assert!(
+            doc.attach_shadow(&host, ShadowRootInit::open()).is_err(),
+            "no longer declarative"
+        );
         // A different mode does not take it over.
-        assert!(doc.attach_shadow(&by_id(&doc, "c"), ShadowRootInit::open()).is_err());
+        assert!(doc
+            .attach_shadow(&by_id(&doc, "c"), ShadowRootInit::open())
+            .is_err());
     }
 
     // HTML §13.2.6.4.4 attaches at the template's start tag, so the first of
@@ -573,5 +625,4 @@ mod tests {
         assert_eq!(doc.get_element_by_id("x").unwrap().tag_name(), Some("b"));
         assert!(doc.get_element_by_id("inner").is_none());
     }
-
 }

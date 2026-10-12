@@ -207,8 +207,8 @@ fn a_declarative_shadow_root_is_attached_by_the_parser() {
     // A closed one is attached but not reachable; an <a> cannot host one, so
     // its template stays an ordinary template.
     assert_eq!(ev(&b, "[String(document.getElementById('c').shadowRoot), document.getElementById('c').children.length, document.getElementById('bad').firstElementChild.localName].join()"), "null,0,template");
-    // An element that already has a declarative root cannot attach another.
-    assert_eq!(thrown(&b, "document.getElementById('h').attachShadow({ mode: 'open' });"), "NotSupportedError");
+    // A declarative root is taken over only in its own mode (DOM §4.2.14).
+    assert_eq!(thrown(&b, "document.getElementById('h').attachShadow({ mode: 'closed' });"), "NotSupportedError");
     // The fragment parser (innerHTML) does not attach declarative roots.
     assert_eq!(
         ev(&b, "var p = document.createElement('div'); p.innerHTML = '<div><template shadowrootmode=open><i></i></template></div>'; [String(p.firstChild.shadowRoot), p.firstChild.firstChild.localName].join()"),
