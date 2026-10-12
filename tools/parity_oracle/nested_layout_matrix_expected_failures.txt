@@ -145,10 +145,10 @@ core--abspos--grid--w-50pct--h-50pct             grid-max-content-width-no-grid-
 core--abspos--grid--w-max-content--h-50pct       grid-max-content-width-no-grid-arm
 core--abspos--grid--w-auto--h-120px              grid-max-content-width-no-grid-arm
 core--abspos--grid--w-50pct--h-120px             grid-max-content-width-no-grid-arm
-core--block--grid--w-fit-content--h-120px        grid-max-content-width-no-grid-arm
 core--float--grid--w-fit-content--h-120px        grid-max-content-width-no-grid-arm
 core--inline-block--grid--w-fit-content--h-120px grid-max-content-width-no-grid-arm
 core--abspos--grid--w-fit-content--h-120px       grid-max-content-width-no-grid-arm
+core--block--grid--w-fit-content--h-120px        grid-max-content-width-no-grid-arm
 core--table-cell--grid--w-fit-content--h-120px   grid-max-content-width-no-grid-arm
 
 # flex-item-min-width-is-its-own-width: 20

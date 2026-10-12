@@ -93,9 +93,9 @@ second cause, it is named under its first.
 |---|---|---|---|---|
 | 1 | `intrinsic-width-keyword-unparsed` | 36 | 0 | rustkit-css `parse_length` |
 | 2 | `grid-item-of-flex-laid-out-as-block` | 36 | 26 | flex.rs step 11 (#663 cause 1) |
-| 3 | `fit-content-width-is-zero` | 30 | 0 | rustkit-layout `calculate_block_width` |
+| 3 | `fit-content-width-is-zero` | 27 | 0 | rustkit-layout `calculate_block_width` |
 | 4 | `inline-block-baseline-of-flex-or-grid-content` | 25 | 0 | rustkit-layout `inline_block_baseline_y` / `baseline_is_bottom_edge` |
-| 5 | `grid-max-content-width-no-grid-arm` | 24 | 13 | grid.rs `estimate_max_content_width` (#663 cause 2) |
+| 5 | `grid-max-content-width-no-grid-arm` | 27 | 13 | grid.rs `estimate_max_content_width` (#663 cause 2) |
 | 6 | `flex-item-min-width-is-its-own-width` | 20 | 0 | flex.rs `create_flex_item` with grid.rs `own_min_content_width` |
 | 7 | `table-cell-percent-height` | 16 | 0 | table.rs `layout_cell` / `stretch_cell` |
 | 8 | `grid-auto-rows-not-stretched-to-non-px-height` | 9 | 0 | grid.rs `layout_grid_container`, `own_definite_height` |
@@ -112,9 +112,10 @@ second cause, it is named under its first.
 | 19 | `max-height-ignored-on-stretched-item` | 1 | 0 | grid.rs stretch; flex.rs cross size |
 | | **total** | **231** | **39** | |
 
-Of the cases tagged 2 or 5 that still fail on #663 (10 and 11): 5 stop at
+Of the cases tagged 2 or 5 that still fail on #663 (10 and 14): 5 stop at
 cause 4 (the inline-block outer's baseline), 10 at cause 8 (auto rows not
-stretched), 2 at cause 16, 2 at cause 9, 1 at cause 14 and 1 at cause 19.
+stretched), 3 at cause 3 (`width: fit-content` is 0), 2 at cause 16, 2 at
+cause 9, 1 at cause 14 and 1 at cause 19.
 
 Each "smallest page" below is the body of a page whose `<head>` is
 `<style>body{margin:0;font-size:0;line-height:0}</style>`; boxes are
@@ -160,7 +161,7 @@ the grid stretched to the row's 300px and its auto rows not;
 at cause 16; `grid-span--flex-col--auto-rows-40` at cause 14;
 `clamp--flex-row--max-height-grid` at cause 19.
 
-### 3. `fit-content-width-is-zero` (30)
+### 3. `fit-content-width-is-zero` (27, and 3 more behind cause 5)
 
 **Rule:** `width: fit-content` on a block is `min(max-content,
 max(min-content, available))`; the engine makes it 0.
@@ -203,7 +204,7 @@ Where: `inline_block_baseline_y` and `baseline_is_bottom_edge` in
 with a baseline (text, a control, an image) through any block, flex or grid
 child, so a flex or grid container of empty items gives none.
 
-### 5. `grid-max-content-width-no-grid-arm` (24; 13 match on #663)
+### 5. `grid-max-content-width-no-grid-arm` (27; 13 match on #663)
 
 **Rule:** the max-content width of a grid is the sum of its columns; the
 engine takes its widest child, so a grid in a float, an inline-block or an
@@ -218,9 +219,10 @@ absolutely positioned box is too narrow.
 
 Where: `estimate_max_content_width` / `own_max_content_width` in
 `crates/rustkit-layout/src/grid.rs`, cause 2 of PR #663. Left on #663: of the
-8 inline-block outer cases, 5 stop at cause 4 and 3 (`*--h-50pct`) at cause
+8 other inline-block outer cases, 5 stop at cause 4 and 3 (`*--h-50pct`) at cause
 8 with cause 4 behind it; `core--abspos--grid--*--h-50pct` (3) stop at
-cause 8.
+cause 8; `core--{float,inline-block,abspos}--grid--w-fit-content--h-120px`
+(3) stop at cause 3 (the inner grid is 0 wide once the outer box is 120).
 
 ### 6. `flex-item-min-width-is-its-own-width` (20)
 
