@@ -217,6 +217,8 @@ mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
 #[cfg(test)]
+mod nested_layout_matrix_tests;
+#[cfg(test)]
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod ws_beside_block_replaced_tests;
