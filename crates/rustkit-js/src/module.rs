@@ -229,6 +229,9 @@ impl JsRuntime {
             .borrow_mut()
             .insert(url.to_string(), module.clone());
         let load = module.load(&mut self.context);
+        // The engine's promise, not the page's: a failure is the module's
+        // error, never an unhandled rejection.
+        self.rejections.forget(&JsObject::from(load.clone()));
         let _ = self.context.run_jobs();
         self.modules.entries.insert(
             url.to_string(),
@@ -338,7 +341,10 @@ impl JsRuntime {
                 return ModuleState::Failed(message);
             }
             let evaluation = match module.evaluate(&mut self.context) {
-                Ok(p) => p,
+                Ok(p) => {
+                    self.rejections.forget(&JsObject::from(p.clone()));
+                    p
+                }
                 Err(e) => {
                     let message = describe(&e, &mut self.context);
                     if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
@@ -359,7 +365,18 @@ impl JsRuntime {
         match evaluation.state() {
             PromiseState::Pending => ModuleState::Evaluating,
             PromiseState::Fulfilled(_) => ModuleState::Done,
-            PromiseState::Rejected(reason) => ModuleState::Threw(describe_value(&reason, &mut self.context)),
+            PromiseState::Rejected(reason) => {
+                // The engine's own record of the stack goes after the
+                // message, as Boa's text for a classic script's error has it
+                // (read through the realm's getter: no page code runs).
+                let mut message = describe_value(&reason, &mut self.context);
+                let getter = self.rejections.stack_getter.borrow().clone();
+                if let (_, Some(stack)) = crate::describe::error_report(&reason, getter.as_ref(), &mut self.context) {
+                    message.push('\n');
+                    message.push_str(stack.trim_end());
+                }
+                ModuleState::Threw(message)
+            }
         }
     }
 }

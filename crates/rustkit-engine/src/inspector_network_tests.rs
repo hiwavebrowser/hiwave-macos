@@ -151,7 +151,7 @@ fn a_small_load_is_recorded_in_this_exact_order() {
             "request #3 GET image /pic.png by=parser",
             "response #3 200 image/png",
             "relayout image_loaded(count=1)",
-            "console Log hi @inline#1:1:12",
+            "console Log hi @inline#1:1:9",
             "load_finished over_budget=0",
         ]
     );

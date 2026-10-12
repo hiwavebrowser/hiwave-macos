@@ -4077,16 +4077,17 @@ impl Engine {
                     }
                     false => (outcome, event),
                 };
+                // What the module logged comes before what it threw: module
+                // evaluation ends in no `evaluate_script`, which would flush.
+                bindings.flush_console();
                 let record = ScriptRecord {
-                    source: label,
+                    source: label.clone(),
                     bytes: text.len(),
                     elapsed_ms,
                     outcome,
                 };
                 inspector_glue::log_script(log, &inspector, record, None);
-                if let Some(ran) = log.last() {
-                    inspector_glue::drain_quiet(bindings, &inspector, &ran.source);
-                }
+                inspector_glue::drain_reports(bindings, &inspector, log, &label);
                 if let Some(event) = event {
                     let _ = bindings.fire_script_event(node_id, event);
                 }
@@ -4097,17 +4098,16 @@ impl Engine {
             // `inline#n` label, or for an external one `script#n`, which
             // the Inspector shows as its URL. Not the URL itself: that would
             // make it the base of the script's dynamic `import()`s.
-            // (Numbered only for a listening Inspector, which maps the
-            // number back: with nobody listening this allocates nothing.)
-            let external: Option<Cow<str>> = if label.starts_with("inline#") {
+            // The same names with the Inspector on or off, so the script
+            // log reads the same either way; only a listening Inspector
+            // records which URL each stands for.
+            let external: Option<String> = if label.starts_with("inline#") {
                 None
-            } else if inspector.is_active() {
+            } else {
                 external_scripts += 1;
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
-                Some(Cow::Owned(name))
-            } else {
-                Some(Cow::Borrowed("script"))
+                Some(name)
             };
             let record = run(label, text.len(), &|label| {
                 let name = external.as_deref().unwrap_or(label);
@@ -4117,10 +4117,12 @@ impl Engine {
                 let _ = bindings.set_current_script(None);
                 result
             });
+            let source = record.source.clone();
             inspector_glue::log_script(log, &inspector, record, None);
-            if let Some(ran) = log.last() {
-                inspector_glue::drain_quiet(bindings, &inspector, &ran.source);
-            }
+            // What its listeners threw (a synchronous `click()`, an `on*`
+            // attribute) belongs to this script, not to the lifecycle step
+            // that would otherwise drain it.
+            inspector_glue::drain_reports(bindings, &inspector, log, &source);
         }
         if poisoned.get() {
             return;

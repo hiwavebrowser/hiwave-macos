@@ -26,7 +26,17 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
             rustkit_js::LogLevel::Error => ConsoleLevel::Error,
             rustkit_js::LogLevel::Debug => ConsoleLevel::Debug,
         };
-        let location = at.map(|at| sink.location(&at.path, at.line, at.column));
+        // Boa places a call at its `(`; a browser places it at the method's
+        // name (`console.log(` is `log`), which is the name's length before.
+        let method_len = match level {
+            ConsoleLevel::Log => 3,
+            ConsoleLevel::Info | ConsoleLevel::Warn => 4,
+            ConsoleLevel::Error | ConsoleLevel::Debug => 5,
+        };
+        let location = at.map(|at| {
+            let column = if at.column > method_len { at.column - method_len } else { at.column };
+            sink.location(&at.path, at.line, column)
+        });
         sink.console(level, message, location);
     }));
     let _ = bindings.set_error_details(true);
@@ -46,15 +56,18 @@ pub(crate) fn script_error(inspector: &Inspector, text: &str, stack: Option<Stri
     inspector.emit_with(|inspector| {
         let (name, message, position, own_stack) = parse_error_text(text);
         // A listener's error text has no stack of its own; the one
-        // captured beside it does. Only the page's frames are kept.
-        let stack = stack.or(own_stack).map(|s| page_frames(&s)).filter(|s| !s.is_empty());
-        // Where it was thrown: the innermost page frame, else the
+        // captured beside it does.
+        let stack = stack.or(own_stack);
+        // Where it was thrown: the innermost frame that is the page's.
+        // Code in no named script (eval, an `on*` attribute) has no place
+        // of its own, and is never given its caller's. With no stack, the
         // position Boa put on the message line.
-        let position = stack
-            .as_deref()
-            .and_then(|s| parse_error_text(&format!("x\n{s}")).2)
-            .or(position)
-            .filter(|(path, _, _)| !path.is_empty());
+        let position = match stack.as_deref() {
+            Some(stack) => throw_site(stack),
+            None => position.filter(|(path, _, _)| !path.is_empty() && !path.contains("eval at")),
+        };
+        // Only the page's frames are kept.
+        let stack = stack.map(|s| page_frames(&s)).filter(|s| !s.is_empty());
         let location = position.map(|(path, line, column)| inspector.location(&path, line, column));
         InspectorEvent::ScriptError {
             name: cap(&name, MAX_SHORT_CHARS).0,
@@ -104,14 +117,40 @@ pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source:
 }
 
 /// A Boa stack without the frames that are not the page's: native
-/// functions and the engine's own (unnamed) glue scripts.
+/// functions, the engine's own (unnamed) glue scripts, and `eval` code
+/// (Boa names no script for it; the frame that called `eval` stays).
 fn page_frames(stack: &str) -> String {
     stack
         .lines()
         .filter(|line| {
             let line = line.trim_end();
-            !(line.ends_with("(native)") || line.contains("(unknown at ") || line.contains(" (:") || line.trim().is_empty())
+            !(line.ends_with("(native)")
+                || line.contains("(unknown at ")
+                || line.contains(" (:")
+                || line.contains("eval at")
+                || line.trim().is_empty())
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The innermost page frame of a Boa stack, passing over native functions
+/// and the engine's own unnamed glue; `None` when the innermost page code is
+/// in no named script: `eval` code (`<eval>`, `eval at`) or a function built
+/// from a string (`anonymous`: an `on*` attribute's handler).
+fn throw_site(stack: &str) -> Option<crate::inspector::PositionParts> {
+    for line in stack.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.ends_with("(native)") {
+            continue;
+        }
+        if line.contains("eval at") || line.starts_with("at <eval>") || line.starts_with("at anonymous (unknown at ") {
+            return None;
+        }
+        if line.contains("(unknown at ") || line.contains(" (:") {
+            continue;
+        }
+        return parse_error_text(&format!("x\n{line}")).2.filter(|(path, _, _)| !path.is_empty());
+    }
+    None
 }

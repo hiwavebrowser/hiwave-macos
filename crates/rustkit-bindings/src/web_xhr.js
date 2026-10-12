@@ -160,7 +160,14 @@
         if (s.responseType !== '' && s.responseType !== 'document') {
             throw domError("Failed to read the 'responseXML' property from 'XMLHttpRequest': The value is only accessible if the object's 'responseType' is '' or 'document' (was '" + s.responseType + "').", 'InvalidStateError');
         }
-        if (g.__rustkit_unsupported) g.__rustkit_unsupported('XMLHttpRequest', 'responseXML');
+        // Only a response that is a document (XML or HTML) would have been
+        // parsed into one: anything else is null in every browser too.
+        if (g.__rustkit_unsupported && s.state === DONE && s.bytes) {
+            var type = String(s.mime || headerValue(s, 'content-type') || '').split(';')[0].trim().toLowerCase();
+            if (s.responseType === 'document' ? /(^text\/html$)|xml$/.test(type) : /xml$/.test(type)) {
+                g.__rustkit_unsupported('XMLHttpRequest', 'responseXML');
+            }
+        }
         return null;
     });
     Object.defineProperty(XMLHttpRequest.prototype, 'responseType', {
