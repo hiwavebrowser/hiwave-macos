@@ -23,6 +23,8 @@ pub(crate) struct Route {
     pub headers: Vec<(&'static str, String)>,
 }
 
+// Delays, redirects and the request record serve the Network half's tests.
+#[allow(dead_code)]
 impl Route {
     pub fn ok(path: &'static str, content_type: &'static str, body: impl Into<String>) -> Self {
         Route { path, status: 200, content_type, body: body.into(), delay_ms: 0, headers: Vec::new() }
@@ -48,6 +50,7 @@ impl Route {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) struct TestServer {
     pub port: u16,
     /// Request paths, in arrival order (the request line's target, query
@@ -500,11 +503,12 @@ console.log('{\"type\":\"navigation_start\"}\\n<' + 'script>alert(1)<' + '/scrip
     assert!(!consoles[1].1);
     // In JSON Lines it stays one line and one string.
     let mut out = Vec::new();
-    let mut sink = crate::inspector::JsonLinesSink::new(&mut out);
-    for r in records(&engine, view) {
-        sink.record(&r);
+    {
+        let mut sink = crate::inspector::JsonLinesSink::new(&mut out);
+        for r in records(&engine, view) {
+            sink.record(&r);
+        }
     }
-    drop(sink);
     let text = String::from_utf8(out).unwrap();
     for line in text.lines() {
         let back: InspectorRecord = serde_json::from_str(line).expect("each line is one record");
