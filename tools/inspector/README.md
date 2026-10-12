@@ -61,12 +61,21 @@ loads, so content differences show up as DOM roots and are not engine defects.
   - `identity.node_id` (no node ids in script)
   - `paint.display_commands` and `paint.command_kinds`
   - `box.grid_lines` (Chromium does not expose resolved placement)
-- **Privacy:**
-  - the URL loses its query and fragment unless `--keep-query`
+- **Padding and content boxes** are the bounding rect less computed border
+  and padding, so they are null under a scaling, rotating or skewing
+  transform on the element or an ancestor.
+- **Privacy** (`record_scrub.mjs`, applied in Node before writing):
+  - the page URL loses user name and password, and its query and fragment
+    unless `--keep-query`
   - text is a length only
-  - `background-image` URLs lose their query, and `data:` URLs their contents
+  - every `url()` in `background-image` (including inside `image-set()`)
+    loses user name, password, query and fragment; `data:` URLs become
+    `data:…`; `file:` URLs become a path relative to the page
   - nothing reads cookies, storage or form values
-  - a local file is named by the path as given (pass it repo-relative)
+  - a local page is named by a relative path: as given when relative,
+    otherwise relative to the working directory, otherwise its file name
+- **Exit status:** 1 when navigation threw or the page answered HTTP 400 or
+  above (the records of an error page are still written).
 
 ## inspector_diff.py
 
@@ -87,6 +96,18 @@ class part of a key is normalised to the first two classes joined by dots.
 The engine mirrors the `getSelector` that captured the committed baselines
 (`div.card featured`); today's `getSelector` writes `div.card.featured`.
 
+### Shifted siblings
+
+The oracle key numbers same-tag siblings (`:nth-of-type`), so one removed or
+added sibling shifts the keys of those after it. Wherever a paired parent has
+an unpaired child, its same-tag children are re-aligned in order on (tag, id,
+classes, text length within the DOM tolerance). A pair is kept only when the
+leftmost and the rightmost longest alignments agree on it. An element they
+disagree on (one of several identical siblings went missing, and which one
+cannot be told) is counted in `matching.unverified` and not classified: the
+parent's `child_count` still reports the difference. Descendants of re-paired
+elements pair by their path below them (`match_key: "aligned"`).
+
 ### Classification
 
 Classification walks Chrome's elements in document order and stops at the
@@ -94,9 +115,10 @@ first stage that differs:
 
 - **DOM:**
   - a missing element (`chrome_only`)
-  - an extra element (`ours_only`; always a root)
+  - an extra element (`ours_only`)
   - a different `tag` or `child_count`
-  - a different `text_length` beyond the tolerance
+  - a different `text_length` beyond the tolerance, not counting the text of
+    `<style>` and `<script>` descendants
 - **STYLE** compares only properties that can matter for this element:
   - **Never compared**, because they are used values that come out of layout:
     `width`, `height`, `margin-*`, `padding-*`, `top/right/bottom/left/inset`.
@@ -107,30 +129,57 @@ first stage that differs:
   - **`z-index`** only on positioned boxes and items.
   - **A `display:none` element** is compared on `display` only.
   - **Size limits and overflow are ignored on inline boxes.**
+  - **No effect, not compared:** `float`/`clear` on flex and grid items,
+    `vertical-align` outside inline-level boxes and table cells, `object-fit`
+    outside replaced elements.
   - **Normalisation:**
-    - colours become `rgba(r, g, b, a)`
+    - colours become `rgba(r, g, b, a)` (names `black`/`white`/`transparent`
+      and hex too); every fully transparent colour is `rgba(0, 0, 0, 0)`
     - a bare `0` becomes `0px`
     - numbers are rounded to 0.01
     - font family lists are compared unquoted and in lower case
   - **Equivalent keywords** are treated as the same value:
-    - `justify-content: normal ≡ flex-start`
+    - `justify-content: normal ≡ flex-start`, and `start`/`end` ≡
+      `flex-start`/`flex-end` for `justify-content`, `align-items`,
+      `align-self` (the engine maps them on parse)
     - `align-items: normal ≡ stretch`
-    - `text-align: start ≡ left`
+    - `text-align: start ≡ left`, `end ≡ right` (LTR), `-webkit-center ≡ center`
     - `font-weight: normal ≡ 400`
-    - gaps: `normal ≡ 0px`
-    - `min-*: auto ≡ 0px`
+    - gaps: `normal ≡ 0px`, per side (`gap: normal 5px ≡ 0px 5px`)
+    - `min-*: auto ≡ 0px`, except on flex and grid items
+    - `z-index: auto ≡ 0` (the engine stores both as 0)
     - `display: list-item ≡ block`
-    - `transparent ≡ rgba(0, 0, 0, 0)`
   - **`grid-template-*`** is compared only when both sides are plain px
-    lists. The engine reports the specified tracks; Chromium reports resolved
-    px.
-  - **`transform`** matrices are compared to within 0.01.
+    lists. `none` on a grid container (Chromium reports the implicit tracks)
+    and lists with line names are not compared.
+  - **`transform`**: the identity matrix is `none`, an affine `matrix3d` is a
+    `matrix`, and matrices are compared to within 0.01.
+  - **`background-image`**: a relative URL (the engine keeps it as
+    specified) equals Chromium's absolute one when the absolute URL ends with
+    it; a rooted or `../` path is not guessed at. `-webkit-` gradients are
+    named like the unprefixed ones.
 - **GEOMETRY:** `has_box` differs, or the border box (else the content box)
   is off by more than the threshold.
 
-A **divergence root** is a divergent element whose parent does not diverge at
-an *earlier* stage. A child that only differs in GEOMETRY under a
-STYLE-divergent parent is a consequence. A same-stage child stays a root.
+A **divergence root** is a divergent element that is not a consequence of
+another divergence. These are consequences, not roots:
+
+- anything under a parent that diverges at an *earlier* stage (GEOMETRY
+  under a STYLE-divergent parent), and anything inside a missing or extra
+  element;
+- a GEOMETRY difference that its neighbours' deltas explain. Each axis of the
+  border box moved with the parent's content box (or an abspos box's
+  containing block), anywhere within the room that box gained or lost, or
+  with the previous sibling's far edge; the width grew or shrank with the
+  parent's content box; the height equals the change in its in-flow
+  children's extent, with its own padding and border unchanged. A
+  difference in the content box alone is always the element's own;
+- a STYLE difference in inherited properties whose values equal the
+  parent's on both sides (a root keeps only its own properties in `fields`).
+
+Known over-count: items stretched to a flex line's height all change with
+the tallest item, and each stays a root, because the records cannot say
+which item set the height.
 
 ### Output (`schema: hiwave-inspector-diff/1`)
 
@@ -147,12 +196,15 @@ inputs always give the same bytes.
 | `summary.stage_counts` | `{DOM, STYLE, GEOMETRY}`: roots per stage. **This is the per-site "failure cause" the board publishes.** |
 | `summary.style_properties` | STYLE roots counted by property name (one root can count under several) |
 | `summary.geometry_contexts` | GEOMETRY roots by formatting context: `block`, `inline`, `float`, `flex item`, `grid item`, `table cell`, `abspos`, `fixed`, `no box` |
-| `matching` | counts, the `ambiguous` list, and `truncated` (either input hit its element cap) |
-| `page`, `settings` | the two URLs and engines, the viewport, our `text_metrics_font_derived`, the thresholds |
+| `matching` | counts, the `ambiguous` list, `unverified` (elements left unclassified by sibling re-alignment, both sides), and `truncated` (either input hit its element cap) |
+| `page`, `settings` | the two page names (each as its record gives it) and engines, the viewport, our `text_metrics_font_derived`, the thresholds |
 
 Each root in `first`, `first_innermost` and `roots` carries: `stage`,
-`selector` (Chrome's structural selector), `oracle_key`, `tag`, `match_key`,
-`formatting_context`, `affected_area`, and `fields`. A field is one of:
+`selector` (Chrome's structural selector), `oracle_key`, `tag`, `match_key`
+(`id`, `path`, `path_noclass`, or `aligned`), `formatting_context`,
+`affected_area`, `order` (the index of the element in Chrome's record, or
+null for an extra element of ours), `root` (always true in these lists), and
+`fields`. A field is one of:
 
 - `{property, ours, chrome}` for STYLE
 - `{field, ours, chrome, dx, dy, dw, dh}` for a box
@@ -181,4 +233,6 @@ classes. Its Chromium record is committed as
 plants one difference (a removed or added element, a tag, a text length, a
 colour, a flex-grow, a box delta, a duplicated key), and checks that the tool
 names the right element, stage and fields. Other tests check that equivalent
-serialisations and irrelevant properties produce no difference.
+serialisations and irrelevant properties produce no difference, that a
+consequence is not counted as a root, and (through node, skipped without it)
+that `record_scrub.mjs` scrubs background-image URLs.
