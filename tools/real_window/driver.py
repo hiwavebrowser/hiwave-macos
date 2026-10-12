@@ -859,6 +859,12 @@ class Driver:
         self.expect(c, "the five visits happened in order and the last one finished", last and starts == list("12345"),
                     "visits started: %s; request times (s): %s"
                     % (starts, self.fixture.times("/i0a_nav.html", self.since)))
+        # Each page asks to leave in its first script. How long it stays is
+        # how long a person's own click on a link would wait, too.
+        asked = self.fixture.times("/i0a_nav.html", self.since)
+        stays = [round(b - a, 1) for (a, b) in zip(asked, asked[1:])]
+        self.expect(c, "each page was left within 1 s of being requested", len(stays) == 4 and max(stays) < 1.0,
+                    "seconds each page stayed: %s" % stays)
         self.expect_no_hold(c, "five pages, four left while loading", log_from)
         time.sleep(1.0)
         frame = self.frame(c, "last", [RED, GREEN])

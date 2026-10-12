@@ -20,7 +20,8 @@
 <script>
   fetch('/beacon?i0a-nav-after-script-' + n);
   var img = document.createElement('img');
-  img.src = (n < 5) ? '/slowimg/ff0000.png?ms=3000' : '/img/00ff00.png';
+  // A different address each visit: an image already fetched is not waited for.
+  img.src = (n < 5) ? '/slowimg/ff0000.png?ms=3000&n=' + n : '/img/00ff00.png';
   document.body.appendChild(img);
   if (n === 5) { fetch('/beacon?i0a-nav-last'); }
 </script>
