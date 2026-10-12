@@ -522,3 +522,14 @@ fn a_box_inside_a_scroll_container_says_element_scroll_is_not_applied() {
     assert!(!notes("#out").contains("scroll"), "{}", notes("#out"));
     assert!(!notes("#s").contains("scroll"), "{}", notes("#s"));
 }
+
+#[test]
+fn background_image_layers_are_listed_top_first_as_written() {
+    let (engine, view) = engine_with(
+        "<html><body><div id=b style=\"height:10px;background:radial-gradient(red, blue), url(a.png), linear-gradient(red, blue)\"></div></body></html>",
+        800,
+        600,
+    );
+    let r = diag(&engine, view, "#b");
+    assert_eq!(r["style"]["background-image"], "radial-gradient(…), url(\"a.png\"), linear-gradient(…)");
+}
