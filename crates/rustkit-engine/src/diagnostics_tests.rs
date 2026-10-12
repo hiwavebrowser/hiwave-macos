@@ -425,6 +425,7 @@ fn a_transformed_box_reports_its_bounding_client_rect() {
     assert!(near(&bb["w"], 56.57) && near(&bb["h"], 56.57), "{bb}");
     assert!(near(&bb["x"], 28.0 - 28.28), "{bb}");
     assert!(near(&bb["y"], 8.0 + 20.0 - 28.28), "{bb}");
+    assert_eq!(r["style"]["transform"], "matrix(0.707107, 0.707107, -0.707107, 0.707107, 0, 0)");
     // A rotated padding box is not a rect: unknown, not the untransformed one.
     assert_eq!(r["box"]["padding_box"], serde_json::Value::Null);
     assert!(r["unavailable"]["box.padding_box"].is_string());

@@ -1033,7 +1033,9 @@ fn style_record(
                 } else {
                     let bb = d.border_box();
                     let m6 = t.to_matrix(bb.width, bb.height);
-                    format!("matrix({})", m6.iter().map(|v| num(*v)).collect::<Vec<_>>().join(", "))
+                    // Six decimals, as Chromium serialises matrix entries.
+                    let six = |v: f32| format!("{}", (v as f64 * 1e6).round() / 1e6 + 0.0);
+                    format!("matrix({})", m6.iter().map(|v| six(*v)).collect::<Vec<_>>().join(", "))
                 }
             }),
             "flex-wrap" => Some(kw(&s.flex_wrap)),
