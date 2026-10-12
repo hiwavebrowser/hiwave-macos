@@ -351,6 +351,7 @@ struct Builder<'a> {
     text_len: HashMap<usize, usize>,
     /// The `html` element, when its geometry is the anonymous layout root's.
     root_stand_in: Option<usize>,
+    sibs: Siblings,
 }
 
 fn element_parts(node: &Node) -> Option<(String, &HashMap<String, String>)> {
@@ -387,26 +388,77 @@ fn short_label(node: &Node) -> String {
     out
 }
 
+/// Where an element sits among its parent's element children.
+#[derive(Clone, Copy)]
+struct SiblingPos {
+    index: usize,
+    count: usize,
+    /// 1-based among same-tag siblings, and how many there are.
+    of_type: usize,
+    of_type_count: usize,
+}
+
+/// Every connected element's `SiblingPos`, listed once per parent. Asking a
+/// parent for its children per record made a whole-page dump quadratic in
+/// the sibling count (20k siblings: 12 s).
+#[derive(Default)]
+struct Siblings(HashMap<usize, SiblingPos>);
+
+impl Siblings {
+    fn of_tree(root: &Rc<Node>) -> Self {
+        let mut map = HashMap::new();
+        let mut stack = vec![root.clone()];
+        while let Some(n) = stack.pop() {
+            let kids = element_children(&n);
+            Self::fill(&kids, &mut map);
+            stack.extend(n.children());
+        }
+        Siblings(map)
+    }
+
+    fn fill(kids: &[Rc<Node>], map: &mut HashMap<usize, SiblingPos>) {
+        let tags: Vec<String> = kids.iter().map(|k| element_parts(k).map(|(t, _)| t).unwrap_or_default()).collect();
+        let mut per_tag: HashMap<&str, usize> = HashMap::new();
+        for t in &tags {
+            *per_tag.entry(t).or_default() += 1;
+        }
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for (i, (k, t)) in kids.iter().zip(&tags).enumerate() {
+            let nth = seen.entry(t).or_default();
+            *nth += 1;
+            map.insert(
+                k.id.raw(),
+                SiblingPos { index: i, count: kids.len(), of_type: *nth, of_type_count: per_tag[t.as_str()] },
+            );
+        }
+    }
+
+    /// `None` for an element without a parent node.
+    fn of(&self, n: &Rc<Node>) -> Option<SiblingPos> {
+        if let Some(p) = self.0.get(&n.id.raw()) {
+            return Some(*p);
+        }
+        // Not in the connected tree (removed by script): list its parent now.
+        let mut map = HashMap::new();
+        let parent = n.parent()?;
+        Self::fill(&element_children(&parent), &mut map);
+        map.get(&n.id.raw()).copied()
+    }
+}
+
 /// Unique structural selector: tag and `:nth-child(n)` when the element has
 /// element siblings, from the root element down.
-fn structural_selector(node: &Rc<Node>) -> String {
+fn structural_selector(node: &Rc<Node>, sibs: &Siblings) -> String {
     let mut parts = Vec::new();
     let mut cur = Some(node.clone());
     while let Some(n) = cur {
         let Some((tag, _)) = element_parts(&n) else { break };
-        let parent = parent_element(&n);
-        let seg = match n.parent() {
-            Some(p) => {
-                let kids = element_children(&p);
-                match kids.iter().position(|k| k.id == n.id) {
-                    Some(i) if kids.len() > 1 => format!("{tag}:nth-child({})", i + 1),
-                    _ => tag,
-                }
-            }
-            None => tag,
+        let seg = match sibs.of(&n) {
+            Some(p) if p.count > 1 => format!("{tag}:nth-child({})", p.index + 1),
+            _ => tag,
         };
         parts.push(seg);
-        cur = parent;
+        cur = parent_element(&n);
     }
     parts.reverse();
     parts.join(" > ")
@@ -414,7 +466,7 @@ fn structural_selector(node: &Rc<Node>) -> String {
 
 /// The oracle's `getSelector` key, through the same segment builder the
 /// layout identity uses, for an element that has no box to carry one.
-fn oracle_key(node: &Rc<Node>) -> String {
+fn oracle_key(node: &Rc<Node>, sibs: &Siblings) -> String {
     let mut parts = Vec::new();
     let mut cur = Some(node.clone());
     let mut foreign = false;
@@ -430,16 +482,7 @@ fn oracle_key(node: &Rc<Node>) -> String {
     }
     while let Some(n) = cur {
         let Some((tag, attrs)) = element_parts(&n) else { break };
-        let (index, total) = match n.parent() {
-            Some(p) => {
-                let same: Vec<_> = element_children(&p)
-                    .into_iter()
-                    .filter(|k| element_parts(k).is_some_and(|(t, _)| t == tag))
-                    .collect();
-                (same.iter().position(|k| k.id == n.id).map_or(1, |i| i + 1), same.len())
-            }
-            None => (1, 1),
-        };
+        let (index, total) = sibs.of(&n).map_or((1, 1), |p| (p.of_type, p.of_type_count));
         parts.push(Engine::selector_segment(&tag, attrs, index, total, foreign));
         if Engine::enters_foreign_content(&tag) {
             foreign = false;
@@ -520,11 +563,12 @@ impl<'a> Builder<'a> {
         }
         let mut text_len = HashMap::new();
         text_lengths(src.document.root(), &mut text_len);
-        Self { src, index, text_len, root_stand_in }
+        let sibs = Siblings::of_tree(src.document.root());
+        Self { src, index, text_len, root_stand_in, sibs }
     }
 
     fn selector_of_node(&self, raw: usize) -> Option<String> {
-        self.src.document.get_node(rustkit_dom::NodeId::new(raw)).map(|n| structural_selector(&n))
+        self.src.document.get_node(rustkit_dom::NodeId::new(raw)).map(|n| structural_selector(&n, &self.sibs))
     }
 
     fn record(&self, node: &Rc<Node>) -> Option<ElementDiagnostics> {
@@ -548,10 +592,10 @@ impl<'a> Builder<'a> {
             tag: tag.clone(),
             id: attrs.get("id").filter(|i| !i.is_empty()).cloned(),
             classes: classes_of(attrs),
-            selector: structural_selector(node),
+            selector: structural_selector(node, &self.sibs),
             oracle_key: ctx
                 .and_then(|c| c.boxes[0].identity().map(|i| i.selector.clone()))
-                .unwrap_or_else(|| oracle_key(node)),
+                .unwrap_or_else(|| oracle_key(node, &self.sibs)),
             ancestry: {
                 let mut v = Vec::new();
                 let mut cur = parent.clone();
@@ -561,7 +605,7 @@ impl<'a> Builder<'a> {
                 }
                 v
             },
-            child_index: node.parent().and_then(|p| element_children(&p).iter().position(|k| k.id == node.id)),
+            child_index: self.sibs.of(node).map(|p| p.index),
         };
 
         const SHADOW: &str = "shadow trees and slots live in script only (web_shadow.js)";
@@ -668,7 +712,7 @@ impl<'a> Builder<'a> {
                 } else if parent.as_ref().is_some_and(|q| q.id == p.id) {
                     "display:none, or dropped by the box tree builder".into()
                 } else {
-                    format!("an ancestor has no box (nearest boxed ancestor: {})", structural_selector(&p))
+                    format!("an ancestor has no box (nearest boxed ancestor: {})", structural_selector(&p, &self.sibs))
                 };
             }
             cur = parent_element(&p);
