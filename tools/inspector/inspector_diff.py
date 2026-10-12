@@ -115,12 +115,18 @@ ITEM_GRID = {"grid-column-start", "grid-column-end", "grid-row-start", "grid-row
 POSITIONED = {"z-index"}
 
 # Keyword spellings that mean the same used behaviour. Applied to both sides.
+# `start`/`end` and `flex-start`/`flex-end` place items the same way in a
+# flex or grid container (the engine maps the former on parse). z-index
+# `auto` and `0` stack differently, but the engine stores both as 0 and
+# cannot tell them apart, so a difference there would be invented.
 EQUIVALENT = {
-    "justify-content": {"normal": "flex-start", "start": "flex-start"},
-    "align-items": {"normal": "stretch"},
-    "align-self": {"normal": "auto"},
+    "justify-content": {"normal": "flex-start", "start": "flex-start", "end": "flex-end"},
+    "align-items": {"normal": "stretch", "start": "flex-start", "end": "flex-end"},
+    "align-self": {"normal": "auto", "start": "flex-start", "end": "flex-end"},
     "justify-self": {"normal": "auto"},
-    "text-align": {"start": "left", "end": "right", "-webkit-left": "left"},
+    "text-align": {"start": "left", "end": "right", "-webkit-left": "left",
+                   "-webkit-center": "center", "-webkit-right": "right"},
+    "z-index": {"0": "auto"},
     "font-weight": {"normal": "400", "bold": "700"},
     "row-gap": {"normal": "0px"},
     "column-gap": {"normal": "0px"},
@@ -130,6 +136,37 @@ EQUIVALENT = {
     "display": {"list-item": "block"},
     "background-color": {"transparent": "rgba(0, 0, 0, 0)"},
 }
+
+NAMED_COLORS = {"black": "rgb(0, 0, 0)", "white": "rgb(255, 255, 255)", "transparent": "rgba(0, 0, 0, 0)"}
+HEX_RE = re.compile(r"#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b")
+GAP_PROPS = {"gap", "row-gap", "column-gap"}
+URL_RE = re.compile(r'url\(\s*"?([^")]*)"?\s*\)')
+
+
+def _hex(m: "re.Match[str]") -> str:
+    h = m.group(1)
+    if len(h) in (3, 4):
+        h = "".join(ch * 2 for ch in h)
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    a = int(h[6:8], 16) / 255 if len(h) == 8 else 1.0
+    return f"rgba({r}, {g}, {b}, {a})"
+
+
+def _matrix(v: str) -> str:
+    """`matrix3d` that is a 2D affine as `matrix`; the identity as `none`."""
+    m = re.fullmatch(r"matrix3d\((.*)\)", v)
+    if m:
+        n = [float(x) for x in m.group(1).split(",")]
+        flat = [n[2], n[3], n[6], n[7], n[8], n[9], n[11], n[14]]
+        if len(n) == 16 and all(abs(x) < 1e-6 for x in flat) and abs(n[10] - 1) < 1e-6 and abs(n[15] - 1) < 1e-6:
+            v = f"matrix({n[0]}, {n[1]}, {n[4]}, {n[5]}, {n[12]}, {n[13]})"
+    m = re.fullmatch(r"matrix\((.*)\)", v)
+    if m:
+        n = [float(x) for x in m.group(1).split(",")]
+        if len(n) == 6 and all(abs(a - b) < 1e-6 for a, b in zip(n, (1, 0, 0, 1, 0, 0))):
+            return "none"
+    return v
+
 
 COLOR_RE = re.compile(r"rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+%?))?\s*\)")
 NUM_RE = re.compile(r"-?\d+(?:\.\d+)?(?:e-?\d+)?")
@@ -149,10 +186,23 @@ def normalize_value(prop: str, value: Optional[str]) -> Optional[str]:
     v = EQUIVALENT.get(prop, {}).get(v, v)
     if prop == "font-family":
         return ", ".join(f.strip().strip("'\"").lower() for f in v.split(","))
+    if prop in GAP_PROPS:
+        # Per side: `gap: normal 5px` is row-gap normal, column-gap 5px.
+        parts = ["0px" if t == "normal" else t for t in v.split(" ")]
+        v = parts[0] if len(set(parts)) == 1 else " ".join(parts)
+    if prop == "transform":
+        v = _matrix(v)
+    if prop == "background-image":
+        v = re.sub(r"-webkit-((?:repeating-)?(?:linear|radial|conic)-gradient)\([^)]*(?:\([^)]*\)[^)]*)*\)",
+                   r"\1(…)", v)
+    v = re.sub(r"\b(black|white|transparent)\b", lambda m: NAMED_COLORS[m.group(1)], v)
+    v = HEX_RE.sub(_hex, v)
 
     def color(m):
         a = m.group(4)
         alpha = 1.0 if a is None else (float(a[:-1]) / 100 if a.endswith("%") else float(a))
+        if alpha == 0:
+            return "rgba(0, 0, 0, 0)"  # every transparent colour paints the same
         return f"rgba({_num(m.group(1))}, {_num(m.group(2))}, {_num(m.group(3))}, {_num(alpha)})"
 
     v = COLOR_RE.sub(color, v)
@@ -198,8 +248,31 @@ def comparable_props(rec: Dict[str, Any], parent_rec: Optional[Dict[str, Any]]) 
 
 
 def _unresolved_track_list(v: str) -> bool:
-    """The engine reports grid-template-* as specified; only px lists compare."""
-    return bool(re.search(r"fr|auto|minmax|repeat|%|content", v))
+    """Only px lists compare: anything else, or `none` (a grid container's
+    implicit tracks), is a list one side has not resolved."""
+    return v == "none" or bool(re.search(r"fr|auto|minmax|repeat|%|content|\[", v))
+
+
+def _same_urls(o: str, c: str) -> bool:
+    """background-image layers with relative URLs on one side.
+
+    The engine keeps a URL as specified (relative to its stylesheet, which
+    the record does not name); Chromium resolves it. Equal when every layer
+    is equal, or Chromium's absolute URL ends with ours' relative path.
+    """
+    ou, cu = URL_RE.findall(o), URL_RE.findall(c)
+    if len(ou) != len(cu) or URL_RE.sub("url()", o) != URL_RE.sub("url()", c):
+        return False
+    for a, b in zip(ou, cu):
+        if a == b:
+            continue
+        rel, absu = (a, b) if "://" not in a else (b, a)
+        if "://" in rel or rel.startswith("/") or ".." in rel:
+            return False
+        rel = re.sub(r"^(\./)+", "", rel)
+        if not absu.endswith("/" + rel):
+            return False
+    return True
 
 
 def style_diffs(ours: Dict[str, Any], chrome: Dict[str, Any], chrome_parent: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -210,6 +283,8 @@ def style_diffs(ours: Dict[str, Any], chrome: Dict[str, Any], chrome_parent: Opt
         if o is None or c is None or o == c:
             continue  # unknown on one side is not a difference
         if p.startswith("grid-template") and (_unresolved_track_list(o) or _unresolved_track_list(c)):
+            continue
+        if p == "background-image" and _same_urls(o, c):
             continue
         if p == "transform" and o != "none" and c != "none":
             on, cn = [float(x) for x in NUM_RE.findall(o)], [float(x) for x in NUM_RE.findall(c)]
