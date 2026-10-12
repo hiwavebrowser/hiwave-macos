@@ -790,22 +790,89 @@ impl Drop for RequestGuard {
     }
 }
 
-/// Answer `guard` (if any) with `response`'s status line and sizes;
-/// `decoded_size` is what the caller read of the body.
-pub fn answer(guard: Option<RequestGuard>, response: &rustkit_net::Response, decoded_size: Option<u64>) {
-    if let Some(guard) = guard {
+impl RequestGuard {
+    /// The response's status line arrived; its body is still to be read.
+    pub fn received(self, response: &rustkit_net::Response) -> ReceivedResponse {
         let mime = response
             .content_type
             .as_ref()
             .map(|m| m.essence_str().to_string())
             .or_else(|| response.headers.get("content-type").and_then(|v| v.to_str().ok()).map(str::to_string));
-        guard.response(
-            response.status.as_u16(),
-            mime.as_deref(),
-            response.encoded_body_size,
-            decoded_size,
-            response.from_cache,
+        ReceivedResponse {
+            status: response.status.as_u16(),
+            mime,
+            encoded_size: response.encoded_body_size,
+            from_cache: response.from_cache,
+            guard: self,
+        }
+    }
+}
+
+/// A request whose response arrived and whose body is being read: record
+/// it with the decoded size once read, or as a failure if the body is not
+/// usable. Dropped, it records the guard's drop stage.
+pub struct ReceivedResponse {
+    guard: RequestGuard,
+    status: u16,
+    mime: Option<String>,
+    encoded_size: Option<u64>,
+    from_cache: bool,
+}
+
+impl ReceivedResponse {
+    /// The body was read: `decoded_size` bytes.
+    pub fn read(self, decoded_size: usize) {
+        self.guard.response(
+            self.status,
+            self.mime.as_deref(),
+            self.encoded_size,
+            Some(decoded_size as u64),
+            self.from_cache,
         );
+    }
+
+    /// The response is recorded without reading its body.
+    pub fn unread(self) {
+        self.guard
+            .response(self.status, self.mime.as_deref(), self.encoded_size, None, self.from_cache);
+    }
+
+    /// The body arrived and was not usable (`HTTP <status>` is prefixed).
+    pub fn fail(self, stage: FailureStage, reason: &str) {
+        let reason = format!("HTTP {}: {reason}", self.status);
+        self.guard.fail(stage, &reason);
+    }
+}
+
+/// Record `response` for `guard` (if any), its body `decoded_size` bytes.
+pub fn answer(guard: Option<RequestGuard>, response: &rustkit_net::Response, decoded_size: usize) {
+    if let Some(guard) = guard {
+        guard.received(response).read(decoded_size);
+    }
+}
+
+/// Record a module fetch through the page's policy: its source arrived,
+/// the policy refused it, or the script budget ran out (`Err(Elapsed)`).
+pub fn answer_module(
+    guard: Option<RequestGuard>,
+    fetched: &Result<Result<rustkit_net::policy::ModuleSource, rustkit_net::policy::Denial>, tokio::time::error::Elapsed>,
+) {
+    let Some(guard) = guard else { return };
+    match fetched {
+        Ok(Ok(module)) => guard.response(
+            module.status,
+            Some(&module.content_type),
+            None,
+            Some(module.body_len as u64),
+            false,
+        ),
+        // The server answered; the engine will not run an error page.
+        Ok(Err(rustkit_net::policy::Denial::BadStatus(status))) => guard.response(*status, None, None, None, false),
+        Ok(Err(denial)) => {
+            let (stage, reason) = denial_stage(denial);
+            guard.fail(stage, reason);
+        }
+        Err(_) => guard.fail(FailureStage::OverBudget, "script budget spent"),
     }
 }
 

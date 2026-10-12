@@ -1483,7 +1483,7 @@ mod tests {
         ));
     }
 
-    fn gzip(data: &[u8]) -> Vec<u8> {
+    pub(super) fn gzip(data: &[u8]) -> Vec<u8> {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::Write::write_all(&mut enc, data).unwrap();
         enc.finish().unwrap()
@@ -1708,6 +1708,42 @@ mod governed_tests {
         assert_eq!(r.status.as_u16(), 302);
         assert_eq!(r.header("location"), Some(&format!("http://127.0.0.1:{target_port}/x")[..]));
         assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_followed_redirect_chain_and_the_encoded_size_are_kept() {
+        let body = super::tests::gzip(b"<p>the real page</p>");
+        let mut reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        reply.extend_from_slice(&body);
+        let (target_port, _) = serve(reply).await;
+        let hop = format!(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1:{target_port}/end\r\nContent-Length: 0\r\n\r\n"
+        );
+        let (hop_port, _) = serve(hop.into_bytes()).await;
+        let first = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{hop_port}/hop\r\nContent-Length: 0\r\n\r\n"
+        );
+        let (port, _) = serve(first.into_bytes()).await;
+        let r = client().get(&format!("http://127.0.0.1:{port}/start")).await.unwrap();
+        assert_eq!(r.text().unwrap(), "<p>the real page</p>");
+        assert_eq!(r.encoded_body_size, body.len() as u64);
+        let chain: Vec<(String, u16)> = r
+            .redirect_chain
+            .iter()
+            .map(|(url, status)| (url.to_string(), status.as_u16()))
+            .collect();
+        assert_eq!(
+            chain,
+            vec![
+                (format!("http://127.0.0.1:{port}/start"), 302),
+                (format!("http://127.0.0.1:{hop_port}/hop"), 301),
+            ]
+        );
+        assert_eq!(r.url.as_str(), format!("http://127.0.0.1:{target_port}/end"));
     }
 
     #[tokio::test]

@@ -453,33 +453,60 @@ fn image_svg(mut svg: rustkit_svg::SvgDocument) -> rustkit_svg::SvgDocument {
 /// Referer the document's policy allows, and the caller's deadline bounds
 /// it. The image manager only decodes and caches what arrives. A cached
 /// image or a `data:` URL needs no request.
+///
+/// `inspector` records the request, if one is made; a caller that bounds
+/// the future with a deadline gets an `over_budget` failure when it drops it.
 async fn fetch_raster_image(
     loader: &ResourceLoader,
     image_manager: &ImageManager,
     referrer: &SubresourceReferrer,
     url: Url,
+    inspector: Option<(&Arc<Inspector>, &'static str)>,
 ) -> Result<Arc<rustkit_image::LoadedImage>, rustkit_image::ImageError> {
     use rustkit_image::ImageError;
 
     if url.scheme() == "data" || image_manager.is_cached(&url) {
         return image_manager.load(url).await;
     }
-    let response = loader
-        .fetch(referrer.get_for(url.clone(), RequestDestination::Image))
-        .await
-        .map_err(|e| ImageError::FetchError(format!("{e} for {url}")))?;
+    let guard = inspector
+        .and_then(|(inspector, initiator)| inspector.begin_request(&url, "GET", ResourceType::Image, Some(initiator)))
+        .map(|g| g.dropped_as(FailureStage::OverBudget, "subresource budget spent"));
+    let response = match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)).await {
+        Ok(response) => response,
+        Err(e) => {
+            inspector::fail_net(guard, &e);
+            return Err(ImageError::FetchError(format!("{e} for {url}")));
+        }
+    };
+    let received = guard.map(|g| g.received(&response));
     if !response.ok() {
+        if let Some(received) = received {
+            received.unread();
+        }
         return Err(ImageError::FetchError(format!(
             "HTTP {} for {}",
             response.status, url
         )));
     }
     let content_type = response.content_type.as_ref().map(|mime| mime.to_string());
-    let body = response
-        .bytes()
-        .await
-        .map_err(|e| ImageError::FetchError(format!("{e} for {url}")))?;
-    image_manager.insert_fetched(&url, content_type.as_deref(), &body)
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(e) => {
+            if let Some(received) = received {
+                received.fail(FailureStage::Connect, "body cut off");
+            }
+            return Err(ImageError::FetchError(format!("{e} for {url}")));
+        }
+    };
+    let decoded = image_manager.insert_fetched(&url, content_type.as_deref(), &body);
+    if let Some(received) = received {
+        match &decoded {
+            // An SVG served under an image URL goes on to the SVG lane.
+            Ok(_) | Err(ImageError::Svg(_)) => received.read(body.len()),
+            Err(_) => received.fail(FailureStage::Decode, "image did not decode"),
+        }
+    }
+    decoded
 }
 
 /// What one image pass is to fetch, and everything the fetch needs
@@ -491,11 +518,15 @@ struct ImagePlan {
     svg_urls: Vec<Url>,
     /// Images already in a cache that the pass counts as loaded.
     already_loaded: usize,
-    budget: std::time::Duration,
     deadline: tokio::time::Instant,
     referrer: SubresourceReferrer,
     loader: Arc<ResourceLoader>,
     image_manager: Arc<ImageManager>,
+    inspector: Arc<Inspector>,
+    /// What asked for the images: `parser`, or `script` for a pass over
+    /// what scripts added. A CSS background is always `css`.
+    initiator: &'static str,
+    css_urls: std::collections::HashSet<Url>,
 }
 
 impl ImagePlan {
@@ -2968,6 +2999,7 @@ impl Engine {
         };
         let policy = view.script_policy.clone();
         let document = view.url.clone();
+        let inspector = view.inspector.clone();
         let live_requests = &mut view.live_requests;
         let mut threw: Vec<(&str, String)> = Vec::new();
 
@@ -2988,7 +3020,9 @@ impl Engine {
                     live_requests.extend(
                         requests
                             .into_iter()
-                            .map(|request| script_net::start_live(policy.clone(), loader.clone(), request, deadline)),
+                            .map(|request| {
+                                script_net::start_live(policy.clone(), loader.clone(), request, deadline, inspector.clone())
+                            }),
                     );
                 }
                 Err(_) => threw.push(("network", "JS engine panic".into())),
@@ -3018,6 +3052,7 @@ impl Engine {
                     tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
                     document,
                     &mut modules_fetched,
+                    &inspector,
                 )
                 .await;
                 out.requests += found.requests;
@@ -3679,12 +3714,14 @@ impl Engine {
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let base = base.clone();
+        let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
         Some(
             futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module)| {
                 let loader = loader.clone();
                 let referrer = referrer.clone();
                 let policy = policy.clone();
                 let base = base.clone();
+                let inspector = inspector.clone();
                 async move {
                     let mut label = label;
                     let result = match entry {
@@ -3697,8 +3734,11 @@ impl Engine {
                         Ok((timing, Body::External(url))) if is_module => match &policy {
                             None => Err(ScriptOutcome::FetchFailed("no network policy for this page".into())),
                             Some(policy) => {
+                                let guard = inspector.begin_request(&url, "GET", ResourceType::Module, Some("parser"));
                                 let fetch = policy.fetch_module(&loader, &url, &base);
-                                match tokio::time::timeout_at(deadline, fetch).await {
+                                let fetched = tokio::time::timeout_at(deadline, fetch).await;
+                                inspector::answer_module(guard, &fetched);
+                                match fetched {
                                     Ok(Ok(module)) => {
                                         label = module.final_url.to_string();
                                         Ok((timing, module.source))
@@ -3710,18 +3750,39 @@ impl Engine {
                         },
                         Ok((timing, Body::External(url))) => {
                             let fetch = async {
+                                let guard = inspector
+                                    .begin_request(&url, "GET", ResourceType::Script, Some("parser"))
+                                    .map(|g| g.dropped_as(FailureStage::OverBudget, "script budget spent"));
                                 match loader.fetch(
                                     referrer.get_for(url, RequestDestination::Script),
                                 ).await {
-                                    Ok(response) if response.ok() => match response.text().await {
-                                        Ok(text) => Ok((timing, text)),
-                                        Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
-                                    },
-                                    Ok(response) => Err(ScriptOutcome::FetchFailed(format!(
-                                        "HTTP {}",
-                                        response.status
-                                    ))),
-                                    Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
+                                    Ok(response) if response.ok() => {
+                                        let received = guard.map(|g| g.received(&response));
+                                        match response.text().await {
+                                            Ok(text) => {
+                                                if let Some(received) = received {
+                                                    received.read(text.len());
+                                                }
+                                                Ok((timing, text))
+                                            }
+                                            Err(e) => {
+                                                if let Some(received) = received {
+                                                    received.fail(FailureStage::Decode, "body is not UTF-8");
+                                                }
+                                                Err(ScriptOutcome::FetchFailed(format!("{e}")))
+                                            }
+                                        }
+                                    }
+                                    Ok(response) => {
+                                        if let Some(guard) = guard {
+                                            guard.received(&response).unread();
+                                        }
+                                        Err(ScriptOutcome::FetchFailed(format!("HTTP {}", response.status)))
+                                    }
+                                    Err(e) => {
+                                        inspector::fail_net(guard, &e);
+                                        Err(ScriptOutcome::FetchFailed(format!("{e}")))
+                                    }
                                 }
                             };
                             tokio::time::timeout_at(deadline, fetch)
@@ -3968,6 +4029,7 @@ impl Engine {
                                 tokio::time::Instant::now() + remaining,
                                 document,
                                 &mut count,
+                                &inspector,
                             )
                             .await;
                             modules_fetched.set(count);
@@ -4076,6 +4138,7 @@ impl Engine {
             let loader = loader.clone();
             let document = document_url.clone();
             let modules_fetched = &modules_fetched;
+            let inspector = &inspector;
             async move {
                 match policy {
                     Some(policy) => {
@@ -4092,6 +4155,7 @@ impl Engine {
                             timers,
                             document.as_ref(),
                             &mut count,
+                            inspector,
                         )
                         .await;
                         modules_fetched.set(count);
@@ -4263,9 +4327,14 @@ impl Engine {
 
         // Fetch the URL
         let request = Request::get(url.clone()).destination(RequestDestination::Document);
+        let guard = view
+            .inspector
+            .begin_request(&url, "GET", ResourceType::Document, Some("navigation"))
+            .map(|g| g.dropped_as(FailureStage::Cancelled, "navigation superseded"));
         let response = match self.loader.fetch(request).await {
             Ok(response) => response,
             Err(e) => {
+                inspector::fail_net(guard, &e);
                 if let Some(view) = self.views.get(&id) {
                     view.inspector.emit_with(|inspector| InspectorEvent::LoadEndedEarly {
                         url: Some(inspector.url(&url)),
@@ -4276,6 +4345,16 @@ impl Engine {
                 return Err(e.into());
             }
         };
+
+        if let (Some(view), Some(_)) = (self.views.get(&id), &guard) {
+            let chain: Vec<(Url, u16)> = response
+                .redirect_chain
+                .iter()
+                .map(|(from, status)| (from.clone(), status.as_u16()))
+                .collect();
+            view.inspector.redirects(&chain, &response.url);
+        }
+        let received = guard.map(|g| g.received(&response));
 
         // First await boundary crossed — are we still the current navigation?
         if self.nav_superseded(id, generation) {
@@ -4294,12 +4373,16 @@ impl Engine {
         // shown like any other document. Only an error response with
         // nothing in it fails the navigation.
         let mut response = Some(response);
+        let mut received = received;
         let mut error_page = None;
         if !status.is_success() {
             let body = match response.take() {
                 Some(response) => response.text().await.unwrap_or_default(),
                 None => String::new(),
             };
+            if let Some(received) = received.take() {
+                received.read(body.len());
+            }
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after the body of an error response");
                 return Ok(());
@@ -4350,7 +4433,20 @@ impl Engine {
         // Parse HTML
         let html = match (error_page, response) {
             (Some(body), _) => body,
-            (None, Some(response)) => response.text().await?,
+            (None, Some(response)) => match response.text().await {
+                Ok(text) => {
+                    if let Some(received) = received.take() {
+                        received.read(text.len());
+                    }
+                    text
+                }
+                Err(e) => {
+                    if let Some(received) = received.take() {
+                        received.fail(FailureStage::Decode, "body is not UTF-8");
+                    }
+                    return Err(e.into());
+                }
+            },
             (None, None) => String::new(),
         };
 
@@ -10528,15 +10624,29 @@ impl Engine {
         let deadline = self.subresource_deadline();
         let referrer = self.subresource_referrer(id);
         let referrer = &referrer;
+        let inspector = &view.inspector;
         let fetched: Vec<Option<Stylesheet>> = futures::stream::iter(urls.into_iter().map(|url| {
             let loader = loader.clone();
             async move {
                 info!(%url, "Loading external stylesheet");
                 let load = async {
+                    // Made inside the future the budget drops: a sheet still
+                    // loading at the deadline is recorded over budget.
+                    let guard = inspector
+                        .begin_request(&url, "GET", ResourceType::Stylesheet, Some("parser"))
+                        .map(|g| g.dropped_as(FailureStage::OverBudget, "subresource budget spent"));
                     match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Style)).await {
                         Ok(response) => {
+                            let received = guard.map(|g| g.received(&response));
                             if response.ok() {
-                                match response.text().await {
+                                let text = response.text().await;
+                                if let Some(received) = received {
+                                    match &text {
+                                        Ok(css_text) => received.read(css_text.len()),
+                                        Err(_) => received.fail(FailureStage::Decode, "body is not UTF-8"),
+                                    }
+                                }
+                                match text {
                                     Ok(css_text) => match Stylesheet::parse(&absolutize_css_urls(&css_text, &url)) {
                                         Ok(stylesheet) => {
                                             debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
@@ -10553,11 +10663,15 @@ impl Engine {
                                     }
                                 }
                             } else {
+                                if let Some(received) = received {
+                                    received.unread();
+                                }
                                 warn!(status = %response.status, %url, "Failed to fetch stylesheet");
                                 None
                             }
                         }
                         Err(e) => {
+                            inspector::fail_net(guard, &e);
                             warn!(?e, %url, "Failed to fetch stylesheet");
                             None
                         }
@@ -10645,7 +10759,13 @@ impl Engine {
 
         let base_url = view.url.as_ref();
         let mut images = self.discover_images(document.as_ref(), base_url);
-        images.extend(Self::discover_background_images(view.display_list.as_ref()));
+        let backgrounds = Self::discover_background_images(view.display_list.as_ref());
+        let css_urls = match view.inspector.is_active() {
+            true => backgrounds.iter().map(|(_, url)| url.clone()).collect(),
+            false => std::collections::HashSet::new(),
+        };
+        let inspector = view.inspector.clone();
+        images.extend(backgrounds);
         if only_new {
             images.retain(|(_, url)| !view.images_attempted.contains(url));
         }
@@ -10693,11 +10813,13 @@ impl Engine {
             pending,
             svg_urls,
             already_loaded: loaded,
-            budget: std::time::Duration::from_millis(self.config.subresource_budget_ms),
             deadline: self.subresource_deadline(),
             referrer: self.subresource_referrer(id),
             loader: self.loader.clone(),
             image_manager,
+            inspector,
+            initiator: if only_new { "script" } else { "parser" },
+            css_urls,
         }))
     }
 
@@ -10713,7 +10835,20 @@ impl Engine {
         use futures::stream::StreamExt;
         const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
 
-        let ImagePlan { pending, svg_urls, already_loaded, budget, deadline, referrer, loader, image_manager } = plan;
+        let ImagePlan {
+            pending,
+            svg_urls,
+            already_loaded,
+            deadline,
+            referrer,
+            loader,
+            image_manager,
+            inspector,
+            initiator,
+            css_urls,
+        } = plan;
+        let initiator_of = |url: &Url| if css_urls.contains(url) { "css" } else { initiator };
+        let inspector = &inspector;
         let mut loaded = already_loaded;
         let mut svgs = Vec::new();
 
@@ -10727,30 +10862,62 @@ impl Engine {
             let parsed: Vec<Option<(String, rustkit_svg::SvgDocument)>> =
                 futures::stream::iter(svg_urls.into_iter().map(|url| {
                     let loader = loader.clone();
+                    let initiator = initiator_of(&url);
                     async move {
                         info!(%url, "Loading SVG image");
-                        let fetched = tokio::time::timeout_at(deadline, loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)))
-                            .await
-                            .unwrap_or(Err(NetError::Timeout(budget)));
+                        let guard = inspector.begin_request(&url, "GET", ResourceType::Image, Some(initiator));
+                        let fetched = match tokio::time::timeout_at(
+                            deadline,
+                            loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)),
+                        )
+                        .await
+                        {
+                            Ok(fetched) => fetched,
+                            Err(_) => {
+                                if let Some(guard) = guard {
+                                    guard.fail(FailureStage::OverBudget, "subresource budget spent");
+                                }
+                                warn!(%url, "Failed to fetch SVG image: over the subresource budget");
+                                return None;
+                            }
+                        };
                         match fetched {
-                            Ok(response) if response.ok() => match response.text().await {
-                                Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
-                                    Ok(doc) => Some((url.to_string(), image_svg(doc))),
+                            Ok(response) if response.ok() => {
+                                let received = guard.map(|g| g.received(&response));
+                                match response.text().await {
+                                    Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
+                                        Ok(doc) => {
+                                            if let Some(received) = received {
+                                                received.read(xml.len());
+                                            }
+                                            Some((url.to_string(), image_svg(doc)))
+                                        }
+                                        Err(e) => {
+                                            if let Some(received) = received {
+                                                received.fail(FailureStage::Decode, "SVG did not parse");
+                                            }
+                                            warn!(?e, %url, "Failed to parse SVG image");
+                                            None
+                                        }
+                                    },
                                     Err(e) => {
-                                        warn!(?e, %url, "Failed to parse SVG image");
+                                        if let Some(received) = received {
+                                            received.fail(FailureStage::Decode, "body is not UTF-8");
+                                        }
+                                        warn!(?e, %url, "Failed to read SVG body");
                                         None
                                     }
-                                },
-                                Err(e) => {
-                                    warn!(?e, %url, "Failed to read SVG body");
-                                    None
                                 }
-                            },
+                            }
                             Ok(response) => {
+                                if let Some(guard) = guard {
+                                    guard.received(&response).unread();
+                                }
                                 warn!(status = %response.status, %url, "Failed to fetch SVG image");
                                 None
                             }
                             Err(e) => {
+                                inspector::fail_net(guard, &e);
                                 warn!(?e, %url, "Failed to fetch SVG image");
                                 None
                             }
@@ -10774,9 +10941,10 @@ impl Engine {
         let results: Vec<RasterOutcome> = futures::stream::iter(pending.into_iter().map(|url| {
             let image_manager = image_manager.clone();
             let loader = loader.clone();
+            let initiator = initiator_of(&url);
             async move {
                 info!(%url, "Loading image");
-                let load = fetch_raster_image(&loader, &image_manager, referrer, url.clone());
+                let load = fetch_raster_image(&loader, &image_manager, referrer, url.clone(), Some((inspector, initiator)));
                 let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
                     warn!(%url, "Image over the subresource budget; rendering without it");
                     return (false, None);
@@ -11087,16 +11255,43 @@ impl Engine {
         let deadline = self.subresource_deadline();
         let referrer = self.subresource_referrer(id);
         let referrer = &referrer;
+        let inspector = self.views.get(&id).map(|v| v.inspector.clone());
+        let inspector = &inspector;
         let fetched: Vec<_> = stream::iter(targets.into_iter().map(|(key, family, url)| async move {
             info!(%family, %url, "Loading web font");
             let load = async {
+                let guard = inspector
+                    .as_ref()
+                    .and_then(|i| i.begin_request(&url, "GET", ResourceType::Font, Some("css")))
+                    .map(|g| g.dropped_as(FailureStage::OverBudget, "subresource budget spent"));
                 match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Font)).await {
-                    Ok(response) if response.ok() => match response.bytes().await {
-                        Ok(bytes) => Ok(bytes.to_vec()),
-                        Err(e) => Err(format!("Failed to read web font body: {e:?}")),
-                    },
-                    Ok(response) => Err(format!("Failed to fetch web font: status {}", response.status)),
-                    Err(e) => Err(format!("Failed to fetch web font: {e:?}")),
+                    Ok(response) if response.ok() => {
+                        let received = guard.map(|g| g.received(&response));
+                        match response.bytes().await {
+                            Ok(bytes) => {
+                                if let Some(received) = received {
+                                    received.read(bytes.len());
+                                }
+                                Ok(bytes.to_vec())
+                            }
+                            Err(e) => {
+                                if let Some(received) = received {
+                                    received.fail(FailureStage::Connect, "body cut off");
+                                }
+                                Err(format!("Failed to read web font body: {e:?}"))
+                            }
+                        }
+                    }
+                    Ok(response) => {
+                        if let Some(guard) = guard {
+                            guard.received(&response).unread();
+                        }
+                        Err(format!("Failed to fetch web font: status {}", response.status))
+                    }
+                    Err(e) => {
+                        inspector::fail_net(guard, &e);
+                        Err(format!("Failed to fetch web font: {e:?}"))
+                    }
                 }
             };
             let outcome = tokio::time::timeout_at(deadline, load)
@@ -14576,7 +14771,14 @@ impl Engine {
         let event_tx = self.event_tx.clone();
         let referrer = self.subresource_referrer(view_id);
 
-        let load = fetch_raster_image(&self.loader, &image_manager, &referrer, url.clone());
+        let inspector = self.views.get(&view_id).map(|v| v.inspector.clone());
+        let load = fetch_raster_image(
+            &self.loader,
+            &image_manager,
+            &referrer,
+            url.clone(),
+            inspector.as_ref().map(|i| (i, "script")),
+        );
         let loaded = tokio::time::timeout_at(self.subresource_deadline(), load)
             .await
             .unwrap_or_else(|_| {

@@ -145,7 +145,9 @@ fn a_small_load_is_recorded_in_this_exact_order() {
             "response #2 200 text/css",
             "first_layout",
             "first_paint",
-            "relayout stylesheet_loaded",
+            // The sheet arrived before the first layout (render-blocking),
+            // so that layout is the initial load's.
+            "relayout initial_load",
             "request #3 GET image /pic.png by=parser",
             "response #3 200 image/png",
             "relayout image_loaded(count=1)",
@@ -176,22 +178,38 @@ fn a_request_the_shield_refuses_is_a_policy_failure() {
     assert!(!server.requests.lock().unwrap().iter().any(|p| p.contains("tracker")), "refused before any byte");
 }
 
+/// Two script requests to another origin on the loopback: the policy's
+/// private-network rule refuses one before it connects (a public page may
+/// not reach private addresses, and another port is another site), and a
+/// `same-origin` request is refused as cross-origin. (A response missing
+/// `Access-Control-Allow-Origin` cannot be served from a loopback test
+/// server for the same reason; the policy's own tests cover it.)
 #[test]
-fn a_cross_origin_fetch_without_cors_is_a_cors_failure() {
+fn script_requests_the_policy_refuses_are_policy_and_cors_failures() {
     let other = serve(vec![Route::ok("/data", "application/json", "{\"private\":true}")]);
     let page = format!(
-        "<html><body><script>fetch('http://127.0.0.1:{}/data').catch(function () {{}});</script></body></html>",
-        other.port
+        "<html><body><script>
+fetch('http://127.0.0.1:{port}/data').catch(function () {{}});
+fetch('http://127.0.0.1:{port}/data?again', {{ mode: 'same-origin' }}).catch(function () {{}});
+</script></body></html>",
+        port = other.port
     );
     let page: &'static str = Box::leak(page.into_boxed_str());
     let (engine, view, server) = load(vec![Route::html("/", page)]);
     let records = records(&engine, view);
     assert_each_request_answered_once(&records);
-    let cors: Vec<String> = outcomes(&records, server.port)
+    let refused: Vec<String> = outcomes(&records, server.port)
         .into_iter()
         .filter(|l| l.starts_with("fetch "))
         .collect();
-    assert_eq!(cors, vec![format!("fetch http://127.0.0.1:{}/data by=script -> failed cors", other.port)]);
+    assert_eq!(
+        refused,
+        vec![
+            format!("fetch http://127.0.0.1:{}/data by=script -> failed policy", other.port),
+            format!("fetch http://127.0.0.1:{}/data by=script -> failed cors", other.port),
+        ]
+    );
+    assert_eq!(other.hits.load(std::sync::atomic::Ordering::SeqCst), 0, "neither reached the other server");
 }
 
 #[test]
@@ -310,20 +328,33 @@ fn an_image_that_does_not_decode_is_a_decode_failure() {
     assert!(outcomes(&records, server.port).contains(&"image /broken.png by=parser -> failed decode".to_string()));
 }
 
+/// The loader's memory cache answers a repeated document GET. (Loopback
+/// subresources are never cached: the shared cache would answer a private
+/// URL without connecting, so it skips them.)
 #[test]
 fn a_repeated_get_is_answered_from_the_cache() {
-    let page = r#"<html><body><img src="/pic.png"><script>fetch('/pic.png');</script></body></html>"#;
-    let (engine, view, _server) = load(vec![
-        Route::html("/", page),
-        png("/pic.png").header("Cache-Control", "max-age=600"),
-    ]);
+    let server = serve(vec![Route::html("/", "<html><body>x</body></html>").header("Cache-Control", "max-age=600")]);
+    let (mut engine, view) = engine(EngineConfig::default(), None);
+    let rt = runtime();
+    rt.block_on(engine.load_url(view, server.url("/"))).unwrap();
+    rt.block_on(engine.load_url(view, server.url("/"))).unwrap();
     let records = records(&engine, view);
     assert_each_request_answered_once(&records);
-    let cached = records
+    let documents: Vec<String> = records
         .iter()
-        .filter(|r| matches!(r.event, InspectorEvent::Response { from_cache: true, .. }))
-        .count();
-    assert!(cached >= 1, "{:?}", records.iter().map(|r| describe(r, 0)).collect::<Vec<_>>());
+        .map(|r| describe(r, server.port))
+        .filter(|l| l.starts_with("response"))
+        .collect();
+    assert_eq!(documents, vec!["response #1 200 text/html", "response #2 200 text/html cache"]);
+    assert_eq!(server.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let encoded: Vec<Option<u64>> = records
+        .iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::Response { encoded_size, .. } => Some(encoded_size),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(encoded, vec![Some(27), None], "the cache transferred nothing");
 }
 
 // ---- Privacy ----
