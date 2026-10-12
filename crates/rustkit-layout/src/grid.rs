@@ -4683,6 +4683,25 @@ fn apply_align_self(
         }
     }
 
+    // An `auto` margin on the block axis takes the free space before
+    // `align-self` is looked at (css-grid-1 6.4): `margin-top: auto` puts
+    // the item at the bottom of its area, both margins centre it. google's
+    // logo is `height: 100%; max-height: 92px; margin-top: auto` in a
+    // taller row and sat at the top. Only an item with an explicit height
+    // is handled: the height of an `auto` one is not known until Phase 9
+    // has flowed it.
+    let top_auto = matches!(child.style.margin_top, Length::Auto);
+    let bottom_auto = matches!(child.style.margin_bottom, Length::Auto);
+    if has_explicit_height && (top_auto || bottom_auto) {
+        let free = (cell_height - child_height).max(0.0);
+        let before = match (top_auto, bottom_auto) {
+            (true, true) => free / 2.0,
+            (true, false) => free,
+            _ => 0.0,
+        };
+        return (cell_y + before, child_height);
+    }
+
     match align {
         AlignSelf::FlexStart | AlignSelf::Auto => (cell_y, child_height),
         AlignSelf::FlexEnd => (cell_y + cell_height - child_height, child_height),

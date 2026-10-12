@@ -43,24 +43,19 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// counts as the whole 600 toward its column, so the empty first column is 0
 /// wide; in Chromium the columns are 200 and 400.
 ///
-/// The two below are google's logo block (two `height: 100%` items in one
-/// cell of a grid whose height is `calc(100% - 560px)`, in a column). The
-/// items no longer take the height of the two stacked as blocks, and the
-/// one with a `max-height` keeps it;
-/// `percent-height-item-with-a-max-height-in-a-min-height-grid-in-a-column`
-/// pins both. What is left:
+/// The last one is google's logo block (two `height: 100%` items in one cell
+/// of a grid whose height is `calc(100% - 560px)`, in a column). The items
+/// no longer take the height of the two stacked as blocks, the one with a
+/// `max-height` keeps it, and its `margin-top: auto` puts it at the bottom
+/// of the row; `two-items-in-one-cell-of-a-calc-height-grid-in-an-auto-
+/// height-column` and `percent-height-item-with-a-max-height-in-a-min-
+/// height-grid-in-a-column` pin those. What is left:
 ///
-/// `two-items-in-one-cell-of-a-calc-height-grid-in-an-auto-height-column`:
-/// the item's `margin-top: auto` is not read, so it sits at the top of its
-/// row where Chromium has it at the bottom (y 0, Chromium 58).
-///
-/// `two-items-in-one-cell-of-a-calc-height-grid-in-a-column`: that, and the
-/// grid's `calc(100% - 560px)` is not resolved against the column's
-/// definite height: the grid is its `min-height`, 150, where Chromium has
-/// 240.
+/// `two-items-in-one-cell-of-a-calc-height-grid-in-a-column`: the grid's
+/// `calc(100% - 560px)` is not resolved against the column's definite
+/// height: the grid is its `min-height`, 150, where Chromium has 240.
 const GAPS: &[&str] = &[
     "span-by-row-end-in-a-row",
-    "two-items-in-one-cell-of-a-calc-height-grid-in-an-auto-height-column",
     "two-items-in-one-cell-of-a-calc-height-grid-in-a-column",
     "percent-height-item-sharing-an-area-in-a-row",
     "bing-textarea-and-its-replica-in-a-row",
