@@ -64,16 +64,45 @@ const GAPS: &[&str] = &[
     "percent-height-row-is-not-touched",
 ];
 
+/// The pages are checked in four tests, a quarter each. As one test they
+/// held the GPU for over 120 s on a loaded machine (31 pages at more than a
+/// second each), and the tests queued behind it failed in the GPU test guard.
+const PARTS: usize = 4;
+
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
-fn a_grid_that_is_a_flex_item_is_as_in_chrome() {
+fn a_grid_that_is_a_flex_item_is_as_in_chrome_1_of_4() {
+    pages_are_as_in_chrome(0);
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn a_grid_that_is_a_flex_item_is_as_in_chrome_2_of_4() {
+    pages_are_as_in_chrome(1);
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn a_grid_that_is_a_flex_item_is_as_in_chrome_3_of_4() {
+    pages_are_as_in_chrome(2);
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn a_grid_that_is_a_flex_item_is_as_in_chrome_4_of_4() {
+    pages_are_as_in_chrome(3);
+}
+
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn pages_are_as_in_chrome(part: usize) {
     let data: serde_json::Value =
         serde_json::from_str(include_str!("../../../tools/parity_oracle/grid_in_flex_cases.json"))
             .expect("case file");
     let (w, h) = (data["viewport"][0].as_u64().unwrap(), data["viewport"][1].as_u64().unwrap());
     let mut wrong = Vec::new();
     let mut gaps_that_pass = Vec::new();
-    for case in data["cases"].as_array().expect("cases") {
+    let cases = data["cases"].as_array().expect("cases");
+    for case in cases.iter().skip(part).step_by(PARTS) {
         let name = case["name"].as_str().unwrap();
         let chrome = case["chrome_boxes"].as_str().expect("run grid_flexible_row_log.mjs --write");
 
