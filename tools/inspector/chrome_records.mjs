@@ -16,16 +16,20 @@
  * real-site context. `oracle_key` is getSelector read out of
  * capture_baseline.mjs, as element_rects.mjs does.
  *
- * Privacy: the page URL loses its query and fragment unless --keep-query;
- * text is reported as a length only; background-image URLs lose their query
- * and data: URLs their contents. Nothing reads cookies, storage or form values.
+ * Privacy (record_scrub.mjs): the page URL loses its user name and password,
+ * and its query and fragment unless --keep-query; a local page is named by a
+ * relative path, never a host path. Text is reported as a length only. Every
+ * url() in background-image loses userinfo, query and fragment, data: URLs
+ * their contents, and file: URLs become paths relative to the page. Nothing
+ * reads cookies, storage or form values.
  */
 
 // Playwright is installed once, in tools/parity_oracle (`npm ci` there).
 import { chromium } from '../parity_oracle/node_modules/playwright/index.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
+import { backgroundImage, reportTarget } from './record_scrub.mjs';
 import {
   createDeterministicContext,
   getDeterministicLaunchOptions,
@@ -104,30 +108,6 @@ function collect([fnSrc, props, maxElements]) {
     for (const c of el.classList) s += `.${c}`;
     return s;
   }
-  function scrubUrl(u) {
-    if (/^data:/i.test(u)) return 'data:…';
-    return u.split(/[?#]/)[0];
-  }
-  function backgroundImage(v) {
-    if (!v || v === 'none') return 'none';
-    // Split top-level layers.
-    const layers = [];
-    let depth = 0, cur = '';
-    for (const ch of v) {
-      if (ch === '(') depth++;
-      if (ch === ')') depth--;
-      if (ch === ',' && depth === 0) { layers.push(cur.trim()); cur = ''; continue; }
-      cur += ch;
-    }
-    layers.push(cur.trim());
-    return layers.map((l) => {
-      const url = l.match(/^url\(\s*["']?(.*?)["']?\s*\)$/i);
-      if (url) return `url("${scrubUrl(url[1])}")`;
-      const g = l.match(/^((?:repeating-)?(?:linear|radial|conic)-gradient)\(/i);
-      if (g) return `${g[1].toLowerCase()}(…)`;
-      return l;
-    }).join(', ');
-  }
   const px = (v) => parseFloat(v) || 0;
   function boxes(el, cs) {
     const b = el.getBoundingClientRect();
@@ -198,8 +178,8 @@ function collect([fnSrc, props, maxElements]) {
     };
     unavailable['identity.node_id'] = 'Chromium exposes no node id to script';
     for (const p of props) {
-      let v = c.getPropertyValue(p);
-      if (p === 'background-image') v = backgroundImage(v);
+      // background-image is scrubbed in Node (record_scrub.mjs) before writing.
+      const v = c.getPropertyValue(p);
       record.style[p] = v === '' ? null : v;
       if (v === '') unavailable[`style.${p}`] = 'empty in getComputedStyle';
     }
@@ -226,8 +206,25 @@ function collect([fnSrc, props, maxElements]) {
     const { border, padding, content } = boxes(el, c);
     record.box.has_box = true;
     record.box.border_box = r4(border.x, border.y, border.width, border.height);
-    record.box.padding_box = r4(...padding);
-    record.box.content_box = r4(...content);
+    // Padding and content boxes are the bounding rect less computed border
+    // and padding, which holds only while no transform on the chain scales,
+    // rotates or skews; otherwise they are unknown (as on the engine side
+    // for rotation; the engine maps a scale, which compares as unknown here).
+    let axisTransformOnly = true;
+    for (let p = el; p; p = parentOf(p)) {
+      const t = cs(p).transform;
+      if (t && t !== 'none') {
+        const m = new DOMMatrixReadOnly(t);
+        if (!m.is2D || m.a !== 1 || m.b !== 0 || m.c !== 0 || m.d !== 1) { axisTransformOnly = false; break; }
+      }
+    }
+    if (axisTransformOnly) {
+      record.box.padding_box = r4(...padding);
+      record.box.content_box = r4(...content);
+    } else {
+      unavailable['box.padding_box'] = 'not derivable from the bounding rect under a scale, rotation or skew';
+      unavailable['box.content_box'] = 'not derivable from the bounding rect under a scale, rotation or skew';
+    }
 
     // Containing block, as far as script can know.
     let cb = null;
@@ -292,7 +289,7 @@ function collect([fnSrc, props, maxElements]) {
     });
     out.push(record);
   }
-  return { elements: out, total: all.length, scroll: [scrollX, scrollY] };
+  return { elements: out, total: all.length, scroll: [scrollX, scrollY], href: location.href };
 }
 
 function parseArgs(argv) {
@@ -313,17 +310,6 @@ function parseArgs(argv) {
   return opts;
 }
 
-export function reportUrl(url, keepQuery) {
-  if (keepQuery) return url;
-  try {
-    const u = new URL(url);
-    u.search = '';
-    u.hash = '';
-    return u.toString();
-  } catch {
-    return url.split(/[?#]/)[0];
-  }
-}
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -331,11 +317,12 @@ async function main() {
     console.error('usage: chrome_records.mjs <url|html-file> <out.json> [--width W --height H --scale S --settle MS --max-elements N --keep-query]');
     process.exit(2);
   }
-  const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(opts.target);
+  const isUrl = /^(?:[a-z][a-z0-9+.-]*:\/\/|data:|about:)/i.test(opts.target);
+  const named = reportTarget(opts.target, isUrl, opts.keepQuery, process.cwd());
   const fnSrc = extractGetSelectorSource(
     readFileSync(join(__dirname, '..', 'parity_oracle', 'capture_baseline.mjs'), 'utf8'),
   );
-  const result = { target: isUrl ? reportUrl(opts.target, opts.keepQuery) : opts.target, status: 'ok', error: null };
+  const result = { target: named, status: 'ok', error: null };
   const browser = await chromium.launch(getDeterministicLaunchOptions());
   try {
     let context;
@@ -358,18 +345,28 @@ async function main() {
       });
     }
     const page = await context.newPage();
+    let response = null;
     try {
-      await page.goto(url, { waitUntil: isUrl ? 'load' : 'networkidle', timeout: NAV_TIMEOUT_MS });
+      response = await page.goto(url, { waitUntil: isUrl ? 'load' : 'networkidle', timeout: NAV_TIMEOUT_MS });
     } catch (e) {
       result.nav_error = String(e.message || e).split('\n')[0];
     }
+    // An error page is recorded (it is what loaded) but the run is not ok.
+    if (response && response.status() >= 400) {
+      result.status = 'error';
+      result.error = `HTTP ${response.status()}`;
+    }
     await page.waitForTimeout(isUrl ? opts.settle : 50);
     const got = await page.evaluate(collect, [fnSrc, STYLE_PROPERTIES, opts.maxElements]);
+    for (const r of got.elements) {
+      const v = r.style['background-image'];
+      if (v != null) r.style['background-image'] = backgroundImage(v, got.href);
+    }
     const dump = {
       schema: 'hiwave-element-diagnostics/1',
       page: {
-        // A local file is named by its repo-relative argument, never by host path.
-        url: isUrl ? reportUrl(opts.target, opts.keepQuery) : opts.target,
+        // A local file is named by a relative path, never by host path.
+        url: named,
         engine: { version: `chromium ${browser.version()}`, commit: null },
         viewport: [opts.width, opts.height],
         device_scale: isUrl ? opts.scale : 1,
@@ -397,6 +394,6 @@ async function main() {
   if (result.status !== 'ok') process.exit(1);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   await main();
 }
