@@ -32974,15 +32974,20 @@ mod aspect_ratio_empty_block_tests {
             );
             by_id(&root, "n").expect("#n").dimensions.border_box().y
         };
-        assert_eq!(
-            n_y(concat!(
-                r#"<style>.r{aspect-ratio:4/1}.r.x{aspect-ratio:auto}</style>"#,
-                r#"<body style="margin:0"><div style="width:400px">"#,
-                r#"<div class="r x"></div><div id="n" style="height:5px"></div></div></body>"#,
-            )),
-            0.0,
-            "aspect-ratio: auto resets an earlier ratio"
-        );
+        for reset in ["auto", "initial", "unset"] {
+            assert_eq!(
+                n_y(&format!(
+                    concat!(
+                        r#"<style>.r{{aspect-ratio:4/1}}.r.x{{aspect-ratio:{}}}</style>"#,
+                        r#"<body style="margin:0"><div style="width:400px">"#,
+                        r#"<div class="r x"></div><div id="n" style="height:5px"></div></div></body>"#,
+                    ),
+                    reset
+                )),
+                0.0,
+                "aspect-ratio: {reset} resets an earlier ratio"
+            );
+        }
         for ratio in ["0", "0/1", "1/0", "-2"] {
             assert_eq!(
                 n_y(&format!(
