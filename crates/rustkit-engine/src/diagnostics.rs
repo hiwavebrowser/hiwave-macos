@@ -767,6 +767,15 @@ impl<'a> Builder<'a> {
         });
         insets(&mut style, b, ctx, scroll, self.src.viewport, unavailable);
         let parent_display = ctx.parent.map(|p| p.style.display);
+        // min-width/min-height: auto computes to 0 except on flex and grid
+        // items, where getComputedStyle keeps `auto`.
+        if !parent_display.is_some_and(|d| d.is_flex() || matches!(d, Display::Grid | Display::InlineGrid)) {
+            for p in ["min-width", "min-height"] {
+                if style.get(p).and_then(|v| v.as_deref()) == Some("auto") {
+                    style.insert(p, Some("0px".into()));
+                }
+            }
+        }
         let parent_sel = || ctx.parent.and_then(selector_of).unwrap_or_else(|| "anonymous".into());
         let mut grid_item = false;
         let fc = match position {

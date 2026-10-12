@@ -105,7 +105,7 @@ fn a_block_records_identity_tree_box_style_and_paint() {
         ("margin-top", "10px"), ("padding-left", "5px"), ("border-top-width", "2px"),
         ("box-sizing", "content-box"), ("font-size", "16px"), ("color", "rgb(0, 0, 0)"),
         ("background-image", "none"), ("transform", "none"), ("opacity", "1"), ("inset", "auto"),
-        ("max-width", "none"), ("min-width", "auto"), ("grid-template-columns", "none"),
+        ("max-width", "none"), ("min-width", "0px"), ("grid-template-columns", "none"),
     ] {
         assert_eq!(st[p], v, "style {p}");
     }
@@ -137,6 +137,8 @@ fn flex_and_grid_items_name_their_container() {
     assert_eq!(f1["box"]["border_box"], rect(0.0, 74.0, 200.0, 50.0));
     assert_eq!(f1["box"]["containing_block"]["selector"], flex.as_str());
     assert_eq!(f1["style"]["flex-grow"], "1");
+    // A flex item keeps min-width: auto; a block's computes to 0px.
+    assert_eq!(f1["style"]["min-width"], "auto");
     assert_eq!(f1["box"]["grid_lines"], serde_json::Value::Null);
     assert!(f1["unavailable"].get("box.grid_lines").is_none());
 
