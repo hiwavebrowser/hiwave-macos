@@ -198,6 +198,8 @@ mod ancestor_attribute_tests;
 #[cfg(all(test, feature = "headless"))]
 mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
+mod script_nav_image_wait_tests;
+#[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
@@ -774,6 +776,12 @@ pub struct EngineConfig {
     /// the budget is a different frame. The live app turns it on, where a
     /// script that does not end is a window that does not answer.
     pub interrupt_scripts_at_budget: bool,
+    /// The embedder loads the URL a page's script asks for
+    /// ([`Engine::take_script_navigation`]), as the live app does. A load
+    /// whose scripts have asked to leave then does not wait for the images
+    /// those scripts added: nobody will see that page. Off by default: a
+    /// capture never follows the page, and shows it as it was.
+    pub follows_script_navigation: bool,
 }
 
 impl Default for EngineConfig {
@@ -792,6 +800,7 @@ impl Default for EngineConfig {
             script_network_rounds: 8,
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
+            follows_script_navigation: false,
         }
     }
 }
