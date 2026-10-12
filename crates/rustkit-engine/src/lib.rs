@@ -32823,7 +32823,10 @@ mod gap_shorthand_tests {
 
         // Three values, or a second value that is no length: the
         // declaration is invalid and changes nothing.
-        for bad in ["1px 2px 3px", "1px red"] {
+        // A negative length or a bare number other than 0 is invalid in
+        // either position (Chromium 141 ignores `gap: -5px 20px` and
+        // `gap: 10 20`), and so is the one-value form of either.
+        for bad in ["1px 2px 3px", "1px red", "-5px 20px", "10px -1px", "10 20", "-5px", "10"] {
             let mut style = ComputedStyle::new();
             e.apply_style_property(&mut style, "gap", bad);
             assert_eq!(style.row_gap, ComputedStyle::new().row_gap, "{bad}");
