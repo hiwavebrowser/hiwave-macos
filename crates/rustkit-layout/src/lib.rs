@@ -48,6 +48,8 @@ mod flex_auto_margin_relayout_tests;
 mod flex_item_min_height_tests;
 
 #[cfg(test)]
+mod fit_content_width_tests;
+#[cfg(test)]
 mod min_max_height_unit_tests;
 
 #[cfg(test)]
