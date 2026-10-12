@@ -946,7 +946,9 @@ fn four(t: String, r: String, b: String, l: String) -> String {
 /// but not spelled out. tools/inspector normalises Chromium's value the same way.
 pub(crate) fn background_image(b: &LayoutBox) -> String {
     let mut out = Vec::new();
-    for layer in &b.style.background_layers {
+    // The engine stores layers bottom first (index 0 paints first); CSS and
+    // getComputedStyle list them top first, as written.
+    for layer in b.style.background_layers.iter().rev() {
         out.push(match &layer.image {
             rustkit_css::BackgroundImage::None => "none".to_string(),
             rustkit_css::BackgroundImage::Url(u) => format!("url(\"{}\")", scrub_url(u)),
