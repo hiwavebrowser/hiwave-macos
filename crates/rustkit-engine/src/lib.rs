@@ -164,13 +164,22 @@ use rustkit_layout::{
 };
 use std::borrow::Cow;
 use std::cell::Cell;
+pub mod inspector;
 mod relayout_cause;
 use relayout_cause::PendingCauses;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
+pub use inspector::{
+    ConsoleLevel, EndReason, Inspector, InspectorConfig, InspectorEvent, InspectorRecord, InspectorSink,
+    InspectorSnapshot, InspectorSummary, SourceLocation, UnsupportedApiCount,
+};
 pub use rustkit_bindings::MutationKind;
 mod script_net;
 #[cfg(test)]
 mod script_net_tests;
+#[cfg(test)]
+mod inspector_tests;
+#[cfg(all(test, feature = "headless"))]
+mod inspector_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod relayout_cause_engine_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -655,6 +664,8 @@ struct ViewState {
     relayout_pending: PendingCauses,
     /// Relayouts since the current document was committed, by cause.
     relayout_stats: RelayoutStats,
+    /// The view's Inspector record (see `inspector`).
+    inspector: Arc<Inspector>,
 }
 
 impl ViewState {
@@ -782,6 +793,10 @@ pub struct EngineConfig {
     /// those scripts added: nobody will see that page. Off by default: a
     /// capture never follows the page, and shows it as it was.
     pub follows_script_navigation: bool,
+    /// Whether views keep an Inspector buffer, and how URLs in its events
+    /// are shown (see `inspector`). Off by default; a sink attached with
+    /// [`Engine::add_inspector_sink`] turns recording on for its view.
+    pub inspector: InspectorConfig,
 }
 
 impl Default for EngineConfig {
@@ -801,6 +816,7 @@ impl Default for EngineConfig {
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             follows_script_navigation: false,
+            inspector: InspectorConfig::default(),
         }
     }
 }
@@ -1636,6 +1652,7 @@ impl Engine {
             live_images: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
+            inspector: Inspector::new(&self.config.inspector),
         };
 
         self.views.insert(id, view_state);
@@ -1717,6 +1734,7 @@ impl Engine {
             live_images: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
+            inspector: Inspector::new(&self.config.inspector),
         };
 
         let id = view_state.id;
@@ -1807,6 +1825,7 @@ impl Engine {
             live_images: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
+            inspector: Inspector::new(&self.config.inspector),
         };
 
         self.views.insert(id, view_state);
@@ -3585,6 +3604,26 @@ impl Engine {
     /// lifecycle listener or timer callback.
     pub fn script_log(&self, id: EngineViewId) -> Option<&[ScriptRecord]> {
         self.views.get(&id).map(|v| v.script_log.as_slice())
+    }
+
+    /// The view's Inspector: its event buffer and sinks. The handle can be
+    /// kept and read from any thread, including while the page's script is
+    /// running ([`Inspector::snapshot_since`]); reading runs no script.
+    pub fn inspector(&self, id: EngineViewId) -> Option<Arc<Inspector>> {
+        self.views.get(&id).map(|v| v.inspector.clone())
+    }
+
+    /// Send the view's Inspector events to `sink` from now on (this turns
+    /// recording on for the view). Console capture and rejection tracking
+    /// are set up when a document is committed, so attach before loading.
+    pub fn add_inspector_sink(
+        &mut self,
+        id: EngineViewId,
+        sink: Box<dyn InspectorSink>,
+    ) -> Result<(), EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        view.inspector.add_sink(sink);
+        Ok(())
     }
 
     /// Collect the document's `<script>`s in document order and start

@@ -5496,6 +5496,7 @@ dependencies = [
  "rustkit-renderer",
  "rustkit-svg",
  "rustkit-viewhost",
+ "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
