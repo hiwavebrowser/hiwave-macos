@@ -193,6 +193,32 @@ fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
     let summary = InspectorSummary::from_records(&records, &unsupported);
     assert_eq!(
         serde_json::to_string(&summary).unwrap(),
-        r#"{"schema":1,"events":4,"console":{"log":1,"info":0,"warn":0,"error":1,"debug":0},"script_errors":1,"unhandled_rejections":1,"unsupported_apis":{"XMLHttpRequest.open(async=false)":4}}"#
+        r#"{"schema":2,"events":4,"console":{"log":1,"info":0,"warn":0,"error":1,"debug":0},"script_errors":1,"unhandled_rejections":1,"unsupported_apis":{"XMLHttpRequest.open(async=false)":4},"requests":{},"failures_by_stage":{}}"#
     );
+}
+
+#[test]
+fn a_request_guard_answers_once_and_a_dropped_one_fails() {
+    let inspector = buffered(16);
+    let url = url::Url::parse("https://a.test/x.png?q=1").unwrap();
+    let answered = inspector.begin_request(&url, "GET", ResourceType::Image, Some("parser")).unwrap();
+    answered.response(200, Some("image/png; charset=binary"), Some(10), Some(10), false);
+    let dropped = inspector
+        .begin_request(&url, "GET", ResourceType::Image, None)
+        .unwrap()
+        .dropped_as(FailureStage::OverBudget, "subresource budget spent");
+    drop(dropped);
+    let failed = inspector.begin_request(&url, "GET", ResourceType::Fetch, Some("script")).unwrap();
+    failed.fail(FailureStage::Cors, "CORS check failed for https://b.test/?secret=1");
+    assert_eq!(inspector.open_requests(), 0);
+    let events: Vec<InspectorEvent> = inspector.snapshot_since(0).records.into_iter().map(|r| r.event).collect();
+    assert!(matches!(&events[0], InspectorEvent::Request { id: 1, url, .. } if url == "https://a.test/x.png"));
+    assert!(matches!(&events[1], InspectorEvent::Response { id: 1, status: 200, mime: Some(m), .. } if m == "image/png"));
+    assert!(matches!(&events[3], InspectorEvent::Failure { id: 2, stage: FailureStage::OverBudget, .. }));
+    assert!(
+        matches!(&events[5], InspectorEvent::Failure { id: 3, stage: FailureStage::Cors, reason, .. } if reason == "CORS check failed for https://b.test/")
+    );
+    // Off: no guard, nothing built.
+    let off = Inspector::new(&InspectorConfig::default());
+    assert!(off.begin_request(&url, "GET", ResourceType::Image, None).is_none());
 }

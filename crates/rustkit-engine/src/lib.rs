@@ -171,7 +171,7 @@ use relayout_cause::PendingCauses;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
 pub use inspector::{
     ConsoleLevel, EndReason, Inspector, InspectorConfig, InspectorEvent, InspectorRecord, InspectorSink,
-    InspectorSnapshot, InspectorSummary, SourceLocation, UnsupportedApiCount,
+    InspectorSnapshot, InspectorSummary, SourceLocation, UnsupportedApiCount, FailureStage, ResourceType,
 };
 pub use rustkit_bindings::MutationKind;
 mod script_net;
@@ -181,6 +181,8 @@ mod script_net_tests;
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod inspector_network_tests;
 #[cfg(all(test, feature = "headless"))]
 mod relayout_cause_engine_tests;
 #[cfg(all(test, feature = "headless"))]

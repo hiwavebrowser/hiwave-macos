@@ -74,6 +74,12 @@ pub struct Response {
     pub body: Bytes,
     /// Final URL (after redirects).
     pub url: Url,
+    /// Body bytes as they came over the wire, before any
+    /// `Content-Encoding` was undone (`body.len()` after).
+    pub encoded_body_size: u64,
+    /// The redirects followed to get here, in order: each URL that answered
+    /// with a redirect, and its status.
+    pub redirect_chain: Vec<(Url, StatusCode)>,
 }
 
 impl Response {
@@ -452,8 +458,11 @@ impl Client {
                     .join(location)
                     .map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
                 debug!(from = %url, to = %redirect_url, "Following redirect");
-                return Box::pin(self.request_url(Method::GET, redirect_url, HeaderMap::new(), None, redirect_count + 1))
-                    .await;
+                let mut followed =
+                    Box::pin(self.request_url(Method::GET, redirect_url, HeaderMap::new(), None, redirect_count + 1))
+                        .await?;
+                followed.redirect_chain.insert(0, (url, response.status));
+                return Ok(followed);
             }
         }
 
@@ -463,6 +472,8 @@ impl Client {
             headers: response.headers,
             body: response.body,
             url,
+            encoded_body_size: response.encoded_len,
+            redirect_chain: Vec::new(),
         })
     }
 
@@ -571,6 +582,7 @@ impl Client {
             let _ = recv.flow_control().release_capacity(chunk.len());
         }
 
+        let encoded_len = collected.len() as u64;
         let body = decode_content_encoding_capped(Bytes::from(collected), &mut response_headers, self.max_body)?;
 
         Ok(RawResponse {
@@ -578,6 +590,7 @@ impl Client {
             version: Version::HTTP_2,
             headers: response_headers,
             body,
+            encoded_len,
         })
     }
 
@@ -742,6 +755,7 @@ image/avif,image/webp,*/*;q=0.8",
 
         // Read body
         let body = read_body(&mut reader, &response_headers, self.max_body).await?;
+        let encoded_len = body.len() as u64;
         let body = decode_content_encoding_capped(body, &mut response_headers, self.max_body)?;
 
         trace!(status = %status, body_len = body.len(), "Response received");
@@ -751,6 +765,7 @@ image/avif,image/webp,*/*;q=0.8",
             version,
             headers: response_headers,
             body,
+            encoded_len,
         })
     }
 }
@@ -767,6 +782,8 @@ struct RawResponse {
     version: Version,
     headers: HeaderMap,
     body: Bytes,
+    /// Body length before `Content-Encoding` was undone.
+    encoded_len: u64,
 }
 
 impl RawResponse {
@@ -1423,6 +1440,8 @@ mod tests {
             headers,
             body: Bytes::from("Hello"),
             url: Url::parse("https://example.com").unwrap(),
+            encoded_body_size: 5,
+            redirect_chain: Vec::new(),
         };
 
         assert!(response.is_success());
