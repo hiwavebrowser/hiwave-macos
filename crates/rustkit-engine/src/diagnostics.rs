@@ -682,7 +682,7 @@ impl<'a> Builder<'a> {
         if ctx.boxes.len() > 1 {
             notes.push(format!("laid out as {} boxes; rects are their union", ctx.boxes.len()));
         }
-        let style = style_record(b, notes, unavailable);
+        let mut style = style_record(b, unavailable);
         let position = b.style.position;
         if position == rustkit_css::Position::Fixed && scroll != (0.0, 0.0) {
             notes.push("fixed box: viewport rect is layout minus scroll, as getBoundingClientRect here".into());
@@ -696,6 +696,7 @@ impl<'a> Builder<'a> {
                 ContainingBlock { selector: None, content_box: DiagRect { x: 0.0, y: 0.0, w: w as f32, h: h as f32 } }
             }
         });
+        insets(&mut style, b, ctx, scroll, self.src.viewport, unavailable);
         let parent_display = ctx.parent.map(|p| p.style.display);
         let parent_sel = || ctx.parent.and_then(selector_of).unwrap_or_else(|| "anonymous".into());
         let mut grid_item = false;
@@ -887,7 +888,6 @@ pub(crate) fn scrub_url(u: &str) -> String {
 
 fn style_record(
     b: &LayoutBox,
-    notes: &mut Vec<String>,
     unavailable: &mut BTreeMap<String, String>,
 ) -> BTreeMap<&'static str, Option<String>> {
     let s = &*b.style;
@@ -915,12 +915,8 @@ fn style_record(
             "min-height" => Some(len(&s.min_height, false)),
             "max-width" => Some(len(&s.max_width, true)),
             "max-height" => Some(len(&s.max_height, true)),
-            "inset" => Some(four(
-                base["top"].to_string(),
-                base["right"].to_string(),
-                base["bottom"].to_string(),
-                base["left"].to_string(),
-            )),
+            // Resolved against the containing block in `insets`.
+            "top" | "right" | "bottom" | "left" | "inset" => None,
             "opacity" => Some(num(s.opacity)),
             "transform" => Some({
                 let t = s.effective_transform();
@@ -1020,6 +1016,100 @@ fn has_line_names(t: &rustkit_css::GridTemplate) -> bool {
             | rustkit_css::TrackRepeat::AutoFill(d)
             | rustkit_css::TrackRepeat::AutoFit(d) => named(d),
         })
+}
+
+/// `top`/`right`/`bottom`/`left`/`inset` as getComputedStyle resolves them:
+/// - static: the computed value (a percentage as written, `auto` kept);
+/// - relative: percentages against the containing block's content box, and
+///   `auto` as the negated opposite side or `0px`;
+/// - sticky: `auto` kept, percentages unknown (they resolve against the
+///   scrollport, which the record does not model);
+/// - absolute/fixed: the used offsets, read from the laid-out margin box
+///   against the containing block's padding box (the viewport for fixed).
+fn insets(
+    style: &mut BTreeMap<&'static str, Option<String>>,
+    b: &LayoutBox,
+    ctx: &BoxContext<'_>,
+    scroll: (f32, f32),
+    viewport: (u32, u32),
+    unavailable: &mut BTreeMap<String, String>,
+) {
+    use rustkit_css::Position;
+    let s = &*b.style;
+    let font_px = match s.font_size {
+        Length::Px(p) => p,
+        _ => 16.0,
+    };
+    let vp = (viewport.0 as f32, viewport.1 as f32);
+    let icb = Rect { x: 0.0, y: 0.0, width: vp.0, height: vp.1 };
+    // [top, right, bottom, left] and the axis size each side's % refers to.
+    let specified = [&s.top, &s.right, &s.bottom, &s.left];
+    let auto = |l: &Option<Length>| matches!(l, None | Some(Length::Auto));
+    let values: [Option<String>; 4] = match s.position {
+        Position::Static => specified.map(|l| match l {
+            None => Some("auto".to_string()),
+            Some(l) => Some(length(l, false, font_px, vp)),
+        }),
+        Position::Sticky => specified.map(|l| match l {
+            None | Some(Length::Auto) => Some("auto".to_string()),
+            Some(Length::Percent(_)) => None,
+            Some(l) => Some(length(l, false, font_px, vp)),
+        }),
+        Position::Relative => {
+            let cb = ctx.containing_block.map_or(icb, |c| c.dimensions.content);
+            let sizes = [cb.height, cb.width, cb.height, cb.width];
+            let px = |i: usize| -> Option<f32> {
+                match specified[i] {
+                    None | Some(Length::Auto) => None,
+                    Some(Length::Percent(p)) => Some(p / 100.0 * sizes[i]),
+                    Some(l) => Some(l.to_px_with_viewport(font_px, 16.0, sizes[i], vp.0, vp.1)),
+                }
+            };
+            let mut out: [Option<String>; 4] = Default::default();
+            for i in 0..4 {
+                let v = match px(i) {
+                    Some(v) => v,
+                    // Over-constrained or both auto: the opposite side wins.
+                    None if !auto(specified[(i + 2) % 4]) => -px((i + 2) % 4).unwrap_or(0.0),
+                    None => 0.0,
+                };
+                out[i] = Some(css_px(v + 0.0));
+            }
+            out
+        }
+        Position::Absolute | Position::Fixed => {
+            let (m, cb) = if s.position == Position::Fixed {
+                let m = b.dimensions.margin_box();
+                (Rect { x: m.x - scroll.0, y: m.y - scroll.1, ..m }, icb)
+            } else {
+                (b.dimensions.margin_box(), ctx.containing_block.map_or(icb, |c| c.dimensions.padding_box()))
+            };
+            [
+                m.y - cb.y,
+                cb.x + cb.width - (m.x + m.width),
+                cb.y + cb.height - (m.y + m.height),
+                m.x - cb.x,
+            ]
+            .map(|v| Some(css_px(v + 0.0)))
+        }
+    };
+    for (name, v) in ["top", "right", "bottom", "left"].into_iter().zip(values.iter()) {
+        if v.is_none() {
+            unavailable.insert(
+                format!("style.{name}"),
+                "a sticky box's percentage inset resolves against its scrollport, which is not modelled".into(),
+            );
+        }
+        style.insert(name, v.clone());
+    }
+    let inset = match values {
+        [Some(t), Some(r), Some(bt), Some(l)] => Some(four(t, r, bt, l)),
+        _ => {
+            unavailable.insert("style.inset".into(), "a side is unknown".into());
+            None
+        }
+    };
+    style.insert("inset", inset);
 }
 
 /// A track list that is px only (fixed repeats expanded), as getComputedStyle

@@ -160,7 +160,8 @@ fn an_abspos_box_names_its_positioned_containing_block() {
     assert_eq!(r["box"]["containing_block"]["content_box"], rect(0.0, 154.0, 200.0, 100.0));
     assert_eq!(r["box"]["border_box"], rect(20.0, 184.0, 50.0, 60.0));
     assert_eq!(r["style"]["position"], "absolute");
-    assert_eq!(r["style"]["inset"], "30px auto auto 20px");
+    // An abspos box's auto sides are its used offsets (200x100 block).
+    assert_eq!(r["style"]["inset"], "30px 130px 10px 20px");
 }
 
 #[test]
@@ -352,7 +353,8 @@ fn percentage_insets_resolve_against_the_containing_block() {
     let (engine, view) = engine_with(
         "<html><body style=\"margin:0\">\
          <div style=\"position:relative;width:400px;height:120px\">\
-         <div id=a style=\"position:absolute;top:50%;right:10%;width:40px;height:20px\"></div></div>\
+         <div id=a style=\"position:absolute;top:50%;right:10%;width:40px;height:20px\"></div>\
+         <div id=rp style=\"position:relative;top:10%;left:5%;height:10px\"></div></div>\
          <div id=s style=\"top:50%;height:10px\"></div>\
          </body></html>",
         800,
@@ -366,6 +368,9 @@ fn percentage_insets_resolve_against_the_containing_block() {
     assert_eq!(r["style"]["bottom"], "40px");
     assert_eq!(r["style"]["left"], "320px");
     assert_eq!(r["style"]["inset"], "60px 40px 40px 320px");
+    // Relative: % of the containing block; an auto side is the negated opposite.
+    let rp = diag(&engine, view, "#rp");
+    assert_eq!(rp["style"]["inset"], "12px -20px -12px 20px");
     // A static box's insets do not apply: the computed value, as written.
     let s = diag(&engine, view, "#s");
     assert_eq!(s["style"]["top"], "50%");
