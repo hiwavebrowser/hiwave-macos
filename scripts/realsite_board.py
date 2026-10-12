@@ -44,6 +44,10 @@ BOARDS = {
     # own trend file. A full run also writes the top-20 subset to trend.csv as
     # the /60 board, so one run keeps both numbers.
     "top25": (REPO / "websuite" / "realsite-top25.json", "trend-top25.csv"),
+    # --board categories (Plan Z week 2, B0): 30 sites, six categories of five,
+    # its own number (/90) and its own trend file. The manifest's "blocked" row
+    # is not loaded here; it is reported beside the board, never scored into it.
+    "categories": (REPO / "websuite" / "realsite-categories.json", "trend-categories.csv"),
 }
 ORACLE = REPO / "tools" / "parity_oracle" / "realsite.mjs"
 DEFAULT_CHROME = (
