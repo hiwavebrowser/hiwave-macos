@@ -333,3 +333,144 @@ fn a_body_background_moved_to_the_canvas_is_unknown_not_none() {
     assert!(body["unavailable"]["style.background-image"].as_str().unwrap().contains("canvas"));
     assert_eq!(diag(&engine, view, "#p")["style"]["background-image"], "none");
 }
+
+// ---------------------------------------------------------------------------
+// R1 review inputs: fields that were confidently wrong.
+// ---------------------------------------------------------------------------
+
+fn engine_with(html: &str, w: u32, h: u32) -> (Engine, EngineViewId) {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: w, height: h }).expect("view");
+    engine.load_html(view, html).expect("load_html");
+    (engine, view)
+}
+
+#[test]
+fn percentage_insets_resolve_against_the_containing_block() {
+    let (engine, view) = engine_with(
+        "<html><body style=\"margin:0\">\
+         <div style=\"position:relative;width:400px;height:120px\">\
+         <div id=a style=\"position:absolute;top:50%;right:10%;width:40px;height:20px\"></div></div>\
+         <div id=s style=\"top:50%;height:10px\"></div>\
+         </body></html>",
+        800,
+        600,
+    );
+    let r = diag(&engine, view, "#a");
+    assert_eq!(r["box"]["border_box"], rect(320.0, 60.0, 40.0, 20.0));
+    assert_eq!(r["style"]["top"], "60px");
+    assert_eq!(r["style"]["right"], "40px");
+    // auto insets of an abspos box are its used offsets, as getComputedStyle.
+    assert_eq!(r["style"]["bottom"], "40px");
+    assert_eq!(r["style"]["left"], "320px");
+    assert_eq!(r["style"]["inset"], "60px 40px 40px 320px");
+    // A static box's insets do not apply: the computed value, as written.
+    let s = diag(&engine, view, "#s");
+    assert_eq!(s["style"]["top"], "50%");
+    assert_eq!(s["style"]["left"], "auto");
+}
+
+#[test]
+fn display_is_none_only_when_the_cascade_says_so() {
+    let (engine, view) = engine_with(
+        "<html><body><span id=e></span><select><option id=o>A</option></select></body></html>",
+        800,
+        600,
+    );
+    for sel in ["#e", "#o"] {
+        let r = diag(&engine, view, sel);
+        if r["box"]["has_box"] == false {
+            assert_eq!(r["style"]["display"], serde_json::Value::Null, "{sel}");
+            assert!(r["unavailable"]["style.display"].is_string(), "{sel}");
+        } else {
+            assert_ne!(r["style"]["display"], "none", "{sel}");
+        }
+    }
+}
+
+#[test]
+fn z_index_zero_and_auto_are_unknown_not_auto() {
+    let (engine, view) = engine_with(
+        "<html><body><div id=z style=\"position:absolute;z-index:0\">x</div></body></html>",
+        800,
+        600,
+    );
+    let r = diag(&engine, view, "#z");
+    assert_eq!(r["style"]["z-index"], serde_json::Value::Null);
+    assert!(r["unavailable"]["style.z-index"].as_str().unwrap().contains("auto"));
+}
+
+#[test]
+fn a_transformed_box_reports_its_bounding_client_rect() {
+    let (engine, view) = engine_with(
+        "<html><body style=\"margin:8px\">\
+         <div id=r style=\"transform:rotate(45deg);width:40px;height:40px\"><div id=c style=\"width:10px;height:10px\"></div></div>\
+         <div id=t style=\"transform:translate(5px,6px) scale(2);width:10px;height:10px\"></div>\
+         </body></html>",
+        800,
+        600,
+    );
+    let r = diag(&engine, view, "#r");
+    let bb = &r["box"]["border_box"];
+    let near = |v: &serde_json::Value, want: f64| (v.as_f64().unwrap() - want).abs() < 0.02;
+    assert!(near(&bb["w"], 56.57) && near(&bb["h"], 56.57), "{bb}");
+    assert!(near(&bb["x"], 28.0 - 28.28), "{bb}");
+    assert!(near(&bb["y"], 8.0 + 20.0 - 28.28), "{bb}");
+    // A rotated padding box is not a rect: unknown, not the untransformed one.
+    assert_eq!(r["box"]["padding_box"], serde_json::Value::Null);
+    assert!(r["unavailable"]["box.padding_box"].is_string());
+    // A descendant is mapped through the ancestor's transform too.
+    let c = diag(&engine, view, "#c");
+    assert!(near(&c["box"]["border_box"]["w"], 14.14), "{}", c["box"]["border_box"]);
+    // Translate and scale keep rects axis-aligned: all three are mapped.
+    let t = diag(&engine, view, "#t");
+    assert_eq!(t["box"]["border_box"], rect(8.0, 8.0 + 40.0 - 5.0 + 6.0, 20.0, 20.0));
+    assert_eq!(t["box"]["content_box"], rect(8.0, 49.0, 20.0, 20.0));
+}
+
+#[test]
+fn grid_templates_that_are_not_all_px_are_unknown() {
+    let (engine, view) = engine_with(
+        "<html><body style=\"margin:0\">\
+         <div id=g style=\"display:grid;width:400px;grid-template-columns:100px 1fr 2fr\"><div>a</div></div>\
+         <div id=p style=\"display:grid;grid-template-columns:100px 200px;grid-template-rows:30px\"><div>a</div></div>\
+         <div id=b style=\"grid-template-columns:1fr 2fr\"></div>\
+         </body></html>",
+        800,
+        600,
+    );
+    let g = diag(&engine, view, "#g");
+    assert_eq!(g["style"]["grid-template-columns"], serde_json::Value::Null);
+    assert!(g["unavailable"]["style.grid-template-columns"].is_string());
+    // No row template: Chromium reports the implicit tracks, which the engine does not keep.
+    assert_eq!(g["style"]["grid-template-rows"], serde_json::Value::Null);
+    let p = diag(&engine, view, "#p");
+    assert_eq!(p["style"]["grid-template-columns"], "100px 200px");
+    assert_eq!(p["style"]["grid-template-rows"], "30px");
+    // Not a grid container: getComputedStyle reports the computed (specified) list.
+    assert_eq!(diag(&engine, view, "#b")["style"]["grid-template-columns"], "1fr 2fr");
+}
+
+#[test]
+fn a_point_outside_the_viewport_hits_nothing() {
+    let (engine, view) = engine_with(
+        "<html><body style=\"margin:0\"><div style=\"height:2000px\">tall</div></body></html>",
+        800,
+        800,
+    );
+    for (x, y) in [(10.0, 900.0), (-5.0, -5.0), (5000.0, 10.0), (10.0, 800.0)] {
+        let r = engine.element_diagnostics(view, &DiagnosticTarget::Point { x, y }, &opts()).unwrap();
+        assert!(r.is_none(), "({x},{y}) hit {:?}", r.map(|r| r.identity.selector));
+    }
+    assert!(engine.element_diagnostics(view, &DiagnosticTarget::Point { x: 10.0, y: 799.0 }, &opts()).unwrap().is_some());
+}
+
+#[test]
+fn urls_lose_user_name_and_password() {
+    let u = Url::parse("https://user:secret@example.test/a?token=1#f").unwrap();
+    assert_eq!(diagnostics::report_url(&u, false), "https://example.test/a");
+    assert_eq!(diagnostics::report_url(&u, true), "https://example.test/a?token=1#f");
+    assert_eq!(diagnostics::scrub_url("https://u:p@cdn.test/i.png?sig=T#f"), "https://cdn.test/i.png");
+    assert_eq!(diagnostics::scrub_url("//u:p@cdn.test/i.png"), "//cdn.test/i.png");
+    assert_eq!(diagnostics::scrub_url("img/a@2x.png"), "img/a@2x.png");
+}
