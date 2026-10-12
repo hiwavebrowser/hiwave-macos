@@ -4310,6 +4310,15 @@ impl LayoutBox {
                     available
                 }
             }
+            // css-sizing-3 §3.2: `fit-content` is min(max-content,
+            // max(min-content, available)), the shrink-to-fit width, in
+            // every context; unlike `auto` it never fills a block. The
+            // `_` arm below read it as 0 (`Length::to_px`).
+            Length::FitContent => {
+                let available =
+                    (containing_block.content.width - total_margin_border_padding).max(0.0);
+                shrink_to_fit_content_width(self, available)
+            }
             _ => {
                 let specified_width =
                     self.length_to_px(&style.width, containing_block.content.width);

@@ -43,37 +43,12 @@ core--table-cell--flex-col--w-max-content--h-50pct   intrinsic-width-keyword-unp
 core--table-cell--grid--w-min-content--h-auto        intrinsic-width-keyword-unparsed
 core--table-cell--grid--w-max-content--h-50pct       intrinsic-width-keyword-unparsed
 
-# fit-content-width-is-zero: 30
-core--block--block--w-fit-content--h-120px               fit-content-width-is-zero
-core--block--flex-row--w-fit-content--h-120px            fit-content-width-is-zero
-core--block--flex-col--w-fit-content--h-120px            fit-content-width-is-zero
-core--block--grid--w-fit-content--h-120px                fit-content-width-is-zero
-core--block--inline-block--w-fit-content--h-120px        fit-content-width-is-zero
-core--float--block--w-fit-content--h-120px               fit-content-width-is-zero
-core--float--flex-row--w-fit-content--h-120px            fit-content-width-is-zero
-core--float--flex-col--w-fit-content--h-120px            fit-content-width-is-zero
-core--float--grid--w-fit-content--h-120px                fit-content-width-is-zero
-core--float--inline-block--w-fit-content--h-120px        fit-content-width-is-zero
-core--inline-block--block--w-fit-content--h-120px        fit-content-width-is-zero
-core--inline-block--flex-row--w-fit-content--h-120px     fit-content-width-is-zero
-core--inline-block--flex-col--w-fit-content--h-120px     fit-content-width-is-zero
-core--inline-block--grid--w-fit-content--h-120px         fit-content-width-is-zero
-core--inline-block--inline-block--w-fit-content--h-120px fit-content-width-is-zero
-core--flex-col--block--w-fit-content--h-120px            fit-content-width-is-zero
-core--flex-col--flex-row--w-fit-content--h-120px         fit-content-width-is-zero
-core--flex-col--flex-col--w-fit-content--h-120px         fit-content-width-is-zero
-core--flex-col--grid--w-fit-content--h-120px             fit-content-width-is-zero
-core--flex-col--inline-block--w-fit-content--h-120px     fit-content-width-is-zero
-core--abspos--block--w-fit-content--h-120px              fit-content-width-is-zero
-core--abspos--flex-row--w-fit-content--h-120px           fit-content-width-is-zero
-core--abspos--flex-col--w-fit-content--h-120px           fit-content-width-is-zero
-core--abspos--grid--w-fit-content--h-120px               fit-content-width-is-zero
-core--abspos--inline-block--w-fit-content--h-120px       fit-content-width-is-zero
-core--table-cell--block--w-fit-content--h-120px          fit-content-width-is-zero
-core--table-cell--flex-row--w-fit-content--h-120px       fit-content-width-is-zero
-core--table-cell--flex-col--w-fit-content--h-120px       fit-content-width-is-zero
-core--table-cell--grid--w-fit-content--h-120px           fit-content-width-is-zero
-core--table-cell--inline-block--w-fit-content--h-120px   fit-content-width-is-zero
+# fit-content-width-of-column-flex-item-is-zero: 5
+core--flex-col--block--w-fit-content--h-120px            fit-content-width-of-column-flex-item-is-zero
+core--flex-col--flex-row--w-fit-content--h-120px         fit-content-width-of-column-flex-item-is-zero
+core--flex-col--flex-col--w-fit-content--h-120px         fit-content-width-of-column-flex-item-is-zero
+core--flex-col--grid--w-fit-content--h-120px             fit-content-width-of-column-flex-item-is-zero
+core--flex-col--inline-block--w-fit-content--h-120px     fit-content-width-of-column-flex-item-is-zero
 
 # grid-item-of-flex-laid-out-as-block: 30
 core--flex-row--grid--w-auto--h-auto         grid-item-of-flex-laid-out-as-block
@@ -107,7 +82,7 @@ border-box--flex-col--grid                   grid-item-of-flex-laid-out-as-block
 align--flex-col--grid-center                 grid-item-of-flex-laid-out-as-block
 align--flex-col--grid-stretch                grid-item-of-flex-laid-out-as-block
 
-# grid-max-content-width-no-grid-arm: 24
+# grid-max-content-width-no-grid-arm: 29
 core--float--grid--w-auto--h-auto                grid-max-content-width-no-grid-arm
 core--float--grid--w-50pct--h-auto               grid-max-content-width-no-grid-arm
 core--float--grid--w-min-content--h-auto         grid-max-content-width-no-grid-arm
@@ -132,6 +107,11 @@ core--abspos--grid--w-50pct--h-50pct             grid-max-content-width-no-grid-
 core--abspos--grid--w-max-content--h-50pct       grid-max-content-width-no-grid-arm
 core--abspos--grid--w-auto--h-120px              grid-max-content-width-no-grid-arm
 core--abspos--grid--w-50pct--h-120px             grid-max-content-width-no-grid-arm
+core--block--grid--w-fit-content--h-120px        grid-max-content-width-no-grid-arm
+core--float--grid--w-fit-content--h-120px        grid-max-content-width-no-grid-arm
+core--inline-block--grid--w-fit-content--h-120px grid-max-content-width-no-grid-arm
+core--abspos--grid--w-fit-content--h-120px       grid-max-content-width-no-grid-arm
+core--table-cell--grid--w-fit-content--h-120px   grid-max-content-width-no-grid-arm
 
 # flex-item-min-width-is-its-own-width: 20
 core--float--flex-row--w-50pct--h-auto         flex-item-min-width-is-its-own-width
