@@ -573,6 +573,15 @@ impl<'a> Builder<'a> {
         let (style, layout_box, paint) = match ctx {
             Some(ctx) => {
                 let (mut style, layout_box, paint) = self.boxed(ctx, &mut notes, &mut unavailable);
+                if tag == "body" && self.body_background_moved(ctx.boxes[0]) {
+                    for p in ["background-color", "background-image"] {
+                        style.insert(p, None);
+                        unavailable.insert(
+                            format!("style.{p}"),
+                            "moved to the canvas (CSS 2.1 §14.2); the body box keeps none".into(),
+                        );
+                    }
+                }
                 if self.root_stand_in == Some(raw) {
                     style.values_mut().for_each(|v| *v = None);
                     unavailable.retain(|k, _| !k.starts_with("style."));
@@ -609,6 +618,15 @@ impl<'a> Builder<'a> {
             notes,
             unavailable,
         })
+    }
+
+    /// The engine transfers body's background to the root box when html's
+    /// is transparent and clears it from body, so body's own is not kept.
+    fn body_background_moved(&self, body: &LayoutBox) -> bool {
+        let has = |s: &rustkit_css::ComputedStyle| {
+            s.background_color.a > 0.0 || s.background_gradient.is_some() || !s.background_layers.is_empty()
+        };
+        self.src.layout.is_some_and(|root| root.node_id.is_none() && has(&root.style)) && !has(&body.style)
     }
 
     fn no_box_reason(&self, node: &Rc<Node>, tag: &str, connected: bool) -> String {
@@ -745,8 +763,9 @@ fn num(v: f32) -> String {
     if r.fract() == 0.0 { format!("{}", r as i64) } else { format!("{r}") }
 }
 
-/// A specified length that has not been resolved against a box.
-fn length(l: &Length, none_for_auto: bool) -> String {
+/// A specified length that has not been resolved against a box: absolute
+/// and font/viewport-relative lengths in px, percentages as written.
+fn length(l: &Length, none_for_auto: bool, font_px: f32, viewport: (f32, f32)) -> String {
     match l {
         Length::Auto if none_for_auto => "none".into(),
         Length::Auto => "auto".into(),
@@ -754,7 +773,7 @@ fn length(l: &Length, none_for_auto: bool) -> String {
         Length::Px(p) => css_px(*p),
         Length::Percent(p) => format!("{}%", num(*p)),
         Length::FitContent => "fit-content".into(),
-        other => format!("{other:?}").to_lowercase(),
+        other => css_px(other.to_px_with_viewport(font_px, 16.0, 0.0, viewport.0, viewport.1)),
     }
 }
 
@@ -863,14 +882,23 @@ fn style_record(
     let base: HashMap<&str, &str> = base.lines().filter_map(|l| l.split_once('\t')).collect();
     let kw = |v: &dyn std::fmt::Debug| css_keyword(&format!("{v:?}"));
     let inline_non_replaced = matches!(b.box_type, BoxType::Inline);
+    let font_px = match s.font_size {
+        Length::Px(p) => p,
+        _ => 16.0,
+    };
+    let len = |l: &Length, none_for_auto| length(l, none_for_auto, font_px, b.viewport);
+    // getComputedStyle's width/height follow box-sizing.
+    let border_box_sizing = s.box_sizing == rustkit_css::BoxSizing::BorderBox;
     for p in STYLE_PROPERTIES {
         let v = match *p {
             "width" | "height" if inline_non_replaced => Some("auto".into()),
+            "width" if border_box_sizing => Some(css_px(d.border_box().width)),
+            "height" if border_box_sizing => Some(css_px(d.border_box().height)),
             "clear" => Some(kw(&s.clear)),
-            "min-width" => Some(length(&s.min_width, false)),
-            "min-height" => Some(length(&s.min_height, false)),
-            "max-width" => Some(length(&s.max_width, true)),
-            "max-height" => Some(length(&s.max_height, true)),
+            "min-width" => Some(len(&s.min_width, false)),
+            "min-height" => Some(len(&s.min_height, false)),
+            "max-width" => Some(len(&s.max_width, true)),
+            "max-height" => Some(len(&s.max_height, true)),
             "inset" => Some(four(
                 base["top"].to_string(),
                 base["right"].to_string(),
@@ -902,10 +930,10 @@ fn style_record(
             "justify-content" => Some(kw(&s.justify_content)),
             "justify-self" => Some(kw(&s.justify_self)),
             "order" => Some(s.order.to_string()),
-            "row-gap" => Some(length(&s.row_gap, false)),
-            "column-gap" => Some(length(&s.column_gap, false)),
+            "row-gap" => Some(len(&s.row_gap, false)),
+            "column-gap" => Some(len(&s.column_gap, false)),
             "gap" => {
-                let (r, c) = (length(&s.row_gap, false), length(&s.column_gap, false));
+                let (r, c) = (len(&s.row_gap, false), len(&s.column_gap, false));
                 Some(if r == c { r } else { format!("{r} {c}") })
             }
             "grid-template-columns" => Some(template(&s.grid_template_columns)),

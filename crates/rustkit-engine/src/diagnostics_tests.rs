@@ -20,6 +20,7 @@ fn page() -> String {
          #wide{{width:300px;height:10px}}\
          #far{{height:20px;margin-top:2000px}}\
          #fade{{opacity:0.5}}\
+         #sized{{box-sizing:border-box;width:120px;height:30px;padding:10px;min-height:5vh;max-width:20em}}\
          </style></head><body>\
          <div id=block class=\"a b\">text</div>\
          <div id=flex><div id=f1></div><div id=f2></div></div>\
@@ -28,6 +29,7 @@ fn page() -> String {
          <div id=gone><span id=inside>x</span></div>\
          <div id=clip><div id=wide></div></div>\
          <div id=fade><img id=pic alt=\"\" src=\"{GIF}\" width=40 height=30></div>\
+         <div id=sized></div>\
          <p id=far>far</p>\
          </body></html>"
     )
@@ -219,12 +221,14 @@ fn an_element_scrolled_out_of_view_is_outside_the_viewport_until_scrolled_to() {
     assert_eq!(before["paint"]["outside_viewport"], true);
     let y = before["box"]["border_box"]["y"].as_f64().unwrap();
     assert!(y > 2000.0, "{y}");
-    engine.set_scroll_offset(view, 0.0, 1720.0).unwrap();
+    // Scrolled to the bottom (the offset clamps to the document's end).
+    engine.set_scroll_offset(view, 0.0, 1.0e6).unwrap();
+    let scroll = engine.get_scroll_offset(view).unwrap().1;
     let after = diag(&engine, view, "#far");
     assert_eq!(after["paint"]["outside_viewport"], false);
-    assert_eq!(after["page"]["scroll"], serde_json::json!([0.0, 1720.0]));
+    assert_eq!(after["page"]["scroll"], json(&(0.0f32, scroll)));
     let moved = after["box"]["border_box"]["y"].as_f64().unwrap();
-    assert!((y - moved - 1720.0).abs() < 0.02, "{y} -> {moved}");
+    assert!((y - moved - scroll as f64).abs() < 0.02, "{y} -> {moved}");
     assert_eq!(diag(&engine, view, "#block")["paint"]["outside_viewport"], true);
 }
 
@@ -272,9 +276,9 @@ fn the_dump_covers_every_element_is_deterministic_compact_and_capped() {
     let b = engine.all_element_diagnostics(view, &opts()).unwrap();
     let text = serde_json::to_string(&a).unwrap();
     assert_eq!(text, serde_json::to_string(&b).unwrap());
-    // html, head, style, body and the 16 elements in body.
-    assert_eq!(a.total_elements, 20);
-    assert_eq!(a.elements.len(), 20);
+    // html, head, style, body and the 17 elements in body.
+    assert_eq!(a.total_elements, 21);
+    assert_eq!(a.elements.len(), 21);
     assert!(!a.truncated);
     let tags: Vec<&str> = a.elements.iter().take(4).map(|e| e.identity.tag.as_str()).collect();
     assert_eq!(tags, ["html", "head", "style", "body"]);
@@ -292,7 +296,7 @@ fn the_dump_covers_every_element_is_deterministic_compact_and_capped() {
     let capped = engine
         .all_element_diagnostics(view, &DiagnosticsOptions { max_elements: 3, ..opts() })
         .unwrap();
-    assert_eq!((capped.elements.len(), capped.total_elements, capped.truncated), (3, 20, true));
+    assert_eq!((capped.elements.len(), capped.total_elements, capped.truncated), (3, 21, true));
 }
 
 #[test]
@@ -302,4 +306,30 @@ fn page_urls_lose_query_and_fragment_unless_asked() {
     assert_eq!(diagnostics::report_url(&u, true), "https://example.test/a/b?token=1#frag");
     assert_eq!(diagnostics::scrub_url("https://cdn.test/i.png?sig=x"), "https://cdn.test/i.png");
     assert_eq!(diagnostics::scrub_url("data:image/png;base64,AAAA"), "data:…");
+}
+
+#[test]
+fn sizes_follow_box_sizing_and_relative_lengths_resolve_to_px() {
+    let (engine, view) = engine_with_page();
+    let r = diag(&engine, view, "#sized");
+    // getComputedStyle reports the border-box size under box-sizing:border-box.
+    assert_eq!(r["style"]["width"], "120px");
+    assert_eq!(r["style"]["height"], "30px");
+    assert_eq!(r["box"]["content_box"]["w"], 100.0);
+    assert_eq!(r["style"]["min-height"], "30px"); // 5vh of 600
+    assert_eq!(r["style"]["max-width"], "320px"); // 20em at 16px
+}
+
+#[test]
+fn a_body_background_moved_to_the_canvas_is_unknown_not_none() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 }).expect("view");
+    engine
+        .load_html(view, "<html><body style=\"background:linear-gradient(red, blue)\"><p id=p>x</p></body></html>")
+        .expect("load_html");
+    let body = diag(&engine, view, "body");
+    assert_eq!(body["style"]["background-image"], serde_json::Value::Null);
+    assert_eq!(body["style"]["background-color"], serde_json::Value::Null);
+    assert!(body["unavailable"]["style.background-image"].as_str().unwrap().contains("canvas"));
+    assert_eq!(diag(&engine, view, "#p")["style"]["background-image"], "none");
 }
