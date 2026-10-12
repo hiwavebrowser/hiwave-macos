@@ -222,3 +222,32 @@ fn a_request_guard_answers_once_and_a_dropped_one_fails() {
     let off = Inspector::new(&InspectorConfig::default());
     assert!(off.begin_request(&url, "GET", ResourceType::Image, None).is_none());
 }
+
+/// A guard with a budget deadline tells the two drops apart: before the
+/// deadline it was abandoned (a navigation, a closed view), at or after it
+/// the budget ran out.
+#[test]
+fn a_dropped_request_is_over_budget_only_past_its_deadline() {
+    let inspector = buffered(16);
+    let url = url::Url::parse("https://a.test/x.png").unwrap();
+    let later = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let passed = tokio::time::Instant::now();
+    drop(inspector.begin_request(&url, "GET", ResourceType::Image, None).unwrap().over_budget_at(later, "subresource budget spent"));
+    drop(inspector.begin_request(&url, "GET", ResourceType::Image, None).unwrap().over_budget_at(passed, "subresource budget spent"));
+    let stages: Vec<(FailureStage, String)> = inspector
+        .snapshot_since(0)
+        .records
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::Failure { stage, reason, .. } => Some((stage, reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stages,
+        vec![
+            (FailureStage::Cancelled, "abandoned (navigation or view closed)".to_string()),
+            (FailureStage::OverBudget, "subresource budget spent".to_string()),
+        ]
+    );
+}

@@ -461,7 +461,7 @@ async fn fetch_raster_image(
     image_manager: &ImageManager,
     referrer: &SubresourceReferrer,
     url: Url,
-    inspector: Option<(&Arc<Inspector>, &'static str)>,
+    inspector: Option<(&Arc<Inspector>, &'static str, tokio::time::Instant)>,
 ) -> Result<Arc<rustkit_image::LoadedImage>, rustkit_image::ImageError> {
     use rustkit_image::ImageError;
 
@@ -469,8 +469,11 @@ async fn fetch_raster_image(
         return image_manager.load(url).await;
     }
     let guard = inspector
-        .and_then(|(inspector, initiator)| inspector.begin_request(&url, "GET", ResourceType::Image, Some(initiator)))
-        .map(|g| g.dropped_as(FailureStage::OverBudget, "subresource budget spent"));
+        .and_then(|(inspector, initiator, deadline)| {
+            inspector
+                .begin_request(&url, "GET", ResourceType::Image, Some(initiator))
+                .map(|g| g.over_budget_at(deadline, "subresource budget spent"))
+        });
     let response = match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)).await {
         Ok(response) => response,
         Err(e) => {
@@ -3752,7 +3755,7 @@ impl Engine {
                             let fetch = async {
                                 let guard = inspector
                                     .begin_request(&url, "GET", ResourceType::Script, Some("parser"))
-                                    .map(|g| g.dropped_as(FailureStage::OverBudget, "script budget spent"));
+                                    .map(|g| g.over_budget_at(deadline, "script budget spent"));
                                 match loader.fetch(
                                     referrer.get_for(url, RequestDestination::Script),
                                 ).await {
@@ -10636,7 +10639,7 @@ impl Engine {
                     // loading at the deadline is recorded over budget.
                     let guard = inspector
                         .begin_request(&url, "GET", ResourceType::Stylesheet, Some("parser"))
-                        .map(|g| g.dropped_as(FailureStage::OverBudget, "subresource budget spent"));
+                        .map(|g| g.over_budget_at(deadline, "subresource budget spent"));
                     match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Style)).await {
                         Ok(response) => {
                             let received = guard.map(|g| g.received(&response));
@@ -10946,7 +10949,7 @@ impl Engine {
             let initiator = initiator_of(&url);
             async move {
                 info!(%url, "Loading image");
-                let load = fetch_raster_image(&loader, &image_manager, referrer, url.clone(), Some((inspector, initiator)));
+                let load = fetch_raster_image(&loader, &image_manager, referrer, url.clone(), Some((inspector, initiator, deadline)));
                 let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
                     warn!(%url, "Image over the subresource budget; rendering without it");
                     return (false, None);
@@ -11265,7 +11268,7 @@ impl Engine {
                 let guard = inspector
                     .as_ref()
                     .and_then(|i| i.begin_request(&url, "GET", ResourceType::Font, Some("css")))
-                    .map(|g| g.dropped_as(FailureStage::OverBudget, "subresource budget spent"));
+                    .map(|g| g.over_budget_at(deadline, "subresource budget spent"));
                 match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Font)).await {
                     Ok(response) if response.ok() => {
                         let received = guard.map(|g| g.received(&response));
@@ -14774,14 +14777,15 @@ impl Engine {
         let referrer = self.subresource_referrer(view_id);
 
         let inspector = self.views.get(&view_id).map(|v| v.inspector.clone());
+        let deadline = self.subresource_deadline();
         let load = fetch_raster_image(
             &self.loader,
             &image_manager,
             &referrer,
             url.clone(),
-            inspector.as_ref().map(|i| (i, "script")),
+            inspector.as_ref().map(|i| (i, "script", deadline)),
         );
-        let loaded = tokio::time::timeout_at(self.subresource_deadline(), load)
+        let loaded = tokio::time::timeout_at(deadline, load)
             .await
             .unwrap_or_else(|_| {
                 Err(rustkit_image::ImageError::FetchError(

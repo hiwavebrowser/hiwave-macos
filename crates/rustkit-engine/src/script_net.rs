@@ -200,7 +200,7 @@ async fn execute(
     };
     let guard = inspector
         .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some("script"))
-        .map(|g| g.dropped_as(FailureStage::Cancelled, "cancelled by navigation"));
+        .map(|g| g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)"));
     match tokio::time::timeout_at(deadline, policy.execute(loader, script_request)).await {
         Ok(Ok(response)) => {
             if let Some(guard) = guard {

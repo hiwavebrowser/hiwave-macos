@@ -233,7 +233,7 @@ fn a_slow_request_is_cancelled_by_navigating_away() {
         .map(|r| describe(r, server.port))
         .filter(|l| l.contains("/slow") || l.starts_with("failure"))
         .collect();
-    assert_eq!(slow, vec!["request #2 GET fetch /slow by=script", "failure #2 cancelled cancelled by navigation"]);
+    assert_eq!(slow, vec!["request #2 GET fetch /slow by=script", "failure #2 cancelled abandoned (navigation or view closed)"]);
 }
 
 #[test]

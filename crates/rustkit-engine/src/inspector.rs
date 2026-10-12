@@ -641,7 +641,8 @@ impl Inspector {
             id,
             started: Instant::now(),
             dropped_as: FailureStage::Cancelled,
-            dropped_reason: "abandoned",
+            dropped_reason: "abandoned (navigation or view closed)",
+            budget: None,
             done: false,
         })
     }
@@ -749,6 +750,8 @@ pub struct RequestGuard {
     started: Instant,
     dropped_as: FailureStage,
     dropped_reason: &'static str,
+    /// Dropped at or past this deadline, it ran out of a budget.
+    budget: Option<(Instant, &'static str)>,
     done: bool,
 }
 
@@ -762,6 +765,14 @@ impl RequestGuard {
     pub fn dropped_as(mut self, stage: FailureStage, reason: &'static str) -> Self {
         self.dropped_as = stage;
         self.dropped_reason = reason;
+        self
+    }
+
+    /// Dropped unanswered at or after `deadline` (the budget that bounds the
+    /// fetch ran out), it is recorded `over_budget` with `reason`; dropped
+    /// before it (a navigation, a closed view), at the drop stage.
+    pub fn over_budget_at(mut self, deadline: tokio::time::Instant, reason: &'static str) -> Self {
+        self.budget = Some((deadline.into_std(), reason));
         self
     }
 
@@ -811,10 +822,14 @@ impl Drop for RequestGuard {
         if self.done {
             return;
         }
+        let (stage, reason) = match self.budget {
+            Some((deadline, reason)) if Instant::now() >= deadline => (FailureStage::OverBudget, reason),
+            _ => (self.dropped_as, self.dropped_reason),
+        };
         let event = InspectorEvent::Failure {
             id: self.id,
-            stage: self.dropped_as,
-            reason: self.dropped_reason.to_string(),
+            stage,
+            reason: reason.to_string(),
             duration_ms: self.duration_ms(),
         };
         self.inspector.finish_request(self.id, event);
@@ -892,7 +907,7 @@ pub fn answer_module(
     match fetched {
         Ok(Ok(module)) => guard.response(
             module.status,
-            Some(&module.content_type),
+            module.content_type.as_ref().and_then(|v| v.to_str().ok()),
             None,
             Some(module.body_len as u64),
             false,

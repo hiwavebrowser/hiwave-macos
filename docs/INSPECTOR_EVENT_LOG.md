@@ -122,12 +122,18 @@ engine read, `null` when it did not read the body.
 | `cors` | a script request another origin did not allow (or a `same-origin` request to another origin) |
 | `mime` | a module script not served with a JavaScript MIME type |
 | `decode` | the body arrived and was not usable: not UTF-8, an image that does not decode, an SVG that does not parse |
-| `cancelled` | the page navigated away (a live script request), or the navigation was superseded |
+| `cancelled` | abandoned before its budget ran out: the page navigated away or the view closed (reason `abandoned (navigation or view closed)`), or the navigation was superseded |
 | `over_budget` | the subresource phase's or the script budget ran out first, or the response was over the size cap |
 
 Not recorded as separate requests: CORS preflights and the hops of a script
-request's redirects (the policy follows them inside one request), `data:` URLs,
-and images the image cache already holds.
+request's redirects (the policy follows them inside one request), `data:` URLs
+of images, stylesheets and fonts, and images the image cache already holds. A
+`fetch()` or XHR of a `data:` URL is a request, shown as `data:<mime>,…`.
+
+A previous page's live script requests are dropped when the new document is
+committed, so their `cancelled` failures come after the new page's
+`navigation_start` (and its document request), before its `navigation_commit`.
+If the new document cannot be fetched, the old page and its requests stay.
 
 ### Unsupported APIs
 

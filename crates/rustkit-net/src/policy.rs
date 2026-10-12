@@ -109,7 +109,7 @@ pub struct ModuleSource {
     pub source: String,
     /// The response's status (2xx) and `Content-Type`, for diagnostics.
     pub status: u16,
-    pub content_type: String,
+    pub content_type: Option<http::HeaderValue>,
     /// Body bytes as received.
     pub body_len: usize,
 }
@@ -549,7 +549,8 @@ impl FetchPolicy {
             final_url: r.url,
             source,
             status: r.status,
-            content_type: ty.to_string(),
+            // A header clone shares its bytes: nothing is allocated here.
+            content_type: r.headers.get(http::header::CONTENT_TYPE).cloned(),
             body_len: r.body.len(),
         })
     }
