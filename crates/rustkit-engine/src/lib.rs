@@ -13322,6 +13322,8 @@ impl Engine {
                 Cmd::PopTransform => serde_json::json!({ "op": "pop_transform" }),
                 Cmd::PushOpacity(alpha) => serde_json::json!({ "op": "push_opacity", "opacity": alpha }),
                 Cmd::PopOpacity => serde_json::json!({ "op": "pop_opacity" }),
+                Cmd::PushViewportFixed => serde_json::json!({ "op": "push_viewport_fixed" }),
+                Cmd::PopViewportFixed => serde_json::json!({ "op": "pop_viewport_fixed" }),
                 // Not yet modelled: form controls, carets, focus rings, and
                 // the SVG primitives. Named and dumped rather than dropped.
                 other => serde_json::json!({
@@ -16707,18 +16709,26 @@ fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
 
 /// The list the window draws for a page scrolled by `scroll_offset`: the
 /// page's own list, which stays in document coordinates, inside one
-/// translate.
+/// translate. A `position: fixed` box does not move with the page, so its
+/// run (`PushViewportFixed` to `PopViewportFixed`) is drawn inside the
+/// opposite translate.
 fn scrolled_commands(
     commands: &[rustkit_layout::DisplayCommand],
     scroll_offset: (f32, f32),
 ) -> Vec<rustkit_layout::DisplayCommand> {
-    let mut scrolled = Vec::with_capacity(commands.len() + 2);
-    scrolled.push(rustkit_layout::DisplayCommand::PushTransform {
-        matrix: [1.0, 0.0, 0.0, 1.0, -scroll_offset.0, -scroll_offset.1],
+    use rustkit_layout::DisplayCommand;
+    let translate = |x: f32, y: f32| DisplayCommand::PushTransform {
+        matrix: [1.0, 0.0, 0.0, 1.0, x, y],
         origin: (0.0, 0.0),
-    });
-    scrolled.extend(commands.iter().cloned());
-    scrolled.push(rustkit_layout::DisplayCommand::PopTransform);
+    };
+    let mut scrolled = Vec::with_capacity(commands.len() + 2);
+    scrolled.push(translate(-scroll_offset.0, -scroll_offset.1));
+    scrolled.extend(commands.iter().map(|command| match command {
+        DisplayCommand::PushViewportFixed => translate(scroll_offset.0, scroll_offset.1),
+        DisplayCommand::PopViewportFixed => DisplayCommand::PopTransform,
+        other => other.clone(),
+    }));
+    scrolled.push(DisplayCommand::PopTransform);
     scrolled
 }
 

@@ -74,8 +74,8 @@ fn a_fixed_box_keeps_its_contents_and_can_sit_deep_in_the_page() {
            <div style='position:absolute;left:0;top:20px;width:20px;height:20px'></div>\
            <div style='position:fixed;left:40px;top:20px;width:20px;height:20px'></div>\
          </div>\
-         <section style='margin-top:300px'>\
-           <div style='position:fixed;left:160px;top:60px;width:20px;height:20px'></div></section>",
+         <div style='height:300px;background:none'></div>\
+         <section><div style='position:fixed;left:160px;top:60px;width:20px;height:20px'></div></section>",
     );
     let scrolled = capture(&mut engine, view, &scrolled_commands(&list, (0.0, 50.0)), "nested");
     assert!(dark(&scrolled, 50, 5), "the bar");
@@ -101,4 +101,58 @@ fn an_unscrolled_page_draws_its_fixed_box_where_layout_put_it() {
         page_list("<div style='position:fixed;left:100px;top:40px;width:40px;height:20px'></div>");
     let frame = capture(&mut engine, view, &list, "plain");
     assert!(dark(&frame, 120, 50) && !dark(&frame, 120, 20) && !dark(&frame, 50, 50));
+}
+
+fn marks(list: &[DisplayCommand]) -> (usize, usize) {
+    (
+        list.iter().filter(|c| matches!(c, DisplayCommand::PushViewportFixed)).count(),
+        list.iter().filter(|c| matches!(c, DisplayCommand::PopViewportFixed)).count(),
+    )
+}
+
+/// One run for each outermost fixed box, none for a box that scrolls.
+#[test]
+fn a_run_is_marked_for_each_outermost_fixed_box_only() {
+    let (_engine, _view, list) = page_list(
+        "<div style='position:fixed;left:0;top:0;width:100px;height:10px'>\
+           <div style='position:fixed;left:40px;top:20px;width:20px;height:20px'></div></div>\
+         <div style='position:absolute;left:100px;top:60px;width:40px;height:40px'></div>\
+         <section><div style='position:fixed;left:160px;top:60px;width:20px;height:20px'></div></section>",
+    );
+    assert_eq!(marks(&list), (2, 2), "{list:?}");
+    let (_engine, _view, list) =
+        page_list("<div style='position:absolute;left:100px;top:60px;width:40px;height:40px'></div>");
+    assert_eq!(marks(&list), (0, 0), "{list:?}");
+}
+
+/// A transformed box is the containing block of the fixed boxes inside it
+/// (css-transforms-1): they move with it, so with the page.
+#[test]
+fn a_fixed_box_under_a_transformed_ancestor_moves_with_the_page() {
+    let (mut engine, view, list) = page_list(
+        "<section style='transform:translate(10px,0)'>\
+           <div style='position:fixed;left:20px;top:60px;width:20px;height:20px'></div></section>",
+    );
+    assert_eq!(marks(&list), (0, 0), "{list:?}");
+    let at_top = capture(&mut engine, view, &list, "transformed-top");
+    assert!(dark(&at_top, 40, 70), "10 right of its left, 60 down");
+    let scrolled = capture(&mut engine, view, &scrolled_commands(&list, (0.0, 50.0)), "transformed");
+    assert!(dark(&scrolled, 40, 20) && !dark(&scrolled, 40, 70), "drawn 50 up");
+}
+
+/// A fixed box escapes the clip of a box that scrolls. The clip moves with
+/// the page; the fixed box inside it does not, and what follows the fixed
+/// box in the clipping box is still clipped.
+#[test]
+fn a_fixed_box_inside_a_clipping_box_stays_put_and_the_clip_scrolls() {
+    let (mut engine, view, list) = page_list(
+        "<div style='height:60px;background:none'></div>\
+         <section style='overflow:hidden;height:20px'>\
+           <div style='position:fixed;left:0;top:0;width:40px;height:20px'></div>\
+           <div style='margin-left:100px;width:40px;height:60px'></div></section>",
+    );
+    let scrolled = capture(&mut engine, view, &scrolled_commands(&list, (0.0, 50.0)), "clip");
+    assert!(dark(&scrolled, 20, 10), "the fixed box, outside the clip and at the top of the window");
+    assert!(dark(&scrolled, 120, 20), "the clipped block, 50 up: 10 to 30");
+    assert!(!dark(&scrolled, 120, 40), "and still cut at the clipping box's edge");
 }

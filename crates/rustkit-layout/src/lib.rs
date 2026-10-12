@@ -7291,6 +7291,16 @@ pub enum DisplayCommand {
     /// End the innermost opacity scope.
     PopOpacity,
 
+    /// Start of a `position: fixed` box whose containing block is the
+    /// viewport. What follows, up to the matching `PopViewportFixed`, does
+    /// not move when the page scrolls. The pair draws nothing and the list
+    /// stays in document coordinates: whoever draws a scrolled page undoes
+    /// the scroll for this run (the engine's `scrolled_commands`). Runs do
+    /// not nest: a fixed box inside one is already held.
+    PushViewportFixed,
+    /// End of a `PushViewportFixed` run.
+    PopViewportFixed,
+
     /// Draw text with a gradient fill (for background-clip: text effect).
     GradientText {
         text: String,
@@ -8041,6 +8051,12 @@ pub struct DisplayList {
     /// dropdown escaping an `overflow: hidden` wrapper). Such a box pops
     /// exactly these clips before painting and re-pushes them after.
     escapable_clips: Vec<(Rect, BorderRadius)>,
+    /// Whether the box being painted is inside a `PushViewportFixed` run.
+    in_viewport_fixed: bool,
+    /// How many ancestors of the box being painted have a `transform`. A
+    /// transformed box is the containing block of the fixed boxes inside
+    /// it (css-transforms-1 §3), so those move with it and with the page.
+    transformed_ancestors: u32,
     /// `text-overflow: ellipsis` scope of the nearest block container being
     /// painted (css-overflow-3 §5.1). Inline boxes, anonymous blocks and
     /// text runs paint inside it; a nested block container replaces it with
@@ -8145,6 +8161,8 @@ impl DisplayList {
             depth: 0,
             root_overflow_visible: true,
             escapable_clips: Vec::new(),
+            in_viewport_fixed: false,
+            transformed_ancestors: 0,
             ellipsis: None,
         }
     }
@@ -8164,6 +8182,8 @@ impl DisplayList {
             root_overflow_visible: root.style.overflow_x == rustkit_css::Overflow::Visible
                 && root.style.overflow_y == rustkit_css::Overflow::Visible,
             escapable_clips: Vec::new(),
+            in_viewport_fixed: false,
+            transformed_ancestors: 0,
             ellipsis: None,
         }
     }
@@ -8241,6 +8261,18 @@ impl DisplayList {
             None
         };
 
+        // A fixed box is held against the page's scroll with everything
+        // it paints. The run opens after the clips it escapes are popped
+        // and closes before they are pushed again: those belong to boxes
+        // that scroll.
+        let viewport_fixed = layout_box.position == Position::Fixed
+            && !self.in_viewport_fixed
+            && self.transformed_ancestors == 0;
+        if viewport_fixed {
+            self.in_viewport_fixed = true;
+            self.commands.push(DisplayCommand::PushViewportFixed);
+        }
+
         // Check if this creates a new stacking context
         let creates_context = layout_box
             .stacking_context
@@ -8284,6 +8316,7 @@ impl DisplayList {
                 matrix,
                 origin: (origin_x, origin_y),
             });
+            self.transformed_ancestors += 1;
         }
 
         // Render this box
@@ -8386,6 +8419,7 @@ impl DisplayList {
         // Pop transform if we pushed one
         if has_transform {
             self.commands.push(DisplayCommand::PopTransform);
+            self.transformed_ancestors -= 1;
         }
 
         if fades {
@@ -8394,6 +8428,11 @@ impl DisplayList {
 
         if creates_context {
             self.commands.push(DisplayCommand::PopStackingContext);
+        }
+
+        if viewport_fixed {
+            self.commands.push(DisplayCommand::PopViewportFixed);
+            self.in_viewport_fixed = false;
         }
 
         // Restore the clips this box's subtree was scoped out of; an escaping
