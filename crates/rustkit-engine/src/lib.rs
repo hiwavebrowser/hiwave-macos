@@ -165,6 +165,13 @@ use rustkit_layout::{
 use std::borrow::Cow;
 use std::cell::Cell;
 mod relayout_cause;
+mod diagnostics;
+pub use diagnostics::{
+    DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
+    DEFAULT_MAX_ELEMENTS, STYLE_PROPERTIES,
+};
+#[cfg(all(test, feature = "headless"))]
+mod diagnostics_tests;
 use relayout_cause::PendingCauses;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
 pub use rustkit_bindings::MutationKind;
