@@ -200,6 +200,8 @@ mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod script_nav_image_wait_tests;
+#[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
@@ -783,6 +785,12 @@ pub struct EngineConfig {
     /// `interrupt_scripts_at_budget`; script still running when it is spent
     /// is stopped at its next call into the host.
     pub live_turn_budget_ms: u64,
+    /// The embedder loads the URL a page's script asks for
+    /// ([`Engine::take_script_navigation`]), as the live app does. A load
+    /// whose scripts have asked to leave then does not wait for the images
+    /// those scripts added: nobody will see that page. Off by default: a
+    /// capture never follows the page, and shows it as it was.
+    pub follows_script_navigation: bool,
 }
 
 impl Default for EngineConfig {
@@ -802,6 +810,7 @@ impl Default for EngineConfig {
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
+            follows_script_navigation: false,
         }
     }
 }
@@ -4584,8 +4593,23 @@ impl Engine {
 
             // Images were discovered before the scripts ran. One more pass
             // fetches what the scripts added, and lays out again only if
-            // one of those arrived.
-            match self.load_images_added_by_scripts(id).await {
+            // one of those arrived. Not for a page that has asked to leave
+            // and will be left: the wait is on the window's thread, for a
+            // frame nobody sees (3 s of a 4.9 s stay, i0a_nav, 2026-10-12).
+            let leaving = self.config.follows_script_navigation
+                && self
+                    .views
+                    .get(&id)
+                    .and_then(|view| view.bindings.as_ref())
+                    .is_some_and(|bindings| bindings.navigation_requested());
+            if leaving {
+                info!(?id, "Page asked to navigate: not waiting for images its scripts added");
+            }
+            let added = match leaving {
+                true => Ok(0),
+                false => self.load_images_added_by_scripts(id).await,
+            };
+            match added {
                 Ok(0) => {}
                 Ok(count) => {
                     info!(count, "Loaded images added by page scripts");
@@ -14734,6 +14758,13 @@ impl EngineBuilder {
     /// (`EngineConfig::live_turn_budget_ms`).
     pub fn live_turn_budget_ms(mut self, ms: u64) -> Self {
         self.config.live_turn_budget_ms = ms;
+        self
+    }
+
+    /// The embedder follows a page's own navigations
+    /// (`EngineConfig::follows_script_navigation`).
+    pub fn follows_script_navigation(mut self, follows: bool) -> Self {
+        self.config.follows_script_navigation = follows;
         self
     }
 

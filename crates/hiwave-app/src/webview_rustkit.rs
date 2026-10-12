@@ -108,6 +108,10 @@ fn content_engine_builder() -> EngineBuilder {
         // minutes (Pete had to kill the app, 2026-10-08).
         .interrupt_scripts_at_budget(true)
         .live_turn_budget_ms(LIVE_TURN_BUDGET_MS)
+        // The event loop loads what a page's script asks for
+        // (`take_script_navigation`), so a page that has asked to leave is
+        // not kept waiting for images its scripts added.
+        .follows_script_navigation(true)
 }
 
 /// `HIWAVE_RENDER_EVERY_WAKE=1`: draw at every wake of the event loop,
@@ -700,6 +704,12 @@ mod tests {
         let config = content_engine_builder().config().clone();
         assert!(config.interrupt_scripts_at_budget);
         assert_eq!(config.live_turn_budget_ms, 5_000);
+    }
+
+    #[test]
+    fn content_views_follow_a_page_s_own_navigation() {
+        assert!(content_engine_builder().config().follows_script_navigation);
+        assert!(!rustkit_engine::EngineConfig::default().follows_script_navigation);
     }
 
     #[test]
