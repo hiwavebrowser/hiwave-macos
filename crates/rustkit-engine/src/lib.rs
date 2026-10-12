@@ -198,6 +198,8 @@ mod ancestor_attribute_tests;
 #[cfg(all(test, feature = "headless"))]
 mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
+mod live_turn_budget_tests;
+#[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
@@ -774,6 +776,12 @@ pub struct EngineConfig {
     /// the budget is a different frame. The live app turns it on, where a
     /// script that does not end is a window that does not answer.
     pub interrupt_scripts_at_budget: bool,
+    /// Wall-clock budget for the script one turn of the live loop runs
+    /// after the load (`pump_live`: timer callbacks and response handlers),
+    /// and for the listeners of one input event. Read only with
+    /// `interrupt_scripts_at_budget`; script still running when it is spent
+    /// is stopped at its next call into the host.
+    pub live_turn_budget_ms: u64,
 }
 
 impl Default for EngineConfig {
@@ -792,6 +800,7 @@ impl Default for EngineConfig {
             script_network_rounds: 8,
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
+            live_turn_budget_ms: 5_000,
         }
     }
 }
