@@ -9761,6 +9761,9 @@ impl Engine {
             _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
                 style.mask.reset(property)
             }
+            // Not inherited, so `unset` lands here too: the initial value is
+            // `auto`, no ratio.
+            "aspect-ratio" => style.aspect_ratio = None,
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
