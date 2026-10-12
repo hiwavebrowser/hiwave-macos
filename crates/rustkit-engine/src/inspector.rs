@@ -979,10 +979,17 @@ pub fn scrub_url(url: &Url, keep_query: bool) -> String {
     }
 }
 
+/// A script position as text gives it: path, line, column.
+pub type PositionParts = (String, u32, u32);
+
+/// What [`parse_error_text`] finds: name, message, where it was thrown, and
+/// the stack lines.
+pub type ErrorTextParts = (String, String, Option<PositionParts>, Option<String>);
+
 /// An error string as the engine records it (`String(error)`, the JS
 /// engine's `Name: message (path:line:col)` with its stack lines after it,
 /// or what a listener's `report` captured) taken apart. Parses text only.
-pub fn parse_error_text(text: &str) -> (String, String, Option<(String, u32, u32)>, Option<String>) {
+pub fn parse_error_text(text: &str) -> ErrorTextParts {
     let (head, stack) = match text.split_once('\n') {
         Some((head, rest)) => (head, Some(rest)),
         None => (text, None),
@@ -1018,7 +1025,7 @@ pub fn parse_error_text(text: &str) -> (String, String, Option<(String, u32, u32
 }
 
 /// `path:line:col`, the path possibly holding colons itself.
-fn parse_position(text: &str) -> Option<(String, u32, u32)> {
+fn parse_position(text: &str) -> Option<PositionParts> {
     let (rest, column) = text.rsplit_once(':')?;
     let (path, line) = rest.rsplit_once(':')?;
     let path = path.strip_prefix("unknown at ").unwrap_or(path);
