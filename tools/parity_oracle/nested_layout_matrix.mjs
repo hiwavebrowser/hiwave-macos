@@ -331,19 +331,17 @@ for (const c of cases) {
   c.rects = (await page_.evaluate(RECTS)).map(([id, ...r]) => [id, ...r.map(round)]);
 }
 await browser.close();
+// One case per line, so the file diffs (and reviews) by case.
+const head = {
+  chrome: version,
+  viewport: VIEWPORT,
+  device_scale_factor: 1,
+  generator: 'tools/parity_oracle/nested_layout_matrix.mjs',
+  rects: 'border box per element with an id: [id, x, y, width, height], getBoundingClientRect, 2 decimals',
+};
+const lines = Object.entries(head).map(([k, v]) => ` ${JSON.stringify(k)}: ${JSON.stringify(v)},`);
 writeFileSync(
   FILE,
-  JSON.stringify(
-    {
-      chrome: version,
-      viewport: VIEWPORT,
-      device_scale_factor: 1,
-      generator: 'tools/parity_oracle/nested_layout_matrix.mjs',
-      rects: 'border box per element with an id: [id, x, y, width, height], getBoundingClientRect, 2 decimals',
-      cases,
-    },
-    null,
-    1,
-  ) + '\n',
+  ['{', ...lines, ' "cases": [', cases.map((c) => '  ' + JSON.stringify(c)).join(',\n'), ' ]', '}', ''].join('\n'),
 );
 console.log(`${cases.length} cases written, chrome ${version}`);
