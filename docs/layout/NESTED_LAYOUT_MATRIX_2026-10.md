@@ -472,6 +472,24 @@ and #663). Two code paths: the grid stretch in
 `apply_align_self`) and the flex cross size in flex.rs. Not located more
 closely.
 
+### 20. `fit-content-width-of-column-flex-item-is-zero` (5, behind cause 3)
+
+Found once cause 3 was fixed (PR #672): the 5 `core--flex-col--*--w-fit-content--h-120px`
+cases, tagged 3 on develop, stop here.
+
+**Rule:** a column flex item with `width: fit-content` is as wide as its
+content (its cross size is not stretched); the engine makes it 0.
+
+```html
+<div id="o" style="display:flex;flex-direction:column;width:600px"><div id="i" style="width:fit-content">
+  <div id="b" style="width:70px;height:30px"></div></div></div>
+```
+
+`#i`: engine 0 wide (with #672), Chromium 70.
+
+Where: the cross size of a column flex item in
+`crates/rustkit-layout/src/flex.rs`; not located.
+
 ## Where #663 stands against this matrix
 
 39 cases go from failing to matching and none the other way: 26 tagged 2
