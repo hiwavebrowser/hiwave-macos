@@ -204,6 +204,8 @@ mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
 #[cfg(all(test, feature = "headless"))]
+mod fixed_under_scroll_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -13758,14 +13760,7 @@ impl Engine {
                             .execute(&display_list.commands, &texture_view)
                             .map_err(|e| EngineError::RenderError(e.to_string()))?;
                     } else {
-                        let mut scrolled: Vec<rustkit_layout::DisplayCommand> =
-                            Vec::with_capacity(display_list.commands.len() + 2);
-                        scrolled.push(rustkit_layout::DisplayCommand::PushTransform {
-                            matrix: [1.0, 0.0, 0.0, 1.0, -scroll_offset.0, -scroll_offset.1],
-                            origin: (0.0, 0.0),
-                        });
-                        scrolled.extend(display_list.commands.iter().cloned());
-                        scrolled.push(rustkit_layout::DisplayCommand::PopTransform);
+                        let scrolled = scrolled_commands(&display_list.commands, scroll_offset);
                         renderer
                             .execute(&scrolled, &texture_view)
                             .map_err(|e| EngineError::RenderError(e.to_string()))?;
@@ -16708,6 +16703,23 @@ fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
         outer[0] * inner[4] + outer[2] * inner[5] + outer[4],
         outer[1] * inner[4] + outer[3] * inner[5] + outer[5],
     ]
+}
+
+/// The list the window draws for a page scrolled by `scroll_offset`: the
+/// page's own list, which stays in document coordinates, inside one
+/// translate.
+fn scrolled_commands(
+    commands: &[rustkit_layout::DisplayCommand],
+    scroll_offset: (f32, f32),
+) -> Vec<rustkit_layout::DisplayCommand> {
+    let mut scrolled = Vec::with_capacity(commands.len() + 2);
+    scrolled.push(rustkit_layout::DisplayCommand::PushTransform {
+        matrix: [1.0, 0.0, 0.0, 1.0, -scroll_offset.0, -scroll_offset.1],
+        origin: (0.0, 0.0),
+    });
+    scrolled.extend(commands.iter().cloned());
+    scrolled.push(rustkit_layout::DisplayCommand::PopTransform);
+    scrolled
 }
 
 /// The page-space affine this box's own `transform` contributes, or `None`
