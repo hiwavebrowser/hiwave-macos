@@ -26,25 +26,9 @@ const BOXES: &str = "(function () {\
 
 /// Boxes the engine does not place where Chromium does yet, by case. An id
 /// listed here that starts to match Chromium fails the test, so the list
-/// cannot go stale.
-///
-/// All of them are the acceptance page's shadow `<style>` (`:host` padding
-/// and border, `::slotted(.item)` margin): shadow-tree styles are not
-/// applied yet (style scoping is the next slice).
-const GAPS: &[(&str, &[&str])] = &[
-    (
-        "acceptance",
-        &[
-            "card", "a", "b", "d", "bottom", "hdr", "titlebox", "main", "fb2",
-        ],
-    ),
-    (
-        "acceptance-mutated",
-        &[
-            "card", "a", "b", "d", "bottom", "hdr", "titlebox", "main", "added", "fb2",
-        ],
-    ),
-];
+/// cannot go stale. Empty since style scoping (slice 2): the acceptance
+/// page's shadow `<style>` applies.
+const GAPS: &[(&str, &[&str])] = &[];
 
 struct Rendered {
     engine: Engine,
@@ -209,10 +193,9 @@ fn shadow_content_is_laid_out_where_chromium_puts_it() {
     );
 }
 
-/// Cases whose hit tests do not match Chromium yet, for the same reason as
-/// their `GAPS`: without the shadow `<style>`, the boxes the probes aim at
-/// sit 6px higher. A case listed here that matches fails the test.
-const HIT_GAPS: &[&str] = &["acceptance", "acceptance-mutated"];
+/// Cases whose hit tests do not match Chromium yet, as `GAPS`. A case
+/// listed here that matches fails the test.
+const HIT_GAPS: &[&str] = &[];
 
 /// The layout hit test finds the innermost flat-tree element Chromium finds:
 /// shadow content, and slotted light nodes (not the slot, which has no box).

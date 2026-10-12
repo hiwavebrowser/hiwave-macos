@@ -232,3 +232,18 @@ fn upgrade_converts_a_detached_subtree_on_demand() {
     .unwrap();
     assert_eq!(ev(&b, "log.join()"), "defined,ctor,true");
 }
+
+/// `:defined` is answered from the DOM: each define records its name there,
+/// and only names that were defined.
+#[test]
+fn define_tells_the_dom_which_names_are_defined() {
+    let doc = Rc::new(Document::parse_html(PAGE).unwrap());
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(doc.clone()).unwrap();
+    assert!(doc.defined_custom_elements().is_empty());
+    b.evaluate("customElements.define('x-a', class extends HTMLElement {});").unwrap();
+    assert_eq!(thrown(&b, "customElements.define('Bad', class extends HTMLElement {});"), "SyntaxError");
+    let names = doc.defined_custom_elements();
+    assert!(names.contains("x-a"), "{names:?}");
+    assert_eq!(names.len(), 1, "{names:?}");
+}

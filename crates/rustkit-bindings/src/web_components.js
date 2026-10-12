@@ -7,8 +7,10 @@
 // methods of the node wrappers and does nothing (one length check) until
 // a page defines its first element. Stated limits: autonomous custom
 // elements only (`define(name, ctor, { extends })` throws NotSupportedError,
-// as in Safari); adoptedCallback never fires (one document); `:defined` is not
-// a selector; ElementInternals / form-associated elements are not provided.
+// as in Safari); adoptedCallback never fires (one document); ElementInternals /
+// form-associated elements are not provided. `:defined` follows the names
+// defined here: each define tells the DOM (`__rkShadowInternals`, 'define'),
+// and the style engine reads that set.
 // Shadow DOM is not here (see the shadow root work).
 (function (g) {
     if (g.customElements) return;
@@ -24,6 +26,7 @@
     var stack = [];                 // upgrade/construct in progress
     var rawCreateElement = null;    // the DOM's own createElement, below
     var selector = '';              // joined defined names, for subtree scans
+    var shadowHost = g.__rkShadowInternals || null;  // tells the DOM a name is defined
 
     function domError(message, name) {
         return typeof g.DOMException === 'function' ? new g.DOMException(message, name) : (function () { var e = new Error(message); e.name = name; return e; })();
@@ -210,6 +213,7 @@
         if (byCtor) byCtor.set(ctor, def);
         names.push(name);
         selector = names.join(',');
+        if (shadowHost) shadowHost.call('define', document, name);
         // Every connected element of that name that already exists upgrades.
         var found = document.getElementsByTagName(name);
         Array.prototype.slice.call(found).forEach(function (el) { upgrade(el, def); });

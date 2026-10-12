@@ -74,28 +74,8 @@ pub fn is_valid_shadow_host_name(name: &str) -> bool {
         "section",
         "span",
     ];
-    const RESERVED: [&str; 8] = [
-        "annotation-xml",
-        "color-profile",
-        "font-face",
-        "font-face-src",
-        "font-face-uri",
-        "font-face-format",
-        "font-face-name",
-        "missing-glyph",
-    ];
     let lower = name.to_ascii_lowercase();
-    if HOSTS.contains(&lower.as_str()) {
-        return true;
-    }
-    // HTML §4.13.3 valid custom element name, simplified: a lowercase
-    // ASCII letter first, a hyphen, no uppercase ASCII, not reserved.
-    name.starts_with(|c: char| c.is_ascii_lowercase())
-        && name.contains('-')
-        && !name
-            .chars()
-            .any(|c| c.is_ascii_uppercase() || c.is_ascii_whitespace())
-        && !RESERVED.contains(&name)
+    HOSTS.contains(&lower.as_str()) || is_valid_custom_element_name(name)
 }
 
 impl Node {
@@ -231,7 +211,44 @@ fn find_slot(root: &Rc<Node>, name: &str) -> Option<Rc<Node>> {
     None
 }
 
+/// HTML §4.13.2 valid custom element name, simplified as for shadow hosts:
+/// a lowercase ASCII letter first, a hyphen, no uppercase ASCII or
+/// whitespace, and not one of the reserved names. An element with such a
+/// name is not `:defined` until its name is defined.
+pub fn is_valid_custom_element_name(name: &str) -> bool {
+    const RESERVED: [&str; 8] = [
+        "annotation-xml",
+        "color-profile",
+        "font-face",
+        "font-face-src",
+        "font-face-uri",
+        "font-face-format",
+        "font-face-name",
+        "missing-glyph",
+    ];
+    name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.contains('-')
+        && !name
+            .chars()
+            .any(|c| c.is_ascii_uppercase() || c.is_ascii_whitespace())
+        && !RESERVED.contains(&name)
+}
+
 impl Document {
+    /// `customElements.define(name, ...)` ran: elements of this name are
+    /// `:defined` from now on. (Every connected element of the name is
+    /// upgraded by the define, so the name stands for the elements.)
+    pub fn define_custom_element(&self, name: &str) {
+        self.defined_custom_elements
+            .borrow_mut()
+            .insert(name.to_string());
+    }
+
+    /// The custom element names defined so far.
+    pub fn defined_custom_elements(&self) -> std::collections::HashSet<String> {
+        self.defined_custom_elements.borrow().clone()
+    }
+
     /// Has any node of this document ever had a shadow root?
     pub fn has_shadow_roots(&self) -> bool {
         self.shadow_roots.get() > 0
@@ -601,6 +618,18 @@ mod tests {
 
     // HTML §13.2.6.4.4 attaches at the template's start tag, so the first of
     // two declarative templates on one host wins; the second stays a template.
+    #[test]
+    fn defined_custom_element_names_are_recorded() {
+        let doc = Document::parse_html("<body><x-a></x-a></body>").unwrap();
+        assert!(doc.defined_custom_elements().is_empty());
+        doc.define_custom_element("x-a");
+        assert!(doc.defined_custom_elements().contains("x-a"));
+        assert!(is_valid_custom_element_name("x-a"));
+        assert!(!is_valid_custom_element_name("div"));
+        assert!(!is_valid_custom_element_name("font-face"));
+        assert!(!is_valid_custom_element_name("X-a"));
+    }
+
     #[test]
     fn the_first_declarative_template_on_a_host_wins() {
         let doc = Document::parse_html(
