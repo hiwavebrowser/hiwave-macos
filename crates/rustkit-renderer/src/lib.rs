@@ -2635,7 +2635,13 @@ impl Renderer {
             }
 
             DisplayCommand::Line { x1, y1, x2, y2, color, width } => {
-                // Draw as thin rectangle
+                // Draw as thin rectangle, in screen space: the ends go
+                // through the transform on the stack (the page's scroll is
+                // one) and the width grows by its scale.
+                let m = self.current_transform();
+                let (x1, y1) = (m[0] * x1 + m[2] * y1 + m[4], m[1] * x1 + m[3] * y1 + m[5]);
+                let (x2, y2) = (m[0] * x2 + m[2] * y2 + m[4], m[1] * x2 + m[3] * y2 + m[5]);
+                let width = width * (m[0] * m[3] - m[1] * m[2]).abs().sqrt();
                 let dx = x2 - x1;
                 let dy = y2 - y1;
                 let len = (dx * dx + dy * dy).sqrt();
@@ -2688,10 +2694,13 @@ impl Renderer {
                         color.a,
                     ];
                     
+                    // One matrix for the whole polygon: a path is flattened
+                    // into many of these.
+                    let m = self.current_transform();
                     let base = self.color_vertices.len() as u32;
                     for (x, y) in points {
                         self.color_vertices.push(ColorVertex {
-                            position: [*x, *y],
+                            position: [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]],
                             color: c,
                         });
                     }
