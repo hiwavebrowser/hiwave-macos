@@ -471,14 +471,16 @@ fn union(a: Rect, b: Rect) -> Rect {
     Rect { x: l, y: t, width: r - l, height: bt - t }
 }
 
-/// The page URL as a record reports it: no query or fragment unless asked.
+/// The page URL as a record reports it: never a user name or password, and
+/// no query or fragment unless asked.
 pub(crate) fn report_url(url: &Url, include_query: bool) -> String {
-    if include_query {
-        return url.to_string();
-    }
     let mut u = url.clone();
-    u.set_query(None);
-    u.set_fragment(None);
+    let _ = u.set_username("");
+    let _ = u.set_password(None);
+    if !include_query {
+        u.set_query(None);
+        u.set_fragment(None);
+    }
     u.to_string()
 }
 
@@ -861,12 +863,25 @@ fn gradient_name(debug: &str) -> String {
     format!("{}{base}(…)", if repeating { "repeating-" } else { "" })
 }
 
-/// A URL inside a record: no query or fragment, `data:` contents elided.
+/// A URL inside a record: no user name or password, no query or fragment,
+/// `data:` contents elided. The URL may be relative, as specified.
 pub(crate) fn scrub_url(u: &str) -> String {
     if u.starts_with("data:") {
         return "data:…".into();
     }
-    u.split(['?', '#']).next().unwrap_or("").to_string()
+    let u = u.split(['?', '#']).next().unwrap_or("");
+    // Userinfo can only sit in an authority: after `scheme://` or a leading `//`.
+    let authority_at = match u.find("://") {
+        Some(i) if u[..i].chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) => i + 3,
+        _ if u.starts_with("//") => 2,
+        _ => return u.to_string(),
+    };
+    let rest = &u[authority_at..];
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..authority_end].rfind('@') {
+        Some(at) => format!("{}{}", &u[..authority_at], &rest[at + 1..]),
+        None => u.to_string(),
+    }
 }
 
 fn style_record(
