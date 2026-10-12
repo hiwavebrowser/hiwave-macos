@@ -10,7 +10,8 @@
 // No case has text: the page sets `font-size: 0; line-height: 0` and every
 // leaf is an empty box with a fixed size (or a size that comes only from
 // stretch, percentages or the container), so font metrics never decide a
-// case.
+// case. With no strut a baseline shows nowhere on its own, hence the `#s`
+// probe beside the inline-block outer (see OUTER).
 //
 //   node nested_layout_matrix.mjs              list the generated cases
 //   node nested_layout_matrix.mjs --write      capture in Chromium and write
@@ -30,7 +31,14 @@ const VIEWPORT = [1280, 800];
 const OUTER = {
   block: (i) => `<div id="o" style="width:600px;height:300px">${i}</div>`,
   float: (i) => `<div id="o" style="float:left;height:300px">${i}</div>`,
-  'inline-block': (i) => `<div id="o" style="display:inline-block;height:300px">${i}</div>`,
+  // A 10x10 inline-block `#s` shares the line, baseline-aligned: with no
+  // strut (font-size 0) its y is where the outer box's baseline is, which
+  // the outer box takes from its content (a flex or grid container's first
+  // item, a block's last line, else its bottom edge). Without it the
+  // baseline would decide nothing here and only show with a real font.
+  'inline-block': (i) =>
+    `<div id="o" style="display:inline-block;height:300px">${i}</div>` +
+    `<div id="s" style="display:inline-block;width:10px;height:10px"></div>`,
   'flex-row': (i) => `<div id="o" style="display:flex;width:600px;height:300px">${i}</div>`,
   'flex-col': (i) =>
     `<div id="o" style="display:flex;flex-direction:column;width:600px;height:300px">${i}</div>`,
