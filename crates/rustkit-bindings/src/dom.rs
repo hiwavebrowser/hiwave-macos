@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 mod node_apis;
+mod shadow;
 
 /// Does this element match this selector list? `None` means the list is
 /// invalid, and script throws `SyntaxError`.
@@ -201,9 +202,18 @@ fn first_with_id(document: &Document, id: &str) -> Option<Rc<Node>> {
     found
 }
 
-/// Is `ancestor` `node` or one of its ancestors?
-fn is_inclusive_ancestor(ancestor: &Rc<Node>, node: &Rc<Node>) -> bool {
-    ancestor.id == node.id || is_descendant(node, ancestor)
+/// DOM §4.2.2.1 "host-including inclusive ancestor": is `ancestor` `node`
+/// or one of its ancestors, climbing from a shadow root to its host, so a
+/// host cannot be inserted into its own shadow tree?
+fn is_host_including_inclusive_ancestor(ancestor: &Rc<Node>, node: &Rc<Node>) -> bool {
+    let mut current = Some(node.clone());
+    while let Some(n) = current {
+        if n.id == ancestor.id {
+            return true;
+        }
+        current = n.parent().or_else(|| n.shadow_host());
+    }
+    false
 }
 
 fn is_child_of(node: &Rc<Node>, parent: &Rc<Node>) -> bool {
@@ -223,7 +233,7 @@ fn pre_insert(
     if !parent.is_element() && !is_fragment(parent) {
         return Err("HierarchyRequestError");
     }
-    if is_inclusive_ancestor(node, parent) {
+    if is_host_including_inclusive_ancestor(node, parent) || node.is_shadow_root() {
         return Err("HierarchyRequestError");
     }
     if child.as_ref().is_some_and(|c| !is_child_of(c, parent)) {
@@ -288,6 +298,7 @@ fn adopt_template_contents(
             }
             pending.push(content);
         }
+        pending.extend(node.shadow_root());
         pending.extend(node.children());
     }
 }
@@ -1177,6 +1188,7 @@ pub(crate) fn install(
     )?;
 
     runtime.evaluate_script(WRAPPERS_JS)?;
+    shadow::install(runtime, host, dirty)?;
     node_apis::install(runtime, host)
 }
 
@@ -1335,6 +1347,9 @@ const WRAPPERS_JS: &str = r#"
     var elementProto = function (id) {
         return elementProtos[N.info(gen, id, 'local')] || HTMLElement.prototype;
     };
+    // A shadow root is a fragment the DOM links to a host (dom/shadow.rs);
+    // ShadowRoot is defined later, by web_interfaces.js.
+    var fragmentProto = function () { return DocumentFragment.prototype; };
     function wrap(id) {
         if (typeof id !== 'number') return null;
         var w = cache.get(id);
@@ -1342,7 +1357,7 @@ const WRAPPERS_JS: &str = r#"
         var t = N.info(gen, id, 'type');
         var proto = t === 1 ? elementProto(id)
                   : t === 3 ? Text.prototype : t === 9 ? Document.prototype
-                  : t === 8 ? Comment.prototype : t === 11 ? DocumentFragment.prototype
+                  : t === 8 ? Comment.prototype : t === 11 ? fragmentProto(id)
                   : Node.prototype;
         w = Object.create(proto);
         Object.defineProperty(w, SLOT, { value: { id: id, gen: gen } });
@@ -2860,6 +2875,7 @@ const WRAPPERS_JS: &str = r#"
     // For node_apis.js, which runs next and deletes it.
     g.__rkNodeInternals = {
         wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
+        setFragmentProto: function (f) { fragmentProto = f; },
         extendElementProto: function (f) {
             var base = elementProto;
             elementProto = function (id) { return f(id, base); };
