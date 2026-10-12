@@ -972,6 +972,15 @@ fn style_record(
             }),
             "background-image" => Some(background_image(b)),
             "object-fit" => Some(s.object_fit.clone()),
+            // The computed style keeps `auto` as 0: an explicit `z-index: 0`
+            // and `auto` cannot be told apart, and they stack differently.
+            "z-index" if s.z_index == 0 => {
+                unavailable.insert(
+                    "style.z-index".into(),
+                    "the engine stores auto as 0; auto and 0 cannot be told apart".into(),
+                );
+                None
+            }
             "content-visibility" | "contain" => {
                 unavailable.insert(format!("style.{p}"), "not modelled by the engine".into());
                 None
