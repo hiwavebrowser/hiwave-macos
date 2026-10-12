@@ -24,9 +24,10 @@ REPO = SCRIPTS.parent
 RECEIPT = SCRIPTS / "receipt.py"
 
 
-def run_receipt(*args, cwd=REPO):
+def run_receipt(*args, cwd=REPO, env=None):
     out = subprocess.run([sys.executable, str(RECEIPT), "--package", "T", *args],
-                         capture_output=True, text=True, cwd=cwd, timeout=120)
+                         capture_output=True, text=True, cwd=cwd, timeout=120,
+                         env={**os.environ, **env} if env else None)
     assert out.returncode == 0, out.stderr
     return out.stdout
 
@@ -115,8 +116,73 @@ class TestReceiptNoHostPaths(unittest.TestCase):
                         ("D:/a/b.txt, then", "b.txt, then"),
                         (f"file://{home}/frames/y.html", "y.html"),
                         ("~/zz-not-a-repo/a/b.txt", "b.txt"),
-                        (f"dir {home}/bins/ (and {home}/x/c.txt)", "dir bins (and c.txt)")]:
+                        (f"dir {home}/bins/ (and {home}/x/c.txt)", "dir bins (and c.txt)"),
+                        # the four from the first review of #661
+                        ("linked -L/Users/example/lib and -I/Users/example/inc", "linked -Llib and -Iinc"),
+                        ("path:/Users/example/a/b", "path:b"),
+                        ("PATH=/usr/bin:/Users/example/.cargo/bin", "PATH=bin:bin"),
+                        (r"\\fileserver\example\x.txt", "x.txt"),
+                        ("--remap-path-prefix=/Users/example/hiwave=. -C link-arg=/opt/x/y.o", "--remap-path-prefix=hiwave=. -C link-arg=y.o")]:
             self.assertEqual(receipt.public_text(t, REPO), want)
+
+    def test_a_shell_variable_path_in_the_note_is_not_mangled(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import receipt
+        for t in ["${HOME}/x/y", "$HOME/x/y"]:
+            self.assertEqual(receipt.public_text(t, REPO), t)
+
+    def test_rustflags_and_engine_flag_values_are_stripped(self):
+        env = {"RUSTFLAGS": f"--remap-path-prefix={self.outside}/hiwave=. -L{self.outside}/lib",
+               "RUSTKIT_TRACE_OUT": f"{self.outside}/trace.json", "RUSTKIT_L0": "0"}
+        out = run_receipt(env=env)
+        self.assert_clean(out)
+        rec = json.loads(out)
+        self.assertEqual(rec["rustflags"], "--remap-path-prefix=hiwave=. -Llib")
+        self.assertEqual(rec["effective_engine_flags"]["RUSTKIT_TRACE_OUT"], "trace.json")
+        self.assertEqual(rec["effective_engine_flags"]["RUSTKIT_L0"], "0")
+        kept = json.loads(run_receipt("--host-paths", env=env))
+        self.assertEqual(kept["rustflags"], env["RUSTFLAGS"])
+        self.assertEqual(kept["effective_engine_flags"]["RUSTKIT_TRACE_OUT"], env["RUSTKIT_TRACE_OUT"])
+
+    def clone_with_origin(self, origin):
+        wt = self.outside / "wt"
+        wt.mkdir(exist_ok=True)
+        for cmd in (["git", "init", "-q"], ["git", "remote", "remove", "origin"], ["git", "remote", "add", "origin", origin]):
+            subprocess.run(cmd, cwd=wt, capture_output=True, timeout=60)
+        return wt
+
+    def test_a_local_path_origin_prints_as_its_basename(self):
+        wt = self.clone_with_origin(str(self.outside / "hiwave-mirror"))
+        out = run_receipt(cwd=wt)
+        self.assert_clean(out)
+        self.assertEqual(json.loads(out)["repo"], "hiwave-mirror")
+        self.assertEqual(json.loads(run_receipt("--host-paths", cwd=wt))["repo"], str(self.outside / "hiwave-mirror"))
+
+    def test_origin_urls_keep_their_address_and_lose_credentials(self):
+        for origin, want in [("https://user:token@example.com/org/repo.git", "https://example.com/org/repo.git"),
+                             ("https://github.com/hiwavebrowser/hiwave-macos.git", "https://github.com/hiwavebrowser/hiwave-macos.git"),
+                             ("git@github.com:hiwavebrowser/hiwave-macos.git", "git@github.com:hiwavebrowser/hiwave-macos.git"),
+                             (f"file://{self.outside}/hiwave-mirror", "hiwave-mirror")]:
+            out = run_receipt(cwd=self.clone_with_origin(origin))
+            self.assert_clean(out)
+            self.assertNotIn("token", out)
+            self.assertEqual(json.loads(out)["repo"], want)
+
+    def test_the_machine_name_is_printed_only_with_host_paths(self):
+        import platform
+        self.assertIsNone(json.loads(run_receipt())["host"])
+        self.assertEqual(json.loads(run_receipt("--host-paths"))["host"], platform.node())
+
+    def test_a_binary_under_a_linked_target_prints_as_typed(self):
+        wt = self.clone_with_origin("https://example.com/org/repo.git")
+        try:
+            (wt / "target").symlink_to(self.outside, target_is_directory=True)
+        except OSError:
+            self.skipTest("no symlinks here")
+        rec = json.loads(run_receipt("--binary", "target/parity/parity-capture", cwd=wt))
+        self.assertEqual(rec["binary"], "target/parity/parity-capture")
+        self.assertEqual(rec["profile"], "parity")
+        self.assertIsNotNone(rec["binary_sha256"])
 
     def test_markdown_output_is_clean_too(self):
         out = run_receipt("--markdown", "--binary", str(self.binary), "--runs", str(self.run_file))
