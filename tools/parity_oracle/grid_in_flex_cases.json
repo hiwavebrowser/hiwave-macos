@@ -66,6 +66,26 @@
    "chrome_boxes": "x:0:0:700:90 m:0:0:700:90 a:0:0:345:90 b:355:0:345:40 c:355:50:345:40"
   },
   {
+   "name": "percent-height-item-sharing-an-area-in-a-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:600px}#m{display:grid;padding-top:14px}#a{height:100%;grid-area:content;min-width:200px}#b{height:auto;grid-area:content}</style></head><body><div id=x><div id=m><div id=a></div><div id=b>word</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:34 m:0:0:200:34 a:0:14:200:20 b:0:14:200:20"
+  },
+  {
+   "name": "percent-height-item-sharing-an-area-in-a-block",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:600px}#m{display:grid;padding-top:14px}#a{height:100%;grid-area:content;min-width:200px}#b{height:auto;grid-area:content}</style></head><body><div id=x><div id=m><div id=a></div><div id=b>word</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:34 m:0:0:600:34 a:200:14:400:20 b:200:14:400:20"
+  },
+  {
+   "name": "bing-textarea-and-its-replica-in-a-row",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:600px;overflow:hidden}#m{display:grid;position:relative;padding-top:14px}#m::after{content:attr(data-v) ' ';white-space:pre-wrap;visibility:hidden;grid-area:content}#q{resize:none;height:100%;grid-area:content;overflow:hidden;padding:0;border:0;margin:0;max-height:22px;white-space:nowrap;font:inherit;min-width:200px;width:100%;flex:auto}</style></head><body><div id=x><div id=m data-v=''><textarea id=q rows=1></textarea></div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:34 m:0:0:200:34 q:0:14:200:20"
+  },
+  {
+   "name": "bing-textarea-and-its-replica-in-a-block",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:600px;overflow:hidden}#m{display:grid;position:relative;padding-top:14px}#m::after{content:attr(data-v) ' ';white-space:pre-wrap;visibility:hidden;grid-area:content}#q{resize:none;height:100%;grid-area:content;overflow:hidden;padding:0;border:0;margin:0;max-height:22px;white-space:nowrap;font:inherit;min-width:200px;width:100%;flex:auto}</style></head><body><div id=x><div id=m data-v=''><textarea id=q rows=1></textarea></div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:34 m:0:0:600:34 q:200:14:400:20"
+  },
+  {
    "name": "control-the-same-grid-in-a-block",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:700px}#m{display:grid;gap:24px;grid-template-columns:400px 276px}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
    "chrome_boxes": "x:0:0:700:60 m:0:0:700:60 a:0:0:400:60 b:424:0:276:60"
