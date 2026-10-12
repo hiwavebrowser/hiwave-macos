@@ -482,3 +482,40 @@ fn urls_lose_user_name_and_password() {
     assert_eq!(diagnostics::scrub_url("//u:p@cdn.test/i.png"), "//cdn.test/i.png");
     assert_eq!(diagnostics::scrub_url("img/a@2x.png"), "img/a@2x.png");
 }
+
+#[test]
+fn every_invalid_selector_is_an_error() {
+    let (engine, view) = engine_with_page();
+    for sel in ["", "p[", "[", "div:has(", "a[href=\"x]", "p:frobnicate"] {
+        let r = engine.element_diagnostics(view, &DiagnosticTarget::Selector(sel.into()), &opts());
+        assert!(r.is_err(), "{sel:?} gave {:?}", r.map(|o| o.map(|r| r.identity.selector)));
+    }
+    for sel in ["[data-x=\"a]b\"]", "div:not(#gone)", "p"] {
+        assert!(engine.element_diagnostics(view, &DiagnosticTarget::Selector(sel.into()), &opts()).is_ok(), "{sel}");
+    }
+}
+
+#[test]
+fn a_removed_element_is_not_in_the_dom() {
+    let (engine, view) = engine_with_page();
+    let raw = diag(&engine, view, "#wide")["identity"]["node_id"].as_u64().unwrap() as usize;
+    let doc = engine.views.get(&view).unwrap().document.clone().unwrap();
+    doc.get_node(rustkit_dom::NodeId::new(raw)).unwrap().remove_from_parent();
+    let r = target(&engine, view, DiagnosticTarget::Node(raw));
+    assert_eq!(r["tree"]["connected"], false);
+    assert_eq!(r["tree"]["in_dom"], false);
+}
+
+#[test]
+fn a_box_inside_a_scroll_container_says_element_scroll_is_not_applied() {
+    let (engine, view) = engine_with(
+        "<html><body><div id=s style=\"overflow:auto;height:50px\"><div id=in style=\"height:200px\">x</div></div>\
+         <div id=out style=\"height:10px\"></div></body></html>",
+        800,
+        600,
+    );
+    let notes = |sel: &str| diag(&engine, view, sel)["notes"].to_string();
+    assert!(notes("#in").contains("scroll"), "{}", notes("#in"));
+    assert!(!notes("#out").contains("scroll"), "{}", notes("#out"));
+    assert!(!notes("#s").contains("scroll"), "{}", notes("#s"));
+}
