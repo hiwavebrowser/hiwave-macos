@@ -808,12 +808,19 @@ class Driver:
         self.expect(c, "%s: the window thread was never held %d ms or more" % (during, self.LIMIT_MS),
                     not holds, "holds (ms): %s" % (holds or "none"))
 
-    def expect_controls(self, c, during, close=False):
-        """A new tab, a resize and (if asked) closing the tab, each answered
-        within LIMIT_MS. Written without a seat that can post input: expect to
-        fix these the first time they run."""
+    def expect_controls(self, c, during, new_tab=False, resize=True, close=False):
+        """A resize and (if asked) a new tab or closing the tab, each answered
+        within LIMIT_MS.
+
+        A new tab is asked for only by `i0a_newtab`. The app has one content
+        view: a new tab loads its start page into it and the page that was
+        there is gone (closing the new tab loads the old address again, from
+        the start). First run with real input, 2026-10-12: Cmd+T sent in every
+        check replaced the page under test, so "the page ticks again", "the
+        request is answered" and both last frames failed for that reason."""
         if not self.can_input:
-            for what in ["a new tab (Cmd+T)", "a resize"] + (["closing the tab (Cmd+W)"] if close else []):
+            asked = (["a new tab (Cmd+T)"] if new_tab else []) + (["a resize"] if resize else [])
+            for what in asked + (["closing the tab (Cmd+W)"] if close else []):
                 self.not_run(c, "%s: %s is answered within %d ms" % (during, what, self.LIMIT_MS),
                              self.why_not("Accessibility"))
             return
@@ -827,8 +834,9 @@ class Driver:
             self.expect(c, "%s: %s is answered within %d ms" % (during, what, self.LIMIT_MS),
                         bool(m) and took < limit, "%.0f ms" % (took * 1000) if m else "no log line in 3 s")
 
-        key(17, r"New tab - navigating to start page", "a new tab (Cmd+T)")
-        if self.can_resize:
+        if new_tab:
+            key(17, r"New tab - navigating to start page", "a new tab (Cmd+T)")
+        if resize and self.can_resize:
             code, win = self.hw("window", pid)
             w, h = int(win.get("w", 1200)) - 120, int(win.get("h", 800)) - 80
             t0 = time.time()
@@ -838,7 +846,7 @@ class Driver:
             self.expect(c, "%s: a resize is answered within %d ms" % (during, self.LIMIT_MS),
                         code == 0 and took < limit and abs(now.get("w", 0) - w) < 4,
                         "%.0f ms; asked %dx%d, window %s" % (took * 1000, w, h, json.dumps(now)))
-        else:
+        elif resize:
             self.not_run(c, "%s: a resize is answered within %d ms" % (during, self.LIMIT_MS),
                          self.why_not("Accessibility"))
         if close:
@@ -946,8 +954,29 @@ class Driver:
         time.sleep(2.0)
         self.expect_no_hold(c, "2 s after the tab was closed", log_from)
 
+    def i0a_newtab(self):
+        """I0(a): a new tab opens at once while another tab's script does not end."""
+        c = "i0a_newtab"
+        self.start_spin(c)
+        if self.app is None or not self.app.alive():
+            return
+        mark = self.fixture.mark()
+        self.expect_controls(c, "while the script runs", new_tab=True, resize=False)
+        if not self.can_input:
+            return
+        # The new tab's page replaces the spinning one in the content view,
+        # so that script must stop and the old page asks for nothing more.
+        time.sleep(2.0)
+        log_from, quiet = len(self.app.log_text()), self.fixture.mark()
+        time.sleep(2.0)
+        self.expect_no_hold(c, "2 s after the new tab opened", log_from)
+        late = self.fixture.seen("beacon?i0a-spin-tick-", quiet)
+        self.expect(c, "the page the new tab replaced asks for nothing more", not late,
+                    "%d ticks after the new tab (%d since Cmd+T)"
+                    % (len(late), len(self.fixture.seen("beacon?i0a-spin-tick-", mark))))
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close",
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "i0a_newtab",
               "h24_svg_scroll", "fixed_scroll"]
 
     def run(self, names):

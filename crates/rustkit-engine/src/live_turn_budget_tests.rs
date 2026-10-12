@@ -280,3 +280,54 @@ document.getElementById('p').addEventListener('click', function () {{ {SPIN} }})
         r#"String("Script stopped: it ran past 200 ms (timers)|Script stopped: it ran past 200 ms (event:click)")"#
     );
 }
+
+/// Real window, 2026-10-12, the first run with real input: a new tab and a
+/// resize were sent while `i0a_spin.html` was spinning, and afterwards the
+/// page did not tick, its request was not answered and its image was gone.
+/// The app's log gives the cause (the new tab's start page is loaded into
+/// the one content view, so the spinning page no longer exists). This is
+/// the other explanation, ruled out: input that arrives after a stopped
+/// turn does not leave the page's timers or its network answers dead.
+#[test]
+fn input_after_a_stopped_turn_leaves_timers_and_answers_running() {
+    let page = format!(
+        "<html><body><p id=p>alive</p><input id=q><script>
+window.got = 'none'; window.ticks = 0; window.resized = 0; window.typed = 0;
+window.addEventListener('resize', function () {{ window.resized += 1; }});
+document.getElementById('q').addEventListener('input', function () {{ window.typed += 1; }});
+setTimeout(function () {{ setInterval(function () {{ window.ticks += 1; }}, 100); }}, 60000);
+setTimeout(function () {{
+  var x = window.x = new XMLHttpRequest(); x.open('GET', '/data');
+  x.onload = function () {{ document.getElementById('p').textContent = x.responseText; window.got = x.responseText; }};
+  x.onerror = function () {{ window.got = 'error'; }};
+  x.send();
+}}, 61000);
+setTimeout(function () {{ {SPIN} }}, 61000);
+</script></body></html>"
+    );
+    let routes = vec![("/", "text/html", page), ("/data", "text/plain", "hello".to_string())];
+    let (mut engine, view) = load_routes(config(), routes);
+    let rt = runtime();
+    rt.block_on(engine.pump_live(view, 60_000));
+    rt.block_on(engine.pump_live(view, 1_000));
+    assert_eq!(over_budget(&engine, view), ["timers"], "{:#?}", engine.script_log(view));
+    let ticks = |engine: &mut Engine| -> f64 {
+        let shown = engine.execute_script(view, "window.ticks").unwrap();
+        shown.trim_start_matches("Number(").trim_end_matches(')').parse().unwrap()
+    };
+    let before = ticks(&mut engine);
+    // What the window sends when a person resizes it and types.
+    engine.set_view_bounds(view, Bounds { x: 0, y: 0, width: 300, height: 100 }).unwrap();
+    engine.execute_script(view, "document.getElementById('q').focus()").unwrap();
+    engine.handle_text_key(view, 0, "a", false, false, false);
+    turns(&rt, &mut engine, view, 12);
+    assert_eq!(over_budget(&engine, view), ["timers"], "{:#?}", engine.script_log(view));
+    assert_eq!(
+        engine.execute_script(view, &format!("{GOT} + ' resized=' + window.resized + ' typed=' + window.typed")).unwrap(),
+        r#"String("hello hello rs=4 resized=1 typed=1")"#,
+        "{:#?}",
+        engine.script_log(view)
+    );
+    let after = ticks(&mut engine);
+    assert!(after >= before + 3.0, "the interval stopped ticking after the input: {before} then {after}");
+}
