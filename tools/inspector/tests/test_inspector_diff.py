@@ -474,3 +474,14 @@ def test_an_own_padding_change_under_a_moved_parent_stays_a_root():
     rec(doc, CARD2)["box"]["content_box"]["w"] -= 5
     r = run(doc)
     assert CARD2 in [d["selector"] for d in r["roots"]]
+
+
+def test_min_width_auto_is_0px_except_on_flex_and_grid_items():
+    o, c = both()
+    rec(o, HERO)["style"]["min-width"] = "auto"
+    rec(c, HERO)["style"]["min-width"] = "0px"
+    assert idf.compare(o, c)["first"] is None
+    rec(o, CELL2)["style"]["min-width"] = "0px"   # a flex item: auto and 0 differ
+    rec(c, CELL2)["style"]["min-width"] = "auto"
+    r = idf.compare(o, c)
+    assert (r["first"]["stage"], r["first"]["selector"]) == ("STYLE", CELL2)

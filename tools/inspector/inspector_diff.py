@@ -36,6 +36,7 @@ Usage:
 import argparse
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -119,6 +120,8 @@ ITEM_FLEX = {"flex-grow", "flex-shrink", "flex-basis", "align-self", "order"}
 ITEM_GRID = {"grid-column-start", "grid-column-end", "grid-row-start", "grid-row-end",
              "align-self", "justify-self", "order"}
 POSITIONED = {"z-index"}
+# Elements whose content is replaced; object-fit applies only to them.
+REPLACED = {"img", "video", "canvas", "iframe", "embed", "object", "input", "svg"}
 
 # Keyword spellings that mean the same used behaviour. Applied to both sides.
 # `start`/`end` and `flex-start`/`flex-end` place items the same way in a
@@ -137,8 +140,6 @@ EQUIVALENT = {
     "row-gap": {"normal": "0px"},
     "column-gap": {"normal": "0px"},
     "gap": {"normal": "0px"},
-    "min-width": {"auto": "0px"},
-    "min-height": {"auto": "0px"},
     "display": {"list-item": "block"},
     "background-color": {"transparent": "rgba(0, 0, 0, 0)"},
 }
@@ -223,7 +224,11 @@ def normalize_value(prop: str, value: Optional[str]) -> Optional[str]:
 
 
 def comparable_props(rec: Dict[str, Any], parent_rec: Optional[Dict[str, Any]]) -> List[str]:
-    """The properties that can matter for this element's display type."""
+    """The properties that can matter for this element's display type.
+
+    float/clear do nothing on a flex or grid item (Chromium still reports
+    them), vertical-align only applies to inline-level boxes and table
+    cells, object-fit only to replaced elements."""
     style = rec.get("style") or {}
     display = style.get("display") or ""
     pdisplay = ((parent_rec or {}).get("style") or {}).get("display") or ""
@@ -245,6 +250,12 @@ def comparable_props(rec: Dict[str, Any], parent_rec: Optional[Dict[str, Any]]) 
         if p in POSITIONED and position == "static" and not (pflex or pgrid):
             continue
         if display == "none" and p != "display":
+            continue
+        if p in ("float", "clear") and (pflex or pgrid):
+            continue
+        if p == "vertical-align" and not (display.startswith("inline") or display == "table-cell"):
+            continue
+        if p == "object-fit" and rec["identity"]["tag"] not in REPLACED:
             continue
         if display == "inline" and p in ("min-width", "min-height", "max-width", "max-height",
                                           "aspect-ratio", "box-sizing", "overflow-x", "overflow-y"):
@@ -284,8 +295,14 @@ def _same_urls(o: str, c: str) -> bool:
 def style_diffs(ours: Dict[str, Any], chrome: Dict[str, Any], chrome_parent: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
     os_, cs = ours.get("style") or {}, chrome.get("style") or {}
+    pdisplay = ((chrome_parent or {}).get("style") or {}).get("display") or ""
+    item = pdisplay in ("flex", "inline-flex", "grid", "inline-grid")
     for p in comparable_props(chrome, chrome_parent):
         o, c = normalize_value(p, os_.get(p)), normalize_value(p, cs.get(p))
+        if p in ("min-width", "min-height") and not item:
+            # auto computes to 0 outside flex and grid items; on an item the
+            # two differ and are compared as written.
+            o, c = ("0px" if v == "auto" else v for v in (o, c))
         if o is None or c is None or o == c:
             continue  # unknown on one side is not a difference
         if p.startswith("grid-template") and (_unresolved_track_list(o) or _unresolved_track_list(c)):
@@ -328,14 +345,36 @@ def geometry_diffs(ours: Dict[str, Any], chrome: Dict[str, Any], threshold: floa
     return out
 
 
-def dom_diffs(ours: Dict[str, Any], chrome: Dict[str, Any], text_tolerance: int) -> List[Dict[str, Any]]:
+def page_text_lengths(es: List[Dict[str, Any]]) -> Dict[int, Optional[int]]:
+    """textContent length without the text of <style>/<script> descendants:
+    a stylesheet or script edit is not a DOM difference of its ancestors."""
+    by_sel = {e["record"]["identity"]["selector"]: e["order"] for e in es}
+    hidden = {e["order"]: 0 for e in es}
+    for e in es:
+        if e["tag"] not in ("style", "script"):
+            continue
+        n = (e["record"].get("tree") or {}).get("text_length") or 0
+        sel = e["record"]["identity"]["selector"]
+        while " > " in sel:
+            sel = sel.rsplit(" > ", 1)[0]
+            if sel in by_sel:
+                hidden[by_sel[sel]] += n
+    out = {}
+    for e in es:
+        n = (e["record"].get("tree") or {}).get("text_length")
+        out[e["order"]] = None if n is None else n - hidden[e["order"]]
+    return out
+
+
+def dom_diffs(ours: Dict[str, Any], chrome: Dict[str, Any], text_tolerance: int,
+              lengths: Optional[Tuple[Optional[int], Optional[int]]] = None) -> List[Dict[str, Any]]:
     out = []
     if ours["identity"]["tag"] != chrome["identity"]["tag"]:
         out.append({"field": "tag", "ours": ours["identity"]["tag"], "chrome": chrome["identity"]["tag"]})
     ot, ct = ours.get("tree") or {}, chrome.get("tree") or {}
     if ot.get("child_count") != ct.get("child_count"):
         out.append({"field": "child_count", "ours": ot.get("child_count"), "chrome": ct.get("child_count")})
-    ol, cl = ot.get("text_length"), ct.get("text_length")
+    ol, cl = lengths if lengths else (ot.get("text_length"), ct.get("text_length"))
     if ol is not None and cl is not None and abs(ol - cl) > max(text_tolerance, TEXT_TOLERANCE_SHARE * cl):
         out.append({"field": "text_length", "ours": ol, "chrome": cl})
     return out
@@ -605,6 +644,7 @@ def compare(ours_doc: Dict[str, Any], chrome_doc: Dict[str, Any],
 
     chrome_parent = parents(chrome)
     ours_parent = parents(ours)
+    ours_text, chrome_text = page_text_lengths(ours), page_text_lengths(chrome)
     pairs, chrome_only, ours_only, c_unverified, o_unverified = _realign(
         pairs, chrome_only, ours_only, chrome, ours, chrome_parent, ours_parent, text_tolerance)
     partner = {c["order"]: (key, o) for key, o, c in pairs}
@@ -625,7 +665,8 @@ def compare(ours_doc: Dict[str, Any], chrome_doc: Dict[str, Any],
             match_key, o = partner[c["order"]]
             orec = o["record"]
             for stage, fn in (
-                ("DOM", lambda: dom_diffs(orec, rec, text_tolerance)),
+                ("DOM", lambda: dom_diffs(orec, rec, text_tolerance,
+                                          (ours_text[o["order"]], chrome_text[c["order"]]))),
                 ("STYLE", lambda: style_diffs(orec, rec, par["record"] if par else None)),
                 ("GEOMETRY", lambda: geometry_diffs(orec, rec, threshold)),
             ):
@@ -882,11 +923,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         n = draw_overlay(result, args.overlay, args.frame, (int(vp[0]), int(vp[1])))
         print(f"overlay: {args.overlay} ({n} roots drawn)", file=sys.stderr)
     text = json.dumps(result, indent=2, sort_keys=True)
-    if args.out:
-        Path(args.out).write_text(text + "\n")
-        print(format_report(result))
-    else:
-        print(text)
+    try:
+        if args.out:
+            Path(args.out).write_text(text + "\n")
+            print(format_report(result))
+        else:
+            print(text)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # The reader (head, a pager) stopped early: not an error of ours.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
     return 0
 
 
