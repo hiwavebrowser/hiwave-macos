@@ -239,8 +239,5 @@ aspect-ratio--flex-col--fixed-width aspect-ratio-height-of-column-flex-item
 clamp--flex-row--max-height-grid max-height-ignored-on-stretched-item
 clamp--grid--max-height-grid     max-height-ignored-on-stretched-item
 
-# aspect-ratio-only-empty-block-dropped: 1
-aspect-ratio--block--auto aspect-ratio-only-empty-block-dropped
-
 # percent-height-chain-in-stretched-grid-item: 1
 percent-height--grid--through-auto percent-height-chain-in-stretched-grid-item

@@ -5082,7 +5082,8 @@ impl Engine {
     ///   `<hr>`'s 8px stack to 16 around an empty flex container);
     /// - `min-height` and `clear` give it extent or clearance;
     /// - a flex or grid item takes a track slot, a gap and free space (an
-    ///   empty `flex:1` spacer).
+    ///   empty `flex:1` spacer);
+    /// - `aspect-ratio` gives it a height from its width (css-sizing-4 §5).
     fn empty_block_affects_layout(child: &LayoutBox, parent: &ComputedStyle) -> bool {
         use rustkit_css::Length;
         let nonzero = |len: &Length| !matches!(len, Length::Zero | Length::Auto | Length::Px(0.0));
@@ -5102,6 +5103,7 @@ impl Engine {
             || nonzero(&s.margin_bottom)
             || nonzero(&s.min_height)
             || s.clear != rustkit_css::Clear::None
+            || s.aspect_ratio.is_some()
             || rustkit_layout::establishes_bfc(s, child.float)
     }
 
@@ -32916,7 +32918,10 @@ mod aspect_ratio_empty_block_tests {
     use rustkit_layout::{Dimensions, Rect};
 
     fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
-        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+        if b.identity
+            .as_ref()
+            .is_some_and(|i| i.selector == format!("#{id}"))
+        {
             return Some(b);
         }
         b.children.iter().find_map(|c| by_id(c, id))
@@ -32938,7 +32943,10 @@ mod aspect_ratio_empty_block_tests {
             ..Default::default()
         });
         // Chromium 141: #r 600 x 300, #n below it at y 300, #o 305 tall.
-        let r = by_id(&root, "r").expect("#r has a box").dimensions.border_box();
+        let r = by_id(&root, "r")
+            .expect("#r has a box")
+            .dimensions
+            .border_box();
         assert_eq!((r.width, r.height), (600.0, 300.0));
         let n = by_id(&root, "n").expect("#n").dimensions.border_box();
         assert_eq!(n.y, 300.0);
