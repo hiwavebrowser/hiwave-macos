@@ -819,6 +819,15 @@ class Driver:
         self.expect_controls(c, "while the script runs")
         time.sleep(5)
         self.expect_no_hold(c, "5 s of the script running", log_from)
+        # The lesser claim, while script still runs on the window's thread:
+        # the hold ends. The app stops the script at its turn budget (5 s).
+        if log_from is not None:
+            ended = self.app.wait_log(r"Window thread held ms=(\d+)", 5, log_from)
+            self.expect(c, "the hold ended within 10 s of the script's start", bool(ended),
+                        ended.group(0) if ended else "still held: %s ms" % self.holds(log_from))
+            mark = self.fixture.mark()
+            self.expect(c, "the page ticks again afterwards",
+                        bool(ended) and self.fixture.wait("beacon?i0a-spin-tick-", 3, mark))
         frame = self.frame(c, "during", [GREEN])
         if frame is None:
             return self.not_run(c, "the window still shows the page's green image", self.why_not("Screen Recording"))
