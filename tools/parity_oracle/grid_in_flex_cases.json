@@ -121,6 +121,41 @@
    "chrome_boxes": "x:0:0:600:34 m:0:0:600:34 q:200:14:400:20"
   },
   {
+   "name": "percent-height-column-percent-height-item",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}html,body{height:100%}#x{display:flex;flex-direction:column;height:100%;width:600px}#s{height:20px}#m{height:25%}</style></head><body><div id=x><div id=m>m</div><div id=s>after</div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:800 m:0:0:600:200 s:0:200:600:20"
+  },
+  {
+   "name": "percent-height-column-flex-1-item",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}html,body{height:100%}#x{display:flex;flex-direction:column;height:100%;width:600px}#s{height:20px}#m{flex:1}</style></head><body><div id=x><div id=m>m</div><div id=s>after</div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:800 m:0:0:600:780 s:0:780:600:20"
+  },
+  {
+   "name": "percent-height-column-justify-center",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}html,body{height:100%}#x{display:flex;flex-direction:column;height:100%;width:600px}#s{height:20px}#x{justify-content:center}#m{height:60px}</style></head><body><div id=x><div id=m>m</div><div id=s>after</div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:800 m:0:360:600:60 s:0:420:600:20"
+  },
+  {
+   "name": "percent-height-column-border-box-padding",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}html,body{height:100%}#x{display:flex;flex-direction:column;height:100%;width:600px}#s{height:20px}#x{height:50%;padding:10px;box-sizing:border-box}#m{height:50%}</style></head><body><div id=x><div id=m>m</div><div id=s>after</div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:400 m:10:10:580:190 s:10:200:580:20"
+  },
+  {
+   "name": "percent-height-column-items-shrink",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}html,body{height:100%}#x{display:flex;flex-direction:column;height:100%;width:600px}#s{height:20px}#x{height:10%}#m{height:200px}</style></head><body><div id=x><div id=m>m</div><div id=s>after</div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:80 m:0:0:600:60 s:0:60:600:20"
+  },
+  {
+   "name": "percent-height-column-in-an-auto-height-parent",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;flex-direction:column;height:100%;width:600px}#s{height:20px}#m{height:50%}</style></head><body><div id=x><div id=m>m</div><div id=s>after</div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:40 m:0:0:600:20 s:0:20:600:20"
+  },
+  {
+   "name": "percent-height-row-is-not-touched",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}html,body{height:100%}#x{display:flex;height:50%;width:600px}#m{height:50%}#s{height:20px}</style></head><body><div id=x><div id=m>m</div><div id=s>after</div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:400 m:0:0:10:200 s:10:0:48:20"
+  },
+  {
    "name": "control-the-same-grid-in-a-block",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:700px}#m{display:grid;gap:24px;grid-template-columns:400px 276px}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
    "chrome_boxes": "x:0:0:700:60 m:0:0:700:60 a:0:0:400:60 b:424:0:276:60"

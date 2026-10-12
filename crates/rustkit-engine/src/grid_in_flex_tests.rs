@@ -54,12 +54,33 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// `two-items-in-one-cell-of-a-calc-height-grid-in-a-column`: the grid's
 /// `calc(100% - 560px)` is not resolved against the column's definite
 /// height: the grid is its `min-height`, 150, where Chromium has 240.
+///
+/// The `percent-height-column-*` pages have no grid: they are the column
+/// google's logo block sits in, a flex column whose own `height` is a
+/// percentage (`html, body, #x { height: 100% }`). The flex pass reads a
+/// definite main size from style alone, so such a column is indefinite to
+/// it: a `height: 25%` item is its text (20, Chromium 200), a `flex: 1`
+/// item does not grow (20, Chromium 780), `justify-content: center` leaves
+/// the items at the top, and a border-box column with padding does the
+/// same.
+///
+/// `percent-height-column-items-shrink`: a `height: 200px` item in an 80px
+/// column stays 200; Chromium shrinks it to 60 beside its 20px sibling.
+///
+/// `percent-height-row-is-not-touched`: a `height: 50%` item of a row that
+/// is 400 tall is 110; Chromium has 200.
 const GAPS: &[&str] = &[
     "span-by-row-end-in-a-row",
     "two-items-in-one-cell-of-a-calc-height-grid-in-a-column",
     "percent-height-item-sharing-an-area-in-a-row",
     "bing-textarea-and-its-replica-in-a-row",
     "bing-textarea-and-its-replica-in-a-block",
+    "percent-height-column-percent-height-item",
+    "percent-height-column-flex-1-item",
+    "percent-height-column-justify-center",
+    "percent-height-column-border-box-padding",
+    "percent-height-column-items-shrink",
+    "percent-height-row-is-not-touched",
 ];
 
 #[test]
