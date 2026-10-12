@@ -33850,7 +33850,7 @@ mod grid_template_areas_tests {
     }
 
     #[test]
-    fn an_unknown_area_name_auto_places() {
+    fn an_unknown_area_name_is_the_first_implicit_line() {
         for root in laid_out(concat!(
             r#"<body style="margin:0"><div style="display:grid;width:200px;"#,
             r#"grid-template-columns:100px 100px;grid-template-areas:'a b'">"#,
@@ -33858,10 +33858,14 @@ mod grid_template_areas_tests {
             r#"<div id="y" style="grid-area:a;height:10px"></div>"#,
             r#"</div></body>"#,
         )) {
-            // `y` claims area a (column 1); `nope` auto-places into the
-            // first free cell, column 2.
+            // `y` claims area a (column 1). `nope` names no area, so its
+            // lines are the first implicit ones after the explicit grid:
+            // a third column and a second row. Until 2026-10-12 this test
+            // asked for auto-placement into column 2, which no browser does
+            // (pinned Chromium: `unknown-area-name-beside-declared-areas-
+            // in-a-block` in grid_in_flex_cases.json).
             assert_eq!(rect(&root, "y").0, 0.0);
-            assert_eq!(rect(&root, "x").0, 100.0);
+            assert_eq!((rect(&root, "x").0, rect(&root, "x").1), (200.0, 10.0));
         }
     }
 

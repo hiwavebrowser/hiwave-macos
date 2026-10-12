@@ -71,6 +71,16 @@
    "chrome_boxes": "x:0:0:600:34 m:0:0:200:34 a:0:14:200:20 b:0:14:200:20"
   },
   {
+   "name": "percent-height-item-sharing-an-area-in-a-row-with-a-width",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;width:600px}#m{display:grid;width:300px;padding-top:14px}#a{height:100%;grid-area:content}#b{height:auto;grid-area:content}</style></head><body><div id=x><div id=m><div id=a></div><div id=b>word</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:34 m:0:0:300:34 a:131:14:169:20 b:131:14:169:20"
+  },
+  {
+   "name": "unknown-area-name-beside-declared-areas-in-a-block",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:600px}#m{display:grid;width:200px;grid-template-columns:100px 100px;grid-template-areas:'a b'}#a{grid-area:nope;height:10px}#b{grid-area:a;height:10px}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:20 m:0:0:200:20 a:200:10:38:10 b:0:0:100:10"
+  },
+  {
    "name": "percent-height-item-sharing-an-area-in-a-block",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:600px}#m{display:grid;padding-top:14px}#a{height:100%;grid-area:content;min-width:200px}#b{height:auto;grid-area:content}</style></head><body><div id=x><div id=m><div id=a></div><div id=b>word</div></div></div></body></html>",
    "chrome_boxes": "x:0:0:600:34 m:0:0:600:34 a:200:14:400:20 b:200:14:400:20"

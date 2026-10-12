@@ -547,7 +547,8 @@ impl<'a> GridItem<'a> {
             // Both start and end are explicit (number or resolved name)
             ((start, false, None), (end, false, None)) if start != 0 && end != 0 => {
                 self.column_start = start;
-                self.column_end = end;
+                // The same line twice is a span of one (css-grid-1 8.3.1).
+                self.column_end = if end == start { start + 1 } else { end };
                 self.auto_column = false;
             }
             // Start is explicit, end is auto
@@ -589,7 +590,7 @@ impl<'a> GridItem<'a> {
             // Both start and end are explicit
             ((start, false, None), (end, false, None)) if start != 0 && end != 0 => {
                 self.row_start = start;
-                self.row_end = end;
+                self.row_end = if end == start { start + 1 } else { end };
                 self.auto_row = false;
             }
             // Start is explicit, end is auto
@@ -1096,8 +1097,15 @@ impl GridLayout {
                 if let Some(n) = self.find_column_line_by_name(name) {
                     (n, false, None)
                 } else {
-                    trace!("Column line name '{}' not found, using auto", name);
-                    (0, true, None)
+                    // No line has this name. css-grid-1 8.3: every implicit
+                    // line is then taken to have it, so this is the first
+                    // line after the explicit grid. Until 2026-10-12 the
+                    // item was auto-placed instead, and two items that named
+                    // the same missing area (bing's search box: a textarea
+                    // and the `::after` that sizes it, both `grid-area:
+                    // content`) landed in two rows where they share a cell.
+                    trace!("Column line name '{}' not found, using the first implicit line", name);
+                    (self.explicit_columns as i32 + 2, false, None)
                 }
             }
             GridLine::Span(count) => (0, true, Some(*count)),
@@ -1192,8 +1200,9 @@ impl GridLayout {
                 if let Some(n) = self.find_row_line_by_name(name) {
                     (n, false, None)
                 } else {
-                    trace!("Row line name '{}' not found, using auto", name);
-                    (0, true, None)
+                    // As for columns: the first line after the explicit grid.
+                    trace!("Row line name '{}' not found, using the first implicit line", name);
+                    (self.explicit_rows as i32 + 2, false, None)
                 }
             }
             GridLine::Span(count) => (0, true, Some(*count)),
@@ -6174,10 +6183,11 @@ mod tests {
         assert_eq!(line2, 2);
         assert!(!is_auto2);
 
-        // Unknown name falls back to auto
+        // An unknown name is the first implicit line after the explicit
+        // grid (two columns, three lines: line 4), not auto-placement.
         let (line3, is_auto3, _) = grid.resolve_column_line(&GridLine::Name("unknown".to_string()));
-        assert_eq!(line3, 0);
-        assert!(is_auto3);
+        assert_eq!(line3, 4);
+        assert!(!is_auto3);
     }
 
     #[test]

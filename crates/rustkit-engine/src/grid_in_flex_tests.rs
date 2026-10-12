@@ -25,7 +25,29 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// `span-by-row-end-in-a-row`: the span is right (the item covers both
 /// rows), but the first row is 20 tall, its text, where `grid-auto-rows:
 /// 40px` makes it 40 in Chromium. The second row is 40.
-const GAPS: &[&str] = &["span-by-row-end-in-a-row"];
+///
+/// The three below are bing's search box (a textarea that is `height: 100%`
+/// and shares `grid-area: content`, a name no area has, with an `::after`).
+/// Their heights and rows match since the missing name resolves to the first
+/// implicit line; `percent-height-item-sharing-an-area-in-a-block` and
+/// `...-in-a-row-with-a-width` pin that. What is left is width:
+///
+/// `percent-height-item-sharing-an-area-in-a-row`: the grid is 38 wide, its
+/// word, where the item's `min-width: 200px` makes it 200 in Chromium (the
+/// content-width estimate does not read `min-width`).
+///
+/// `bing-textarea-and-its-replica-in-a-row`: the grid and the textarea are
+/// 214 wide; Chromium has 200, the `min-width`.
+///
+/// `bing-textarea-and-its-replica-in-a-block`: the textarea's `width: 100%`
+/// counts as the whole 600 toward its column, so the empty first column is 0
+/// wide; in Chromium the columns are 200 and 400.
+const GAPS: &[&str] = &[
+    "span-by-row-end-in-a-row",
+    "percent-height-item-sharing-an-area-in-a-row",
+    "bing-textarea-and-its-replica-in-a-row",
+    "bing-textarea-and-its-replica-in-a-block",
+];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
