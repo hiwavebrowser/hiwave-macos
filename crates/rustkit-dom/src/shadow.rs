@@ -526,4 +526,52 @@ mod tests {
             "dropping the document frees both"
         );
     }
+
+    // DOM §4.2.14: attachShadow on a host whose root came from a template,
+    // in the same mode, empties that root and returns it (a server-rendered
+    // component's constructor attaches unconditionally). Only once.
+    #[test]
+    fn attach_shadow_takes_over_a_declarative_root_once() {
+        let doc = Document::parse_html(
+            "<body><x-el id=h><template shadowrootmode=open><i id=pre></i></template></x-el>\
+             <x-el id=c><template shadowrootmode=closed><i></i></template></x-el></body>",
+        )
+        .unwrap();
+        let host = by_id(&doc, "h");
+        let declared = host.shadow_root().unwrap();
+        let root = doc.attach_shadow(&host, ShadowRootInit::open()).expect("reuses the declarative root");
+        assert_eq!(root.id, declared.id);
+        assert!(root.children().is_empty(), "its children are removed");
+        assert!(doc.attach_shadow(&host, ShadowRootInit::open()).is_err(), "no longer declarative");
+        // A different mode does not take it over.
+        assert!(doc.attach_shadow(&by_id(&doc, "c"), ShadowRootInit::open()).is_err());
+    }
+
+    // HTML §13.2.6.4.4 attaches at the template's start tag, so the first of
+    // two declarative templates on one host wins; the second stays a template.
+    #[test]
+    fn the_first_declarative_template_on_a_host_wins() {
+        let doc = Document::parse_html(
+            "<body><div id=h><template shadowrootmode=open><i id=first></i></template>\
+             <template shadowrootmode=open><i id=second></i></template></div></body>",
+        )
+        .unwrap();
+        let host = by_id(&doc, "h");
+        assert_eq!(ids(&host.flat_children()), "first");
+        assert_eq!(host.children().len(), 1);
+        assert_eq!(host.children()[0].tag_name(), Some("template"));
+    }
+
+    // Ids inside a declarative root are not the document's: the engine's
+    // id lookups (fragment scroll, label for) must not find them.
+    #[test]
+    fn ids_inside_a_declarative_root_leave_the_document_id_table() {
+        let doc = Document::parse_html(
+            "<body><div id=h><template shadowrootmode=open><i id=x></i><i id=inner></i></template></div><b id=x></b></body>",
+        )
+        .unwrap();
+        assert_eq!(doc.get_element_by_id("x").unwrap().tag_name(), Some("b"));
+        assert!(doc.get_element_by_id("inner").is_none());
+    }
+
 }

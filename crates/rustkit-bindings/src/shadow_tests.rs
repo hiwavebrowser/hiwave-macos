@@ -240,3 +240,15 @@ fn assignment_follows_slot_attribute_and_child_changes() {
     b.evaluate("document.getElementById('b').slot = 'x'; var n = document.createElement('i'); n.id = 'n'; host.insertBefore(n, host.firstChild); document.getElementById('a').remove();").unwrap();
     assert_eq!(ev(&b, "ids(sx) + '|' + ids(sd) + '|' + (document.getElementById('b').assignedSlot === sx)"), "b|n|true");
 }
+
+// A custom element's constructor attaching its shadow root over the
+// declarative one the server rendered (DOM §4.2.14): no throw, same root.
+#[test]
+fn attach_shadow_over_a_declarative_root_returns_it_emptied() {
+    let b = bound_to("<body><x-el id=h><template shadowrootmode=open><i id=pre></i></template></x-el></body>");
+    assert_eq!(
+        ev(&b, "var h = document.getElementById('h'), before = h.shadowRoot, r = h.attachShadow({ mode: 'open' }); [r === before, r.childNodes.length].join()"),
+        "true,0"
+    );
+    assert_eq!(thrown(&b, "document.getElementById('h').attachShadow({ mode: 'open' });"), "NotSupportedError");
+}

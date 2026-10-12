@@ -138,6 +138,16 @@
    "name": "inheritance-across-the-boundary",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=host style=\"line-height:40px\"><div id=lt>y</div></div><script>document.getElementById('host').attachShadow({mode:'open'}).innerHTML = \"<div id=sh>x<\\/div><div id=wrap style=\\\"line-height:10px\\\"><slot><\\/slot><\\/div>\";</script></body></html>",
    "chrome_boxes": "host:0:0:800:50 lt:0:40:800:10 sh:0:0:800:40 wrap:0:40:800:10"
+  },
+  {
+   "name": "attach-shadow-reuses-a-declarative-root",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><x-el id=h><template shadowrootmode=open><div id=pre style=\"height:7px\"></div></template></x-el><div id=status style=\"height:1px\"></div><script>try { var r = document.getElementById('h').attachShadow({mode:'open'}); r.innerHTML = '<div id=post style=\"height:9px\"><\\/div>'; } catch (e) { document.getElementById('status').id = 'threw'; }</script></body></html>",
+   "chrome_boxes": "h:0:0:800:9 status:0:9:800:1 post:0:0:800:9"
+  },
+  {
+   "name": "the-first-declarative-template-wins",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=h><template shadowrootmode=open><div id=first style=\"height:7px\"></div></template><template shadowrootmode=open><div id=second style=\"height:9px\"></div></template></div></body></html>",
+   "chrome_boxes": "h:0:0:800:7 first:0:0:800:7"
   }
  ],
  "chrome": "141.0.7390.37"
