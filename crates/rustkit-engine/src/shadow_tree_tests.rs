@@ -271,3 +271,159 @@ fn document_queries_still_stop_at_the_shadow_boundary() {
         "open,dsd-top,1,<div id=\"dl\" style=\"height:21px\">light</div>,null,1"
     );
 }
+
+// ---- Slice 2: style scoping. Each case below is one page of
+// shadow_tree_cases.json; the full-file test above checks them all, these
+// name the behaviour each one pins.
+
+/// One case's boxes against Chromium's, every id.
+fn assert_case_matches_chromium(name: &str) {
+    let (data, viewport) = cases();
+    let c = case(&data, name);
+    let chrome = split_boxes(c["chrome_boxes"].as_str().expect("chrome_boxes"));
+    let engine = render(&data, name, viewport).boxes();
+    assert_eq!(engine, chrome, "{name}: engine boxes (left) against Chromium's (right)");
+}
+
+/// A shadow `<style>` styles its own tree only: the document's `<p>`, and an
+/// id the sheet names that exists only in the document, are untouched.
+#[test]
+fn a_shadow_style_does_not_leak_out() {
+    assert_case_matches_chromium("scoped-style-does-not-leak-out");
+}
+
+/// Document rules (`.x{display:none}`, `slot{display:block}`, `p{margin:0}`,
+/// `div{height}`) do not match inside a shadow tree.
+#[test]
+fn document_styles_do_not_leak_in() {
+    assert_case_matches_chromium("document-style-does-not-leak-in");
+}
+
+/// `#ghost` in the document names an id that exists only in a shadow tree:
+/// it matches nothing.
+#[test]
+fn a_document_rule_naming_a_shadow_id_does_not_match() {
+    assert_case_matches_chromium("document-rule-naming-a-shadow-id");
+}
+
+/// Inherited properties cross the boundary: host -> shadow tree, and the
+/// slot's flat-tree parent -> the slotted node (font-size and colour).
+#[test]
+fn inherited_properties_cross_into_the_shadow_tree() {
+    assert_case_matches_chromium("inheritance-into-the-shadow-tree");
+}
+
+/// `:host` and `:host(.wide)` style the host from inside; an outer rule on
+/// the host beats either whatever its specificity; `:host(.wide) .lab`,
+/// `:host .lab` and `:host > .lab` match inside; `div .lab` does not reach
+/// past the shadow root.
+#[test]
+fn host_rules_with_and_without_an_argument() {
+    assert_case_matches_chromium("host-rules");
+}
+
+/// `::slotted(p)` styles assigned nodes only (not a `<p>` inside one), and a
+/// light-DOM rule beats it whatever their specificities.
+#[test]
+fn slotted_rules_lose_to_light_rules() {
+    assert_case_matches_chromium("slotted-rules");
+}
+
+/// Two nested shadow trees, each with its own `<style>`: each sheet styles
+/// its own tree, and the inner `:host` styles the inner host.
+#[test]
+fn nested_shadow_trees_each_use_their_own_styles() {
+    assert_case_matches_chromium("nested-shadow-styles");
+}
+
+/// `:defined` / `:not(:defined)`: a custom element is defined once
+/// `customElements.define` ran for its name; one never defined is not;
+/// every other element is.
+#[test]
+fn defined_follows_the_custom_element_registry() {
+    assert_case_matches_chromium("defined-pseudo-class");
+}
+
+/// The text colour and background of every element with a box, in the
+/// cases that set `colors`, against Chromium's `getComputedStyle`.
+#[test]
+fn scoped_colours_match_chromium() {
+    let (data, viewport) = cases();
+    let mut wrong = Vec::new();
+    for c in data["cases"].as_array().unwrap() {
+        let Some(chrome) = c["chrome_colors"].as_str() else {
+            continue;
+        };
+        let name = c["name"].as_str().unwrap();
+        let page = render(&data, name, viewport);
+        for entry in chrome.split(' ') {
+            let (id, want) = entry.split_once(':').unwrap();
+            if want == "-" {
+                continue;
+            }
+            let got = page.colors_of(id);
+            if got != want {
+                wrong.push(format!("{name} #{id}: engine {got}, chrome {want}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A `<style>` added to a shadow root after the first layout restyles that
+/// tree (and only it); removing it again restores the earlier style.
+#[test]
+fn adding_and_removing_a_shadow_style_after_layout_restyles() {
+    let html = "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}</style></head><body><div id=h></div><div id=light>l</div><script>document.getElementById('h').attachShadow({mode:'open'}).innerHTML = '<div id=t>x</div>';</script></body></html>";
+    let mut page = Rendered::load(html, None, (800, 600));
+    let boxes = |page: &mut Rendered| {
+        page.boxes()
+            .into_iter()
+            .map(|(id, b)| format!("{id}:{b}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(boxes(&mut page), "h:0:0:800:20 light:0:20:800:20 t:0:0:800:20");
+    page.js("var s = document.createElement('style'); s.id = 'sheet'; s.textContent = 'div{height:12px}'; document.getElementById('h').shadowRoot.appendChild(s); 'ok'");
+    assert_eq!(boxes(&mut page), "h:0:0:800:12 light:0:12:800:20 t:0:0:800:12 sheet:0:0:0:0");
+    page.js("document.getElementById('h').shadowRoot.getElementById('sheet').textContent = 'div{height:14px}'; 'ok'");
+    assert_eq!(boxes(&mut page), "h:0:0:800:14 light:0:14:800:20 t:0:0:800:14 sheet:0:0:0:0");
+    page.js("document.getElementById('h').shadowRoot.getElementById('sheet').remove(); 'ok'");
+    assert_eq!(boxes(&mut page), "h:0:0:800:20 light:0:20:800:20 t:0:0:800:20");
+}
+
+impl Rendered {
+    /// `color/background` of the element with this id (shadow trees
+    /// included) as Chromium serializes them, from the box the engine laid
+    /// out for it; `-` when it has none.
+    fn colors_of(&self, id: &str) -> String {
+        let view = &self.engine.views[&self.view];
+        let document = view.document.as_ref().expect("document");
+        let mut node = None;
+        document.traverse_shadow_including(|n| {
+            if node.is_none() && n.get_attribute("id") == Some(id) {
+                node = Some(n.id.raw());
+            }
+        });
+        let Some(node) = node else {
+            return "no element".into();
+        };
+        fn find(b: &rustkit_layout::LayoutBox, node: usize) -> Option<&rustkit_layout::LayoutBox> {
+            if b.node_id == Some(node) {
+                return Some(b);
+            }
+            b.children.iter().find_map(|c| find(c, node))
+        }
+        let Some(b) = find(view.layout.as_ref().expect("layout"), node) else {
+            return "-".into();
+        };
+        fn css(c: &rustkit_css::Color) -> String {
+            if c.a >= 1.0 {
+                format!("rgb({},{},{})", c.r, c.g, c.b)
+            } else {
+                format!("rgba({},{},{},{})", c.r, c.g, c.b, c.a)
+            }
+        }
+        format!("{}/{}", css(&b.style.color), css(&b.style.background_color))
+    }
+}

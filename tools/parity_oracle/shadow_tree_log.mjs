@@ -6,7 +6,10 @@
 //   chrome_boxes  "id:x:y:width:height" for every element with an id, the
 //                 document's first, then each shadow tree's (BOXES);
 //   chrome_hits   for each [x, y] in `probes`, the id of the innermost
-//                 element there, inside shadow trees (HITS).
+//                 element there, inside shadow trees (HITS);
+//   chrome_colors when the case sets `colors`: "id:color/background" for
+//                 every element with an id that has a box, in BOXES order,
+//                 "id:-" for one without (COLORS).
 // The engine is tested against these strings (crates/rustkit-engine,
 // shadow_tree_tests).
 //
@@ -24,6 +27,20 @@ export const BOXES = `(function () {
     Array.prototype.forEach.call(root.querySelectorAll('[id]'), function (e) {
       var r = e.getBoundingClientRect();
       out.push(e.id + ':' + Math.round(r.left) + ':' + Math.round(r.top) + ':' + Math.round(r.width) + ':' + Math.round(r.height));
+    });
+    Array.prototype.forEach.call(root.querySelectorAll('*'), function (e) { if (e.shadowRoot) walk(e.shadowRoot); });
+  }
+  walk(document);
+  return out.join(' ');
+})()`;
+export const COLORS = `(function () {
+  var out = [];
+  function walk(root) {
+    Array.prototype.forEach.call(root.querySelectorAll('[id]'), function (e) {
+      var r = e.getBoundingClientRect();
+      if (!r.width && !r.height) { out.push(e.id + ':-'); return; }
+      var s = getComputedStyle(e);
+      out.push(e.id + ':' + s.color.replace(/ /g, '') + '/' + s.backgroundColor.replace(/ /g, ''));
     });
     Array.prototype.forEach.call(root.querySelectorAll('*'), function (e) { if (e.shadowRoot) walk(e.shadowRoot); });
   }
@@ -55,6 +72,10 @@ for (const c of data.cases) {
   if (c.script) await page.evaluate(c.script);
   c.chrome_boxes = await page.evaluate(BOXES);
   console.log(c.name + '  ' + c.chrome_boxes);
+  if (c.colors) {
+    c.chrome_colors = await page.evaluate(COLORS);
+    console.log('  colors ' + c.chrome_colors);
+  }
   if (c.probes) {
     c.chrome_hits = await page.evaluate(HITS(c.probes));
     console.log('  hits ' + c.chrome_hits);
