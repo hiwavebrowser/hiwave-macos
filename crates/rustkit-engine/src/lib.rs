@@ -32775,6 +32775,49 @@ mod logical_property_tests {
     }
 }
 
+// `gap` is `<row-gap> <column-gap>?`: one value sets both, two set each.
+// The two-value form was handed whole to `parse_length`, which fails on
+// it, so `gap: 10px 20px` set neither (nested layout matrix,
+// `gap-two-value-shorthand-dropped`).
+#[cfg(test)]
+mod gap_shorthand_tests {
+    use super::*;
+
+    #[test]
+    fn gap_with_two_values_sets_the_row_gap_then_the_column_gap() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        for property in ["gap", "grid-gap"] {
+            let mut style = ComputedStyle::new();
+            e.apply_style_property(&mut style, property, "10px 20px");
+            assert_eq!(style.row_gap, rustkit_css::Length::Px(10.0), "{property}");
+            assert_eq!(style.column_gap, rustkit_css::Length::Px(20.0), "{property}");
+
+            let mut style = ComputedStyle::new();
+            e.apply_style_property(&mut style, property, "calc(4px + 6px) 5%");
+            assert_eq!(style.row_gap, rustkit_css::Length::Px(10.0), "{property}");
+            assert_eq!(style.column_gap, rustkit_css::Length::Percent(5.0), "{property}");
+        }
+    }
+
+    #[test]
+    fn gap_with_one_value_sets_both_and_a_bad_value_sets_neither() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut style = ComputedStyle::new();
+        e.apply_style_property(&mut style, "gap", "calc(4px + 6px)");
+        assert_eq!(style.row_gap, rustkit_css::Length::Px(10.0));
+        assert_eq!(style.column_gap, rustkit_css::Length::Px(10.0));
+
+        // Three values, or a second value that is no length: the
+        // declaration is invalid and changes nothing.
+        for bad in ["1px 2px 3px", "1px red"] {
+            let mut style = ComputedStyle::new();
+            e.apply_style_property(&mut style, "gap", bad);
+            assert_eq!(style.row_gap, ComputedStyle::new().row_gap, "{bad}");
+            assert_eq!(style.column_gap, ComputedStyle::new().column_gap, "{bad}");
+        }
+    }
+}
+
 // ── float / clear (realsite B3). Nothing parsed the two properties, and
 //    the main flow loop never placed a float, so every float laid out as a
 //    block and every clearfix did nothing. ──
