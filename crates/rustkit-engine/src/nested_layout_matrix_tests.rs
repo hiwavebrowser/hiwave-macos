@@ -11,8 +11,10 @@
 //! border-box, wrapping, alignment, the automatic minimum size of a flex
 //! item, a flex container in a shrink-to-fit box). For every element with an
 //! id the file has the border box Chromium reports; the engine must give each
-//! one's x, y, width and height within 1px. No page has text, so font
-//! metrics decide nothing.
+//! one's x, y, width and height within 1px. No page has text and the body
+//! has `font-size: 0`, so font metrics decide nothing; a baseline-aligned
+//! 10x10 probe `#s` beside the inline-block outer shows its baseline without
+//! a strut.
 //!
 //! Each page is laid out as `relayout` lays out a view (viewport set, the
 //! margin-collapse entry point, the root's children as formatting roots),
@@ -37,6 +39,10 @@ use std::collections::HashSet;
 const CASES: &str = include_str!("../../../tools/parity_oracle/nested_layout_matrix_cases.json");
 const EXPECTED_FAILURES: &str =
     include_str!("../../../tools/parity_oracle/nested_layout_matrix_expected_failures.txt");
+/// The cause report: every tag in the expectations file must be one of its
+/// cause headings (`### N. \`tag\``), so a mistyped tag cannot quietly
+/// start a new cause.
+const CAUSES: &str = include_str!("../../../docs/layout/NESTED_LAYOUT_MATRIX_2026-10.md");
 const TOLERANCE: f32 = 1.0;
 
 /// `name -> cause tag` from the expectations file (`name tag`, `#` comments).
@@ -103,6 +109,17 @@ fn nested_layout_modes_are_as_in_chromium() {
     assert!(
         unknown.is_empty(),
         "expected failures name no case: {unknown:?}"
+    );
+    let headings: Vec<&str> = CAUSES.lines().filter(|l| l.starts_with("### ")).collect();
+    let mut untold: Vec<_> = expected
+        .values()
+        .filter(|tag| !headings.iter().any(|h| h.contains(&format!("`{tag}`"))))
+        .collect();
+    untold.sort();
+    untold.dedup();
+    assert!(
+        untold.is_empty(),
+        "cause tags with no heading in NESTED_LAYOUT_MATRIX_2026-10.md: {untold:?}"
     );
 
     // The style memo is keyed by the document's address: keep every
