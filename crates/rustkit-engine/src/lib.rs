@@ -5103,7 +5103,7 @@ impl Engine {
             || nonzero(&s.margin_bottom)
             || nonzero(&s.min_height)
             || s.clear != rustkit_css::Clear::None
-            || s.aspect_ratio.is_some()
+            || s.aspect_ratio.is_some_and(|r| r.is_finite() && r > 0.0)
             || rustkit_layout::establishes_bfc(s, child.float)
     }
 
@@ -8985,21 +8985,21 @@ impl Engine {
             }
             "aspect-ratio" => {
                 // Parse aspect-ratio: width / height or auto
+                // `auto` resets an earlier ratio. A degenerate ratio (`0`,
+                // `0/1`, `1/0`) is valid and behaves as `auto`; a negative
+                // number makes the declaration invalid (it changes nothing).
                 let value = value.trim();
+                let (w, h) = match value.split_once('/') {
+                    Some((w, h)) => (w.trim().parse::<f32>(), h.trim().parse::<f32>()),
+                    None => (value.parse::<f32>(), Ok(1.0)),
+                };
                 if value == "auto" {
-                    // Auto is the default, do nothing
-                } else if let Some(slash_pos) = value.find('/') {
-                    // Format: width / height
-                    let width_str = value[..slash_pos].trim();
-                    let height_str = value[slash_pos + 1..].trim();
-                    if let (Ok(w), Ok(h)) = (width_str.parse::<f32>(), height_str.parse::<f32>()) {
-                        if h > 0.0 {
-                            style.aspect_ratio = Some(w / h);
-                        }
+                    style.aspect_ratio = None;
+                } else if let (Ok(w), Ok(h)) = (w, h) {
+                    if w >= 0.0 && h >= 0.0 {
+                        let ratio = w / h;
+                        style.aspect_ratio = (ratio.is_finite() && ratio > 0.0).then_some(ratio);
                     }
-                } else if let Ok(ratio) = value.parse::<f32>() {
-                    // Single number (ratio to 1)
-                    style.aspect_ratio = Some(ratio);
                 }
             }
             "border-spacing" => {
