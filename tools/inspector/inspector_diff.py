@@ -454,6 +454,128 @@ def _inherited_only(fields, ours_parent, chrome_parent) -> List[Dict[str, Any]]:
     return out
 
 
+def _same_element(o: Dict[str, Any], c: Dict[str, Any], text_tolerance: int) -> bool:
+    """Could these two records be the same element? Tag, id and classes
+    equal, text length within the DOM tolerance. Text itself is never read."""
+    oi, ci = o["identity"], c["identity"]
+    if (oi["tag"], oi.get("id"), list(oi.get("classes") or [])) != (ci["tag"], ci.get("id"), list(ci.get("classes") or [])):
+        return False
+    ol, cl = (o.get("tree") or {}).get("text_length"), (c.get("tree") or {}).get("text_length")
+    return ol is None or cl is None or abs(ol - cl) <= max(text_tolerance, TEXT_TOLERANCE_SHARE * cl)
+
+
+def _alignment(a: List[Any], b: List[Any], eq, leftmost: bool) -> Dict[int, int]:
+    """One longest alignment of a onto b (indices), taking matches as early
+    (leftmost) or as late as possible."""
+    if not leftmost:
+        n, m = len(a), len(b)
+        rev = _alignment(a[::-1], b[::-1], eq, True)
+        return {n - 1 - i: m - 1 - j for i, j in rev.items()}
+    n, m = len(a), len(b)
+    suf = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        for j in range(m - 1, -1, -1):
+            suf[i][j] = max(suf[i + 1][j], suf[i][j + 1], suf[i + 1][j + 1] + 1 if eq(a[i], b[j]) else 0)
+    out, i, j = {}, 0, 0
+    while i < n and j < m:
+        if eq(a[i], b[j]) and suf[i][j] == suf[i + 1][j + 1] + 1:
+            out[i] = j
+            i, j = i + 1, j + 1
+        elif suf[i][j + 1] >= suf[i + 1][j]:
+            j += 1
+        else:
+            i += 1
+    return out
+
+
+def _realign(pairs, chrome_only, ours_only, chrome, ours, chrome_parent, ours_parent, text_tolerance):
+    """Re-pair the children of a paired parent that has an unpaired child.
+
+    The oracle key numbers same-tag siblings (`:nth-of-type`), so removing
+    one shifts the keys of those after it and they pair with the wrong
+    elements. Under such a parent, same-tag children are aligned in order
+    on (tag, id, classes, text length). A pair is kept only when the
+    leftmost and the rightmost longest alignments agree on it; an element
+    they disagree on is UNVERIFIED (reported, never classified), so a
+    removed one of identical siblings is never named as another. Paired
+    elements' descendants are re-paired by their path below them.
+    Returns (pairs, chrome_only, ours_only, unverified chrome orders,
+    unverified ours orders).
+    """
+    c_partner = {c["order"]: o for _, o, c in pairs}
+    o_partner = {o["order"]: c for _, o, c in pairs}
+    gaps = set()
+    for c in chrome_only:
+        p = chrome_parent.get(c["order"])
+        if p and p["order"] in c_partner:
+            gaps.add((c_partner[p["order"]]["order"], p["order"]))
+    for o in ours_only:
+        p = ours_parent.get(o["order"])
+        if p and p["order"] in o_partner:
+            gaps.add((p["order"], o_partner[p["order"]]["order"]))
+    if not gaps:
+        return pairs, chrome_only, ours_only, set(), set()
+
+    def kids(es, parent_of):
+        out: Dict[int, List[Dict[str, Any]]] = {}
+        for e in es:
+            p = parent_of.get(e["order"])
+            if p:
+                out.setdefault(p["order"], []).append(e)
+        return out
+
+    c_kids, o_kids = kids(chrome, chrome_parent), kids(ours, ours_parent)
+
+    def subtree(e, kid_map):
+        out, stack = [], [e]
+        while stack:
+            x = stack.pop()
+            out.append(x)
+            stack.extend(kid_map.get(x["order"], []))
+        return out
+
+    eq = lambda o, c: _same_element(o["record"], c["record"], text_tolerance)  # noqa: E731
+    new_pairs, c_reset, o_reset = [], set(), set()
+    c_unverified, o_unverified = set(), set()
+    for po, pc in sorted(gaps):
+        tags = {e["tag"] for e in c_kids.get(pc, []) + o_kids.get(po, [])}
+        for tag in sorted(tags):
+            cs = [e for e in c_kids.get(pc, []) if e["tag"] == tag]
+            os_ = [e for e in o_kids.get(po, []) if e["tag"] == tag]
+            if len(cs) == len(os_) and all(c["order"] in c_partner and c_partner[c["order"]] in os_ for c in cs):
+                continue  # already paired among themselves
+            for e in cs:
+                c_reset.update(x["order"] for x in subtree(e, c_kids))
+            for e in os_:
+                o_reset.update(x["order"] for x in subtree(e, o_kids))
+            left = _alignment(os_, cs, eq, True)
+            right = _alignment(os_, cs, eq, False)
+            sure = {i: j for i, j in left.items() if right.get(i) == j}
+            unsure_o = (set(left) | set(right)) - set(sure)
+            unsure_c = (set(left.values()) | set(right.values())) - set(sure.values())
+            for i in unsure_o:
+                o_unverified.update(x["order"] for x in subtree(os_[i], o_kids))
+            for j in unsure_c:
+                c_unverified.update(x["order"] for x in subtree(cs[j], c_kids))
+            for i, j in sure.items():
+                o_top, c_top = os_[i], cs[j]
+                o_base, c_base = o_top["record"]["identity"]["selector"], c_top["record"]["identity"]["selector"]
+                o_rel = {x["record"]["identity"]["selector"][len(o_base):]: x for x in subtree(o_top, o_kids)}
+                for x in subtree(c_top, c_kids):
+                    y = o_rel.get(x["record"]["identity"]["selector"][len(c_base):])
+                    if y is not None:
+                        new_pairs.append(("aligned", y, x))
+    kept = [p for p in pairs if p[1]["order"] not in o_reset and p[2]["order"] not in c_reset]
+    pairs = sorted(kept + new_pairs, key=lambda p: p[2]["order"])
+    paired_c = {c["order"] for _, _, c in pairs}
+    paired_o = {o["order"] for _, o, _ in pairs}
+    chrome_only = [c for c in chrome if c["order"] not in paired_c and c["order"] not in c_unverified
+                   and (c["order"] in c_reset or any(c is x for x in chrome_only))]
+    ours_only = [o for o in ours if o["order"] not in paired_o and o["order"] not in o_unverified
+                 and (o["order"] in o_reset or any(o is x for x in ours_only))]
+    return pairs, chrome_only, ours_only, c_unverified, o_unverified
+
+
 def in_head(rec: Dict[str, Any]) -> bool:
     sel = rec["identity"]["selector"]
     return sel.startswith("html > head")
@@ -470,8 +592,6 @@ def compare(ours_doc: Dict[str, Any], chrome_doc: Dict[str, Any],
     else:
         skip = lambda e: False  # noqa: E731
     pairs, chrome_only, ours_only, ambiguous = ed.match(ours, chrome)
-    partner = {c["order"]: (key, o) for key, o, c in pairs}
-    ours_paired = {o["order"] for _, o, _ in pairs}
     ambiguous_keys = {a["key"] for a in ambiguous}
 
     # Tree parents from each side's own unique structural selectors.
@@ -485,6 +605,11 @@ def compare(ours_doc: Dict[str, Any], chrome_doc: Dict[str, Any],
 
     chrome_parent = parents(chrome)
     ours_parent = parents(ours)
+    pairs, chrome_only, ours_only, c_unverified, o_unverified = _realign(
+        pairs, chrome_only, ours_only, chrome, ours, chrome_parent, ours_parent, text_tolerance)
+    partner = {c["order"]: (key, o) for key, o, c in pairs}
+    chrome_missing = {c["order"] for c in chrome_only}
+    ours_extra = {o["order"] for o in ours_only}
     stage_of: Dict[int, Optional[str]] = {}
     divergent: List[Dict[str, Any]] = []
 
@@ -508,7 +633,7 @@ def compare(ours_doc: Dict[str, Any], chrome_doc: Dict[str, Any],
                 if d:
                     found = (stage, d)
                     break
-        elif c["selector"] in ambiguous_keys:
+        elif c["selector"] in ambiguous_keys or c["order"] in c_unverified:
             stage_of[c["order"]] = None  # unpaired by design: not a divergence
             continue
         else:
@@ -520,6 +645,8 @@ def compare(ours_doc: Dict[str, Any], chrome_doc: Dict[str, Any],
         # Not a root under a parent that diverges at an earlier stage; a
         # same-stage consequence is settled below, once every delta is known.
         is_root = pstage is None or STAGE_RANK[pstage] >= STAGE_RANK[found[0]]
+        if c["order"] in chrome_missing and par and par["order"] in chrome_missing:
+            is_root = False  # inside a missing element: missing with it
         cbox = _rect((rec.get("box") or {}).get("border_box"))
         obox = _rect(((partner.get(c["order"]) or (None, {"record": {}}))[1]["record"].get("box") or {}).get("border_box"))
         if found[0] == "GEOMETRY" and cbox and obox:
@@ -576,16 +703,19 @@ def compare(ours_doc: Dict[str, Any], chrome_doc: Dict[str, Any],
     # Extra elements: ours only. A root unless their parent's partner diverges earlier.
     chrome_order_of_ours = {o["order"]: c["order"] for _, o, c in pairs}
     for o in ours_only:
-        if o["selector"] in ambiguous_keys or skip(o):
+        if o["selector"] in ambiguous_keys or o["order"] in o_unverified or skip(o):
             continue
         rec = o["record"]
         par = ours_parent[o["order"]]
         pc = chrome_order_of_ours.get(par["order"]) if par else None
+        inside_extra = bool(par and par["order"] in ours_extra)
         obox = _rect((rec.get("box") or {}).get("border_box"))
         divergent.append({
             "order": None,
             "stage": "DOM",
-            "root": True,  # DOM is the earliest stage: an extra element is always a root
+            # DOM is the earliest stage: an extra element is a root, unless
+            # it is inside another extra element.
+            "root": not inside_extra,
             "selector": rec["identity"]["selector"],
             "oracle_key": rec["identity"]["oracle_key"],
             "tag": rec["identity"]["tag"],
@@ -647,6 +777,7 @@ def compare(ours_doc: Dict[str, Any], chrome_doc: Dict[str, Any],
             "chrome_only": len(chrome_only),
             "ours_only": len(ours_only),
             "ambiguous": sorted(ambiguous, key=lambda a: a["key"]),
+            "unverified": len(c_unverified) + len(o_unverified),
             "truncated": bool(ours_doc.get("truncated") or chrome_doc.get("truncated")),
         },
         "first": public(first),

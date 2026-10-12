@@ -53,10 +53,14 @@ def test_identical_records_have_no_divergence():
 
 
 def test_a_missing_element_is_a_dom_root():
-    doc = ours()
+    # The cards' text lengths (10, 11) are within the tolerance, so which one
+    # is missing could not be told; this card is made distinguishable.
+    chrome = copy.deepcopy(CHROME)
+    rec(chrome, CARD2)["tree"]["text_length"] = 40
+    doc = copy.deepcopy(chrome)
     doc["elements"] = [e for e in doc["elements"] if e["identity"]["selector"] != CARD2]
     rec(doc, SECTION)["tree"]["child_count"] = 1
-    r = run(doc)
+    r = idf.compare(doc, chrome)
     # The section's child count differs first in document order; the missing
     # card is where it enters.
     assert r["first"]["stage"] == "DOM"
@@ -71,6 +75,7 @@ def test_an_extra_element_is_a_dom_root():
     extra = copy.deepcopy(rec(doc, CARD2))
     extra["identity"].update(selector=f"{SECTION} > div:nth-child(3)",
                              oracle_key="body > section > div.card:nth-of-type(3)")
+    extra["tree"]["text_length"] = 40  # distinguishable from the card it copies
     doc["elements"].append(extra)
     r = run(doc)
     assert r["matching"]["ours_only"] == 1
