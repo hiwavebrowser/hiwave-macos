@@ -1,0 +1,239 @@
+{
+ "description": "Category board, week of 2026-10-12 (Plan Z week 2, package B0). Six categories of five. Atlas picks, pending Pete edits. The blocked row is reported separately and never scored into the total. traits are filled from the first reading.",
+ "viewport": {
+  "width": 1280,
+  "height": 800
+ },
+ "sites": [
+  {
+   "id": "google",
+   "url": "https://www.google.com/",
+   "category": "search-portals",
+   "traits": []
+  },
+  {
+   "id": "bing",
+   "url": "https://www.bing.com/",
+   "category": "search-portals",
+   "traits": []
+  },
+  {
+   "id": "duckduckgo",
+   "url": "https://duckduckgo.com/",
+   "category": "search-portals",
+   "traits": []
+  },
+  {
+   "id": "yahoo",
+   "url": "https://www.yahoo.com/",
+   "category": "search-portals",
+   "traits": []
+  },
+  {
+   "id": "msn",
+   "url": "https://www.msn.com/",
+   "category": "search-portals",
+   "traits": []
+  },
+  {
+   "id": "wikipedia",
+   "url": "https://en.wikipedia.org/wiki/Web_browser",
+   "category": "reference-docs",
+   "traits": []
+  },
+  {
+   "id": "github",
+   "url": "https://github.com/",
+   "category": "reference-docs",
+   "traits": []
+  },
+  {
+   "id": "mdn",
+   "url": "https://developer.mozilla.org/en-US/",
+   "category": "reference-docs",
+   "traits": []
+  },
+  {
+   "id": "stackoverflow",
+   "url": "https://stackoverflow.com/questions",
+   "category": "reference-docs",
+   "traits": []
+  },
+  {
+   "id": "pythondocs",
+   "url": "https://docs.python.org/3/",
+   "category": "reference-docs",
+   "traits": []
+  },
+  {
+   "id": "cnn",
+   "url": "https://www.cnn.com/",
+   "category": "news-editorial",
+   "traits": []
+  },
+  {
+   "id": "bbc",
+   "url": "https://www.bbc.com/",
+   "category": "news-editorial",
+   "traits": []
+  },
+  {
+   "id": "theguardian",
+   "url": "https://www.theguardian.com/us",
+   "category": "news-editorial",
+   "traits": []
+  },
+  {
+   "id": "npr",
+   "url": "https://www.npr.org/",
+   "category": "news-editorial",
+   "traits": []
+  },
+  {
+   "id": "simonwillison",
+   "url": "https://simonwillison.net/tags/browser-challenge/",
+   "category": "news-editorial",
+   "traits": []
+  },
+  {
+   "id": "walmart",
+   "url": "https://www.walmart.com/",
+   "category": "shopping-listings",
+   "traits": []
+  },
+  {
+   "id": "etsy",
+   "url": "https://www.etsy.com/",
+   "category": "shopping-listings",
+   "traits": []
+  },
+  {
+   "id": "cargurus",
+   "url": "https://www.cargurus.com/",
+   "category": "shopping-listings",
+   "traits": []
+  },
+  {
+   "id": "autotrader",
+   "url": "https://www.autotrader.com/",
+   "category": "shopping-listings",
+   "traits": []
+  },
+  {
+   "id": "bringatrailer",
+   "url": "https://bringatrailer.com/",
+   "category": "shopping-listings",
+   "traits": []
+  },
+  {
+   "id": "reddit",
+   "url": "https://www.reddit.com/",
+   "category": "social-forums",
+   "traits": []
+  },
+  {
+   "id": "x",
+   "url": "https://x.com/",
+   "category": "social-forums",
+   "traits": []
+  },
+  {
+   "id": "youtube",
+   "url": "https://www.youtube.com/",
+   "category": "social-forums",
+   "traits": []
+  },
+  {
+   "id": "hackernews",
+   "url": "https://news.ycombinator.com/",
+   "category": "social-forums",
+   "traits": []
+  },
+  {
+   "id": "facebook",
+   "url": "https://www.facebook.com/",
+   "category": "social-forums",
+   "traits": []
+  },
+  {
+   "id": "shopify",
+   "url": "https://www.shopify.com/",
+   "category": "apps-product",
+   "traits": []
+  },
+  {
+   "id": "squarespace",
+   "url": "https://www.squarespace.com/",
+   "category": "apps-product",
+   "traits": []
+  },
+  {
+   "id": "lyft",
+   "url": "https://www.lyft.com/",
+   "category": "apps-product",
+   "traits": []
+  },
+  {
+   "id": "microsoft",
+   "url": "https://www.microsoft.com/en-us",
+   "category": "apps-product",
+   "traits": []
+  },
+  {
+   "id": "apple",
+   "url": "https://www.apple.com/",
+   "category": "apps-product",
+   "traits": []
+  }
+ ],
+ "blocked": [
+  {
+   "id": "ebay",
+   "url": "https://www.ebay.com/",
+   "category": "blocked",
+   "traits": [
+    "network-refusal"
+   ]
+  },
+  {
+   "id": "amazon",
+   "url": "https://www.amazon.com/",
+   "category": "blocked",
+   "traits": [
+    "network-refusal"
+   ]
+  },
+  {
+   "id": "chrono24",
+   "url": "https://www.chrono24.com/",
+   "category": "blocked",
+   "traits": [
+    "network-refusal"
+   ]
+  },
+  {
+   "id": "cars",
+   "url": "https://www.cars.com/",
+   "category": "blocked",
+   "traits": [
+    "network-refusal"
+   ]
+  },
+  {
+   "id": "nytimes",
+   "url": "https://www.nytimes.com/",
+   "category": "blocked",
+   "traits": [
+    "network-refusal"
+   ]
+  },
+  {
+   "id": "chatgpt",
+   "url": "https://chatgpt.com/",
+   "category": "blocked",
+   "traits": [
+    "network-refusal"
+   ]
+  }
+ ]
+}
