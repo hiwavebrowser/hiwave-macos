@@ -17,9 +17,15 @@ record differs:
   GEOMETRY  a box differs by more than --threshold  -> layout and sizing
   (none)    the records agree as far as both know   -> look at paint
 
-A divergence ROOT is a divergent element whose parent does not diverge at an
-earlier stage (a child of a STYLE-divergent parent that only differs in
-GEOMETRY is a consequence, not a root). See README.md for the JSON contract.
+A divergence ROOT is a divergent element that is not a consequence:
+  - its parent does not diverge at an earlier stage (a child of a
+    STYLE-divergent parent that only differs in GEOMETRY is a consequence);
+  - a GEOMETRY difference is not explained by its neighbours' deltas: moved
+    with its parent's content box or its previous sibling's far edge, a width
+    that follows the parent's, a height that follows its own children;
+  - a STYLE difference is not only an inherited value equal to the parent's
+    on both sides.
+`summary.stage_counts` counts roots only. See README.md for the JSON contract.
 
 Usage:
     python3 tools/inspector/inspector_diff.py OURS.json CHROME.json \\
@@ -348,6 +354,106 @@ def context_class(fc: Optional[str]) -> str:
     return fc.split(" of ")[0]
 
 
+# Inherited properties among STYLE_PROPERTIES: a child that carries its
+# parent's value on both sides only repeats the parent's difference.
+INHERITED = {"color", "font-family", "font-size", "font-weight", "line-height",
+             "text-align", "visibility", "white-space"}
+
+
+def _delta(o: Optional[Dict[str, float]], c: Optional[Dict[str, float]]) -> Optional[Dict[str, float]]:
+    if not o or not c:
+        return None
+    return {k: o[k] - c[k] for k in ("x", "y", "w", "h")}
+
+
+class _Boxes:
+    """Ours-minus-Chrome deltas of the paired elements' boxes, by Chrome order."""
+
+    def __init__(self, partner, chrome_by_order):
+        self.border, self.content, self.ours, self.chrome = {}, {}, {}, {}
+        for order, (_, o) in partner.items():
+            ob = o["record"].get("box") or {}
+            cb = chrome_by_order[order]["record"].get("box") or {}
+            if not (ob.get("has_box") and cb.get("has_box")):
+                continue
+            self.ours[order], self.chrome[order] = ob, cb
+            self.border[order] = _delta(_rect(ob.get("border_box")), _rect(cb.get("border_box")))
+            self.content[order] = _delta(_rect(ob.get("content_box")), _rect(cb.get("content_box")))
+
+
+def _within(v: float, lo: float, hi: float, thr: float) -> bool:
+    return lo - thr <= v <= hi + thr
+
+
+def _geometry_explained(order, boxes, parent_order, prev_order, children, cb_order, threshold) -> bool:
+    """A GEOMETRY difference that follows from its neighbours' differences.
+
+    Position: each axis moved with the parent's (or abspos containing
+    block's) content box, anywhere within the room that box gained or lost
+    (centring, distribution), or with the far edge of the previous sibling.
+    Width: unchanged, or shrank/grew with the parent's content box (top-down).
+    Height: unchanged, or equal to the change in its in-flow children's
+    extent with its own padding and border unchanged (an auto height,
+    bottom-up). Anything else is the element's own: a root.
+    """
+    d = boxes.border.get(order)
+    if d is None:
+        return False
+    own = boxes.content.get(order)
+    refs = []
+    for ref in (parent_order, cb_order):
+        rd = boxes.content.get(ref) if ref is not None else None
+        if rd:
+            refs.append(((rd["x"], rd["x"] + min(0.0, rd["w"]), rd["x"] + max(0.0, rd["w"])),
+                         (rd["y"], rd["y"] + min(0.0, rd["h"]), rd["y"] + max(0.0, rd["h"]))))
+    pd = boxes.border.get(prev_order) if prev_order is not None else None
+    if pd:
+        ex, ey = pd["x"] + pd["w"], pd["y"] + pd["h"]
+        refs.append(((ex, ex, ex), (ey, ey, ey)))
+
+    def axis(v, i):
+        return abs(v) <= threshold or any(_within(v, min(r[i][1], r[i][0]), max(r[i][2], r[i][0]), threshold)
+                                          for r in refs)
+
+    if not (axis(d["x"], 0) and axis(d["y"], 1)):
+        return False
+    pc = boxes.content.get(parent_order) if parent_order is not None else None
+    if abs(d["w"]) > threshold:
+        if not (pc and pc["w"] * d["w"] > 0 and abs(d["w"]) <= abs(pc["w"]) + threshold):
+            return False
+    if abs(d["h"]) > threshold:
+        if own is None or abs(d["h"] - own["h"]) > threshold:
+            return False  # its own padding or border changed
+        flow = [k for k in children if k in boxes.border
+                and not (boxes.chrome[k].get("formatting_context") or "").startswith(("absolute", "fixed"))]
+        if not flow:
+            return False
+
+        def extent(side):
+            top = side[order]["content_box"]["y"]
+            return max(side[k]["border_box"]["y"] + side[k]["border_box"]["h"] for k in flow) - top
+
+        if abs((extent(boxes.ours) - extent(boxes.chrome)) - own["h"]) > threshold:
+            return False
+    return True
+
+
+def _inherited_only(fields, ours_parent, chrome_parent) -> List[Dict[str, Any]]:
+    """The STYLE fields that are not just the parent's inherited value."""
+    if not ours_parent or not chrome_parent:
+        return fields
+    op, cp = ours_parent.get("style") or {}, chrome_parent.get("style") or {}
+    out = []
+    for f in fields:
+        p = f.get("property")
+        if (p in INHERITED
+                and normalize_value(p, op.get(p)) == normalize_value(p, f["ours"])
+                and normalize_value(p, cp.get(p)) == normalize_value(p, f["chrome"])):
+            continue
+        out.append(f)
+    return out
+
+
 def in_head(rec: Dict[str, Any]) -> bool:
     sel = rec["identity"]["selector"]
     return sel.startswith("html > head")
@@ -411,6 +517,8 @@ def compare(ours_doc: Dict[str, Any], chrome_doc: Dict[str, Any],
         if not found:
             continue
         pstage = stage_of.get(par["order"]) if par else None
+        # Not a root under a parent that diverges at an earlier stage; a
+        # same-stage consequence is settled below, once every delta is known.
         is_root = pstage is None or STAGE_RANK[pstage] >= STAGE_RANK[found[0]]
         cbox = _rect((rec.get("box") or {}).get("border_box"))
         obox = _rect(((partner.get(c["order"]) or (None, {"record": {}}))[1]["record"].get("box") or {}).get("border_box"))
@@ -431,6 +539,39 @@ def compare(ours_doc: Dict[str, Any], chrome_doc: Dict[str, Any],
             "fields": found[1],
             "_parent_order": par["order"] if par else None,
         })
+
+    # Same-stage consequences are not roots.
+    chrome_by_order = {c["order"]: c for c in chrome}
+    by_selector = {c["record"]["identity"]["selector"]: c["order"] for c in chrome}
+    children: Dict[int, List[int]] = {}
+    for c in chrome:
+        p = chrome_parent[c["order"]]
+        if p:
+            children.setdefault(p["order"], []).append(c["order"])
+    prev_sibling = {}
+    for kids in children.values():
+        for a, b in zip(kids, kids[1:]):
+            prev_sibling[b] = a
+    boxes = _Boxes(partner, chrome_by_order)
+    for d in divergent:
+        if not d["root"]:
+            continue
+        order, par = d["order"], d["_parent_order"]
+        # Only a border-box difference can be inherited from neighbours: a
+        # content-box one under an unchanged border box is the element's own.
+        if d["stage"] == "GEOMETRY" and all(f.get("field") == "border_box" for f in d["fields"]):
+            fc = d["formatting_context"] or ""
+            cb = ((chrome_by_order[order]["record"].get("box") or {}).get("containing_block") or {}).get("selector")
+            cb_order = by_selector.get(cb) if fc.startswith("absolute") and cb else None
+            if _geometry_explained(order, boxes, par, prev_sibling.get(order), children.get(order, []),
+                                   cb_order, threshold):
+                d["root"] = False
+        elif d["stage"] == "STYLE" and par is not None and par in partner:
+            own = _inherited_only(d["fields"], partner[par][1]["record"], chrome_by_order[par]["record"])
+            if not own:
+                d["root"] = False
+            else:
+                d["fields"] = own
 
     # Extra elements: ours only. A root unless their parent's partner diverges earlier.
     chrome_order_of_ours = {o["order"]: c["order"] for _, o, c in pairs}

@@ -460,3 +460,12 @@ def test_chrome_background_image_scrubbing():
     p = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True)
     assert p.returncode == 0, p.stderr
     assert json.loads(p.stdout) == [e for _, _, e in SCRUB_CASES]
+
+
+def test_an_own_padding_change_under_a_moved_parent_stays_a_root():
+    doc = ours()
+    shift(doc, SECTION, h=5)
+    rec(doc, CARD2)["box"]["content_box"]["x"] += 5  # padding-left, border box unchanged
+    rec(doc, CARD2)["box"]["content_box"]["w"] -= 5
+    r = run(doc)
+    assert CARD2 in [d["selector"] for d in r["roots"]]
