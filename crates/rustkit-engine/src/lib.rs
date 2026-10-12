@@ -52,9 +52,13 @@ pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::Compos
 /// itself, so a test must not keep a GPU engine alive on its own thread while
 /// waiting for such a helper; that would wait on itself.
 ///
-/// Waiting is bounded: after [`test_gpu::MAX_WAIT`] the waiter panics and
-/// names the holder, so a test that hangs while holding the GPU fails the
-/// tests queued behind it loudly instead of stalling the binary silently.
+/// Waiting is bounded per holder: when one test has held the guard for
+/// [`test_gpu::MAX_WAIT`] the waiter panics and names it, so a test that
+/// hangs while holding the GPU fails the tests queued behind it loudly
+/// instead of stalling the binary silently. The limit used to be on the
+/// waiter's whole time in the queue: in a full run on a loaded machine the
+/// queue of GPU tests is longer than that, and tests failed naming whichever
+/// test happened to hold the GPU at the time.
 #[cfg(test)]
 pub(crate) mod test_gpu {
     use std::cell::RefCell;
@@ -111,9 +115,16 @@ pub(crate) mod test_gpu {
         limit: Duration,
     ) -> std::sync::MutexGuard<'a, Option<String>> {
         let mut holder = holder.lock().unwrap_or_else(|e| e.into_inner());
-        let deadline = std::time::Instant::now() + limit;
+        let mut deadline = std::time::Instant::now() + limit;
+        let mut waiting_on: Option<String> = None;
         while let Some(other) = holder.as_ref() {
             let now = std::time::Instant::now();
+            // The limit is on one test's hold, not on the length of the
+            // queue: when the holder changes, the queue has moved.
+            if waiting_on.as_deref() != Some(other.as_str()) {
+                waiting_on = Some(other.clone());
+                deadline = now + limit;
+            }
             if now >= deadline {
                 panic!(
                     "GPU test guard: waited {}s for `{other}` to finish with the GPU; \
