@@ -4662,6 +4662,26 @@ fn apply_align_self(
         Length::Calc(_) => child.length_to_px(&child.style.height, cell_height),
         _ => cell_height,
     };
+    // A definite `max-height` and `min-height` bound an explicit height (max
+    // first, then min, CSS 2.1 10.7), as the inline axis does above. google's
+    // logo is `height: 100%; max-height: 92px` in a 150px row and was 150
+    // tall. Both are the SPECIFIED sizes, so `box-sizing` covers them alike.
+    // An `auto` height is left to the stretch and min/max passes that follow.
+    let definite = |l: &Length| match l {
+        Length::Auto | Length::FitContent | Length::Percent(_) => None,
+        Length::Calc(sum) if sum.percent != 0.0 => None,
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => None,
+        l => Some(child.length_to_px(l, 0.0)),
+    };
+    let mut child_height = child_height;
+    if has_explicit_height {
+        if let Some(max_h) = definite(&child.style.max_height) {
+            child_height = child_height.min(max_h);
+        }
+        if let Some(min_h) = definite(&child.style.min_height) {
+            child_height = child_height.max(min_h);
+        }
+    }
 
     match align {
         AlignSelf::FlexStart | AlignSelf::Auto => (cell_y, child_height),

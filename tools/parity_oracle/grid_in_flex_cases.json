@@ -91,6 +91,11 @@
    "chrome_boxes": "x:0:0:600:170 m:0:0:600:150 a:0:58:600:92 b:0:0:600:150 s:0:150:600:20"
   },
   {
+   "name": "percent-height-item-with-a-max-height-in-a-min-height-grid-in-a-column",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{display:flex;flex-direction:column;width:600px}#m{display:grid;min-height:150px;height:calc(100% - 560px);max-height:290px}#a{grid-area:1/1;height:100%;max-height:92px}#b{grid-area:1/1;height:100%}#s{height:20px}</style></head><body><div id=x><div id=m><div id=a><div style='height:92px'></div></div><div id=b><div style='height:40px'></div></div></div><div id=s>after</div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:170 m:0:0:600:150 a:0:0:600:92 b:0:0:600:150 s:0:150:600:20"
+  },
+  {
    "name": "two-items-in-one-cell-in-a-block",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:600px}#m{display:grid}#a{grid-area:1/1;height:100%;max-height:92px}#b{grid-area:1/1;height:100%}#s{height:20px}</style></head><body><div id=x><div id=m><div id=a><div style='height:92px'></div></div><div id=b><div style='height:40px'></div></div></div><div id=s>after</div></div></body></html>",
    "chrome_boxes": "x:0:0:600:112 m:0:0:600:92 a:0:0:600:92 b:0:0:600:92 s:0:92:600:20"

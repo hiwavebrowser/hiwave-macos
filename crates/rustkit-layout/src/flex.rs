@@ -909,9 +909,21 @@ fn layout_flex_container_at(
                     // does before its grid pass. Without the pass here the
                     // items stayed stacked as blocks, whatever the tracks
                     // (reddit's feed: the sidebar under the feed, H26b).
+                    //
+                    // Its height is the one the flex algorithm decided, when
+                    // it decided one. The flow above has just written the
+                    // items' stacked height over it, and a grid whose
+                    // `height` is not `auto` takes what it is handed as its
+                    // own height: google's logo block (two items in one
+                    // cell, `height: calc(100% - 560px)`) was laid out 184
+                    // tall, 92 + 92, in a 150px box, and on a doodle day 460.
                     if item.layout_box.style.display.is_grid() {
                         let inner = item.layout_box.dimensions.content;
-                        crate::grid::layout_grid_container(item.layout_box, inner.width, inner.height);
+                        let height = resolved_main_height
+                            .or(definite_cross_height)
+                            .or(fixed_by_flex)
+                            .unwrap_or(inner.height);
+                        crate::grid::layout_grid_container(item.layout_box, inner.width, height);
                     }
                     // A flex item is a formatting-context root, so its last
                     // in-flow child's bottom margin never collapses through
