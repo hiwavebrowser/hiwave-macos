@@ -3717,8 +3717,14 @@ impl LayoutBox {
             );
             // Then apply flex layout algorithm. See the sibling call in
             // `layout_with_definite_height` for why no containing block goes
-            // over from here.
-            flex::layout_flex_container(self, &self.dimensions.clone());
+            // over from here. A percentage height resolved above is the
+            // column's definite main size; style alone cannot say so.
+            match definite_for_children {
+                Some(h) if flex::has_percentage(&self.style.height) => {
+                    flex::layout_flex_container_at_resolved_percent_height(self, h)
+                }
+                _ => flex::layout_flex_container(self, &self.dimensions.clone()),
+            }
         } else if self.style.display.is_grid() {
             // For grid containers, layout children normally first
             self.layout_block_children_with_collapse(

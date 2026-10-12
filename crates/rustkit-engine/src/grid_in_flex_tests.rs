@@ -43,26 +43,17 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// counts as the whole 600 toward its column, so the empty first column is 0
 /// wide; in Chromium the columns are 200 and 400.
 ///
-/// The last one is google's logo block (two `height: 100%` items in one cell
-/// of a grid whose height is `calc(100% - 560px)`, in a column). The items
-/// no longer take the height of the two stacked as blocks, the one with a
-/// `max-height` keeps it, and its `margin-top: auto` puts it at the bottom
-/// of the row; `two-items-in-one-cell-of-a-calc-height-grid-in-an-auto-
-/// height-column` and `percent-height-item-with-a-max-height-in-a-min-
-/// height-grid-in-a-column` pin those. What is left:
-///
-/// `two-items-in-one-cell-of-a-calc-height-grid-in-a-column`: the grid's
-/// `calc(100% - 560px)` is not resolved against the column's definite
-/// height: the grid is its `min-height`, 150, where Chromium has 240.
+/// google's logo block (two `height: 100%` items in one cell of a grid whose
+/// height is `calc(100% - 560px)`, in a column) is no gap any more:
+/// `two-items-in-one-cell-of-a-calc-height-grid-in-a-column` matches since a
+/// `height: 100%` column hands its items the height the block pass resolved.
 ///
 /// The `percent-height-column-*` pages have no grid: they are the column
 /// google's logo block sits in, a flex column whose own `height` is a
-/// percentage (`html, body, #x { height: 100% }`). The flex pass reads a
-/// definite main size from style alone, so such a column is indefinite to
-/// it: a `height: 25%` item is its text (20, Chromium 200), a `flex: 1`
-/// item does not grow (20, Chromium 780), `justify-content: center` leaves
-/// the items at the top, and a border-box column with padding does the
-/// same.
+/// percentage (`html, body, #x { height: 100% }`). The block pass resolves
+/// that height and hands it to the flex pass, so a `height: 25%` item, a
+/// `flex: 1` item, `justify-content: center` and a border-box column with
+/// padding are as in Chromium. Two neighbours are not:
 ///
 /// `percent-height-column-items-shrink`: a `height: 200px` item in an 80px
 /// column stays 200; Chromium shrinks it to 60 beside its 20px sibling.
@@ -71,14 +62,9 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// is 400 tall is 110; Chromium has 200.
 const GAPS: &[&str] = &[
     "span-by-row-end-in-a-row",
-    "two-items-in-one-cell-of-a-calc-height-grid-in-a-column",
     "percent-height-item-sharing-an-area-in-a-row",
     "bing-textarea-and-its-replica-in-a-row",
     "bing-textarea-and-its-replica-in-a-block",
-    "percent-height-column-percent-height-item",
-    "percent-height-column-flex-1-item",
-    "percent-height-column-justify-center",
-    "percent-height-column-border-box-padding",
     "percent-height-column-items-shrink",
     "percent-height-row-is-not-touched",
 ];
