@@ -185,6 +185,65 @@ class TestReceiptNoHostPaths(unittest.TestCase):
         self.assertEqual(rec["profile"], "parity")
         self.assertIsNotNone(rec["binary_sha256"])
 
+    # ── the second review of #661 ───────────────────────────────────────────
+
+    def test_a_home_directory_prints_as_a_tilde_not_the_account_name(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import receipt
+        for t, want in [("cd /Users/example && make", "cd ~ && make"),
+                        ("PATH=/usr/bin:/Users/example:/bin", "PATH=bin:~:/bin"),
+                        ("/home/example", "~"),
+                        ("/Users/example/", "~"),
+                        (r"C:\Users\example", "~"),
+                        (f"at {Path.home()}.", "at ~."),
+                        ("~example/hiwave/x.txt and ~example/", "x.txt and ~")]:
+            self.assertEqual(receipt.public_text(t, REPO), want)
+        self.assertEqual(receipt.public_path("/Users/example", REPO), "~")
+        self.assertEqual(receipt.public_path(str(Path.home()), REPO), "~")
+        rec = json.loads(run_receipt("--runs", "/Users/example", env={"RUSTKIT_HOME": "/Users/example"}))
+        self.assertEqual(rec["effective_engine_flags"]["RUSTKIT_HOME"], "~")
+        self.assertEqual(rec["raw_runs"][0]["file"], "~")
+
+    def test_an_option_word_glued_to_a_path_is_stripped(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import receipt
+        for t, want in [("-isystem/Users/example/inc", "-isysteminc"),
+                        ("-iquote/Users/example/inc -isysroot/Users/example/sdk", "-iquoteinc -isysrootsdk"),
+                        ("--L/Users/example/lib", "--Llib"),
+                        # not options: a word with a dash inside it is a relative path
+                        ("rustkit-layout/src/grid.rs and x-y/a/b", "rustkit-layout/src/grid.rs and x-y/a/b")]:
+            self.assertEqual(receipt.public_text(t, REPO), want)
+        rec = json.loads(run_receipt(env={"RUSTFLAGS": "-C opt-level=3 -isystem/Users/example/inc"}))
+        self.assertEqual(rec["rustflags"], "-C opt-level=3 -isysteminc")
+
+    def test_nothing_is_written_to_stderr(self):
+        # Python 3.12+ shows a DeprecationWarning raised in __main__ with the
+        # script's absolute path in it.
+        out = subprocess.run([sys.executable, "-W", "error::DeprecationWarning", str(RECEIPT), "--package", "T",
+                              "--binary", str(self.binary)], capture_output=True, text=True, cwd=REPO, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stderr, "")
+        rec = json.loads(out.stdout)
+        for field in ("utc", "binary_mtime_utc"):
+            self.assertRegex(rec[field], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$")
+
+    def test_the_base_is_cleaned_like_the_note(self):
+        rec = json.loads(run_receipt("--base", f"{self.outside}/x"))
+        self.assertEqual(rec["base_sha"], "x")
+        self.assertEqual(json.loads(run_receipt("--base", "5feb459a"))["base_sha"], "5feb459a")
+
+    def test_an_origin_with_a_remote_path_or_a_query_keeps_only_its_address(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import receipt
+        for origin, want in [("example@nas.local:/Users/example/m.git", "nas.local:m.git"),
+                             ("nas.local:/srv/git/m.git", "nas.local:m.git"),
+                             ("example@nas.local:~/m.git", "nas.local:m.git"),
+                             ("https://t@github.com/o/r?token=abc", "https://github.com/o/r"),
+                             ("git@github.com:hiwavebrowser/hiwave-macos.git", "git@github.com:hiwavebrowser/hiwave-macos.git")]:
+            self.assertEqual(receipt.public_repo(origin), want)
+        self.assertEqual(receipt.public_text("got https://t@github.com/o/r?token=abc&ref=main", REPO),
+                         "got https://github.com/o/r?token=REDACTED&ref=main")
+
     def test_markdown_output_is_clean_too(self):
         out = run_receipt("--markdown", "--binary", str(self.binary), "--runs", str(self.run_file))
         self.assert_clean(out)
