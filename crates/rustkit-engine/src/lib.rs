@@ -944,6 +944,39 @@ fn log_script_stopped(source: &str, elapsed_ms: u64, late: Option<std::time::Dur
     );
 }
 
+/// Starts the live turn budget (`EngineConfig::live_turn_budget_ms`) for the
+/// script about to run on `bindings`, and returns when it started. `None`
+/// when scripts are not interrupted (the board).
+fn arm_live_turn(config: &EngineConfig, bindings: &DomBindings) -> Option<std::time::Instant> {
+    if !config.interrupt_scripts_at_budget {
+        return None;
+    }
+    let now = std::time::Instant::now();
+    bindings.set_execution_deadline(Some(now + std::time::Duration::from_millis(config.live_turn_budget_ms)));
+    Some(now)
+}
+
+/// Ends what [`arm_live_turn`] started: lifts the deadline, so the page's
+/// later script runs, and returns the record of the script it stopped, if
+/// it stopped one.
+fn end_live_turn(armed: Option<std::time::Instant>, bindings: &DomBindings, source: &str) -> Option<ScriptRecord> {
+    let started = armed?;
+    let hit = bindings.take_deadline_hit();
+    let late = bindings.take_deadline_overrun();
+    bindings.set_execution_deadline(None);
+    if !hit {
+        return None;
+    }
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    log_script_stopped(source, elapsed_ms, late);
+    Some(ScriptRecord {
+        source: source.to_string(),
+        bytes: 0,
+        elapsed_ms,
+        outcome: ScriptOutcome::OverBudget,
+    })
+}
+
 /// Classify a `<script>` element. `None` for data blocks
 /// (`application/ld+json`, `text/template`, ...), which are not scripts.
 fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
@@ -2907,6 +2940,7 @@ impl Engine {
             return true;
         };
         let source = format!("event:{event_type}");
+        let armed = arm_live_turn(&self.config, bindings);
         let not_cancelled = match bindings.fire_mouse_event(target, event_type, data) {
             Ok(not_cancelled) => not_cancelled,
             Err(e) => {
@@ -2919,6 +2953,7 @@ impl Engine {
                 true
             }
         };
+        let stopped = end_live_turn(armed, bindings, &source);
         for message in bindings.take_reported_errors() {
             view.script_log.push(ScriptRecord {
                 source: source.clone(),
@@ -2927,6 +2962,7 @@ impl Engine {
                 outcome: ScriptOutcome::Threw(message),
             });
         }
+        view.script_log.extend(stopped);
         debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
         not_cancelled
     }
@@ -2960,6 +2996,10 @@ impl Engine {
         let document = view.url.clone();
         let live_requests = &mut view.live_requests;
         let mut threw: Vec<(&str, String)> = Vec::new();
+        // One budget for all the script this turn runs. This thread is the
+        // window's: until 2026-10-12 a callback that did not end held it
+        // for as long as it ran.
+        let armed = arm_live_turn(&self.config, bindings);
 
         // Timers first: what they ask of the network is answered this turn.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2969,6 +3009,10 @@ impl Engine {
             Ok(Err(e)) => threw.push(("timers", e.to_string())),
             Err(_) => threw.push(("timers", "JS engine panic".into())),
         }
+        // Whose script spent the budget: a timer's, or a response handler's
+        // below. The deadline stays set either way, so nothing more of this
+        // turn's script gets past a host call.
+        let timers_at = std::time::Instant::now();
         if let Some(policy) = policy {
             // Start what the page has asked for since the last turn. No turn
             // waits for an answer: this thread is the window's.
@@ -3017,8 +3061,16 @@ impl Engine {
                 }
             }
         }
+        let budget = std::time::Duration::from_millis(self.config.live_turn_budget_ms);
+        let stopped_in = if armed.is_some_and(|started| timers_at.duration_since(started) >= budget) {
+            "timers"
+        } else {
+            "network"
+        };
+        let stopped = end_live_turn(armed, bindings, stopped_in);
         threw.extend(bindings.take_reported_errors().into_iter().map(|message| ("timers", message)));
         out.next_timer_ms = bindings.next_timer_delay();
+        view.script_log.extend(stopped);
         for (source, message) in threw {
             if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
                 break;
@@ -3275,10 +3327,15 @@ impl Engine {
             shift_key: shift,
             ..Default::default()
         };
+        let armed = arm_live_turn(&self.config, bindings);
         let not_cancelled = bindings.fire_key_event(node, event_type, &data).unwrap_or_else(|e| {
             debug!(?id, event_type, error = %e, "key listener threw");
             true
         });
+        let stopped = end_live_turn(armed, bindings, &format!("event:{event_type}"));
+        if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
+            view.script_log.push(stopped);
+        }
         if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
             debug!(?id, error = %e, "relayout after key event failed");
         }
@@ -14604,6 +14661,13 @@ impl EngineBuilder {
     /// (`EngineConfig::interrupt_scripts_at_budget`).
     pub fn interrupt_scripts_at_budget(mut self, interrupt: bool) -> Self {
         self.config.interrupt_scripts_at_budget = interrupt;
+        self
+    }
+
+    /// Budget for the script of one live turn or one input event
+    /// (`EngineConfig::live_turn_budget_ms`).
+    pub fn live_turn_budget_ms(mut self, ms: u64) -> Self {
+        self.config.live_turn_budget_ms = ms;
         self
     }
 

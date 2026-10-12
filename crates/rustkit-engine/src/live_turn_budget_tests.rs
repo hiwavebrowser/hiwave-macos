@@ -13,7 +13,7 @@ use crate::script_net_tests::serve_routes;
 
 /// About nine million callbacks, with a host call every 4096: far longer
 /// than the budgets below, and stoppable at a host call.
-const SPIN: &str = "var spun = 0; var row = new Array(3000).fill(0);
+const SPIN: &str = "window.started = true; var spun = 0; var row = new Array(3000).fill(0);
 row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 0) { document.getElementById('p'); } }); });";
 
 fn config() -> EngineConfig {
@@ -72,7 +72,7 @@ fn a_timer_callback_still_running_at_the_turn_budget_is_stopped() {
     // The page is still a page: its next timer runs on a later turn, and
     // script runs in it.
     runtime().block_on(engine.pump_live(view, 1_000));
-    assert_eq!(engine.execute_script(view, "window.after === true && spun > 0").unwrap(), "Boolean(true)");
+    assert_eq!(engine.execute_script(view, "window.after === true && window.started === true").unwrap(), "Boolean(true)");
     assert_eq!(engine.execute_script(view, "document.title").unwrap(), r#"String("after")"#);
 }
 
@@ -89,7 +89,7 @@ document.getElementById('p').addEventListener('click', function () {{ {SPIN} }})
     let took = started.elapsed();
     assert!(took < std::time::Duration::from_millis(1500), "the listener ran on past the turn budget: {took:?}");
     assert_eq!(over_budget(&engine, view), ["event:click"], "{:#?}", engine.script_log(view));
-    assert_eq!(engine.execute_script(view, "document.title = 'x'; spun > 0").unwrap(), "Boolean(true)");
+    assert_eq!(engine.execute_script(view, "document.title = 'x'; window.started === true").unwrap(), "Boolean(true)");
 }
 
 /// The board's frames are taken with scripts that run to their end.

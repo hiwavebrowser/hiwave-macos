@@ -77,6 +77,16 @@ pub struct RustKitView {
 /// the hand tests of 2026-10-08 needed more than about 8 s.
 const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
 
+/// The longest the script of one turn after the load may run: the timer
+/// callbacks and response handlers of one pass of the live loop, or the
+/// listeners of one click or key. Until 2026-10-12 there was no limit, and a
+/// callback that did not end held the window for good.
+///
+/// 5 s is the figure the thread-ownership design recommends (its open
+/// question 2); it is Pete's to set. It bounds the freeze and does not
+/// remove it: the script still runs on the window's thread.
+const LIVE_TURN_BUDGET_MS: u64 = 5_000;
+
 /// The engine builder for content views, before the shield is attached.
 fn content_engine_builder() -> EngineBuilder {
     // Browser-plausible UA. "HiWave/1.0 RustKit/1.0" alone got us
@@ -93,6 +103,7 @@ fn content_engine_builder() -> EngineBuilder {
         // the window's thread, and ebay.com's module graph held it for
         // minutes (Pete had to kill the app, 2026-10-08).
         .interrupt_scripts_at_budget(true)
+        .live_turn_budget_ms(LIVE_TURN_BUDGET_MS)
 }
 
 /// `HIWAVE_RENDER_EVERY_WAKE=1`: draw at every wake of the event loop,
@@ -678,6 +689,13 @@ mod tests {
         // the engine's own default (parity-capture, the board) stay at 5 s.
         assert_eq!(builder.config().timer_horizon_ms, 5_000);
         assert_eq!(rustkit_engine::EngineConfig::default().script_budget_ms, 5_000);
+    }
+
+    #[test]
+    fn content_views_get_a_budget_for_script_after_the_load() {
+        let config = content_engine_builder().config().clone();
+        assert!(config.interrupt_scripts_at_budget);
+        assert_eq!(config.live_turn_budget_ms, 5_000);
     }
 
     #[test]
