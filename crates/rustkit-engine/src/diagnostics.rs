@@ -209,6 +209,9 @@ struct BoxContext<'a> {
     opacity: f32,
     opacity_layer: bool,
     transform_layer: bool,
+    /// Page-space affine of this box's own and its ancestors' transforms
+    /// (the painter's, `own_transform_affine`); `None` = untransformed.
+    affine: Option<[f32; 6]>,
 }
 
 #[derive(Clone, Copy)]
@@ -219,6 +222,7 @@ struct Inherited<'a> {
     opacity: f32,
     opacity_layer: bool,
     transform_layer: bool,
+    affine: Option<[f32; 6]>,
 }
 
 /// Clip ancestors, nearest first, as a stack-allocated list.
@@ -255,6 +259,10 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
         let transformed = !s.effective_transform().is_identity();
         let opacity_layer = inh.opacity_layer || s.opacity < 1.0;
         let transform_layer = inh.transform_layer || transformed;
+        let affine = match (inh.affine, own_transform_affine(b)) {
+            (Some(outer), Some(own)) => Some(compose_affine(outer, own)),
+            (outer, own) => outer.or(own),
+        };
         if let Some(node) = b.node_id {
             match out.get_mut(&node) {
                 Some(ctx) => ctx.boxes.push(b),
@@ -284,6 +292,7 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
                             opacity,
                             opacity_layer,
                             transform_layer,
+                            affine,
                         },
                     );
                 }
@@ -301,6 +310,7 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
             opacity,
             opacity_layer,
             transform_layer,
+            affine,
         };
         let own = ClipLink { clip: b, up: clip };
         let child_clip = if element && clips(b) { Some(&own) } else { clip };
@@ -316,6 +326,7 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
         opacity: 1.0,
         opacity_layer: false,
         transform_layer: false,
+        affine: None,
     };
     walk(root, inh, None, &mut out);
     out
@@ -502,6 +513,7 @@ impl<'a> Builder<'a> {
                     opacity: 1.0,
                     opacity_layer: false,
                     transform_layer: false,
+                    affine: None,
                 });
                 root_stand_in = Some(raw);
             }
@@ -730,6 +742,28 @@ impl<'a> Builder<'a> {
             notes.push("clip ancestry does not model an abspos box escaping a non-positioned clip".into());
         }
 
+        // getBoundingClientRect is the bounding box of the transformed
+        // border box. Padding and content boxes stay rects only while every
+        // transform on the chain keeps axes (translate, scale).
+        let (mut padding_box, mut content_box) = (Some(padding), Some(content));
+        if let Some(m) = ctx.affine {
+            let map = |r: Rect| {
+                let (x, y, w, h) = transformed_bounds(m, r.x, r.y, r.width, r.height);
+                Rect { x, y, width: w, height: h }
+            };
+            border = map(border);
+            if m[1].abs() < 1e-6 && m[2].abs() < 1e-6 {
+                padding_box = Some(map(padding));
+                content_box = Some(map(content));
+            } else {
+                padding_box = None;
+                content_box = None;
+                for f in ["box.padding_box", "box.content_box"] {
+                    unavailable.insert(f.into(), "not a rect under a rotating or skewing transform".into());
+                }
+            }
+            notes.push("containing block and clip ancestry are computed on untransformed boxes".into());
+        }
         let viewport_border = to_viewport(border, scroll);
         let (vw, vh) = (self.src.viewport.0 as f32, self.src.viewport.1 as f32);
         let outside = viewport_border.x + viewport_border.w <= 0.0
@@ -739,8 +773,8 @@ impl<'a> Builder<'a> {
         let layout_box = BoxInfo {
             has_box: true,
             border_box: Some(viewport_border),
-            padding_box: Some(to_viewport(padding, scroll)),
-            content_box: Some(to_viewport(content, scroll)),
+            padding_box: padding_box.map(|r| to_viewport(r, scroll)),
+            content_box: content_box.map(|r| to_viewport(r, scroll)),
             containing_block,
             formatting_context: Some(fc),
             ..Default::default()
