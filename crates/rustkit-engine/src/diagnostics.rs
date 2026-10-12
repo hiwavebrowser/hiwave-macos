@@ -1035,7 +1035,8 @@ impl Engine {
     /// app can therefore call it from the window thread between turns, and it
     /// answers from the last completed layout even while the page has script
     /// work pending. A selector is matched with the cascade's matcher; an
-    /// invalid one is an error.
+    /// invalid one is an error. A point is in viewport CSS px; one outside
+    /// the viewport matches nothing, as `elementFromPoint`.
     pub fn element_diagnostics(
         &self,
         id: EngineViewId,
@@ -1047,6 +1048,13 @@ impl Engine {
         let src = self.diagnostics_source(view, &page)?;
         let node = match target {
             DiagnosticTarget::Node(raw) => src.document.get_node(rustkit_dom::NodeId::new(*raw)),
+            // As `elementFromPoint`: a point outside the viewport hits nothing,
+            // even where the document has content there.
+            DiagnosticTarget::Point { x, y }
+                if !(*x >= 0.0 && *y >= 0.0 && *x < src.viewport.0 as f32 && *y < src.viewport.1 as f32) =>
+            {
+                None
+            }
             DiagnosticTarget::Point { x, y } => src
                 .layout
                 .and_then(|l| l.hit_test(x + src.scroll.0, y + src.scroll.1))
