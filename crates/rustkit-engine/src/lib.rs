@@ -837,6 +837,10 @@ const LIVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// open.
 const MAX_LIVE_SCRIPT_RECORDS: usize = 2_000;
 
+/// How long the console line about a stopped script may take
+/// ([`end_live_turn`]).
+const STOP_NOTE_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// How a page `<script>` is scheduled, per its `type`, `src`, `async`
 /// and `defer` attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -958,8 +962,15 @@ fn arm_live_turn(config: &EngineConfig, bindings: &DomBindings) -> Option<std::t
 
 /// Ends what [`arm_live_turn`] started: lifts the deadline, so the page's
 /// later script runs, and returns the record of the script it stopped, if
-/// it stopped one.
-fn end_live_turn(armed: Option<std::time::Instant>, bindings: &DomBindings, source: &str) -> Option<ScriptRecord> {
+/// it stopped one. The page's console gets a line too: the stopped script
+/// cannot catch the stop, so without it nothing the page's author can read
+/// says why a callback ended part-way.
+fn end_live_turn(
+    config: &EngineConfig,
+    armed: Option<std::time::Instant>,
+    bindings: &DomBindings,
+    source: &str,
+) -> Option<ScriptRecord> {
     let started = armed?;
     let hit = bindings.take_deadline_hit();
     let late = bindings.take_deadline_overrun();
@@ -969,6 +980,12 @@ fn end_live_turn(armed: Option<std::time::Instant>, bindings: &DomBindings, sour
     }
     let elapsed_ms = started.elapsed().as_millis() as u64;
     log_script_stopped(source, elapsed_ms, late);
+    // `console.warn` may be the page's own function by now, so it gets a
+    // limit as well.
+    let note = format!("Script stopped: it ran past {} ms ({source})", config.live_turn_budget_ms);
+    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
+    let _ = bindings.evaluate(&format!("console.warn({})", serde_json::Value::String(note)));
+    bindings.set_execution_deadline(None);
     Some(ScriptRecord {
         source: source.to_string(),
         bytes: 0,
@@ -1968,14 +1985,19 @@ impl Engine {
 
         if let Some(view) = self.views.get_mut(&id) {
             if let Some(bindings) = view.bindings.as_ref() {
-                let fired = bindings
-                    .set_dimensions(bounds.width as f64, bounds.height as f64)
-                    .and_then(|()| {
-                        bindings.fire_lifecycle_event(
-                            rustkit_bindings::LifecycleTarget::Window,
-                            "resize",
-                        )
-                    });
+                let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
+                let armed = arm_live_turn(&self.config, bindings);
+                let fired = sized.and_then(|()| {
+                    bindings.fire_lifecycle_event(
+                        rustkit_bindings::LifecycleTarget::Window,
+                        "resize",
+                    )
+                });
+                let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
+                // A stopped listener's error is the stop itself, which has
+                // its own record.
+                let fired = if stopped.is_some() { Ok(()) } else { fired };
+                view.script_log.extend(stopped);
                 if let Err(e) = fired {
                     view.script_log.push(ScriptRecord {
                         source: "event:resize".into(),
@@ -2941,19 +2963,24 @@ impl Engine {
         };
         let source = format!("event:{event_type}");
         let armed = arm_live_turn(&self.config, bindings);
-        let not_cancelled = match bindings.fire_mouse_event(target, event_type, data) {
+        let fired = bindings.fire_mouse_event(target, event_type, data);
+        let stopped = end_live_turn(&self.config, armed, bindings, &source);
+        let not_cancelled = match fired {
             Ok(not_cancelled) => not_cancelled,
             Err(e) => {
-                view.script_log.push(ScriptRecord {
-                    source: source.clone(),
-                    bytes: 0,
-                    elapsed_ms: 0,
-                    outcome: ScriptOutcome::Threw(e.to_string()),
-                });
+                // A stopped listener's error is the stop itself, which has
+                // its own record.
+                if stopped.is_none() {
+                    view.script_log.push(ScriptRecord {
+                        source: source.clone(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(e.to_string()),
+                    });
+                }
                 true
             }
         };
-        let stopped = end_live_turn(armed, bindings, &source);
         for message in bindings.take_reported_errors() {
             view.script_log.push(ScriptRecord {
                 source: source.clone(),
@@ -3000,19 +3027,29 @@ impl Engine {
         // window's: until 2026-10-12 a callback that did not end held it
         // for as long as it ran.
         let armed = arm_live_turn(&self.config, bindings);
+        let budget = std::time::Duration::from_millis(self.config.live_turn_budget_ms);
+        // Whether the turn's budget is gone. The deadline stays set to the
+        // end of the turn, so from then on any script the turn starts is
+        // refused at its first host call: none is started.
+        let spent = || armed.is_some_and(|started| started.elapsed() >= budget);
+        // Where in `threw` the error that unwound a stopped script is. The
+        // stop has its own record, and the error reads as the loop limit's.
+        let mut unwound = None;
 
         // Timers first: what they ask of the network is answered this turn.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
         })) {
             Ok(Ok(ran)) => out.timers_ran = ran,
-            Ok(Err(e)) => threw.push(("timers", e.to_string())),
+            Ok(Err(e)) => {
+                unwound = spent().then_some(threw.len());
+                threw.push(("timers", e.to_string()));
+            }
             Err(_) => threw.push(("timers", "JS engine panic".into())),
         }
         // Whose script spent the budget: a timer's, or a response handler's
-        // below. The deadline stays set either way, so nothing more of this
-        // turn's script gets past a host call.
-        let timers_at = std::time::Instant::now();
+        // below.
+        let spent_by_timers = spent();
         if let Some(policy) = policy {
             // Start what the page has asked for since the last turn. No turn
             // waits for an answer: this thread is the window's.
@@ -3030,20 +3067,41 @@ impl Engine {
             // Delivery only: a timer a response handler sets runs on a later
             // turn, when its time has passed, and a request it makes starts
             // on the next.
-            for (request_id, outcome) in script_net::settle_live(live_requests, LIVE_NETWORK_SLICE).await {
+            //
+            // An answer is handed over only while the turn has budget left.
+            // The bridge forgets a request before it calls the page's
+            // handler, so an answer handed to a turn that was stopped (by a
+            // timer, or by the handler of the answer before it) was lost:
+            // the handler's first host call was refused and the request
+            // never finished (#666 review). What is not handed over waits,
+            // in order, for the next turn.
+            let mut answers = script_net::settle_live(live_requests, LIVE_NETWORK_SLICE).await.into_iter();
+            while !spent() {
+                let Some((request_id, outcome)) = answers.next() else {
+                    break;
+                };
                 out.requests += 1;
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     bindings.deliver_net_response(request_id, outcome)
                 })) {
                     Ok(Ok(_)) => {}
-                    Ok(Err(e)) => threw.push(("network", e.to_string())),
+                    Ok(Err(e)) => {
+                        if spent() {
+                            unwound = Some(threw.len());
+                        }
+                        threw.push(("network", e.to_string()));
+                    }
                     Err(_) => threw.push(("network", "JS engine panic".into())),
                 }
             }
+            for (at, answer) in answers.enumerate() {
+                live_requests.insert(at, Box::pin(std::future::ready(answer)));
+            }
             out.in_flight = live_requests.len();
             // The modules a dynamic `import()` asked for are still fetched
-            // inside the turn.
-            if let Some(document) = document.as_ref() {
+            // inside the turn, unless its budget is gone: they are asked
+            // for again on the next.
+            if let Some(document) = document.as_ref().filter(|_| !spent()) {
                 let mut modules_fetched = 0;
                 let found = script_net::pump_modules(
                     bindings,
@@ -3061,15 +3119,16 @@ impl Engine {
                 }
             }
         }
-        let budget = std::time::Duration::from_millis(self.config.live_turn_budget_ms);
-        let stopped_in = if armed.is_some_and(|started| timers_at.duration_since(started) >= budget) {
-            "timers"
-        } else {
-            "network"
-        };
-        let stopped = end_live_turn(armed, bindings, stopped_in);
+        let stopped_in = if spent_by_timers { "timers" } else { "network" };
+        // A turn that ran out of budget held work back (answers, modules,
+        // the timers behind the one that was stopped): the next is due.
+        let held_back = spent();
+        let stopped = end_live_turn(&self.config, armed, bindings, stopped_in);
+        if let Some(at) = unwound.filter(|_| stopped.is_some()) {
+            threw.remove(at);
+        }
         threw.extend(bindings.take_reported_errors().into_iter().map(|message| ("timers", message)));
-        out.next_timer_ms = bindings.next_timer_delay();
+        out.next_timer_ms = if held_back { Some(0) } else { bindings.next_timer_delay() };
         view.script_log.extend(stopped);
         for (source, message) in threw {
             if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
@@ -3172,12 +3231,18 @@ impl Engine {
         if matches!(result, KeyHandleResult::ValueChanged) {
             // Script reads `value` from the bindings; keep it current,
             // then tell the page.
+            let mut stopped = None;
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
                 bindings.sync_control_value(focused.raw(), state.value());
                 let typed = (!key.is_empty() && !ctrl).then_some(key);
+                let armed = arm_live_turn(&self.config, bindings);
                 if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
                     debug!(?id, error = %e, "input listener threw");
                 }
+                stopped = end_live_turn(&self.config, armed, bindings, "event:input");
+            }
+            if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
+                view.script_log.push(stopped);
             }
             if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
                 debug!(?id, error = %e, "relayout after input event failed");
@@ -3332,7 +3397,7 @@ impl Engine {
             debug!(?id, event_type, error = %e, "key listener threw");
             true
         });
-        let stopped = end_live_turn(armed, bindings, &format!("event:{event_type}"));
+        let stopped = end_live_turn(&self.config, armed, bindings, &format!("event:{event_type}"));
         if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
             view.script_log.push(stopped);
         }
