@@ -160,7 +160,9 @@ fn an_abspos_box_names_its_positioned_containing_block() {
     assert_eq!(r["box"]["containing_block"]["content_box"], rect(0.0, 154.0, 200.0, 100.0));
     assert_eq!(r["box"]["border_box"], rect(20.0, 184.0, 50.0, 60.0));
     assert_eq!(r["style"]["position"], "absolute");
-    assert_eq!(r["style"]["inset"], "30px auto auto 20px");
+    // Used distances from the containing block's padding box (200x100).
+    assert_eq!(r["style"]["inset"], "30px 130px 10px 20px");
+    assert_eq!(r["style"]["right"], "130px");
 }
 
 #[test]
@@ -170,7 +172,8 @@ fn a_display_none_element_has_no_box_and_says_why() {
     assert_eq!(r["box"]["has_box"], false);
     assert_eq!(r["box"]["no_box_reason"], "display:none, or dropped by the box tree builder");
     assert_eq!(r["box"]["border_box"], serde_json::Value::Null);
-    assert_eq!(r["style"]["display"], "none");
+    // The engine cannot tell display:none from a dropped box: unknown.
+    assert_eq!(r["style"]["display"], serde_json::Value::Null);
     assert_eq!(r["style"]["width"], serde_json::Value::Null);
     assert_eq!(r["unavailable"]["style"], "no layout box: the engine keeps computed style only on boxes");
     assert_eq!(r["paint"]["clipped"], serde_json::Value::Null);
@@ -185,6 +188,7 @@ fn a_display_none_element_has_no_box_and_says_why() {
     assert_eq!(inside["style"]["display"], serde_json::Value::Null);
 
     let head = diag(&engine, view, "head");
+    assert_eq!(head["style"]["display"], "none"); // the UA sheet's
     assert_eq!(head["box"]["no_box_reason"], "not rendered: head is display:none in the UA sheet");
     assert_eq!(head["identity"]["oracle_key"], "html > head");
 }
@@ -332,4 +336,115 @@ fn a_body_background_moved_to_the_canvas_is_unknown_not_none() {
     assert_eq!(body["style"]["background-color"], serde_json::Value::Null);
     assert!(body["unavailable"]["style.background-image"].as_str().unwrap().contains("canvas"));
     assert_eq!(diag(&engine, view, "#p")["style"]["background-image"], "none");
+}
+
+/// The R1 review's probes (#674), each against Chromium 141's answer.
+fn review_page() -> (Engine, EngineViewId) {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    engine
+        .load_html(
+            view,
+            "<!DOCTYPE html><html><head><style>body{margin:0}</style></head><body>\
+             <div style=\"position:relative;width:400px;height:120px\">\
+               <div id=a style=\"position:absolute;top:50%;right:10%;width:40px;height:20px\"></div>\
+               <div id=z style=\"position:absolute;z-index:0;width:10px;height:10px\"></div>\
+             </div>\
+             <span id=e></span>\
+             <div id=rot style=\"transform:rotate(45deg);width:40px;height:40px;margin-left:8px\"></div>\
+             <div id=g style=\"display:grid;grid-template-columns:100px 1fr 2fr;width:490px\"><i></i></div>\
+             <div id=gpx style=\"display:grid;grid-template-columns:100px 200px\"><i></i></div>\
+             <div id=rel style=\"position:relative;top:10%;left:5px;height:10px\"></div>\
+             </body></html>",
+        )
+        .expect("load_html");
+    (engine, view)
+}
+
+#[test]
+fn percentage_insets_resolve_against_the_containing_block() {
+    let (engine, view) = review_page();
+    let a = diag(&engine, view, "#a");
+    assert_eq!((a["style"]["top"].as_str(), a["style"]["right"].as_str()), (Some("60px"), Some("40px")));
+    assert_eq!(a["style"]["inset"], "60px 40px 40px 320px");
+    // Relative: percentages of the containing block, auto sides negated.
+    let rel = diag(&engine, view, "#rel");
+    let cb_h = rel["box"]["containing_block"]["content_box"]["h"].as_f64().unwrap();
+    let top = format!("{}px", ((cb_h * 0.1) * 100.0).round() / 100.0);
+    assert_eq!(rel["style"]["top"], top.as_str());
+    assert_eq!(rel["style"]["left"], "5px");
+    assert_eq!(rel["style"]["right"], "-5px");
+}
+
+#[test]
+fn an_empty_span_is_not_reported_display_none() {
+    let (engine, view) = review_page();
+    let e = diag(&engine, view, "#e");
+    if e["box"]["has_box"] == false {
+        assert_eq!(e["style"]["display"], serde_json::Value::Null);
+    } else {
+        assert_eq!(e["style"]["display"], "inline");
+    }
+}
+
+#[test]
+fn z_index_zero_is_unknown_not_auto() {
+    let (engine, view) = review_page();
+    let z = diag(&engine, view, "#z");
+    assert_eq!(z["style"]["z-index"], serde_json::Value::Null);
+    assert!(z["unavailable"]["style.z-index"].as_str().unwrap().contains("indistinguishable"));
+}
+
+#[test]
+fn a_transformed_box_reports_its_bounding_box() {
+    let (engine, view) = review_page();
+    let r = diag(&engine, view, "#rot");
+    let bb = &r["box"]["border_box"];
+    let (w, h) = (bb["w"].as_f64().unwrap(), bb["h"].as_f64().unwrap());
+    assert!((w - 56.57).abs() < 0.02 && (h - 56.57).abs() < 0.02, "{bb}");
+    assert!((bb["x"].as_f64().unwrap() - (8.0 + 20.0 - 28.28)).abs() < 0.02, "{bb}");
+    assert_eq!(r["paint"]["in_transform_layer"], true);
+    assert!(r["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().starts_with("transformed")));
+    assert_eq!(r["style"]["transform"], "matrix(0.707107, 0.707107, -0.707107, 0.707107, 0, 0)");
+}
+
+#[test]
+fn grid_templates_are_unknown_unless_plain_px() {
+    let (engine, view) = review_page();
+    let g = diag(&engine, view, "#g");
+    assert_eq!(g["style"]["grid-template-columns"], serde_json::Value::Null);
+    assert_eq!(g["style"]["grid-template-rows"], serde_json::Value::Null); // implicit tracks
+    assert!(g["unavailable"]["style.grid-template-columns"].is_string());
+    assert_eq!(diag(&engine, view, "#gpx")["style"]["grid-template-columns"], "100px 200px");
+    assert_eq!(diag(&engine, view, "#rel")["style"]["grid-template-columns"], "none"); // not a grid
+}
+
+#[test]
+fn a_point_outside_the_viewport_finds_nothing() {
+    let (engine, view) = review_page();
+    for (x, y) in [(10.0, 900.0), (10.0, 600.0), (-5.0, -5.0), (5000.0, 10.0)] {
+        let r = engine.element_diagnostics(view, &DiagnosticTarget::Point { x, y }, &opts()).unwrap();
+        assert!(r.is_none(), "({x}, {y})");
+    }
+    assert!(engine.element_diagnostics(view, &DiagnosticTarget::Point { x: 10.0, y: 10.0 }, &opts()).unwrap().is_some());
+}
+
+#[test]
+fn unbalanced_selectors_are_errors() {
+    let (engine, view) = review_page();
+    for sel in ["p[", "[", "div:has(", "a)"] {
+        let r = engine.element_diagnostics(view, &DiagnosticTarget::Selector(sel.into()), &opts());
+        assert!(r.is_err(), "{sel}");
+    }
+    let quoted = engine.element_diagnostics(view, &DiagnosticTarget::Selector("[title=\"a[\"]".into()), &opts());
+    assert!(quoted.unwrap().is_none());
+}
+
+#[test]
+fn urls_lose_their_credentials() {
+    let u = Url::parse("https://user:secret@example.test/a?token=1#f").unwrap();
+    assert_eq!(diagnostics::report_url(&u, false), "https://example.test/a");
+    assert_eq!(diagnostics::report_url(&u, true), "https://example.test/a?token=1#f");
+    assert_eq!(diagnostics::scrub_url("https://u:p@cdn.test/i.png?sig=T#f"), "https://cdn.test/i.png");
+    assert_eq!(diagnostics::scrub_url("img/x.png?v=2"), "img/x.png");
 }

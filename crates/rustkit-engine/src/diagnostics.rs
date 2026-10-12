@@ -121,7 +121,10 @@ pub struct Identity {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TreeState {
+    /// The document's node table holds this node. A node script removed
+    /// stays there (in the DOM, not connected) until it is dropped.
     pub in_dom: bool,
+    /// The node's root is the document.
     pub connected: bool,
     pub in_shadow_tree: Option<bool>,
     pub shadow_host: Option<String>,
@@ -209,6 +212,9 @@ struct BoxContext<'a> {
     opacity: f32,
     opacity_layer: bool,
     transform_layer: bool,
+    /// The page-space affine of this box and its ancestors' transforms, as
+    /// the painter applies them (`own_transform_affine`).
+    affine: Option<[f32; 6]>,
 }
 
 #[derive(Clone, Copy)]
@@ -219,6 +225,7 @@ struct Inherited<'a> {
     opacity: f32,
     opacity_layer: bool,
     transform_layer: bool,
+    affine: Option<[f32; 6]>,
 }
 
 /// Clip ancestors, nearest first, as a stack-allocated list.
@@ -255,6 +262,11 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
         let transformed = !s.effective_transform().is_identity();
         let opacity_layer = inh.opacity_layer || s.opacity < 1.0;
         let transform_layer = inh.transform_layer || transformed;
+        let affine = match (inh.affine, own_transform_affine(b)) {
+            (a, None) => a,
+            (None, Some(o)) => Some(o),
+            (Some(a), Some(o)) => Some(compose_affine(a, o)),
+        };
         if let Some(node) = b.node_id {
             match out.get_mut(&node) {
                 Some(ctx) => ctx.boxes.push(b),
@@ -284,6 +296,7 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
                             opacity,
                             opacity_layer,
                             transform_layer,
+                            affine,
                         },
                     );
                 }
@@ -301,6 +314,7 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
             opacity,
             opacity_layer,
             transform_layer,
+            affine,
         };
         let own = ClipLink { clip: b, up: clip };
         let child_clip = if element && clips(b) { Some(&own) } else { clip };
@@ -316,6 +330,7 @@ fn index_layout<'a>(root: &'a LayoutBox) -> HashMap<usize, BoxContext<'a>> {
         opacity: 1.0,
         opacity_layer: false,
         transform_layer: false,
+        affine: None,
     };
     walk(root, inh, None, &mut out);
     out
@@ -349,8 +364,52 @@ fn element_parts(node: &Node) -> Option<(String, &HashMap<String, String>)> {
     }
 }
 
-fn element_children(node: &Node) -> Vec<Rc<Node>> {
-    node.children().into_iter().filter(|c| matches!(c.node_type, NodeType::Element { .. })).collect()
+/// One parent's element children, indexed for the per-record lookups.
+struct Siblings {
+    kids: Vec<Rc<Node>>,
+    /// Raw id -> (index among element children, 1-based index among
+    /// same-tag siblings, same-tag sibling count).
+    pos: HashMap<usize, (usize, usize, usize)>,
+}
+
+thread_local! {
+    /// Sibling indexes by parent node id, for the duration of one build
+    /// (`Builder::new` clears it): every record walks its ancestors' sibling
+    /// lists, which made a whole-page dump quadratic in the sibling count.
+    static SIBLINGS: std::cell::RefCell<HashMap<usize, Rc<Siblings>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn siblings(parent: &Node) -> Rc<Siblings> {
+    let raw = parent.id.raw();
+    if let Some(hit) = SIBLINGS.with(|c| c.borrow().get(&raw).cloned()) {
+        return hit;
+    }
+    let kids: Vec<Rc<Node>> =
+        parent.children().into_iter().filter(|c| matches!(c.node_type, NodeType::Element { .. })).collect();
+    let tag = |n: &Node| element_parts(n).map(|(t, _)| t).unwrap_or_default();
+    let mut totals: HashMap<String, usize> = HashMap::new();
+    for k in &kids {
+        *totals.entry(tag(k)).or_insert(0) += 1;
+    }
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let pos = kids
+        .iter()
+        .enumerate()
+        .map(|(i, k)| {
+            let t = tag(k);
+            let n = seen.entry(t.clone()).or_insert(0);
+            *n += 1;
+            (k.id.raw(), (i, *n, totals[&t]))
+        })
+        .collect();
+    let index = Rc::new(Siblings { kids, pos });
+    SIBLINGS.with(|c| c.borrow_mut().insert(raw, index.clone()));
+    index
+}
+
+fn clear_child_caches() {
+    SIBLINGS.with(|c| c.borrow_mut().clear());
 }
 
 fn parent_element(node: &Node) -> Option<Rc<Node>> {
@@ -386,9 +445,9 @@ fn structural_selector(node: &Rc<Node>) -> String {
         let parent = parent_element(&n);
         let seg = match n.parent() {
             Some(p) => {
-                let kids = element_children(&p);
-                match kids.iter().position(|k| k.id == n.id) {
-                    Some(i) if kids.len() > 1 => format!("{tag}:nth-child({})", i + 1),
+                let sib = siblings(&p);
+                match sib.pos.get(&n.id.raw()) {
+                    Some((i, _, _)) if sib.kids.len() > 1 => format!("{tag}:nth-child({})", i + 1),
                     _ => tag,
                 }
             }
@@ -420,13 +479,7 @@ fn oracle_key(node: &Rc<Node>) -> String {
     while let Some(n) = cur {
         let Some((tag, attrs)) = element_parts(&n) else { break };
         let (index, total) = match n.parent() {
-            Some(p) => {
-                let same: Vec<_> = element_children(&p)
-                    .into_iter()
-                    .filter(|k| element_parts(k).is_some_and(|(t, _)| t == tag))
-                    .collect();
-                (same.iter().position(|k| k.id == n.id).map_or(1, |i| i + 1), same.len())
-            }
+            Some(p) => siblings(&p).pos.get(&n.id.raw()).map_or((1, 1), |&(_, i, total)| (i, total)),
             None => (1, 1),
         };
         parts.push(Engine::selector_segment(&tag, attrs, index, total, foreign));
@@ -473,12 +526,13 @@ fn union(a: Rect, b: Rect) -> Rect {
 
 /// The page URL as a record reports it: no query or fragment unless asked.
 pub(crate) fn report_url(url: &Url, include_query: bool) -> String {
-    if include_query {
-        return url.to_string();
-    }
     let mut u = url.clone();
-    u.set_query(None);
-    u.set_fragment(None);
+    let _ = u.set_username("");
+    let _ = u.set_password(None);
+    if !include_query {
+        u.set_query(None);
+        u.set_fragment(None);
+    }
     u.to_string()
 }
 
@@ -500,10 +554,12 @@ impl<'a> Builder<'a> {
                     opacity: 1.0,
                     opacity_layer: false,
                     transform_layer: false,
+                    affine: None,
                 });
                 root_stand_in = Some(raw);
             }
         }
+        clear_child_caches();
         let mut text_len = HashMap::new();
         text_lengths(src.document.root(), &mut text_len);
         Self { src, index, text_len, root_stand_in }
@@ -547,17 +603,17 @@ impl<'a> Builder<'a> {
                 }
                 v
             },
-            child_index: node.parent().and_then(|p| element_children(&p).iter().position(|k| k.id == node.id)),
+            child_index: node.parent().and_then(|p| siblings(&p).pos.get(&raw).map(|&(i, _, _)| i)),
         };
 
         const SHADOW: &str = "shadow trees and slots live in script only (web_shadow.js)";
         let tree = TreeState {
-            in_dom: true,
+            in_dom: self.src.document.get_node(node.id).is_some_and(|n| Rc::ptr_eq(&n, node)),
             connected,
             in_shadow_tree: if connected { Some(false) } else { None },
             shadow_host: None,
             assigned_slot: None,
-            child_count: element_children(node).len(),
+            child_count: siblings(node).kids.len(),
             text_length: self.text_len.get(&raw).copied().unwrap_or_else(|| text_lengths(node, &mut HashMap::new())),
         };
         if !connected {
@@ -593,10 +649,10 @@ impl<'a> Builder<'a> {
                 let reason = self.no_box_reason(node, &tag, connected);
                 let mut style: BTreeMap<&'static str, Option<String>> =
                     STYLE_PROPERTIES.iter().map(|p| (*p, None)).collect();
-                // An element with no box under a boxed parent is display:none
-                // (as rustkit-bindings' computedMap answers); deeper ones keep
-                // their own display, which the engine never computed.
-                if reason.starts_with("display:none") || reason.starts_with("not rendered") {
+                // Only the UA sheet's hidden elements are known to be
+                // display:none; for the others the engine cannot tell
+                // display:none from a box the tree builder dropped.
+                if reason.starts_with("not rendered") {
                     style.insert("display", Some("none".into()));
                 }
                 unavailable.insert("style".into(), "no layout box: the engine keeps computed style only on boxes".into());
@@ -618,6 +674,77 @@ impl<'a> Builder<'a> {
             notes,
             unavailable,
         })
+    }
+
+    /// `top/right/bottom/left/inset` as getComputedStyle resolves them: for
+    /// an absolutely positioned box, the used distances from its containing
+    /// block's padding box; for a relative or sticky box, the specified
+    /// offsets with percentages taken against the containing block; for a
+    /// static box, the specified values.
+    fn resolve_insets(
+        &self,
+        b: &LayoutBox,
+        ctx: &BoxContext<'a>,
+        border: Rect,
+        style: &mut BTreeMap<&'static str, Option<String>>,
+        unavailable: &mut BTreeMap<String, String>,
+    ) {
+        use rustkit_css::Position as P;
+        let s = &*b.style;
+        let font_px = match s.font_size {
+            Length::Px(p) => p,
+            _ => 16.0,
+        };
+        let (vw, vh) = (self.src.viewport.0 as f32, self.src.viewport.1 as f32);
+        let cb_padding = match ctx.containing_block {
+            Some(cb) => cb.dimensions.padding_box(),
+            None => Rect { x: 0.0, y: 0.0, width: vw, height: vh },
+        };
+        let cb_content = ctx.containing_block.map_or(cb_padding, |cb| cb.dimensions.content);
+        let side = |l: &Option<Length>, basis: f32| -> Option<f32> {
+            match l {
+                None | Some(Length::Auto) => None,
+                Some(l) => Some(l.to_px_with_viewport(font_px, 16.0, basis, vw, vh)),
+            }
+        };
+        let values: [Option<String>; 4] = match s.position {
+            P::Absolute | P::Fixed => {
+                let m = &b.dimensions.margin;
+                let (l, t) = (border.x - m.left, border.y - m.top);
+                let (r, bt) = (border.x + border.width + m.right, border.y + border.height + m.bottom);
+                [
+                    Some(css_px(t - cb_padding.y)),
+                    Some(css_px(cb_padding.x + cb_padding.width - r)),
+                    Some(css_px(cb_padding.y + cb_padding.height - bt)),
+                    Some(css_px(l - cb_padding.x)),
+                ]
+            }
+            P::Static => [&s.top, &s.right, &s.bottom, &s.left].map(|l| match l {
+                None | Some(Length::Auto) => Some("auto".into()),
+                Some(l) => Some(length(l, false, font_px, (vw, vh))),
+            }),
+            _ => {
+                // Relative/sticky: an auto side is the negation of its
+                // opposite, or 0 when both are auto (CSS 2.1 §9.4.3).
+                let (t, r, bt, l) = (
+                    side(&s.top, cb_content.height),
+                    side(&s.right, cb_content.width),
+                    side(&s.bottom, cb_content.height),
+                    side(&s.left, cb_content.width),
+                );
+                let pair = |a: Option<f32>, b: Option<f32>| a.or(b.map(|v| -v)).unwrap_or(0.0);
+                [pair(t, bt), pair(r, l), pair(bt, t), pair(l, r)].map(|v| Some(css_px(v)))
+            }
+        };
+        if matches!(s.position, P::Sticky) {
+            unavailable.insert("style.top".into(), "sticky offsets are reported as specified".into());
+        }
+        let names = ["top", "right", "bottom", "left"];
+        for (n, v) in names.iter().zip(values.iter()) {
+            style.insert(n, v.clone());
+        }
+        let [t, r, bt, l] = values.map(|v| v.unwrap_or_default());
+        style.insert("inset", Some(four(t, r, bt, l)));
     }
 
     /// The engine transfers body's background to the root box when html's
@@ -679,8 +806,19 @@ impl<'a> Builder<'a> {
         if ctx.boxes.len() > 1 {
             notes.push(format!("laid out as {} boxes; rects are their union", ctx.boxes.len()));
         }
-        let style = style_record(b, notes, unavailable);
+        // getBoundingClientRect is the bounding box of the transformed box.
+        let untransformed_border = border;
+        if let Some(m) = ctx.affine {
+            let map = |r: Rect| {
+                let (x, y, width, height) = transformed_bounds(m, r.x, r.y, r.width, r.height);
+                Rect { x, y, width, height }
+            };
+            (border, padding, content) = (map(border), map(padding), map(content));
+            notes.push("transformed: rects are the bounding boxes of the transformed boxes".into());
+        }
+        let mut style = style_record(b, unavailable);
         let position = b.style.position;
+        self.resolve_insets(b, ctx, untransformed_border, &mut style, unavailable);
         if position == rustkit_css::Position::Fixed && scroll != (0.0, 0.0) {
             notes.push("fixed box: viewport rect is layout minus scroll, as getBoundingClientRect here".into());
         }
@@ -861,17 +999,21 @@ fn gradient_name(debug: &str) -> String {
     format!("{}{base}(…)", if repeating { "repeating-" } else { "" })
 }
 
-/// A URL inside a record: no query or fragment, `data:` contents elided.
+/// A URL inside a record: no credentials, query or fragment, `data:`
+/// contents elided.
 pub(crate) fn scrub_url(u: &str) -> String {
     if u.starts_with("data:") {
         return "data:…".into();
     }
+    if let Ok(parsed) = Url::parse(u) {
+        return report_url(&parsed, false);
+    }
+    // Relative: no authority to carry credentials.
     u.split(['?', '#']).next().unwrap_or("").to_string()
 }
 
 fn style_record(
     b: &LayoutBox,
-    notes: &mut Vec<String>,
     unavailable: &mut BTreeMap<String, String>,
 ) -> BTreeMap<&'static str, Option<String>> {
     let s = &*b.style;
@@ -913,7 +1055,12 @@ fn style_record(
                 } else {
                     let bb = d.border_box();
                     let m6 = t.to_matrix(bb.width, bb.height);
-                    format!("matrix({})", m6.iter().map(|v| num(*v)).collect::<Vec<_>>().join(", "))
+                    // Six decimals, as Chromium serialises matrix entries.
+                    let six = |v: f32| {
+                        let r = (v as f64 * 1e6).round() / 1e6 + 0.0;
+                        format!("{r}")
+                    };
+                    format!("matrix({})", m6.iter().map(|v| six(*v)).collect::<Vec<_>>().join(", "))
                 }
             }),
             "flex-wrap" => Some(kw(&s.flex_wrap)),
@@ -936,8 +1083,26 @@ fn style_record(
                 let (r, c) = (len(&s.row_gap, false), len(&s.column_gap, false));
                 Some(if r == c { r } else { format!("{r} {c}") })
             }
-            "grid-template-columns" => Some(template(&s.grid_template_columns)),
-            "grid-template-rows" => Some(template(&s.grid_template_rows)),
+            "grid-template-columns" | "grid-template-rows" => {
+                let t = if *p == "grid-template-columns" { &s.grid_template_columns } else { &s.grid_template_rows };
+                let grid = matches!(s.display, Display::Grid | Display::InlineGrid);
+                let px_only = t.repeats.is_empty()
+                    && !t.tracks.is_empty()
+                    && t.tracks.iter().all(|d| matches!(d.size, TrackSize::Px(_)));
+                if grid && !px_only {
+                    // getComputedStyle reports the resolved px tracks of a
+                    // grid container (implicit ones included), which grid
+                    // layout does not keep.
+                    unavailable.insert(format!("style.{p}"), "resolved track sizes are not kept by grid layout".into());
+                    None
+                } else {
+                    Some(template(t))
+                }
+            }
+            "z-index" if s.z_index == 0 => {
+                unavailable.insert("style.z-index".into(), "the engine stores auto as 0: auto and 0 are indistinguishable".into());
+                None
+            }
             "grid-auto-flow" => Some(match s.grid_auto_flow {
                 rustkit_css::GridAutoFlow::Row => "row".into(),
                 rustkit_css::GridAutoFlow::Column => "column".into(),
@@ -965,10 +1130,27 @@ fn style_record(
         };
         m.insert(p, v);
     }
-    if matches!(s.display, Display::Grid | Display::InlineGrid) {
-        notes.push("grid-template-* is the specified track list, not the resolved px getComputedStyle reports".into());
-    }
     m
+}
+
+/// `[`/`]` and `(`/`)` pair up outside strings. The shared query validator
+/// accepts `p[` and `div:has(` (and matches nothing), which would read as
+/// "no element" instead of the error Chromium throws.
+fn brackets_balance(sel: &str) -> bool {
+    let mut stack = Vec::new();
+    let mut quote = None;
+    for c in sel.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '[' | '(') => stack.push(c),
+            (None, ']') if stack.pop() != Some('[') => return false,
+            (None, ')') if stack.pop() != Some('(') => return false,
+            _ => {}
+        }
+    }
+    stack.is_empty() && quote.is_none()
 }
 
 impl Engine {
@@ -1017,10 +1199,12 @@ impl Engine {
     /// Read-only over the view's LAST COMMITTED layout tree and DOM: it takes
     /// `&self`, runs no script, triggers no layout, and borrows the DOM's
     /// `RefCell`s (children, node map) only for the duration of the call. An
-    /// app can therefore call it from the window thread between turns, and it
-    /// answers from the last completed layout even while the page has script
-    /// work pending. A selector is matched with the cascade's matcher; an
-    /// invalid one is an error.
+    /// app can therefore call it from the window thread between turns (script
+    /// runs under `&mut Engine`, so never during a script turn), and it
+    /// answers from the last completed layout even when script has changed
+    /// the DOM since. A selector is matched with the cascade's matcher; an
+    /// invalid one is an error. A point outside the viewport matches nothing,
+    /// as `elementFromPoint`.
     pub fn element_diagnostics(
         &self,
         id: EngineViewId,
@@ -1032,11 +1216,19 @@ impl Engine {
         let src = self.diagnostics_source(view, &page)?;
         let node = match target {
             DiagnosticTarget::Node(raw) => src.document.get_node(rustkit_dom::NodeId::new(*raw)),
+            DiagnosticTarget::Point { x, y }
+                if *x < 0.0 || *y < 0.0 || *x >= src.viewport.0 as f32 || *y >= src.viewport.1 as f32 =>
+            {
+                None // as elementFromPoint: nothing outside the viewport
+            }
             DiagnosticTarget::Point { x, y } => src
                 .layout
                 .and_then(|l| l.hit_test(x + src.scroll.0, y + src.scroll.1))
                 .and_then(|hit| hit.node_id)
                 .and_then(|raw| src.document.get_node(rustkit_dom::NodeId::new(raw))),
+            DiagnosticTarget::Selector(sel) if !brackets_balance(sel) => {
+                return Err(EngineError::RenderError(format!("invalid selector: {sel}")));
+            }
             DiagnosticTarget::Selector(sel) => {
                 let mut stack = vec![src.document.root().clone()];
                 let mut found = None;
