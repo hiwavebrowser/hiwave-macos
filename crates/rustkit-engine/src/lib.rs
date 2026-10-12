@@ -32953,6 +32953,52 @@ mod aspect_ratio_empty_block_tests {
         let o = by_id(&root, "o").expect("#o").dimensions.border_box();
         assert_eq!(o.height, 305.0);
     }
+
+    /// An empty block whose ratio gives it no height is still an empty
+    /// block: `aspect-ratio: auto` over an earlier ratio, and a degenerate
+    /// ratio, keep no box, and margins collapse through it (R1 on #673;
+    /// Chromium 141 numbers).
+    #[test]
+    fn an_empty_block_without_a_usable_ratio_is_still_dropped() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let n_y = |html: &str| {
+            let d = Document::parse_html(html).expect("parse");
+            let mut root = e.build_layout_from_document(&d, &[]);
+            root.layout_with_collapse(
+                &Dimensions {
+                    content: Rect::new(0.0, 0.0, 800.0, 0.0),
+                    ..Default::default()
+                },
+                &mut rustkit_layout::MarginCollapseContext::new(),
+                &mut rustkit_layout::FloatContext::new(),
+            );
+            by_id(&root, "n").expect("#n").dimensions.border_box().y
+        };
+        assert_eq!(
+            n_y(concat!(
+                r#"<style>.r{aspect-ratio:4/1}.r.x{aspect-ratio:auto}</style>"#,
+                r#"<body style="margin:0"><div style="width:400px">"#,
+                r#"<div class="r x"></div><div id="n" style="height:5px"></div></div></body>"#,
+            )),
+            0.0,
+            "aspect-ratio: auto resets an earlier ratio"
+        );
+        for ratio in ["0", "0/1", "1/0", "-2"] {
+            assert_eq!(
+                n_y(&format!(
+                    concat!(
+                        r#"<body style="margin:0"><div style="width:400px;border-top:1px solid">"#,
+                        r#"<div style="height:10px;margin-bottom:20px"></div>"#,
+                        r#"<div style="aspect-ratio:{}"></div>"#,
+                        r#"<div id="n" style="height:10px;margin-top:30px"></div></div></body>"#,
+                    ),
+                    ratio
+                )),
+                41.0,
+                "aspect-ratio: {ratio}: the margins collapse through the empty block"
+            );
+        }
+    }
 }
 
 /// Upper bound on the bytes a single `var()` expansion may produce. Real
