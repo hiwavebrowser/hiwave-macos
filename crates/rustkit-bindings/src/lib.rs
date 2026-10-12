@@ -757,6 +757,12 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_submit_requests()
     }
 
+    /// Whether script has asked to navigate or to submit a form since the
+    /// requests were last taken. Takes nothing.
+    pub fn navigation_requested(&self) -> bool {
+        self.dom_host.borrow().navigation_requested()
+    }
+
     /// The absolute URLs script asked to navigate to since the last call
     /// (`location.href = url`, `location.assign/replace`, `link.click()`),
     /// oldest first. Nothing navigates until the embedder does.

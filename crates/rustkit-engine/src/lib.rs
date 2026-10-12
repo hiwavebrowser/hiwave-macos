@@ -4461,8 +4461,23 @@ impl Engine {
 
             // Images were discovered before the scripts ran. One more pass
             // fetches what the scripts added, and lays out again only if
-            // one of those arrived.
-            match self.load_images_added_by_scripts(id).await {
+            // one of those arrived. Not for a page that has asked to leave
+            // and will be left: the wait is on the window's thread, for a
+            // frame nobody sees (3 s of a 4.9 s stay, i0a_nav, 2026-10-12).
+            let leaving = self.config.follows_script_navigation
+                && self
+                    .views
+                    .get(&id)
+                    .and_then(|view| view.bindings.as_ref())
+                    .is_some_and(|bindings| bindings.navigation_requested());
+            if leaving {
+                info!(?id, "Page asked to navigate: not waiting for images its scripts added");
+            }
+            let added = match leaving {
+                true => Ok(0),
+                false => self.load_images_added_by_scripts(id).await,
+            };
+            match added {
                 Ok(0) => {}
                 Ok(count) => {
                     info!(count, "Loaded images added by page scripts");
@@ -14604,6 +14619,13 @@ impl EngineBuilder {
     /// (`EngineConfig::interrupt_scripts_at_budget`).
     pub fn interrupt_scripts_at_budget(mut self, interrupt: bool) -> Self {
         self.config.interrupt_scripts_at_budget = interrupt;
+        self
+    }
+
+    /// The embedder follows a page's own navigations
+    /// (`EngineConfig::follows_script_navigation`).
+    pub fn follows_script_navigation(mut self, follows: bool) -> Self {
+        self.config.follows_script_navigation = follows;
         self
     }
 

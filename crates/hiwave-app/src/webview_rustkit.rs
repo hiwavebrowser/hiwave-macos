@@ -93,6 +93,10 @@ fn content_engine_builder() -> EngineBuilder {
         // the window's thread, and ebay.com's module graph held it for
         // minutes (Pete had to kill the app, 2026-10-08).
         .interrupt_scripts_at_budget(true)
+        // The event loop loads what a page's script asks for
+        // (`take_script_navigation`), so a page that has asked to leave is
+        // not kept waiting for images its scripts added.
+        .follows_script_navigation(true)
 }
 
 /// `HIWAVE_RENDER_EVERY_WAKE=1`: draw at every wake of the event loop,
@@ -678,6 +682,12 @@ mod tests {
         // the engine's own default (parity-capture, the board) stay at 5 s.
         assert_eq!(builder.config().timer_horizon_ms, 5_000);
         assert_eq!(rustkit_engine::EngineConfig::default().script_budget_ms, 5_000);
+    }
+
+    #[test]
+    fn content_views_follow_a_page_s_own_navigation() {
+        assert!(content_engine_builder().config().follows_script_navigation);
+        assert!(!rustkit_engine::EngineConfig::default().follows_script_navigation);
     }
 
     #[test]
