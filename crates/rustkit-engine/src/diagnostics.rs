@@ -593,15 +593,16 @@ impl<'a> Builder<'a> {
             }
             None => {
                 let reason = self.no_box_reason(node, &tag, connected);
-                let mut style: BTreeMap<&'static str, Option<String>> =
+                let style: BTreeMap<&'static str, Option<String>> =
                     STYLE_PROPERTIES.iter().map(|p| (*p, None)).collect();
-                // An element with no box under a boxed parent is display:none
-                // (as rustkit-bindings' computedMap answers); deeper ones keep
-                // their own display, which the engine never computed.
-                if reason.starts_with("display:none") || reason.starts_with("not rendered") {
-                    style.insert("display", Some("none".into()));
-                }
+                // No box does not mean display:none: the box tree builder also
+                // drops elements it does not render (an empty span, an option),
+                // and it keeps no style for either. Unknown, not a guess.
                 unavailable.insert("style".into(), "no layout box: the engine keeps computed style only on boxes".into());
+                unavailable.insert(
+                    "style.display".into(),
+                    "no layout box: display:none and an element the box tree builder dropped look the same".into(),
+                );
                 for f in ["box", "paint"] {
                     unavailable.insert(f.into(), "no layout box".into());
                 }

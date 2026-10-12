@@ -170,7 +170,9 @@ fn a_display_none_element_has_no_box_and_says_why() {
     assert_eq!(r["box"]["has_box"], false);
     assert_eq!(r["box"]["no_box_reason"], "display:none, or dropped by the box tree builder");
     assert_eq!(r["box"]["border_box"], serde_json::Value::Null);
-    assert_eq!(r["style"]["display"], "none");
+    // Not "none": the engine cannot tell display:none from a dropped box.
+    assert_eq!(r["style"]["display"], serde_json::Value::Null);
+    assert!(r["unavailable"]["style.display"].is_string());
     assert_eq!(r["style"]["width"], serde_json::Value::Null);
     assert_eq!(r["unavailable"]["style"], "no layout box: the engine keeps computed style only on boxes");
     assert_eq!(r["paint"]["clipped"], serde_json::Value::Null);
