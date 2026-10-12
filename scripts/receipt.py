@@ -11,8 +11,10 @@ and "all tests green" are facts a reader can check, not prose.
 
 The output goes into public PR bodies and comments, so it carries no path of
 the machine that ran it: a file inside the repository prints repo-relative, any
-other file prints as its basename, and absolute paths typed into --note get the
-same treatment. --host-paths keeps the paths as given, for local use only.
+other file prints as its basename, and absolute paths in --note, RUSTFLAGS and
+the RUSTKIT_* values get the same treatment. A local-path origin prints as its
+basename, an origin URL loses its credentials, and the machine's name is left
+out. --host-paths keeps all of these as given, for local use only.
 
 Runs on macOS, Windows and Linux; every field it cannot determine is printed
 as null rather than guessed.
@@ -53,18 +55,40 @@ def public_path(path, root):
 
 # An absolute path in free text: POSIX with at least one directory (so "/60" and
 # "and/or" are left alone, and the "//host/..." of a URL is not a path), a "~/"
-# path, or a Windows drive path. A path with a space in it is cut at the space.
-ABS_PATH = re.compile(r"(?<![\w.:/\\~])~?/(?:[\w.@+~-]+/)+[\w.@+~-]*|(?<![A-Za-z])[A-Za-z]:[\\/](?:[\w.@+~-]+[\\/])*[\w.@+~-]*")
+# path, a Windows drive path or a UNC path. The "/" may follow a one-letter
+# option ("-L/abs"), a ":" ("path:/abs", the entries of a PATH= list) or an "=",
+# but not a word, which is a relative path ("a/b/c") or "${HOME}/x". A path with
+# a space in it is cut at the space.
+SEG = r"[\w.@+~$-]"
+ABS_PATH = re.compile(
+    r"(?:(?P<flag>(?<![\w-])-[A-Za-z])|(?<![\w./\\~}]))(?P<posix>~?/(?:SEG+/)+SEG*)"
+    r"|(?<![A-Za-z])[A-Za-z]:[\\/](?:SEG+[\\/])*SEG*"
+    r"|(?<![\w\\/:])\\\\SEG+(?:\\SEG+)+".replace("SEG", SEG))
 
 
 def public_text(text, root):
     def one(m):
-        tok = m.group(0)
+        tok = m.group("posix") or m.group(0)
         body = tok.rstrip(".")
-        if re.match(r"[A-Za-z]:", body):
-            return re.split(r"[\\/]", body.rstrip("\\/"))[-1] + tok[len(body):]
-        return public_path(os.path.expanduser(body), root) + tok[len(body):]
-    return ABS_PATH.sub(one, text.replace("file://", "")) if text else text
+        if m.group("posix"):
+            return (m.group("flag") or "") + public_path(os.path.expanduser(body), root) + tok[len(body):]
+        return re.split(r"[\\/]", body.rstrip("\\/"))[-1] + tok[len(body):]
+    if not text:
+        return text
+    text = re.sub(r"(\b[A-Za-z][\w+.-]*://)[^/\s@]*@", r"\1", text.replace("file://", ""))
+    return ABS_PATH.sub(one, text)
+
+
+def public_repo(url):
+    """An origin URL without its credentials; a local-path origin as its basename."""
+    if not url:
+        return url
+    m = re.match(r"([A-Za-z][\w+.-]*)://(?:[^/@]*@)?(.*)", url)
+    if m and m.group(1).lower() != "file":
+        return m.group(1) + "://" + m.group(2)
+    if not m and re.match(r"[\w.-]+@[\w.-]+:", url):
+        return url
+    return re.split(r"[\\/]", (m.group(2) if m else url).rstrip("\\/"))[-1] or None
 
 
 def main():
@@ -90,6 +114,8 @@ def main():
     target = next((l.split(":", 1)[1].strip() for l in (target or "").splitlines() if l.startswith("host:")), None)
     lock_hash = sha256(root / "Cargo.lock")
     binary = Path(a.binary).resolve() if a.binary else None
+    typed = Path(os.path.abspath(a.binary)) if a.binary else None
+    origin = sh("git", "config", "--get", "remote.origin.url", cwd=root)
     shown = (lambda p: str(p)) if a.host_paths else (lambda p: public_path(p, root))
     text = (lambda t: t) if a.host_paths else (lambda t: public_text(t, root))
     rec = {
@@ -97,20 +123,20 @@ def main():
         "base_sha": a.base,
         "candidate_sha": head,
         "dirty_state": dirty,
-        "repo": sh("git", "config", "--get", "remote.origin.url", cwd=root),
+        "repo": origin if a.host_paths else public_repo(origin),
         "branch": sh("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=root),
         "cargo_lock_sha256": lock_hash,
-        "binary": shown(binary) if binary else None,
+        "binary": shown(a.binary) if binary else None,
         "binary_sha256": sha256(binary) if binary else None,
         "binary_mtime_utc": datetime.datetime.utcfromtimestamp(binary.stat().st_mtime).isoformat() + "Z" if binary and binary.exists() else None,
         "toolchain": toolchain,
         "cargo": cargo,
         "target": target,
-        "profile": a.profile or ("parity" if binary and "parity" in binary.parts else "release" if binary and "release" in binary.parts else None),
+        "profile": a.profile or next((p for p in ("parity", "release") if binary and (p in typed.parts or p in binary.parts)), None),
         "features": a.features,
-        "rustflags": os.environ.get("RUSTFLAGS"),
-        "effective_engine_flags": {k: v for k, v in os.environ.items() if k.startswith("RUSTKIT_")},
-        "host": platform.node(),
+        "rustflags": text(os.environ.get("RUSTFLAGS")),
+        "effective_engine_flags": {k: text(v) for k, v in os.environ.items() if k.startswith("RUSTKIT_")},
+        "host": platform.node() if a.host_paths else None,
         "os": platform.platform(),
         "cpu": platform.processor() or sh("sysctl", "-n", "machdep.cpu.brand_string"),
         "sccache": bool(shutil.which("sccache")),

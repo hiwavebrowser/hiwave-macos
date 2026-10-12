@@ -122,6 +122,7 @@ class TestReceiptNoHostPaths(unittest.TestCase):
                         ("path:/Users/example/a/b", "path:b"),
                         ("PATH=/usr/bin:/Users/example/.cargo/bin", "PATH=bin:bin"),
                         (r"\\fileserver\example\x.txt", "x.txt"),
+                        ("pushed to https://user:token@example.com/org/repo.git", "pushed to https://example.com/org/repo.git"),
                         ("--remap-path-prefix=/Users/example/hiwave=. -C link-arg=/opt/x/y.o", "--remap-path-prefix=hiwave=. -C link-arg=y.o")]:
             self.assertEqual(receipt.public_text(t, REPO), want)
 
