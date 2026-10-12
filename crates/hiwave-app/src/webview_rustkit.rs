@@ -79,8 +79,12 @@ const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
 
 /// The longest the script of one turn after the load may run: the timer
 /// callbacks and response handlers of one pass of the live loop, or the
-/// listeners of one click or key. Until 2026-10-12 there was no limit, and a
+/// listeners of one input event. Until 2026-10-12 there was no limit, and a
 /// callback that did not end held the window for good.
+///
+/// It is per event, not per action: a click is `mousedown`, `mouseup` and
+/// `click`, each with its own budget, and a resize has one of its own ahead
+/// of the turn's.
 ///
 /// 5 s is the figure the thread-ownership design recommends (its open
 /// question 2); it is Pete's to set. It bounds the freeze and does not

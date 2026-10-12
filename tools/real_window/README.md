@@ -81,7 +81,9 @@ of a run (about a minute for all checks).
 ### The I0(a) checks
 
 Each of the four makes a page misbehave and asks whether the person still has
-control. Two measures, reported apart:
+control. There are three fixture pages for the four checks: `i0a_script` and
+`i0a_close` both use `i0a_spin.html`. `i0a_script` also asks that a request
+the page made in the turn its script was stopped in is still answered to it. Two measures, reported apart:
 
 - **The stall log** (needs nothing from the seat). The driver starts the app
   with `HIWAVE_STALL_LOG=1`; a helper thread in the app then posts a ping to

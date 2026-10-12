@@ -828,6 +828,10 @@ class Driver:
             mark = self.fixture.mark()
             self.expect(c, "the page ticks again afterwards",
                         bool(ended) and self.fixture.wait("beacon?i0a-spin-tick-", 3, mark))
+            asked = self.fixture.seen("beacon?i0a-spin-asked", self.since)
+            self.expect(c, "a request made in the turn that was stopped is answered to the page",
+                        bool(asked) and self.fixture.wait("beacon?i0a-spin-answered", 3, self.since),
+                        "asked %d, onload %d" % (len(asked), len(self.fixture.seen("beacon?i0a-spin-answered", self.since))))
         frame = self.frame(c, "during", [GREEN])
         if frame is None:
             return self.not_run(c, "the window still shows the page's green image", self.why_not("Screen Recording"))

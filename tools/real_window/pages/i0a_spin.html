@@ -32,6 +32,15 @@
       if (armed || reply !== 'spin') { return; }
       armed = true;
       fetch('/beacon?i0a-spin-armed');
+      // Asked in the turn the spin is stopped in (the two timers are due
+      // together and run in this order): the answer must still reach the
+      // page. Until 2026-10-12 it was dropped with the stopped turn.
+      setTimeout(function () {
+        var x = new XMLHttpRequest();
+        x.open('GET', '/beacon?i0a-spin-asked');
+        x.onload = function () { document.getElementById('p'); fetch('/beacon?i0a-spin-answered'); };
+        x.send();
+      }, 1000);
       setTimeout(spin, 1000);
     }, function () {});
   }, 200);

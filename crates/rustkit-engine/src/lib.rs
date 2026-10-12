@@ -778,7 +778,8 @@ pub struct EngineConfig {
     pub interrupt_scripts_at_budget: bool,
     /// Wall-clock budget for the script one turn of the live loop runs
     /// after the load (`pump_live`: timer callbacks and response handlers),
-    /// and for the listeners of one input event. Read only with
+    /// and for the listeners of one input event (a mouse event, a key, the
+    /// `input` of a typed key, a `resize`). Read only with
     /// `interrupt_scripts_at_budget`; script still running when it is spent
     /// is stopped at its next call into the host.
     pub live_turn_budget_ms: u64,
