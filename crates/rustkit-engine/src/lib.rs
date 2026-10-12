@@ -32795,6 +32795,7 @@ mod logical_property_tests {
 #[cfg(test)]
 mod gap_shorthand_tests {
     use super::*;
+    use rustkit_css::Length;
 
     #[test]
     fn gap_with_two_values_sets_the_row_gap_then_the_column_gap() {
@@ -32802,13 +32803,13 @@ mod gap_shorthand_tests {
         for property in ["gap", "grid-gap"] {
             let mut style = ComputedStyle::new();
             e.apply_style_property(&mut style, property, "10px 20px");
-            assert_eq!(style.row_gap, rustkit_css::Length::Px(10.0), "{property}");
-            assert_eq!(style.column_gap, rustkit_css::Length::Px(20.0), "{property}");
+            assert_eq!(style.row_gap, Length::Px(10.0), "{property}");
+            assert_eq!(style.column_gap, Length::Px(20.0), "{property}");
 
             let mut style = ComputedStyle::new();
             e.apply_style_property(&mut style, property, "calc(4px + 6px) 5%");
-            assert_eq!(style.row_gap, rustkit_css::Length::Px(10.0), "{property}");
-            assert_eq!(style.column_gap, rustkit_css::Length::Percent(5.0), "{property}");
+            assert_eq!(style.row_gap, Length::Px(10.0), "{property}");
+            assert_eq!(style.column_gap, Length::Percent(5.0), "{property}");
         }
     }
 
@@ -32817,8 +32818,8 @@ mod gap_shorthand_tests {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut style = ComputedStyle::new();
         e.apply_style_property(&mut style, "gap", "calc(4px + 6px)");
-        assert_eq!(style.row_gap, rustkit_css::Length::Px(10.0));
-        assert_eq!(style.column_gap, rustkit_css::Length::Px(10.0));
+        assert_eq!(style.row_gap, Length::Px(10.0));
+        assert_eq!(style.column_gap, Length::Px(10.0));
 
         // Three values, or a second value that is no length: the
         // declaration is invalid and changes nothing.
