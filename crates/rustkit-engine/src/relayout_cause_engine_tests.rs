@@ -119,6 +119,37 @@ fn a_script_write_names_its_kind_and_node() {
     assert_eq!(stats(&engine, view).relayouts, before);
 }
 
+/// A control `.value` / `.checked` write is `MutationKind::FormValue` all the
+/// way into `RelayoutStats.mutations` (#655). Bindings tallies alone are not
+/// enough: W7-C attribution reads the engine rollup after flush.
+#[test]
+fn a_form_value_write_is_counted_under_form_value() {
+    let (mut engine, view) = engine_and_view();
+    engine
+        .load_html(
+            view,
+            "<input id=i value=a><input id=c type=checkbox>",
+        )
+        .expect("load_html");
+    engine
+        .execute_script(
+            view,
+            "document.getElementById('i').value = 'b'; \
+             document.getElementById('c').checked = true;",
+        )
+        .expect("script");
+    let s = stats(&engine, view);
+    assert_eq!(
+        last(&engine, view),
+        Some(RelayoutCause::ScriptMutation {
+            kind: MutationKind::FormValue,
+            node: "input#i".into()
+        })
+    );
+    assert!(s.by_cause.get("script_mutation") >= 1, "{s:?}");
+    assert_eq!(s.mutations.get("form_value"), 2, "{s:?}");
+}
+
 #[test]
 fn a_scroll_listener_write_is_a_scroll() {
     let (mut engine, view, _server, _rt) = load(tall(

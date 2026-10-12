@@ -68,6 +68,25 @@ fn a_page_whose_script_submitted_a_form_still_gets_the_image() {
     assert_eq!(asked, None, "a POST is not followed");
 }
 
+/// A GET form the embedder will follow still goes through `submit_requests`,
+/// not `navigation_requests`. Skipping the image wait is gated on
+/// `navigation_requested()` only (#667 R1): a GET submit must not flip that
+/// bit, or POST pages that stay would lose their images when the gate is
+/// widened. The page keeps the image; the embedder still receives the URL.
+#[test]
+fn a_get_form_submit_keeps_its_images_and_hands_the_url_to_the_embedder() {
+    let page = "<html><body><form id=f method=get action=/next><input name=q value=1></form>
+<script>document.getElementById('f').submit();</script>
+<script>var img = document.createElement('img'); img.src = '/slow-added.png'; document.body.appendChild(img);</script>
+</body></html>";
+    let (requests, asked) = load(follows(), page);
+    assert_eq!(requests, 2, "the page and its image — submit is not a URL leave");
+    assert!(
+        asked.as_deref().is_some_and(|url| url.contains("/next")),
+        "GET submit is still handed off: {asked:?}"
+    );
+}
+
 /// A capture does not follow the page: it shows the page as it was, with
 /// what its scripts added.
 #[test]
