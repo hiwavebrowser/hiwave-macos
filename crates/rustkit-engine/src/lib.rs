@@ -291,6 +291,8 @@ pub use inspector_page::{
     diff_root_record, inspector_page_html, inspector_select_script, InspectorInputError, InspectorSelection,
     INSPECTOR_DIFF_SCHEMA, INSPECTOR_PAGE_TEMPLATE,
 };
+#[cfg(all(test, feature = "headless"))]
+mod inspector_page_tests;
 use relayout_cause::PendingCauses;
 mod shadow_tree;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
