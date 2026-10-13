@@ -4197,6 +4197,11 @@ impl Engine {
                     (Some(position), Some(document)) => format!("{document}#inline-module-{position}"),
                     _ => label.clone(),
                 };
+                // Named by the engine, so its positions read `inline#n`; a
+                // page module whose URL merely ends the same way does not.
+                if module_url != label {
+                    inspector.alias_script(&module_url, &label);
+                }
                 info!(source = %label, bytes = text.len(), "Running module script");
                 let module_started = std::time::Instant::now();
                 let begun = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

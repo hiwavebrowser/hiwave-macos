@@ -491,14 +491,12 @@ impl Inspector {
     /// A position as events show it: the script's URL (an alias resolved,
     /// a URL scrubbed) or its `inline#n` label.
     pub fn location(&self, path: &str, line: u32, column: u32) -> SourceLocation {
-        let url = self
-            .state()
-            .aliases
-            .iter()
-            .find(|(alias, _)| alias == path)
-            .map(|(_, url)| url.clone())
-            .unwrap_or_else(|| self.url_text(path));
-        SourceLocation { url, line, column }
+        SourceLocation { url: self.url_text(path), line, column }
+    }
+
+    /// What the engine named `name` with [`alias_script`](Self::alias_script).
+    fn alias(&self, name: &str) -> Option<String> {
+        self.state().aliases.iter().find(|(alias, _)| alias == name).map(|(_, url)| url.clone())
     }
 
     /// Engine-made text that can name scripts (an error message, a stack):
@@ -602,12 +600,10 @@ impl Inspector {
     /// [`url`](Self::url) for text that may not be a URL (a script label
     /// such as `inline#2`, which is kept as it is).
     pub fn url_text(&self, text: &str) -> String {
-        // An inline module runs as `<document>#inline-module-<n>`: it is the
-        // page's n-th `<script>`, as an inline classic script is.
-        if let Some((_, n)) = text.rsplit_once("#inline-module-") {
-            if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) {
-                return format!("inline#{n}");
-            }
+        // A name the engine gave a script (an inline module runs as
+        // `<document>#inline-module-<n>`, aliased to `inline#n`).
+        if let Some(url) = self.alias(text) {
+            return url;
         }
         if text.starts_with("event:") {
             return cap(text, MAX_SHORT_CHARS).0;
@@ -626,13 +622,7 @@ impl Inspector {
     /// newlines dropped, backslashes as slashes, any scheme). `None` for
     /// anything else: a frame that cannot be read is dropped, never copied.
     pub fn frame_location(&self, path: &str, line: u32, column: u32) -> Option<SourceLocation> {
-        if let Some(url) = self
-            .state()
-            .aliases
-            .iter()
-            .find(|(alias, _)| alias == path)
-            .map(|(_, url)| url.clone())
-        {
+        if let Some(url) = self.alias(path) {
             return Some(SourceLocation { url, line, column });
         }
         let label = |prefix: &str| {
@@ -641,11 +631,6 @@ impl Inspector {
         };
         let url = if label("inline#") || label("script#") {
             path.to_string()
-        } else if let Some((_, n)) = path.rsplit_once("#inline-module-") {
-            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            format!("inline#{n}")
         } else {
             self.url(&Url::parse(path).ok()?)
         };
@@ -990,16 +975,8 @@ pub fn net_error_kind(error: &rustkit_net::NetError) -> &'static str {
         NetError::InvalidUrl(_) => "invalid_url",
         NetError::RequestFailed(_) | NetError::IoError(_) => "network",
         NetError::HttpError(http) => match http {
-            HttpError::ConnectionFailed(text) => {
-                let text = text.to_ascii_lowercase();
-                if text.contains("no addresses") || text.contains("lookup") || text.contains("resolve")
-                    || text.contains("name or service")
-                {
-                    "dns"
-                } else {
-                    "connect"
-                }
-            }
+            HttpError::LookupFailed(_) => "dns",
+            HttpError::ConnectionFailed(_) => "connect",
             HttpError::IoError(_) => "connect",
             HttpError::TlsError(_) => "tls",
             HttpError::Timeout => "timeout",

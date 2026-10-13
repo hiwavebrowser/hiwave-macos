@@ -235,4 +235,6 @@ fn a_network_errors_kind_is_never_read_from_its_text() {
         let error = NetError::HttpError(HttpError::ConnectionFailed(text.into()));
         assert_eq!(net_error_kind(&error), "connect", "{text:?}");
     }
+    let lookup = NetError::HttpError(HttpError::LookupFailed("nowhere.test: no addresses".into()));
+    assert_eq!(net_error_kind(&lookup), "dns");
 }
