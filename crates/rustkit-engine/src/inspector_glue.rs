@@ -13,7 +13,7 @@ use std::sync::Arc;
 use rustkit_bindings::DomBindings;
 
 use crate::inspector::{cap, ConsoleLevel, Inspector, InspectorEvent, SourceLocation, MAX_MESSAGE_CHARS, MAX_STACK_CHARS};
-use crate::{ScriptOutcome, ScriptRecord};
+use crate::{EngineFailure, ScriptOutcome, ScriptRecord};
 
 /// Set up a document's new bindings for a listening Inspector: console
 /// calls with their positions, error reports, unsupported members' callers.
@@ -50,24 +50,22 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
 
 /// Push `record` onto a script log. A page exception in it reaches the
 /// Inspector from the runtime's report at the next drain; only the engine's
-/// own failures (a panic inside the JS engine, an import map it refused)
-/// are recorded from here, with a fixed message.
+/// own failures (a panic inside the JS engine, an import map it refused),
+/// which the engine marks where it raises them, are recorded from here,
+/// with a fixed message. What page script threw is never one of them,
+/// whatever its text.
 pub(crate) fn log_script(log: &mut Vec<ScriptRecord>, inspector: &Inspector, record: ScriptRecord) {
-    if let ScriptOutcome::Threw(text) = &record.outcome {
-        engine_error(inspector, text, &record.source);
+    if let ScriptOutcome::EngineFailed(failure) = &record.outcome {
+        engine_error(inspector, failure, &record.source);
     }
     log.push(record);
 }
 
-/// The engine's own failure `text`, if it is one, as a `script_error` with
-/// a fixed message; page exceptions are left to their reports.
-pub(crate) fn engine_error(inspector: &Inspector, text: &str, script: &str) {
-    let (message, length) = if text == "JS engine panic" {
-        ("JS engine panic", None)
-    } else if let Some(detail) = text.strip_prefix("import map: ") {
-        ("import map rejected", Some(detail.chars().count() as u64))
-    } else {
-        return;
+/// The engine's own `failure` as a `script_error` with a fixed message.
+pub(crate) fn engine_error(inspector: &Inspector, failure: &EngineFailure, script: &str) {
+    let (message, length) = match failure {
+        EngineFailure::Panic => ("JS engine panic", None),
+        EngineFailure::ImportMap(why) => ("import map rejected", Some(why.chars().count() as u64)),
     };
     inspector.emit_with(|inspector| InspectorEvent::ScriptError {
         name: String::new(),
