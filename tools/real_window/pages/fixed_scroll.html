@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>position: fixed under scroll</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  #bar { position: fixed; top: 0; left: 0; width: 100%; height: 120px; background: #ff00ff; }
+  .band { height: 1500px; }
+  #a { background: #ff0000; }
+  #b { background: #00ff00; }
+  #c { background: #0000ff; }
+</style>
+<!-- A magenta bar fixed to the top of the viewport over three bands, each
+     taller than any window. When the server answers a beacon with "go" the
+     page scrolls itself to the green band: the bar must still be on screen.
+     A bar that scrolls away with the page leaves no magenta in the frame. -->
+<div id="bar"></div>
+<div id="a" class="band"></div>
+<div id="b" class="band"></div>
+<div id="c" class="band"></div>
+<script>
+  var n = 0, scrolled = false;
+  function beacon(name) { return fetch('/beacon?' + name).then(function (r) { return r.text(); }); }
+  setInterval(function () {
+    n += 1;
+    beacon('fixed-tick-' + n).then(function (reply) {
+      if (reply !== 'go' || scrolled) { return; }
+      scrolled = true;
+      window.scrollTo(0, 1700);
+      setTimeout(function () { beacon('fixed-at-' + Math.round(window.scrollY)); }, 200);
+    }, function () {});
+  }, 200);
+</script>
