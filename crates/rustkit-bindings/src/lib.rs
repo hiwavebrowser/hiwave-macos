@@ -374,8 +374,8 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// time. Promise reactions run when the enclosing evaluation returns, not
 /// between two timer callbacks.
 /// The Web API members the bindings report as unimplemented when page
-/// script reaches them (`__rustkit_unsupported` in the bindings' scripts).
-/// Nothing else is ever reported: page script can call the reporter too.
+/// script reaches them (`__rk.unsupported` in the bindings' scripts, a
+/// native page script cannot reach). Nothing else is ever reported.
 pub const UNSUPPORTED_MEMBERS: [(&str, &str); 5] = [
     ("XMLHttpRequest", "open(async=false)"),
     ("XMLHttpRequest", "responseXML"),
@@ -391,48 +391,6 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     function report(e) {
         try { reportError(e); } catch (_) {}
     }
-    // Unsupported members note their first caller's position only while
-    // the engine records diagnostics.
-    var withStacks = false;
-    window.__rustkit_errors_with_stacks = function (on) { withStacks = !!on; };
-
-    // Web API members the bindings know they do not implement, reached by
-    // page script: `interface.member` -> count and the first caller's
-    // position (only while the console notes positions). Page script can
-    // call this too, so only the instrumented members count (the same list
-    // as `UNSUPPORTED_MEMBERS`): the table never holds page text and never
-    // outgrows the list.
-    var allowed = Object.create(null);
-    allowed['XMLHttpRequest.open(async=false)'] = true;
-    allowed['XMLHttpRequest.responseXML'] = true;
-    allowed['CustomElementRegistry.define(extends)'] = true;
-    allowed['ReadableStream.getReader(byob)'] = true;
-    allowed['DOMParser.parseFromString(XML)'] = true;
-    var unsupported = Object.create(null);
-    var unsupportedKeys = [];
-    var where = typeof __rustkit_console_where === 'function' ? __rustkit_console_where : null;
-    window.__rustkit_unsupported = function (iface, member) {
-        if (typeof iface !== 'string' || typeof member !== 'string') return;
-        var key = iface + '.' + member;
-        if (allowed[key] !== true) return;
-        var seen = unsupported[key];
-        if (seen) { seen.n++; return; }
-        var at = null;
-        try { if (withStacks && where) at = where(true) || null; } catch (_) {}
-        unsupported[key] = { i: iface, m: member, n: 1, sent: 0, at: at || null };
-        unsupportedKeys.push(key);
-    };
-    window.__rustkit_take_unsupported = function () {
-        var out = [];
-        for (var k = 0; k < unsupportedKeys.length; k++) {
-            var u = unsupported[unsupportedKeys[k]];
-            if (u.n > u.sent) {
-                out.push({ i: u.i, m: u.m, n: u.n - u.sent, at: u.at });
-                u.sent = u.n;
-            }
-        }
-        return JSON.stringify(out);
-    };
 
     function makeEventTarget(target) {
         var listeners = {};
@@ -930,7 +888,7 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_encoding.js"))?;
 
         // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
-        runtime.evaluate_script(include_str!("web_streams.js"))?;
+        runtime.evaluate_with_host(include_str!("web_streams.js"))?;
 
         // Intl (en-US only) and the toLocale*String methods over it (web_intl.js).
         runtime.evaluate_script(include_str!("web_intl.js"))?;
@@ -1468,11 +1426,7 @@ impl DomBindings {
     /// message text only when `keep_text` (see
     /// [`JsRuntime::set_error_reports`]).
     pub fn set_error_details(&self, on: bool, keep_text: bool) -> Result<(), BindingError> {
-        let mut runtime = self.runtime.borrow_mut();
-        runtime.set_error_reports(on, keep_text);
-        runtime.evaluate_script(&format!(
-            "if (window.__rustkit_errors_with_stacks) window.__rustkit_errors_with_stacks({on});"
-        ))?;
+        self.runtime.borrow_mut().set_error_reports(on, keep_text);
         Ok(())
     }
 
@@ -1487,34 +1441,11 @@ impl DomBindings {
     /// call: `(interface, member, times, first caller's position)`. Only
     /// [`UNSUPPORTED_MEMBERS`] are ever returned.
     pub fn take_unsupported_apis(&self) -> Vec<(String, String, u64, Option<rustkit_js::ScriptPosition>)> {
-        #[derive(serde::Deserialize)]
-        struct Reached {
-            i: String,
-            m: String,
-            n: u64,
-            at: Option<String>,
-        }
-        let drained = self.runtime.borrow_mut().evaluate_script(
-            "window.__rustkit_take_unsupported ? window.__rustkit_take_unsupported() : '[]'",
-        );
-        let Ok(JsValue::String(json)) = drained else {
-            return Vec::new();
-        };
-        serde_json::from_str::<Vec<Reached>>(&json)
-            .unwrap_or_default()
+        self.runtime
+            .borrow_mut()
+            .take_unsupported()
             .into_iter()
-            .filter(|r| UNSUPPORTED_MEMBERS.contains(&(r.i.as_str(), r.m.as_str())))
-            .map(|r| {
-                let at = r.at.and_then(|at| {
-                    let mut parts = at.split('\u{1}');
-                    Some(rustkit_js::ScriptPosition {
-                        path: parts.next()?.to_string(),
-                        line: parts.next()?.parse().ok()?,
-                        column: parts.next()?.parse().ok()?,
-                    })
-                });
-                (r.i, r.m, r.n, at)
-            })
+            .filter(|(i, m, _, _)| UNSUPPORTED_MEMBERS.contains(&(i.as_str(), m.as_str())))
             .collect()
     }
 
@@ -2512,18 +2443,49 @@ mod tests {
         assert!(bindings.take_reported_errors().is_empty(), "drained");
     }
 
-    /// The reporter's allow-list in script is `UNSUPPORTED_MEMBERS`.
+    /// Every member the bindings' scripts report is in
+    /// `UNSUPPORTED_MEMBERS`, and every listed member is reported somewhere.
     #[test]
-    fn the_unsupported_allow_list_matches_in_script_and_rust() {
-        for (interface, member) in UNSUPPORTED_MEMBERS {
-            assert!(PAGE_LIFECYCLE_JS.contains(&format!("allowed['{interface}.{member}'] = true;")));
-        }
-        assert_eq!(PAGE_LIFECYCLE_JS.matches("allowed['").count(), UNSUPPORTED_MEMBERS.len());
+    fn the_unsupported_list_matches_the_reporting_scripts() {
+        let sources = [
+            include_str!("web_xhr.js"),
+            include_str!("web_components.js"),
+            include_str!("web_streams.js"),
+            dom::WRAPPERS_JS_FOR_TESTS,
+        ]
+        .concat();
+        let mut reported: Vec<(String, String)> = sources
+            .split("__rk.unsupported('")
+            .skip(1)
+            .map(|rest| {
+                let (interface, rest) = rest.split_once("', '").unwrap();
+                (interface.to_string(), rest.split_once("')").unwrap().0.to_string())
+            })
+            .collect();
+        reported.sort();
+        reported.dedup();
+        let mut listed: Vec<(String, String)> =
+            UNSUPPORTED_MEMBERS.iter().map(|(i, m)| (i.to_string(), m.to_string())).collect();
+        listed.sort();
+        assert_eq!(reported, listed);
     }
 
-    /// A listener's error reaches the script log as text, and, with
-    /// details on, a report with no page text: its type, standard name,
-    /// message length and frames.
+    /// Page script reaches neither the reporter nor the table.
+    #[test]
+    fn page_script_cannot_report_or_read_unsupported_members() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let seen = bindings
+            .evaluate("[typeof __rustkit_unsupported, typeof __rustkit_take_unsupported, typeof __rustkit_errors_with_stacks].join()")
+            .unwrap();
+        assert!(matches!(seen, JsValue::String(ref s) if s == "undefined,undefined,undefined"), "{seen:?}");
+        bindings
+            .evaluate("try { new DOMParser().parseFromString('<a/>', 'text/xml'); } catch (e) {}")
+            .unwrap();
+        let apis = bindings.take_unsupported_apis();
+        assert_eq!(apis.len(), 1);
+        assert_eq!((apis[0].0.as_str(), apis[0].1.as_str(), apis[0].2), ("DOMParser", "parseFromString(XML)", 1));
+    }
+
     #[test]
     fn a_listener_error_is_reported_as_text_and_as_a_report_without_page_text() {
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();

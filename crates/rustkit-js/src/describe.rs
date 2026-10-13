@@ -206,28 +206,8 @@ pub(crate) fn stack_getter(context: &Context) -> Option<JsObject> {
     descriptor.get().and_then(|g| g.as_object())
 }
 
-/// `__rustkit_console_format(...args)`: the console line for a call's
-/// arguments, built when the call is made. Runs none of the page's code.
-pub(crate) fn console_format(
-    _this: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> boa_engine::JsResult<JsValue> {
-    Ok(join_line(args, |arg| text(arg, context)))
-}
-
-/// `__rustkit_console_format_redacted(...args)`: the line as
-/// [`redacted_text`] shows each argument (the default for a recording
-/// embedder: no page text leaves the runtime).
-pub(crate) fn console_format_redacted(
-    _this: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> boa_engine::JsResult<JsValue> {
-    Ok(join_line(args, |arg| redacted_text(arg, context)))
-}
-
-fn join_line(args: &[JsValue], mut describe: impl FnMut(&JsValue) -> String) -> JsValue {
+/// A console line: each argument described, joined by spaces, capped.
+pub(crate) fn join_line(args: &[JsValue], mut describe: impl FnMut(&JsValue) -> String) -> String {
     const MAX_ARGS: usize = 256;
     const MAX_CHARS: usize = 16 * 1024;
     let mut line = String::new();
@@ -245,5 +225,5 @@ fn join_line(args: &[JsValue], mut describe: impl FnMut(&JsValue) -> String) -> 
             break;
         }
     }
-    JsValue::from(boa_engine::JsString::from(line.as_str()))
+    line
 }

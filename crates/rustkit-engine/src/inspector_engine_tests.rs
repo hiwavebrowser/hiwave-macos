@@ -1123,7 +1123,7 @@ Array.prototype.push = function () {
   if (!pushing) { pushing = true; try { realPush.call(this, 'FORGED_PUSH'); } catch (e) {} pushing = false; }
   return realPush.apply(this, arguments);
 };
-var realApply = Function.prototype.apply;
+var realApply = Function.prototype.apply, realStringify = JSON.stringify, realString = String;
 Function.prototype.apply = function () { return 'FORGED_APPLY'; };
 JSON.stringify = function () { return '["FORGED_JSON"]'; };
 String = function () { return 'FORGED_STRING'; };
@@ -1135,8 +1135,16 @@ Object.defineProperty(Object.prototype, 'msg', { get: function () { return 'FORG
 Object.defineProperty(Object.prototype, 'args', { get: function () { return ['FORGED_ARGS']; }, configurable: true });
 Object.prototype[Symbol.toPrimitive] = function () { return 'FORGED_PRIMITIVE'; };
 console.log('after patches', 1);
-try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
 throw new RangeError('after patches');
+</script><script>
+// The bindings' own event dispatch (not the log) runs on builtins a page
+// can patch: put them back so the genuine listener and timer still run.
+Array.prototype.push = realPush; Function.prototype.apply = realApply;
+JSON.stringify = realStringify; String = realString;
+delete Error.prototype.toString; delete Error.prototype.toJSON;
+delete Error.prototype.message; delete Error.prototype.name;
+delete Object.prototype.msg; delete Object.prototype.args; delete Object.prototype[Symbol.toPrimitive];
+try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
 </script></body></html>"#;
     let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
     let records = records(&engine, view);

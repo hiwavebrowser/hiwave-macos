@@ -1195,6 +1195,9 @@ pub(crate) fn install(
 
 /// Wrapper prototypes, the identity cache, and the `document` read
 /// surface. `window.__rustkit_dom_reset(gen)` rebinds it to a new document.
+#[cfg(test)]
+pub(crate) const WRAPPERS_JS_FOR_TESTS: &str = WRAPPERS_JS;
+
 const WRAPPERS_JS: &str = r#"
 (function (g) {
     var N = {
@@ -2819,7 +2822,7 @@ const WRAPPERS_JS: &str = r#"
         type = String(type);
         if (type === 'text/xml' || type === 'application/xml' ||
             type === 'application/xhtml+xml' || type === 'image/svg+xml') {
-            if (g.__rustkit_unsupported) g.__rustkit_unsupported('DOMParser', 'parseFromString(XML)');
+            __rk.unsupported('DOMParser', 'parseFromString(XML)');
             throw new DOMException("Failed to execute 'parseFromString' on 'DOMParser': " +
                 "XML documents are not supported yet.", 'NotSupportedError');
         }

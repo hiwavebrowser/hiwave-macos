@@ -218,8 +218,6 @@ pub struct JsRuntime {
     deadline: std::rc::Rc<ExecutionDeadline>,
     #[cfg(feature = "boa")]
     rejections: std::rc::Rc<rejections::RejectionHooks>,
-    /// Console arguments reach the handler as type and length only.
-    console_redacted: bool,
     #[cfg(feature = "boa")]
     diag: std::rc::Rc<diag::Diagnostics>,
     /// The natives the embedder's own scripts are handed
@@ -275,7 +273,6 @@ impl JsRuntime {
             timers: Arc::new(Mutex::new(HashMap::new())),
             globals: HashMap::new(),
             deadline: std::rc::Rc::default(),
-            console_redacted: false,
             #[cfg(feature = "boa")]
             rejections,
             #[cfg(feature = "boa")]
@@ -332,30 +329,19 @@ impl JsRuntime {
     /// notes where it was called from (one walk of the call stack per call).
     pub fn set_console_handler(&mut self, handler: ConsoleHandler) {
         self.console_handler = Some(Arc::new(handler));
-        self.start_console_capture();
+        #[cfg(feature = "boa")]
+        self.diag.console_capturing.set(true);
     }
 
     /// Hand the handler each console argument's type, and a string's length,
     /// instead of its text (see `describe::redacted_text`): for an embedder
     /// that records console calls where page text must not go. Off by
-    /// default. Set it before any page script runs.
+    /// default. The flag lives here, in Rust: no page script can change it.
     pub fn set_console_redaction(&mut self, on: bool) {
-        self.console_redacted = on;
-        if self.console_handler.is_some() {
-            self.start_console_capture();
-        }
-    }
-
-    fn start_console_capture(&mut self) {
         #[cfg(feature = "boa")]
-        {
-            use boa_engine::Source;
-            let script = format!(
-                "if (console && console.__rustkit_capture) console.__rustkit_capture({});",
-                self.console_redacted
-            );
-            let _ = self.context.eval(Source::from_bytes(script.as_bytes()));
-        }
+        self.diag.console_redacted.set(on);
+        #[cfg(not(feature = "boa"))]
+        let _ = on;
     }
 
     /// Describe page errors for [`take_error_reports`](Self::take_error_reports):
@@ -418,9 +404,25 @@ impl JsRuntime {
         }
     }
 
+    /// Unimplemented members the embedder's scripts reported page script
+    /// reaching (`__rk.unsupported(interface, member)`) since the last call:
+    /// `(interface, member, times, first caller's position)`. At most 64
+    /// members are held.
+    pub fn take_unsupported(&mut self) -> Vec<(String, String, u64, Option<ScriptPosition>)> {
+        #[cfg(feature = "boa")]
+        {
+            self.diag.take_unsupported()
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            Vec::new()
+        }
+    }
+
     /// Evaluate one of the embedder's own scripts (never page script) as
     /// the body of a function whose parameter `__rk` is the host object:
-    /// `__rk.reportError(e)` reports what a listener or timer threw. The
+    /// `__rk.reportError(e)` reports what a listener or timer threw,
+    /// `__rk.unsupported(interface, member)` an unimplemented member. The
     /// object is reachable only from the closures such a script builds, so
     /// page script cannot report, forge or read through it.
     pub fn evaluate_with_host(&mut self, source: &str) -> Result<JsValue, JsError> {
@@ -452,89 +454,40 @@ impl JsRuntime {
         }
     }
 
-    /// Set up console API.
+    /// Set up console API: `console.log`, `info`, `warn`, `error` and
+    /// `debug` are native functions. Without a handler a call does nothing;
+    /// with one its line is built at the call (no page code runs) and queued
+    /// in Rust with the caller's position. Nothing on `console` or anywhere
+    /// else page script can reach turns redaction off or adds to the queue.
     fn setup_console(&mut self) -> Result<(), JsError> {
-        // Console is set up via evaluate_script with native function bindings
-        // For now, we'll inject a simple console object
-        // Without a handler each call keeps its arguments (never read). With
-        // one (`__rustkit_capture`, set by `set_console_handler`), the line is
-        // built at the call by `__rustkit_console_format`, which runs none of
-        // the page's code, and the caller's position is noted. The two
-        // natives are taken here, before any page script, so a page that
-        // replaces the globals changes nothing.
-        let console_script = r#"
-            var console = (function () {
-                var where = typeof __rustkit_console_where === 'function' ? __rustkit_console_where : null;
-                var verbatim = typeof __rustkit_console_format === 'function' ? __rustkit_console_format : null;
-                var redacted = typeof __rustkit_console_format_redacted === 'function' ? __rustkit_console_format_redacted : null;
-                var format = verbatim;
-                var capturing = false;
-                function method(level) {
-                    return function () {
-                        if (capturing) {
-                            this._logs.push({level: level, msg: format.apply(null, arguments), at: where(false)});
-                        } else {
-                            this._logs.push({level: level, args: Array.from(arguments)});
-                        }
-                    };
-                }
-                var console = {
-                    _logs: [],
-                    log: method('log'),
-                    info: method('info'),
-                    warn: method('warn'),
-                    error: method('error'),
-                    debug: method('debug'),
-                    _flush: function() {
-                        var logs = this._logs;
-                        this._logs = [];
-                        return logs;
-                    }
-                };
-                Object.defineProperty(console, '__rustkit_capture', {
-                    value: function (redact) {
-                        format = redact ? redacted : verbatim;
-                        capturing = !!(where && format);
-                    }
-                });
-                return console;
-            })();
-        "#;
-
         #[cfg(feature = "boa")]
         {
-            use boa_engine::{js_string, NativeFunction, Source};
+            use boa_engine::{js_string, object::ObjectInitializer, property::Attribute, NativeFunction};
+            let mut console = ObjectInitializer::new(&mut self.context);
+            for (name, level) in [
+                ("log", LogLevel::Log),
+                ("info", LogLevel::Info),
+                ("warn", LogLevel::Warn),
+                ("error", LogLevel::Error),
+                ("debug", LogLevel::Debug),
+            ] {
+                let diag = self.diag.clone();
+                // SAFETY: the closure holds an `Rc<Diagnostics>`, whose only
+                // GC handle (the stack getter) stays rooted while it lives.
+                let method = unsafe {
+                    NativeFunction::from_closure(move |_this, args, context| {
+                        diag.console_call(level, args, context);
+                        Ok(boa_engine::JsValue::undefined())
+                    })
+                };
+                console.function(method, js_string!(name), 0);
+            }
+            let console = console.build();
             self.context
-                .register_global_callable(
-                    js_string!("__rustkit_console_where"),
-                    1,
-                    NativeFunction::from_fn_ptr(console_caller_position),
-                )
+                .register_global_property(js_string!("console"), console, Attribute::WRITABLE | Attribute::CONFIGURABLE)
                 .map_err(|e| JsError::ExecutionError(e.to_string()))?;
-            self.context
-                .register_global_callable(
-                    js_string!("__rustkit_console_format"),
-                    0,
-                    NativeFunction::from_fn_ptr(describe::console_format),
-                )
-                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
-            self.context
-                .register_global_callable(
-                    js_string!("__rustkit_console_format_redacted"),
-                    0,
-                    NativeFunction::from_fn_ptr(describe::console_format_redacted),
-                )
-                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
-            self.context
-                .eval(Source::from_bytes(console_script).with_path(std::path::Path::new(CONSOLE_SCRIPT_PATH)))
-                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
-            Ok(())
         }
-        #[cfg(not(feature = "boa"))]
-        {
-            self.evaluate_script(console_script)?;
-            Ok(())
-        }
+        Ok(())
     }
 
     /// Evaluate JavaScript code.
@@ -647,96 +600,6 @@ impl JsRuntime {
         self.deadline.late.take()
     }
 
-    #[cfg(feature = "boa")]
-    fn drain_console(&mut self) -> Vec<(LogLevel, String, Option<ScriptPosition>)> {
-        use boa_engine::Source;
-
-        // Evaluate console._flush() directly on the context without calling
-        // evaluate_script, preventing infinite recursion.
-        let Ok(logs_val) = self.context.eval(Source::from_bytes("console._flush()")) else {
-            return Vec::new();
-        };
-
-        let Some(logs_obj) = logs_val.as_object() else {
-            return Vec::new();
-        };
-
-        let Ok(len_val) = logs_obj.get(boa_engine::js_string!("length"), &mut self.context) else {
-            return Vec::new();
-        };
-
-        let Some(len) = len_val.as_number() else {
-            return Vec::new();
-        };
-
-        if len < 0.0 || !len.is_finite() {
-            return Vec::new();
-        }
-
-        const MAX_FLUSH_ENTRIES: u32 = 10_000;
-        const MAX_FLUSH_ARGS: u32 = 256;
-
-        let count = (len as u32).min(MAX_FLUSH_ENTRIES);
-        let mut entries = Vec::with_capacity(count as usize);
-
-        for i in 0..count {
-            let Ok(entry_val) = logs_obj.get(i, &mut self.context) else {
-                continue;
-            };
-            let Some(entry_obj) = entry_val.as_object() else {
-                continue;
-            };
-
-            let level_str = entry_obj
-                .get(boa_engine::js_string!("level"), &mut self.context)
-                .ok()
-                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
-                .unwrap_or_else(|| "log".to_string());
-
-            let level = match level_str.as_str() {
-                "info" => LogLevel::Info,
-                "warn" => LogLevel::Warn,
-                "error" => LogLevel::Error,
-                "debug" => LogLevel::Debug,
-                _ => LogLevel::Log,
-            };
-
-            // Built at the call (capturing); else the arguments, described
-            // without running any of the page's code.
-            let built = entry_obj
-                .get(boa_engine::js_string!("msg"), &mut self.context)
-                .ok()
-                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()));
-            let mut msg_parts = Vec::new();
-            if let Some(built) = built {
-                msg_parts.push(built);
-            } else if let Ok(args_val) = entry_obj.get(boa_engine::js_string!("args"), &mut self.context) {
-                if let Some(args_obj) = args_val.as_object() {
-                    if let Ok(args_len_val) = args_obj.get(boa_engine::js_string!("length"), &mut self.context) {
-                        let args_count = (args_len_val.as_number().unwrap_or(0.0).max(0.0) as u32).min(MAX_FLUSH_ARGS);
-                        for arg_idx in 0..args_count {
-                            if let Ok(arg) = args_obj.get(arg_idx, &mut self.context) {
-                                msg_parts.push(match self.console_redacted {
-                                    true => describe::redacted_text(&arg, &self.context),
-                                    false => describe::text(&arg, &mut self.context),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-
-            let at = entry_obj
-                .get(boa_engine::js_string!("at"), &mut self.context)
-                .ok()
-                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
-                .and_then(|at| parse_position_record(&at));
-            entries.push((level, msg_parts.join(" "), at));
-        }
-
-        entries
-    }
-
     /// Hand the console calls made since the last flush to the handler
     /// now (module evaluation and job runs do not end in an
     /// `evaluate_script`, which flushes).
@@ -752,7 +615,7 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         {
-            let logs = self.drain_console();
+            let logs = self.diag.take_console();
             for (level, msg, at) in logs {
                 handler(level, &msg, at.as_ref());
             }
@@ -945,59 +808,26 @@ fn host_object(diag: &std::rc::Rc<diag::Diagnostics>, context: &mut boa_engine::
             Ok(boa_engine::JsValue::undefined())
         })
     };
+    let noter = diag.clone();
+    // SAFETY: as above.
+    let unsupported = unsafe {
+        NativeFunction::from_closure(move |_this, args, context| {
+            if let (Some(interface), Some(member)) = (
+                args.first().and_then(|a| a.as_string()),
+                args.get(1).and_then(|a| a.as_string()),
+            ) {
+                noter.unsupported(&interface.to_std_string_escaped(), &member.to_std_string_escaped(), context);
+            }
+            Ok(boa_engine::JsValue::undefined())
+        })
+    };
     ObjectInitializer::new(context)
         .function(report_error, js_string!("reportError"), 1)
+        .function(unsupported, js_string!("unsupported"), 2)
         .build()
 }
 
-/// The path the console object is evaluated under, so its own frames can be
-/// told from its callers'.
 #[cfg(feature = "boa")]
-const CONSOLE_SCRIPT_PATH: &str = "<rustkit console>";
-
-/// `__rustkit_console_where(skipUnnamed)`: the position of the innermost
-/// frame other than the console's own, as `path\u{1}line\u{1}column`.
-/// That frame is the caller; when it is not in a named script (`eval` code,
-/// an `on*` attribute's handler) the answer is `undefined`, never an outer
-/// caller's position. With `skipUnnamed` (the bindings' own unnamed glue
-/// calling this) unnamed frames are passed over instead. Reads the VM's
-/// frames only; runs no script.
-#[cfg(feature = "boa")]
-fn console_caller_position(
-    _this: &boa_engine::JsValue,
-    args: &[boa_engine::JsValue],
-    context: &mut boa_engine::Context,
-) -> boa_engine::JsResult<boa_engine::JsValue> {
-    use boa_engine::vm::SourcePath;
-    let skip_unnamed = args.first().is_some_and(|a| a.to_boolean());
-    for frame in context.stack_trace() {
-        let location = frame.position();
-        let path = match &location.path {
-            SourcePath::Path(path) => path.to_string_lossy().into_owned(),
-            _ if skip_unnamed => continue,
-            _ => return Ok(boa_engine::JsValue::undefined()),
-        };
-        if path == CONSOLE_SCRIPT_PATH {
-            continue;
-        }
-        let Some(position) = location.position else {
-            return Ok(boa_engine::JsValue::undefined());
-        };
-        let record = format!("{path}\u{1}{}\u{1}{}", position.line_number(), position.column_number());
-        return Ok(boa_engine::JsValue::from(boa_engine::JsString::from(record.as_str())));
-    }
-    Ok(boa_engine::JsValue::undefined())
-}
-
-#[cfg(feature = "boa")]
-fn parse_position_record(record: &str) -> Option<ScriptPosition> {
-    let mut parts = record.split('\u{1}');
-    let path = parts.next()?.to_string();
-    let line = parts.next()?.parse().ok()?;
-    let column = parts.next()?.parse().ok()?;
-    Some(ScriptPosition { path, line, column })
-}
-
 fn from_boa_value(value: &boa_engine::JsValue) -> JsValue {
     if value.is_undefined() {
         JsValue::Undefined
@@ -1431,24 +1261,54 @@ mod tests {
         assert_eq!(runtime.evaluate_script("n").unwrap().is_truthy(), false, "page code ran");
     }
 
-    /// A page cannot break or redirect the console by overwriting the
-    /// natives it uses.
+    /// Nothing page script can reach turns redaction off or writes a line
+    /// of its own: the console methods are natives, the flag and the queue
+    /// live in Rust, and no prototype the page can patch is used.
     #[test]
-    fn overwriting_the_console_natives_changes_nothing() {
+    fn page_script_cannot_switch_redaction_off_or_forge_console_lines() {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
         runtime.set_console_handler(Box::new(move |_level, msg, _at| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
+        runtime.set_console_redaction(true);
         runtime
             .evaluate_script(
-                "__rustkit_console_format = function () { return 'hijacked'; };
-                 __rustkit_console_where = 1; console._where = 1;
-                 console.log('still', 'fine');",
+                "var secret = 'SECRET';
+                 try { console.__rustkit_capture(false); } catch (e) {}
+                 try { console._logs.push({level: 'error', msg: 'FORGED'}); } catch (e) {}
+                 console._flush = function () { return [{level: 'error', msg: 'FORGED'}]; };
+                 __rustkit_console_format = function () { return 'FORGED'; };
+                 Function.prototype.apply = function () { return 'FORGED'; };
+                 Array.prototype.push = function () { return 0; };
+                 Array.from = function () { return ['FORGED']; };
+                 JSON.stringify = function () { return 'FORGED'; };
+                 String = function () { return 'FORGED'; };
+                 Object.prototype[Symbol.toPrimitive] = function () { return 'FORGED'; };
+                 Object.defineProperty(Object.prototype, 'msg', { get: function () { return 'FORGED'; } });
+                 console.log(secret, 1);",
             )
             .unwrap();
-        assert_eq!(received.lock().unwrap().clone(), vec!["still fine"]);
+        assert_eq!(received.lock().unwrap().clone(), vec!["<string len=6> <number>"]);
+    }
+
+    /// A page that logs without end holds at most 1024 lines between flushes.
+    #[test]
+    fn console_lines_waiting_for_a_flush_are_bounded() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+            recv_clone.lock().unwrap().push(msg.to_string());
+        }));
+        let module = runtime.begin_module("https://a.test/m.js", "for (let i = 0; i < 5000; i++) console.log(i);");
+        assert!(module.is_ok());
+        let _ = runtime.poll_module(&module.unwrap());
+        runtime.flush_console();
+        let lines = received.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1024);
+        assert_eq!(lines.last().map(String::as_str), Some("4999"));
     }
 
     /// Code with no named script of its own (`eval`) has no position; the
@@ -1490,22 +1350,4 @@ mod tests {
         assert_eq!(runtime.evaluate_script("n").unwrap().is_truthy(), false, "page code ran");
     }
 
-    #[test]
-    fn console_flush_bounded_against_hostile_length() {
-        let mut runtime = JsRuntime::new().unwrap();
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
-            recv_clone.lock().unwrap().push(msg.to_string());
-        }));
-
-        // Hostile script overwriting console._flush with huge length
-        runtime
-            .evaluate_script("console._flush = () => ({ length: 4294967295 });")
-            .unwrap();
-
-        // Evaluation completes without hanging or OOM
-        let result = runtime.evaluate_script("1 + 1");
-        assert!(result.is_ok());
-    }
 }

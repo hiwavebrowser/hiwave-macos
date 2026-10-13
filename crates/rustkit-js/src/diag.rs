@@ -21,7 +21,20 @@ use std::collections::{HashSet, VecDeque};
 use boa_engine::builtins::error::Error;
 use boa_engine::{Context, JsObject, JsValue};
 
-use crate::{ErrorReport, ScriptPosition};
+use crate::{ErrorReport, LogLevel, ScriptPosition};
+
+/// One console call: level, line, the caller's position.
+pub(crate) type ConsoleCall = (LogLevel, String, Option<ScriptPosition>);
+
+/// An unimplemented member the embedder's scripts saw page script reach.
+struct Unsupported {
+    interface: String,
+    member: String,
+    count: u64,
+    sent: u64,
+    at: Option<ScriptPosition>,
+}
+
 /// Reports held at once; past it the oldest is dropped.
 const MAX_REPORTS: usize = 256;
 /// Listener and timer exception texts held for the script log at once.
@@ -30,6 +43,10 @@ const MAX_REPORTED_TEXTS: usize = 1024;
 const MAX_KNOWN_PATHS: usize = 4096;
 /// Frames kept per report.
 const MAX_FRAMES: usize = 32;
+/// Console calls held between flushes; past it the oldest is dropped.
+const MAX_CONSOLE_PENDING: usize = 1024;
+/// Distinct unsupported members held.
+const MAX_UNSUPPORTED: usize = 64;
 
 /// The error names the engine itself gives: ECMAScript's and the
 /// `DOMException` names the bindings throw. Any other `name` is page text.
@@ -120,9 +137,72 @@ pub(crate) struct Diagnostics {
     /// The realm's own `Error.prototype.stack` getter, taken before any page
     /// script ran.
     pub(crate) stack_getter: RefCell<Option<JsObject>>,
+    /// Console calls are recorded (an embedder set a console handler).
+    pub(crate) console_capturing: Cell<bool>,
+    /// Console arguments are recorded as type and length only.
+    pub(crate) console_redacted: Cell<bool>,
+    console: RefCell<VecDeque<ConsoleCall>>,
+    unsupported: RefCell<Vec<Unsupported>>,
 }
 
 impl Diagnostics {
+    /// A console call at `level` with `args` (the native `console.*`
+    /// methods): its line is built here, from the values as they are now,
+    /// running none of the page's code.
+    pub(crate) fn console_call(&self, level: LogLevel, args: &[JsValue], context: &mut Context) {
+        if !self.console_capturing.get() {
+            return;
+        }
+        let line = match self.console_redacted.get() {
+            true => crate::describe::join_line(args, |arg| crate::describe::redacted_text(arg, context)),
+            false => crate::describe::join_line(args, |arg| crate::describe::text(arg, context)),
+        };
+        let at = caller_position(context, false);
+        let mut pending = self.console.borrow_mut();
+        if pending.len() >= MAX_CONSOLE_PENDING {
+            pending.pop_front();
+        }
+        pending.push_back((level, line, at));
+    }
+
+    pub(crate) fn take_console(&self) -> Vec<ConsoleCall> {
+        self.console.borrow_mut().drain(..).collect()
+    }
+
+    /// The embedder's scripts saw page script reach `interface.member`,
+    /// which the engine does not implement. The first caller's position is
+    /// noted while reports are on.
+    pub(crate) fn unsupported(&self, interface: &str, member: &str, context: &mut Context) {
+        let mut table = self.unsupported.borrow_mut();
+        if let Some(entry) = table.iter_mut().find(|u| u.interface == interface && u.member == member) {
+            entry.count += 1;
+            return;
+        }
+        if table.len() >= MAX_UNSUPPORTED {
+            return;
+        }
+        let at = match self.on.get() {
+            true => caller_position(context, true),
+            false => None,
+        };
+        table.push(Unsupported { interface: interface.to_string(), member: member.to_string(), count: 1, sent: 0, at });
+    }
+
+    /// The members reached since the last call: `(interface, member, times,
+    /// first caller's position)`.
+    pub(crate) fn take_unsupported(&self) -> Vec<(String, String, u64, Option<ScriptPosition>)> {
+        let mut table = self.unsupported.borrow_mut();
+        table
+            .iter_mut()
+            .filter(|u| u.count > u.sent)
+            .map(|u| {
+                let new = u.count - u.sent;
+                u.sent = u.count;
+                (u.interface.clone(), u.member.clone(), new, u.at.clone())
+            })
+            .collect()
+    }
+
     /// `path` names a script the engine evaluates (noted only while
     /// reports are on: nothing is kept for an embedder that records none).
     pub(crate) fn know_path(&self, path: &str) {
@@ -338,3 +418,27 @@ impl Diagnostics {
     }
 }
 
+/// The position of the innermost script frame on the VM's stack: the
+/// caller of the native that asks. When that frame is in no named script
+/// (`eval` code, an `on*` attribute's handler) the answer is `None`, never
+/// an outer caller's position; with `skip_unnamed` (the embedder's own
+/// unnamed glue is the caller) unnamed frames are passed over instead.
+/// Reads the VM's frames only; runs no script.
+pub(crate) fn caller_position(context: &mut Context, skip_unnamed: bool) -> Option<ScriptPosition> {
+    use boa_engine::vm::SourcePath;
+    for frame in context.stack_trace() {
+        let location = frame.position();
+        let path = match &location.path {
+            SourcePath::Path(path) => path.to_string_lossy().into_owned(),
+            _ if skip_unnamed => continue,
+            _ => return None,
+        };
+        let position = location.position?;
+        return Some(ScriptPosition {
+            path,
+            line: position.line_number(),
+            column: position.column_number(),
+        });
+    }
+    None
+}

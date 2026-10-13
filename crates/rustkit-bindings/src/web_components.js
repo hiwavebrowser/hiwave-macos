@@ -207,7 +207,7 @@
         if (byName[name]) throw domError("Failed to execute 'define' on 'CustomElementRegistry': the name \"" + name + '" has already been used with this registry', 'NotSupportedError');
         if (byCtor && byCtor.has(ctor)) throw domError("Failed to execute 'define' on 'CustomElementRegistry': this constructor has already been used with this registry", 'NotSupportedError');
         if (options && options.extends !== undefined && options.extends !== null) {
-            if (g.__rustkit_unsupported) g.__rustkit_unsupported('CustomElementRegistry', 'define(extends)');
+            __rk.unsupported('CustomElementRegistry', 'define(extends)');
             throw domError("Failed to execute 'define' on 'CustomElementRegistry': customized built-in elements are not supported", 'NotSupportedError');
         }
         var proto = ctor.prototype;

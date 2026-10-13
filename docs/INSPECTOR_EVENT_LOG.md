@@ -68,8 +68,8 @@ an `on*` attribute compiles. Their console calls and errors are never given
 the position of the code that called them; an error's `stack` still lists the
 page frames around them.
 
-`message` of a `console` event is built when the call is made and runs none
-of the page's code. By default it holds no page text: a string is
+`message` of a `console` event is built when the call is made, by the native
+`console.*` method itself, and runs none of the page's code. By default it holds no page text: a string is
 `<string len=N>`, a number `<number>` (`<bigint>`, `<symbol>`), `true`,
 `false`, `null` and `undefined` as they are, an error
 `<TypeError message len=N>` (a name the engine does not give is `Error`), any
@@ -138,8 +138,9 @@ script reaches it: `XMLHttpRequest.open(async=false)`,
 or HTML with `responseType = 'document'`: anywhere else it is `null` in
 every browser), `CustomElementRegistry.define(extends)`,
 `ReadableStream.getReader(byob)`, `DOMParser.parseFromString(XML)`. Only
-these members are ever recorded (`rustkit_bindings::UNSUPPORTED_MEMBERS`):
-page script can reach the reporter, but cannot add names or text. One event
+these members are ever recorded (`rustkit_bindings::UNSUPPORTED_MEMBERS`),
+through a native reporter page script cannot reach; the table holds at most
+64 members. One event
 per member per page; `Inspector::unsupported_apis()` and the summary carry the
 counts. Property reads that fall through to `undefined` are not detected:
 that needs a hook on every property access (see the PR that added this).
@@ -166,6 +167,21 @@ The log is meant to be pasted into public issues and PRs.
   convenience, not a guarantee; the text is the page's.
 - No request or response header, body, cookie, form value or storage content
   is recorded.
+- Nothing page script can reach switches redaction off, writes into the
+  console, error or unsupported-member queues, or changes what a record
+  says. The `console` methods are native functions; the redaction flag and
+  the queues live in Rust (`rustkit_js` `diag`). The bindings' own scripts
+  report errors and unsupported members through natives handed to them in a
+  closure before any page script runs (`JsRuntime::evaluate_with_host`):
+  there is no window global, no property on `console`, and no call through
+  a prototype or global a page can patch (`Array.prototype.push`,
+  `Function.prototype.apply`, `JSON.stringify`, `String`, `toString`,
+  `toJSON`, getters, `Symbol.toPrimitive`) between a page value and a
+  record.
+- Every queue is bounded: console lines between flushes (1024, oldest
+  dropped), error reports (256), listener error texts for the script log
+  (1024), unsupported members (64), unhandled rejections (256), the engine's
+  own promises (1024), known script paths (4096), and the ring buffer.
 - Console messages carry no page text by default: each argument's type, and
   a string's length. Pages log cookies, form values and their own URL.
   `InspectorConfig::keep_console_text` (`parity-capture
