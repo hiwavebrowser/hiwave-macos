@@ -13,7 +13,7 @@ fn console(message: &str) -> InspectorEvent {
 }
 
 fn buffered(capacity: usize) -> std::sync::Arc<Inspector> {
-    Inspector::new(&InspectorConfig { buffer: true, capacity, keep_url_query: false })
+    Inspector::new(&InspectorConfig { buffer: true, capacity, ..Default::default() })
 }
 
 #[test]

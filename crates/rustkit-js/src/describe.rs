@@ -82,6 +82,63 @@ pub(crate) fn text(value: &JsValue, context: &mut Context) -> String {
     }
 }
 
+/// The error names the engine itself gives; any other `name` is page text.
+const STANDARD_ERROR_NAMES: [&str; 9] = [
+    "Error",
+    "TypeError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "EvalError",
+    "URIError",
+    "AggregateError",
+    "DOMException",
+];
+
+/// A value as a console line shows it when its text is not to be kept:
+/// a string (and an error's message) only as its length, a number only as
+/// its type. `true`, `false`, `null` and `undefined` carry no page text and
+/// are shown as they are; an object by its tag, as in [`text`].
+pub(crate) fn redacted_text(value: &JsValue) -> String {
+    if let Some(s) = value.as_string() {
+        return format!("<string len={}>", s.to_std_string_escaped().chars().count());
+    }
+    if value.is_number() {
+        return "<number>".to_string();
+    }
+    if value.is_bigint() {
+        return "<bigint>".to_string();
+    }
+    if value.is_symbol() {
+        return "<symbol>".to_string();
+    }
+    if let Some(b) = value.as_boolean() {
+        return b.to_string();
+    }
+    if value.is_null() {
+        return "null".to_string();
+    }
+    let Some(object) = value.as_object() else {
+        return "undefined".to_string();
+    };
+    if object.is::<Error>() {
+        let name = inherited_data_property(&object, "name")
+            .and_then(|v| string_of(&v))
+            .filter(|n| STANDARD_ERROR_NAMES.contains(&n.as_str()))
+            .unwrap_or_else(|| "Error".to_string());
+        let length = inherited_data_property(&object, "message")
+            .and_then(|v| string_of(&v))
+            .map_or(0, |m| m.chars().count());
+        format!("<{name} message len={length}>")
+    } else if object.is_array() {
+        "[object Array]".to_string()
+    } else if object.is_callable() {
+        "[object Function]".to_string()
+    } else {
+        "[object Object]".to_string()
+    }
+}
+
 /// A thrown or rejected value as an error report: its text and, for an
 /// error object, its stack. `stack_getter` is the engine's own
 /// `Error.prototype.stack` getter, taken before any page script ran.
@@ -117,6 +174,21 @@ pub(crate) fn console_format(
     args: &[JsValue],
     context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
+    Ok(join_line(args, |arg| text(arg, context)))
+}
+
+/// `__rustkit_console_format_redacted(...args)`: the line as
+/// [`redacted_text`] shows each argument (the default for a recording
+/// embedder: no page text leaves the runtime).
+pub(crate) fn console_format_redacted(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    Ok(join_line(args, redacted_text))
+}
+
+fn join_line(args: &[JsValue], mut describe: impl FnMut(&JsValue) -> String) -> JsValue {
     const MAX_ARGS: usize = 256;
     const MAX_CHARS: usize = 16 * 1024;
     let mut line = String::new();
@@ -124,7 +196,7 @@ pub(crate) fn console_format(
         if i > 0 {
             line.push(' ');
         }
-        line.push_str(&text(arg, context));
+        line.push_str(&describe(arg));
         if line.len() > MAX_CHARS {
             let mut end = MAX_CHARS;
             while !line.is_char_boundary(end) {
@@ -134,5 +206,5 @@ pub(crate) fn console_format(
             break;
         }
     }
-    Ok(JsValue::from(boa_engine::JsString::from(line.as_str())))
+    JsValue::from(boa_engine::JsString::from(line.as_str()))
 }

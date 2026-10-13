@@ -18,6 +18,7 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
         return;
     }
     let sink = inspector.clone();
+    bindings.set_console_redaction(!inspector.keeps_console_text());
     bindings.set_console_handler(Box::new(move |level, message, at| {
         let level = match level {
             rustkit_js::LogLevel::Log => ConsoleLevel::Log,

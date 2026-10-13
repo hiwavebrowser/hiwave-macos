@@ -11,8 +11,10 @@
 //! keeps its scheme, host, port and path, never its user name, password,
 //! query or fragment (a flag keeps the query and fragment); a `data:` URL
 //! keeps only its MIME type. No header, request or response body, form value
-//! or storage is recorded. Console messages are page-controlled text: they are
-//! capped and stored as-is, never interpreted.
+//! or storage is recorded. A console message is, by default, each argument's
+//! type and a string's length only (pages log cookies, form values and their
+//! own URL); with [`InspectorConfig::keep_console_text`] it is the text,
+//! capped, URLs in it scrubbed, never interpreted.
 //!
 //! The buffer is behind a mutex shared with the embedder ([`Engine::inspector`]
 //! hands out an `Arc`), so another thread can take a snapshot while the page's
@@ -52,6 +54,11 @@ pub struct InspectorConfig {
     /// Keep the query string and fragment of URLs in events. Off by default:
     /// they carry session ids and tokens.
     pub keep_url_query: bool,
+    /// Keep the text of console messages. Off by default: a console line
+    /// is then each argument's type, and a string's length (`<string
+    /// len=12>`), since pages log cookies, form values and their own URL.
+    /// When on, URLs in the text are still scrubbed as event URLs are.
+    pub keep_console_text: bool,
 }
 
 impl Default for InspectorConfig {
@@ -60,6 +67,7 @@ impl Default for InspectorConfig {
             buffer: false,
             capacity: DEFAULT_CAPACITY,
             keep_url_query: false,
+            keep_console_text: false,
         }
     }
 }
@@ -226,6 +234,7 @@ struct State {
 pub struct Inspector {
     active: AtomicBool,
     keep_url_query: bool,
+    keep_console_text: bool,
     state: Mutex<State>,
 }
 
@@ -234,6 +243,7 @@ impl Inspector {
         Arc::new(Self {
             active: AtomicBool::new(config.buffer),
             keep_url_query: config.keep_url_query,
+            keep_console_text: config.keep_console_text,
             state: Mutex::new(State {
                 buffer: config.buffer,
                 capacity: config.capacity.max(1),
@@ -540,10 +550,17 @@ impl Inspector {
         }
     }
 
-    /// A console call (`message` is capped here).
+    /// Whether console messages keep their text (see
+    /// [`InspectorConfig::keep_console_text`]).
+    pub fn keeps_console_text(&self) -> bool {
+        self.keep_console_text
+    }
+
+    /// A console call (`message` is capped here, and URLs in it scrubbed).
     pub fn console(&self, level: ConsoleLevel, message: &str, location: Option<SourceLocation>) {
-        self.emit_with(|_| {
+        self.emit_with(|inspector| {
             let (message, truncated) = cap(message, MAX_MESSAGE_CHARS);
+            let message = inspector.scrub_text(&message);
             InspectorEvent::Console { level, message, truncated, location }
         });
     }

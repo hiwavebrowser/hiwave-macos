@@ -1445,6 +1445,12 @@ impl DomBindings {
         self.runtime.borrow_mut().set_console_handler(handler);
     }
 
+    /// Console arguments reach the handler as type and length only (see
+    /// [`JsRuntime::set_console_redaction`]).
+    pub fn set_console_redaction(&self, on: bool) {
+        self.runtime.borrow_mut().set_console_redaction(on);
+    }
+
     /// Hand pending console calls to the console handler now.
     pub fn flush_console(&self) {
         self.runtime.borrow_mut().flush_console();

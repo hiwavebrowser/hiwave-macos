@@ -174,6 +174,14 @@ pub(crate) fn describe(record: &InspectorRecord, port: u16) -> String {
     }
 }
 
+/// The default config, with console messages kept as text (for the tests
+/// that follow what a page logged).
+fn console_text() -> EngineConfig {
+    let mut config = EngineConfig::default();
+    config.inspector.keep_console_text = true;
+    config
+}
+
 fn load_page(config: EngineConfig, routes: Vec<Route>) -> (Engine, EngineViewId, TestServer) {
     let server = serve(routes);
     let (mut engine, view) = inspected_engine(config);
@@ -213,11 +221,12 @@ fn a_page_load_is_recorded_in_order() {
             "first_layout",
             "first_paint",
             "relayout initial_load",
-            "console Log one 2 @inline#1:2:9",
-            "console Info two @inline#1:3:9",
-            "console Warn three @inline#1:4:9",
-            "console Error four @inline#1:5:9",
-            "console Debug five @inline#1:6:9",
+            // By default a line is its arguments' types and lengths.
+            "console Log <string len=3> <number> @inline#1:2:9",
+            "console Info <string len=3> @inline#1:3:9",
+            "console Warn <string len=5> @inline#1:4:9",
+            "console Error <string len=4> @inline#1:5:9",
+            "console Debug <string len=4> @inline#1:6:9",
             "load_finished over_budget=0",
         ]
     );
@@ -329,7 +338,7 @@ fn a_new_navigation_starts_a_new_page_in_the_same_log() {
         Route::html("/", "<html><body><script>console.log('first')</script></body></html>"),
         Route::html("/next", "<html><body><script>console.log('second')</script></body></html>"),
     ]);
-    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    let (mut engine, view) = inspected_engine(console_text());
     let rt = runtime();
     rt.block_on(engine.load_url(view, server.url("/"))).unwrap();
     rt.block_on(engine.load_url(view, server.url("/next"))).unwrap();
@@ -488,7 +497,7 @@ fn console_messages_are_capped_and_kept_as_text() {
 console.log('x'.repeat(5000));
 console.log('{\"type\":\"navigation_start\"}\\n<' + 'script>alert(1)<' + '/script>');
 </script></body></html>";
-    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let (engine, view, _server) = load_page(console_text(), vec![Route::html("/", page)]);
     let consoles: Vec<(String, bool)> = records(&engine, view)
         .into_iter()
         .filter_map(|r| match r.event {
@@ -543,6 +552,29 @@ console.log(new Error('see https://x.test/p?token=ERRQUERY'));
     }
 }
 
+
+/// A console line is its arguments' types (and a string's length) unless
+/// console text is asked for; even then a URL in it loses its query.
+#[test]
+fn console_text_is_kept_only_when_asked_and_its_urls_are_scrubbed() {
+    let page = "<html><body><script>
+console.log('https://h.test/p?token=Q', 'x', 12, true, null, undefined, {a: 1}, [1], new TypeError('a secret'));
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let mut lines = Vec::new();
+    for config in [EngineConfig::default(), console_text()] {
+        let (mut engine, view) = inspected_engine(config);
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        lines.push(only(&described(&engine, view, server.port), &["console"]));
+    }
+    assert_eq!(
+        lines,
+        vec![
+            vec!["console Log <string len=24> <string len=1> <number> true null undefined [object Object] [object Array] <TypeError message len=8> @inline#1:2:9"],
+            vec!["console Log https://h.test/p x 12 true null undefined [object Object] [object Array] TypeError: a secret @inline#1:2:9"],
+        ]
+    );
+}
 
 // ---- Neighbouring behaviour: what naming the page's scripts must not change ----
 
@@ -669,7 +701,7 @@ var c = 3;
 null.modinl;
 </script><script type=\"module\" src=\"/mod.js\"></script></body></html>";
     let (engine, view, server) = load_page(
-        EngineConfig::default(),
+        console_text(),
         vec![
             Route::html("/", page),
             Route::ok("/mod.js", "text/javascript", "var a = 1;\nconsole.log('ext-mod-log');\nvar b = 2;\n  null.modext;\n"),
@@ -709,7 +741,7 @@ fn handler_and_eval_code_are_never_given_their_callers_position() {
 console.log('after-click');
 eval(\"console.log('in-eval')\");
 </script><script>console.log('second-script');</script></body></html>";
-    let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let (engine, view, server) = load_page(console_text(), vec![Route::html("/", page)]);
     let lines = only(&described(&engine, view, server.port), &["console", "script_error"]);
     assert_eq!(
         lines,
@@ -758,7 +790,7 @@ fn logging_runs_no_page_code() {
 var p = new Proxy({}, { get() { n += 1; throw new Error('trap'); } }); console.log(p);
 Promise.reject({ toString() { n += 1000; return 'r'; } });</script>
 <script>console.info('n seen by script 2 = ' + n);</script></body></html>";
-    let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let (engine, view, server) = load_page(console_text(), vec![Route::html("/", page)]);
     let lines = only(&described(&engine, view, server.port), &["console", "script_error"]);
     assert_eq!(
         lines,

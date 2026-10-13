@@ -69,10 +69,16 @@ the position of the code that called them; an error's `stack` still lists the
 page frames around them.
 
 `message` of a `console` event is built when the call is made and runs none
-of the page's code: strings, numbers and other primitives as they are,
-`Symbol(x)`, an error as `Name: message` from its own data properties, any
-other object as a tag (`[object Object]`, `[object Array]`,
-`[object Function]`). Unhandled rejections are described the same way.
+of the page's code. By default it holds no page text: a string is
+`<string len=N>`, a number `<number>` (`<bigint>`, `<symbol>`), `true`,
+`false`, `null` and `undefined` as they are, an error
+`<TypeError message len=N>` (a name the engine does not give is `Error`), any
+other object a tag (`[object Object]`, `[object Array]`,
+`[object Function]`). With `InspectorConfig::keep_console_text`
+(`parity-capture --event-log-console-text`) it is the text: primitives as
+they are, `Symbol(x)`, an error as `Name: message` from its own data
+properties, objects as the same tags, and URLs in it scrubbed (see Privacy).
+Unhandled rejections are described as the kept text is.
 
 `script` names what ran the code: a script URL, `inline#n`, or the engine
 step (`event:DOMContentLoaded`, `event:load`, `event:resize`,
@@ -109,9 +115,12 @@ The log is meant to be pasted into public issues and PRs.
   `=`).
 - No request or response header, body, cookie, form value or storage content
   is recorded.
-- Console messages are page-controlled text: capped at 1024 characters and
-  stored as they are, never interpreted. A page can put anything in them,
-  including a URL with its query: read them as untrusted text.
+- Console messages carry no page text by default: each argument's type, and
+  a string's length. Pages log cookies, form values and their own URL.
+  `InspectorConfig::keep_console_text` (`parity-capture
+  --event-log-console-text`) keeps the text, capped at 1024 characters,
+  URLs in it scrubbed, never interpreted: never for a log that will be
+  shared.
 
 ## `parity-capture --event-log <file> --event-summary`
 
