@@ -2744,6 +2744,10 @@ impl Renderer {
                 }
             }
 
+            // Marks only: a list for a scrolled page arrives with these
+            // already turned into the translate that undoes the scroll.
+            DisplayCommand::PushViewportFixed | DisplayCommand::PopViewportFixed => {}
+
             DisplayCommand::GradientText {
                 text,
                 x,
