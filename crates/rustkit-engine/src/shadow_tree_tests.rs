@@ -447,7 +447,9 @@ fn the_display_list_paints_what_chromium_paints() {
                 None => "-",
             };
             if got != want {
-                wrong.push(format!("{name} #{id}: engine {got}, chrome {want} ({background})"));
+                wrong.push(format!(
+                    "{name} #{id}: engine {got}, chrome {want} ({background})"
+                ));
             }
         }
     }
