@@ -111,6 +111,16 @@ The `hiwave-app` crate uses feature flags:
 - `parity-baseline/` - RustKit vs Chrome comparison results
 - `goldens/` - Golden images for visual regression
 
+## Pull requests labelled `no-check`
+
+A pull request carrying the GitHub label `no-check` is a standing or parked PR
+(for example a long-lived ledger). Do not review it, stamp it, run a receipt on
+it, push to it, or merge it, and leave it out of review queues and status
+lists. Check a PR's labels before starting work on it. Removing the label puts
+it back in the queue. Only the project lead adds or removes `no-check`; a worker
+does not park its own PR. A `no-check` PR's `r2-pass` label or earlier stamp is
+not a pass for its current head.
+
 ## Commit Message Format
 
 Use conventional commits:
