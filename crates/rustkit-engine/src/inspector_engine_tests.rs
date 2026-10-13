@@ -921,3 +921,24 @@ throw 'data:text/plain,SECRET_DATA';
     let all = serde_json::to_string(&records(&engine, view)).unwrap();
     assert!(!all.contains("SECRET") && !all.contains("U0VDUkVU"), "{all}");
 }
+
+/// Page script cannot write its own text into `unsupported_api` events or
+/// the summary, nor grow the table: only the bindings' own members count.
+#[test]
+fn page_script_cannot_forge_unsupported_api_events() {
+    let page = "<html><body><script>
+document.cookie = 'sid=COOKIE_LOG';
+if (window.__rustkit_unsupported) window.__rustkit_unsupported(document.cookie, 'FORGED');
+for (var i = 0; i < 2000; i++) { try { window.__rustkit_unsupported('X' + i, 'm'); } catch (e) {} }
+try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
+</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let apis = engine.inspector(view).unwrap().unsupported_apis();
+    let names: Vec<String> = apis.iter().map(|u| format!("{}.{}", u.interface, u.member)).collect();
+    assert_eq!(names, vec!["XMLHttpRequest.open(async=false)"]);
+    let summary = InspectorSummary::from_records(&records, &apis);
+    assert_eq!(summary.unsupported_apis.keys().collect::<Vec<_>>(), vec!["XMLHttpRequest.open(async=false)"]);
+    let all = serde_json::to_string(&records).unwrap();
+    assert!(!all.contains("COOKIE_LOG") && !all.contains("FORGED"), "{all}");
+}
