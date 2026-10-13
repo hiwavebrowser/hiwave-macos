@@ -52,9 +52,13 @@ pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::Compos
 /// itself, so a test must not keep a GPU engine alive on its own thread while
 /// waiting for such a helper; that would wait on itself.
 ///
-/// Waiting is bounded: after [`test_gpu::MAX_WAIT`] the waiter panics and
-/// names the holder, so a test that hangs while holding the GPU fails the
-/// tests queued behind it loudly instead of stalling the binary silently.
+/// Waiting is bounded per holder: when one test has held the guard for
+/// [`test_gpu::MAX_WAIT`] the waiter panics and names it, so a test that
+/// hangs while holding the GPU fails the tests queued behind it loudly
+/// instead of stalling the binary silently. The limit used to be on the
+/// waiter's whole time in the queue: in a full run on a loaded machine the
+/// queue of GPU tests is longer than that, and tests failed naming whichever
+/// test happened to hold the GPU at the time.
 #[cfg(test)]
 pub(crate) mod test_gpu {
     use std::cell::RefCell;
@@ -97,25 +101,138 @@ pub(crate) mod test_gpu {
             return;
         }
         let me = this_thread();
-        let mut holder = HOLDER.lock().unwrap_or_else(|e| e.into_inner());
-        let deadline = std::time::Instant::now() + MAX_WAIT;
+        let mut holder = wait_until_free(&HOLDER, &RELEASED, MAX_WAIT);
+        *holder = Some(me);
+        drop(holder);
+        TOKEN.with(|t| *t.borrow_mut() = Some(Token));
+    }
+
+    /// Wait until nothing holds the guard, and return it locked. Panics,
+    /// naming the holder, after `limit`.
+    fn wait_until_free<'a>(
+        holder: &'a Mutex<Option<String>>,
+        released: &Condvar,
+        limit: Duration,
+    ) -> std::sync::MutexGuard<'a, Option<String>> {
+        let mut holder = holder.lock().unwrap_or_else(|e| e.into_inner());
+        let mut deadline = std::time::Instant::now() + limit;
+        let mut waiting_on: Option<String> = None;
         while let Some(other) = holder.as_ref() {
             let now = std::time::Instant::now();
+            // The limit is on one test's hold, not on the length of the
+            // queue: when the holder changes, the queue has moved.
+            if waiting_on.as_deref() != Some(other.as_str()) {
+                waiting_on = Some(other.clone());
+                deadline = now + limit;
+            }
             if now >= deadline {
                 panic!(
                     "GPU test guard: waited {}s for `{other}` to finish with the GPU; \
                      that test is hung or kept a GPU engine alive while waiting on a helper thread",
-                    MAX_WAIT.as_secs()
+                    limit.as_secs()
                 );
             }
-            holder = RELEASED
+            holder = released
                 .wait_timeout(holder, deadline - now)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
-        *holder = Some(me);
-        drop(holder);
-        TOKEN.with(|t| *t.borrow_mut() = Some(Token));
+        holder
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Arc;
+
+        /// In a full run on a loaded machine the GPU tests queue for longer
+        /// than the limit although none of them holds the GPU for long. A
+        /// waiter must outlast such a queue: six holders of 200 ms each, with
+        /// a limit of one second.
+        #[test]
+        fn a_waiter_outlasts_a_queue_of_short_holders() {
+            let holder = Arc::new(Mutex::new(Some("holder-0".to_string())));
+            let released = Arc::new(Condvar::new());
+            let (h, r) = (holder.clone(), released.clone());
+            let queue = std::thread::spawn(move || {
+                for next in 1..=6 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let mut now = h.lock().unwrap_or_else(|e| e.into_inner());
+                    *now = (next < 6).then(|| format!("holder-{next}"));
+                    r.notify_all();
+                }
+            });
+            let free = wait_until_free(&holder, &released, Duration::from_secs(1));
+            assert!(free.is_none());
+            drop(free);
+            queue.join().unwrap();
+        }
+
+        /// A helper thread queues on the guard like any test. The test that
+        /// waits for it must not give up while the queue is still moving: six
+        /// holders of 200 ms each, a guard limit of 400 ms.
+        #[test]
+        fn a_caller_outlasts_its_helper_queueing_behind_short_holders() {
+            let limit = Duration::from_millis(400);
+            let holder = Arc::new(Mutex::new(Some("holder-0".to_string())));
+            let released = Arc::new(Condvar::new());
+            let (h, r) = (holder.clone(), released.clone());
+            let queue = std::thread::spawn(move || {
+                for next in 1..=6 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let mut now = h.lock().unwrap_or_else(|e| e.into_inner());
+                    *now = (next < 6).then(|| format!("holder-{next}"));
+                    r.notify_all();
+                }
+            });
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let helper = std::thread::spawn(move || {
+                drop(wait_until_free(&holder, &released, limit));
+                let _ = ready_tx.send(());
+            });
+            assert!(helper_has_its_engine(&ready_rx));
+            helper.join().unwrap();
+            queue.join().unwrap();
+        }
+
+        /// A helper stuck behind one holder past the limit fails in the guard
+        /// and never reports; its caller hears of it at once.
+        #[test]
+        fn a_caller_learns_its_helper_failed_in_the_guard() {
+            let limit = Duration::from_millis(200);
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let helper = std::thread::spawn(move || {
+                let holder = Mutex::new(Some("stuck".to_string()));
+                let released = Condvar::new();
+                drop(wait_until_free(&holder, &released, limit));
+                let _ = ready_tx.send(());
+            });
+            let started = std::time::Instant::now();
+            assert!(!helper_has_its_engine(&ready_rx));
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(helper.join().is_err());
+        }
+
+        /// One test that keeps the GPU past the limit still fails the waiter,
+        /// by name.
+        #[test]
+        #[should_panic(expected = "for `stuck`")]
+        fn a_holder_past_the_limit_fails_the_waiter_by_name() {
+            let holder = Mutex::new(Some("stuck".to_string()));
+            let released = Condvar::new();
+            drop(wait_until_free(&holder, &released, Duration::from_millis(200)));
+        }
+    }
+
+    /// Wait for a helper thread to say it has its engine. False when it never
+    /// will.
+    ///
+    /// No limit of its own: the helper queues on the guard, whose limit is per
+    /// holder, and a limit here would bring back the limit on the whole queue.
+    /// A helper that fails in the guard panics and drops its sender, which
+    /// ends this wait at once.
+    fn helper_has_its_engine(ready: &std::sync::mpsc::Receiver<()>) -> bool {
+        ready.recv().is_ok()
     }
 
     /// Run `work` against a fresh engine on a helper thread, and fail with
@@ -137,10 +254,7 @@ pub(crate) mod test_gpu {
             let _ = ready_tx.send(());
             let _ = done_tx.send(work(&e));
         });
-        if ready_rx
-            .recv_timeout(MAX_WAIT + Duration::from_secs(30))
-            .is_err()
-        {
+        if !helper_has_its_engine(&ready_rx) {
             panic!("{what}: the helper thread never got an engine");
         }
         match done_rx.recv_timeout(budget) {
