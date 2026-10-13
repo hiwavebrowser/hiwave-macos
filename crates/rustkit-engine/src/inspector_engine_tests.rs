@@ -899,3 +899,25 @@ fn a_thrown_non_error_is_described_without_its_properties() {
     let all = serde_json::to_string(&records).unwrap();
     assert!(!all.contains("SECRET") && !all.contains("user"), "{all}");
 }
+
+/// A `data:` URL inside error text keeps only its MIME type, as a `data:`
+/// URL field does; a word that merely ends in `data:` is not one.
+#[test]
+fn a_data_url_in_error_text_keeps_only_its_mime_type() {
+    let page = "<html><body><script>
+Promise.reject(new Error('load data:text/plain;base64,U0VDUkVU,SECRET_B64 failed'));
+Promise.reject(new Error('metadata: kept'));
+throw 'data:text/plain,SECRET_DATA';
+</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let messages: Vec<String> = records(&engine, view)
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::ScriptError { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages, vec!["data:text/plain,…", "load data:text/plain,…", "metadata: kept"]);
+    let all = serde_json::to_string(&records(&engine, view)).unwrap();
+    assert!(!all.contains("SECRET") && !all.contains("U0VDUkVU"), "{all}");
+}
