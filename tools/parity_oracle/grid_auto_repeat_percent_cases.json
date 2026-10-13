@@ -1,0 +1,60 @@
+{
+ "viewport": [
+  1280,
+  800
+ ],
+ "boxes": "xywh",
+ "cases": [
+  {
+   "name": "cnn-story-grid-auto-fit-minmax-percent",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;gap:32px 24px;grid-template-columns:repeat(auto-fit,minmax(25%,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:20 i1:0:0:173:20 i2:197:0:173:20 i3:395:0:173:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fill-minmax-percent",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;gap:32px 24px;grid-template-columns:repeat(auto-fill,minmax(25%,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:20 i1:0:0:173:20 i2:197:0:173:20 i3:395:0:173:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-plain-percent",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;gap:32px 24px;grid-template-columns:repeat(auto-fit,25%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:20 i1:0:0:142:20 i2:166:0:142:20 i3:332:0:142:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-minmax-percent-two-rows",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;gap:32px 24px;grid-template-columns:repeat(auto-fit,minmax(25%,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li><li id=i5></li><li id=i6></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:72 i1:0:0:173:20 i2:197:0:173:20 i3:395:0:173:20 i4:0:52:173:20 i5:197:52:173:20 i6:395:52:173:20 after:0:72:1280:18"
+  },
+  {
+   "name": "auto-fit-minmax-40-percent",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;gap:32px 24px;grid-template-columns:repeat(auto-fit,minmax(40%,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:72 i1:0:0:272:20 i2:296:0:272:20 i3:0:52:272:20 after:0:72:1280:18"
+  },
+  {
+   "name": "auto-fill-20-percent-no-gap",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;grid-template-columns:repeat(auto-fill,20%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li><li id=i5></li><li id=i6></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:40 i1:0:0:114:20 i2:114:0:114:20 i3:227:0:114:20 i4:341:0:114:20 i5:454:0:114:20 i6:0:20:114:20 after:0:40:1280:18"
+  },
+  {
+   "name": "auto-fit-minmax-px-control",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;gap:32px 24px;grid-template-columns:repeat(auto-fit,minmax(142px,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:20 i1:0:0:173:20 i2:197:0:173:20 i3:395:0:173:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-minmax-percent-of-an-auto-width",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{gap:20px;grid-template-columns:repeat(auto-fit,minmax(30%,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:60 i1:0:0:413:20 i2:433:0:413:20 i3:867:0:413:20 i4:0:40:413:20 after:0:60:1280:18"
+  },
+  {
+   "name": "a-fixed-track-then-auto-fill-percent",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;grid-template-columns:100px repeat(auto-fill,25%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li><li id=i5></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:40 i1:0:0:100:20 i2:100:0:142:20 i3:242:0:142:20 i4:384:0:142:20 i5:0:20:100:20 after:0:40:1280:18"
+  },
+  {
+   "name": "auto-fill-percent-max-of-minmax",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;gap:10px;grid-template-columns:repeat(auto-fill,minmax(50px,30%))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:600:50 i1:0:0:180:20 i2:190:0:180:20 i3:380:0:180:20 i4:0:30:180:20 after:0:50:1280:18"
+  }
+ ],
+ "chrome": "143.0.7499.4"
+}
