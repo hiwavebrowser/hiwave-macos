@@ -224,6 +224,17 @@ fn html_on_a_page_shorter_than_the_viewport_is_as_tall_as_its_content() {
 }
 
 #[test]
+fn html_without_a_doctype_notes_that_chromium_is_in_quirks_mode() {
+    let page = "<html><body style=\"margin:0\"><div style=\"height:50px\"></div></body></html>";
+    let (engine, view) = engine_with(page, 1280, 800);
+    let notes = diag(&engine, view, "html")["notes"].to_string();
+    assert!(notes.contains("quirks mode"), "{notes}");
+    let (engine, view) = engine_with(&format!("<!DOCTYPE html>{page}"), 1280, 800);
+    let notes = diag(&engine, view, "html")["notes"].to_string();
+    assert!(!notes.contains("quirks mode"), "{notes}");
+}
+
+#[test]
 fn a_clipped_element_names_its_clipping_ancestor() {
     let (engine, view) = engine_with_page();
     let r = diag(&engine, view, "#wide");
