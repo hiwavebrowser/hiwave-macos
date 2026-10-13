@@ -25,7 +25,7 @@
         var e = new Error(message); e.name = name; return e;
     }
     function report(e) {
-        try { if (g.__rustkit_errors) g.__rustkit_errors.push(g.__rustkit_error_text ? g.__rustkit_error_text(e) : String(e)); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
 
     // ---- bytes <-> base64

@@ -20,6 +20,10 @@ mod executor;
 mod describe;
 #[cfg(feature = "boa")]
 mod rejections;
+#[cfg(feature = "boa")]
+mod diag;
+#[cfg(feature = "boa")]
+pub use diag::{engine_message, standard_name, STANDARD_ERROR_NAMES};
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
 
@@ -110,13 +114,39 @@ pub struct ScriptPosition {
 /// and the calling script's position when the caller was in a named script.
 pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>) + Send + Sync>;
 
-/// A promise rejected with no handler by the end of an evaluation (the
-/// microtask checkpoint): `String(reason)`, and the reason's `stack` when it
-/// is an error that has one.
+/// A page error for diagnostics: an exception no script caught (in a
+/// script, a module, a listener or a timer) or a promise rejected with no
+/// handler. By default it holds no text the page chose (see `diag`): the
+/// thrown value's type, a standard error name, a message's length, and the
+/// positions of the page's frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnhandledRejection {
-    pub message: String,
-    pub stack: Option<String>,
+pub struct ErrorReport {
+    /// What was thrown: `error`, `string`, `number`, `bigint`, `boolean`,
+    /// `symbol`, `null`, `undefined`, `object`, `array` or `function`.
+    pub value: &'static str,
+    /// An error's `name` when it is a standard one, else `Error`; `None`
+    /// for a value that is not an error.
+    pub name: Option<&'static str>,
+    /// The message text: only with error text kept
+    /// ([`JsRuntime::set_error_reports`]), or when it is one of the engine's
+    /// own messages ([`engine_message`]).
+    pub message: Option<String>,
+    /// The message's length in characters (an error's `message`, a thrown
+    /// string).
+    pub message_len: Option<usize>,
+    /// The page's frames, innermost first: only positions in scripts the
+    /// engine evaluated, never a function name.
+    pub frames: Vec<ScriptPosition>,
+    /// The first of `frames` is where it was thrown. Not so when the
+    /// innermost page code is in no script of its own (`eval` code, an
+    /// `on*` attribute's handler): it then has no position, and is never
+    /// given its caller's.
+    pub located: bool,
+    /// A promise rejected with no handler.
+    pub rejection: bool,
+    /// A module that threw after a top-level `await` outlived the step that
+    /// ran it: its path.
+    pub module: Option<String>,
 }
 
 /// Timer callback.
@@ -186,10 +216,17 @@ pub struct JsRuntime {
     timers: Arc<Mutex<HashMap<TimerId, PendingTimer>>>,
     globals: HashMap<String, JsValue>,
     deadline: std::rc::Rc<ExecutionDeadline>,
+    #[cfg(feature = "boa")]
+    rejections: std::rc::Rc<rejections::RejectionHooks>,
     /// Console arguments reach the handler as type and length only.
     console_redacted: bool,
     #[cfg(feature = "boa")]
-    rejections: std::rc::Rc<rejections::RejectionHooks>,
+    diag: std::rc::Rc<diag::Diagnostics>,
+    /// The natives the embedder's own scripts are handed
+    /// ([`evaluate_with_host`](Self::evaluate_with_host)); page script
+    /// never sees this object.
+    #[cfg(feature = "boa")]
+    host: boa_engine::JsObject,
 }
 
 impl JsRuntime {
@@ -221,6 +258,10 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         context.strict(config.strict_mode);
+        #[cfg(feature = "boa")]
+        let diag = std::rc::Rc::new(diag::Diagnostics::default());
+        #[cfg(feature = "boa")]
+        let host = host_object(&diag, &mut context);
 
         let mut runtime = Self {
             #[cfg(feature = "boa")]
@@ -237,13 +278,17 @@ impl JsRuntime {
             console_redacted: false,
             #[cfg(feature = "boa")]
             rejections,
+            #[cfg(feature = "boa")]
+            diag,
+            #[cfg(feature = "boa")]
+            host,
         };
 
         // Set up built-in APIs
         runtime.setup_console()?;
         #[cfg(feature = "boa")]
         {
-            *runtime.rejections.stack_getter.borrow_mut() = describe::stack_getter(&runtime.context);
+            *runtime.diag.stack_getter.borrow_mut() = describe::stack_getter(&runtime.context);
         }
 
         debug!("JavaScript runtime initialized");
@@ -313,28 +358,97 @@ impl JsRuntime {
         }
     }
 
-    /// Note promises rejected with no handler, for
-    /// [`take_unhandled_rejections`](Self::take_unhandled_rejections). Off
-    /// by default.
-    pub fn set_rejection_tracking(&mut self, on: bool) {
-        #[cfg(feature = "boa")]
-        self.rejections.tracking.set(on);
-        #[cfg(not(feature = "boa"))]
-        let _ = on;
-    }
-
-    /// The promises rejected since the last call that still have no
-    /// handler (with tracking on). Describing a rejection reads its
-    /// reason's `toString` and `stack`, which a page can define.
-    pub fn take_unhandled_rejections(&mut self) -> Vec<UnhandledRejection> {
+    /// Describe page errors for [`take_error_reports`](Self::take_error_reports):
+    /// uncaught exceptions, those the embedder's scripts report, and
+    /// promises rejected with no handler. Off by default. `keep_text` keeps
+    /// each message's text, which carries whatever the page put in it
+    /// (cookies, form values, tokens): never for a log that will be shared.
+    pub fn set_error_reports(&mut self, on: bool, keep_text: bool) {
         #[cfg(feature = "boa")]
         {
-            let hooks = self.rejections.clone();
-            hooks.take(&mut self.context)
+            self.diag.on.set(on);
+            self.diag.keep_text.set(keep_text);
+            self.rejections.tracking.set(on);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = (on, keep_text);
+    }
+
+    /// The page errors since the last call (with reports on), oldest first:
+    /// exceptions, then modules that threw after a top-level `await`, then
+    /// promises still rejected with no handler. Runs none of the page's
+    /// code.
+    pub fn take_error_reports(&mut self) -> Vec<ErrorReport> {
+        #[cfg(feature = "boa")]
+        {
+            if !self.diag.on.get() {
+                return Vec::new();
+            }
+            let mut reports = self.diag.take();
+            for (module, reason) in self.take_late_module_rejections() {
+                let mut report = self.diag.describe(&reason, None, false, &mut self.context);
+                report.module = Some(module);
+                reports.push(report);
+            }
+            let reasons = self.rejections.take();
+            for reason in reasons {
+                let report = self.diag.describe(&reason, None, true, &mut self.context);
+                reports.push(report);
+            }
+            reports
         }
         #[cfg(not(feature = "boa"))]
         {
             Vec::new()
+        }
+    }
+
+    /// What listeners and timers threw since the last call (reported by
+    /// the embedder's scripts through the host natives), as text:
+    /// `TypeError: x is not a function`, a thrown object as
+    /// `[object Object]` (see `describe::text`). Held for at most 1024.
+    pub fn take_reported_errors(&mut self) -> Vec<String> {
+        #[cfg(feature = "boa")]
+        {
+            self.diag.take_reported_texts()
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Evaluate one of the embedder's own scripts (never page script) as
+    /// the body of a function whose parameter `__rk` is the host object:
+    /// `__rk.reportError(e)` reports what a listener or timer threw. The
+    /// object is reachable only from the closures such a script builds, so
+    /// page script cannot report, forge or read through it.
+    pub fn evaluate_with_host(&mut self, source: &str) -> Result<JsValue, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::Source;
+            let wrapped = format!("(function (__rk) {{\n{source}\n}})");
+            let function = self
+                .context
+                .eval(Source::from_bytes(wrapped.as_bytes()))
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            let function = function
+                .as_object()
+                .filter(|f| f.is_callable())
+                .ok_or_else(|| JsError::ExecutionError("host script is not a function".into()))?;
+            let host = boa_engine::JsValue::from(self.host.clone());
+            let result = function.call(&boa_engine::JsValue::undefined(), &[host], &mut self.context);
+            let _ = self.context.run_jobs();
+            self.flush_console_logs();
+            match result {
+                Ok(value) => Ok(self.convert_boa_value(&value)),
+                Err(err) => Err(JsError::ExecutionError(describe::error_text(&err, &mut self.context))),
+            }
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = source;
+            Err(JsError::NotInitialized)
         }
     }
 
@@ -444,9 +558,11 @@ impl JsRuntime {
             use boa_engine::Source;
 
             let result = match path {
-                Some(path) => self
-                    .context
-                    .eval(Source::from_bytes(source).with_path(std::path::Path::new(path))),
+                Some(path) => {
+                    self.diag.know_path(path);
+                    self.context
+                        .eval(Source::from_bytes(source).with_path(std::path::Path::new(path)))
+                }
                 None => self.context.eval(Source::from_bytes(source)),
             };
             // Promise reactions (`.then`, `await`) are jobs Boa queues but
@@ -463,6 +579,10 @@ impl JsRuntime {
                         // to script failure; ordinary microtask rejections are handled by Promise rejection events
                         // and do not fail the synchronous script value that already completed successfully.
                         if msg.contains("Job queue") || msg.contains("limit") || msg.contains("timeout") {
+                            if self.diag.on.get() {
+                                let report = self.diag.describe_error(&job_err, &mut self.context);
+                                self.diag.push(report);
+                            }
                             return Err(JsError::ExecutionError(msg));
                         }
                     }
@@ -471,6 +591,10 @@ impl JsRuntime {
                 }
                 Err(err) => {
                     self.flush_console_logs();
+                    if self.diag.on.get() {
+                        let report = self.diag.describe_error(&err, &mut self.context);
+                        self.diag.push(report);
+                    }
                     let msg = describe::error_text(&err, &mut self.context);
                     Err(JsError::ExecutionError(msg))
                 }
@@ -804,6 +928,26 @@ fn to_boa_value(value: JsValue) -> boa_engine::JsValue {
             BoaValue::undefined()
         }
     }
+}
+
+/// The host object [`JsRuntime::evaluate_with_host`] hands the embedder's
+/// scripts: natives that write into `diag`, built here, before any script.
+#[cfg(feature = "boa")]
+fn host_object(diag: &std::rc::Rc<diag::Diagnostics>, context: &mut boa_engine::Context) -> boa_engine::JsObject {
+    use boa_engine::{js_string, object::ObjectInitializer, NativeFunction};
+    let reporter = diag.clone();
+    // SAFETY: the closure holds an `Rc<Diagnostics>`, whose only GC handles
+    // (the stack getter, report values never) stay rooted while it lives.
+    let report_error = unsafe {
+        NativeFunction::from_closure(move |_this, args, context| {
+            let value = args.first().cloned().unwrap_or_default();
+            reporter.reported(&value, context);
+            Ok(boa_engine::JsValue::undefined())
+        })
+    };
+    ObjectInitializer::new(context)
+        .function(report_error, js_string!("reportError"), 1)
+        .build()
 }
 
 /// The path the console object is evaluated under, so its own frames can be
@@ -1222,20 +1366,21 @@ mod tests {
     fn unhandled_rejections_are_reported_only_when_tracked_and_unhandled() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime.evaluate_script("Promise.reject(new Error('untracked'));").unwrap();
-        assert!(runtime.take_unhandled_rejections().is_empty());
+        assert!(runtime.take_error_reports().is_empty());
 
-        runtime.set_rejection_tracking(true);
+        runtime.set_error_reports(true, false);
         runtime
             .evaluate_script_named(
                 "Promise.reject(new TypeError('lost'));\nPromise.reject(1).catch(function () {});\nvar late = Promise.reject('late'); late.then(null, function () {});",
                 "inline#1",
             )
             .unwrap();
-        let rejections = runtime.take_unhandled_rejections();
+        let rejections = runtime.take_error_reports();
         assert_eq!(rejections.len(), 1, "{rejections:?}");
-        assert_eq!(rejections[0].message, "TypeError: lost");
-        assert!(rejections[0].stack.as_deref().unwrap_or("").contains("inline#1:1:"), "{rejections:?}");
-        assert!(runtime.take_unhandled_rejections().is_empty(), "taken once");
+        let r = &rejections[0];
+        assert_eq!((r.value, r.name, r.message.as_deref(), r.message_len, r.rejection), ("error", Some("TypeError"), None, Some(4), true));
+        assert_eq!(r.frames, vec![ScriptPosition { path: "inline#1".into(), line: 1, column: 16 }]);
+        assert!(runtime.take_error_reports().is_empty(), "taken once");
     }
 
     #[test]
@@ -1325,22 +1470,23 @@ mod tests {
     #[test]
     fn describing_a_rejection_runs_no_page_code() {
         let mut runtime = JsRuntime::new().unwrap();
-        runtime.set_rejection_tracking(true);
+        runtime.set_error_reports(true, true);
         runtime
             .evaluate_script_named(
                 "var n = 0;
                  Promise.reject({ toString() { n += 1; return 'x'; } });
                  var e = new Error('plain');
                  Object.defineProperty(e, 'stack', { get() { n += 10; return 'fake'; } });
+                 Object.defineProperty(e, 'name', { get() { n += 100; return 'Fake'; } });
                  Promise.reject(e);",
                 "inline#1",
             )
             .unwrap();
-        let rejections = runtime.take_unhandled_rejections();
+        let rejections = runtime.take_error_reports();
         assert_eq!(rejections.len(), 2);
-        assert_eq!(rejections[0].message, "[object Object]");
-        assert_eq!(rejections[1].message, "Error: plain");
-        assert!(rejections[1].stack.as_deref().unwrap_or("").contains("inline#1:3:"), "the stack is where the error was made: {rejections:?}");
+        assert_eq!((rejections[0].value, rejections[0].message.as_deref()), ("object", None));
+        assert_eq!((rejections[1].name, rejections[1].message.as_deref()), (Some("Error"), Some("plain")));
+        assert_eq!(rejections[1].frames.first().map(|f| f.line), Some(3), "the stack is where the error was made: {rejections:?}");
         assert_eq!(runtime.evaluate_script("n").unwrap().is_truthy(), false, "page code ran");
     }
 

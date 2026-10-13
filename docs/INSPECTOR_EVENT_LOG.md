@@ -47,7 +47,7 @@ field that is `null` today may hold a value later.
 | `load_finished` | `url`, `scripts_over_budget` (scripts not run, or stopped, because the script budget was spent) |
 | `load_ended_early` | `url`, `reason` (`navigated_away`, `failed`), `detail` (`stopped`, `another navigation started`, `HTTP 404`, or a one-word network stage: `dns`, `connect`, `tls`, `timeout`, `policy`, `redirect`, `http`, `network`, `invalid_url`, `over_budget`, `cancelled`) |
 | `console` | `level` (`log`, `info`, `warn`, `error`, `debug`), `message`, `truncated`, `location` |
-| `script_error` | `name` (`TypeError`, ...; empty for a thrown non-error), `message`, `location`, `stack`, `unhandled_rejection`, `script` |
+| `script_error` | `name` (a standard name, else `Error`; empty for a thrown non-error), `message` (`null` unless kept, below), `location`, `stack`, `unhandled_rejection`, `script`, `value` (what was thrown: `error`, `string`, `number`, `bigint`, `boolean`, `symbol`, `null`, `undefined`, `object`, `array`, `function`; `engine` for the engine's own failure), `message_len` (characters in an error's message or a thrown string, else `null`) |
 | `unsupported_api` | `interface`, `member`, `location` (first sighting on the page) |
 | `first_layout` | — |
 | `first_paint` | — |
@@ -78,7 +78,6 @@ other object a tag (`[object Object]`, `[object Array]`,
 (`parity-capture --event-log-console-text`) it is the text: primitives as
 they are, `Symbol(x)`, an error as `Name: message` from its own data
 properties, objects as the same tags, and URLs in it scrubbed (see Privacy).
-Unhandled rejections are described as the kept text is.
 
 `script` names what ran the code: a script URL, `inline#n`, or the engine
 step (`event:DOMContentLoaded`, `event:load`, `event:resize`,
@@ -89,12 +88,47 @@ once, never also as an unhandled rejection, including one thrown after a
 top-level `await` that outlived the module's script step (recorded when the
 step that settled it ends, as the module's).
 
-A thrown value that is not an error is described as kept console text
-describes it (`[object Object]`, a string as it is), never with its
-properties; `name` is then empty.
+A `script_error` holds no page text by default. It is described in native
+code from the thrown value itself, never from its text, and runs none of the
+page's code (no `toString`, getter, `toJSON`, `Symbol.toPrimitive` or Proxy
+trap):
 
-`stack` holds the page's frames only (`    at name (url:line:col)` lines; no
-native, engine or `eval` frames), capped at 4096 characters.
+- `value` is the thrown value's type, and `message_len` the length of an
+  error's `message` (an own or inherited data property, never a getter) or
+  of a thrown string. A Symbol's description, a number and an object's
+  properties are not recorded.
+- `name` is the error's `name` only when it is one the engine itself gives:
+  `Error`, `TypeError`, `RangeError`, `SyntaxError`, `ReferenceError`,
+  `EvalError`, `URIError`, `AggregateError`, `DOMException`, and the
+  `DOMException` names the bindings throw (`AbortError`, `DataCloneError`,
+  `HierarchyRequestError`, `IndexSizeError`, `InvalidCharacterError`,
+  `InvalidStateError`, `NamespaceError`, `NoModificationAllowedError`,
+  `NotAllowedError`, `NotFoundError`, `NotSupportedError`, `OperationError`,
+  `QuotaExceededError`, `SecurityError`, `TimeoutError`,
+  `TypeMismatchError`, `NetworkError`, `EncodingError`,
+  `InvalidAccessError`; `rustkit_js::STANDARD_ERROR_NAMES`). Any other name
+  is `Error`.
+- `message` is `null`, except for a message the engine raises itself,
+  matched against a fixed list (`not a callable function`, `not a
+  constructor`, `cannot convert 'null' or 'undefined' to object`, `Failed to
+  fetch`, ...; `rustkit_js::engine_message`). A message with a part that can
+  come from the page (`x is not defined`, `x is not a function`) is kept as
+  its fixed part only: `… is not defined`. The engine's own failures (`JS
+  engine panic`, `import map rejected`) have `value` `engine`.
+- `stack` is the page's frames, innermost first, one `    at url:line:col`
+  line each, capped at 4096 characters: no function names (a page can name a
+  function anything), and only frames in a script the engine evaluated
+  (`inline#n`, or the script's URL as in Privacy). A frame that cannot be
+  read (no position, an unknown script, a native or `eval` frame) is
+  dropped, never copied. An error object's frames are the engine's record of
+  where it was made, read through the engine's own `Error.prototype.stack`
+  getter, never a `stack` the page set.
+
+With `InspectorConfig::keep_error_text` (`parity-capture
+--event-log-error-text`) `message` is the page's text, verbatim, capped at
+1024 characters: an error's `message`, a thrown string, `Symbol(x)`, a
+number. It carries whatever the page put in it (cookies, form values,
+tokens): never for a log that will be shared.
 
 ### Unsupported APIs
 
@@ -118,13 +152,18 @@ The log is meant to be pasted into public issues and PRs.
   always removed; query and fragment are removed unless
   `InspectorConfig::keep_url_query` (`parity-capture --event-log-keep-query`)
   is set. A `data:` URL becomes `data:<mime>,…`; a `blob:` URL its origin.
-- URLs inside error messages, rejection reasons, stacks and kept console
-  text are scrubbed the same way wherever they sit in the text (after a
-  quote, in brackets, after `=`). Once a URL's query or fragment starts,
-  everything up to whitespace goes with it (brackets, parens and quotes are
-  legal in a query), except a frame's `:line:col)` and closing punctuation.
-  A `data:` URL in text becomes `data:<mime>,…` and the rest of its line
-  goes with its payload.
+- A frame's or a script's URL is read by the URL parser (any scheme; tabs
+  and newlines dropped, backslashes as slashes, IPv6 hosts) and reduced as
+  above; a `data:` script is `data:<mime>,…`, a scheme with no host its
+  scheme alone (`javascript:`). What the parser cannot read is dropped.
+- Errors carry no page text by default (see `script_error` above): the
+  thrown value's type, a standard name, a message's length, frame positions.
+  Messages are not scrubbed: they are left out. Only the engine's own fixed
+  messages are kept. `InspectorConfig::keep_error_text` keeps the page's
+  text: never for a log that will be shared.
+- With `keep_console_text` on, URLs in the kept console text are scrubbed
+  wherever they sit in it (after a quote, in brackets, after `=`): a
+  convenience, not a guarantee; the text is the page's.
 - No request or response header, body, cookie, form value or storage content
   is recorded.
 - Console messages carry no page text by default: each argument's type, and

@@ -155,8 +155,10 @@ pub(crate) struct ModuleEntry {
     evaluation: Option<JsPromise>,
     failed: Option<String>,
     /// A poll answered `Evaluating` (a top-level `await`) and the outcome
-    /// has not been taken since: [`JsRuntime::take_late_module_errors`].
+    /// has not been taken since (see [`JsRuntime::take_error_reports`]).
     awaiting: bool,
+    /// Its evaluation's outcome has been reported.
+    settled: bool,
 }
 
 #[derive(Default)]
@@ -218,11 +220,15 @@ impl JsRuntime {
         let module = match existing {
             Some(module) => module,
             None => {
+                self.diag.know_path(url);
                 let path = Path::new(url);
                 let parsed = Module::parse(Source::from_bytes(source).with_path(path), None, &mut self.context);
                 match parsed {
                     Ok(module) => module,
-                    Err(e) => return Err(describe(&e, &mut self.context)),
+                    Err(e) => {
+                        self.report_error(&e);
+                        return Err(describe(&e, &mut self.context));
+                    }
                 }
             }
         };
@@ -244,6 +250,7 @@ impl JsRuntime {
                 evaluation: None,
                 failed: None,
                 awaiting: false,
+                settled: false,
             },
         );
         Ok(ModuleHandle(url.to_string()))
@@ -266,6 +273,7 @@ impl JsRuntime {
                 match known {
                     Some(module) => Ok(module),
                     None => {
+                        self.diag.know_path(&fetched.final_url);
                         let path = Path::new(fetched.final_url.as_str());
                         match Module::parse(
                             Source::from_bytes(fetched.source.as_str()).with_path(path),
@@ -328,6 +336,7 @@ impl JsRuntime {
             match entry.load.state() {
                 PromiseState::Pending => return ModuleState::Loading,
                 PromiseState::Rejected(reason) => {
+                    self.report_value(&reason);
                     let message = describe_value(&reason, &mut self.context);
                     if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                         entry.failed = Some(message.clone());
@@ -338,6 +347,7 @@ impl JsRuntime {
             }
             let module = entry.module.clone();
             if let Err(e) = module.link(&mut self.context) {
+                self.report_error(&e);
                 let message = describe(&e, &mut self.context);
                 if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                     entry.failed = Some(message.clone());
@@ -350,6 +360,7 @@ impl JsRuntime {
                     p
                 }
                 Err(e) => {
+                    self.report_error(&e);
                     let message = describe(&e, &mut self.context);
                     if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                         entry.failed = Some(message.clone());
@@ -367,13 +378,38 @@ impl JsRuntime {
             None => return ModuleState::Loading,
         };
         let state = evaluation.state();
+        // The outcome is reported once, here or as a late module error.
+        let pending = matches!(state, PromiseState::Pending);
+        let mut first_outcome = false;
         if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
-            entry.awaiting = matches!(state, PromiseState::Pending);
+            entry.awaiting = pending;
+            first_outcome = !pending && !entry.settled;
+            entry.settled |= !pending;
         }
         match state {
             PromiseState::Pending => ModuleState::Evaluating,
             PromiseState::Fulfilled(_) => ModuleState::Done,
-            PromiseState::Rejected(reason) => ModuleState::Threw(self.thrown_text(&reason)),
+            PromiseState::Rejected(reason) => {
+                if first_outcome {
+                    self.report_value(&reason);
+                }
+                ModuleState::Threw(self.thrown_text(&reason))
+            }
+        }
+    }
+
+    /// A module's error, reported once (with reports on).
+    fn report_error(&mut self, error: &boa_engine::JsError) {
+        if self.diag.on.get() {
+            let report = self.diag.describe_error(error, &mut self.context);
+            self.diag.push(report);
+        }
+    }
+
+    fn report_value(&mut self, value: &JsValue) {
+        if self.diag.on.get() {
+            let report = self.diag.describe(value, None, false, &mut self.context);
+            self.diag.push(report);
         }
     }
 
@@ -383,7 +419,7 @@ impl JsRuntime {
     /// getter: no page code runs).
     fn thrown_text(&mut self, reason: &JsValue) -> String {
         let mut message = describe_value(reason, &mut self.context);
-        let getter = self.rejections.stack_getter.borrow().clone();
+        let getter = self.diag.stack_getter.borrow().clone();
         if let (_, Some(stack)) = crate::describe::error_report(reason, getter.as_ref(), &mut self.context) {
             message.push('\n');
             message.push_str(stack.trim_end());
@@ -392,11 +428,10 @@ impl JsRuntime {
     }
 
     /// The modules a poll left `Evaluating` (a top-level `await` still
-    /// waiting) whose evaluation has since thrown: `(module URL, error
-    /// text)`, each once, in no particular order. A browser reports such an
-    /// error as the module's uncaught error. Modules that finished cleanly
-    /// stop being watched.
-    pub fn take_late_module_errors(&mut self) -> Vec<(String, String)> {
+    /// waiting) whose evaluation has since thrown: `(module URL, reason)`,
+    /// each once, by URL. A browser reports such an error as the module's
+    /// uncaught error. Modules that finished cleanly stop being watched.
+    pub(crate) fn take_late_module_rejections(&mut self) -> Vec<(String, JsValue)> {
         let mut settled = Vec::new();
         for (url, entry) in self.modules.entries.iter_mut() {
             if !entry.awaiting {
@@ -406,18 +441,16 @@ impl JsRuntime {
                 Some(PromiseState::Pending) => {}
                 Some(PromiseState::Rejected(reason)) => {
                     entry.awaiting = false;
+                    entry.settled = true;
                     settled.push((url.clone(), reason));
                 }
-                _ => entry.awaiting = false,
+                _ => {
+                    entry.awaiting = false;
+                    entry.settled = true;
+                }
             }
         }
         settled.sort_by(|a, b| a.0.cmp(&b.0));
         settled
-            .into_iter()
-            .map(|(url, reason)| {
-                let text = self.thrown_text(&reason);
-                (url, text)
-            })
-            .collect()
     }
 }

@@ -1,17 +1,22 @@
 //! Where the page's script reaches the Inspector: the console handler, the
-//! exceptions the script log records, unhandled rejections and the
-//! unimplemented members the bindings saw. Every function here returns at
-//! once when the view's Inspector has nobody listening.
+//! page errors the JS runtime describes (exceptions, unhandled rejections,
+//! modules that threw after a top-level `await`) and the unimplemented
+//! members the bindings saw. Every function here returns at once when the
+//! view's Inspector has nobody listening.
+//!
+//! An error record is built from the runtime's report only, never from the
+//! script log's text: the report holds no text the page chose unless error
+//! text is asked for (see `rustkit_js::ErrorReport`).
 
 use std::sync::Arc;
 
 use rustkit_bindings::DomBindings;
 
-use crate::inspector::{cap, parse_error_text, ConsoleLevel, Inspector, InspectorEvent, MAX_SHORT_CHARS, MAX_STACK_CHARS};
+use crate::inspector::{cap, ConsoleLevel, Inspector, InspectorEvent, SourceLocation, MAX_MESSAGE_CHARS, MAX_STACK_CHARS};
 use crate::{ScriptOutcome, ScriptRecord};
 
 /// Set up a document's new bindings for a listening Inspector: console
-/// calls with their positions, rejection tracking, listener error stacks.
+/// calls with their positions, error reports, unsupported members' callers.
 /// Nothing is set up (and nothing costs anything) when nobody listens.
 pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
     if !inspector.is_active() {
@@ -34,65 +39,89 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
             ConsoleLevel::Info | ConsoleLevel::Warn => 4,
             ConsoleLevel::Error | ConsoleLevel::Debug => 5,
         };
-        let location = at.map(|at| {
+        let location = at.and_then(|at| {
             let column = if at.column > method_len { at.column - method_len } else { at.column };
-            sink.location(&at.path, at.line, column)
+            sink.frame_location(&at.path, at.line, column)
         });
         sink.console(level, message, location);
     }));
-    let _ = bindings.set_error_details(true);
+    let _ = bindings.set_error_details(true, inspector.keeps_error_text());
 }
 
-/// Push `record` onto a script log; an exception in it is also a
-/// `ScriptError` (with `stack` when the caller has one apart from the text).
-pub(crate) fn log_script(log: &mut Vec<ScriptRecord>, inspector: &Inspector, record: ScriptRecord, stack: Option<String>) {
+/// Push `record` onto a script log. A page exception in it reaches the
+/// Inspector from the runtime's report at the next drain; only the engine's
+/// own failures (a panic inside the JS engine, an import map it refused)
+/// are recorded from here, with a fixed message.
+pub(crate) fn log_script(log: &mut Vec<ScriptRecord>, inspector: &Inspector, record: ScriptRecord) {
     if let ScriptOutcome::Threw(text) = &record.outcome {
-        script_error(inspector, text, stack, false, &record.source);
+        engine_error(inspector, text, &record.source);
     }
     log.push(record);
 }
 
-/// Record one exception, `text` as the script log keeps it.
-pub(crate) fn script_error(inspector: &Inspector, text: &str, stack: Option<String>, rejection: bool, script: &str) {
+/// The engine's own failure `text`, if it is one, as a `script_error` with
+/// a fixed message; page exceptions are left to their reports.
+pub(crate) fn engine_error(inspector: &Inspector, text: &str, script: &str) {
+    let (message, length) = if text == "JS engine panic" {
+        ("JS engine panic", None)
+    } else if let Some(detail) = text.strip_prefix("import map: ") {
+        ("import map rejected", Some(detail.chars().count() as u64))
+    } else {
+        return;
+    };
+    inspector.emit_with(|inspector| InspectorEvent::ScriptError {
+        name: String::new(),
+        message: Some(message.to_string()),
+        location: None,
+        stack: None,
+        unhandled_rejection: false,
+        script: inspector.url_text(script),
+        value: "engine".to_string(),
+        message_len: length,
+    });
+}
+
+/// One page error, from the runtime's report: under `script` unless it is a
+/// module's own late error.
+pub(crate) fn script_error(inspector: &Inspector, report: &rustkit_js::ErrorReport, script: &str) {
     inspector.emit_with(|inspector| {
-        let (name, message, position, own_stack) = parse_error_text(text);
-        // A listener's error text has no stack of its own; the one
-        // captured beside it does.
-        let stack = stack.or(own_stack);
-        // Where it was thrown: the innermost frame that is the page's.
-        // Code in no named script (eval, an `on*` attribute) has no place
-        // of its own, and is never given its caller's. With no stack, the
-        // position Boa put on the message line.
-        let position = match stack.as_deref() {
-            Some(stack) => throw_site(stack),
-            None => position.filter(|(path, _, _)| !path.is_empty() && !path.contains("eval at")),
-        };
-        // Only the page's frames are kept.
-        let stack = stack.map(|s| page_frames(&s)).filter(|s| !s.is_empty());
-        let location = position.map(|(path, line, column)| inspector.location(&path, line, column));
+        let frames: Vec<SourceLocation> = report
+            .frames
+            .iter()
+            .filter_map(|f| inspector.frame_location(&f.path, f.line, f.column))
+            .collect();
+        let location = frames.first().filter(|_| report.located).cloned();
+        let stack = (!frames.is_empty()).then(|| {
+            let lines: Vec<String> = frames
+                .iter()
+                .map(|f| format!("    at {}:{}:{}", f.url, f.line, f.column))
+                .collect();
+            cap(&lines.join("\n"), MAX_STACK_CHARS).0
+        });
         InspectorEvent::ScriptError {
-            name: cap(&name, MAX_SHORT_CHARS).0,
-            message: inspector.scrub_text(&cap(&message, crate::inspector::MAX_MESSAGE_CHARS).0),
+            name: report.name.unwrap_or("").to_string(),
+            message: report.message.as_deref().map(|m| cap(m, MAX_MESSAGE_CHARS).0),
             location,
-            stack: stack.map(|s| inspector.scrub_text(&cap(&s, MAX_STACK_CHARS).0)),
-            unhandled_rejection: rejection,
-            script: inspector.url_text(script),
+            stack,
+            unhandled_rejection: report.rejection,
+            script: inspector.url_text(report.module.as_deref().unwrap_or(script)),
+            value: report.value.to_string(),
+            message_len: report.message_len.map(|n| n as u64),
         }
     });
 }
 
-/// After `source` ran: the errors its listeners and timers reported (onto
-/// the log, as before, and to the Inspector with their stacks), then, for a
-/// listening Inspector only, unhandled rejections and unimplemented members.
+/// After `source` ran: the errors its listeners and timers reported go onto
+/// the log (as before), then, for a listening Inspector only, the page's
+/// error reports and unimplemented members.
 pub(crate) fn drain_reports(bindings: &DomBindings, inspector: &Inspector, log: &mut Vec<ScriptRecord>, source: &str) {
-    for (message, stack) in bindings.take_reported_error_details() {
-        let record = ScriptRecord {
+    for message in bindings.take_reported_errors() {
+        log.push(ScriptRecord {
             source: source.to_string(),
             bytes: 0,
             elapsed_ms: 0,
             outcome: ScriptOutcome::Threw(message),
-        };
-        log_script(log, inspector, record, stack);
+        });
     }
     drain_quiet(bindings, inspector, source);
 }
@@ -103,77 +132,30 @@ pub(crate) fn drain_reports(bindings: &DomBindings, inspector: &Inspector, log: 
 /// which records it under the lifecycle step that drains next, as it always
 /// has: a script whose listener threw is not a script that threw.
 pub(crate) fn drain_script_reports(bindings: &DomBindings, inspector: &Inspector, carried: &mut Vec<String>, script: &str) {
-    for (message, stack) in bindings.take_reported_error_details() {
-        script_error(inspector, &message, stack, false, script);
-        carried.push(message);
-    }
+    carried.extend(bindings.take_reported_errors());
     drain_quiet(bindings, inspector, script);
 }
 
-/// Late module errors, unhandled rejections and unimplemented members
-/// since the last drain:
-/// Inspector events only, never script log records (the board's counts
-/// stay what they were).
+/// The page's error reports and unimplemented members since the last
+/// drain: Inspector events only, never script log records (the board's
+/// counts stay what they were).
 pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source: &str) {
     if !inspector.is_active() {
         return;
     }
-    // A module whose top-level `await` outlived its script step and then
-    // threw: that module's uncaught error, as Chromium reports it.
-    for (module, text) in bindings.take_late_module_errors() {
-        script_error(inspector, &text, None, false, &module);
-    }
-    for rejection in bindings.take_unhandled_rejections() {
-        let text = match &rejection.stack {
-            Some(stack) => format!("{}\n{stack}", rejection.message),
-            None => rejection.message.clone(),
-        };
-        script_error(inspector, &text, None, true, source);
-    }
+    drain_errors(bindings, inspector, source);
     for (interface, member, count, at) in bindings.take_unsupported_apis() {
-        let location = at.map(|at| inspector.location(&at.path, at.line, at.column));
+        let location = at.and_then(|at| inspector.frame_location(&at.path, at.line, at.column));
         inspector.unsupported_api(&interface, &member, count, location);
     }
 }
 
-/// A Boa stack without the frames that are not the page's: native
-/// functions, the engine's own (unnamed) glue scripts, and `eval` code
-/// (Boa names no script for it; the frame that called `eval` stays). Only
-/// frame lines (`at name (path:line:col)`) are kept: anything else in the
-/// text is not a frame.
-fn page_frames(stack: &str) -> String {
-    stack
-        .lines()
-        .filter(|line| {
-            let line = line.trim_end();
-            let frame = line.trim_start().starts_with("at ") && line.ends_with(')');
-            frame
-                && !(line.ends_with("(native)")
-                    || line.contains("(unknown at ")
-                    || line.contains(" (:")
-                    || line.contains("eval at"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// The innermost page frame of a Boa stack, passing over native functions
-/// and the engine's own unnamed glue; `None` when the innermost page code is
-/// in no named script: `eval` code (`<eval>`, `eval at`) or a function built
-/// from a string (`anonymous`: an `on*` attribute's handler).
-fn throw_site(stack: &str) -> Option<crate::inspector::PositionParts> {
-    for line in stack.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.ends_with("(native)") {
-            continue;
-        }
-        if line.contains("eval at") || line.starts_with("at <eval>") || line.starts_with("at anonymous (unknown at ") {
-            return None;
-        }
-        if line.contains("(unknown at ") || line.contains(" (:") {
-            continue;
-        }
-        return parse_error_text(&format!("x\n{line}")).2.filter(|(path, _, _)| !path.is_empty());
+/// The page's error reports since the last drain, under `source`.
+pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source: &str) {
+    if !inspector.is_active() {
+        return;
     }
-    None
+    for report in bindings.take_error_reports() {
+        script_error(inspector, &report, source);
+    }
 }

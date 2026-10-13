@@ -128,6 +128,13 @@ struct Args {
     #[arg(long)]
     event_log_console_text: bool,
 
+    /// Keep the message text of the page's errors in the event log (by
+    /// default an error is its type, a standard name and its message's
+    /// length). Pages throw cookies and form values: never for a log that
+    /// will be shared.
+    #[arg(long)]
+    event_log_error_text: bool,
+
     /// Enable verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -1190,6 +1197,7 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     config.replay_proxy = replay_proxy;
     config.inspector.keep_url_query = args.event_log_keep_query;
     config.inspector.keep_console_text = args.event_log_console_text;
+    config.inspector.keep_error_text = args.event_log_error_text;
     config
 }
 
@@ -1244,6 +1252,8 @@ mod tests {
         assert!(capture_config(&parsed(&["--event-log-keep-query"]), None).inspector.keep_url_query);
         assert!(!capture_config(&parsed(&["--event-log", "x.jsonl"]), None).inspector.keep_console_text);
         assert!(capture_config(&parsed(&["--event-log-console-text"]), None).inspector.keep_console_text);
+        assert!(!capture_config(&parsed(&["--event-log", "x.jsonl"]), None).inspector.keep_error_text);
+        assert!(capture_config(&parsed(&["--event-log-error-text"]), None).inspector.keep_error_text);
         // Nothing records unless asked: no buffer either way.
         assert!(!capture_config(&parsed(&["--event-summary"]), None).inspector.buffer);
     }

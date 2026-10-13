@@ -49,6 +49,16 @@ fn primitive_text(value: &JsValue, context: &mut Context) -> Option<String> {
     value.to_string(context).ok().map(|s| s.to_std_string_escaped())
 }
 
+/// An error object's `name`, from data properties only.
+pub(crate) fn error_name(object: &JsObject) -> Option<String> {
+    inherited_data_property(object, "name").and_then(|v| string_of(&v))
+}
+
+/// An error object's `message`, from data properties only.
+pub(crate) fn error_message(object: &JsObject) -> Option<String> {
+    inherited_data_property(object, "message").and_then(|v| string_of(&v))
+}
+
 /// An error object's `Name: message` (or `Name`), from data properties only.
 fn error_head(object: &JsObject) -> String {
     let name = inherited_data_property(object, "name")
@@ -66,7 +76,7 @@ fn error_head(object: &JsObject) -> String {
 /// An error object, or an object made from a constructor whose prototype
 /// is the realm's `Error.prototype` (the bindings' `DOMException`). Reads
 /// internal prototype links only: no Proxy trap runs.
-fn is_error_like(object: &JsObject, context: &Context) -> bool {
+pub(crate) fn is_error_like(object: &JsObject, context: &Context) -> bool {
     if object.is::<Error>() {
         return true;
     }
@@ -126,18 +136,6 @@ pub(crate) fn text(value: &JsValue, context: &mut Context) -> String {
     }
 }
 
-/// The error names the engine itself gives; any other `name` is page text.
-const STANDARD_ERROR_NAMES: [&str; 9] = [
-    "Error",
-    "TypeError",
-    "RangeError",
-    "ReferenceError",
-    "SyntaxError",
-    "EvalError",
-    "URIError",
-    "AggregateError",
-    "DOMException",
-];
 
 /// A value as a console line shows it when its text is not to be kept:
 /// a string (and an error's message) only as its length, a number only as
@@ -166,10 +164,7 @@ pub(crate) fn redacted_text(value: &JsValue, context: &Context) -> String {
         return "undefined".to_string();
     };
     if is_error_like(&object, context) {
-        let name = inherited_data_property(&object, "name")
-            .and_then(|v| string_of(&v))
-            .filter(|n| STANDARD_ERROR_NAMES.contains(&n.as_str()))
-            .unwrap_or_else(|| "Error".to_string());
+        let name = crate::diag::standard_name(error_name(&object).as_deref());
         let length = inherited_data_property(&object, "message")
             .and_then(|v| string_of(&v))
             .map_or(0, |m| m.chars().count());

@@ -1187,7 +1187,8 @@ pub(crate) fn install(
         }),
     )?;
 
-    runtime.evaluate_script(WRAPPERS_JS)?;
+    // Its listener and handler errors go to the host natives (`__rk`).
+    runtime.evaluate_with_host(WRAPPERS_JS)?;
     shadow::install(runtime, host, dirty)?;
     node_apis::install(runtime, host)
 }
@@ -2649,9 +2650,7 @@ const WRAPPERS_JS: &str = r#"
         try {
             return typeof cb === 'function' ? cb.call(t, event) : cb.handleEvent(event);
         } catch (e) {
-            var msg;
-            try { msg = g.__rustkit_error_text ? g.__rustkit_error_text(e) : String(e); } catch (_) { msg = '<unprintable exception>'; }
-            if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
+            try { __rk.reportError(e); } catch (_) {}
         }
     }
     // An element's on<type> handler: the property when one was assigned
@@ -2676,9 +2675,7 @@ const WRAPPERS_JS: &str = r#"
                 c.fn = new Function('event',
                     'with (this.ownerDocument || {}) { with (this) {\n' + src + '\n} }');
             } catch (e) {
-                var msg;
-                try { msg = g.__rustkit_error_text ? g.__rustkit_error_text(e) : String(e); } catch (_) { msg = '<unprintable exception>'; }
-                if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
+                try { __rk.reportError(e); } catch (_) {}
             }
         }
         return c.fn;
