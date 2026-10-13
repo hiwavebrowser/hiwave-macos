@@ -112,7 +112,14 @@ fn a_frames_script_is_a_label_or_a_url_reduced_by_the_url_parser() {
     let at = |path: &str| inspector.frame_location(path, 1, 2).map(|l| l.url);
     assert_eq!(at("inline#3").as_deref(), Some("inline#3"));
     assert_eq!(at("script#2").as_deref(), Some("https://a.test/app.js"));
+    // An inline module is `inline#n` because the engine named it so (an
+    // alias), never because a URL ends in `#inline-module-n`: a page can
+    // import `./x.js#inline-module-1` (third R1 hold @ 6bda3b2c).
+    inspector.alias_script("https://doc.test/#inline-module-4", "inline#4");
     assert_eq!(at("https://doc.test/#inline-module-4").as_deref(), Some("inline#4"));
+    assert_eq!(inspector.url_text("https://doc.test/#inline-module-4"), "inline#4");
+    assert_eq!(at("https://doc.test/x.js#inline-module-1").as_deref(), Some("https://doc.test/x.js"));
+    assert_eq!(inspector.url_text("https://doc.test/x.js#inline-module-1"), "https://doc.test/x.js");
     assert_eq!(at("http://[::1]:9/x?token=S").as_deref(), Some("http://[::1]:9/x"));
     assert_eq!(at("ht\ttps://h.test/x?token=S").as_deref(), Some("https://h.test/x"));
     assert_eq!(at("https:\\h.test\\x?token=S").as_deref(), Some("https://h.test/x"));
@@ -215,4 +222,17 @@ fn a_query_is_scrubbed_up_to_whitespace_or_a_frames_position() {
         keeping.scrub_text("bad https://u:p@h.test/x?a[]=1&t=S."),
         "bad https://h.test/x?a[]=1&t=S."
     );
+}
+
+/// A network error's stage comes from the error's kind, never its text: a
+/// connection failure whose text says `lookup` (a host name, a server's
+/// words) is still `connect` (third R1 hold @ 6bda3b2c, audit).
+#[test]
+fn a_network_errors_kind_is_never_read_from_its_text() {
+    use rustkit_http::HttpError;
+    use rustkit_net::NetError;
+    for text in ["h2 handshake: lookup.test went away", "resolve this", "no addresses", "Name or service not known"] {
+        let error = NetError::HttpError(HttpError::ConnectionFailed(text.into()));
+        assert_eq!(net_error_kind(&error), "connect", "{text:?}");
+    }
 }

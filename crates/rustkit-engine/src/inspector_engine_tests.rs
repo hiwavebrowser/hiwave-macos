@@ -1303,3 +1303,24 @@ fn an_import_map_the_engine_refused_is_an_engine_record() {
         .count();
     assert_eq!(engine_values, 1);
 }
+
+/// A module whose URL ends in `#inline-module-n` is not the page's n-th
+/// inline script: only the engine names a script `inline#n` (third R1 hold
+/// @ 6bda3b2c, audit).
+#[test]
+fn a_module_url_cannot_pass_for_an_inline_script() {
+    let page = "<html><body><script type=module src=\"/main.js\"></script>\
+<script type=module src=\"/late.js#inline-module-2\"></script></body></html>";
+    let routes = vec![
+        Route::html("/", page),
+        Route::ok("/main.js", "text/javascript", "import './evil.js#inline-module-1';"),
+        Route::ok("/evil.js", "text/javascript", "export const x = 1;\nthrow new Error('evil');"),
+        Route::ok("/late.js", "text/javascript", "await 0;\nthrow new Error('late');"),
+    ];
+    let (engine, view, _server) = load_page(EngineConfig::default(), routes);
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    assert_eq!(records.iter().filter(|r| r.event.kind() == "script_error").count(), 2, "{all}");
+    assert!(!all.contains("inline#") && !all.contains("inline-module"), "{all}");
+    assert!(all.contains("/evil.js:2:") && all.contains("/late.js"), "{all}");
+}
