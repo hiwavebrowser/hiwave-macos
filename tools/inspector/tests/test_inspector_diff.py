@@ -536,3 +536,21 @@ def test_a_navigation_error_names_the_target_as_the_record_does():
     for g, (_, _, named) in zip(got, cases):
         assert "SECRET" not in g and "#frag" not in g and "/home/" not in g, g
         assert named in g, g
+
+
+def test_a_failed_navigation_is_an_error_with_no_records(tmp_path):
+    p, out = _chrome_records(tmp_path, FAILED_NAV)
+    result = json.loads(p.stdout.strip().splitlines()[-1])
+    assert p.returncode != 0, p.stdout
+    assert result["status"] == "error", result
+    assert "net::ERR_" in result["error"], result
+    # Chromium's error page is not the page asked for: nothing is recorded.
+    assert not out.exists() and "records_path" not in result, result
+
+
+@pytest.mark.parametrize("target", ["data:text/html,<p>x</p>", "about:blank"])
+def test_a_navigation_with_no_network_response_is_still_ok(tmp_path, target):
+    p, out = _chrome_records(tmp_path, target)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert json.loads(p.stdout.strip().splitlines()[-1])["status"] == "ok"
+    assert out.exists()
