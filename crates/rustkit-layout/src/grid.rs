@@ -2958,7 +2958,18 @@ pub fn layout_grid_container(
                 AlignSelf::Baseline => AlignSelf::FlexStart,
                 other => other,
             };
-            if !matches!(align, AlignSelf::FlexStart | AlignSelf::Center | AlignSelf::FlexEnd) {
+            // An `auto` margin on the block axis takes the free space and
+            // `align-self` then has nothing to act on, `stretch` included
+            // (css-grid-1 6.4): `margin-top: auto` puts the item at the end
+            // of its area, both centre it. google's logo block is `height:
+            // 100%; max-height: 92px; margin-top: auto` in a grid that
+            // centres its items and sat in the middle of its row.
+            let top_auto = matches!(child.style.margin_top, Length::Auto);
+            let bottom_auto = matches!(child.style.margin_bottom, Length::Auto);
+            let auto_margin = top_auto || bottom_auto;
+            if !auto_margin
+                && !matches!(align, AlignSelf::FlexStart | AlignSelf::Center | AlignSelf::FlexEnd)
+            {
                 continue;
             }
             let Some(&(r0, r1)) = row_spans.get(item_idx) else {
@@ -3016,9 +3027,16 @@ pub fn layout_grid_container(
                 - margin_top
                 - child.dimensions.margin.bottom
                 - (child.dimensions.content.height + pb);
-            let offset = match align {
-                AlignSelf::Center => free / 2.0,
-                AlignSelf::FlexEnd => free,
+            let offset = match (auto_margin, align) {
+                // An item taller than its area has no free space to give
+                // its margins and stays at the start.
+                (true, _) => match (top_auto, bottom_auto) {
+                    (true, true) => free.max(0.0) / 2.0,
+                    (true, false) => free.max(0.0),
+                    _ => 0.0,
+                },
+                (false, AlignSelf::Center) => free / 2.0,
+                (false, AlignSelf::FlexEnd) => free,
                 _ => 0.0,
             };
             let border_top = child.dimensions.content.y
