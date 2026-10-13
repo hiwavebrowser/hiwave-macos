@@ -1111,6 +1111,11 @@ pub enum Display {
     /// Columns and column groups are never rendered; they only carry widths.
     TableColumn,
     TableColumnGroup,
+    /// `contents`: the element generates no box; its children take its
+    /// place. Only the UA style of `<slot>` sets it (author `display:
+    /// contents` is still unsupported, see `parse_display`), and the
+    /// engine's box-tree build removes such boxes, so layout never sees one.
+    Contents,
 }
 
 impl Display {
