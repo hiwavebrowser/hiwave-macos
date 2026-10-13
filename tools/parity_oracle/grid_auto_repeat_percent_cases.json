@@ -119,6 +119,71 @@
    "name": "auto-fit-percent-fewer-items-with-a-gap",
    "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;gap:24px;grid-template-columns:repeat(auto-fit,minmax(20%,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
    "chrome_boxes": "g:0:0:568:20 i1:0:0:272:20 i2:296:0:272:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-percent-then-a-fixed-track-item-in-the-last",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;column-gap:20px;grid-template-columns:repeat(auto-fit,20%) 60px}#i2{grid-column:-2}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:600:20 i1:0:0:120:20 i2:140:0:60:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-percent-item-in-the-fourth-track",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;column-gap:20px;grid-template-columns:repeat(auto-fit,20%)}#i2{grid-column:4}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:600:20 i1:0:0:120:20 i2:140:0:120:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-px-item-in-the-fourth-track",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;column-gap:20px;grid-template-columns:repeat(auto-fit,120px)}#i2{grid-column:4}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:600:20 i1:0:0:120:20 i2:140:0:120:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-minmax-percent-cards-beside-a-sidebar",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:1000px;gap:24px;grid-template-columns:repeat(auto-fit,minmax(20%,1fr)) 240px}#i2{grid-column:-2}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1000:20 i1:0:0:736:20 i2:760:0:240:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-percent-rows-item-in-the-fourth-row",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}li{height:auto;width:20px}#g{height:400px;row-gap:20px;grid-template-rows:repeat(auto-fit,20%)}#i2{grid-row:4}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:400 i1:0:0:20:80 i2:0:100:20:80 after:0:400:1280:18"
+  },
+  {
+   "name": "auto-fit-px-collapsed-tracks-first",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;column-gap:20px;grid-template-columns:repeat(auto-fit,100px)}#i1{grid-column:3}</style></head><body><ul id=g><li id=i1></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:600:20 i1:0:0:100:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-px-collapsed-tracks-first-between-and-last",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;column-gap:20px;grid-template-columns:repeat(auto-fit,100px)}#i1{grid-column:2}#i2{grid-column:4}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:600:20 i1:0:0:100:20 i2:120:0:100:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-px-collapsed-between-space-between",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;column-gap:20px;justify-content:space-between;grid-template-columns:repeat(auto-fit,100px)}#i2{grid-column:4}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:600:20 i1:0:0:100:20 i2:500:0:100:20 after:0:20:1280:18"
+  },
+  {
+   "name": "a-zero-px-track-keeps-its-gutters",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;column-gap:20px;grid-template-columns:100px 0px 100px}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:600:20 i1:0:0:100:20 i2:120:0:0:20 i3:140:0:100:20 after:0:20:1280:18"
+  },
+  {
+   "name": "a-zero-px-track-space-between",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;column-gap:20px;justify-content:space-between;grid-template-columns:100px 0px 100px}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:600:20 i1:0:0:100:20 i2:300:0:0:20 i3:500:0:100:20 after:0:20:1280:18"
+  },
+  {
+   "name": "an-empty-auto-column-keeps-its-gutters",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;column-gap:20px;justify-content:start;grid-template-columns:100px auto 100px}#i2{grid-column:3}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:600:20 i1:0:0:100:20 i2:140:0:100:20 after:0:20:1280:18"
+  },
+  {
+   "name": "an-empty-auto-row-keeps-its-gutters",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:200px;row-gap:20px}#i2{grid-row:3}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:200:80 i1:0:0:200:20 i2:0:60:200:20 after:0:80:1280:18"
+  },
+  {
+   "name": "an-empty-auto-row-under-a-min-height",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}li{height:auto}#g{width:200px;min-height:200px;row-gap:20px}#i2{grid-row:3}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:200:200 i1:0:0:200:53 i2:0:147:200:53 after:0:200:1280:18"
   }
  ],
  "chrome": "143.0.7499.4"
