@@ -537,8 +537,13 @@ fn union(a: Rect, b: Rect) -> Rect {
 }
 
 /// The page URL as a record reports it: never a user name or password, and
-/// no query or fragment unless asked.
+/// no query or fragment unless asked. A `data:` URL's payload is the
+/// document itself, so it is reduced to `data:<mime>` even then.
 pub(crate) fn report_url(url: &Url, include_query: bool) -> String {
+    if url.scheme() == "data" {
+        let mime = url.path().split([',', ';']).next().unwrap_or("").trim();
+        return format!("data:{mime}");
+    }
     let mut u = url.clone();
     let _ = u.set_username("");
     let _ = u.set_password(None);
