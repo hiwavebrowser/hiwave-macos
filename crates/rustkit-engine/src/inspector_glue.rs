@@ -96,6 +96,19 @@ pub(crate) fn drain_reports(bindings: &DomBindings, inspector: &Inspector, log: 
     drain_quiet(bindings, inspector, source);
 }
 
+/// After the page's script `script` ran: what its listeners and callbacks
+/// reported (a synchronous `click()`, a custom element reaction) goes to the
+/// Inspector now, as this script's, and onto `carried` for the script log,
+/// which records it under the lifecycle step that drains next, as it always
+/// has: a script whose listener threw is not a script that threw.
+pub(crate) fn drain_script_reports(bindings: &DomBindings, inspector: &Inspector, carried: &mut Vec<String>, script: &str) {
+    for (message, stack) in bindings.take_reported_error_details() {
+        script_error(inspector, &message, stack, false, script);
+        carried.push(message);
+    }
+    drain_quiet(bindings, inspector, script);
+}
+
 /// Unhandled rejections and unimplemented members since the last drain:
 /// Inspector events only, never script log records (the board's counts
 /// stay what they were).

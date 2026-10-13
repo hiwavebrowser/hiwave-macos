@@ -4072,6 +4072,9 @@ impl Engine {
         let scripts_started = std::time::Instant::now();
         let modules_fetched = Cell::new(0usize);
         let mut external_scripts = 0usize;
+        // What listeners reported while a script ran, for the script log at
+        // the next lifecycle step.
+        let mut carried: Vec<String> = Vec::new();
         for (label, _, source, node_id, is_module) in runnable {
             let text = match source {
                 Ok(text) => text,
@@ -4201,7 +4204,7 @@ impl Engine {
                     outcome,
                 };
                 inspector_glue::log_script(log, &inspector, record, None);
-                inspector_glue::drain_reports(bindings, &inspector, log, &label);
+                inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &label);
                 if let Some(event) = event {
                     let _ = bindings.fire_script_event(node_id, event);
                 }
@@ -4234,9 +4237,9 @@ impl Engine {
             let source = record.source.clone();
             inspector_glue::log_script(log, &inspector, record, None);
             // What its listeners threw (a synchronous `click()`, an `on*`
-            // attribute) belongs to this script, not to the lifecycle step
-            // that would otherwise drain it.
-            inspector_glue::drain_reports(bindings, &inspector, log, &source);
+            // attribute) is this script's in the Inspector; the script log
+            // keeps it for the next lifecycle step (`carried`).
+            inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &source);
         }
         if poisoned.get() {
             return;
@@ -4372,6 +4375,14 @@ impl Engine {
                     inspector_glue::log_script(log, &inspector, record, None);
                     return;
                 }
+            }
+            for message in carried.drain(..) {
+                log.push(ScriptRecord {
+                    source: source.to_string(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                });
             }
             inspector_glue::drain_reports(bindings, &inspector, log, source);
         }
