@@ -62,13 +62,31 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 ///
 /// `percent-height-row-is-not-touched`: a `height: 50%` item of a row that
 /// is 400 tall is 110; Chromium has 200.
-#[cfg(all(target_os = "macos", feature = "headless"))]
+///
+/// In the six below the grid is as wide as in Chromium and the columns in
+/// it are not. They are text-free, so the every-OS test reads the list too.
+///
+/// `auto-tracks-min-width-*`: two `auto` columns of 150px words in items
+/// with a `min-width` length, in a 100 or 200px grid. Chromium shares the
+/// width, 50 or 100 each; here each column is 150. The grid pass has one
+/// contribution per item, and an `auto` column needs two (the minimum, here
+/// the `min-width`, and the max-content it may grow to). The same items in
+/// `1fr` columns match.
+///
+/// `zero-fr-and-fr-tracks-*`: a `0fr` column is 0 wide; in Chromium it is
+/// its item's min-content, 60.
 const GAPS: &[&str] = &[
     "percent-height-item-sharing-an-area-in-a-row",
     "bing-textarea-and-its-replica-in-a-row",
     "bing-textarea-and-its-replica-in-a-block",
     "percent-height-column-items-shrink",
     "percent-height-row-is-not-touched",
+    "auto-tracks-min-width-0-items-flex-1-beside-a-sibling",
+    "auto-tracks-min-width-0-items-in-a-narrow-float",
+    "auto-tracks-min-width-20px-items-flex-1-beside-a-sibling",
+    "auto-tracks-min-width-20px-items-in-a-narrow-float",
+    "zero-fr-and-fr-tracks-in-a-float",
+    "zero-fr-and-fr-tracks-in-a-row",
 ];
 
 /// The pages are checked in six tests, a sixth each. As one test they
@@ -163,6 +181,7 @@ fn text_free_pages_are_as_in_chrome_on_every_os() {
     // document alive so no later page can reuse an earlier one's address.
     let mut documents = Vec::new();
     let mut wrong = Vec::new();
+    let mut gaps_that_pass = Vec::new();
     let mut checked = 0;
     for case in data["cases"].as_array().expect("cases") {
         if case["no_text"].as_bool() != Some(true) {
@@ -184,10 +203,16 @@ fn text_free_pages_are_as_in_chrome_on_every_os() {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        if got != chrome {
-            wrong.push(format!("{name}\n   engine {got}\n   chrome {chrome}"));
+        match (got == chrome, GAPS.contains(&name)) {
+            (false, false) => wrong.push(format!("{name}\n   engine {got}\n   chrome {chrome}")),
+            (true, true) => gaps_that_pass.push(name),
+            _ => {}
         }
     }
     assert!(checked > 0, "no page is marked no_text");
     assert!(wrong.is_empty(), "{} of {checked} wrong:\n{}", wrong.len(), wrong.join("\n"));
+    assert!(
+        gaps_that_pass.is_empty(),
+        "listed as a gap but matches Chrome now, take it off the list: {gaps_that_pass:?}"
+    );
 }

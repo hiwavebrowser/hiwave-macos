@@ -454,6 +454,27 @@ impl<'a> GridItem<'a> {
         min_width.max(auto_min) + margins
     }
 
+    /// The item's contribution to columns that are all flexible.
+    ///
+    /// A flexible column takes its base size from the item and its final
+    /// size from the `fr` share, so the contribution is the minimum one
+    /// alone: for an auto-width item with a `min-width` that is a length,
+    /// that length and not the content (css-grid-1 §6.6: the automatic
+    /// minimum is for `min-width: auto`). Two `1fr` columns of 150px words
+    /// in `min-width: 0` items are 50 each in a 100px grid in Chromium 143;
+    /// here each was 150. A column sized from content keeps
+    /// `get_width_contribution`: it has one number for its minimum and its
+    /// content, and the length alone would empty it.
+    pub fn get_flexible_width_contribution(&self, container_width: f32) -> f32 {
+        let style = &self.layout_box.style;
+        if matches!(style.width, Length::Auto) && style.overflow_x == Overflow::Visible {
+            if let Some(min_width) = length_min_width_border_box(self.layout_box) {
+                return min_width + horizontal_margins(style);
+            }
+        }
+        self.get_width_contribution(container_width)
+    }
+
     /// Set explicit placement from style.
     pub fn set_placement(&mut self, placement: &GridPlacement) {
         // Start with both dimensions needing auto-placement
@@ -1760,11 +1781,15 @@ pub fn layout_grid_container(
     let column_contributions: Vec<(usize, usize, f32)> = items
         .iter()
         .map(|item| {
-            (
-                (item.column_start - 1).max(0) as usize,
-                item.column_span.max(1) as usize,
-                item.get_width_contribution(container_width),
-            )
+            let start = (item.column_start - 1).max(0) as usize;
+            let span = item.column_span.max(1) as usize;
+            let flexible = (start..start + span).all(|i| grid.columns.get(i).is_some_and(|t| t.is_flexible));
+            let contribution = if flexible {
+                item.get_flexible_width_contribution(container_width)
+            } else {
+                item.get_width_contribution(container_width)
+            };
+            (start, span, contribution)
         })
         .collect();
     let max_col_span = column_contributions.iter().map(|c| c.1).max().unwrap_or(1);
@@ -3233,31 +3258,47 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
     // The largest contribution of the items that auto-placement puts in a
     // column: item i goes to column i mod n.
     // Walked once per column and constraint: a track below asks up to three
-    // times.
-    let mut contributions = vec![(0.0f32, 0.0f32); columns];
+    // times. The third value is the largest minimum contribution, what an
+    // `auto` minimum is sized from; it is above the content only for a
+    // `min-width` longer than the content, which floors the other two.
+    let mut contributions = vec![(0.0f32, 0.0f32, 0.0f32); columns];
     for (i, c) in items.iter().enumerate() {
-        let (low, high) = &mut contributions[i % columns];
-        *low = low.max(estimate_min_content_width(c));
-        *high = high.max(estimate_max_content_width(c));
+        let (low, high, floor) = &mut contributions[i % columns];
+        let min_content = estimate_min_content_width(c);
+        let minimum = minimum_contribution_width(c, min_content);
+        *low = low.max(min_content).max(minimum);
+        *high = high.max(estimate_max_content_width(c)).max(minimum);
+        *floor = floor.max(minimum);
     }
     let content = |column: usize, min: bool| -> f32 {
-        let (low, high) = contributions[column];
+        let (low, high, _) = contributions[column];
         if min { low } else { high }
     };
+    let floor = |column: usize| contributions[column].2;
     let mut total = 0.0f32;
     // The flexible tracks, as (base size, factor), and the one `fr` size
     // they share under a max-content constraint.
     //
     // css-grid-1 section 12.7: under a min-content constraint the flex
     // fraction is zero, so a flexible track is its base size: its minimum
-    // (`minmax(0, 1fr)` is 0), or the min-content of its items for a plain
-    // `<n>fr`, whose minimum is `auto`. Under a max-content constraint the
-    // fraction is the largest any track needs (section 12.7.1: its base
-    // size over its factor, and its items' max-content over the factor,
-    // neither factor counted below 1), and a track is that fraction times
-    // its factor, never less than its base size. Chromium 143: `0.5fr`
-    // around a 100px word is 100 wide, two `minmax(100px, 1fr)` around 50
-    // and 150 are 300, and two `minmax(0, 1fr)` shrink to their container.
+    // (`minmax(0, 1fr)` is 0), or the minimum contribution of its items
+    // for a plain `<n>fr`, whose minimum is `auto`. Under a max-content
+    // constraint the fraction is the largest any track needs (section
+    // 12.7.1): its base size over its factor, and its items' max-content
+    // over the factor, neither factor counted below 1; where that item
+    // fraction times the factor is less than the base size the track is
+    // inflexible for the item, which then asks only for its max-content
+    // less the base. A track is the fraction times its factor, never less
+    // than its base size. Chromium 143: `0.5fr` around a 100px word is 100
+    // wide, two `minmax(100px, 1fr)` around 50 and 150 are 300, two
+    // `minmax(0, 1fr)` shrink to their container, and `0.25fr 1fr` around
+    // two 60px words and a 10px one is 60 and 60.
+    //
+    // An `auto` minimum (`auto`, `minmax(auto, ..)`, `<n>fr`) under a
+    // min-content constraint is the minimum contribution too, not the
+    // min-content: two `1fr` columns of 150px words in `overflow: hidden`
+    // or `min-width: 0` items have a min-content of 0, so the grid shrinks
+    // to a narrow float or row instead of overflowing it at 300.
     let mut flexible: Vec<(f32, f32)> = Vec::new();
     let mut fr_size = 0.0f32;
     for (column, track) in template.tracks.iter().enumerate() {
@@ -3266,18 +3307,22 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
                 TrackSize::Px(v) => Some(*v),
                 TrackSize::MinContent => Some(content(column, true)),
                 TrackSize::MaxContent => Some(content(column, false)),
-                TrackSize::Auto | TrackSize::Percent(_) => Some(content(column, min)),
+                TrackSize::Auto | TrackSize::Percent(_) => {
+                    Some(if min { floor(column) } else { content(column, false) })
+                }
                 TrackSize::FitContent(limit) => Some(content(column, min).min(limit.max(content(column, true)))),
                 _ => None,
             }
         };
         let mut flex = |base: f32, fr: f32| {
             let fr = fr.max(0.0);
-            fr_size = fr_size.max(base.max(content(column, false)) / fr.max(1.0));
+            let item = content(column, false) / fr.max(1.0);
+            let item = if item * fr < base { content(column, false) - base } else { item };
+            fr_size = fr_size.max(base / fr.max(1.0)).max(item);
             flexible.push((base, fr));
         };
         match &track.size {
-            TrackSize::Fr(fr) => flex(content(column, true), *fr),
+            TrackSize::Fr(fr) => flex(floor(column), *fr),
             TrackSize::MinMax(low, high) => match high.as_ref() {
                 TrackSize::Fr(fr) => flex(sized(low, true).unwrap_or(0.0), *fr),
                 high => {
@@ -3293,6 +3338,45 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
         total += if min { base } else { base.max(fr_size * fr) };
     }
     Some(total + gap * (columns as f32 - 1.0))
+}
+
+/// A grid item's minimum contribution to a column with an `auto` minimum
+/// (border box), given its min-content width.
+///
+/// css-grid-1 section 12.5 with the automatic minimum size of section 6.6:
+/// an item with a `width` contributes that (the min-content estimate reads
+/// it already); otherwise a `min-width` that is a length is the contribution
+/// whatever the content, a scroll container contributes nothing but its
+/// padding and border, and any other item its min-content.
+fn minimum_contribution_width(item: &LayoutBox, min_content: f32) -> f32 {
+    let style = &item.style;
+    if matches!(style.width, Length::Px(_)) {
+        return min_content;
+    }
+    if let Some(min_width) = length_min_width_border_box(item) {
+        return min_width;
+    }
+    if style.overflow_x != Overflow::Visible {
+        return horizontal_padding_border(style);
+    }
+    min_content
+}
+
+/// The border-box width a `min-width` that is a length gives a box, or
+/// `None` for `auto`, a percentage or a keyword.
+fn length_min_width_border_box(item: &LayoutBox) -> Option<f32> {
+    let style = &item.style;
+    let min_width = match &style.min_width {
+        Length::Auto | Length::FitContent | Length::Percent(_) => return None,
+        Length::Calc(sum) if sum.percent != 0.0 => return None,
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => return None,
+        length => item.length_to_px(length, 0.0),
+    };
+    let padding_border = horizontal_padding_border(style);
+    Some(match style.box_sizing {
+        BoxSizing::BorderBox => min_width.max(padding_border),
+        BoxSizing::ContentBox => min_width + padding_border,
+    })
 }
 
 /// Size grid tracks using the track sizing algorithm.
