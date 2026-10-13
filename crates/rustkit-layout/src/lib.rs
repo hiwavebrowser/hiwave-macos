@@ -3541,8 +3541,11 @@ impl LayoutBox {
     /// Seats the atomic inlines inside this inline box on the line's
     /// baseline. An inline box lays its children out at its own top; once
     /// the box is on the baseline, a box inside it whose baseline is its
-    /// bottom edge (or its last line) would hang below the line.
-    fn seat_atomics_in_inline(&mut self, baseline_y: f32) {
+    /// bottom edge (or its last line) would hang below the line. One the
+    /// align pass does not seat (`vertical-align: top|bottom|middle`) goes
+    /// back to the line top, where it is left when it is the block's own
+    /// child.
+    fn seat_atomics_in_inline(&mut self, baseline_y: f32, line_top: f32) {
         for c in &mut self.children {
             if c.style.display == rustkit_css::Display::None
                 || c.float != Float::None
@@ -3551,17 +3554,18 @@ impl LayoutBox {
                 continue;
             }
             if c.is_atomic_line_member() {
-                let Some((above, _)) = c.line_member_baseline_extents() else {
-                    continue;
+                let target = match c.line_member_baseline_extents() {
+                    Some((above, _)) => baseline_y - above,
+                    None => line_top,
                 };
                 let d = &c.dimensions;
                 let top = d.content.y - d.margin.top - d.border.top - d.padding.top;
-                let dy = baseline_y - above - top;
+                let dy = target - top;
                 if dy.abs() > 0.01 {
                     crate::flex::translate_subtree(c, 0.0, dy);
                 }
             } else if matches!(c.box_type, BoxType::Inline) {
-                c.seat_atomics_in_inline(baseline_y);
+                c.seat_atomics_in_inline(baseline_y, line_top);
             }
         }
     }
@@ -5451,7 +5455,7 @@ impl LayoutBox {
                 crate::flex::translate_subtree(c, 0.0, dy);
             }
             if seats_as_text(c) {
-                c.seat_atomics_in_inline(baseline_y);
+                c.seat_atomics_in_inline(baseline_y, line_top);
             }
         }
     }

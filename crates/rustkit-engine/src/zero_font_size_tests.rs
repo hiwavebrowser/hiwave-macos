@@ -118,6 +118,50 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
         r#"<div id=f><div id=x><a href=#><img style="width:40px;height:30px" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a></div></div><div id=y style="height:5px"></div>"#,
         "f:0:0:1280:30 x:0:0:40:30 y:0:30:1280:5",
     ),
+    // Where the boxes inside the inline box sit: on the line's baseline,
+    // with the inline box itself a zero-height box at the baseline.
+    (
+        "where a linked image and its link sit",
+        "",
+        r#"<div id=x><a id=a href=#><img id=g style="width:40px;height:30px" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:30 a:0:30:40:0 g:0:0:40:30 y:0:30:1280:5",
+    ),
+    (
+        "a short inline-block outside a span and a tall one inside",
+        "",
+        r#"<div id=x><i id=p style="display:inline-block;width:100px;height:10px"></i><span id=s><i id=q style="display:inline-block;width:50px;height:30px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:30 p:0:20:100:10 s:100:30:50:0 q:100:0:50:30 y:0:30:1280:5",
+    ),
+    (
+        "a tall inline-block outside a span and a short one inside",
+        "",
+        r#"<div id=x><i id=p style="display:inline-block;width:100px;height:30px"></i><span id=s><i id=q style="display:inline-block;width:50px;height:10px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:30 p:0:0:100:30 s:100:30:50:0 q:100:20:50:10 y:0:30:1280:5",
+    ),
+    (
+        "two inline-blocks of two heights in one span",
+        "",
+        r#"<div id=x><span id=s><i id=p style="display:inline-block;width:100px;height:10px"></i><i id=q style="display:inline-block;width:50px;height:30px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:30 s:0:30:150:0 p:0:20:100:10 q:100:0:50:30 y:0:30:1280:5",
+    ),
+    (
+        "an inline-block with a margin in a span",
+        "",
+        r#"<div id=x><span id=s><i id=q style="display:inline-block;width:50px;height:10px;margin:5px 0 7px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:22 s:0:22:50:0 q:0:5:50:10 y:0:22:1280:5",
+    ),
+    (
+        "a top-aligned inline-block in a span beside a taller one",
+        "",
+        r#"<div id=x><i id=p style="display:inline-block;width:100px;height:30px"></i><span id=s><i id=q style="display:inline-block;width:50px;height:10px;vertical-align:top"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:30 p:0:0:100:30 s:100:30:50:0 q:100:0:50:10 y:0:30:1280:5",
+    ),
+    (
+        "an inline-block two inline boxes deep beside a taller one",
+        "",
+        r#"<div id=x><i id=p style="display:inline-block;width:100px;height:30px"></i><span><b id=s><i id=q style="display:inline-block;width:50px;height:10px"></i></b></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:30 p:0:0:100:30 s:100:30:50:0 q:100:20:50:10 y:0:30:1280:5",
+    ),
 ];
 
 /// Pages that do not match Chromium yet. One that starts to match fails the
