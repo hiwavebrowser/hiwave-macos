@@ -461,7 +461,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
     };
 
     let engine_result = EngineBuilder::new()
-        .with_config(capture_config(&args, replay_proxy))
+        .with_config(capture_config(args, replay_proxy))
         .user_agent(user_agent)
         .javascript_enabled(url.is_some() || args.actions.is_some())
         .build();
