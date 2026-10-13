@@ -1190,6 +1190,9 @@ delete Error.prototype.toString; delete Error.prototype.toJSON;
 delete Error.prototype.message; delete Error.prototype.name;
 delete Object.prototype.msg; delete Object.prototype.args; delete Object.prototype[Symbol.toPrimitive];
 try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
+</script><script type=module>throw 'import map: ' + document.cookie;
+</script><script type=module>throw 'JS engine panic';
+</script><script type=module>await 0; throw 'import map: x';
 </script></body></html>"#;
     let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
     let records = records(&engine, view);
@@ -1216,7 +1219,18 @@ try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
             "{genuine:?} missing: {errors:?}"
         );
     }
-    assert_eq!(errors.len(), 3, "{errors:?}");
+    // Third R1 hold @ 6bda3b2c: the modules' thrown strings are the page's
+    // own `string` errors, never the engine's.
+    let values: Vec<&str> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { value, .. } => Some(value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(values.iter().filter(|v| **v == "string").count(), 3, "{all}");
+    assert!(!values.contains(&"engine"), "{all}");
+    assert_eq!(errors.len(), 6, "{errors:?}");
     let apis: Vec<String> = engine
         .inspector(view)
         .unwrap()
@@ -1225,4 +1239,67 @@ try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
         .map(|u| format!("{}.{} x{}", u.interface, u.member, u.count))
         .collect();
     assert_eq!(apis, vec!["XMLHttpRequest.open(async=false) x1"]);
+}
+
+/// The engine's own failures (a panic inside the JS engine, an import map
+/// it refused) are recorded as `value: "engine"` where the engine raises
+/// them, never because of what a failure's text says: a page throwing the
+/// engine's very words, from anywhere, is a page error (third R1 hold @
+/// 6bda3b2c).
+#[test]
+fn a_page_throwing_an_engine_message_is_never_an_engine_record() {
+    let mut page = String::from("<html><body><script>document.cookie = 'sid=COOKIEVALUE';</script>");
+    let mut throws = 0;
+    for message in ["JS engine panic", "import map: x", "import map: ' + document.cookie + '"] {
+        for (kind, body) in [
+            ("", format!("throw '{message}';")),
+            ("type=module", format!("throw '{message}';")),
+            ("type=module", format!("await 0; throw '{message}';")),
+            ("", format!("setTimeout(function () {{ throw '{message}'; }}, 0);")),
+            ("", format!("window.addEventListener('load', function () {{ throw '{message}'; }});")),
+            ("", format!("Promise.reject('{message}');")),
+            ("", format!("(async function () {{ throw '{message}'; }})();")),
+            ("", format!("(async function () {{ await 0; throw '{message}'; }})();")),
+        ] {
+            page.push_str(&format!("<script {kind}>{body}</script>"));
+            throws += 1;
+        }
+    }
+    page.push_str("</body></html>");
+    let (mut engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    // And on the live loop, after the load.
+    engine
+        .execute_script(view, "setTimeout(function () { throw 'JS engine panic'; }, 0); setTimeout(function () { throw 'import map: x'; }, 0);")
+        .unwrap();
+    runtime().block_on(engine.pump_live(view, 10));
+    throws += 2;
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    let values: Vec<&str> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { value, .. } => Some(value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(!values.contains(&"engine"), "{all}");
+    assert!(!all.contains("COOKIEVALUE") && !all.contains("JS engine panic") && !all.contains("import map"), "{all}");
+    assert_eq!(values, vec!["string"; throws], "{all}");
+    let summary = InspectorSummary::from_records(&records, &[]);
+    assert_eq!(summary.script_errors as usize, throws, "{summary:?}");
+}
+
+/// What the engine itself refused is still an engine record: an import map
+/// that is not JSON.
+#[test]
+fn an_import_map_the_engine_refused_is_an_engine_record() {
+    let page = "<html><body><script type=importmap>{ not json</script><script type=module>window.x = 1;</script></body></html>";
+    let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let errors = only(&described(&engine, view, server.port), &["script_error"]);
+    assert_eq!(errors, vec!["script_error : import map rejected script=importmap rejection=false"]);
+    let engine_values = records(&engine, view)
+        .iter()
+        .filter(|r| matches!(&r.event, InspectorEvent::ScriptError { value, .. } if value == "engine"))
+        .count();
+    assert_eq!(engine_values, 1);
 }
