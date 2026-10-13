@@ -193,9 +193,6 @@ aspect-ratio--flex-col--fixed-width aspect-ratio-height-of-column-flex-item
 margin-auto--block--grid grid-item-auto-margins-ignored
 margin-auto--grid--grid  grid-item-auto-margins-ignored
 
-# aspect-ratio-only-empty-block-dropped: 1
-aspect-ratio--block--auto aspect-ratio-only-empty-block-dropped
-
 # percent-height-chain-in-stretched-grid-item: 1
 percent-height--grid--through-auto percent-height-chain-in-stretched-grid-item
 

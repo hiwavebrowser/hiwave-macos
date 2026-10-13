@@ -28,7 +28,7 @@ pub use images::{
     CrossOrigin, FaviconLink, ImageDecoding, ImageElement, ImageElementManager, ImageLoading,
     ImageLoadingState, PictureElement, PictureSource,
 };
-pub use shadow::{ShadowRootInit, ShadowRootMode};
+pub use shadow::{is_valid_custom_element_name, ShadowRootInit, ShadowRootMode};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -288,6 +288,15 @@ pub struct Document {
     /// means no node has a shadow root, so tree walks can skip the shadow
     /// checks entirely.
     shadow_roots: Cell<usize>,
+    /// Custom element names `customElements.define` has defined, for
+    /// `:defined` (see `shadow.rs`, `define_custom_element`).
+    defined_custom_elements: RefCell<std::collections::HashSet<String>>,
+    /// The page's load has settled its custom element definitions (once
+    /// per document; see `shadow.rs`, `settle_custom_element_definitions`).
+    custom_element_definitions_settled: Cell<bool>,
+    /// The names that settle found present and undefined, minus any
+    /// defined since: `:defined` for the cascade only.
+    settled_custom_elements: RefCell<std::collections::HashSet<String>>,
 }
 
 /// Sink for building a Document from HTML parsing.
@@ -497,6 +506,9 @@ impl Document {
             elements_by_id: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
             shadow_roots: Cell::new(0),
+            defined_custom_elements: RefCell::new(std::collections::HashSet::new()),
+            custom_element_definitions_settled: Cell::new(false),
+            settled_custom_elements: RefCell::new(std::collections::HashSet::new()),
         }
     }
 
