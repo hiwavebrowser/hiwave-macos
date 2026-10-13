@@ -432,7 +432,7 @@ impl JsRuntime {
             let wrapped = format!("(function (__rk) {{\n{source}\n}})");
             let function = self
                 .context
-                .eval(Source::from_bytes(wrapped.as_bytes()))
+                .eval(Source::from_bytes(wrapped.as_bytes()).with_path(std::path::Path::new(diag::EMBEDDER_PATH)))
                 .map_err(|e| JsError::ExecutionError(e.to_string()))?;
             let function = function
                 .as_object()
@@ -490,7 +490,10 @@ impl JsRuntime {
         Ok(())
     }
 
-    /// Evaluate JavaScript code.
+    /// Evaluate JavaScript code as one of the embedder's own scripts: its
+    /// frames are passed over in error reports and console positions (the
+    /// page's own scripts go through
+    /// [`evaluate_script_named`](Self::evaluate_script_named)).
     pub fn evaluate_script(&mut self, source: &str) -> Result<JsValue, JsError> {
         self.evaluate(source, None)
     }
@@ -516,7 +519,9 @@ impl JsRuntime {
                     self.context
                         .eval(Source::from_bytes(source).with_path(std::path::Path::new(path)))
                 }
-                None => self.context.eval(Source::from_bytes(source)),
+                None => self
+                    .context
+                    .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH))),
             };
             // Promise reactions (`.then`, `await`) are jobs Boa queues but
             // does not run on its own; a page's async code never resumes
