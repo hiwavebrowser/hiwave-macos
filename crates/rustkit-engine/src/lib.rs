@@ -5444,6 +5444,14 @@ impl Engine {
                     return true;
                 }
                 BoxType::Inline | BoxType::Block | BoxType::AnonymousBlock => {
+                    // An inline-block (or inline-flex, inline-grid) that
+                    // was kept is content on the line whatever it holds: a
+                    // sized, empty one is an icon. Without this a `<span>`
+                    // or `<a>` around only such a box was dropped with it,
+                    // and a block holding nothing else went too.
+                    if child.style.display.is_atomic_inline() {
+                        return true;
+                    }
                     // Recursively check children
                     if Self::has_content_children(child) {
                         return true;

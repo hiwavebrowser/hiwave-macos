@@ -3462,8 +3462,24 @@ impl LayoutBox {
         // A non-atomic inline sits on the baseline as a line of text in its
         // own font (its rect is only the content area; the line sees the
         // line-height split).
-        if matches!(self.box_type, BoxType::Text(_) | BoxType::Inline) {
+        if matches!(self.box_type, BoxType::Text(_)) {
             return Some(Self::text_line_box_extents(&self.style));
+        }
+        // The atomic inlines inside it are on the same line, at any depth
+        // of inline boxes (CSS2 10.8: the line box holds every inline-level
+        // box on the line, not only the container's own children). Left
+        // out, `<a><img></a>` gave the line only the link's font: a linked
+        // 30px image under `font-size: 0` made a line 0 tall and the next
+        // block was laid over the image (16 at the default size).
+        if matches!(self.box_type, BoxType::Inline) {
+            let (mut above, mut below) = Self::text_line_box_extents(&self.style);
+            self.for_each_atomic_in_inline(&mut |atomic| {
+                if let Some((a, b)) = atomic.line_member_baseline_extents() {
+                    above = above.max(a);
+                    below = below.max(b);
+                }
+            });
+            return Some((above, below));
         }
         let h = self.dimensions.margin_box().height;
         let above = if matches!(self.box_type, BoxType::FormControl(_))
@@ -3484,6 +3500,70 @@ impl LayoutBox {
             return None;
         };
         Some((above, (h - above).max(0.0)))
+    }
+
+    /// Calls `f` with each atomic inline-level box (inline-block, image,
+    /// control) inside this inline box, through any depth of inline boxes.
+    fn for_each_atomic_in_inline(&self, f: &mut dyn FnMut(&LayoutBox)) {
+        for c in &self.children {
+            if c.style.display == rustkit_css::Display::None
+                || c.float != Float::None
+                || matches!(c.position, Position::Absolute | Position::Fixed)
+            {
+                continue;
+            }
+            if c.is_atomic_line_member() {
+                f(c);
+            } else if matches!(c.box_type, BoxType::Inline) {
+                c.for_each_atomic_in_inline(f);
+            }
+        }
+    }
+
+    /// An inline-block, inline-flex or inline-grid box, an image or a form
+    /// control: a box that sits on a line as one unit.
+    fn is_atomic_line_member(&self) -> bool {
+        self.style.display.is_atomic_inline()
+            || matches!(self.box_type, BoxType::Image { .. } | BoxType::FormControl(_))
+    }
+
+    /// The tallest margin box among the atomic inlines inside this inline
+    /// box (0 with none): the floor the block loops keep for a line's
+    /// height, as for an atomic inline that is their own child.
+    fn tallest_atomic_in_inline(&self) -> f32 {
+        let mut tallest = 0.0f32;
+        self.for_each_atomic_in_inline(&mut |atomic| {
+            tallest = tallest.max(atomic.dimensions.margin_box().height);
+        });
+        tallest
+    }
+
+    /// Seats the atomic inlines inside this inline box on the line's
+    /// baseline. An inline box lays its children out at its own top; once
+    /// the box is on the baseline, a box inside it whose baseline is its
+    /// bottom edge (or its last line) would hang below the line.
+    fn seat_atomics_in_inline(&mut self, baseline_y: f32) {
+        for c in &mut self.children {
+            if c.style.display == rustkit_css::Display::None
+                || c.float != Float::None
+                || matches!(c.position, Position::Absolute | Position::Fixed)
+            {
+                continue;
+            }
+            if c.is_atomic_line_member() {
+                let Some((above, _)) = c.line_member_baseline_extents() else {
+                    continue;
+                };
+                let d = &c.dimensions;
+                let top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+                let dy = baseline_y - above - top;
+                if dy.abs() > 0.01 {
+                    crate::flex::translate_subtree(c, 0.0, dy);
+                }
+            } else if matches!(c.box_type, BoxType::Inline) {
+                c.seat_atomics_in_inline(baseline_y);
+            }
+        }
     }
 
     fn inline_strut_descent(&self) -> f32 {
@@ -4924,7 +5004,9 @@ impl LayoutBox {
                     if half_leading > 0.0 {
                         child.shift_inline_content_area(half_leading);
                     }
-                    line_height = line_height.max(child.get_line_height());
+                    line_height = line_height
+                        .max(child.get_line_height())
+                        .max(child.tallest_atomic_in_inline());
                     // The inline's text wrapped onto several line boxes: the
                     // flow must advance past ALL of them, exactly as the
                     // phase-5 split below does for a bare text run. Before
@@ -5294,7 +5376,11 @@ impl LayoutBox {
         let x_height = fs * 0.5;
         for &i in &members {
             let c = &children[i];
-            let above = if matches!(c.box_type, BoxType::Text(_)) || seats_as_text(c) {
+            let above = if seats_as_text(c) {
+                // With the atomic inlines inside it, which sit on the same
+                // baseline (line_member_baseline_extents).
+                c.line_member_baseline_extents().map_or(text_extents(&c.style).0, |e| e.0)
+            } else if matches!(c.box_type, BoxType::Text(_)) {
                 text_extents(&c.style).0
             } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
             {
@@ -5363,6 +5449,9 @@ impl LayoutBox {
             // line leaves the run where it is. Ledgered, not chased.
             if dy.abs() > 0.01 && !is_multi_line_split {
                 crate::flex::translate_subtree(c, 0.0, dy);
+            }
+            if seats_as_text(c) {
+                c.seat_atomics_in_inline(baseline_y);
             }
         }
     }
@@ -5938,7 +6027,9 @@ impl LayoutBox {
                     if half_leading > 0.0 {
                         child.shift_inline_content_area(half_leading);
                     }
-                    line_height = line_height.max(child.get_line_height());
+                    line_height = line_height
+                        .max(child.get_line_height())
+                        .max(child.tallest_atomic_in_inline());
                     // The inline's text wrapped onto several line boxes: the
                     // flow must advance past ALL of them, exactly as the
                     // phase-5 split below does for a bare text run. Before
