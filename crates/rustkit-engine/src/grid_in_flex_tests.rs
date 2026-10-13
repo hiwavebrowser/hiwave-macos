@@ -10,7 +10,7 @@
 //! longest word (46px) and its two items were stacked in one column, so the
 //! sidebar sat below the feed.
 //!
-//! The four tests that load every page into a view run on macOS, where the
+//! The six tests that load every page into a view run on macOS, where the
 //! shaper is the one the pinned boxes assume. The pages marked `no_text`
 //! (words are inline-blocks of a fixed width, `font-size: 0`) depend on no
 //! shaper and are also checked on every OS, without a view or a script.
@@ -71,34 +71,46 @@ const GAPS: &[&str] = &[
     "percent-height-row-is-not-touched",
 ];
 
-/// The pages are checked in four tests, a quarter each. As one test they
+/// The pages are checked in six tests, a sixth each. As one test they
 /// held the GPU for over 120 s on a loaded machine (31 pages at more than a
-/// second each), and the tests queued behind it failed in the GPU test guard.
+/// second each, when there were 31), and the tests queued behind it failed in the GPU test guard.
 #[cfg(all(target_os = "macos", feature = "headless"))]
-const PARTS: usize = 4;
+const PARTS: usize = 6;
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
-fn a_grid_that_is_a_flex_item_is_as_in_chrome_1_of_4() {
+fn a_grid_that_is_a_flex_item_is_as_in_chrome_1_of_6() {
     pages_are_as_in_chrome(0);
 }
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
-fn a_grid_that_is_a_flex_item_is_as_in_chrome_2_of_4() {
+fn a_grid_that_is_a_flex_item_is_as_in_chrome_2_of_6() {
     pages_are_as_in_chrome(1);
 }
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
-fn a_grid_that_is_a_flex_item_is_as_in_chrome_3_of_4() {
+fn a_grid_that_is_a_flex_item_is_as_in_chrome_3_of_6() {
     pages_are_as_in_chrome(2);
 }
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
-fn a_grid_that_is_a_flex_item_is_as_in_chrome_4_of_4() {
+fn a_grid_that_is_a_flex_item_is_as_in_chrome_4_of_6() {
     pages_are_as_in_chrome(3);
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn a_grid_that_is_a_flex_item_is_as_in_chrome_5_of_6() {
+    pages_are_as_in_chrome(4);
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn a_grid_that_is_a_flex_item_is_as_in_chrome_6_of_6() {
+    pages_are_as_in_chrome(5);
 }
 
 #[cfg(all(target_os = "macos", feature = "headless"))]

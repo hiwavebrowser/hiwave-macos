@@ -307,6 +307,210 @@
    "no_text": true,
    "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:100px}#m{display:grid;grid-template-columns:1fr 1fr}</style></head><body><div id=x><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
    "chrome_boxes": "x:0:0:100:10 m:0:0:300:10 i0:0:0:150:10 i1:150:0:150:10"
+  },
+  {
+   "name": "fr-tracks-min-width-0-items-flex-1-beside-a-sibling",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:300px}#s{width:100px;height:10px}#m{flex:1 1 0;display:grid;grid-template-columns:1fr 1fr}#i0,#i1{min-width:0}</style></head><body><div id=x><div id=s></div><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:300:10 s:0:0:100:10 m:100:0:200:10 i0:100:0:100:10 i1:200:0:100:10"
+  },
+  {
+   "name": "fr-tracks-min-width-0-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{min-width:0}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "fr-tracks-min-width-0-items-in-a-narrow-row",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:100px}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{min-width:0}</style></head><body><div id=x><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "fr-tracks-min-width-0-items-in-a-narrow-inline-block",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{display:inline-block}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{min-width:0}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:10 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "fr-tracks-min-width-20px-items-flex-1-beside-a-sibling",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:300px}#s{width:100px;height:10px}#m{flex:1 1 0;display:grid;grid-template-columns:1fr 1fr}#i0,#i1{min-width:20px}</style></head><body><div id=x><div id=s></div><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:300:10 s:0:0:100:10 m:100:0:200:10 i0:100:0:100:10 i1:200:0:100:10"
+  },
+  {
+   "name": "fr-tracks-min-width-20px-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{min-width:20px}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "fr-tracks-min-width-20px-items-in-a-narrow-row",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:100px}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{min-width:20px}</style></head><body><div id=x><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "fr-tracks-min-width-20px-items-in-a-narrow-inline-block",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{display:inline-block}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{min-width:20px}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:10 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "fr-tracks-overflow-hidden-items-flex-1-beside-a-sibling",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:300px}#s{width:100px;height:10px}#m{flex:1 1 0;display:grid;grid-template-columns:1fr 1fr}#i0,#i1{overflow:hidden}</style></head><body><div id=x><div id=s></div><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:300:10 s:0:0:100:10 m:100:0:200:10 i0:100:0:100:10 i1:200:0:100:10"
+  },
+  {
+   "name": "fr-tracks-overflow-hidden-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{overflow:hidden}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "fr-tracks-overflow-hidden-items-in-a-narrow-row",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:100px}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{overflow:hidden}</style></head><body><div id=x><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "fr-tracks-overflow-hidden-items-in-a-narrow-inline-block",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{display:inline-block}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{overflow:hidden}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:10 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "minmax-auto-1fr-tracks-min-width-0-items-flex-1-beside-a-sibling",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:300px}#s{width:100px;height:10px}#m{flex:1 1 0;display:grid;grid-template-columns:minmax(auto,1fr) minmax(auto,1fr)}#i0,#i1{min-width:0}</style></head><body><div id=x><div id=s></div><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:300:10 s:0:0:100:10 m:100:0:200:10 i0:100:0:100:10 i1:200:0:100:10"
+  },
+  {
+   "name": "minmax-auto-1fr-tracks-min-width-0-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:minmax(auto,1fr) minmax(auto,1fr)}#i0,#i1{min-width:0}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "minmax-auto-1fr-tracks-min-width-20px-items-flex-1-beside-a-sibling",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:300px}#s{width:100px;height:10px}#m{flex:1 1 0;display:grid;grid-template-columns:minmax(auto,1fr) minmax(auto,1fr)}#i0,#i1{min-width:20px}</style></head><body><div id=x><div id=s></div><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:300:10 s:0:0:100:10 m:100:0:200:10 i0:100:0:100:10 i1:200:0:100:10"
+  },
+  {
+   "name": "minmax-auto-1fr-tracks-min-width-20px-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:minmax(auto,1fr) minmax(auto,1fr)}#i0,#i1{min-width:20px}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "minmax-auto-1fr-tracks-overflow-hidden-items-flex-1-beside-a-sibling",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:300px}#s{width:100px;height:10px}#m{flex:1 1 0;display:grid;grid-template-columns:minmax(auto,1fr) minmax(auto,1fr)}#i0,#i1{overflow:hidden}</style></head><body><div id=x><div id=s></div><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:300:10 s:0:0:100:10 m:100:0:200:10 i0:100:0:100:10 i1:200:0:100:10"
+  },
+  {
+   "name": "minmax-auto-1fr-tracks-overflow-hidden-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:minmax(auto,1fr) minmax(auto,1fr)}#i0,#i1{overflow:hidden}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "auto-tracks-min-width-0-items-flex-1-beside-a-sibling",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:300px}#s{width:100px;height:10px}#m{flex:1 1 0;display:grid;grid-template-columns:auto auto}#i0,#i1{min-width:0}</style></head><body><div id=x><div id=s></div><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:300:10 s:0:0:100:10 m:100:0:200:10 i0:100:0:100:10 i1:200:0:100:10"
+  },
+  {
+   "name": "auto-tracks-min-width-0-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:auto auto}#i0,#i1{min-width:0}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "auto-tracks-min-width-20px-items-flex-1-beside-a-sibling",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:300px}#s{width:100px;height:10px}#m{flex:1 1 0;display:grid;grid-template-columns:auto auto}#i0,#i1{min-width:20px}</style></head><body><div id=x><div id=s></div><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:300:10 s:0:0:100:10 m:100:0:200:10 i0:100:0:100:10 i1:200:0:100:10"
+  },
+  {
+   "name": "auto-tracks-min-width-20px-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:auto auto}#i0,#i1{min-width:20px}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "auto-tracks-overflow-hidden-items-flex-1-beside-a-sibling",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:300px}#s{width:100px;height:10px}#m{flex:1 1 0;display:grid;grid-template-columns:auto auto}#i0,#i1{overflow:hidden}</style></head><body><div id=x><div id=s></div><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:300:10 s:0:0:100:10 m:100:0:200:10 i0:100:0:100:10 i1:200:0:100:10"
+  },
+  {
+   "name": "auto-tracks-overflow-hidden-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:auto auto}#i0,#i1{overflow:hidden}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "fr-tracks-padded-min-width-0-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{min-width:0;padding:0 5px}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "fr-tracks-border-box-min-width-items-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:1fr 1fr}#i0,#i1{min-width:30px;padding:0 5px;box-sizing:border-box}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "auto-tracks-one-overflow-hidden-item-in-a-narrow-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{float:left}#m{display:grid;grid-template-columns:auto auto}#i0{overflow:hidden}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:0 f:0:0:150:10 m:0:0:150:10 i0:0:0:0:10 i1:0:0:150:10"
+  },
+  {
+   "name": "quarter-fr-and-fr-tracks-in-a-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#f{float:left}#m{display:grid;grid-template-columns:0.25fr 1fr}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:60px\"></i> <i style=\"width:60px\"></i></div><div id=i1><i style=\"width:10px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:0 f:0:0:120:20 m:0:0:120:20 i0:0:0:60:20 i1:60:0:60:20"
+  },
+  {
+   "name": "zero-fr-and-fr-tracks-in-a-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#f{float:left}#m{display:grid;grid-template-columns:0fr 1fr}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:60px\"></i> <i style=\"width:60px\"></i></div><div id=i1><i style=\"width:10px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:0 f:0:0:120:20 m:0:0:120:20 i0:0:0:60:20 i1:60:0:60:20"
+  },
+  {
+   "name": "quarter-fr-and-fr-tracks-in-a-row",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:600px}#m{display:grid;grid-template-columns:0.25fr 1fr}</style></head><body><div id=x><div id=m><div id=i0><i style=\"width:60px\"></i> <i style=\"width:60px\"></i></div><div id=i1><i style=\"width:10px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:20 m:0:0:120:20 i0:0:0:60:20 i1:60:0:60:20"
+  },
+  {
+   "name": "zero-fr-and-fr-tracks-in-a-row",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#x{display:flex;width:600px}#m{display:grid;grid-template-columns:0fr 1fr}</style></head><body><div id=x><div id=m><div id=i0><i style=\"width:60px\"></i> <i style=\"width:60px\"></i></div><div id=i1><i style=\"width:10px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:600:20 m:0:0:120:20 i0:0:0:60:20 i1:60:0:60:20"
+  },
+  {
+   "name": "tenth-fr-tracks-in-a-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#f{float:left}#m{display:grid;grid-template-columns:0.1fr 0.1fr}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:60px\"></i> <i style=\"width:60px\"></i></div><div id=i1><i style=\"width:10px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:0 f:0:0:70:20 m:0:0:70:20 i0:0:0:60:20 i1:60:0:10:20"
+  },
+  {
+   "name": "minmax-200px-1fr-and-fr-tracks-in-a-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:900px}#f{float:left}#m{display:grid;grid-template-columns:minmax(200px,1fr) 1fr}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:50px\"></i></div><div id=i1><i style=\"width:100px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:900:0 f:0:0:400:10 m:0:0:400:10 i0:0:0:200:10 i1:200:0:200:10"
+  },
+  {
+   "name": "minmax-200px-2fr-and-fr-tracks-in-a-float",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:900px}#f{float:left}#m{display:grid;grid-template-columns:minmax(200px,2fr) 1fr}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:50px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:900:0 f:0:0:450:10 m:0:0:450:10 i0:0:0:300:10 i1:300:0:150:10"
   }
  ],
  "chrome": "143.0.7499.4"
