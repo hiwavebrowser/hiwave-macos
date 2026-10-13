@@ -169,3 +169,49 @@ fn a_pseudo_element_member_is_matched_anywhere_in_a_selector_list() {
         );
     }
 }
+
+/// A list member that names the pseudo-element cascades with ITS OWN
+/// specificity when it is the one that matches (Selectors 4 §17), as an
+/// element's rule does. With every member matched, each took the list's
+/// maximum: `.c::before, #zz .c::before { width: 50px }` beat a later
+/// `.d::before { width: 20px }`. Chromium 141: 20 (the #684 second review).
+#[test]
+fn a_pseudo_element_list_member_cascades_with_its_own_specificity() {
+    let width = |css: &str, class: &str| {
+        measured(
+            css,
+            &format!("<span id=p class='{class}' style='display:inline-block'></span>"),
+            WIDTHS,
+        )
+    };
+    for pseudo in ["before", "after"] {
+        let made = format!(".c::{pseudo}{{content:'';display:block;height:5px}}");
+        for (list, want) in [
+            // The review's page, and the same with the matching member last.
+            (format!(".c::{pseudo}, #zz .c::{pseudo}"), 20),
+            (format!("#zz .c::{pseudo}, .c::{pseudo}"), 20),
+            (format!("#zz::{pseudo}, .c::{pseudo}"), 20),
+            // A member with no pseudo-element lends it nothing.
+            (format!("#zz, .c::{pseudo}"), 20),
+            (format!(".c:{pseudo}, #zz i"), 20),
+            // The more specific member matches: the list wins.
+            (format!(".c::{pseudo}, #p::{pseudo}"), 50),
+            (format!("#p.c::{pseudo}, .zz::{pseudo}"), 50),
+        ] {
+            assert_eq!(
+                width(&format!("{made} {list}{{width:50px}} .d::{pseudo}{{width:20px}}"), "c d"),
+                format!("String(\"p:{want}\")"),
+                "{list}"
+            );
+        }
+    }
+    // The ordinary shape of it.
+    assert_eq!(
+        width(
+            ".icon::before{content:'';display:block;height:5px} \
+             .icon::before, .nav .menu .icon::before{width:12px} .icon-big::before{width:24px}",
+            "icon icon-big"
+        ),
+        "String(\"p:24\")"
+    );
+}
