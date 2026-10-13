@@ -799,6 +799,13 @@
    "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:minmax(0,1fr) auto}#i0{grid-column:1/-1}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:400px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
    "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10",
    "engine_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:550:10"
+  },
+  {
+   "name": "header-over-two-of-three-flexible-columns-min-width-0-items-in-a-narrow-inline-block",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#m>div{min-height:10px}#c{width:100px}#f{display:inline-block}#m{display:grid;grid-template-columns:minmax(auto,1fr) 2fr 2fr;column-gap:10px}#i0{grid-column:span 2}#i1{grid-column:1;grid-row:2;min-width:0}#i2{grid-column:3;grid-row:2;min-width:0}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:60px\"></i></div><div id=i1><i style=\"width:60px\"></i> <i style=\"width:60px\"></i></div><div id=i2><i style=\"width:60px\"></i></div></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:100:30 f:0:0:100:30 m:0:0:100:30 i0:0:0:58:10 i1:0:10:16:20 i2:68:10:32:20",
+   "engine_boxes": "c:0:0:100:30 f:0:0:100:30 m:0:0:100:30 i0:0:0:70:10 i1:0:10:60:20 i2:80:10:60:20"
   }
  ],
  "chrome": "143.0.7499.4"
