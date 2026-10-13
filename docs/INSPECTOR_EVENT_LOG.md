@@ -119,6 +119,8 @@ The log is meant to be pasted into public issues and PRs.
   quote, in brackets, after `=`). Once a URL's query or fragment starts,
   everything up to whitespace goes with it (brackets, parens and quotes are
   legal in a query), except a frame's `:line:col)` and closing punctuation.
+  A `data:` URL in text becomes `data:<mime>,…` and the rest of its line
+  goes with its payload.
 - No request or response header, body, cookie, form value or storage content
   is recorded.
 - Console messages carry no page text by default: each argument's type, and

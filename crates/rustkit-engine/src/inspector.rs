@@ -500,18 +500,35 @@ impl Inspector {
     /// to whitespace, a quote or a bracket; once its query or fragment
     /// starts, everything up to whitespace is the query (brackets, parens
     /// and quotes are legal in it), less a trailing `:line:col)` position
-    /// or closing punctuation.
+    /// or closing punctuation. A `data:` URL becomes `data:<mime>,…`, its
+    /// payload (which may hold spaces) dropped to the end of the line.
     fn scrub_urls(&self, text: &str) -> String {
-        const SCHEMES: [&str; 5] = ["https://", "http://", "wss://", "ws://", "file://"];
+        const SCHEMES: [&str; 6] = ["https://", "http://", "wss://", "ws://", "file://", "data:"];
         let lower = text.to_ascii_lowercase();
         let mut out = String::with_capacity(text.len());
         let mut rest = 0;
         while rest < text.len() {
             let next = SCHEMES
                 .iter()
-                .filter_map(|scheme| lower[rest..].find(scheme).map(|i| rest + i))
+                .filter_map(|scheme| find_scheme(&lower, rest, scheme))
                 .min();
             let Some(start) = next else { break };
+            out.push_str(&text[rest..start]);
+            if lower[start..].starts_with("data:") {
+                let tail = query_tail(&text[start..]);
+                let mime = text[start + 5..]
+                    .split([',', ';'])
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || "/+-.".contains(*c))
+                    .take(64)
+                    .collect::<String>();
+                out.push_str(&format!("data:{mime},…"));
+                out.push_str(tail);
+                rest = text.len();
+                break;
+            }
             let stop = text[start..]
                 .find(|c: char| c.is_whitespace() || "'\"`<>()[]{}?#".contains(c))
                 .map(|i| start + i)
@@ -533,7 +550,6 @@ impl Inspector {
                 }
                 (end, "", end)
             };
-            out.push_str(&text[rest..start]);
             match Url::parse(&text[start..url_end]) {
                 Ok(url) => out.push_str(&self.url(&url)),
                 // Not a URL after all: keep the scheme, drop what follows.
@@ -678,6 +694,21 @@ pub fn parse_error_text(text: &str) -> ErrorTextParts {
         })
         .or(head_position);
     (name, message, position, stack.map(str::to_string))
+}
+
+/// Where `scheme` next starts in `lower` from `from`: anywhere for a
+/// `scheme://`, and for `data:` only where no letter or digit comes right
+/// before it (`metadata:` is a word).
+fn find_scheme(lower: &str, from: usize, scheme: &str) -> Option<usize> {
+    let mut at = from;
+    loop {
+        let found = at + lower[at..].find(scheme)?;
+        let word_before = lower[..found].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric());
+        if scheme.ends_with("//") || !word_before {
+            return Some(found);
+        }
+        at = found + scheme.len();
+    }
 }
 
 /// What ends a URL's query in text and is not part of it: a frame's
