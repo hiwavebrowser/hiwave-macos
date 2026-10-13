@@ -4271,6 +4271,7 @@ name = "parity-capture"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "png",
  "rustkit-engine",
  "rustkit-layout",
  "rustkit-viewhost",
