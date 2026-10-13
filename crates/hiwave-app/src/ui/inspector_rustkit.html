@@ -415,6 +415,7 @@
         var DIFF_SCHEMA = 'hiwave-inspector-diff/1';
         var ROW_HEIGHT = 20;
         var HEAD_HEIGHT = 28 + 32 + 1;
+        var BANNER_HEIGHT = 24;
 
         function $(id) { return document.getElementById(id); }
 
@@ -537,7 +538,7 @@
         var visible = [];
         var selected = -1;
         var top = 0;
-        var poolSize = Math.max(8, Math.floor(((window.innerHeight || 800) - HEAD_HEIGHT) / ROW_HEIGHT));
+        var poolSize = 8;
         var pool = [];
 
         function rebuildVisible() {
@@ -558,7 +559,10 @@
             return -1;
         }
 
+        // As many rows as fit under the toolbar, pane head and banner.
         function makePool() {
+            var head = HEAD_HEIGHT + ($('banner').className === 'banner' ? BANNER_HEIGHT : 0);
+            poolSize = Math.max(8, Math.floor(((window.innerHeight || 800) - head) / ROW_HEIGHT));
             var rows = $('tree-rows');
             for (var s = 0; s < poolSize; s++) {
                 var row = el('div', 'row empty');

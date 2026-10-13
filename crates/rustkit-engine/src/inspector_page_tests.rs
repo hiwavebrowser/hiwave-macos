@@ -323,13 +323,15 @@ fn arrow_keys_and_clicks_select_and_collapse() {
 fn a_truncated_dump_says_so_and_shows_what_it_has() {
     let (engine, view) = target_with(TARGET);
     let dump = dump_of(&engine, view, 5);
-    let (engine, view) = inspector(&inspector_page_html(&dump, None, None).unwrap());
+    let (mut engine, view) = inspector(&inspector_page_html(&dump, None, None).unwrap());
     let banner = shown_in(&engine, view, "#banner");
     assert!(
         banner.starts_with("Truncated: this dump holds the first 5 of 21 elements"),
         "banner shows {banner:?}"
     );
     assert!(has_text(&engine, view, "Rows 1–4 of 4"), "{:?}", texts(&engine, view));
+    // The banner takes a row's height from the tree: 35 rows fit, not 36.
+    assert_eq!(js_number(&mut engine, view, "document.getElementById('tree-rows').children.length"), 35);
 }
 
 // ---------------------------------------------------------------------------
