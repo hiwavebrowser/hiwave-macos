@@ -855,3 +855,35 @@ var y = new XMLHttpRequest(); y.open('GET', '/doc.xml'); y.onload = function () 
     let counts: Vec<u64> = engine.inspector(view).unwrap().unsupported_apis().iter().map(|u| u.count).collect();
     assert_eq!(counts, vec![2]);
 }
+
+// ---- Review R1 hold (#676 @ bf40c73c) ----
+
+/// A thrown value that is not an error is described as console values are
+/// (`[object Object]`), never with its properties, and `stack` holds only
+/// frame lines.
+#[test]
+fn a_thrown_non_error_is_described_without_its_properties() {
+    let page = "<html><body><script>throw {user:'a', token:'SECRET_OBJ'}</script>
+<script>setTimeout(function () { throw {token: 'SECRET_TIMER'}; }, 0);</script>
+<script type=\"module\">throw {token: 'SECRET_MOD'};</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let errors: Vec<(String, String, Option<String>)> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { name, message, stack, .. } => {
+                Some((name.clone(), message.clone(), stack.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    for (name, message, stack) in &errors {
+        assert_eq!((name.as_str(), message.as_str()), ("", "[object Object]"), "{errors:?}");
+        for line in stack.as_deref().unwrap_or("").lines() {
+            assert!(line.starts_with("    at ") && line.ends_with(')'), "not a frame line: {line:?}");
+        }
+    }
+    let all = serde_json::to_string(&records).unwrap();
+    assert!(!all.contains("SECRET") && !all.contains("user"), "{all}");
+}
