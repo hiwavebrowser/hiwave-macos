@@ -1025,3 +1025,87 @@ throw new Error('TLA_MICRO');
     );
 }
 
+// ---- Review R1 hold, round 2 (#676 @ 56cbdfed) ----
+
+/// Nothing page script can reach turns console redaction off, writes into
+/// the engine's console or error queues, or changes what a record says:
+/// not the engine's globals, not properties of `console`, not a prototype
+/// or a global function the engine's own code calls (`push`, `apply`,
+/// `JSON.stringify`, `String`, `toString`, `toJSON`, a `message` getter,
+/// `Symbol.toPrimitive`). Genuine calls and errors are still recorded.
+#[test]
+fn page_script_cannot_switch_redaction_off_or_forge_records() {
+    let page = r#"<html><body><script>
+document.cookie = 'sid=COOKIEVALUE';
+window.addEventListener('load', function () { throw new Error('genuine load'); });
+setTimeout(function () { throw new TypeError('genuine timer'); }, 0);
+</script><script>
+try { console.__rustkit_capture(false); } catch (e) {}
+console.log(document.cookie);
+try { console._logs.push({level: 'error', msg: 'FORGED_LOGS ' + document.cookie}); } catch (e) {}
+try { console._flush = function () { return [{level: 'error', msg: 'FORGED_FLUSH'}]; }; } catch (e) {}
+try { __rustkit_console_format = function () { return 'FORGED_FORMAT'; }; } catch (e) {}
+try { __rustkit_console_format_redacted = function () { return 'FORGED_FORMAT_R'; }; } catch (e) {}
+</script><script>
+try { window.__rustkit_errors.push('FORGED_ERRORS ' + document.cookie); } catch (e) {}
+try { window.__rustkit_error_text = function () { return 'FORGED_ERROR_TEXT'; }; } catch (e) {}
+try { window.__rustkit_errors_with_stacks(false); } catch (e) {}
+try { window.__rustkit_take_unsupported = function () {
+  return '[{"i":"XMLHttpRequest","m":"responseXML","n":7,"at":"https://x.test/FORGED_AT\u00011\u00011"}]';
+}; } catch (e) {}
+</script><script>
+var realPush = Array.prototype.push, pushing = false;
+Array.prototype.push = function () {
+  if (!pushing) { pushing = true; try { realPush.call(this, 'FORGED_PUSH'); } catch (e) {} pushing = false; }
+  return realPush.apply(this, arguments);
+};
+var realApply = Function.prototype.apply;
+Function.prototype.apply = function () { return 'FORGED_APPLY'; };
+JSON.stringify = function () { return '["FORGED_JSON"]'; };
+String = function () { return 'FORGED_STRING'; };
+Error.prototype.toString = function () { return 'FORGED_TOSTRING'; };
+Error.prototype.toJSON = function () { return 'FORGED_TOJSON'; };
+Object.defineProperty(Error.prototype, 'message', { get: function () { return 'FORGED_GETTER'; }, configurable: true });
+Object.defineProperty(Error.prototype, 'name', { get: function () { return 'FORGED_NAME'; }, configurable: true });
+Object.defineProperty(Object.prototype, 'msg', { get: function () { return 'FORGED_MSG'; }, configurable: true });
+Object.defineProperty(Object.prototype, 'args', { get: function () { return ['FORGED_ARGS']; }, configurable: true });
+Object.prototype[Symbol.toPrimitive] = function () { return 'FORGED_PRIMITIVE'; };
+console.log('after patches', 1);
+try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
+throw new RangeError('after patches');
+</script></body></html>"#;
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    assert!(!all.contains("FORGED") && !all.contains("COOKIEVALUE"), "{all}");
+    let console: Vec<String> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::Console { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(console, vec!["<string len=15>", "<string len=13> <number>"], "{all}");
+    let errors: Vec<(String, String)> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { name, script, .. } => Some((name.clone(), script.clone())),
+            _ => None,
+        })
+        .collect();
+    for genuine in [("RangeError", "inline#4"), ("Error", "event:load"), ("TypeError", "timers")] {
+        assert!(
+            errors.iter().any(|(name, script)| (name.as_str(), script.as_str()) == genuine),
+            "{genuine:?} missing: {errors:?}"
+        );
+    }
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    let apis: Vec<String> = engine
+        .inspector(view)
+        .unwrap()
+        .unsupported_apis()
+        .iter()
+        .map(|u| format!("{}.{} x{}", u.interface, u.member, u.count))
+        .collect();
+    assert_eq!(apis, vec!["XMLHttpRequest.open(async=false) x1"]);
+}
