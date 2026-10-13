@@ -5085,7 +5085,8 @@ impl Engine {
     ///   `<hr>`'s 8px stack to 16 around an empty flex container);
     /// - `min-height` and `clear` give it extent or clearance;
     /// - a flex or grid item takes a track slot, a gap and free space (an
-    ///   empty `flex:1` spacer).
+    ///   empty `flex:1` spacer);
+    /// - `aspect-ratio` gives it a height from its width (css-sizing-4 §5).
     fn empty_block_affects_layout(child: &LayoutBox, parent: &ComputedStyle) -> bool {
         use rustkit_css::Length;
         let nonzero = |len: &Length| !matches!(len, Length::Zero | Length::Auto | Length::Px(0.0));
@@ -5105,6 +5106,7 @@ impl Engine {
             || nonzero(&s.margin_bottom)
             || nonzero(&s.min_height)
             || s.clear != rustkit_css::Clear::None
+            || s.aspect_ratio.is_some_and(|r| r.is_finite() && r > 0.0)
             || rustkit_layout::establishes_bfc(s, child.float)
     }
 
@@ -9042,21 +9044,21 @@ impl Engine {
             }
             "aspect-ratio" => {
                 // Parse aspect-ratio: width / height or auto
+                // `auto` resets an earlier ratio. A degenerate ratio (`0`,
+                // `0/1`, `1/0`) is valid and behaves as `auto`; a negative
+                // number makes the declaration invalid (it changes nothing).
                 let value = value.trim();
+                let (w, h) = match value.split_once('/') {
+                    Some((w, h)) => (w.trim().parse::<f32>(), h.trim().parse::<f32>()),
+                    None => (value.parse::<f32>(), Ok(1.0)),
+                };
                 if value == "auto" {
-                    // Auto is the default, do nothing
-                } else if let Some(slash_pos) = value.find('/') {
-                    // Format: width / height
-                    let width_str = value[..slash_pos].trim();
-                    let height_str = value[slash_pos + 1..].trim();
-                    if let (Ok(w), Ok(h)) = (width_str.parse::<f32>(), height_str.parse::<f32>()) {
-                        if h > 0.0 {
-                            style.aspect_ratio = Some(w / h);
-                        }
+                    style.aspect_ratio = None;
+                } else if let (Ok(w), Ok(h)) = (w, h) {
+                    if w >= 0.0 && h >= 0.0 {
+                        let ratio = w / h;
+                        style.aspect_ratio = (ratio.is_finite() && ratio > 0.0).then_some(ratio);
                     }
-                } else if let Ok(ratio) = value.parse::<f32>() {
-                    // Single number (ratio to 1)
-                    style.aspect_ratio = Some(ratio);
                 }
             }
             "border-spacing" => {
@@ -9818,6 +9820,9 @@ impl Engine {
             _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
                 style.mask.reset(property)
             }
+            // Not inherited, so `unset` lands here too: the initial value is
+            // `auto`, no ratio.
+            "aspect-ratio" => style.aspect_ratio = None,
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
@@ -33007,6 +33012,105 @@ mod float_clear_tests {
         )) {
             assert_eq!(by_id(&root, "a").unwrap().float, rustkit_css::Float::Left);
             assert_eq!(by_id(&root, "p").unwrap().float, rustkit_css::Float::None);
+        }
+    }
+}
+
+// An empty block whose only size is `aspect-ratio` (css-sizing-4 §5): its
+// width fills the line and its height follows from the ratio, so it is not
+// an empty block and must stay in the tree. It was dropped as one, with
+// its height and everything below it (nested layout matrix,
+// `aspect-ratio-only-empty-block-dropped`).
+#[cfg(test)]
+mod aspect_ratio_empty_block_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity
+            .as_ref()
+            .is_some_and(|i| i.selector == format!("#{id}"))
+        {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    #[test]
+    fn an_empty_block_sized_by_its_aspect_ratio_keeps_its_box() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(concat!(
+            r#"<body style="margin:0"><div id="o" style="width:600px">"#,
+            r#"<div id="r" style="aspect-ratio:2/1"></div>"#,
+            r#"<div id="n" style="height:5px"></div>"#,
+            r#"</div></body>"#,
+        ))
+        .expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        root.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        });
+        // Chromium 141: #r 600 x 300, #n below it at y 300, #o 305 tall.
+        let r = by_id(&root, "r")
+            .expect("#r has a box")
+            .dimensions
+            .border_box();
+        assert_eq!((r.width, r.height), (600.0, 300.0));
+        let n = by_id(&root, "n").expect("#n").dimensions.border_box();
+        assert_eq!(n.y, 300.0);
+        let o = by_id(&root, "o").expect("#o").dimensions.border_box();
+        assert_eq!(o.height, 305.0);
+    }
+
+    /// An empty block whose ratio gives it no height is still an empty
+    /// block: `aspect-ratio: auto` over an earlier ratio, and a degenerate
+    /// ratio, keep no box, and margins collapse through it (R1 on #673;
+    /// Chromium 141 numbers).
+    #[test]
+    fn an_empty_block_without_a_usable_ratio_is_still_dropped() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let n_y = |html: &str| {
+            let d = Document::parse_html(html).expect("parse");
+            let mut root = e.build_layout_from_document(&d, &[]);
+            root.layout_with_collapse(
+                &Dimensions {
+                    content: Rect::new(0.0, 0.0, 800.0, 0.0),
+                    ..Default::default()
+                },
+                &mut rustkit_layout::MarginCollapseContext::new(),
+                &mut rustkit_layout::FloatContext::new(),
+            );
+            by_id(&root, "n").expect("#n").dimensions.border_box().y
+        };
+        for reset in ["auto", "initial", "unset"] {
+            assert_eq!(
+                n_y(&format!(
+                    concat!(
+                        r#"<style>.r{{aspect-ratio:4/1}}.r.x{{aspect-ratio:{}}}</style>"#,
+                        r#"<body style="margin:0"><div style="width:400px">"#,
+                        r#"<div class="r x"></div><div id="n" style="height:5px"></div></div></body>"#,
+                    ),
+                    reset
+                )),
+                0.0,
+                "aspect-ratio: {reset} resets an earlier ratio"
+            );
+        }
+        for ratio in ["0", "0/1", "1/0", "-2"] {
+            assert_eq!(
+                n_y(&format!(
+                    concat!(
+                        r#"<body style="margin:0"><div style="width:400px;border-top:1px solid">"#,
+                        r#"<div style="height:10px;margin-bottom:20px"></div>"#,
+                        r#"<div style="aspect-ratio:{}"></div>"#,
+                        r#"<div id="n" style="height:10px;margin-top:30px"></div></div></body>"#,
+                    ),
+                    ratio
+                )),
+                41.0,
+                "aspect-ratio: {ratio}: the margins collapse through the empty block"
+            );
         }
     }
 }
