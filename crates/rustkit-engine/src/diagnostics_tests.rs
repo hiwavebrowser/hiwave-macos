@@ -314,6 +314,20 @@ fn page_urls_lose_query_and_fragment_unless_asked() {
 }
 
 #[test]
+fn a_data_page_url_keeps_only_its_mime_type() {
+    for (u, want) in [
+        ("data:text/html,<p>secret-body</p>?q=1", "data:text/html"),
+        ("data:text/html;charset=utf-8;base64,PHA+c2VjcmV0PC9wPg==", "data:text/html"),
+        ("DATA:,secret-body", "data:"),
+    ] {
+        let u = Url::parse(u).unwrap();
+        for q in [false, true] {
+            assert_eq!(diagnostics::report_url(&u, q), want, "{u} include_query={q}");
+        }
+    }
+}
+
+#[test]
 fn sizes_follow_box_sizing_and_relative_lengths_resolve_to_px() {
     let (engine, view) = engine_with_page();
     let r = diag(&engine, view, "#sized");
