@@ -51,7 +51,7 @@ field that is `null` today may hold a value later.
 | `unsupported_api` | `interface`, `member`, `location` (first sighting on the page) |
 | `first_layout` | — |
 | `first_paint` | — |
-| `relayout` | `cause` (the value of the `relayout cause=` log line), `took_ms` |
+| `relayout` | `cause` (engine words only, below), `took_ms` |
 | `navigation_redirect` | `from`, `to`, `status`: one per redirect the document followed, between its `request` and `response` |
 | `request` | `id` (per view, from 1), `url`, `method`, `resource_type`, `initiator` |
 | `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms` |
@@ -112,13 +112,13 @@ trap):
   `TypeMismatchError`, `NetworkError`, `EncodingError`,
   `InvalidAccessError`; `rustkit_js::STANDARD_ERROR_NAMES`). Any other name
   is `Error`.
-- `message` is `null`, except for a message the engine raises itself,
-  matched against a fixed list (`not a callable function`, `not a
-  constructor`, `cannot convert 'null' or 'undefined' to object`, `Failed to
-  fetch`, ...; `rustkit_js::engine_message`). A message with a part that can
-  come from the page (`x is not defined`, `x is not a function`) is kept as
-  its fixed part only: `… is not defined`. The engine's own failures (`JS
-  engine panic`, `import map rejected`) have `value` `engine`.
+- `message` is `null` for every error that reached page script, whoever
+  raised it: page code can catch an engine error and rethrow it, or throw
+  the engine's very words (`Failed to fetch`, `x is not defined`), so no
+  message is ever kept, or chosen, because of what its text says. Only the
+  engine's own failures, which the engine marks where it raises them
+  (`EngineFailure`, never by their text), have a message: `JS engine panic`
+  or `import map rejected`, with `value` `engine`.
 - `stack` is the page's frames, innermost first, one `    at url:line:col`
   line each, capped at 4096 characters: no function names (a page can name a
   function anything), and only frames in a script the engine evaluated
@@ -133,6 +133,17 @@ With `InspectorConfig::keep_error_text` (`parity-capture
 1024 characters: an error's `message`, a thrown string, `Symbol(x)`, a
 number. It carries whatever the page put in it (cookies, form values,
 tokens): never for a log that will be shared.
+
+`cause` of a `relayout` names why the view was laid out again, in the
+engine's words: `initial_load`, `stylesheet_loaded`, `image_loaded(count=N)`,
+`font_loaded`, `scroll`, `resize`, `timer`, `observer_callback`,
+`hover_or_focus`, `input`, `other(<engine name>)`, or a script write,
+`script_mutation(<kind>)` (a text node) or `script_mutation(<kind>@<tag>)`,
+where `<kind>` is `attribute`, `child_list`, `text`, `style` or `form_value`
+and `<tag>` is the element's tag when it is a standard HTML element (or `svg`,
+`math`), else `other` (a custom element's name, an unknown tag). An element's
+`id`, class, attribute names and values are never recorded. (The engine's
+`relayout cause=` trace line, which is not the Inspector's, keeps `tag#id`.)
 
 ### Requests
 
@@ -210,8 +221,16 @@ The log is meant to be pasted into public issues and PRs.
   scheme alone (`javascript:`). What the parser cannot read is dropped.
 - Errors carry no page text by default (see `script_error` above): the
   thrown value's type, a standard name, a message's length, frame positions.
-  Messages are not scrubbed: they are left out. Only the engine's own fixed
-  messages are kept. `InspectorConfig::keep_error_text` keeps the page's
+  Messages are not scrubbed: they are left out. Only the engine's own
+  failures, marked where the engine raises them, carry a fixed message.
+- A `relayout` cause is engine words, a mutation kind and a standard HTML tag
+  name; never an element's `id`, class, attribute or custom element name.
+- No other field holds a name the page chose: event types in `script` are
+  the ones the engine dispatches itself (`load`, `DOMContentLoaded`,
+  `resize`, mouse and pointer events); `unsupported_api` members are a fixed
+  list; console methods other than `log`, `info`, `warn`, `error` and
+  `debug` (`group` labels, `time` and `count` labels) and
+  `performance.mark` names are not recorded. `InspectorConfig::keep_error_text` keeps the page's
   text: never for a log that will be shared.
 - With `keep_console_text` on, URLs in the kept console text are scrubbed
   wherever they sit in it (after a quote, in brackets, after `=`): a

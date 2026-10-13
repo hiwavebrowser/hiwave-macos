@@ -279,7 +279,7 @@ fn a_throw_names_its_error_script_line_and_column() {
     let lines = described(&engine, view, server.port);
     assert_eq!(
         only(&lines, &["script_error"]),
-        vec!["script_error TypeError: cannot convert 'null' or 'undefined' to object @/app.js:3:8 script=/app.js rejection=false"]
+        vec!["script_error TypeError: <error len=46> @/app.js:3:8 script=/app.js rejection=false"]
     );
     let all = serde_json::to_string(&records(&engine, view)).unwrap();
     assert!(!all.contains("SECRET") && !all.contains("frag"), "{all}");
@@ -309,7 +309,7 @@ window.addEventListener('load', function onLoad() {
     let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
     assert_eq!(
         only(&described(&engine, view, server.port), &["script_error"]),
-        vec!["script_error TypeError: cannot convert 'null' or 'undefined' to object @inline#1:4:12 script=event:load rejection=false"]
+        vec!["script_error TypeError: <error len=46> @inline#1:4:12 script=event:load rejection=false"]
     );
     // The stack names the page's frames only, not the engine's own glue.
     let stack = records(&engine, view)
@@ -661,6 +661,25 @@ document.getElementById('pw').value = 'TYPEDVALUE';
 <script src=\"/p.js%3Bjsessionid=JSESSIONSECRET/x.js\"></script>\
 <script type=module src=\"/m.js;jsessionid=JSESSIONSECRET?token=SCRIPTQUERY\"></script>",
     );
+    // Fourth R1 hold @ 47fc7abb: script gives an element the cookie as its
+    // id, makes a custom element named after the cookie, and writes to
+    // each. The engine lays a load's writes out between its steps, so each
+    // step's first write is a `relayout` record of its own: the id at
+    // `DOMContentLoaded`, the custom element at `load`, writes to it in a
+    // timer, and one more from the embedder after the load.
+    page.push_str(
+        "<div id=t>x</div><script>
+document.addEventListener('DOMContentLoaded', function () {
+  var d = document.getElementById('t'); d.id = document.cookie; d.setAttribute('data-x', '1');
+});
+window.addEventListener('load', function () {
+  var c = document.createElement('x-' + document.cookie.split('=')[1].toLowerCase());
+  c.id = 'el-' + document.cookie; c.setAttribute('class', 'cls-' + document.cookie);
+  document.body.appendChild(c);
+  setTimeout(function () { c.setAttribute('data-y', '1'); c.textContent = 'SECRET_TEXT'; }, 0);
+});
+</script>",
+    );
     page.push_str("</body></html>");
     let script = "console.log('s'); throw new Error('s');";
     let server = serve(vec![
@@ -671,7 +690,21 @@ document.getElementById('pw').value = 'TYPEDVALUE';
     ]);
     let (mut engine, view) = inspected_engine(EngineConfig::default());
     runtime().block_on(engine.load_url(view, server.url("/?token=HREFQUERY"))).expect("load_url");
+    engine
+        .execute_script(view, "document.getElementById('el-' + document.cookie).style.color = 'red';")
+        .expect("execute_script");
     let records = records(&engine, view);
+    let causes: Vec<&str> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::Relayout { cause, .. } => Some(cause.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        causes.iter().filter(|c| c.starts_with("script_mutation(")).count() >= 4,
+        "the writes are still laid out and recorded: {causes:?}"
+    );
     assert_eq!(
         records.iter().filter(|r| r.event.kind() == "console").count(),
         8,
@@ -698,9 +731,13 @@ document.getElementById('pw').value = 'TYPEDVALUE';
         "URLPASSWORD",
         "JSESSIONSECRET",
         "SCRIPTQUERY",
+        "SECRET_TEXT",
     ] {
         assert!(!all.contains(secret), "{secret} leaked: {all}");
     }
+    // A tag name is lowercased, so the custom element's name holds it so.
+    assert!(!all.contains("cookievalue"), "custom element name leaked: {all}");
+    assert!(!all.contains("sid="), "an id leaked: {all}");
 }
 
 
@@ -863,9 +900,9 @@ null.modinl;
         only(&lines, &["console", "script_error"]),
         vec![
             "console Log mod-inline-log @inline#1:3:11",
-            "script_error TypeError: cannot convert 'null' or 'undefined' to object @inline#1:4:6 script=inline#1 rejection=false",
+            "script_error TypeError: <error len=46> @inline#1:4:6 script=inline#1 rejection=false",
             "console Log ext-mod-log @/mod.js:2:9",
-            "script_error TypeError: cannot convert 'null' or 'undefined' to object @/mod.js:4:8 script=/mod.js rejection=false",
+            "script_error TypeError: <error len=46> @/mod.js:4:8 script=/mod.js rejection=false",
         ]
     );
     let summary = InspectorSummary::from_records(&records(&engine, view), &[]);
@@ -900,7 +937,7 @@ eval(\"console.log('in-eval')\");
             "console Log onclick-log",
             "console Log after-click @inline#1:3:9",
             "console Log in-eval",
-            "script_error TypeError: cannot convert 'null' or 'undefined' to object script=inline#1 rejection=false",
+            "script_error TypeError: <error len=46> script=inline#1 rejection=false",
             "console Log second-script @inline#2:1:9",
         ]
     );
@@ -920,7 +957,7 @@ var x = 1;
     let errors = only(&described(&engine, view, server.port), &["script_error"]);
     assert_eq!(
         errors,
-        vec!["script_error TypeError: cannot convert 'null' or 'undefined' to object script=inline#1 rejection=false"]
+        vec!["script_error TypeError: <error len=46> script=inline#1 rejection=false"]
     );
     let stack = records(&engine, view)
         .into_iter()
@@ -1133,11 +1170,10 @@ throw new Error('TLA_MICRO');
 // ---- Review R1 hold, round 2 (#676 @ 56cbdfed) ----
 
 /// A thrown or rejected value is recorded as its type, a standard error
-/// name (any other name is `Error`), and its message's length; only the
-/// engine's own messages are kept, and a message with a part from the page
-/// (`x is not defined`) only as its fixed part.
+/// name (any other name is `Error`), and its message's length, whoever
+/// raised it.
 #[test]
-fn an_error_is_its_type_standard_name_and_length_unless_the_engine_wrote_it() {
+fn an_error_is_its_type_standard_name_and_length() {
     let page = "<html><body><script>
 var e = new TypeError('page text'); e.name = 'SECRET_NAME'; throw e;
 </script><script>throw new DOMException('m', 'NotFoundError');
@@ -1156,8 +1192,10 @@ var e = new TypeError('page text'); e.name = 'SECRET_NAME'; throw e;
             "script_error : <number> @inline#4:1:7 script=inline#4 rejection=false",
             // Boa has no position for this one (`inline#5:?:?`): a frame it
             // cannot read is dropped.
-            "script_error ReferenceError: … is not defined script=inline#5 rejection=false",
-            "script_error TypeError: not a callable function @inline#6:1:9 script=inline#6 rejection=false",
+            "script_error ReferenceError: <error len=38> script=inline#5 rejection=false",
+            // Fourth R1 hold @ 47fc7abb: no message is kept by its text,
+            // the engine's own words included.
+            "script_error TypeError: <error len=23> @inline#6:1:9 script=inline#6 rejection=false",
         ]
     );
 }
@@ -1330,6 +1368,84 @@ fn a_page_throwing_an_engine_message_is_never_an_engine_record() {
     assert_eq!(values, vec!["string"; throws], "{all}");
     let summary = InspectorSummary::from_records(&records, &[]);
     assert_eq!(summary.script_errors as usize, throws, "{summary:?}");
+}
+
+/// Fourth R1 hold @ 47fc7abb, rule 4: no message is kept because of what
+/// it says. Every message the engine used to keep by its text, and the
+/// engine's own failure messages, thrown by the page (exactly, and with a
+/// secret appended; as an error and as a string) from a classic script, a
+/// module, a timer, a listener, a promise rejection and an async function,
+/// is a page record with no text.
+#[test]
+fn a_page_throwing_any_engine_message_is_a_page_record_with_no_text() {
+    let messages = [
+        "not a callable function",
+        "not a constructor",
+        "cannot convert 'null' or 'undefined' to object",
+        "value returned for property of object is not a function",
+        "right-hand side of 'instanceof' is not callable",
+        "cannot mix BigInt and other types, use explicit conversions",
+        "BigInt division by zero",
+        "cyclic object value",
+        "cannot convert Symbol to JSON",
+        "Failed to fetch",
+        "Maximum call stack size exceeded",
+        "Illegal invocation",
+        "Failed to execute 'parseFromString' on 'DOMParser': XML documents are not supported yet.",
+        "PAGEIDENT is not defined",
+        "PAGEIDENT is not a function",
+        "PAGEIDENT is not a constructor",
+        "JS engine panic",
+        "import map rejected",
+        "import map: x",
+    ];
+    // (text, thrown as an error object)
+    let mut thrown: Vec<(String, bool)> = Vec::new();
+    for message in messages {
+        for text in [message.to_string(), format!("{message} SECRETAPPENDED")] {
+            thrown.push((text.clone(), true));
+            thrown.push((text, false));
+        }
+    }
+    let json = serde_json::to_string(&thrown.iter().map(|(t, _)| t).collect::<Vec<_>>()).unwrap();
+    let mut page = format!(
+        "<html><body><script>window.M = {json}; window.T = function (i) {{ \
+         return i % 2 === 0 ? new TypeError(M[i]) : M[i]; }};</script>"
+    );
+    for i in 0..thrown.len() {
+        page.push_str(&format!("<script>throw T({i});</script>"));
+        page.push_str(&format!("<script type=module>throw T({i});</script>"));
+    }
+    page.push_str(
+        "<script>for (var i = 0; i < M.length; i++) (function (i) { \
+         setTimeout(function () { throw T(i); }, 0); \
+         window.addEventListener('load', function () { throw T(i); }); \
+         Promise.reject(T(i)); \
+         (async function () { await 0; throw T(i); })(); })(i);</script></body></html>",
+    );
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    let errors: Vec<(&str, &str, Option<&String>)> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { value, name, message, .. } => Some((value.as_str(), name.as_str(), message.as_ref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), thrown.len() * 6, "every throw is recorded: {all}");
+    for (value, name, message) in &errors {
+        assert!(matches!((*value, *name), ("error", "TypeError") | ("string", "")), "{value} {name}: {all}");
+        assert_eq!(*message, None, "{all}");
+    }
+    for (value, _, _) in &errors {
+        assert_ne!(*value, "engine", "{all}");
+    }
+    assert!(!all.contains("SECRETAPPENDED") && !all.contains("PAGEIDENT"), "{all}");
+    for message in messages {
+        let fixed = message.trim_start_matches("PAGEIDENT");
+        assert!(!all.contains(fixed), "{fixed:?} kept: {all}");
+    }
 }
 
 /// What the engine itself refused is still an engine record: an import map

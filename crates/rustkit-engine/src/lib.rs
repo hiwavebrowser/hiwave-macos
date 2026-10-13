@@ -5218,7 +5218,7 @@ impl Engine {
         );
         if let Some(view) = self.views.get_mut(&id) {
             view.relayout_stats.record(&causes, tree_reused, took_ms);
-            view.inspector.relayout(&cause, took_ms);
+            view.inspector.relayout(causes.first.as_ref(), took_ms);
         }
         Ok(())
     }
