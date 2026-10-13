@@ -1071,20 +1071,35 @@ fn gradient_name(debug: &str) -> String {
 /// A URL inside a record: no user name or password, no query or fragment,
 /// `data:` contents elided. The URL may be relative, as specified.
 pub(crate) fn scrub_url(u: &str) -> String {
-    // Schemes are case-insensitive; leading whitespace is not part of a URL.
-    let u = u.trim_start();
-    if u.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) {
+    // Every decision is made on the URL as the parser reads it: it drops
+    // ASCII tab and newline anywhere, and leading and trailing C0 controls
+    // and spaces, before it reads the scheme (also any leading Unicode
+    // space, to record less). Schemes are case-insensitive.
+    let u: String = u.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    let u = u.trim_start_matches(|c: char| c <= ' ' || c.is_whitespace()).trim_end_matches(|c: char| c <= ' ');
+    let parsed = Url::parse(u).ok();
+    if u.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) || parsed.as_ref().is_some_and(|p| p.scheme() == "data") {
         return "data:…".into();
     }
     let u = u.split(['?', '#']).next().unwrap_or("");
-    // Userinfo can only sit in an authority: after `scheme://` or a leading `//`.
-    let authority_at = match u.find("://") {
-        Some(i) if u[..i].chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) => i + 3,
-        _ if u.starts_with("//") => 2,
-        _ => return u.to_string(),
+    // Userinfo can only sit in an authority: after `scheme://` or a leading
+    // `//`. The parser reads `\` as `/` there, and for a special scheme
+    // (`https:u:p@host`) it needs no slashes at all.
+    let slash = |c: char| c == '/' || c == '\\';
+    let scheme_end = u.find(':').filter(|&i| {
+        i > 0 && u[..i].chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    });
+    let authority_at = match scheme_end {
+        Some(i) if parsed.as_ref().is_some_and(|p| p.is_special() && p.scheme() != "file") => {
+            u[i + 1..].find(|c: char| !slash(c)).map_or(u.len(), |j| i + 1 + j)
+        }
+        Some(i) if u[i + 1..].starts_with("//") => i + 3,
+        Some(_) => return u.to_string(),
+        None if u.starts_with(|c: char| slash(c)) && u[1..].starts_with(|c: char| slash(c)) => 2,
+        None => return u.to_string(),
     };
     let rest = &u[authority_at..];
-    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority_end = rest.find(slash).unwrap_or(rest.len());
     match rest[..authority_end].rfind('@') {
         Some(at) => format!("{}{}", &u[..authority_at], &rest[at + 1..]),
         None => u.to_string(),
