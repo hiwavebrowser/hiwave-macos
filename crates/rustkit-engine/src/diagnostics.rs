@@ -693,6 +693,12 @@ impl<'a> Builder<'a> {
                 }
                 if self.root_stand_in == Some(raw) {
                     html_box(ctx.boxes[0], self.src.scroll, self.src.viewport, &mut layout_box, &mut paint, &mut notes);
+                    let standards = self.src.document.root().children().iter().any(|c| {
+                        matches!(&c.node_type, rustkit_dom::NodeType::DocumentType { name, .. } if name.eq_ignore_ascii_case("html"))
+                    });
+                    if !standards {
+                        notes.push("no <!DOCTYPE html>: Chromium lays this page out in quirks mode, where html fills the viewport; the engine has no quirks mode".into());
+                    }
                     style.values_mut().for_each(|v| *v = None);
                     unavailable.retain(|k, _| !k.starts_with("style."));
                     unavailable.insert("style".into(), "html is laid out by an anonymous root box with the default style".into());
