@@ -9528,6 +9528,10 @@ impl DisplayList {
                 Length::Px(px) => *px,
                 _ => 16.0,
             };
+            // Text at `font-size: 0` has no glyphs to paint.
+            if font_size <= 0.0 {
+                return;
+            }
 
             let x = layout_box.dimensions.content.x;
             let content_y = layout_box.dimensions.content.y;

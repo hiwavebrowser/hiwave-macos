@@ -337,6 +337,8 @@ mod grid_auto_repeat_percent_tests;
 #[cfg(test)]
 mod nested_layout_matrix_tests;
 #[cfg(test)]
+mod zero_font_size_tests;
+#[cfg(test)]
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod ws_beside_block_replaced_tests;
