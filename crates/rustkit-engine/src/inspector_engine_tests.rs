@@ -522,13 +522,23 @@ fn no_cookie_storage_or_form_value_reaches_the_log() {
 document.cookie = 'sid=COOKIEVALUE';
 try { localStorage.setItem('k', 'STOREDVALUE'); } catch (e) {}
 document.getElementById('pw').value = 'TYPEDVALUE';
+console.log(document.cookie);
+console.log(location.href);
+console.log(document.getElementById('pw').value);
+console.info('stored', localStorage.getItem('k'));
+console.log(new Error('see https://x.test/p?token=ERRQUERY'));
 </script></body></html>";
-    let (engine, view, _server) = load_page(
-        EngineConfig::default(),
-        vec![Route::html("/", page).header("Set-Cookie", "server=SETCOOKIEVALUE")],
+    let server = serve(vec![Route::html("/", page).header("Set-Cookie", "server=SETCOOKIEVALUE")]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    runtime().block_on(engine.load_url(view, server.url("/?token=HREFQUERY"))).expect("load_url");
+    let records = records(&engine, view);
+    assert_eq!(
+        records.iter().filter(|r| r.event.kind() == "console").count(),
+        5,
+        "the calls are still recorded"
     );
-    let all = serde_json::to_string(&records(&engine, view)).unwrap();
-    for secret in ["COOKIEVALUE", "STOREDVALUE", "TYPEDVALUE", "hunter2", "SETCOOKIEVALUE"] {
+    let all = serde_json::to_string(&records).unwrap();
+    for secret in ["COOKIEVALUE", "STOREDVALUE", "TYPEDVALUE", "hunter2", "SETCOOKIEVALUE", "HREFQUERY", "ERRQUERY"] {
         assert!(!all.contains(secret), "{secret} leaked: {all}");
     }
 }
