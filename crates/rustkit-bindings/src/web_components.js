@@ -178,6 +178,26 @@
         return el;
     };
 
+    // The connected elements named `name`, in shadow-including tree order
+    // (HTML §4.13.4 define, step "upgrade candidates"): a host's shadow
+    // tree, closed ones too, comes before the host's children.
+    function upgradeCandidates(name) {
+        var light = Array.prototype.slice.call(document.getElementsByTagName(name));
+        if (!shadowHost || !shadowHost.call('any', document)) return light;
+        var out = [];
+        (function walk(node) {
+            var kids = node.children;
+            for (var i = 0; i < kids.length; i++) {
+                var el = kids[i];
+                if (String(el.localName).toLowerCase() === name) out.push(el);
+                var root = shadowHost.node('root', el);
+                if (root) walk(root);
+                walk(el);
+            }
+        })(document);
+        return out;
+    }
+
     // ---- the registry
     function CustomElementRegistry() { throw new TypeError('Illegal constructor'); }
     CustomElementRegistry.prototype.define = function (name, ctor, options) {
@@ -214,9 +234,9 @@
         names.push(name);
         selector = names.join(',');
         if (shadowHost) shadowHost.call('define', document, name);
-        // Every connected element of that name that already exists upgrades.
-        var found = document.getElementsByTagName(name);
-        Array.prototype.slice.call(found).forEach(function (el) { upgrade(el, def); });
+        // Every connected element of that name that already exists upgrades,
+        // shadow trees included.
+        upgradeCandidates(name).forEach(function (el) { upgrade(el, def); });
         if (pending[name]) {
             pending[name].forEach(function (resolve) { resolve(ctor); });
             delete pending[name];
