@@ -18,7 +18,9 @@
 //! thrown value's type, a standard error name (else `Error`), its message's
 //! length, and the positions of the page's frames (script, line, column;
 //! never a function name). An error message is kept only when it is one of
-//! the engine's own fixed messages. [`InspectorConfig::keep_console_text`]
+//! the engine's own fixed messages. A relayout's cause is engine words, a
+//! mutation kind and a standard HTML tag name, never an element's id or a
+//! custom element name. [`InspectorConfig::keep_console_text`]
 //! and [`InspectorConfig::keep_error_text`] keep the page's text: never for a
 //! log that will be shared.
 //!
@@ -183,8 +185,9 @@ pub enum InspectorEvent {
     FirstLayout,
     /// The view's first frame of this document.
     FirstPaint,
-    /// A relayout and the cause it was laid out for (the value the
-    /// `relayout cause=` log line shows).
+    /// A relayout and the cause it was laid out for: the `relayout cause=`
+    /// log line's value without page text (a script write's kind and, for
+    /// a listed HTML element, its tag; never an id).
     Relayout { cause: String, took_ms: f64 },
 }
 
@@ -428,10 +431,13 @@ impl Inspector {
         }
     }
 
-    /// A relayout finished, laid out for `cause`.
-    pub fn relayout(&self, cause: &dyn std::fmt::Display, took_ms: f64) {
+    /// A relayout finished, laid out for `cause` (recorded as
+    /// [`RelayoutCause::record_label`] shows it: no page text).
+    ///
+    /// [`RelayoutCause::record_label`]: crate::RelayoutCause::record_label
+    pub fn relayout(&self, cause: Option<&crate::RelayoutCause>, took_ms: f64) {
         self.emit_with(|_| InspectorEvent::Relayout {
-            cause: cause.to_string(),
+            cause: cause.map(crate::RelayoutCause::record_label).unwrap_or_default(),
             took_ms: round_ms(took_ms),
         });
     }

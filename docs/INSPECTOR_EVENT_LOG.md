@@ -51,7 +51,7 @@ field that is `null` today may hold a value later.
 | `unsupported_api` | `interface`, `member`, `location` (first sighting on the page) |
 | `first_layout` | — |
 | `first_paint` | — |
-| `relayout` | `cause` (the value of the `relayout cause=` log line), `took_ms` |
+| `relayout` | `cause` (engine words only, below), `took_ms` |
 
 `location` is `null` or `{ "url", "line", "column" }` (1-based). `url` is the
 script's URL, or `inline#n` for the page's n-th `<script>` when it is inline,
@@ -130,6 +130,17 @@ With `InspectorConfig::keep_error_text` (`parity-capture
 number. It carries whatever the page put in it (cookies, form values,
 tokens): never for a log that will be shared.
 
+`cause` of a `relayout` names why the view was laid out again, in the
+engine's words: `initial_load`, `stylesheet_loaded`, `image_loaded(count=N)`,
+`font_loaded`, `scroll`, `resize`, `timer`, `observer_callback`,
+`hover_or_focus`, `input`, `other(<engine name>)`, or a script write,
+`script_mutation(<kind>)` (a text node) or `script_mutation(<kind>@<tag>)`,
+where `<kind>` is `attribute`, `child_list`, `text`, `style` or `form_value`
+and `<tag>` is the element's tag when it is a standard HTML element (or `svg`,
+`math`), else `other` (a custom element's name, an unknown tag). An element's
+`id`, class, attribute names and values are never recorded. (The engine's
+`relayout cause=` trace line, which is not the Inspector's, keeps `tag#id`.)
+
 ### Unsupported APIs
 
 Recorded where the bindings know they do not implement something and page
@@ -160,7 +171,15 @@ The log is meant to be pasted into public issues and PRs.
 - Errors carry no page text by default (see `script_error` above): the
   thrown value's type, a standard name, a message's length, frame positions.
   Messages are not scrubbed: they are left out. Only the engine's own fixed
-  messages are kept. `InspectorConfig::keep_error_text` keeps the page's
+  messages are kept.
+- A `relayout` cause is engine words, a mutation kind and a standard HTML tag
+  name; never an element's `id`, class, attribute or custom element name.
+- No other field holds a name the page chose: event types in `script` are
+  the ones the engine dispatches itself (`load`, `DOMContentLoaded`,
+  `resize`, mouse and pointer events); `unsupported_api` members are a fixed
+  list; console methods other than `log`, `info`, `warn`, `error` and
+  `debug` (`group` labels, `time` and `count` labels) and
+  `performance.mark` names are not recorded. `InspectorConfig::keep_error_text` keeps the page's
   text: never for a log that will be shared.
 - With `keep_console_text` on, URLs in the kept console text are scrubbed
   wherever they sit in it (after a quote, in brackets, after `=`): a
