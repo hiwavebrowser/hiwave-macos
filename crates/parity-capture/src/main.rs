@@ -104,6 +104,31 @@ struct Args {
     #[arg(long)]
     live_ms: Option<u64>,
 
+    /// Print the element diagnostics record (JSON) of the first element
+    /// matching this CSS selector. Repeatable.
+    #[arg(long, value_name = "SELECTOR")]
+    diagnose: Vec<String>,
+
+    /// Print the diagnostics record of the element hit at viewport point
+    /// `X,Y` (CSS px). Repeatable.
+    #[arg(long, value_name = "X,Y", value_parser = parse_point_arg)]
+    diagnose_at: Vec<(f32, f32)>,
+
+    /// Write a diagnostics record for every element (with or without a
+    /// layout box) to this file.
+    #[arg(long)]
+    dump_diagnostics: Option<String>,
+
+    /// Cap on the number of records `--dump-diagnostics` writes; the dump
+    /// says `truncated: true` when the page had more elements.
+    #[arg(long, default_value_t = rustkit_engine::DEFAULT_MAX_ELEMENTS)]
+    diagnostics_max_elements: usize,
+
+    /// Keep the page URL's query and fragment in diagnostics records
+    /// (stripped by default).
+    #[arg(long)]
+    diagnostics_keep_query: bool,
+
     /// Enable verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -133,6 +158,12 @@ struct CaptureResult {
     captures: Option<Vec<StepCapture>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     action_results: Option<Vec<ActionResult>>,
+    /// `--diagnose` / `--diagnose-at` records, in argument order; `null`
+    /// where nothing matched.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    diagnostics: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    diagnostics_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -215,6 +246,8 @@ impl CaptureResult {
             error: None,
             captures: None,
             action_results: None,
+            diagnostics: None,
+            diagnostics_path: None,
         }
     }
 
@@ -541,10 +574,72 @@ fn run_capture(args: &Args) -> CaptureResult {
         }
     }
 
+    write_diagnostics(&engine, view_id, args, &mut result);
+
     // Clean up
     let _ = engine.destroy_view(view_id);
 
     result
+}
+
+/// `--diagnose`, `--diagnose-at` and `--dump-diagnostics`: records read from
+/// the final layout, after any actions and the final render.
+fn write_diagnostics(
+    engine: &rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    args: &Args,
+    result: &mut CaptureResult,
+) {
+    use rustkit_engine::{DiagnosticTarget, DiagnosticsOptions};
+    let opts = DiagnosticsOptions {
+        include_url_query: args.diagnostics_keep_query,
+        max_elements: args.diagnostics_max_elements,
+    };
+    let targets: Vec<DiagnosticTarget> = args
+        .diagnose
+        .iter()
+        .map(|s| DiagnosticTarget::Selector(s.clone()))
+        .chain(args.diagnose_at.iter().map(|&(x, y)| DiagnosticTarget::Point { x, y }))
+        .collect();
+    if !targets.is_empty() {
+        let records = targets
+            .iter()
+            .map(|t| match engine.element_diagnostics(view_id, t, &opts) {
+                Ok(r) => serde_json::to_value(r).unwrap_or(serde_json::Value::Null),
+                Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+            })
+            .collect();
+        result.diagnostics = Some(records);
+    }
+    if let Some(ref path) = args.dump_diagnostics {
+        match engine.all_element_diagnostics(view_id, &opts) {
+            Ok(dump) => {
+                if dump.truncated {
+                    warn!(
+                        total = dump.total_elements,
+                        written = dump.elements.len(),
+                        "diagnostics dump truncated at --diagnostics-max-elements"
+                    );
+                }
+                match serde_json::to_string(&dump).map(|json| fs::write(path, json)) {
+                    Ok(Ok(())) => result.diagnostics_path = Some(path.clone()),
+                    Ok(Err(e)) => error!("Failed to write diagnostics: {:?}", e),
+                    Err(e) => error!("Failed to serialise diagnostics: {:?}", e),
+                }
+            }
+            Err(e) => error!("Failed to build diagnostics: {:?}", e),
+        }
+    }
+}
+
+/// `X,Y` in CSS px.
+fn parse_point_arg(s: &str) -> Result<(f32, f32), String> {
+    let (x, y) = s
+        .split_once(',')
+        .ok_or_else(|| format!("expected X,Y, got {s:?}"))?;
+    let x = x.trim().parse().map_err(|e| format!("x {x:?}: {e}"))?;
+    let y = y.trim().parse().map_err(|e| format!("y {y:?}: {e}"))?;
+    Ok((x, y))
 }
 
 fn parse_actions(raw: &str) -> Result<Vec<ActionItem>, String> {
@@ -1259,6 +1354,16 @@ mod tests {
         assert!(!is_micro_suite_path(Path::new(
             "/repo/websuite/pages/blog/index.html"
         )));
+    }
+
+    #[test]
+    fn diagnostics_flags_parse() {
+        let args = parsed(&["--diagnose", "#a", "--diagnose", "div > p", "--diagnose-at", "10,20.5"]);
+        assert_eq!(args.diagnose, vec!["#a".to_string(), "div > p".to_string()]);
+        assert_eq!(args.diagnose_at, vec![(10.0, 20.5)]);
+        assert_eq!(args.diagnostics_max_elements, 5000);
+        assert!(args.dump_diagnostics.is_none());
+        assert!(Args::try_parse_from(["parity-capture", "--url", "https://e.test/", "--diagnose-at", "10"]).is_err());
     }
 
     #[test]
