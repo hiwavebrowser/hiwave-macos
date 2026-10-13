@@ -67,6 +67,57 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
         "<div id=x><div id=m></div></div>",
         "x:0:0:1280:5 m:0:0:1280:5",
     ),
+    // An atomic inline inside an inline box. With no strut left the box
+    // around it must still give the line its height: a linked logo image in
+    // a `font-size: 0` row was 0 tall, and the next block was drawn over it.
+    (
+        "an image in a link, then a block",
+        "",
+        r#"<div id=x><a href=#><img style="width:40px;height:30px" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:30 y:0:30:1280:5",
+    ),
+    (
+        "an inline-block in a span, then a block",
+        "",
+        r#"<div id=x><span>{ib}</span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:10 y:0:10:1280:5",
+    ),
+    (
+        "an inline-block three inline boxes deep",
+        "",
+        r#"<div id=x><span><b><em>{ib}</em></b></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:10 y:0:10:1280:5",
+    ),
+    (
+        "a taller inline-block in a span beside one outside",
+        "",
+        r#"<div id=x>{ib}<span><i style="display:inline-block;width:50px;height:30px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:30 y:0:30:1280:5",
+    ),
+    (
+        "the margin box of an inline-block in a span",
+        "",
+        r#"<div id=x><span><i style="display:inline-block;width:50px;height:10px;margin:5px 0"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:20 y:0:20:1280:5",
+    ),
+    (
+        "an inline-block in a span on a zero line-height at 16px",
+        "#x{font-size:16px;line-height:0}",
+        r#"<div id=x><span>{ib}</span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:10 y:0:10:1280:5",
+    ),
+    (
+        "two lines of inline-blocks in a span",
+        "#x{width:150px}",
+        r#"<div id=x><span>{ib}{ib}</span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:150:20 y:0:20:1280:5",
+    ),
+    (
+        "an image in a link in a flex item",
+        "#f{display:flex}",
+        r#"<div id=f><div id=x><a href=#><img style="width:40px;height:30px" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a></div></div><div id=y style="height:5px"></div>"#,
+        "f:0:0:1280:30 x:0:0:40:30 y:0:30:1280:5",
+    ),
 ];
 
 #[test]
