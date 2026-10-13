@@ -321,6 +321,8 @@ mod polygon_transform_tests;
 #[cfg(all(test, feature = "headless"))]
 mod fixed_under_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
+mod hover_restyle_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -803,14 +805,15 @@ impl ViewState {
             .map(relayout_cause::summary_url)
             .unwrap_or_default();
         info!(
-            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1}",
+            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={}",
             url,
             stats.relayouts,
             stats.by_first_cause,
             stats.by_cause,
             stats.mutations,
             stats.trees_reused,
-            stats.total_ms
+            stats.total_ms,
+            stats.layouts_skipped
         );
     }
 
@@ -4948,7 +4951,7 @@ impl Engine {
         }
         relayout_cause::set_last_build_reused_tree(false);
 
-        self.relayout_uncounted(id)?;
+        let layout_skipped = self.relayout_uncounted(id)?;
 
         let took_ms = started.elapsed().as_secs_f64() * 1000.0;
         let tree_reused = relayout_cause::last_build_reused_tree();
@@ -4959,21 +4962,27 @@ impl Engine {
             .unwrap_or_default();
         info!(
             ?id,
-            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1}",
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} layout_skipped={}",
             cause,
             causes.counts,
             causes.mutations,
             tree_reused,
-            took_ms
+            took_ms,
+            layout_skipped
         );
         if let Some(view) = self.views.get_mut(&id) {
             view.relayout_stats.record(&causes, tree_reused, took_ms);
+            if layout_skipped {
+                view.relayout_stats.layouts_skipped =
+                    view.relayout_stats.layouts_skipped.saturating_add(1);
+            }
         }
         Ok(())
     }
 
-    /// The relayout itself: build, lay out, paint.
-    fn relayout_uncounted(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+    /// The relayout itself: build, lay out, paint. Returns whether the
+    /// layout pass was skipped (the build changed only what is painted).
+    fn relayout_uncounted(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         // This build reads the hovered and pressed chains as they are now.
         if let Some(view) = self.views.get_mut(&id) {
             view.pointer_restyle = false;
@@ -5259,7 +5268,7 @@ impl Engine {
         // Render
         self.render(id)?;
 
-        Ok(())
+        Ok(false)
     }
 
     /// Check if a style has visible styling (dimensions, background, borders, etc.)
