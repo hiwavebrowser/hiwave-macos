@@ -17,11 +17,15 @@
  * capture_baseline.mjs, as element_rects.mjs does.
  *
  * Privacy (record_scrub.mjs): the page URL loses its user name and password,
- * and its query and fragment unless --keep-query; a local page is named by a
- * relative path, never a host path. Text is reported as a length only. Every
- * url() in background-image loses userinfo, query and fragment, data: URLs
- * their contents, and file: URLs become paths relative to the page. Nothing
- * reads cookies, storage or form values.
+ * and its query, fragment and `;` path parameters unless --keep-query; a
+ * data:, javascript: or blob: page is `data:<mime>`, `javascript:` or `blob:`
+ * and its origin either way; a local page is named by a relative path, never
+ * a host path. Text is reported as a length only. Every url() in
+ * background-image loses userinfo, query, fragment and `;` path parameters,
+ * data: URLs their contents, javascript: and blob: URLs as above, and file:
+ * URLs become paths relative to the page. Error messages name the page as
+ * the record does and scrub any other URL in them. Nothing reads cookies,
+ * storage or form values.
  */
 
 // Playwright is installed once, in tools/parity_oracle (`npm ci` there).
@@ -29,7 +33,7 @@ import { chromium } from '../parity_oracle/node_modules/playwright/index.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { backgroundImage, redactTarget, reportTarget } from './record_scrub.mjs';
+import { backgroundImage, isUrlTarget, redactTarget, reportTarget } from './record_scrub.mjs';
 import {
   createDeterministicContext,
   getDeterministicLaunchOptions,
@@ -317,7 +321,7 @@ async function main() {
     console.error('usage: chrome_records.mjs <url|html-file> <out.json> [--width W --height H --scale S --settle MS --max-elements N --keep-query]');
     process.exit(2);
   }
-  const isUrl = /^(?:[a-z][a-z0-9+.-]*:\/\/|data:|about:)/i.test(opts.target);
+  const isUrl = isUrlTarget(opts.target);
   const named = reportTarget(opts.target, isUrl, opts.keepQuery, process.cwd());
   const fnSrc = extractGetSelectorSource(
     readFileSync(join(__dirname, '..', 'parity_oracle', 'capture_baseline.mjs'), 'utf8'),
