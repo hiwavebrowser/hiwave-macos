@@ -455,7 +455,18 @@ const UNDEFINED_HEADER: &str = "<!doctype html><html><head><style>body{margin:0;
 /// Loads `html` through the navigation path (page scripts, load event),
 /// with `budget_ms` for the page's scripts.
 fn navigate(html: &str, budget_ms: u64) -> Rendered {
-    let server = crate::script_net_tests::serve_routes(vec![("/", "text/html", html.to_string())]);
+    navigate_with(html, vec![], budget_ms)
+}
+
+/// [`navigate`], with `routes` served beside the page. Any other path is
+/// served as text, except `/missing...`, which is a 404.
+fn navigate_with(
+    html: &str,
+    mut routes: Vec<(&'static str, &'static str, String)>,
+    budget_ms: u64,
+) -> Rendered {
+    routes.push(("/", "text/html", html.to_string()));
+    let server = crate::script_net_tests::serve_routes(routes);
     let config = EngineConfig {
         script_budget_ms: budget_ms,
         ..EngineConfig::default()
@@ -720,4 +731,103 @@ fn the_component_page_on_the_navigation_path_paints_what_chromium_paints() {
     );
     let wrong = page.painted_against("component-page", c["chrome_painted"].as_str().unwrap());
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+// ---- Only a script the engine lost settles (R1 HOLD @ 8babcc15). A
+//      `nomodule` script that a module-capable browser skips, and a script
+//      whose server answered with an error status, are lost in Chromium
+//      too: the page behaves the same there, so they do not settle.
+
+/// The reviewer's page: a menu whose component is defined on first click,
+/// hidden by its own `:not(:defined){display:none}` rule until then. `rest`
+/// is the page's other script, the one under test.
+fn lazy_menu_page(rest: &str) -> String {
+    format!(
+        "<!doctype html><style>body{{margin:0}} x-lazy:not(:defined){{display:none}}</style>\
+         <x-lazy id=m><div id=mi style=\"height:40px\">secret menu</div></x-lazy>\
+         <script type=module>document.addEventListener('click',function(){{\
+           customElements.define('x-lazy',class extends HTMLElement{{}})}})</script>\
+         {rest}"
+    )
+}
+
+/// What the reviewer reads after the load: the menu item's height and the
+/// menu's display. Chromium 141 keeps the menu hidden: `0,none`.
+const LAZY_MENU_PROBE: &str =
+    "[Math.round(document.getElementById('mi').getBoundingClientRect().height), \
+    getComputedStyle(document.getElementById('m')).display].join()";
+
+/// Loads [`lazy_menu_page`] with `rest`, and reads [`LAZY_MENU_PROBE`].
+fn lazy_menu(rest: &str, budget_ms: u64) -> String {
+    let routes = vec![(
+        "/legacy.js",
+        "text/javascript",
+        "window.legacy = 1;".to_string(),
+    )];
+    let mut page = navigate_with(&lazy_menu_page(rest), routes, budget_ms);
+    assert_eq!(
+        page.js("String(customElements.get('x-lazy'))"),
+        "undefined",
+        "{:#?}",
+        page.engine.script_log(page.view)
+    );
+    page.js(LAZY_MENU_PROBE)
+}
+
+/// A module/nomodule pair whose module ran: Chromium skips the `nomodule`
+/// script by design and keeps the menu hidden; so do we. External and
+/// inline `nomodule` alike.
+#[test]
+fn a_nomodule_script_beside_a_module_does_not_settle() {
+    for rest in [
+        "<script nomodule src=/legacy.js></script>",
+        "<script nomodule>window.legacy = 1</script>",
+    ] {
+        assert_eq!(lazy_menu(rest, 5_000), "0,none", "{rest}");
+    }
+}
+
+/// The same page with a script that really is lost (a top-level `throw`)
+/// still settles: the menu is laid out.
+#[test]
+fn the_lazy_menu_with_a_lost_script_settles() {
+    let got = lazy_menu(
+        "<script nomodule src=/legacy.js></script><script>throw new Error('lost')</script>",
+        5_000,
+    );
+    assert!(got.starts_with("40,") && !got.ends_with(",none"), "{got}");
+}
+
+/// A script whose server answered 404: Chromium loses it too, and keeps
+/// the menu hidden; so do we.
+#[test]
+fn a_script_answered_with_an_error_status_does_not_settle() {
+    assert_eq!(
+        lazy_menu("<script src=/missing-analytics.js></script>", 5_000),
+        "0,none"
+    );
+}
+
+/// A script lost on the engine's side still settles: one whose fetch got
+/// no HTTP response at all (nothing listens on the port), and one the
+/// script budget never started (the first script spends it).
+#[test]
+fn a_script_lost_on_the_engines_side_settles() {
+    for (rest, budget_ms) in [
+        (
+            "<script src=\"http://127.0.0.1:1/gone.js\"></script>",
+            5_000,
+        ),
+        (
+            "<script>var t = Date.now(); while (Date.now() - t < 400) {}</script>\
+             <script>window.late = 1</script>",
+            200,
+        ),
+    ] {
+        let got = lazy_menu(rest, budget_ms);
+        assert!(
+            got.starts_with("40,") && !got.ends_with(",none"),
+            "{rest}: {got}"
+        );
+    }
 }
