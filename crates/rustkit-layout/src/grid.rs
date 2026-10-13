@@ -3255,7 +3255,7 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
     // fraction is the largest any track needs (section 12.7.1: its base
     // size over its factor, and its items' max-content over the factor,
     // neither factor counted below 1), and a track is that fraction times
-    // its factor, never less than its base size. Chromium 148: `0.5fr`
+    // its factor, never less than its base size. Chromium 143: `0.5fr`
     // around a 100px word is 100 wide, two `minmax(100px, 1fr)` around 50
     // and 150 are 300, and two `minmax(0, 1fr)` shrink to their container.
     let mut flexible: Vec<(f32, f32)> = Vec::new();
@@ -3999,7 +3999,7 @@ fn distribute_span_contributions(
                 .filter(|&i| {
                     let t = &tracks[i];
                     // `minmax(0, 1fr)`: a fixed minimum, which no item
-                    // grows. Chromium 148 gives two such columns 50 each in
+                    // grows. Chromium 143 gives two such columns 50 each in
                     // a 100px grid around 150px words; here each was 150.
                     !t.flexible_with_fixed_min
                         && (t.is_min_content || t.is_max_content || t.is_flexible
