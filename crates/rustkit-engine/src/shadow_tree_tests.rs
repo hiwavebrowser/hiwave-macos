@@ -411,6 +411,49 @@ impl Rendered {
     }
 }
 
+/// Whether each element with an id is painted, against Chromium's
+/// `chrome_painted`, in the cases that set `painted` (the component page:
+/// custom elements defined with and without shadow roots, never defined,
+/// declarative roots with and without slots, `:host` opacity and
+/// visibility, `::slotted` visibility, `:not(:defined)` rules). An element
+/// is painted when the display list fills its background colour; each
+/// element of such a case has its own.
+#[test]
+fn the_display_list_paints_what_chromium_paints() {
+    let (data, viewport) = cases();
+    let mut wrong = Vec::new();
+    for c in data["cases"].as_array().unwrap() {
+        let Some(chrome) = c["chrome_painted"].as_str() else {
+            continue;
+        };
+        let name = c["name"].as_str().unwrap();
+        let page = render(&data, name, viewport);
+        let painted = page.painted_colours();
+        for entry in chrome.split(' ') {
+            let (id, want) = entry.split_once(':').unwrap();
+            let background = page.colors_of(id);
+            let got = match background.split_once('/') {
+                Some((_, bg)) => {
+                    let rgb = bg
+                        .trim_start_matches("rgba(")
+                        .trim_start_matches("rgb(")
+                        .trim_end_matches(')');
+                    let rgb: Vec<&str> = rgb.split(',').take(3).collect();
+                    match painted.contains(&rgb.join(",")) {
+                        true => "P",
+                        false => "-",
+                    }
+                }
+                None => "-",
+            };
+            if got != want {
+                wrong.push(format!("{name} #{id}: engine {got}, chrome {want} ({background})"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 // ---- A definition that never arrives (macOS receipt, microsoft.com).
 
 /// A header custom element with light children, as on microsoft.com: a

@@ -10,6 +10,13 @@
 //   chrome_colors when the case sets `colors`: "id:color/background" for
 //                 every element with an id that has a box, in BOXES order,
 //                 "id:-" for one without (COLORS).
+//   chrome_painted when the case sets `painted`: "id:P" for every element
+//                 with an id whose background is painted, "id:-" for one
+//                 that is not (no box, `visibility` not visible, or an
+//                 ancestor in the flat tree at opacity 0), in BOXES order
+//                 (PAINTED). Every such element of the case has its own
+//                 background colour, so the engine finds it in its display
+//                 list.
 // The engine is tested against these strings (crates/rustkit-engine,
 // shadow_tree_tests).
 //
@@ -47,6 +54,25 @@ export const COLORS = `(function () {
   walk(document);
   return out.join(' ');
 })()`;
+export const PAINTED = `(function () {
+  var out = [];
+  function shown(e) {
+    if (getComputedStyle(e).visibility !== 'visible') return false;
+    for (var n = e; n; n = n.assignedSlot || n.parentNode || n.host) {
+      if (n.nodeType === 1 && parseFloat(getComputedStyle(n).opacity) === 0) return false;
+    }
+    return true;
+  }
+  function walk(root) {
+    Array.prototype.forEach.call(root.querySelectorAll('[id]'), function (e) {
+      var r = e.getBoundingClientRect();
+      out.push(e.id + ':' + ((r.width && r.height && shown(e)) ? 'P' : '-'));
+    });
+    Array.prototype.forEach.call(root.querySelectorAll('*'), function (e) { if (e.shadowRoot) walk(e.shadowRoot); });
+  }
+  walk(document);
+  return out.join(' ');
+})()`;
 const HITS = (probes) => `(function () {
   return ${JSON.stringify(probes)}.map(function (p) {
     var e = document.elementFromPoint(p[0], p[1]);
@@ -75,6 +101,10 @@ for (const c of data.cases) {
   if (c.colors) {
     c.chrome_colors = await page.evaluate(COLORS);
     console.log('  colors ' + c.chrome_colors);
+  }
+  if (c.painted) {
+    c.chrome_painted = await page.evaluate(PAINTED);
+    console.log('  painted ' + c.chrome_painted);
   }
   if (c.probes) {
     c.chrome_hits = await page.evaluate(HITS(c.probes));
