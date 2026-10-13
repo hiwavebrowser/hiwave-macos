@@ -8100,6 +8100,11 @@ fn parse_length(value: &str) -> Option<f32> {
 /// A display list of paint commands.
 #[derive(Debug, Clone)]
 pub struct DisplayList {
+    /// In document coordinates, for a page that is not scrolled. Whatever
+    /// draws or reads a scrolled page goes through the engine's
+    /// `scrolled_commands`, which moves the list and holds the
+    /// `PushViewportFixed` runs still (they are no-ops to the renderer);
+    /// a point is tested with `LayoutBox::hit_test_scrolled`.
     pub commands: Vec<DisplayCommand>,
     /// Root element font size for rem unit calculations
     root_font_size: f32,
