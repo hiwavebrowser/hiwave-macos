@@ -352,3 +352,17 @@ fn a_hidden_box_takes_no_click_and_its_shown_child_does() {
     assert_eq!(path(engine.link_at_point(view, 20.0, 60.0)).as_deref(), Some("/held"));
     assert_eq!(path(engine.link_at_point(view, 20.0, 80.0)).as_deref(), Some("/under"));
 }
+
+/// A page with no fixed box is hit with the one pruned walk it always
+/// had: the layout says so once, and no pointer move collects fixed boxes.
+#[test]
+fn only_a_page_with_a_held_fixed_box_pays_for_the_fixed_walk() {
+    let (engine, view, _) = page_list(UNDER);
+    assert!(engine.views[&view].no_held_fixed_boxes, "no fixed box");
+    let (engine, view, _) = page_list(&format!("<div><p style='position:fixed;top:0'>bar</p></div>{UNDER}"));
+    assert!(!engine.views[&view].no_held_fixed_boxes, "a fixed box, deep in the page");
+    let (engine, view, _) = page_list(&format!(
+        "<section style='transform:translate(0,0)'><p style='position:fixed;top:0'>bar</p></section>{UNDER}"
+    ));
+    assert!(engine.views[&view].no_held_fixed_boxes, "a fixed box that scrolls with the page");
+}

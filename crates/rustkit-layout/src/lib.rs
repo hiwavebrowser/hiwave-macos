@@ -6623,8 +6623,24 @@ impl LayoutBox {
         !self.style.effective_transform().is_identity()
     }
 
+    /// Whether a point in this box can land on it: not when it is not
+    /// shown, and not when it is `pointer-events: none`. Both inherit and
+    /// a descendant can undo either, so its children are tested all the same.
+    fn is_hit_target(&self) -> bool {
+        self.style.visibility == rustkit_css::Visibility::Visible
+            && self.style.pointer_events == rustkit_css::PointerEvents::Auto
+    }
+
+    /// Whether the tree under this box has a fixed box the scroll does
+    /// not move: one that `hit_test_held_fixed` would test. The engine
+    /// asks once per layout, so a page with none pays for no such walk.
+    pub fn has_held_fixed_box(&self) -> bool {
+        !self.transforms_descendants()
+            && self.children.iter().any(|child| child.position == Position::Fixed || child.has_held_fixed_box())
+    }
+
     /// Collect a hit at the point, with its `z-index`, for each fixed box
-    /// the scroll does not move, in tree order. A hidden one takes none.
+    /// the scroll does not move, in tree order.
     fn hit_test_held_fixed(&self, x: f32, y: f32, depth: u32, hits: &mut Vec<(i32, HitTestResult)>) {
         if self.transforms_descendants() {
             return;
@@ -6633,11 +6649,9 @@ impl LayoutBox {
         for child in &self.children {
             if child.position != Position::Fixed {
                 child.hit_test_held_fixed(x, y, depth + 1, hits);
-            } else if child.style.visibility == rustkit_css::Visibility::Visible {
-                if let Some(mut hit) = child.hit_test_internal(x, y, depth + 1, false) {
-                    hit.viewport_fixed = true;
-                    hits.push((child.z_index, hit));
-                }
+            } else if let Some(mut hit) = child.hit_test_internal(x, y, depth + 1, false) {
+                hit.viewport_fixed = true;
+                hits.push((child.z_index, hit));
             }
         }
         for (_, hit) in &mut hits[first..] {
@@ -6694,10 +6708,16 @@ impl LayoutBox {
             }
         }
 
+        // No child was hit, so we are the target, if we can be one: a
+        // see-through overlay or a closed menu leaves the point to
+        // whatever is under it.
+        if !self.is_hit_target() {
+            return None;
+        }
+
         // Detect if element is scrollable by checking overflow style
         let is_scrollable = self.detect_overflow();
 
-        // No child was hit, so we are the target
         Some(HitTestResult {
             box_type: self.box_type.clone(),
             border_box,

@@ -534,6 +534,11 @@ struct ViewState {
     document: Option<Rc<Document>>,
     #[allow(dead_code)]
     layout: Option<LayoutBox>,
+    /// Whether `layout` is known to have no `position: fixed` box that
+    /// the scroll leaves in place (`LayoutBox::has_held_fixed_box`), read
+    /// when the layout is stored. Hit testing then needs only the pruned
+    /// walk of the page; `false` is always safe.
+    no_held_fixed_boxes: bool,
     #[allow(dead_code)]
     display_list: Option<DisplayList>,
     #[allow(dead_code)]
@@ -1602,6 +1607,7 @@ impl Engine {
             http_status: None,
             document: None,
             layout: None,
+            no_held_fixed_boxes: false,
             display_list: None,
             frame_generation: 0,
             presented: None,
@@ -1683,6 +1689,7 @@ impl Engine {
             http_status: None,
             document: None,
             layout: None,
+            no_held_fixed_boxes: false,
             display_list: None,
             frame_generation: 0,
             presented: None,
@@ -1773,6 +1780,7 @@ impl Engine {
             http_status: None,
             document: None,
             layout: None,
+            no_held_fixed_boxes: false,
             display_list: None,
             frame_generation: 0,
             presented: None,
@@ -2476,7 +2484,13 @@ impl Engine {
     /// (`scrolled_commands`). Every pointer path asks here, so what is
     /// clicked is what is seen.
     fn hit_at(view: &ViewState, viewport_x: f32, viewport_y: f32) -> Option<rustkit_layout::HitTestResult> {
-        view.layout.as_ref()?.hit_test_scrolled(viewport_x, viewport_y, view.scroll_offset)
+        let layout = view.layout.as_ref()?;
+        if view.no_held_fixed_boxes {
+            // Every pointer move asks here, and collecting fixed boxes
+            // visits the whole tree: a page with none is not asked to.
+            return layout.hit_test(viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+        }
+        layout.hit_test_scrolled(viewport_x, viewport_y, view.scroll_offset)
     }
 
     /// VIEWPORT coordinates in the coordinates of the boxes hit there:
@@ -4996,6 +5010,7 @@ impl Engine {
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
+        view.no_held_fixed_boxes = !root_box.has_held_fixed_box();
         view.layout = Some(root_box);
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
         // answer from this layout.
@@ -6990,6 +7005,7 @@ impl Engine {
                         s.line_break = parent.line_break;
                         s.font_stretch = parent.font_stretch;
                         s.visibility = parent.visibility;
+                        s.pointer_events = parent.pointer_events;
                         // NOT CSS inheritance — feature plumbing: gradient
                         // text (background-clip:text + transparent fill) is
                         // detected on the TEXT box at paint time
@@ -7193,6 +7209,7 @@ impl Engine {
             pseudo_style.line_break = parent.line_break;
             pseudo_style.text_transform = parent.text_transform;
             pseudo_style.visibility = parent.visibility;
+            pseudo_style.pointer_events = parent.pointer_events;
         }
 
         // Sort by cascade layer, then specificity (a, b, c); the sort is
@@ -7361,6 +7378,7 @@ impl Engine {
             style.line_break = parent.line_break;
             style.text_transform = parent.text_transform;
             style.visibility = parent.visibility;
+            style.pointer_events = parent.pointer_events;
             // css-tables: both inherit.
             style.border_spacing = parent.border_spacing;
             style.border_collapse = parent.border_collapse;
@@ -8302,6 +8320,7 @@ impl Engine {
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
             "line-break" => style.line_break = parent.line_break,
             "visibility" => style.visibility = parent.visibility,
+            "pointer-events" => style.pointer_events = parent.pointer_events,
             "border-spacing" => style.border_spacing = parent.border_spacing,
             "border-collapse" => style.border_collapse = parent.border_collapse,
             "vertical-align" => style.vertical_align = parent.vertical_align,
@@ -9185,6 +9204,18 @@ impl Engine {
                     _ => {}
                 }
             }
+            "pointer-events" => {
+                // `none` or not: the other values are SVG's ways of
+                // saying which painted part of a shape is a target.
+                match value.trim().to_ascii_lowercase().as_str() {
+                    "none" => style.pointer_events = rustkit_css::PointerEvents::None,
+                    "auto" | "visiblepainted" | "visiblefill" | "visiblestroke" | "visible" | "painted"
+                    | "fill" | "stroke" | "bounding-box" | "all" => {
+                        style.pointer_events = rustkit_css::PointerEvents::Auto
+                    }
+                    _ => {}
+                }
+            }
             "top" => {
                 if let Some(length) = parse_length(value) {
                     style.top = Some(length);
@@ -9783,6 +9814,7 @@ impl Engine {
             "border-left-width" => style.border_left_width = rustkit_css::Length::Zero,
             "width" => style.width = rustkit_css::Length::Auto,
             "visibility" => style.visibility = rustkit_css::Visibility::Visible,
+            "pointer-events" => style.pointer_events = rustkit_css::PointerEvents::Auto,
             "height" => style.height = rustkit_css::Length::Auto,
             "display" => style.display = rustkit_css::Display::Block,
             "opacity" => style.opacity = 1.0,
@@ -15658,6 +15690,7 @@ fn is_inherited_property(property: &str) -> bool {
             | "word-spacing"
             | "white-space"
             | "visibility"
+            | "pointer-events"
             | "cursor"
             | "direction"
             | "writing-mode"
@@ -16954,6 +16987,7 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("position", css_keyword(&format!("{:?}", s.position))),
         ("float", css_keyword(&format!("{:?}", s.float))),
         ("visibility", css_keyword(&format!("{:?}", s.visibility))),
+        ("pointer-events", css_keyword(&format!("{:?}", s.pointer_events))),
         ("opacity", format!("{}", s.opacity)),
         ("overflow-x", css_keyword(&format!("{:?}", s.overflow_x))),
         ("overflow-y", css_keyword(&format!("{:?}", s.overflow_y))),
@@ -22871,6 +22905,39 @@ mod web_font_tests {
         assert_eq!(vis_of(&layout, "c"), Some(Visible), "a child can set visible");
         assert_eq!(vis_of(&layout, "d"), Some(Collapse), "an invalid value is ignored");
         assert_eq!(vis_of(&layout, "e"), Some(Visible));
+    }
+
+    #[test]
+    fn pointer_events_is_parsed_and_inherited_and_a_child_can_undo_it() {
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .layer { pointer-events: none } .layer .toast { pointer-events: auto }
+            .layer .shape { pointer-events: visiblePainted }
+            .bad { pointer-events: none; pointer-events: nonsense }
+            .layer .reset { pointer-events: initial } .again { pointer-events: inherit }
+        </style></head><body>
+            <div class="layer">a<p>b</p><p class="toast">c</p><p class="shape">d</p>
+                <p class="reset">f<span class="again">g</span></p></div>
+            <div class="bad">e</div>
+            <div>h</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn of(b: &LayoutBox, text: &str) -> Option<rustkit_css::PointerEvents> {
+            if matches!(&b.box_type, BoxType::Text(t) if t.trim() == text) {
+                return Some(b.style.pointer_events);
+            }
+            b.children.iter().find_map(|c| of(c, text))
+        }
+        use rustkit_css::PointerEvents::*;
+        assert_eq!(of(&layout, "a"), Some(None));
+        assert_eq!(of(&layout, "b"), Some(None), "inherited");
+        assert_eq!(of(&layout, "c"), Some(Auto), "a child can set auto");
+        assert_eq!(of(&layout, "d"), Some(Auto), "an SVG value is a target");
+        assert_eq!(of(&layout, "e"), Some(None), "an invalid value is ignored");
+        assert_eq!(of(&layout, "f"), Some(Auto), "initial");
+        assert_eq!(of(&layout, "g"), Some(Auto), "inherit, from the reset parent");
+        assert_eq!(of(&layout, "h"), Some(Auto));
     }
 
     #[test]
