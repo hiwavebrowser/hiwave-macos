@@ -75,6 +75,19 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 ///
 /// `zero-fr-and-fr-tracks-*`: a `0fr` column is 0 wide; in Chromium it is
 /// its item's min-content, 60.
+///
+/// The `auto-tracks-*-in-a-narrow-row` and `-inline-block` four are the
+/// same `auto` columns in two more hosts.
+///
+/// The rest are the two track shapes the shrink-to-fit estimate leaves to
+/// the generic walk (`grid_columns_content_width` returns `None`): a
+/// `fit-content()` column, and a flexible column with a factor below 1.
+/// The grid is then as wide as before the estimate existed, which is wrong
+/// in its own way but was nearer Chromium than the estimate on these: two
+/// `fit-content(80px)` columns of 150px words in `overflow: hidden` items
+/// are 150 in a 100px float (Chromium 100; the estimate gave 300). Each of
+/// these pages has `engine_boxes` in the case file, the walk's answer, and
+/// the tests hold the engine to it until the estimate covers the shape.
 const GAPS: &[&str] = &[
     "percent-height-item-sharing-an-area-in-a-row",
     "bing-textarea-and-its-replica-in-a-row",
@@ -87,6 +100,25 @@ const GAPS: &[&str] = &[
     "auto-tracks-min-width-20px-items-in-a-narrow-float",
     "zero-fr-and-fr-tracks-in-a-float",
     "zero-fr-and-fr-tracks-in-a-row",
+    "auto-tracks-min-width-0-items-in-a-narrow-row",
+    "auto-tracks-min-width-0-items-in-a-narrow-inline-block",
+    "auto-tracks-min-width-20px-items-in-a-narrow-row",
+    "auto-tracks-min-width-20px-items-in-a-narrow-inline-block",
+    "half-and-quarter-fr-tracks-in-a-row",
+    "tenth-fr-tracks-in-a-float",
+    "fit-content-tracks-overflow-hidden-items-in-a-narrow-float",
+    "fit-content-tracks-overflow-hidden-items-in-a-wide-float",
+    "fit-content-tracks-min-width-20px-items-in-a-narrow-float",
+    "fit-content-tracks-min-width-20px-items-in-a-wide-float",
+    "fit-content-tracks-overflow-hidden-items-with-a-gap-in-a-narrow-row",
+    "fit-content-tracks-two-word-items-in-a-narrow-float",
+    "fit-content-tracks-two-word-items-in-a-wide-float",
+    "zero-fr-and-2fr-tracks-min-width-20px-item-in-a-narrow-float",
+    "zero-fr-and-2fr-tracks-min-width-20px-item-in-a-wide-float",
+    "zero-fr-and-2fr-tracks-overflow-hidden-item-in-a-wide-float",
+    "quarter-fr-and-2fr-tracks-min-width-20px-items-in-a-wide-float",
+    "quarter-fr-and-2fr-tracks-in-a-wide-float",
+    "half-fr-and-quarter-fr-tracks-in-a-wide-float",
 ];
 
 /// The pages are checked in six tests, a sixth each. As one test they
@@ -158,6 +190,12 @@ fn pages_are_as_in_chrome(part: usize) {
         match (got == chrome, GAPS.contains(&name)) {
             (false, false) => wrong.push(format!("{name}\n   engine {got}\n   chrome {chrome}")),
             (true, true) => gaps_that_pass.push(name),
+            (false, true) => {
+                // A gap whose answer is pinned: it may not drift either.
+                if let Some(pinned) = case["engine_boxes"].as_str().filter(|pinned| *pinned != got) {
+                    wrong.push(format!("{name} (a gap, pinned)\n   engine {got}\n   pinned {pinned}"));
+                }
+            }
             _ => {}
         }
     }
@@ -206,6 +244,12 @@ fn text_free_pages_are_as_in_chrome_on_every_os() {
         match (got == chrome, GAPS.contains(&name)) {
             (false, false) => wrong.push(format!("{name}\n   engine {got}\n   chrome {chrome}")),
             (true, true) => gaps_that_pass.push(name),
+            (false, true) => {
+                // A gap whose answer is pinned: it may not drift either.
+                if let Some(pinned) = case["engine_boxes"].as_str().filter(|pinned| *pinned != got) {
+                    wrong.push(format!("{name} (a gap, pinned)\n   engine {got}\n   pinned {pinned}"));
+                }
+            }
             _ => {}
         }
     }

@@ -3254,6 +3254,25 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
         return None;
     }
 
+    // Two track shapes keep the generic walk's answer for now: a
+    // `fit-content()` track (its minimum is its items' minimum contribution,
+    // not their min-content) and a flexible track with a factor below 1
+    // (the items of a track the section 12.7.1 restart makes inflexible ask
+    // for nothing). On both the estimate below was further from Chromium
+    // than the walk: two `fit-content(80px)` columns of 150px words in
+    // `overflow: hidden` items were 300 in a 100px float (Chromium 100, the
+    // walk 150), and `0fr 2fr` around a 60px word with `min-width: 20px`
+    // was 100 (Chromium and the walk 60).
+    let outside_the_estimate = |size: &TrackSize| match size {
+        TrackSize::FitContent(_) => true,
+        TrackSize::Fr(fr) => *fr < 1.0,
+        TrackSize::MinMax(_, high) => matches!(high.as_ref(), TrackSize::Fr(fr) if *fr < 1.0),
+        _ => false,
+    };
+    if template.tracks.iter().any(|t| outside_the_estimate(&t.size)) {
+        return None;
+    }
+
     let columns = template.tracks.len();
     // The largest contribution of the items that auto-placement puts in a
     // column: item i goes to column i mod n.
@@ -4083,9 +4102,14 @@ fn distribute_span_contributions(
                 .filter(|&i| {
                     let t = &tracks[i];
                     // `minmax(0, 1fr)`: a fixed minimum, which no item
-                    // grows. Chromium 143 gives two such columns 50 each in
-                    // a 100px grid around 150px words; here each was 150.
-                    !t.flexible_with_fixed_min
+                    // of its own grows. Chromium 143 gives two such columns
+                    // 50 each in a 100px grid around 150px words; here each
+                    // was 150. A spanning item still counts the track: left
+                    // out, the whole contribution went to the content track
+                    // beside it, and a header across `auto minmax(0, 1fr)`
+                    // made the sidebar as wide as the header's text (150
+                    // and 450 in 600; Chromium 40 and 560).
+                    (span > 1 || !t.flexible_with_fixed_min)
                         && (t.is_min_content || t.is_max_content || t.is_flexible
                             || t.growth_limit > t.base_size)
                 })
