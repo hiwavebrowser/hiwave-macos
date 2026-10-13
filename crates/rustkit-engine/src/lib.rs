@@ -52,9 +52,13 @@ pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::Compos
 /// itself, so a test must not keep a GPU engine alive on its own thread while
 /// waiting for such a helper; that would wait on itself.
 ///
-/// Waiting is bounded: after [`test_gpu::MAX_WAIT`] the waiter panics and
-/// names the holder, so a test that hangs while holding the GPU fails the
-/// tests queued behind it loudly instead of stalling the binary silently.
+/// Waiting is bounded per holder: when one test has held the guard for
+/// [`test_gpu::MAX_WAIT`] the waiter panics and names it, so a test that
+/// hangs while holding the GPU fails the tests queued behind it loudly
+/// instead of stalling the binary silently. The limit used to be on the
+/// waiter's whole time in the queue: in a full run on a loaded machine the
+/// queue of GPU tests is longer than that, and tests failed naming whichever
+/// test happened to hold the GPU at the time.
 #[cfg(test)]
 pub(crate) mod test_gpu {
     use std::cell::RefCell;
@@ -97,25 +101,138 @@ pub(crate) mod test_gpu {
             return;
         }
         let me = this_thread();
-        let mut holder = HOLDER.lock().unwrap_or_else(|e| e.into_inner());
-        let deadline = std::time::Instant::now() + MAX_WAIT;
+        let mut holder = wait_until_free(&HOLDER, &RELEASED, MAX_WAIT);
+        *holder = Some(me);
+        drop(holder);
+        TOKEN.with(|t| *t.borrow_mut() = Some(Token));
+    }
+
+    /// Wait until nothing holds the guard, and return it locked. Panics,
+    /// naming the holder, after `limit`.
+    fn wait_until_free<'a>(
+        holder: &'a Mutex<Option<String>>,
+        released: &Condvar,
+        limit: Duration,
+    ) -> std::sync::MutexGuard<'a, Option<String>> {
+        let mut holder = holder.lock().unwrap_or_else(|e| e.into_inner());
+        let mut deadline = std::time::Instant::now() + limit;
+        let mut waiting_on: Option<String> = None;
         while let Some(other) = holder.as_ref() {
             let now = std::time::Instant::now();
+            // The limit is on one test's hold, not on the length of the
+            // queue: when the holder changes, the queue has moved.
+            if waiting_on.as_deref() != Some(other.as_str()) {
+                waiting_on = Some(other.clone());
+                deadline = now + limit;
+            }
             if now >= deadline {
                 panic!(
                     "GPU test guard: waited {}s for `{other}` to finish with the GPU; \
                      that test is hung or kept a GPU engine alive while waiting on a helper thread",
-                    MAX_WAIT.as_secs()
+                    limit.as_secs()
                 );
             }
-            holder = RELEASED
+            holder = released
                 .wait_timeout(holder, deadline - now)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
-        *holder = Some(me);
-        drop(holder);
-        TOKEN.with(|t| *t.borrow_mut() = Some(Token));
+        holder
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Arc;
+
+        /// In a full run on a loaded machine the GPU tests queue for longer
+        /// than the limit although none of them holds the GPU for long. A
+        /// waiter must outlast such a queue: six holders of 200 ms each, with
+        /// a limit of one second.
+        #[test]
+        fn a_waiter_outlasts_a_queue_of_short_holders() {
+            let holder = Arc::new(Mutex::new(Some("holder-0".to_string())));
+            let released = Arc::new(Condvar::new());
+            let (h, r) = (holder.clone(), released.clone());
+            let queue = std::thread::spawn(move || {
+                for next in 1..=6 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let mut now = h.lock().unwrap_or_else(|e| e.into_inner());
+                    *now = (next < 6).then(|| format!("holder-{next}"));
+                    r.notify_all();
+                }
+            });
+            let free = wait_until_free(&holder, &released, Duration::from_secs(1));
+            assert!(free.is_none());
+            drop(free);
+            queue.join().unwrap();
+        }
+
+        /// A helper thread queues on the guard like any test. The test that
+        /// waits for it must not give up while the queue is still moving: six
+        /// holders of 200 ms each, a guard limit of 400 ms.
+        #[test]
+        fn a_caller_outlasts_its_helper_queueing_behind_short_holders() {
+            let limit = Duration::from_millis(400);
+            let holder = Arc::new(Mutex::new(Some("holder-0".to_string())));
+            let released = Arc::new(Condvar::new());
+            let (h, r) = (holder.clone(), released.clone());
+            let queue = std::thread::spawn(move || {
+                for next in 1..=6 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let mut now = h.lock().unwrap_or_else(|e| e.into_inner());
+                    *now = (next < 6).then(|| format!("holder-{next}"));
+                    r.notify_all();
+                }
+            });
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let helper = std::thread::spawn(move || {
+                drop(wait_until_free(&holder, &released, limit));
+                let _ = ready_tx.send(());
+            });
+            assert!(helper_has_its_engine(&ready_rx));
+            helper.join().unwrap();
+            queue.join().unwrap();
+        }
+
+        /// A helper stuck behind one holder past the limit fails in the guard
+        /// and never reports; its caller hears of it at once.
+        #[test]
+        fn a_caller_learns_its_helper_failed_in_the_guard() {
+            let limit = Duration::from_millis(200);
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let helper = std::thread::spawn(move || {
+                let holder = Mutex::new(Some("stuck".to_string()));
+                let released = Condvar::new();
+                drop(wait_until_free(&holder, &released, limit));
+                let _ = ready_tx.send(());
+            });
+            let started = std::time::Instant::now();
+            assert!(!helper_has_its_engine(&ready_rx));
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(helper.join().is_err());
+        }
+
+        /// One test that keeps the GPU past the limit still fails the waiter,
+        /// by name.
+        #[test]
+        #[should_panic(expected = "for `stuck`")]
+        fn a_holder_past_the_limit_fails_the_waiter_by_name() {
+            let holder = Mutex::new(Some("stuck".to_string()));
+            let released = Condvar::new();
+            drop(wait_until_free(&holder, &released, Duration::from_millis(200)));
+        }
+    }
+
+    /// Wait for a helper thread to say it has its engine. False when it never
+    /// will.
+    ///
+    /// No limit of its own: the helper queues on the guard, whose limit is per
+    /// holder, and a limit here would bring back the limit on the whole queue.
+    /// A helper that fails in the guard panics and drops its sender, which
+    /// ends this wait at once.
+    fn helper_has_its_engine(ready: &std::sync::mpsc::Receiver<()>) -> bool {
+        ready.recv().is_ok()
     }
 
     /// Run `work` against a fresh engine on a helper thread, and fail with
@@ -137,10 +254,7 @@ pub(crate) mod test_gpu {
             let _ = ready_tx.send(());
             let _ = done_tx.send(work(&e));
         });
-        if ready_rx
-            .recv_timeout(MAX_WAIT + Duration::from_secs(30))
-            .is_err()
-        {
+        if !helper_has_its_engine(&ready_rx) {
             panic!("{what}: the helper thread never got an engine");
         }
         match done_rx.recv_timeout(budget) {
@@ -5098,7 +5212,8 @@ impl Engine {
     ///   `<hr>`'s 8px stack to 16 around an empty flex container);
     /// - `min-height` and `clear` give it extent or clearance;
     /// - a flex or grid item takes a track slot, a gap and free space (an
-    ///   empty `flex:1` spacer).
+    ///   empty `flex:1` spacer);
+    /// - `aspect-ratio` gives it a height from its width (css-sizing-4 §5).
     fn empty_block_affects_layout(child: &LayoutBox, parent: &ComputedStyle) -> bool {
         use rustkit_css::Length;
         let nonzero = |len: &Length| !matches!(len, Length::Zero | Length::Auto | Length::Px(0.0));
@@ -5118,6 +5233,7 @@ impl Engine {
             || nonzero(&s.margin_bottom)
             || nonzero(&s.min_height)
             || s.clear != rustkit_css::Clear::None
+            || s.aspect_ratio.is_some_and(|r| r.is_finite() && r > 0.0)
             || rustkit_layout::establishes_bfc(s, child.float)
     }
 
@@ -9115,21 +9231,21 @@ impl Engine {
             }
             "aspect-ratio" => {
                 // Parse aspect-ratio: width / height or auto
+                // `auto` resets an earlier ratio. A degenerate ratio (`0`,
+                // `0/1`, `1/0`) is valid and behaves as `auto`; a negative
+                // number makes the declaration invalid (it changes nothing).
                 let value = value.trim();
+                let (w, h) = match value.split_once('/') {
+                    Some((w, h)) => (w.trim().parse::<f32>(), h.trim().parse::<f32>()),
+                    None => (value.parse::<f32>(), Ok(1.0)),
+                };
                 if value == "auto" {
-                    // Auto is the default, do nothing
-                } else if let Some(slash_pos) = value.find('/') {
-                    // Format: width / height
-                    let width_str = value[..slash_pos].trim();
-                    let height_str = value[slash_pos + 1..].trim();
-                    if let (Ok(w), Ok(h)) = (width_str.parse::<f32>(), height_str.parse::<f32>()) {
-                        if h > 0.0 {
-                            style.aspect_ratio = Some(w / h);
-                        }
+                    style.aspect_ratio = None;
+                } else if let (Ok(w), Ok(h)) = (w, h) {
+                    if w >= 0.0 && h >= 0.0 {
+                        let ratio = w / h;
+                        style.aspect_ratio = (ratio.is_finite() && ratio > 0.0).then_some(ratio);
                     }
-                } else if let Ok(ratio) = value.parse::<f32>() {
-                    // Single number (ratio to 1)
-                    style.aspect_ratio = Some(ratio);
                 }
             }
             "border-spacing" => {
@@ -9891,6 +10007,9 @@ impl Engine {
             _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
                 style.mask.reset(property)
             }
+            // Not inherited, so `unset` lands here too: the initial value is
+            // `auto`, no ratio.
+            "aspect-ratio" => style.aspect_ratio = None,
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
@@ -33081,6 +33200,105 @@ mod float_clear_tests {
         )) {
             assert_eq!(by_id(&root, "a").unwrap().float, rustkit_css::Float::Left);
             assert_eq!(by_id(&root, "p").unwrap().float, rustkit_css::Float::None);
+        }
+    }
+}
+
+// An empty block whose only size is `aspect-ratio` (css-sizing-4 §5): its
+// width fills the line and its height follows from the ratio, so it is not
+// an empty block and must stay in the tree. It was dropped as one, with
+// its height and everything below it (nested layout matrix,
+// `aspect-ratio-only-empty-block-dropped`).
+#[cfg(test)]
+mod aspect_ratio_empty_block_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity
+            .as_ref()
+            .is_some_and(|i| i.selector == format!("#{id}"))
+        {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    #[test]
+    fn an_empty_block_sized_by_its_aspect_ratio_keeps_its_box() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(concat!(
+            r#"<body style="margin:0"><div id="o" style="width:600px">"#,
+            r#"<div id="r" style="aspect-ratio:2/1"></div>"#,
+            r#"<div id="n" style="height:5px"></div>"#,
+            r#"</div></body>"#,
+        ))
+        .expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        root.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        });
+        // Chromium 141: #r 600 x 300, #n below it at y 300, #o 305 tall.
+        let r = by_id(&root, "r")
+            .expect("#r has a box")
+            .dimensions
+            .border_box();
+        assert_eq!((r.width, r.height), (600.0, 300.0));
+        let n = by_id(&root, "n").expect("#n").dimensions.border_box();
+        assert_eq!(n.y, 300.0);
+        let o = by_id(&root, "o").expect("#o").dimensions.border_box();
+        assert_eq!(o.height, 305.0);
+    }
+
+    /// An empty block whose ratio gives it no height is still an empty
+    /// block: `aspect-ratio: auto` over an earlier ratio, and a degenerate
+    /// ratio, keep no box, and margins collapse through it (R1 on #673;
+    /// Chromium 141 numbers).
+    #[test]
+    fn an_empty_block_without_a_usable_ratio_is_still_dropped() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let n_y = |html: &str| {
+            let d = Document::parse_html(html).expect("parse");
+            let mut root = e.build_layout_from_document(&d, &[]);
+            root.layout_with_collapse(
+                &Dimensions {
+                    content: Rect::new(0.0, 0.0, 800.0, 0.0),
+                    ..Default::default()
+                },
+                &mut rustkit_layout::MarginCollapseContext::new(),
+                &mut rustkit_layout::FloatContext::new(),
+            );
+            by_id(&root, "n").expect("#n").dimensions.border_box().y
+        };
+        for reset in ["auto", "initial", "unset"] {
+            assert_eq!(
+                n_y(&format!(
+                    concat!(
+                        r#"<style>.r{{aspect-ratio:4/1}}.r.x{{aspect-ratio:{}}}</style>"#,
+                        r#"<body style="margin:0"><div style="width:400px">"#,
+                        r#"<div class="r x"></div><div id="n" style="height:5px"></div></div></body>"#,
+                    ),
+                    reset
+                )),
+                0.0,
+                "aspect-ratio: {reset} resets an earlier ratio"
+            );
+        }
+        for ratio in ["0", "0/1", "1/0", "-2"] {
+            assert_eq!(
+                n_y(&format!(
+                    concat!(
+                        r#"<body style="margin:0"><div style="width:400px;border-top:1px solid">"#,
+                        r#"<div style="height:10px;margin-bottom:20px"></div>"#,
+                        r#"<div style="aspect-ratio:{}"></div>"#,
+                        r#"<div id="n" style="height:10px;margin-top:30px"></div></div></body>"#,
+                    ),
+                    ratio
+                )),
+                41.0,
+                "aspect-ratio: {ratio}: the margins collapse through the empty block"
+            );
         }
     }
 }
