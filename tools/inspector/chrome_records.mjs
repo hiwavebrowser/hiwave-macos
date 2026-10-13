@@ -353,6 +353,11 @@ async function main() {
     } catch (e) {
       result.nav_error = redact(e);
     }
+    // A failed navigation loaded Chromium's error page, not the target, so
+    // nothing is recorded. about: and data: URLs load with no response.
+    if (result.nav_error || (!response && isUrl && !/^(about|data):/i.test(opts.target))) {
+      throw new Error(result.nav_error || 'navigation got no response');
+    }
     // An error page is recorded (it is what loaded) but the run is not ok.
     if (response && response.status() >= 400) {
       result.status = 'error';

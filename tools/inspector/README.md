@@ -74,8 +74,12 @@ loads, so content differences show up as DOM roots and are not engine defects.
   - nothing reads cookies, storage or form values
   - a local page is named by a relative path: as given when relative,
     otherwise relative to the working directory, otherwise its file name
-- **Exit status:** 1 when navigation threw or the page answered HTTP 400 or
-  above (the records of an error page are still written).
+  - `nav_error` and `error` name the target as the record does: a URL
+    quoted in an error message loses its query and fragment
+- **Exit status:** 1 when navigation failed (threw, or got no response for
+  an http(s) URL; nothing is recorded, since what loaded is Chromium's own
+  error page) or the page answered HTTP 400 or above (the records of the
+  site's error page are still written).
 
 ## inspector_diff.py
 
