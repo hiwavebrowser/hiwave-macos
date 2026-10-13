@@ -24,7 +24,13 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[];
+const GAPS: &[&str] = &[
+    // `justify-content: start` and `100px auto 100px` with nothing in the
+    // auto column: the column still takes the free space (360 wide; 0 in
+    // Chromium, where only `normal`/`stretch` shares it out). The gutters
+    // are right; the page is here for the day the stretch is.
+    "an-empty-auto-column-keeps-its-gutters",
+];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]

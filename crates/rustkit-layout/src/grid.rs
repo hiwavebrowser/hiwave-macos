@@ -52,6 +52,11 @@ pub struct GridTrack {
     pub fit_content_limit: Option<f32>,
     /// Whether this track is from auto-fit (should collapse if empty).
     pub is_auto_fit: bool,
+    /// An empty auto-fit track, collapsed (css-grid-1 §7.2.3.2): 0 wide, and
+    /// the gutters on either side of it are one gutter. A track that is 0
+    /// wide for any other reason (`0px`, an empty `auto` track) keeps both
+    /// of its gutters; the size alone does not say which this is.
+    pub collapsed: bool,
     /// Final computed size.
     pub size: f32,
     /// Position (offset from container start).
@@ -153,6 +158,7 @@ impl GridTrack {
             is_max_content,
             fit_content_limit,
             is_auto_fit: false,
+            collapsed: false,
             size: base_size,
             position: 0.0,
             line_names: Vec::new(),
@@ -969,6 +975,7 @@ impl GridLayout {
                     // with two items kept four tracks).
                     track.percent = None;
                     track.max_percent = None;
+                    track.collapsed = true;
                     trace!("Collapsed empty auto-fit column track {}", i);
                 }
             }
@@ -992,6 +999,7 @@ impl GridLayout {
                     // with two items kept four tracks).
                     track.percent = None;
                     track.max_percent = None;
+                    track.collapsed = true;
                     trace!("Collapsed empty auto-fit row track {}", i);
                 }
             }
@@ -1853,8 +1861,7 @@ pub fn layout_grid_container(
     // When the container has auto height, the block layout algorithm incorrectly computes height
     // by stacking children vertically. We need to update it to the actual grid-based height.
     if !has_definite_height {
-        let non_collapsed_row_count = grid.rows.iter().filter(|t| t.size > 0.0).count();
-        let total_row_gaps = non_collapsed_row_count.saturating_sub(1) as f32 * row_gap;
+        let total_row_gaps = total_gutters(&grid.rows, row_gap);
         let actual_grid_height: f32 = grid.rows.iter().map(|t| t.size).sum::<f32>() + total_row_gaps;
         container.dimensions.content.height = actual_grid_height;
         debug!("Updated auto-height grid container: {} -> {}", container_height, actual_grid_height);
@@ -2700,15 +2707,12 @@ pub fn layout_grid_container(
             for (i, g) in row_delta.iter().enumerate() {
                 grid.rows[i].size = (grid.rows[i].size + g).max(0.0);
             }
-            // Recompute row positions from the first row's origin; a gap
-            // follows every non-collapsed row (mirrors the auto-height
-            // container formula above).
-            let mut cursor = old_positions.first().copied().unwrap_or(0.0);
+            // Recompute row positions from the first row's origin (mirrors
+            // the auto-height container formula above).
+            let origin = old_positions.first().copied().unwrap_or(0.0);
+            position_tracks(&mut grid.rows, row_gap);
             for row in grid.rows.iter_mut() {
-                row.position = cursor;
-                if row.size > 0.0 {
-                    cursor += row.size + row_gap;
-                }
+                row.position += origin;
             }
 
             let mut idx = 0usize;
@@ -2753,8 +2757,7 @@ pub fn layout_grid_container(
                 idx += 1;
             }
 
-            let non_collapsed = grid.rows.iter().filter(|t| t.size > 0.0).count();
-            let total_gaps = non_collapsed.saturating_sub(1) as f32 * row_gap;
+            let total_gaps = total_gutters(&grid.rows, row_gap);
             container.dimensions.content.height =
                 grid.rows.iter().map(|t| t.size).sum::<f32>() + total_gaps;
         }
@@ -2785,9 +2788,8 @@ pub fn layout_grid_container(
             0.0
         };
         let min_height = min_height - own;
-        let non_collapsed = grid.rows.iter().filter(|t| t.size > 0.0).count();
-        let used = grid.rows.iter().map(|t| t.size).sum::<f32>()
-            + non_collapsed.saturating_sub(1) as f32 * row_gap;
+        let used =
+            grid.rows.iter().map(|t| t.size).sum::<f32>() + total_gutters(&grid.rows, row_gap);
         if min_height - used > 0.5 {
             let old: Vec<(f32, f32)> = grid.rows.iter().map(|t| (t.position, t.size)).collect();
             if style.align_content == AlignContent::Stretch {
@@ -3901,24 +3903,7 @@ fn size_grid_tracks_filling(
         return;
     }
 
-    // Count non-collapsed tracks for gap calculation
-    // Collapsed (auto-fit empty) tracks are explicitly marked is_auto_fit and have all sizing zeroed
-    // A track is collapsed only if it's an auto-fit track with no content
-    let non_collapsed_count = tracks
-        .iter()
-        .filter(|t| {
-            // A track is NOT collapsed if:
-            // - It's not an auto-fit track, OR
-            // - It has some size (base_size, growth_limit, percent, flex)
-            !t.is_auto_fit
-                || t.base_size > 0.0
-                || t.growth_limit > 0.0
-                || t.is_flexible
-                || t.percent.is_some()
-                || t.max_percent.is_some()
-        })
-        .count();
-    let total_gaps = non_collapsed_count.saturating_sub(1) as f32 * gap;
+    let total_gaps = total_gutters(tracks, gap);
     let available_space = (container_size - total_gaps).max(0.0);
 
     // Step 1: Initialize base sizes
@@ -4101,17 +4086,31 @@ fn size_grid_tracks_filling(
     }
 
     // Step 5: Calculate positions (starting from 0, alignment applied separately)
-    // For auto-fit, collapsed tracks (size = 0) should not have gaps
+    position_tracks(tracks, gap);
+}
+
+/// The gutters of a track list: one between each two tracks that are not
+/// collapsed, however many collapsed ones lie between them.
+fn total_gutters(tracks: &[GridTrack], gap: f32) -> f32 {
+    tracks.iter().filter(|t| !t.collapsed).count().saturating_sub(1) as f32 * gap
+}
+
+/// Track positions from 0, from the final sizes. A gutter comes before every
+/// open track but the first one: the gutters on either side of a collapsed
+/// auto-fit track coincide, they do not both vanish. Asking only whether the
+/// track just before was open dropped the gutter owed after a run of
+/// collapsed tracks (`repeat(auto-fit, 120px)` with an item in column 4 and
+/// a 20px gap sat at 120, Chromium 140).
+fn position_tracks(tracks: &mut [GridTrack], gap: f32) {
     let mut position = 0.0;
-    let mut prev_was_collapsed = true; // Start true to skip gap before first track
+    let mut seen_open = false;
     for track in tracks.iter_mut() {
-        // Add gap only if previous track was not collapsed and current track is not collapsed
-        if !prev_was_collapsed && track.size > 0.0 {
+        if seen_open && !track.collapsed {
             position += gap;
         }
         track.position = position;
         position += track.size;
-        prev_was_collapsed = track.size == 0.0;
+        seen_open |= !track.collapsed;
     }
 }
 
@@ -4136,8 +4135,7 @@ fn stretch_auto_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) 
     }
 
     // Calculate used space
-    let non_collapsed_count = tracks.iter().filter(|t| t.size > 0.0).count();
-    let total_gaps = non_collapsed_count.saturating_sub(1) as f32 * gap;
+    let total_gaps = total_gutters(tracks, gap);
     let total_track_size: f32 = tracks.iter().map(|t| t.size).sum();
     let used_space = total_track_size + total_gaps;
     let free_space = (container_size - used_space).max(0.0);
@@ -4156,7 +4154,7 @@ fn stretch_auto_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) 
             // or if it has room to grow (growth_limit > size)
             (t.is_min_content && t.is_max_content) || t.growth_limit > t.size
         })
-        .filter(|(_, t)| t.size > 0.0) // Only stretch non-collapsed tracks
+        .filter(|(_, t)| !t.collapsed) // Only stretch non-collapsed tracks
         .map(|(i, _)| i)
         .collect();
 
@@ -4171,16 +4169,7 @@ fn stretch_auto_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) 
     }
 
     // Recalculate positions after stretching
-    let mut position = 0.0;
-    let mut prev_was_collapsed = true;
-    for track in tracks.iter_mut() {
-        if !prev_was_collapsed && track.size > 0.0 {
-            position += gap;
-        }
-        track.position = position;
-        position += track.size;
-        prev_was_collapsed = track.size == 0.0;
-    }
+    position_tracks(tracks, gap);
 }
 
 /// Apply content alignment (justify-content/align-content) to tracks.
@@ -4194,7 +4183,7 @@ fn apply_content_alignment(tracks: &mut [GridTrack], container_size: f32, gap: f
     let non_collapsed_tracks: Vec<usize> = tracks
         .iter()
         .enumerate()
-        .filter(|(_, t)| t.size > 0.0)
+        .filter(|(_, t)| !t.collapsed)
         .map(|(i, _)| i)
         .collect();
 
@@ -4236,7 +4225,7 @@ fn apply_content_alignment(tracks: &mut [GridTrack], container_size: f32, gap: f
                 let extra_gap = free_space / (track_count - 1) as f32;
                 let mut cumulative_offset = 0.0;
                 for (i, track) in tracks.iter_mut().enumerate() {
-                    if track.size > 0.0 {
+                    if !track.collapsed {
                         track.position += cumulative_offset;
                         // Add gap after each non-collapsed track except the last
                         let is_last_non_collapsed = non_collapsed_tracks.last() == Some(&i);
@@ -4257,7 +4246,7 @@ fn apply_content_alignment(tracks: &mut [GridTrack], container_size: f32, gap: f
                 let gap_per_side = free_space / (track_count * 2) as f32;
                 let mut cumulative_offset = gap_per_side; // Start with half gap
                 for track in tracks.iter_mut() {
-                    if track.size > 0.0 {
+                    if !track.collapsed {
                         track.position += cumulative_offset;
                         cumulative_offset += gap_per_side * 2.0; // Full gap between tracks
                     } else {
@@ -4272,7 +4261,7 @@ fn apply_content_alignment(tracks: &mut [GridTrack], container_size: f32, gap: f
                 let space = free_space / (track_count + 1) as f32;
                 let mut cumulative_offset = space; // Start with one unit of space
                 for track in tracks.iter_mut() {
-                    if track.size > 0.0 {
+                    if !track.collapsed {
                         track.position += cumulative_offset;
                         cumulative_offset += space;
                     } else {
@@ -5991,6 +5980,7 @@ mod tests {
                 t.base_size = 0.0;
                 t.size = 0.0;
                 t.growth_limit = 0.0;
+                t.collapsed = true;
                 t
             },
             {
@@ -6011,9 +6001,26 @@ mod tests {
         assert_eq!(tracks[1].position, 100.0);
         assert_eq!(tracks[1].size, 0.0);
 
-        // Third track should be at position 100 (no gap because previous was collapsed)
-        // The gutters on EITHER SIDE of a collapsed track collapse
-        assert_eq!(tracks[2].position, 100.0);
+        // The gutters on either side of a collapsed track collapse INTO ONE:
+        // the third track is one gutter after the first. This pinned 100 (no
+        // gutter at all); Chromium gives 120 (`repeat(auto-fit, 100px)` with
+        // items in columns 1 and 3 of 3, in the engine's case file as
+        // `auto-fit-px-collapsed-tracks-first-between-and-last`).
+        assert_eq!(tracks[2].position, 120.0);
+    }
+
+    #[test]
+    fn a_zero_size_track_that_is_not_collapsed_keeps_its_gutters() {
+        // `100px 0px 100px` with a 20px gap: Chromium places them at 0, 120
+        // and 140. Reading "0 wide" as "collapsed" gave 0, 100, 100.
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Px(100.0)),
+            GridTrack::new(&TrackSize::Px(0.0)),
+            GridTrack::new(&TrackSize::Px(100.0)),
+        ];
+        size_grid_tracks(&mut tracks, 600.0, 20.0);
+        let positions: Vec<f32> = tracks.iter().map(|t| t.position).collect();
+        assert_eq!(positions, [0.0, 120.0, 140.0]);
     }
 
     #[test]
@@ -6026,6 +6033,7 @@ mod tests {
                 t.base_size = 0.0;
                 t.size = 0.0;
                 t.growth_limit = 0.0;
+                t.collapsed = true;
                 t
             },
             {
@@ -6034,6 +6042,7 @@ mod tests {
                 t.base_size = 0.0;
                 t.size = 0.0;
                 t.growth_limit = 0.0;
+                t.collapsed = true;
                 t
             },
         ];
@@ -7540,6 +7549,7 @@ mod tests {
         tracks[0].is_min_content = false;  // Clear intrinsic flags
         tracks[0].is_max_content = false;
         tracks[0].is_flexible = false;
+        tracks[0].collapsed = true;
         tracks[1].base_size = 100.0;
 
         size_grid_tracks(&mut tracks, 200.0, 10.0);
