@@ -319,6 +319,8 @@ mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
 #[cfg(all(test, feature = "headless"))]
+mod fixed_under_scroll_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -651,6 +653,12 @@ struct ViewState {
     document: Option<Rc<Document>>,
     #[allow(dead_code)]
     layout: Option<LayoutBox>,
+    /// Where `layout` has its `position: fixed` boxes that the scroll
+    /// leaves in place (`LayoutBox::held_fixed_paths`), read when the
+    /// layout is stored. With none, a hit test is the pruned walk of the
+    /// page; with some, those boxes and that walk. `None` (not known) is
+    /// always safe: the boxes are then looked for on every hit test.
+    held_fixed: Option<Vec<Vec<usize>>>,
     #[allow(dead_code)]
     display_list: Option<DisplayList>,
     #[allow(dead_code)]
@@ -1768,6 +1776,7 @@ impl Engine {
             http_status: None,
             document: None,
             layout: None,
+            held_fixed: None,
             display_list: None,
             frame_generation: 0,
             presented: None,
@@ -1849,6 +1858,7 @@ impl Engine {
             http_status: None,
             document: None,
             layout: None,
+            held_fixed: None,
             display_list: None,
             frame_generation: 0,
             presented: None,
@@ -1939,6 +1949,7 @@ impl Engine {
             http_status: None,
             document: None,
             layout: None,
+            held_fixed: None,
             display_list: None,
             frame_generation: 0,
             presented: None,
@@ -2187,7 +2198,8 @@ impl Engine {
     ///
     /// The click point is translated into document coordinates by the
     /// current scroll offset (layout lives in document space; scroll is a
-    /// render-time translate), then the nearest `<a href>` ancestor's raw
+    /// render-time translate; see [`Self::hit_at`] for the fixed boxes it
+    /// does not move), then the nearest `<a href>` ancestor's raw
     /// href is resolved against the view's URL. Returns `None` for clicks
     /// that hit no link — including `javascript:` links, which are dropped
     /// at layout time.
@@ -2198,9 +2210,7 @@ impl Engine {
         viewport_y: f32,
     ) -> Option<String> {
         let view = self.views.get(&id)?;
-        let doc_x = viewport_x + view.scroll_offset.0;
-        let doc_y = viewport_y + view.scroll_offset.1;
-        let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+        let hit = Self::hit_at(view, viewport_x, viewport_y)?;
         let href = hit.link_href?;
         match view.url.as_ref() {
             Some(base) => base.join(&href).ok().map(|u| u.to_string()),
@@ -2237,17 +2247,7 @@ impl Engine {
         viewport_y: f32,
         why: PointFocus,
     ) -> Option<String> {
-        let (doc_x, doc_y) = {
-            let view = self.views.get(&id)?;
-            (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)
-        };
-
-        let hit_node = self
-            .views
-            .get(&id)
-            .and_then(|v| v.layout.as_ref())
-            .and_then(|l| l.hit_test(doc_x, doc_y))
-            .and_then(|h| h.node_id);
+        let hit_node = Self::hit_at(self.views.get(&id)?, viewport_x, viewport_y).and_then(|h| h.node_id);
 
         // Resolve focusability against the DOM, not the layout box: a
         // FormControl box type would miss `contenteditable` and tabindex
@@ -2495,8 +2495,6 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
-        let doc_x = viewport_x + view.scroll_offset.0;
-        let doc_y = viewport_y + view.scroll_offset.1;
         let movement = view
             .pointer_at
             .map_or((0.0, 0.0), |(x, y)| (viewport_x - x, viewport_y - y));
@@ -2518,11 +2516,9 @@ impl Engine {
             }
             chain
         };
-        let hit = view
-            .layout
-            .as_ref()
-            .filter(|_| inside)
-            .and_then(|l| l.hit_test(doc_x, doc_y));
+        let hit = if inside { Self::hit_at(view, viewport_x, viewport_y) } else { None };
+        // The pointer in the coordinates of the boxes under it.
+        let (doc_x, doc_y) = Self::layout_point(view, hit.as_ref(), viewport_x, viewport_y);
         let now = chain(hit.and_then(|hit| hit.node_id));
         let before = chain(view.hovered_node);
         let (over, out) = (now.first().copied(), before.first().copied());
@@ -2652,14 +2648,62 @@ impl Engine {
         self.views.get(&id)?.document.as_ref()?.get_node(rustkit_dom::NodeId::new(raw))
     }
 
+    /// The box under VIEWPORT coordinates in the page as the window shows
+    /// it: scrolled, with its `position: fixed` boxes where they are drawn
+    /// (`scrolled_commands`). Every pointer path asks here, so what is
+    /// clicked is what is seen.
+    fn hit_at(view: &ViewState, viewport_x: f32, viewport_y: f32) -> Option<rustkit_layout::HitTestResult> {
+        let layout = view.layout.as_ref()?;
+        let page_point = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+        // Every pointer move asks here, and finding the fixed boxes visits
+        // the whole tree: it is done once, when the layout is stored.
+        let hit = match view.held_fixed.as_deref() {
+            Some([]) => layout.hit_test(page_point.0, page_point.1),
+            Some(held) => layout.hit_test_scrolled_with(viewport_x, viewport_y, view.scroll_offset, held),
+            None => layout.hit_test_scrolled(viewport_x, viewport_y, view.scroll_offset),
+        };
+        // A point of the window always has a target. Where no box is one
+        // (`body { pointer-events: none }` under an open menu, whose
+        // document listener waits for the press outside it), the root
+        // element is, as in Chromium, even when it is `none` itself.
+        // The layout's own root box has no node, so a hit that ends on it
+        // (every box with a node stepped aside) is the same case.
+        let root_element = || Some(view.document.as_ref()?.document_element()?.id.raw());
+        match hit {
+            Some(hit) if hit.node_id.is_some() => Some(hit),
+            Some(mut hit) => {
+                hit.node_id = root_element();
+                Some(hit)
+            }
+            None => {
+                let in_window = viewport_x >= 0.0
+                    && viewport_y >= 0.0
+                    && viewport_x < layout.dimensions.border_box().width;
+                in_window.then(|| layout.hit_as_root_element(root_element()?, page_point.0, page_point.1))?
+            }
+        }
+    }
+
+    /// VIEWPORT coordinates in the coordinates of the boxes hit there:
+    /// the document's, or the window's own inside a fixed box.
+    fn layout_point(
+        view: &ViewState,
+        hit: Option<&rustkit_layout::HitTestResult>,
+        viewport_x: f32,
+        viewport_y: f32,
+    ) -> (f32, f32) {
+        if hit.is_some_and(|hit| hit.viewport_fixed) {
+            (viewport_x, viewport_y)
+        } else {
+            (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)
+        }
+    }
+
     /// The element under VIEWPORT coordinates (a text run's element), as a
     /// raw NodeId.
     fn element_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<usize> {
         let view = self.views.get(&id)?;
-        let hit = view
-            .layout
-            .as_ref()?
-            .hit_test(viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)?;
+        let hit = Self::hit_at(view, viewport_x, viewport_y)?;
         let mut node = self.node(id, hit.node_id?)?;
         while !node.is_element() {
             node = node.parent()?;
@@ -2692,13 +2736,15 @@ impl Engine {
             .as_ref()
             .and_then(|l| Self::box_origin(l, target))
             .unwrap_or((0.0, 0.0));
+        let hit = Self::hit_at(view, viewport_x, viewport_y);
+        let (doc_x, doc_y) = Self::layout_point(view, hit.as_ref(), viewport_x, viewport_y);
         let data = rustkit_bindings::MouseEventBindingData {
             client_x: viewport_x as f64,
             client_y: viewport_y as f64,
             screen_x: viewport_x as f64,
             screen_y: viewport_y as f64,
-            offset_x: (viewport_x + view.scroll_offset.0 - origin.0) as f64,
-            offset_y: (viewport_y + view.scroll_offset.1 - origin.1) as f64,
+            offset_x: (doc_x - origin.0) as f64,
+            offset_y: (doc_y - origin.1) as f64,
             ..Default::default()
         };
         let not_cancelled = self.fire_mouse(id, target, "click", &data);
@@ -2826,8 +2872,7 @@ impl Engine {
     fn disabled_control_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
         let node = (|| {
             let view = self.views.get(&id)?;
-            let (doc_x, doc_y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
-            let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+            let hit = Self::hit_at(view, viewport_x, viewport_y)?;
             view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))
         })();
         node.is_some_and(Self::in_disabled_control)
@@ -2959,8 +3004,7 @@ impl Engine {
     /// a link has no `link_href` in the layout, so the DOM is asked.
     fn javascript_href_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<String> {
         let view = self.views.get(&id)?;
-        let (doc_x, doc_y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
-        let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+        let hit = Self::hit_at(view, viewport_x, viewport_y)?;
         let mut node = view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))?;
         loop {
             if let NodeType::Element { tag_name, attributes, .. } = &node.node_type {
@@ -3023,9 +3067,7 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return true;
         };
-        let doc_x = viewport_x + view.scroll_offset.0;
-        let doc_y = viewport_y + view.scroll_offset.1;
-        let Some(hit) = view.layout.as_ref().and_then(|l| l.hit_test(doc_x, doc_y)) else {
+        let Some(hit) = Self::hit_at(view, viewport_x, viewport_y) else {
             return true;
         };
         // A text run is hit, but mouse events target its element.
@@ -5186,6 +5228,7 @@ impl Engine {
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
+        view.held_fixed = Some(root_box.held_fixed_paths());
         view.layout = Some(root_box);
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
         // answer from this layout.
@@ -7245,6 +7288,7 @@ impl Engine {
                         s.line_break = parent.line_break;
                         s.font_stretch = parent.font_stretch;
                         s.visibility = parent.visibility;
+                        s.pointer_events = parent.pointer_events;
                         // NOT CSS inheritance — feature plumbing: gradient
                         // text (background-clip:text + transparent fill) is
                         // detected on the TEXT box at paint time
@@ -7448,6 +7492,7 @@ impl Engine {
             pseudo_style.line_break = parent.line_break;
             pseudo_style.text_transform = parent.text_transform;
             pseudo_style.visibility = parent.visibility;
+            pseudo_style.pointer_events = parent.pointer_events;
         }
 
         // Sort by cascade layer, then specificity (a, b, c); the sort is
@@ -7616,6 +7661,7 @@ impl Engine {
             style.line_break = parent.line_break;
             style.text_transform = parent.text_transform;
             style.visibility = parent.visibility;
+            style.pointer_events = parent.pointer_events;
             // css-tables: both inherit.
             style.border_spacing = parent.border_spacing;
             style.border_collapse = parent.border_collapse;
@@ -8588,6 +8634,7 @@ impl Engine {
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
             "line-break" => style.line_break = parent.line_break,
             "visibility" => style.visibility = parent.visibility,
+            "pointer-events" => style.pointer_events = parent.pointer_events,
             "border-spacing" => style.border_spacing = parent.border_spacing,
             "border-collapse" => style.border_collapse = parent.border_collapse,
             "vertical-align" => style.vertical_align = parent.vertical_align,
@@ -9493,6 +9540,18 @@ impl Engine {
                     _ => {}
                 }
             }
+            "pointer-events" => {
+                // `none` or not: the other values are SVG's ways of
+                // saying which painted part of a shape is a target.
+                match value.trim().to_ascii_lowercase().as_str() {
+                    "none" => style.pointer_events = rustkit_css::PointerEvents::None,
+                    "auto" | "visiblepainted" | "visiblefill" | "visiblestroke" | "visible" | "painted"
+                    | "fill" | "stroke" | "bounding-box" | "all" => {
+                        style.pointer_events = rustkit_css::PointerEvents::Auto
+                    }
+                    _ => {}
+                }
+            }
             "top" => {
                 if let Some(length) = parse_length(value) {
                     style.top = Some(length);
@@ -10094,6 +10153,7 @@ impl Engine {
             "border-left-width" => style.border_left_width = rustkit_css::Length::Zero,
             "width" => style.width = rustkit_css::Length::Auto,
             "visibility" => style.visibility = rustkit_css::Visibility::Visible,
+            "pointer-events" => style.pointer_events = rustkit_css::PointerEvents::Auto,
             "height" => style.height = rustkit_css::Length::Auto,
             "display" => style.display = rustkit_css::Display::Block,
             "opacity" => style.opacity = 1.0,
@@ -13638,6 +13698,8 @@ impl Engine {
                 Cmd::PopTransform => serde_json::json!({ "op": "pop_transform" }),
                 Cmd::PushOpacity(alpha) => serde_json::json!({ "op": "push_opacity", "opacity": alpha }),
                 Cmd::PopOpacity => serde_json::json!({ "op": "pop_opacity" }),
+                Cmd::PushViewportFixed => serde_json::json!({ "op": "push_viewport_fixed" }),
+                Cmd::PopViewportFixed => serde_json::json!({ "op": "pop_viewport_fixed" }),
                 // Not yet modelled: form controls, carets, focus rings, and
                 // the SVG primitives. Named and dumped rather than dropped.
                 other => serde_json::json!({
@@ -14076,14 +14138,7 @@ impl Engine {
                             .execute(&display_list.commands, &texture_view)
                             .map_err(|e| EngineError::RenderError(e.to_string()))?;
                     } else {
-                        let mut scrolled: Vec<rustkit_layout::DisplayCommand> =
-                            Vec::with_capacity(display_list.commands.len() + 2);
-                        scrolled.push(rustkit_layout::DisplayCommand::PushTransform {
-                            matrix: [1.0, 0.0, 0.0, 1.0, -scroll_offset.0, -scroll_offset.1],
-                            origin: (0.0, 0.0),
-                        });
-                        scrolled.extend(display_list.commands.iter().cloned());
-                        scrolled.push(rustkit_layout::DisplayCommand::PopTransform);
+                        let scrolled = scrolled_commands(&display_list.commands, scroll_offset);
                         renderer
                             .execute(&scrolled, &texture_view)
                             .map_err(|e| EngineError::RenderError(e.to_string()))?;
@@ -15976,6 +16031,7 @@ fn is_inherited_property(property: &str) -> bool {
             | "word-spacing"
             | "white-space"
             | "visibility"
+            | "pointer-events"
             | "cursor"
             | "direction"
             | "writing-mode"
@@ -17028,6 +17084,31 @@ fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
     ]
 }
 
+/// The list the window draws for a page scrolled by `scroll_offset`: the
+/// page's own list, which stays in document coordinates, inside one
+/// translate. A `position: fixed` box does not move with the page, so its
+/// run (`PushViewportFixed` to `PopViewportFixed`) is drawn inside the
+/// opposite translate.
+fn scrolled_commands(
+    commands: &[rustkit_layout::DisplayCommand],
+    scroll_offset: (f32, f32),
+) -> Vec<rustkit_layout::DisplayCommand> {
+    use rustkit_layout::DisplayCommand;
+    let translate = |x: f32, y: f32| DisplayCommand::PushTransform {
+        matrix: [1.0, 0.0, 0.0, 1.0, x, y],
+        origin: (0.0, 0.0),
+    };
+    let mut scrolled = Vec::with_capacity(commands.len() + 2);
+    scrolled.push(translate(-scroll_offset.0, -scroll_offset.1));
+    scrolled.extend(commands.iter().map(|command| match command {
+        DisplayCommand::PushViewportFixed => translate(scroll_offset.0, scroll_offset.1),
+        DisplayCommand::PopViewportFixed => DisplayCommand::PopTransform,
+        other => other.clone(),
+    }));
+    scrolled.push(DisplayCommand::PopTransform);
+    scrolled
+}
+
 /// The page-space affine this box's own `transform` contributes, or `None`
 /// when it has none.
 ///
@@ -17247,6 +17328,7 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("position", css_keyword(&format!("{:?}", s.position))),
         ("float", css_keyword(&format!("{:?}", s.float))),
         ("visibility", css_keyword(&format!("{:?}", s.visibility))),
+        ("pointer-events", css_keyword(&format!("{:?}", s.pointer_events))),
         ("opacity", format!("{}", s.opacity)),
         ("overflow-x", css_keyword(&format!("{:?}", s.overflow_x))),
         ("overflow-y", css_keyword(&format!("{:?}", s.overflow_y))),
@@ -23164,6 +23246,39 @@ mod web_font_tests {
         assert_eq!(vis_of(&layout, "c"), Some(Visible), "a child can set visible");
         assert_eq!(vis_of(&layout, "d"), Some(Collapse), "an invalid value is ignored");
         assert_eq!(vis_of(&layout, "e"), Some(Visible));
+    }
+
+    #[test]
+    fn pointer_events_is_parsed_and_inherited_and_a_child_can_undo_it() {
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .layer { pointer-events: none } .layer .toast { pointer-events: auto }
+            .layer .shape { pointer-events: visiblePainted }
+            .bad { pointer-events: none; pointer-events: nonsense }
+            .layer .reset { pointer-events: initial } .again { pointer-events: inherit }
+        </style></head><body>
+            <div class="layer">a<p>b</p><p class="toast">c</p><p class="shape">d</p>
+                <p class="reset">f<span class="again">g</span></p></div>
+            <div class="bad">e</div>
+            <div>h</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn of(b: &LayoutBox, text: &str) -> Option<rustkit_css::PointerEvents> {
+            if matches!(&b.box_type, BoxType::Text(t) if t.trim() == text) {
+                return Some(b.style.pointer_events);
+            }
+            b.children.iter().find_map(|c| of(c, text))
+        }
+        use rustkit_css::PointerEvents::*;
+        assert_eq!(of(&layout, "a"), Some(None));
+        assert_eq!(of(&layout, "b"), Some(None), "inherited");
+        assert_eq!(of(&layout, "c"), Some(Auto), "a child can set auto");
+        assert_eq!(of(&layout, "d"), Some(Auto), "an SVG value is a target");
+        assert_eq!(of(&layout, "e"), Some(None), "an invalid value is ignored");
+        assert_eq!(of(&layout, "f"), Some(Auto), "initial");
+        assert_eq!(of(&layout, "g"), Some(Auto), "inherit, from the reset parent");
+        assert_eq!(of(&layout, "h"), Some(Auto));
     }
 
     #[test]
