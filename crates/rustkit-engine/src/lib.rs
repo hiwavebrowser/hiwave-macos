@@ -2021,7 +2021,8 @@ impl Engine {
     ///
     /// The click point is translated into document coordinates by the
     /// current scroll offset (layout lives in document space; scroll is a
-    /// render-time translate), then the nearest `<a href>` ancestor's raw
+    /// render-time translate; see [`Self::hit_at`] for the fixed boxes it
+    /// does not move), then the nearest `<a href>` ancestor's raw
     /// href is resolved against the view's URL. Returns `None` for clicks
     /// that hit no link — including `javascript:` links, which are dropped
     /// at layout time.
@@ -2032,9 +2033,7 @@ impl Engine {
         viewport_y: f32,
     ) -> Option<String> {
         let view = self.views.get(&id)?;
-        let doc_x = viewport_x + view.scroll_offset.0;
-        let doc_y = viewport_y + view.scroll_offset.1;
-        let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+        let hit = Self::hit_at(view, viewport_x, viewport_y)?;
         let href = hit.link_href?;
         match view.url.as_ref() {
             Some(base) => base.join(&href).ok().map(|u| u.to_string()),
@@ -2071,17 +2070,7 @@ impl Engine {
         viewport_y: f32,
         why: PointFocus,
     ) -> Option<String> {
-        let (doc_x, doc_y) = {
-            let view = self.views.get(&id)?;
-            (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)
-        };
-
-        let hit_node = self
-            .views
-            .get(&id)
-            .and_then(|v| v.layout.as_ref())
-            .and_then(|l| l.hit_test(doc_x, doc_y))
-            .and_then(|h| h.node_id);
+        let hit_node = Self::hit_at(self.views.get(&id)?, viewport_x, viewport_y).and_then(|h| h.node_id);
 
         // Resolve focusability against the DOM, not the layout box: a
         // FormControl box type would miss `contenteditable` and tabindex
@@ -2329,8 +2318,6 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
-        let doc_x = viewport_x + view.scroll_offset.0;
-        let doc_y = viewport_y + view.scroll_offset.1;
         let movement = view
             .pointer_at
             .map_or((0.0, 0.0), |(x, y)| (viewport_x - x, viewport_y - y));
@@ -2352,11 +2339,9 @@ impl Engine {
             }
             chain
         };
-        let hit = view
-            .layout
-            .as_ref()
-            .filter(|_| inside)
-            .and_then(|l| l.hit_test(doc_x, doc_y));
+        let hit = if inside { Self::hit_at(view, viewport_x, viewport_y) } else { None };
+        // The pointer in the coordinates of the boxes under it.
+        let (doc_x, doc_y) = Self::layout_point(view, hit.as_ref(), viewport_x, viewport_y);
         let now = chain(hit.and_then(|hit| hit.node_id));
         let before = chain(view.hovered_node);
         let (over, out) = (now.first().copied(), before.first().copied());
@@ -2486,14 +2471,34 @@ impl Engine {
         self.views.get(&id)?.document.as_ref()?.get_node(rustkit_dom::NodeId::new(raw))
     }
 
+    /// The box under VIEWPORT coordinates in the page as the window shows
+    /// it: scrolled, with its `position: fixed` boxes where they are drawn
+    /// (`scrolled_commands`). Every pointer path asks here, so what is
+    /// clicked is what is seen.
+    fn hit_at(view: &ViewState, viewport_x: f32, viewport_y: f32) -> Option<rustkit_layout::HitTestResult> {
+        view.layout.as_ref()?.hit_test_scrolled(viewport_x, viewport_y, view.scroll_offset)
+    }
+
+    /// VIEWPORT coordinates in the coordinates of the boxes hit there:
+    /// the document's, or the window's own inside a fixed box.
+    fn layout_point(
+        view: &ViewState,
+        hit: Option<&rustkit_layout::HitTestResult>,
+        viewport_x: f32,
+        viewport_y: f32,
+    ) -> (f32, f32) {
+        if hit.is_some_and(|hit| hit.viewport_fixed) {
+            (viewport_x, viewport_y)
+        } else {
+            (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)
+        }
+    }
+
     /// The element under VIEWPORT coordinates (a text run's element), as a
     /// raw NodeId.
     fn element_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<usize> {
         let view = self.views.get(&id)?;
-        let hit = view
-            .layout
-            .as_ref()?
-            .hit_test(viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)?;
+        let hit = Self::hit_at(view, viewport_x, viewport_y)?;
         let mut node = self.node(id, hit.node_id?)?;
         while !node.is_element() {
             node = node.parent()?;
@@ -2526,13 +2531,15 @@ impl Engine {
             .as_ref()
             .and_then(|l| Self::box_origin(l, target))
             .unwrap_or((0.0, 0.0));
+        let hit = Self::hit_at(view, viewport_x, viewport_y);
+        let (doc_x, doc_y) = Self::layout_point(view, hit.as_ref(), viewport_x, viewport_y);
         let data = rustkit_bindings::MouseEventBindingData {
             client_x: viewport_x as f64,
             client_y: viewport_y as f64,
             screen_x: viewport_x as f64,
             screen_y: viewport_y as f64,
-            offset_x: (viewport_x + view.scroll_offset.0 - origin.0) as f64,
-            offset_y: (viewport_y + view.scroll_offset.1 - origin.1) as f64,
+            offset_x: (doc_x - origin.0) as f64,
+            offset_y: (doc_y - origin.1) as f64,
             ..Default::default()
         };
         let not_cancelled = self.fire_mouse(id, target, "click", &data);
@@ -2660,8 +2667,7 @@ impl Engine {
     fn disabled_control_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
         let node = (|| {
             let view = self.views.get(&id)?;
-            let (doc_x, doc_y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
-            let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+            let hit = Self::hit_at(view, viewport_x, viewport_y)?;
             view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))
         })();
         node.is_some_and(Self::in_disabled_control)
@@ -2793,8 +2799,7 @@ impl Engine {
     /// a link has no `link_href` in the layout, so the DOM is asked.
     fn javascript_href_at_point(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<String> {
         let view = self.views.get(&id)?;
-        let (doc_x, doc_y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
-        let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+        let hit = Self::hit_at(view, viewport_x, viewport_y)?;
         let mut node = view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node_id?))?;
         loop {
             if let NodeType::Element { tag_name, attributes, .. } = &node.node_type {
@@ -2857,9 +2862,7 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return true;
         };
-        let doc_x = viewport_x + view.scroll_offset.0;
-        let doc_y = viewport_y + view.scroll_offset.1;
-        let Some(hit) = view.layout.as_ref().and_then(|l| l.hit_test(doc_x, doc_y)) else {
+        let Some(hit) = Self::hit_at(view, viewport_x, viewport_y) else {
             return true;
         };
         // A text run is hit, but mouse events target its element.

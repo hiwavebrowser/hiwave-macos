@@ -6592,11 +6592,86 @@ impl LayoutBox {
     /// Perform hit testing at the given point.
     /// Returns the hit test result with information about the element at the point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTestResult> {
-        self.hit_test_internal(x, y, 0)
+        self.hit_test_internal(x, y, 0, false)
     }
 
-    /// Internal hit test that tracks depth.
-    fn hit_test_internal(&self, x: f32, y: f32, depth: u32) -> Option<HitTestResult> {
+    /// Hit test a point of the window (VIEWPORT coordinates) in a page
+    /// scrolled by `scroll`, when `self` is the root of the layout.
+    ///
+    /// The page's boxes are in document coordinates and move with the
+    /// scroll. A `position: fixed` box does not (the painter's
+    /// `PushViewportFixed` run), so it is tested with the viewport point,
+    /// wherever it sits in the tree: it is not inside its parent's box. A
+    /// fixed box with a negative `z-index` is under the page; the others
+    /// are over it, the highest `z-index` and then the latest first.
+    pub fn hit_test_scrolled(&self, viewport_x: f32, viewport_y: f32, scroll: (f32, f32)) -> Option<HitTestResult> {
+        let mut held = Vec::new();
+        self.hit_test_held_fixed(viewport_x, viewport_y, 0, &mut held);
+        // `max_by_key` keeps the last of equals: the box painted last.
+        let top = held.into_iter().max_by_key(|(z_index, _)| *z_index);
+        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, 0, true);
+        match top {
+            Some((z_index, hit)) if z_index >= 0 => Some(hit),
+            Some((_, hit)) => page().or(Some(hit)),
+            None => page(),
+        }
+    }
+
+    /// Whether the boxes inside this one are in a transformed box, where a
+    /// fixed box moves with the page (the painter's `transformed_ancestors`).
+    fn transforms_descendants(&self) -> bool {
+        !self.style.effective_transform().is_identity()
+    }
+
+    /// Collect a hit at the point, with its `z-index`, for each fixed box
+    /// the scroll does not move, in tree order. A hidden one takes none.
+    fn hit_test_held_fixed(&self, x: f32, y: f32, depth: u32, hits: &mut Vec<(i32, HitTestResult)>) {
+        if self.transforms_descendants() {
+            return;
+        }
+        let first = hits.len();
+        for child in &self.children {
+            if child.position != Position::Fixed {
+                child.hit_test_held_fixed(x, y, depth + 1, hits);
+            } else if child.style.visibility == rustkit_css::Visibility::Visible {
+                if let Some(mut hit) = child.hit_test_internal(x, y, depth + 1, false) {
+                    hit.viewport_fixed = true;
+                    hits.push((child.z_index, hit));
+                }
+            }
+        }
+        for (_, hit) in &mut hits[first..] {
+            self.add_as_ancestor(hit);
+        }
+    }
+
+    /// Add this box to the path of a hit in one of its descendants.
+    fn add_as_ancestor(&self, result: &mut HitTestResult) {
+        result.ancestors.push(HitTestAncestor {
+            box_type: self.box_type.clone(),
+            border_box: self.dimensions.border_box(),
+            content_box: self.dimensions.content,
+            z_index: self.z_index,
+            position: self.position,
+        });
+        // Nearest link wins: only fill in from an ancestor if no
+        // closer box already supplied one.
+        if result.link_href.is_none() {
+            result.link_href = self.link_href.clone();
+        }
+        // Same for the node: an anonymous box (a line, a text run
+        // laid out without one) is hit on behalf of its nearest
+        // ancestor that has a DOM node, or a click on it reaches no
+        // element at all.
+        if result.node_id.is_none() {
+            result.node_id = self.node_id;
+        }
+    }
+
+    /// Internal hit test that tracks depth. `skip_held_fixed` leaves out
+    /// the fixed boxes the scroll does not move (`hit_test_scrolled` tests
+    /// those with the viewport point).
+    fn hit_test_internal(&self, x: f32, y: f32, depth: u32, skip_held_fixed: bool) -> Option<HitTestResult> {
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
 
@@ -6606,29 +6681,15 @@ impl LayoutBox {
         }
 
         // Check children in reverse paint order (topmost first)
+        let skip_held_fixed = skip_held_fixed && !self.transforms_descendants();
         let paint_order = self.get_paint_order();
         for child in paint_order.iter().rev() {
-            if let Some(mut result) = child.hit_test_internal(x, y, depth + 1) {
+            if skip_held_fixed && child.position == Position::Fixed {
+                continue;
+            }
+            if let Some(mut result) = child.hit_test_internal(x, y, depth + 1, skip_held_fixed) {
                 // Found a hit in a child - add ourselves to the path
-                result.ancestors.push(HitTestAncestor {
-                    box_type: self.box_type.clone(),
-                    border_box: self.dimensions.border_box(),
-                    content_box: self.dimensions.content,
-                    z_index: self.z_index,
-                    position: self.position,
-                });
-                // Nearest link wins: only fill in from an ancestor if no
-                // closer box already supplied one.
-                if result.link_href.is_none() {
-                    result.link_href = self.link_href.clone();
-                }
-                // Same for the node: an anonymous box (a line, a text run
-                // laid out without one) is hit on behalf of its nearest
-                // ancestor that has a DOM node, or a click on it reaches no
-                // element at all.
-                if result.node_id.is_none() {
-                    result.node_id = self.node_id;
-                }
+                self.add_as_ancestor(&mut result);
                 return Some(result);
             }
         }
@@ -6651,6 +6712,7 @@ impl LayoutBox {
             is_scrollable,
             link_href: self.link_href.clone(),
             node_id: self.node_id,
+            viewport_fixed: false,
         })
     }
 
@@ -6717,6 +6779,7 @@ impl LayoutBox {
             is_scrollable: false,
             link_href: self.link_href.clone(),
             node_id: self.node_id,
+            viewport_fixed: false,
         });
 
         // Check all children
@@ -6760,6 +6823,10 @@ pub struct HitTestResult {
     /// `link_href` this is NOT inherited from ancestors: the caller wants
     /// the element actually under the cursor.
     pub node_id: Option<usize>,
+    /// The hit is in a `position: fixed` box the page's scroll does not
+    /// move (`LayoutBox::hit_test_scrolled`): its boxes are where the
+    /// window shows them, with no scroll to add.
+    pub viewport_fixed: bool,
 }
 
 impl HitTestResult {

@@ -248,6 +248,30 @@ fn a_fixed_box_under_a_transformed_ancestor_is_clicked_where_it_scrolled_to() {
     assert_eq!(path(engine.link_at_point(view, 20.0, 70.0)), None, "nothing where it was");
 }
 
+/// Of two fixed boxes at the point the higher `z-index` is clicked,
+/// whichever comes first in the page, and a fixed box with a negative
+/// `z-index` is under the page's own boxes.
+#[test]
+fn fixed_boxes_are_clicked_in_z_order() {
+    let fixed = |href: &str, z: i32| {
+        format!("<a href='{href}' style='display:block;position:fixed;left:0;top:0;width:200px;height:20px;z-index:{z}'>x</a>")
+    };
+    let (mut engine, view, _) = page_list(&format!(
+        "{}{}<a href='/under' style='display:block;height:300px'>under</a>",
+        fixed("/dialog", 2),
+        fixed("/bar", 1)
+    ));
+    engine.set_scroll_offset(view, 0.0, 50.0).unwrap();
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/dialog"));
+
+    let (mut engine, view, _) = page_list(&format!(
+        "{}<a href='/under' style='display:block;height:300px'>under</a>",
+        fixed("/behind", -1)
+    ));
+    engine.set_scroll_offset(view, 0.0, 50.0).unwrap();
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/under"));
+}
+
 /// A fixed box that is not shown (a closed menu, a dialog's backdrop)
 /// takes no click from the page under it.
 #[test]
