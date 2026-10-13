@@ -484,6 +484,21 @@ fn urls_lose_user_name_and_password() {
     assert_eq!(diagnostics::scrub_url("https://u:p@cdn.test/i.png?sig=T#f"), "https://cdn.test/i.png");
     assert_eq!(diagnostics::scrub_url("//u:p@cdn.test/i.png"), "//cdn.test/i.png");
     assert_eq!(diagnostics::scrub_url("img/a@2x.png"), "img/a@2x.png");
+    // Schemes are case-insensitive, and leading whitespace is not part of the URL.
+    for u in ["DATA:text/plain,SECRET", "Data:text/plain,SECRET", " \tdata:text/plain,SECRET"] {
+        assert_eq!(diagnostics::scrub_url(u), "data:…", "{u:?}");
+    }
+}
+
+#[test]
+fn a_mixed_case_data_url_in_a_background_keeps_no_payload() {
+    let (engine, view) = engine_with(
+        "<html><body><div id=d style=\"width:10px;height:10px;background-image:url('DATA:text/plain,SECRET')\"></div></body></html>",
+        800,
+        600,
+    );
+    let r = diag(&engine, view, "#d");
+    assert!(!r.to_string().contains("SECRET"), "{}", r["style"]["background-image"]);
 }
 
 #[test]
