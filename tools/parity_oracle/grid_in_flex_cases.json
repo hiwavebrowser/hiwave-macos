@@ -159,6 +159,46 @@
    "name": "control-the-same-grid-in-a-block",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}#a{height:60px}#b{height:60px}#x{width:700px}#m{display:grid;gap:24px;grid-template-columns:400px 276px}</style></head><body><div id=x><div id=m><div id=a>feed</div><div id=b>sidebar</div></div></div></body></html>",
    "chrome_boxes": "x:0:0:700:60 m:0:0:700:60 a:0:0:400:60 b:424:0:276:60"
+  },
+  {
+   "name": "auto-margin-top-item-in-a-centred-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}html,body{height:100%}#m{display:grid;height:240px;width:600px;align-items:center}#p{height:100%;margin-top:auto;max-height:92px}</style></head><body><div id=m><div id=p></div></div></body></html>",
+   "chrome_boxes": "m:0:0:600:240 p:0:148:600:92"
+  },
+  {
+   "name": "google-logo-block-centred-grid-in-a-column",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}html,body{height:100%}#x{display:flex;flex-direction:column;height:100%}#t{height:60px}#m{display:grid;justify-items:center;align-items:center;position:relative;grid-template-rows:minmax(0,1fr);padding:0 96px;flex-shrink:0;box-sizing:border-box;min-height:150px;height:calc(100% - 560px);max-height:290px}#p,#q{grid-area:1/1;height:100%;margin-top:auto}#p{max-height:92px;position:relative;width:272px}#q{display:flex;align-items:center}</style></head><body><div id=x><div id=t></div><div id=m><div id=p></div><div id=q><span>doodle</span></div></div></div></body></html>",
+   "chrome_boxes": "x:0:0:1280:800 t:0:0:1280:60 m:0:60:1280:240 p:504:208:272:92 q:611:60:58:240"
+  },
+  {
+   "name": "auto-margins-top-and-bottom-in-an-end-aligned-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}html,body{height:100%}#m{display:grid;height:240px;width:600px;align-items:end}#p{height:40px;margin:auto 0}</style></head><body><div id=m><div id=p></div></div></body></html>",
+   "chrome_boxes": "m:0:0:600:240 p:0:100:600:40"
+  },
+  {
+   "name": "auto-margin-bottom-in-a-centred-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}html,body{height:100%}#m{display:grid;height:240px;width:600px;align-items:center}#p{height:40px;margin-bottom:auto}</style></head><body><div id=m><div id=p></div></div></body></html>",
+   "chrome_boxes": "m:0:0:600:240 p:0:0:600:40"
+  },
+  {
+   "name": "auto-margin-top-auto-height-item-in-a-centred-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}html,body{height:100%}#m{display:grid;height:240px;width:600px;align-items:center}#p{margin-top:auto}#c{height:40px}</style></head><body><div id=m><div id=p><div id=c></div></div></div></body></html>",
+   "chrome_boxes": "m:0:0:600:240 p:0:200:600:40 c:0:200:600:40"
+  },
+  {
+   "name": "auto-margin-top-auto-height-item-in-a-stretch-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}html,body{height:100%}#m{display:grid;height:240px;width:600px;}#p{margin-top:auto}#c{height:40px}</style></head><body><div id=m><div id=p><div id=c></div></div></div></body></html>",
+   "chrome_boxes": "m:0:0:600:240 p:0:200:600:40 c:0:200:600:40"
+  },
+  {
+   "name": "auto-margin-top-in-a-row-shorter-than-the-item",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}html,body{height:100%}#m{display:grid;height:60px;width:600px;align-items:center}#p{height:100px;margin-top:auto}</style></head><body><div id=m><div id=p></div></div></body></html>",
+   "chrome_boxes": "m:0:0:600:60 p:0:0:600:100"
+  },
+  {
+   "name": "control-centred-grid-item-without-auto-margins",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace}html,body{height:100%}#m{display:grid;height:240px;width:600px;align-items:center}#p{height:100%;max-height:92px}</style></head><body><div id=m><div id=p></div></div></body></html>",
+   "chrome_boxes": "m:0:0:600:240 p:0:74:600:92"
   }
  ],
  "chrome": "143.0.7499.4"
