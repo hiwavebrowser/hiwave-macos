@@ -738,6 +738,14 @@ struct ViewState {
     html_clips: std::cell::Cell<bool>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
+    /// Set by `relayout` for the build it is about to run: nothing but a
+    /// pointer restyle asked for it, so it may keep the laid-out tree
+    /// (`Engine::repaint_restyled`).
+    restyle_only: bool,
+    /// The box tree of the last full layout as it was built, before layout
+    /// wrote into it, with what else that layout read. Kept only while the
+    /// view's sheets read `:hover` or `:active`.
+    unlaid: Option<UnlaidTree>,
     /// Where the pointer was at its last move, in viewport coordinates.
     pointer_at: Option<(f32, f32)>,
     /// The primary button is held: between a press and its release.
@@ -837,6 +845,8 @@ impl ViewState {
         self.active_chain.clear();
         self.rule_reads.get_mut().take();
         self.pointer_restyle = false;
+        self.restyle_only = false;
+        self.unlaid = None;
         self.pointer_at = None;
         self.primary_button_down = false;
         self.press_target = None;
@@ -1801,6 +1811,8 @@ impl Engine {
             rule_reads: std::cell::RefCell::new(None),
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
+            restyle_only: false,
+            unlaid: None,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1883,6 +1895,8 @@ impl Engine {
             rule_reads: std::cell::RefCell::new(None),
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
+            restyle_only: false,
+            unlaid: None,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1974,6 +1988,8 @@ impl Engine {
             rule_reads: std::cell::RefCell::new(None),
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
+            restyle_only: false,
+            unlaid: None,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -4939,6 +4955,9 @@ impl Engine {
         // A pending pointer restyle is covered by this build, whoever asked.
         let mut causes = match self.views.get_mut(&id) {
             Some(view) => {
+                view.restyle_only = restyle_repaint_enabled()
+                    && view.pointer_restyle
+                    && view.relayout_pending.is_empty();
                 if view.pointer_restyle {
                     view.relayout_pending.note(RelayoutCause::HoverOrFocus);
                 }
@@ -4984,8 +5003,10 @@ impl Engine {
     /// layout pass was skipped (the build changed only what is painted).
     fn relayout_uncounted(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         // This build reads the hovered and pressed chains as they are now.
+        let mut restyle_only = false;
         if let Some(view) = self.views.get_mut(&id) {
             view.pointer_restyle = false;
+            restyle_only = std::mem::take(&mut view.restyle_only);
         }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
@@ -5047,6 +5068,20 @@ impl Engine {
             // build; cleared immediately after so no later build inherits it.
             self.build_layout_for_view(id, &document, &external_stylesheets)
         };
+
+        // A pointer restyle that changed only what is painted keeps the
+        // laid-out tree.
+        let root_box = if restyle_only {
+            match self.repaint_restyled(id, root_box, (bounds.width, bounds.height))? {
+                None => return Ok(true),
+                Some(tree) => tree,
+            }
+        } else {
+            root_box
+        };
+        let unlaid = self
+            .keeps_unlaid_tree(id)
+            .then(|| root_box.clone());
 
         // Layout computation
         let mut root_box = root_box;
@@ -5126,98 +5161,7 @@ impl Engine {
         debug_layout_box(&root_box, 0);
 
         // Generate display list
-        let display_list = {
-            let _display_list_span = tracing::info_span!("build_display_list").entered();
-            let mut dl = DisplayList::build(&root_box);
-            // Splice cached SVG documents in place of their Image commands.
-            // Done once per layout (not per frame): the renderer only speaks
-            // raster textures, so vector images become their own command
-            // runs positioned in the image's dest_rect.
-            // Normalize resource URLs to absolute, then splice SVGs.
-            //
-            // CSS `url(...)` is parsed without a base (the parser is a free
-            // function with no document in scope), and `<img>` boxes carry
-            // whatever the build produced. The loader caches under ABSOLUTE
-            // urls, so any relative key here misses the cache and then fails
-            // to parse in the paint path — `Invalid URL for image`, once per
-            // image per frame. Rewriting here means the renderer only ever
-            // sees keys that match what the loader stored.
-            let mut expanded = Vec::with_capacity(dl.commands.len());
-            for mut cmd in dl.commands.drain(..) {
-                match &mut cmd {
-                    rustkit_layout::DisplayCommand::Image { url, .. }
-                    | rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
-                    | rustkit_layout::DisplayCommand::MaskedColor { url, .. } => {
-                        if let Some(abs) = self.resolve_resource_url_in(id, url) {
-                            *url = abs.to_string();
-                        }
-                        self.cache_data_svg(url);
-                    }
-                    _ => {}
-                }
-                match &cmd {
-                    rustkit_layout::DisplayCommand::Image {
-                        url,
-                        dest_rect,
-                        current_color,
-                        ..
-                    } => {
-                        if let Some(svg) = self.svg_cache.get(url) {
-                            // The box's CSS color is what `currentColor`
-                            // resolves to inside an inline <svg>; an <img>'s
-                            // color is the initial black either way, so the
-                            // raster lane is unaffected by passing it through.
-                            expanded.extend(svg.render_with_color(
-                                dest_rect.x,
-                                dest_rect.y,
-                                dest_rect.width,
-                                dest_rect.height,
-                                *current_color,
-                            ));
-                            continue;
-                        }
-                    }
-                    rustkit_layout::DisplayCommand::BackgroundImage {
-                        url,
-                        rect,
-                        size,
-                        position,
-                        offset,
-                        repeat,
-                    } => {
-                        if let Some(svg) = self.svg_cache.get(url) {
-                            expanded.extend(svg_background_commands(svg, *rect, size, *position, *offset, *repeat));
-                            continue;
-                        }
-                    }
-                    // A vector mask is spliced like a vector background,
-                    // its paint recoloured to the masked colour with its
-                    // alpha kept (`mask-mode: alpha`). A raster mask stays
-                    // a `MaskedColor` for the renderer.
-                    rustkit_layout::DisplayCommand::MaskedColor {
-                        color,
-                        url,
-                        rect,
-                        size,
-                        position,
-                        offset,
-                        repeat,
-                    } => {
-                        if let Some(svg) = self.svg_cache.get(url) {
-                            let mut cmds =
-                                svg_background_commands(svg, *rect, size, *position, *offset, *repeat);
-                            rustkit_layout::tint_mask_commands(&mut cmds, *color);
-                            expanded.extend(cmds);
-                            continue;
-                        }
-                    }
-                    _ => {}
-                }
-                expanded.push(cmd);
-            }
-            dl.commands = expanded;
-            dl
-        };
+        let display_list = self.display_list_for(id, &root_box);
 
         debug!(
             ?id,
@@ -5243,6 +5187,10 @@ impl Engine {
             .ok_or(EngineError::ViewNotFound(id))?;
         view.held_fixed = Some(root_box.held_fixed_paths());
         view.layout = Some(root_box);
+        view.unlaid = unlaid.map(|tree| UnlaidTree {
+            tree,
+            size: (bounds.width, bounds.height),
+        });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
         // answer from this layout.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
@@ -5269,6 +5217,164 @@ impl Engine {
         self.render(id)?;
 
         Ok(false)
+    }
+
+    /// The display list of a laid-out tree, as the renderer takes it.
+    fn display_list_for(&mut self, id: EngineViewId, root_box: &LayoutBox) -> DisplayList {
+        let _display_list_span = tracing::info_span!("build_display_list").entered();
+        let mut dl = DisplayList::build(root_box);
+        // Splice cached SVG documents in place of their Image commands.
+        // Done once per layout (not per frame): the renderer only speaks
+        // raster textures, so vector images become their own command
+        // runs positioned in the image's dest_rect.
+        // Normalize resource URLs to absolute, then splice SVGs.
+        //
+        // CSS `url(...)` is parsed without a base (the parser is a free
+        // function with no document in scope), and `<img>` boxes carry
+        // whatever the build produced. The loader caches under ABSOLUTE
+        // urls, so any relative key here misses the cache and then fails
+        // to parse in the paint path — `Invalid URL for image`, once per
+        // image per frame. Rewriting here means the renderer only ever
+        // sees keys that match what the loader stored.
+        let mut expanded = Vec::with_capacity(dl.commands.len());
+        for mut cmd in dl.commands.drain(..) {
+            match &mut cmd {
+                rustkit_layout::DisplayCommand::Image { url, .. }
+                | rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+                | rustkit_layout::DisplayCommand::MaskedColor { url, .. } => {
+                    if let Some(abs) = self.resolve_resource_url_in(id, url) {
+                        *url = abs.to_string();
+                    }
+                    self.cache_data_svg(url);
+                }
+                _ => {}
+            }
+            match &cmd {
+                rustkit_layout::DisplayCommand::Image {
+                    url,
+                    dest_rect,
+                    current_color,
+                    ..
+                } => {
+                    if let Some(svg) = self.svg_cache.get(url) {
+                        // The box's CSS color is what `currentColor`
+                        // resolves to inside an inline <svg>; an <img>'s
+                        // color is the initial black either way, so the
+                        // raster lane is unaffected by passing it through.
+                        expanded.extend(svg.render_with_color(
+                            dest_rect.x,
+                            dest_rect.y,
+                            dest_rect.width,
+                            dest_rect.height,
+                            *current_color,
+                        ));
+                        continue;
+                    }
+                }
+                rustkit_layout::DisplayCommand::BackgroundImage {
+                    url,
+                    rect,
+                    size,
+                    position,
+                    offset,
+                    repeat,
+                } => {
+                    if let Some(svg) = self.svg_cache.get(url) {
+                        expanded.extend(svg_background_commands(svg, *rect, size, *position, *offset, *repeat));
+                        continue;
+                    }
+                }
+                // A vector mask is spliced like a vector background,
+                // its paint recoloured to the masked colour with its
+                // alpha kept (`mask-mode: alpha`). A raster mask stays
+                // a `MaskedColor` for the renderer.
+                rustkit_layout::DisplayCommand::MaskedColor {
+                    color,
+                    url,
+                    rect,
+                    size,
+                    position,
+                    offset,
+                    repeat,
+                } => {
+                    if let Some(svg) = self.svg_cache.get(url) {
+                        let mut cmds =
+                            svg_background_commands(svg, *rect, size, *position, *offset, *repeat);
+                        rustkit_layout::tint_mask_commands(&mut cmds, *color);
+                        expanded.extend(cmds);
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            expanded.push(cmd);
+        }
+        dl.commands = expanded;
+        dl
+    }
+
+    /// Whether the view's sheets read `:hover` or `:active` at all: only
+    /// then can a pointer restyle happen, and only then is the tree kept
+    /// for [`Self::repaint_restyled`].
+    fn keeps_unlaid_tree(&self, id: EngineViewId) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let index = view.rule_reads.borrow();
+        index.as_ref().is_some_and(|index| {
+            [&index.reads.hover, &index.reads.active]
+                .iter()
+                .any(|reads| reads.anywhere || !reads.compounds.is_empty())
+        })
+    }
+
+    /// The short path of a pointer restyle. `fresh` is the tree just built
+    /// with the hovered and pressed chains as they are now. When it differs
+    /// from the tree the view's layout was computed from only in paint
+    /// properties (`ComputedStyle::copy_paint_only`), layout would give
+    /// every box the size and place it already has: those properties are
+    /// copied onto the laid-out boxes, the display list is built from them
+    /// and the view is painted. Returns `None` then, and gives `fresh` back
+    /// when the tree has to be laid out.
+    fn repaint_restyled(
+        &mut self,
+        id: EngineViewId,
+        fresh: LayoutBox,
+        size: (u32, u32),
+    ) -> Result<Option<LayoutBox>, EngineError> {
+        let Some(view) = self.views.get_mut(&id) else {
+            return Ok(Some(fresh));
+        };
+        let needs_layout = match (view.unlaid.as_ref(), view.layout.as_ref()) {
+            (Some(kept), Some(_)) if kept.size != size => Some("resized".to_string()),
+            (Some(kept), Some(laid)) => restyle_needs_layout(&kept.tree, &fresh).or_else(|| {
+                (!same_shape(laid, &fresh)).then(|| "layout moved boxes".to_string())
+            }),
+            _ => Some("no kept tree".to_string()),
+        };
+        if let Some(why) = needs_layout {
+            debug!(?id, why = why.as_str(), "Pointer restyle needs a layout");
+            LAST_RESTYLE_MISS.with(|last| *last.borrow_mut() = why);
+            return Ok(Some(fresh));
+        }
+        let (Some(mut laid), Some(kept)) = (view.layout.take(), view.unlaid.take()) else {
+            return Ok(Some(fresh));
+        };
+        copy_changed_paint(&mut laid, &kept.tree, &fresh);
+        let display_list = self.display_list_for(id, &laid);
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        view.layout = Some(laid);
+        view.unlaid = Some(UnlaidTree { tree: fresh, size });
+        // Script reads of computed style answer from the restyled boxes.
+        if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
+            let (geometry, computed) = geometry_snapshot(layout);
+            bindings.set_geometry(geometry);
+            bindings.set_computed_styles(computed);
+        }
+        view.display_list = Some(display_list);
+        view.frame_generation += 1;
+        self.render(id)?;
+        Ok(None)
     }
 
     /// Check if a style has visible styling (dimensions, background, borders, etc.)
@@ -30888,6 +30994,112 @@ fn note_snapshot_image(image_box: &LayoutBox, width: Option<f32>, height: Option
             }
         }
     });
+}
+
+/// Unless `RUSTKIT_RESTYLE_REPAINT=0`: a pointer restyle that changes only
+/// paint keeps the laid-out tree. Read once.
+fn restyle_repaint_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_RESTYLE_REPAINT").is_none_or(|v| v != "0"))
+}
+
+thread_local! {
+    /// Why the last pointer restyle on this thread was laid out in full
+    /// (`restyle_needs_layout`, or the view was resized, or no tree was
+    /// kept). Diagnostics.
+    static LAST_RESTYLE_MISS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The tree a layout was computed from ([`Engine::repaint_restyled`]).
+struct UnlaidTree {
+    tree: LayoutBox,
+    /// The view's width and height at that layout.
+    size: (u32, u32),
+}
+
+/// What the build gives a box besides its style and its children.
+fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
+    let rest = |x: &LayoutBox| {
+        format!(
+            "{:?}",
+            (
+                &x.box_type,
+                &x.offsets,
+                &x.stacking_context,
+                &x.root_element_height,
+                &x.table_span,
+                &x.float,
+                &x.clear,
+            )
+        )
+    };
+    a.node_id == b.node_id
+        && a.children.len() == b.children.len()
+        && a.position == b.position
+        && a.z_index == b.z_index
+        && a.element_id == b.element_id
+        && a.identity == b.identity
+        && a.link_href == b.link_href
+        && a.focused_caret == b.focused_caret
+        && rest(a) == rest(b)
+}
+
+/// Why a tree as built (not laid out) cannot take the layout of `kept`:
+/// a box of it is not the box `kept` has there ("boxes"), or its style
+/// differs in a property that is not paint ("style: <the first one>").
+/// `None` when the two are the same boxes with styles that differ, if at
+/// all, only in paint properties.
+fn restyle_needs_layout(kept: &LayoutBox, fresh: &LayoutBox) -> Option<String> {
+    if !built_alike(kept, fresh) {
+        return Some("boxes".to_string());
+    }
+    if !kept.style.differs_only_in_paint(&fresh.style) {
+        // Named for the log only, on the way to a full layout.
+        let (a, b) = (format!("{:#?}", kept.style), format!("{:#?}", fresh.style));
+        // The pretty form has one top-level field per four-space line.
+        let mut field = "?";
+        for (a, b) in a.lines().zip(b.lines()) {
+            if a.starts_with("    ") && !a.starts_with("     ") {
+                field = a.trim().split(':').next().unwrap_or("?");
+            }
+            if a != b {
+                break;
+            }
+        }
+        return Some(format!("style: {field}"));
+    }
+    kept.children
+        .iter()
+        .zip(&fresh.children)
+        .find_map(|(kept, fresh)| restyle_needs_layout(kept, fresh))
+}
+
+/// Whether a laid-out tree still has the boxes of the tree it was laid out
+/// from, in their places: layout wrote sizes into them and moved none.
+fn same_shape(laid: &LayoutBox, fresh: &LayoutBox) -> bool {
+    laid.node_id == fresh.node_id
+        && laid.children.len() == fresh.children.len()
+        && std::mem::discriminant(&laid.box_type) == std::mem::discriminant(&fresh.box_type)
+        && laid
+            .children
+            .iter()
+            .zip(&fresh.children)
+            .all(|(laid, fresh)| same_shape(laid, fresh))
+}
+
+/// Copy onto `laid` the paint properties of every box whose paint changed
+/// between `kept` and `fresh` (three trees of one shape), and every box's
+/// custom property set. Layout writes resolved values into a laid-out
+/// box's style, so the style is not replaced whole.
+fn copy_changed_paint(laid: &mut LayoutBox, kept: &LayoutBox, fresh: &LayoutBox) {
+    if kept.style.same_paint(&fresh.style) {
+        laid.style.custom_properties = fresh.style.custom_properties.clone();
+    } else {
+        laid.style.copy_paint_only(&fresh.style);
+    }
+    for ((laid, kept), fresh) in laid.children.iter_mut().zip(&kept.children).zip(&fresh.children) {
+        copy_changed_paint(laid, kept, fresh);
+    }
 }
 
 /// Count the boxes of `kept` that differ from the box at the same place in

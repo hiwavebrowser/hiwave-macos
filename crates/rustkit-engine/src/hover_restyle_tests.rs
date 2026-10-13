@@ -133,6 +133,7 @@ fn a_hover_that_changes_a_size_is_laid_out() {
     hover(&mut engine, view, GROW);
     assert_eq!(restyles(&engine, view), 1);
     assert_eq!(skipped(&engine, view), 0, "height is layout");
+    assert_eq!(LAST_RESTYLE_MISS.with(|why| why.borrow().clone()), "style: height");
     let grown = painted(&engine, view);
     assert_ne!(grown.1, at_rest.1, "the card moved down");
     assert_eq!(grown, painted_by_a_full_relayout(&mut engine, view));
