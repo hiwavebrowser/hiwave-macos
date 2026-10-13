@@ -942,3 +942,36 @@ try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
     let all = serde_json::to_string(&records).unwrap();
     assert!(!all.contains("COOKIE_LOG") && !all.contains("FORGED"), "{all}");
 }
+
+/// A module's error after a top-level `await` is an uncaught error of that
+/// module, as Chromium reports it, whether the `await` waited for a task
+/// (a timer) or only a microtask; once each, never as a rejection.
+#[test]
+fn a_module_error_after_a_top_level_await_is_recorded_once() {
+    let page = "<html><body><script type=\"module\">
+await new Promise(function (r) { setTimeout(r, 5); });
+console.log('m-after');
+throw new Error('TLA_TIMER');
+</script><script type=\"module\">
+await Promise.resolve();
+throw new Error('TLA_MICRO');
+</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let mut errors: Vec<(String, String, String, bool)> = records(&engine, view)
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::ScriptError { name, message, script, unhandled_rejection, .. } => {
+                Some((name, message, script, unhandled_rejection))
+            }
+            _ => None,
+        })
+        .collect();
+    errors.sort();
+    assert_eq!(
+        errors,
+        vec![
+            ("Error".to_string(), "TLA_MICRO".to_string(), "inline#2".to_string(), false),
+            ("Error".to_string(), "TLA_TIMER".to_string(), "inline#1".to_string(), false),
+        ]
+    );
+}
