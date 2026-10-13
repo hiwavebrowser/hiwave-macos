@@ -3,7 +3,7 @@
 //! Boa calls `HostPromiseRejectionTracker` when a promise is rejected with
 //! no handler (`Reject`) and when a handler is later added to one
 //! (`Handle`). What is still unhandled when the embedder asks
-//! ([`crate::JsRuntime::take_unhandled_rejections`], after an evaluation and
+//! ([`crate::JsRuntime::take_error_reports`], after an evaluation and
 //! its jobs) is what a browser reports as `unhandledrejection`.
 //!
 //! Off by default: the hook then returns before it looks at anything, so a
@@ -13,31 +13,28 @@
 //! page's: their rejections are reported as the module's error, so they are
 //! [`forget`](RejectionHooks::forget)-ten here.
 //!
-//! Describing a rejection runs none of the page's code (see `describe`).
+//! Describing a rejection runs none of the page's code (see `diag`).
 
 use std::cell::{Cell, RefCell};
 
 use boa_engine::builtins::promise::{OperationType, PromiseState};
 use boa_engine::context::HostHooks;
 use boa_engine::object::builtins::JsPromise;
-use boa_engine::{Context, JsObject};
-
-use crate::UnhandledRejection;
+use boa_engine::{Context, JsObject, JsValue};
 
 /// Most rejections held at once; past it the oldest is dropped (reported
 /// nowhere: a page rejecting this many promises per evaluation is already
 /// named by the ones that were kept).
 const MAX_PENDING: usize = 256;
+/// Engine-owned promises remembered; past it the oldest is forgotten.
+const MAX_IGNORED: usize = 1024;
 
 #[derive(Default)]
 pub(crate) struct RejectionHooks {
     pub(crate) tracking: Cell<bool>,
     pending: RefCell<std::collections::VecDeque<JsObject>>,
     /// Engine-owned promises: never reported.
-    ignored: RefCell<Vec<JsObject>>,
-    /// The realm's own `Error.prototype.stack` getter, taken before any
-    /// page script ran.
-    pub(crate) stack_getter: RefCell<Option<JsObject>>,
+    ignored: RefCell<std::collections::VecDeque<JsObject>>,
 }
 
 impl HostHooks for RejectionHooks {
@@ -75,23 +72,24 @@ impl RejectionHooks {
             return;
         }
         self.pending.borrow_mut().retain(|p| !JsObject::equals(p, promise));
-        self.ignored.borrow_mut().push(promise.clone());
+        let mut ignored = self.ignored.borrow_mut();
+        if ignored.len() >= MAX_IGNORED {
+            ignored.pop_front();
+        }
+        ignored.push_back(promise.clone());
     }
 
-    /// The rejections still unhandled, described, oldest first. Runs none
-    /// of the page's code.
-    pub(crate) fn take(&self, context: &mut Context) -> Vec<UnhandledRejection> {
+    /// The reasons of the rejections still unhandled, oldest first.
+    pub(crate) fn take(&self) -> Vec<JsValue> {
         let pending = std::mem::take(&mut *self.pending.borrow_mut());
-        let getter = self.stack_getter.borrow().clone();
         pending
             .into_iter()
             .filter_map(|object| {
                 let promise = JsPromise::from_object(object).ok()?;
-                let PromiseState::Rejected(reason) = promise.state() else {
-                    return None;
-                };
-                let (message, stack) = crate::describe::error_report(&reason, getter.as_ref(), context);
-                Some(UnhandledRejection { message, stack })
+                match promise.state() {
+                    PromiseState::Rejected(reason) => Some(reason),
+                    _ => None,
+                }
             })
             .collect()
     }

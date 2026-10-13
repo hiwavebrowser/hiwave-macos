@@ -32,7 +32,7 @@
         return typeof g.DOMException === 'function' ? new g.DOMException(message, name) : (function () { var e = new Error(message); e.name = name; return e; })();
     }
     function report(e) {
-        try { if (g.__rustkit_errors) g.__rustkit_errors.push(g.__rustkit_error_text ? g.__rustkit_error_text(e) : String(e)); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
     function call(fn, thisArg, args) {
         try { fn.apply(thisArg, args); } catch (e) { report(e); }
@@ -207,7 +207,7 @@
         if (byName[name]) throw domError("Failed to execute 'define' on 'CustomElementRegistry': the name \"" + name + '" has already been used with this registry', 'NotSupportedError');
         if (byCtor && byCtor.has(ctor)) throw domError("Failed to execute 'define' on 'CustomElementRegistry': this constructor has already been used with this registry", 'NotSupportedError');
         if (options && options.extends !== undefined && options.extends !== null) {
-            if (g.__rustkit_unsupported) g.__rustkit_unsupported('CustomElementRegistry', 'define(extends)');
+            __rk.unsupported('CustomElementRegistry', 'define(extends)');
             throw domError("Failed to execute 'define' on 'CustomElementRegistry': customized built-in elements are not supported", 'NotSupportedError');
         }
         var proto = ctor.prototype;

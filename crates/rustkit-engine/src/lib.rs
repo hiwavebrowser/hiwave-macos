@@ -2189,7 +2189,7 @@ impl Engine {
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(e.to_string()),
                     };
-                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record, None);
+                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                 }
                 inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
             }
@@ -3180,7 +3180,7 @@ impl Engine {
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Threw(e.to_string()),
                 };
-                inspector_glue::log_script(&mut view.script_log, &view.inspector, record, None);
+                inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                 true
             }
         };
@@ -3228,6 +3228,8 @@ impl Engine {
             Ok(Err(e)) => threw.push(("timers", e.to_string())),
             Err(_) => threw.push(("timers", "JS engine panic".into())),
         }
+        // What the timers threw or left rejected is theirs in the Inspector.
+        inspector_glue::drain_errors(bindings, &view.inspector, "timers");
         if let Some(policy) = policy {
             // Start what the page has asked for since the last turn. No turn
             // waits for an answer: this thread is the window's.
@@ -3279,17 +3281,17 @@ impl Engine {
                 }
             }
         }
-        let reported = bindings.take_reported_error_details();
-        inspector_glue::drain_quiet(bindings, &view.inspector, "timers");
+        let reported = bindings.take_reported_errors();
+        inspector_glue::drain_quiet(bindings, &view.inspector, "network");
         out.next_timer_ms = bindings.next_timer_delay();
         let threw = threw
             .into_iter()
-            .map(|(source, message)| (source, message, None))
-            .chain(reported.into_iter().map(|(message, stack)| ("timers", message, stack)));
-        for (source, message, stack) in threw {
+            .chain(reported.into_iter().map(|message| ("timers", message)));
+        for (source, message) in threw {
             if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
-                // The log is full; the Inspector's buffer bounds itself.
-                inspector_glue::script_error(&view.inspector, &message, stack, false, source);
+                // The log is full; the Inspector's buffer bounds itself (the
+                // page's errors reached it from their reports above).
+                inspector_glue::engine_error(&view.inspector, &message, source);
                 continue;
             }
             let record = ScriptRecord {
@@ -3298,7 +3300,7 @@ impl Engine {
                 elapsed_ms: 0,
                 outcome: ScriptOutcome::Threw(message),
             };
-            inspector_glue::log_script(&mut view.script_log, &view.inspector, record, stack);
+            inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
         }
 
         match self.flush_script_dom_writes(id, Some(RelayoutCause::Timer)) {
@@ -4105,7 +4107,7 @@ impl Engine {
                 Err(outcome) if is_module => runnable.push((label, 1, Err(outcome), node_id, true)),
                 Err(outcome) => {
                     let record = ScriptRecord { source: label, bytes: 0, elapsed_ms: 0, outcome };
-                    inspector_glue::log_script(log, &inspector, record, None);
+                    inspector_glue::log_script(log, &inspector, record);
                 }
             }
         }
@@ -4173,7 +4175,7 @@ impl Engine {
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(format!("import map: {message}")),
                     };
-                    inspector_glue::log_script(log, &inspector, record, None);
+                    inspector_glue::log_script(log, &inspector, record);
                 }
             }
         }
@@ -4313,7 +4315,7 @@ impl Engine {
                     elapsed_ms,
                     outcome,
                 };
-                inspector_glue::log_script(log, &inspector, record, None);
+                inspector_glue::log_script(log, &inspector, record);
                 inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &label);
                 if let Some(event) = event {
                     let _ = bindings.fire_script_event(node_id, event);
@@ -4345,7 +4347,7 @@ impl Engine {
                 result
             });
             let source = record.source.clone();
-            inspector_glue::log_script(log, &inspector, record, None);
+            inspector_glue::log_script(log, &inspector, record);
             // What its listeners threw (a synchronous `click()`, an `on*`
             // attribute) is this script's in the Inspector; the script log
             // keeps it for the next lifecycle step (`carried`).
@@ -4403,7 +4405,7 @@ impl Engine {
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Threw("JS engine panic".into()),
                 };
-                inspector_glue::log_script(log, &inspector, record, None);
+                inspector_glue::log_script(log, &inspector, record);
                 return;
             }
             for message in found.threw {
@@ -4413,7 +4415,7 @@ impl Engine {
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Threw(message),
                 };
-                inspector_glue::log_script(log, &inspector, record, None);
+                inspector_glue::log_script(log, &inspector, record);
             }
         }
 
@@ -4459,7 +4461,7 @@ impl Engine {
             // Only an escaped error (the loop limit, a panic) is worth a
             // record of its own; a clean step is not a script.
             if record.outcome != ScriptOutcome::Ran {
-                inspector_glue::log_script(log, &inspector, record, None);
+                inspector_glue::log_script(log, &inspector, record);
             }
             if poisoned.get() {
                 return;
@@ -4475,7 +4477,7 @@ impl Engine {
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(message),
                     };
-                    inspector_glue::log_script(log, &inspector, record, None);
+                    inspector_glue::log_script(log, &inspector, record);
                 }
                 if found.poisoned {
                     let record = ScriptRecord {
@@ -4484,7 +4486,7 @@ impl Engine {
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw("JS engine panic".into()),
                     };
-                    inspector_glue::log_script(log, &inspector, record, None);
+                    inspector_glue::log_script(log, &inspector, record);
                     return;
                 }
             }

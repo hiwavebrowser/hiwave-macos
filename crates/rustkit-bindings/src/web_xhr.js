@@ -25,7 +25,7 @@
         var e = new Error(message); e.name = name; return e;
     }
     function report(e) {
-        try { if (g.__rustkit_errors) g.__rustkit_errors.push(g.__rustkit_error_text ? g.__rustkit_error_text(e) : String(e)); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
 
     // ---- bytes <-> base64
@@ -162,10 +162,10 @@
         }
         // Only a response that is a document (XML or HTML) would have been
         // parsed into one: anything else is null in every browser too.
-        if (g.__rustkit_unsupported && s.state === DONE && s.bytes) {
+        if (s.state === DONE && s.bytes) {
             var type = String(s.mime || headerValue(s, 'content-type') || '').split(';')[0].trim().toLowerCase();
             if (s.responseType === 'document' ? /(^text\/html$)|xml$/.test(type) : /xml$/.test(type)) {
-                g.__rustkit_unsupported('XMLHttpRequest', 'responseXML');
+                __rk.unsupported('XMLHttpRequest', 'responseXML');
             }
         }
         return null;
@@ -252,7 +252,7 @@
         try { abs = new g.URL(String(url), g.document && g.document.baseURI ? g.document.baseURI : g.location.href).href; }
         catch (_) { throw domError("Failed to execute 'open' on 'XMLHttpRequest': Invalid URL", 'SyntaxError'); }
         if (async !== undefined && !async) {
-            if (g.__rustkit_unsupported) g.__rustkit_unsupported('XMLHttpRequest', 'open(async=false)');
+            __rk.unsupported('XMLHttpRequest', 'open(async=false)');
             throw domError("Failed to execute 'open' on 'XMLHttpRequest': synchronous requests are not supported", 'NotSupportedError');
         }
         // open() restarts: abandon anything in flight without events.

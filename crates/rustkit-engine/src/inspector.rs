@@ -11,10 +11,15 @@
 //! keeps its scheme, host, port and path, never its user name, password,
 //! query or fragment (a flag keeps the query and fragment); a `data:` URL
 //! keeps only its MIME type. No header, request or response body, form value
-//! or storage is recorded. A console message is, by default, each argument's
-//! type and a string's length only (pages log cookies, form values and their
-//! own URL); with [`InspectorConfig::keep_console_text`] it is the text,
-//! capped, URLs in it scrubbed, never interpreted.
+//! or storage is recorded. No text the page chose is recorded by default
+//! (pages log and throw cookies, form values and their own URL): a console
+//! message is each argument's type and a string's length; an error is the
+//! thrown value's type, a standard error name (else `Error`), its message's
+//! length, and the positions of the page's frames (script, line, column;
+//! never a function name). An error message is kept only when it is one of
+//! the engine's own fixed messages. [`InspectorConfig::keep_console_text`]
+//! and [`InspectorConfig::keep_error_text`] keep the page's text: never for a
+//! log that will be shared.
 //!
 //! The buffer is behind a mutex shared with the embedder ([`Engine::inspector`]
 //! hands out an `Arc`), so another thread can take a snapshot while the page's
@@ -57,8 +62,16 @@ pub struct InspectorConfig {
     /// Keep the text of console messages. Off by default: a console line
     /// is then each argument's type, and a string's length (`<string
     /// len=12>`), since pages log cookies, form values and their own URL.
-    /// When on, URLs in the text are still scrubbed as event URLs are.
+    /// When on, URLs in the text are still scrubbed as event URLs are, but
+    /// cookies, form values and anything else the page logs are kept: never
+    /// for a log that will be shared.
     pub keep_console_text: bool,
+    /// Keep the message text of errors the page throws or rejects with.
+    /// Off by default: an error is then its type, a standard name, its
+    /// message's length and its frames' positions. When on, the message is
+    /// kept verbatim (capped) with whatever the page put in it: never for a
+    /// log that will be shared.
+    pub keep_error_text: bool,
 }
 
 impl Default for InspectorConfig {
@@ -68,6 +81,7 @@ impl Default for InspectorConfig {
             capacity: DEFAULT_CAPACITY,
             keep_url_query: false,
             keep_console_text: false,
+            keep_error_text: false,
         }
     }
 }
@@ -211,16 +225,31 @@ pub enum InspectorEvent {
     },
     /// An exception no script caught, or a promise rejected with no handler.
     ScriptError {
-        /// `TypeError`, `Error`, ...; empty when a non-error was thrown.
+        /// A standard error name (`TypeError`, `NotFoundError`, ...; any
+        /// other name the page gave is `Error`); empty when a non-error was
+        /// thrown.
         name: String,
-        message: String,
+        /// The message, only when it is one of the engine's own fixed
+        /// messages (`not a callable function`, `… is not defined`) or
+        /// [`InspectorConfig::keep_error_text`] is on; else `null`.
+        message: Option<String>,
+        /// Where it was thrown: the innermost of the page's frames.
         location: Option<SourceLocation>,
+        /// The page's frames, innermost first, one `    at url:line:col`
+        /// line each (no function names).
         stack: Option<String>,
         unhandled_rejection: bool,
         /// Which of the page's scripts it came from: a script URL,
         /// `inline#n`, or the engine step that ran it (`event:load`,
         /// `timers`, `network`, ...).
         script: String,
+        /// What was thrown: `error`, `string`, `number`, `bigint`,
+        /// `boolean`, `symbol`, `null`, `undefined`, `object`, `array`,
+        /// `function`, or `engine` for the engine's own failure.
+        value: String,
+        /// The message's length in characters, when it has one (an error's
+        /// message, a thrown string).
+        message_len: Option<u64>,
     },
     /// Page script used a Web API member the engine does not implement.
     /// Recorded once per page per member; `Inspector::unsupported_apis`
@@ -361,6 +390,7 @@ pub struct Inspector {
     active: AtomicBool,
     keep_url_query: bool,
     keep_console_text: bool,
+    keep_error_text: bool,
     state: Mutex<State>,
 }
 
@@ -370,6 +400,7 @@ impl Inspector {
             active: AtomicBool::new(config.buffer),
             keep_url_query: config.keep_url_query,
             keep_console_text: config.keep_console_text,
+            keep_error_text: config.keep_error_text,
             state: Mutex::new(State {
                 buffer: config.buffer,
                 capacity: config.capacity.max(1),
@@ -768,13 +799,53 @@ impl Inspector {
                 return format!("inline#{n}");
             }
         }
+        if text.starts_with("event:") {
+            return cap(text, MAX_SHORT_CHARS).0;
+        }
         match Url::parse(text) {
-            Ok(url) if matches!(url.scheme(), "http" | "https" | "ws" | "wss" | "file" | "data" | "blob") => {
-                self.url(&url)
-            }
-            // `event:load`, `inline#2`: names, not URLs.
+            // Any scheme, as the URL parser reads it.
+            Ok(url) => self.url(&url),
+            // `inline#2`, `timers`: names, not URLs.
             _ => cap(text, MAX_SHORT_CHARS).0,
         }
+    }
+
+    /// A page frame's script as events show it: an engine label
+    /// (`inline#n`, `script#n` resolved to its URL), or a URL as
+    /// [`url`](Self::url) shows it (the URL parser's reading: tabs and
+    /// newlines dropped, backslashes as slashes, any scheme). `None` for
+    /// anything else: a frame that cannot be read is dropped, never copied.
+    pub fn frame_location(&self, path: &str, line: u32, column: u32) -> Option<SourceLocation> {
+        if let Some(url) = self
+            .state()
+            .aliases
+            .iter()
+            .find(|(alias, _)| alias == path)
+            .map(|(_, url)| url.clone())
+        {
+            return Some(SourceLocation { url, line, column });
+        }
+        let label = |prefix: &str| {
+            path.strip_prefix(prefix)
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        };
+        let url = if label("inline#") || label("script#") {
+            path.to_string()
+        } else if let Some((_, n)) = path.rsplit_once("#inline-module-") {
+            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            format!("inline#{n}")
+        } else {
+            self.url(&Url::parse(path).ok()?)
+        };
+        Some(SourceLocation { url, line, column })
+    }
+
+    /// Whether error messages keep their text (see
+    /// [`InspectorConfig::keep_error_text`]).
+    pub fn keeps_error_text(&self) -> bool {
+        self.keep_error_text
     }
 
     /// Whether console messages keep their text (see
@@ -1076,54 +1147,6 @@ pub fn scrub_url(url: &Url, keep_query: bool) -> String {
     }
 }
 
-/// A script position as text gives it: path, line, column.
-pub type PositionParts = (String, u32, u32);
-
-/// What [`parse_error_text`] finds: name, message, where it was thrown, and
-/// the stack lines.
-pub type ErrorTextParts = (String, String, Option<PositionParts>, Option<String>);
-
-/// An error string as the engine records it (`String(error)`, the JS
-/// engine's `Name: message (path:line:col)` with its stack lines after it,
-/// or what a listener's `report` captured) taken apart. Parses text only.
-pub fn parse_error_text(text: &str) -> ErrorTextParts {
-    let (head, stack) = match text.split_once('\n') {
-        Some((head, rest)) => (head, Some(rest)),
-        None => (text, None),
-    };
-    // Boa appends ` (path:line:col)` to the message line, or ` (native)`
-    // for an error made in a native frame (an `await` resumed by a job).
-    let head = head.strip_suffix(" (native)").unwrap_or(head);
-    let (head, head_position) = match head.rfind(" (") {
-        Some(at) if head.ends_with(')') => match parse_position(&head[at + 2..head.len() - 1]) {
-            Some(position) => (&head[..at], Some(position)),
-            None => (head, None),
-        },
-        _ => (head, None),
-    };
-    let (name, message) = match head.split_once(": ") {
-        Some((name, message))
-            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') =>
-        {
-            (name.to_string(), message.to_string())
-        }
-        _ => (String::new(), head.to_string()),
-    };
-    let stack = stack
-        .map(|s| s.trim_end_matches('\n'))
-        .filter(|s| !s.trim().is_empty());
-    // The innermost frame is where it was thrown.
-    let position = stack
-        .and_then(|s| s.lines().next())
-        .and_then(|line| {
-            // The path holds no space; its query may hold a `(`.
-            let open = line.rfind(" (")?;
-            parse_position(line[open + 2..].strip_suffix(')')?)
-        })
-        .or(head_position);
-    (name, message, position, stack.map(str::to_string))
-}
-
 /// Where `scheme` next starts in `lower` from `from`: anywhere for a
 /// `scheme://`, and for `data:` only where no letter or digit comes right
 /// before it (`metadata:` is a word).
@@ -1168,6 +1191,9 @@ pub fn mime_essence(content_type: &str) -> Option<String> {
     let (kind, subtype) = essence.split_once('/')?;
     (essence.len() <= 64 && token(kind) && token(subtype)).then(|| essence.to_ascii_lowercase())
 }
+
+/// A script position as text gives it: path, line, column.
+type PositionParts = (String, u32, u32);
 
 /// `path:line:col`, the path possibly holding colons itself.
 fn parse_position(text: &str) -> Option<PositionParts> {

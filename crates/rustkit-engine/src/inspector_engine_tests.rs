@@ -163,11 +163,14 @@ pub(crate) fn describe(record: &InspectorRecord, port: u16) -> String {
         InspectorEvent::Console { level, message, location, .. } => {
             format!("console {level:?} {message}{}", at(location))
         }
-        InspectorEvent::ScriptError { name, message, location, unhandled_rejection, script, .. } => format!(
-            "script_error {name}: {message}{} script={} rejection={unhandled_rejection}",
-            at(location),
-            local(script)
-        ),
+        InspectorEvent::ScriptError { name, message, location, unhandled_rejection, script, value, message_len, .. } => {
+            format!(
+                "script_error {name}: {}{} script={} rejection={unhandled_rejection}",
+                shown_message(message, value, *message_len),
+                at(location),
+                local(script)
+            )
+        }
         InspectorEvent::UnsupportedApi { interface, member, location } => {
             format!("unsupported_api {interface}.{member}{}", at(location))
         }
@@ -189,6 +192,16 @@ pub(crate) fn describe(record: &InspectorRecord, port: u16) -> String {
             if *from_cache { " cache" } else { "" }
         ),
         InspectorEvent::Failure { id, stage, reason, .. } => format!("failure #{id} {} {reason}", stage.as_str()),
+    }
+}
+
+/// An error record's message as the tests show it: the text when it was
+/// kept, else the thrown value's type and the message's length.
+pub(crate) fn shown_message(message: &Option<String>, value: &str, length: Option<u64>) -> String {
+    match (message, length) {
+        (Some(message), _) => message.clone(),
+        (None, Some(length)) => format!("<{value} len={length}>"),
+        (None, None) => format!("<{value}>"),
     }
 }
 
@@ -281,7 +294,7 @@ Promise.reject(new Error('caught')).catch(function () {});
     let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
     assert_eq!(
         only(&described(&engine, view, server.port), &["script_error"]),
-        vec!["script_error RangeError: nobody caught this @inline#1:2:16 script=inline#1 rejection=true"]
+        vec!["script_error RangeError: <error len=18> @inline#1:2:16 script=inline#1 rejection=true"]
     );
 }
 
@@ -306,7 +319,8 @@ window.addEventListener('load', function onLoad() {
             _ => None,
         })
         .expect("a stack");
-    assert_eq!(stack, "    at onLoad (inline#1:4:12)");
+    // Positions only: no function names.
+    assert_eq!(stack, "    at inline#1:4:12");
 }
 
 #[test]
@@ -560,16 +574,47 @@ console.log('{\"type\":\"navigation_start\"}\\n<' + 'script>alert(1)<' + '/scrip
 
 #[test]
 fn no_cookie_storage_or_form_value_reaches_the_log() {
-    let page = "<html><body><form><input id=pw type=password value=hunter2></form><script>
+    // Round 1 (console) and the R1 round-2 tables on #676 @ 56cbdfed
+    // (thrown and rejected values, URL shapes the text scrubber missed),
+    // one `<script>` per row so every row runs.
+    let rows: &[&str] = &[
+        "console.log(document.cookie);",
+        "console.log(location.href);",
+        "console.log(document.getElementById('pw').value);",
+        "console.info('stored', localStorage.getItem('k'));",
+        "console.log(new Error('see https://x.test/p?token=ERRQUERY'));",
+        "throw new Error(document.cookie);",
+        "throw document.cookie;",
+        "throw new Error('q ' + location.search);",
+        "throw document.getElementById('pw').value;",
+        "Promise.reject(document.cookie);",
+        "Promise.reject(new Error('rej ' + location.search));",
+        "Promise.reject(document.getElementById('pw').value);",
+        "(async () => { throw new Error('async ' + document.cookie); })();",
+        "window.addEventListener('load', function () { throw new Error('load ' + document.cookie); });",
+        "setTimeout(function () { throw 'timer ' + location.search; }, 0);",
+        "var e = new Error('named'); e.name = 'SECRET_NAME'; throw e;",
+        "throw Symbol('SECRET_SYM');",
+        "throw new Error('http://[::1]:9/x?token=URLSECRET_V6');",
+        "throw new Error('ht\\ttps://h.test/x?token=URLSECRET_TAB');",
+        "throw new Error('da\\tta:text/plain,URLSECRET_DATATAB');",
+        "throw new Error('//h.test/x?token=URLSECRET_PROTOREL');",
+        "throw new Error('/api?token=URLSECRET_REL');",
+        "throw new Error('https://h.test/a\"b?token=URLSECRET_QUOTE');",
+        "throw new Error('https:\\\\h.test\\\\x?token=URLSECRET_BACKSLASH');",
+        "throw new Error('ftp://u:URLPASSWORD@h.test/x?token=URLSECRET_FTP');",
+    ];
+    let mut page = String::from(
+        "<html><body><form><input id=pw type=password value=hunter2></form><script>
 document.cookie = 'sid=COOKIEVALUE';
 try { localStorage.setItem('k', 'STOREDVALUE'); } catch (e) {}
 document.getElementById('pw').value = 'TYPEDVALUE';
-console.log(document.cookie);
-console.log(location.href);
-console.log(document.getElementById('pw').value);
-console.info('stored', localStorage.getItem('k'));
-console.log(new Error('see https://x.test/p?token=ERRQUERY'));
-</script></body></html>";
+</script>",
+    );
+    for row in rows {
+        page.push_str(&format!("<script>{row}</script>"));
+    }
+    page.push_str("</body></html>");
     let server = serve(vec![Route::html("/", page).header("Set-Cookie", "server=SETCOOKIEVALUE")]);
     let (mut engine, view) = inspected_engine(EngineConfig::default());
     runtime().block_on(engine.load_url(view, server.url("/?token=HREFQUERY"))).expect("load_url");
@@ -579,8 +624,26 @@ console.log(new Error('see https://x.test/p?token=ERRQUERY'));
         5,
         "the calls are still recorded"
     );
+    // 14 throws, 4 rejections, a listener and a timer: all still recorded.
+    assert_eq!(
+        records.iter().filter(|r| r.event.kind() == "script_error").count(),
+        20,
+        "the errors are still recorded: {records:?}"
+    );
     let all = serde_json::to_string(&records).unwrap();
-    for secret in ["COOKIEVALUE", "STOREDVALUE", "TYPEDVALUE", "hunter2", "SETCOOKIEVALUE", "HREFQUERY", "ERRQUERY"] {
+    for secret in [
+        "COOKIEVALUE",
+        "STOREDVALUE",
+        "TYPEDVALUE",
+        "hunter2",
+        "SETCOOKIEVALUE",
+        "HREFQUERY",
+        "ERRQUERY",
+        "SECRET_NAME",
+        "SECRET_SYM",
+        "URLSECRET",
+        "URLPASSWORD",
+    ] {
         assert!(!all.contains(secret), "{secret} leaked: {all}");
     }
 }
@@ -812,7 +875,7 @@ var x = 1;
         })
         .unwrap();
     // The `eval(` call, as Boa places calls (at the `(`).
-    assert_eq!(stack, "    at <main> (inline#1:3:7)");
+    assert_eq!(stack, "    at inline#1:3:7");
 }
 
 /// Logging an object runs none of the page's code: the next script sees
@@ -830,16 +893,16 @@ Promise.reject({ toString() { n += 1000; return 'r'; } });</script>
         vec![
             "console Log [object Object] @inline#1:1:20",
             "console Log [object Object] @inline#1:2:80",
-            "script_error : [object Object] script=inline#1 rejection=true",
+            "script_error : <object> script=inline#1 rejection=true",
             "console Info n seen by script 2 = 0 @inline#2:1:9",
         ]
     );
 }
 
-/// Every URL in error text loses its credentials, query and fragment,
-/// wherever it sits: after a quote, inside brackets, after `=`.
+/// Error text with URLs in it (a quote, brackets, `=`, credentials) is not
+/// kept at all: no scrubber has to find them.
 #[test]
-fn urls_anywhere_in_error_text_are_scrubbed() {
+fn error_text_with_urls_in_it_is_recorded_as_its_length() {
     let page = "<html><body><script>
 try { throw new Error(\"fetch failed 'https://u:p@h.test/a?token=SECRET1#f' (https://h.test/b?token=SECRET2) url=https://h.test/c?token=SECRET3.\"); } catch (e) { setTimeout(function () { throw e; }, 0); }
 Promise.reject(new Error('reason https://u:p@h.test/d?token=SECRET4'));
@@ -855,20 +918,22 @@ Promise.reject(new Error('frag https://h.test/f#a(b)SECRET_FR.'));
     let messages: Vec<String> = records(&engine, view)
         .into_iter()
         .filter_map(|r| match r.event {
-            InspectorEvent::ScriptError { message, .. } => Some(message),
+            InspectorEvent::ScriptError { message, value, message_len, .. } => {
+                Some(shown_message(&message, &value, message_len))
+            }
             _ => None,
         })
         .collect();
     assert_eq!(
         messages,
         vec![
-            "reason https://h.test/d",
-            "bad https://h.test/x",
-            "paren https://h.test/y end",
-            "quote https://h.test/z",
-            "frag https://h.test/f.",
-            "in module",
-            "fetch failed 'https://h.test/a' (https://h.test/b) url=https://h.test/c.",
+            "<error len=41>",
+            "<error len=42>",
+            "<error len=48>",
+            "<error len=43>",
+            "<error len=36>",
+            "<error len=9>",
+            "<error len=120>",
         ]
     );
     let all = serde_json::to_string(&records(&engine, view)).unwrap();
@@ -916,27 +981,26 @@ fn a_thrown_non_error_is_described_without_its_properties() {
     let errors: Vec<(String, String, Option<String>)> = records
         .iter()
         .filter_map(|r| match &r.event {
-            InspectorEvent::ScriptError { name, message, stack, .. } => {
-                Some((name.clone(), message.clone(), stack.clone()))
+            InspectorEvent::ScriptError { name, message, stack, value, message_len, .. } => {
+                Some((name.clone(), shown_message(message, value, *message_len), stack.clone()))
             }
             _ => None,
         })
         .collect();
     assert_eq!(errors.len(), 3, "{errors:?}");
     for (name, message, stack) in &errors {
-        assert_eq!((name.as_str(), message.as_str()), ("", "[object Object]"), "{errors:?}");
+        assert_eq!((name.as_str(), message.as_str()), ("", "<object>"), "{errors:?}");
         for line in stack.as_deref().unwrap_or("").lines() {
-            assert!(line.starts_with("    at ") && line.ends_with(')'), "not a frame line: {line:?}");
+            assert!(line.starts_with("    at inline#"), "not a frame line: {line:?}");
         }
     }
     let all = serde_json::to_string(&records).unwrap();
     assert!(!all.contains("SECRET") && !all.contains("user"), "{all}");
 }
 
-/// A `data:` URL inside error text keeps only its MIME type, as a `data:`
-/// URL field does; a word that merely ends in `data:` is not one.
+/// A `data:` URL inside error text is not kept: the text is its length.
 #[test]
-fn a_data_url_in_error_text_keeps_only_its_mime_type() {
+fn a_data_url_in_error_text_is_not_kept() {
     let page = "<html><body><script>
 Promise.reject(new Error('load data:text/plain;base64,U0VDUkVU,SECRET_B64 failed'));
 Promise.reject(new Error('metadata: kept'));
@@ -946,11 +1010,13 @@ throw 'data:text/plain,SECRET_DATA';
     let messages: Vec<String> = records(&engine, view)
         .into_iter()
         .filter_map(|r| match r.event {
-            InspectorEvent::ScriptError { message, .. } => Some(message),
+            InspectorEvent::ScriptError { message, value, message_len, .. } => {
+                Some(shown_message(&message, &value, message_len))
+            }
             _ => None,
         })
         .collect();
-    assert_eq!(messages, vec!["data:text/plain,…", "load data:text/plain,…", "metadata: kept"]);
+    assert_eq!(messages, vec!["<string len=27>", "<error len=54>", "<error len=14>"]);
     let all = serde_json::to_string(&records(&engine, view)).unwrap();
     assert!(!all.contains("SECRET") && !all.contains("U0VDUkVU"), "{all}");
 }
@@ -993,8 +1059,8 @@ throw new Error('TLA_MICRO');
     let mut errors: Vec<(String, String, String, bool)> = records(&engine, view)
         .into_iter()
         .filter_map(|r| match r.event {
-            InspectorEvent::ScriptError { name, message, script, unhandled_rejection, .. } => {
-                Some((name, message, script, unhandled_rejection))
+            InspectorEvent::ScriptError { name, message, script, unhandled_rejection, value, message_len, .. } => {
+                Some((name, shown_message(&message, &value, message_len), script, unhandled_rejection))
             }
             _ => None,
         })
@@ -1003,8 +1069,148 @@ throw new Error('TLA_MICRO');
     assert_eq!(
         errors,
         vec![
-            ("Error".to_string(), "TLA_MICRO".to_string(), "inline#2".to_string(), false),
-            ("Error".to_string(), "TLA_TIMER".to_string(), "inline#1".to_string(), false),
+            ("Error".to_string(), "<error len=9>".to_string(), "inline#1".to_string(), false),
+            ("Error".to_string(), "<error len=9>".to_string(), "inline#2".to_string(), false),
         ]
     );
+}
+
+// ---- Review R1 hold, round 2 (#676 @ 56cbdfed) ----
+
+/// A thrown or rejected value is recorded as its type, a standard error
+/// name (any other name is `Error`), and its message's length; only the
+/// engine's own messages are kept, and a message with a part from the page
+/// (`x is not defined`) only as its fixed part.
+#[test]
+fn an_error_is_its_type_standard_name_and_length_unless_the_engine_wrote_it() {
+    let page = "<html><body><script>
+var e = new TypeError('page text'); e.name = 'SECRET_NAME'; throw e;
+</script><script>throw new DOMException('m', 'NotFoundError');
+</script><script>throw Symbol('SECRET_SYM');
+</script><script>throw 42;
+</script><script>undefinedFunctionSECRET();
+</script><script>(void 0)();
+</script></body></html>";
+    let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    assert_eq!(
+        only(&described(&engine, view, server.port), &["script_error"]),
+        vec![
+            "script_error Error: <error len=9> @inline#1:2:9 script=inline#1 rejection=false",
+            "script_error NotFoundError: <error len=1> @inline#2:1:7 script=inline#2 rejection=false",
+            "script_error : <symbol> @inline#3:1:13 script=inline#3 rejection=false",
+            "script_error : <number> @inline#4:1:7 script=inline#4 rejection=false",
+            // Boa has no position for this one (`inline#5:?:?`): a frame it
+            // cannot read is dropped.
+            "script_error ReferenceError: … is not defined script=inline#5 rejection=false",
+            "script_error TypeError: not a callable function @inline#6:1:9 script=inline#6 rejection=false",
+        ]
+    );
+}
+
+/// With `keep_error_text` the page's message is kept verbatim (capped),
+/// cookies included: the opt-in is for a log that stays private.
+#[test]
+fn error_text_is_kept_verbatim_only_when_asked() {
+    let page = "<html><body><script>
+document.cookie = 'sid=COOKIEVALUE';
+throw new Error('see ' + document.cookie + ' at https://h.test/?q=1');
+</script></body></html>";
+    let mut config = EngineConfig::default();
+    config.inspector.keep_error_text = true;
+    let (engine, view, server) = load_page(config, vec![Route::html("/", page)]);
+    assert_eq!(
+        only(&described(&engine, view, server.port), &["script_error"]),
+        vec!["script_error Error: see sid=COOKIEVALUE at https://h.test/?q=1 @inline#1:3:7 script=inline#1 rejection=false"]
+    );
+}
+
+/// Nothing page script can reach turns console redaction off, writes into
+/// the engine's console or error queues, or changes what a record says:
+/// not the engine's globals, not properties of `console`, not a prototype
+/// or a global function the engine's own code calls (`push`, `apply`,
+/// `JSON.stringify`, `String`, `toString`, `toJSON`, a `message` getter,
+/// `Symbol.toPrimitive`). Genuine calls and errors are still recorded.
+#[test]
+fn page_script_cannot_switch_redaction_off_or_forge_records() {
+    let page = r#"<html><body><script>
+document.cookie = 'sid=COOKIEVALUE';
+window.addEventListener('load', function () { throw new Error('genuine load'); });
+setTimeout(function () { throw new TypeError('genuine timer'); }, 0);
+</script><script>
+try { console.__rustkit_capture(false); } catch (e) {}
+console.log(document.cookie);
+try { console._logs.push({level: 'error', msg: 'FORGED_LOGS ' + document.cookie}); } catch (e) {}
+try { console._flush = function () { return [{level: 'error', msg: 'FORGED_FLUSH'}]; }; } catch (e) {}
+try { __rustkit_console_format = function () { return 'FORGED_FORMAT'; }; } catch (e) {}
+try { __rustkit_console_format_redacted = function () { return 'FORGED_FORMAT_R'; }; } catch (e) {}
+</script><script>
+try { window.__rustkit_errors.push('FORGED_ERRORS ' + document.cookie); } catch (e) {}
+try { window.__rustkit_error_text = function () { return 'FORGED_ERROR_TEXT'; }; } catch (e) {}
+try { window.__rustkit_errors_with_stacks(false); } catch (e) {}
+try { window.__rustkit_take_unsupported = function () {
+  return '[{"i":"XMLHttpRequest","m":"responseXML","n":7,"at":"https://x.test/FORGED_AT\u00011\u00011"}]';
+}; } catch (e) {}
+</script><script>
+var realPush = Array.prototype.push, pushing = false;
+Array.prototype.push = function () {
+  if (!pushing) { pushing = true; try { realPush.call(this, 'FORGED_PUSH'); } catch (e) {} pushing = false; }
+  return realPush.apply(this, arguments);
+};
+var realApply = Function.prototype.apply, realStringify = JSON.stringify, realString = String;
+Function.prototype.apply = function () { return 'FORGED_APPLY'; };
+JSON.stringify = function () { return '["FORGED_JSON"]'; };
+String = function () { return 'FORGED_STRING'; };
+Error.prototype.toString = function () { return 'FORGED_TOSTRING'; };
+Error.prototype.toJSON = function () { return 'FORGED_TOJSON'; };
+Object.defineProperty(Error.prototype, 'message', { get: function () { return 'FORGED_GETTER'; }, configurable: true });
+Object.defineProperty(Error.prototype, 'name', { get: function () { return 'FORGED_NAME'; }, configurable: true });
+Object.defineProperty(Object.prototype, 'msg', { get: function () { return 'FORGED_MSG'; }, configurable: true });
+Object.defineProperty(Object.prototype, 'args', { get: function () { return ['FORGED_ARGS']; }, configurable: true });
+Object.prototype[Symbol.toPrimitive] = function () { return 'FORGED_PRIMITIVE'; };
+console.log('after patches', 1);
+throw new RangeError('after patches');
+</script><script>
+// The bindings' own event dispatch (not the log) runs on builtins a page
+// can patch: put them back so the genuine listener and timer still run.
+Array.prototype.push = realPush; Function.prototype.apply = realApply;
+JSON.stringify = realStringify; String = realString;
+delete Error.prototype.toString; delete Error.prototype.toJSON;
+delete Error.prototype.message; delete Error.prototype.name;
+delete Object.prototype.msg; delete Object.prototype.args; delete Object.prototype[Symbol.toPrimitive];
+try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
+</script></body></html>"#;
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    assert!(!all.contains("FORGED") && !all.contains("COOKIEVALUE"), "{all}");
+    let console: Vec<String> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::Console { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(console, vec!["<string len=15>", "<string len=13> <number>"], "{all}");
+    let errors: Vec<(String, String)> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { name, script, .. } => Some((name.clone(), script.clone())),
+            _ => None,
+        })
+        .collect();
+    for genuine in [("RangeError", "inline#4"), ("Error", "event:load"), ("TypeError", "timers")] {
+        assert!(
+            errors.iter().any(|(name, script)| (name.as_str(), script.as_str()) == genuine),
+            "{genuine:?} missing: {errors:?}"
+        );
+    }
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    let apis: Vec<String> = engine
+        .inspector(view)
+        .unwrap()
+        .unsupported_apis()
+        .iter()
+        .map(|u| format!("{}.{} x{}", u.interface, u.member, u.count))
+        .collect();
+    assert_eq!(apis, vec!["XMLHttpRequest.open(async=false) x1"]);
 }

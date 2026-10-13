@@ -85,48 +85,43 @@ fn records_serialize_with_a_stable_field_order() {
         t_ms: 1.5,
         event: InspectorEvent::ScriptError {
             name: "TypeError".into(),
-            message: "x".into(),
+            message: None,
             location: Some(SourceLocation { url: "https://a.test/s.js".into(), line: 3, column: 9 }),
             stack: None,
             unhandled_rejection: false,
             script: "https://a.test/s.js".into(),
+            value: "error".into(),
+            message_len: Some(12),
         },
     };
     assert_eq!(
         serde_json::to_string(&record).unwrap(),
-        r#"{"seq":7,"t_ms":1.5,"type":"script_error","name":"TypeError","message":"x","location":{"url":"https://a.test/s.js","line":3,"column":9},"stack":null,"unhandled_rejection":false,"script":"https://a.test/s.js"}"#
+        r#"{"seq":7,"t_ms":1.5,"type":"script_error","name":"TypeError","message":null,"location":{"url":"https://a.test/s.js","line":3,"column":9},"stack":null,"unhandled_rejection":false,"script":"https://a.test/s.js","value":"error","message_len":12}"#
     );
     let back: InspectorRecord = serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
     assert_eq!(back, record);
 }
 
+/// A frame's script is an engine label or a URL as the URL parser reads it
+/// (any scheme, tabs and newlines dropped, backslashes as slashes), reduced
+/// to origin and path; anything else is no place at all.
 #[test]
-fn error_text_is_taken_apart_without_running_anything() {
-    let (name, message, at, stack) = parse_error_text(
-        "TypeError: cannot read (inline#2:5:3)\n    at f (inline#2:5:3)\n    at <main> (inline#2:7:1)",
-    );
-    assert_eq!(name, "TypeError");
-    assert_eq!(message, "cannot read");
-    assert_eq!(at, Some(("inline#2".to_string(), 5, 3)));
-    assert_eq!(stack.as_deref(), Some("    at f (inline#2:5:3)\n    at <main> (inline#2:7:1)"));
-
-    // A thrown string: no name.
-    let (name, message, _, _) = parse_error_text("\"oops\"\n    at <main> (inline#1:1:7)");
-    assert_eq!(name, "");
-    assert_eq!(message, "\"oops\"");
-
-    // A URL path with colons in it, and Boa's unnamed-script form.
-    let (_, _, at, _) = parse_error_text("Error: e\n    at g (https://a.test:8080/x.js:12:4)");
-    assert_eq!(at, Some(("https://a.test:8080/x.js".to_string(), 12, 4)));
-    let (_, message, at, _) = parse_error_text("Error: e (unknown at :2:8)");
-    assert_eq!(message, "e");
-    assert_eq!(at, Some((String::new(), 2, 8)));
-
-    // `String(error)` from a listener: just the head.
-    assert_eq!(
-        parse_error_text("ReferenceError: f is not defined"),
-        ("ReferenceError".into(), "f is not defined".into(), None, None)
-    );
+fn a_frames_script_is_a_label_or_a_url_reduced_by_the_url_parser() {
+    let inspector = Inspector::new(&InspectorConfig { buffer: true, ..InspectorConfig::default() });
+    inspector.alias_script("script#2", "https://a.test/app.js?v=SECRET");
+    let at = |path: &str| inspector.frame_location(path, 1, 2).map(|l| l.url);
+    assert_eq!(at("inline#3").as_deref(), Some("inline#3"));
+    assert_eq!(at("script#2").as_deref(), Some("https://a.test/app.js"));
+    assert_eq!(at("https://doc.test/#inline-module-4").as_deref(), Some("inline#4"));
+    assert_eq!(at("http://[::1]:9/x?token=S").as_deref(), Some("http://[::1]:9/x"));
+    assert_eq!(at("ht\ttps://h.test/x?token=S").as_deref(), Some("https://h.test/x"));
+    assert_eq!(at("https:\\h.test\\x?token=S").as_deref(), Some("https://h.test/x"));
+    assert_eq!(at("ftp://u:PW@h.test/x?token=S#f").as_deref(), Some("ftp://h.test/x"));
+    assert_eq!(at("data:text/javascript,SECRET").as_deref(), Some("data:text/javascript,…"));
+    assert_eq!(at("javascript:SECRET").as_deref(), Some("javascript:"));
+    for unreadable in ["inline#", "inline#x", "//h.test/x?token=S", "/api?token=S", "x y", ""] {
+        assert_eq!(at(unreadable), None, "{unreadable:?}");
+    }
 }
 
 #[test]
@@ -172,11 +167,13 @@ fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
         InspectorEvent::Console { level: ConsoleLevel::Error, message: "e".into(), truncated: false, location: None },
         InspectorEvent::ScriptError {
             name: "Error".into(),
-            message: "m".into(),
+            message: None,
             location: None,
             stack: None,
             unhandled_rejection: true,
             script: "inline#1".into(),
+            value: "error".into(),
+            message_len: Some(1),
         },
         InspectorEvent::UnsupportedApi { interface: "XMLHttpRequest".into(), member: "open(async=false)".into(), location: None },
     ]
