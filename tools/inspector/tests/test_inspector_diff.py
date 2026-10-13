@@ -554,3 +554,159 @@ def test_a_navigation_with_no_network_response_is_still_ok(tmp_path, target):
     assert p.returncode == 0, p.stdout + p.stderr
     assert json.loads(p.stdout.strip().splitlines()[-1])["status"] == "ok"
     assert out.exists()
+
+
+# Lead request after #674: `;` path parameters (a servlet `;jsessionid=` is
+# the session cookie) go with the query, in every segment, `%3B` too; a
+# `javascript:` URL is all payload and a `blob:` URL keeps only its origin.
+# Each case mirrors one in #674's diagnostics_tests.rs; the expected string
+# is the engine's, except where noted (the engine keeps a URL's spelling,
+# Chromium gives the parser's).
+
+def _node(expr, cases):
+    """`expr` (a function of m, the module, and one case) over `cases`, in node."""
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    mod = (HERE.parent / "record_scrub.mjs").as_uri()
+    script = (f"const m = await import({json.dumps(mod)});"
+              f"const cases = {json.dumps(cases)};"
+              f"console.log(JSON.stringify(cases.map((c) => ({expr})(c))));")
+    p = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout)
+
+
+SCRUB_URL_CASES = [
+    # (in, out); engine scrub_url gives the same unless noted.
+    ("https://cdn.test/a.png;jsessionid=0123ABCD", "https://cdn.test/a.png"),
+    ("https://cdn.test/a.png;JSESSIONID=S?x", "https://cdn.test/a.png"),
+    ("https://cdn.test/a;jsessionid=S/b.png", "https://cdn.test/a/b.png"),
+    ("https://cdn.test/a;x=1;jsessionid=S/b;v=2/c.png#f", "https://cdn.test/a/b/c.png"),
+    ("https://cdn.test/a%3Bjsessionid=S/b.png", "https://cdn.test/a/b.png"),
+    ("https://cdn.test/a.png%3bjsessionid=S", "https://cdn.test/a.png"),
+    ("https://cdn.test/a.png;", "https://cdn.test/a.png"),
+    # Engine: "https:\\\\cdn.test\\a\\b.png" (its spelling, no parameter).
+    ("https:\\\\cdn.test\\a;jsessionid=S\\b.png", "https://cdn.test/a/b.png"),
+    ("https://cdn.test/a.png;jsess\tion\rid=S", "https://cdn.test/a.png"),
+    ("//cdn.test/a;jsessionid=S/b.png", "//cdn.test/a/b.png"),
+    ("img/a;jsessionid=S/b.png", "img/a/b.png"),
+    ("/img/a.png;jsessionid=S", "/img/a.png"),
+    ("a.png%3Bjsessionid=S", "a.png"),
+    ("img\\a;jsessionid=S\\b.png", "img\\a\\b.png"),
+    ("data:image/png;base64,AAAA", "data:…"),
+    ("blob:https://cdn.test/2b8c;jsessionid=S", "blob:https://cdn.test"),
+    ("https://u:p@cdn.test/a;jsessionid=S/b.png?t=1", "https://cdn.test/a/b.png"),
+    ("//u:p@cdn.test/i.png", "//cdn.test/i.png"),
+    ("img/a@2x.png", "img/a@2x.png"),
+    # Engine: "https:cdn.test/a.png" (its spelling).
+    ("https:u:p@cdn.test/a.png;jsessionid=S", "https://cdn.test/a.png"),
+    ("javascript:alert(document.cookie)", "javascript:"),
+    ("JavaScript:alert(1)", "javascript:"),
+    ("java\tscript:alert(document.cookie)", "javascript:"),
+    (" \tjavascript:alert(1)", "javascript:"),
+    ("blob:https://u:PW@cdn.test/2b8c-uuid", "blob:https://cdn.test"),
+    ("blob:2b8c-uuid", "blob:"),
+    ("DATA:text/plain,SECRET", "data:…"),
+    (" \tdata:text/plain,SECRET", "data:…"),
+    ("da\tta:text/plain,SECRET", "data:…"),
+    ("\u0001data:text/plain,SECRET", "data:…"),
+    ("data\r\n:text/plain,SECRET", "data:…"),
+    ("http://shop.test:8080/a;jsessionid=S#f", "http://shop.test:8080/a"),
+    ("https://shop.test/;jsessionid=S", "https://shop.test/"),
+    ("foo://shop.test/a;sid=S/b", "foo://shop.test/a/b"),
+    ("mailto:a;sid=S", "mailto:a"),
+]
+
+
+@pytest.mark.parametrize("u,want", SCRUB_URL_CASES)
+def test_scrub_url_drops_path_parameters_and_script_and_blob_payloads(u, want):
+    assert _node("([u]) => m.scrubUrl(u, 'https://s.test/p')", [[u]]) == [want]
+
+
+REPORT_TARGET_CASES = [
+    # (target, default, with --keep-query); engine report_url gives the same.
+    ("https://example.test/a/b?token=1#frag", "https://example.test/a/b", "https://example.test/a/b?token=1#frag"),
+    ("https://shop.test/cart;jsessionid=0123ABCD?x=1", "https://shop.test/cart",
+     "https://shop.test/cart;jsessionid=0123ABCD?x=1"),
+    ("https://u:p@shop.test/cart;jsessionid=0123ABCD?x=1", "https://shop.test/cart",
+     "https://shop.test/cart;jsessionid=0123ABCD?x=1"),
+    ("https://shop.test/a;jsessionid=S/b;v=1/c.png", "https://shop.test/a/b/c.png",
+     "https://shop.test/a;jsessionid=S/b;v=1/c.png"),
+    ("https://shop.test/a;x=1;JSESSIONID=S", "https://shop.test/a", "https://shop.test/a;x=1;JSESSIONID=S"),
+    ("https://shop.test/a%3Bjsessionid=S/b", "https://shop.test/a/b", "https://shop.test/a%3Bjsessionid=S/b"),
+    ("https://shop.test/a%3bjsessionid=S/b", "https://shop.test/a/b", "https://shop.test/a%3bjsessionid=S/b"),
+    ("https://shop.test/a;", "https://shop.test/a", "https://shop.test/a;"),
+    ("https://shop.test/;jsessionid=S", "https://shop.test/", "https://shop.test/;jsessionid=S"),
+    ("https:\\\\shop.test\\a;jsessionid=S\\b", "https://shop.test/a/b", "https://shop.test/a;jsessionid=S/b"),
+    ("https://shop.test/a;jsess\tionid=S\n/b", "https://shop.test/a/b", "https://shop.test/a;jsessionid=S/b"),
+    ("http://shop.test:8080/a;jsessionid=S#f", "http://shop.test:8080/a", "http://shop.test:8080/a;jsessionid=S#f"),
+    ("foo://shop.test/a;sid=S/b", "foo://shop.test/a/b", "foo://shop.test/a;sid=S/b"),
+    # data:, javascript: and blob: keep their reduction with or without the opt-in.
+    ("data:text/html;charset=utf-8,x;y", "data:text/html", "data:text/html"),
+    ("data:text/html,<p>secret-body</p>?q=1", "data:text/html", "data:text/html"),
+    ("data:text/html;charset=utf-8;base64,PHA+c2VjcmV0PC9wPg==", "data:text/html", "data:text/html"),
+    ("DATA:,secret-body", "data:", "data:"),
+    ("data:SECRETNOCOMMA", "data:", "data:"),
+    ("blob:https://shop.test/a;jsessionid=S", "blob:https://shop.test", "blob:https://shop.test"),
+    ("blob:https://user:PW@example.test/2b8c-uuid", "blob:https://example.test", "blob:https://example.test"),
+    ("blob:2b8c-uuid", "blob:", "blob:"),
+    ("javascript:alert(document.cookie)", "javascript:", "javascript:"),
+    ("about:blank", "about:blank", "about:blank"),
+]
+
+
+@pytest.mark.parametrize("target,want,want_kept", REPORT_TARGET_CASES)
+def test_the_page_url_drops_path_parameters_unless_asked(target, want, want_kept):
+    got = _node("([t]) => [m.isUrlTarget(t), m.reportTarget(t, m.isUrlTarget(t), false, '/w'),"
+                " m.reportTarget(t, m.isUrlTarget(t), true, '/w')]", [[target]])
+    assert got == [[True, want, want_kept]]
+
+
+BG_PARAM_CASES = [
+    # getComputedStyle's value for #674's in-page reproducers, and the record.
+    ('url("https://cdn.test/a.png;jsessionid=0123ABCD")', "https://s.test/p", 'url("https://cdn.test/a.png")'),
+    ('url("https://cdn.test/a;jsessionid=0123ABCD/b.png%3Bv=0123ABCD")', "https://s.test/p",
+     'url("https://cdn.test/a/b.png")'),
+    ('url("javascript:alert(document.cookie)")', "https://s.test/p", 'url("javascript:")'),
+    ('url("blob:https://s.test/2b8c-uuid")', "https://s.test/p", 'url("blob:https://s.test")'),
+    ('url("file:///home/someone/repo/case/img/a.png;jsessionid=0123ABCD")',
+     "file:///home/someone/repo/case/index.html", 'url("img/a.png")'),
+]
+
+
+def test_background_urls_drop_path_parameters_and_payloads():
+    assert _node("([v, u]) => m.backgroundImage(v, u)", BG_PARAM_CASES) == [e for _, _, e in BG_PARAM_CASES]
+
+
+def test_messages_drop_path_parameters_and_script_and_blob_payloads():
+    target = "https://h.test/cart;jsessionid=0123ABCD?x=1"
+    msgs = [
+        f"page.goto: net::ERR_NAME_NOT_RESOLVED at {target}",
+        "net::ERR_FAILED at https://other.test/a;jsessionid=0123ABCD/b%3Bv=0123ABCD",
+        "Error: blocked javascript:fetch('/x?c='+document.cookie+'0123ABCD') here",
+        "Error: blob:https://u:PW@h.test/0123ABCD not allowed",
+    ]
+    got = _node(f"([msg]) => m.redactTarget(msg, [{json.dumps(target)}],"
+                f" m.reportTarget({json.dumps(target)}, true, false, '/w'))", [[x] for x in msgs])
+    for g in got:
+        assert "0123ABCD" not in g and "cookie" not in g and "PW" not in g, g
+    assert "https://h.test/cart" in got[0] and "https://other.test/a/b" in got[1], got
+    assert "javascript:" in got[2] and "blob:https://h.test" in got[3], got
+
+
+def test_a_session_id_in_the_target_or_a_background_never_reaches_the_output(tmp_path):
+    p, out = _chrome_records(tmp_path, "https://nonexistent.invalid/p;jsessionid=0123ABCD/q%3Bv=0123ABCD?t=1")
+    printed = p.stdout + p.stderr + (out.read_text() if out.exists() else "")
+    assert "0123ABCD" not in printed, printed
+    assert json.loads(p.stdout.strip().splitlines()[-1])["target"] == "https://nonexistent.invalid/p/q"
+    page = ("data:text/html,<style>%23d{width:10px;height:10px;"
+            "background-image:url('https://cdn.invalid/a;jsessionid=0123ABCD/b.png%3Bv=0123ABCD'),"
+            "url('javascript:alert(0123ABCD)')}</style><div id=d></div>")
+    p, out = _chrome_records(tmp_path, page)
+    assert p.returncode == 0, p.stdout + p.stderr
+    printed = p.stdout + p.stderr + out.read_text()
+    assert "0123ABCD" not in printed, printed
+    d = next(e for e in json.loads(out.read_text())["elements"] if e["identity"].get("id") == "d")
+    assert d["style"]["background-image"] == 'url("https://cdn.invalid/a/b.png"), url("javascript:")'
