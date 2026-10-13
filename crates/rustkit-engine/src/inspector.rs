@@ -673,7 +673,12 @@ impl Inspector {
             return None;
         }
         let url = self.url(url);
-        let method = cap(method, 16).0;
+        // The page chooses the method: a standard one, else `OTHER`.
+        let method = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+            .into_iter()
+            .find(|m| m.eq_ignore_ascii_case(method))
+            .unwrap_or("OTHER")
+            .to_string();
         let initiator = initiator.map(|i| cap(i, MAX_SHORT_CHARS).0);
         let mut state = self.state();
         state.last_request_id += 1;

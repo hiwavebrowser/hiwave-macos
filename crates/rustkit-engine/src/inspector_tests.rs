@@ -324,3 +324,24 @@ fn a_network_errors_kind_is_never_read_from_its_text() {
     let lookup = NetError::HttpError(HttpError::LookupFailed("nowhere.test: no addresses".into()));
     assert_eq!(net_error_kind(&lookup), "dns");
 }
+
+/// A request's method is a standard one, else `OTHER`: a page chooses it
+/// (R1 note @ 43dd085c).
+#[test]
+fn a_requests_method_is_a_standard_one_or_other() {
+    let inspector = buffered(16);
+    let url = url::Url::parse("https://a.test/x").unwrap();
+    for method in ["GET", "post", "PATCH", "SECRETMETH", ""] {
+        drop(inspector.begin_request(&url, method, ResourceType::Fetch, Some("script")));
+    }
+    let methods: Vec<String> = inspector
+        .snapshot_since(0)
+        .records
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::Request { method, .. } => Some(method),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(methods, vec!["GET", "POST", "PATCH", "OTHER", "OTHER"]);
+}
