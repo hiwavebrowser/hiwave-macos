@@ -21,6 +21,8 @@ use std::rc::Rc;
 /// - "assigned": the slot's assigned nodes, as an id list.
 /// - "slot": the slot the node is assigned to, or null.
 /// - "any": has any node of this document a shadow root?
+/// - "define": `customElements.define` defined the name `a` (`id` is the
+///   document); elements of that name are `:defined` from now on.
 pub(super) fn install(
     runtime: &mut JsRuntime,
     host: &SharedDomHost,
@@ -82,6 +84,14 @@ pub(super) fn install(
                 Some("assigned") => id_list(node.assigned_nodes()),
                 Some("slot") => node_id(node.assigned_slot()),
                 Some("any") => JsValue::Boolean(document.has_shadow_roots()),
+                Some("define") => {
+                    if let Some(name) = string_arg(args, 3) {
+                        document.define_custom_element(name);
+                        // `:defined` rules now match elements of the name.
+                        d.set(d.get().max(DomDirty::Style));
+                    }
+                    JsValue::Null
+                }
                 _ => JsValue::Null,
             }
         }),

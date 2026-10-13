@@ -986,12 +986,41 @@ pub enum ScriptOutcome {
     Ran,
     /// Threw, with `String(error)` (`TypeError: x is not a function`).
     Threw(String),
-    /// Not run, and why (`type=module unsupported`).
+    /// Not run, and why (`too large to run inside the script budget`).
     Skipped(&'static str),
+    /// A classic `nomodule` script: not run, as module-capable browsers
+    /// skip it by design.
+    Nomodule,
     /// The external script could not be fetched.
-    FetchFailed(String),
+    FetchFailed(FetchFailure),
     /// Not started: the page's script budget was spent.
     OverBudget,
+}
+
+/// Why an external script's fetch failed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FetchFailure {
+    /// The server answered with this status, not 2xx (404, 410, 5xx).
+    /// Chromium does not run the script either.
+    Status(u16),
+    /// No usable HTTP response: a network-level failure, a request the
+    /// page's fetch policy refused, or a body that could not be read.
+    Transport(String),
+}
+
+impl std::fmt::Display for FetchFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchFailure::Status(status) => match http::StatusCode::from_u16(*status)
+                .ok()
+                .and_then(|s| s.canonical_reason())
+            {
+                Some(reason) => write!(f, "HTTP {status} {reason}"),
+                None => write!(f, "HTTP {status}"),
+            },
+            FetchFailure::Transport(message) => f.write_str(message),
+        }
+    }
 }
 
 /// One entry in a view's script log: a `<script>` element, or an exception
@@ -1006,6 +1035,26 @@ pub struct ScriptRecord {
     /// Wall time spent running it.
     pub elapsed_ms: u64,
     pub outcome: ScriptOutcome,
+}
+
+/// Did the engine lose one of the load's scripts, where Chromium would have
+/// run it: stopped or skipped at the script budget, thrown at top level, or
+/// not fetched (no HTTP response), parsed or run? Errors that escaped a
+/// lifecycle-event listener, a timer or a network callback (`event:*`,
+/// `timers`, `network`), and an import map that failed (its module scripts
+/// log their own outcome), are not a lost script. Nor is a script Chromium
+/// loses too: a `nomodule` script, skipped by design, and one whose server
+/// answered with an error status.
+fn load_lost_a_script(log: &[ScriptRecord]) -> bool {
+    log.iter().any(|record| {
+        let callback = record.source.starts_with("event:")
+            || matches!(record.source.as_str(), "timers" | "network" | "importmap");
+        let lost_in_chromium_too = matches!(
+            record.outcome,
+            ScriptOutcome::Nomodule | ScriptOutcome::FetchFailed(FetchFailure::Status(_))
+        );
+        !callback && !lost_in_chromium_too && record.outcome != ScriptOutcome::Ran
+    })
 }
 
 /// Which part of a click is moving the focus.
@@ -1065,7 +1114,7 @@ fn log_script_stopped(source: &str, elapsed_ms: u64, late: Option<std::time::Dur
 
 /// Classify a `<script>` element. `None` for data blocks
 /// (`application/ld+json`, `text/template`, ...), which are not scripts.
-fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
+fn script_timing(node: &Node) -> Option<Result<ScriptTiming, ScriptOutcome>> {
     let script_type = node
         .get_attribute("type")
         .map(|t| t.trim().to_ascii_lowercase())
@@ -1086,7 +1135,7 @@ fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
     // and one of them never returns under Boa (yahoo, weather.com). The
     // attribute is meaningless on a module script.
     if !module && node.get_attribute("nomodule").is_some() {
-        return Some(Err("nomodule (skipped, as in module-capable browsers)"));
+        return Some(Err(ScriptOutcome::Nomodule));
     }
     let external = node.get_attribute("src").is_some();
     Some(Ok(if external && node.get_attribute("async").is_some() {
@@ -3725,7 +3774,7 @@ impl Engine {
             Inline(String),
             External(Url),
         }
-        let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), &'static str>, bool)> = Vec::new();
+        let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), ScriptOutcome>, bool)> = Vec::new();
         let mut index = 0usize;
         document.traverse(|node| {
             if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
@@ -3742,7 +3791,7 @@ impl Engine {
                 Some(s) => base
                     .join(s)
                     .map(|u| (timing, Body::External(u)))
-                    .map_err(|_| "unparseable src"),
+                    .map_err(|_| ScriptOutcome::Skipped("unparseable src")),
                 None => Ok((timing, Body::Inline(node.text_content()))),
             });
             entries.push((label, node.id.raw(), entry, is_module_script(node)));
@@ -3769,14 +3818,16 @@ impl Engine {
                 async move {
                     let mut label = label;
                     let result = match entry {
-                        Err(reason) => Err(ScriptOutcome::Skipped(reason)),
+                        Err(outcome) => Err(outcome),
                         Ok((timing, Body::Inline(text))) => Ok((timing, text)),
                         // A module is fetched through the policy's one
                         // module entry point (script destination, CORS,
                         // JavaScript MIME, 2xx, shield, budgets); its
                         // identity is the URL it ends up at.
                         Ok((timing, Body::External(url))) if is_module => match &policy {
-                            None => Err(ScriptOutcome::FetchFailed("no network policy for this page".into())),
+                            None => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                "no network policy for this page".into(),
+                            ))),
                             Some(policy) => {
                                 let fetch = policy.fetch_module(&loader, &url, &base);
                                 match tokio::time::timeout_at(deadline, fetch).await {
@@ -3784,7 +3835,12 @@ impl Engine {
                                         label = module.final_url.to_string();
                                         Ok((timing, module.source))
                                     }
-                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(format!("{denial}"))),
+                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(match denial {
+                                        rustkit_net::policy::Denial::BadStatus(status) => {
+                                            FetchFailure::Status(status)
+                                        }
+                                        denial => FetchFailure::Transport(format!("{denial}")),
+                                    })),
                                     Err(_) => Err(ScriptOutcome::OverBudget),
                                 }
                             }
@@ -3796,13 +3852,16 @@ impl Engine {
                                 ).await {
                                     Ok(response) if response.ok() => match response.text().await {
                                         Ok(text) => Ok((timing, text)),
-                                        Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
+                                        Err(e) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                            format!("{e}"),
+                                        ))),
                                     },
-                                    Ok(response) => Err(ScriptOutcome::FetchFailed(format!(
-                                        "HTTP {}",
-                                        response.status
+                                    Ok(response) => Err(ScriptOutcome::FetchFailed(FetchFailure::Status(
+                                        response.status.as_u16(),
                                     ))),
-                                    Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
+                                    Err(e) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                        format!("{e}"),
+                                    ))),
                                 }
                             };
                             tokio::time::timeout_at(deadline, fetch)
@@ -4575,6 +4634,23 @@ impl Engine {
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
+            }
+            // The load's scripts are over. If it lost one (a script skipped
+            // or failed here that Chromium runs), a custom element present
+            // now and still undefined may never get its definition: the
+            // cascade treats its name as `:defined` from now on, so a rule
+            // that hides it until its upgrade does not hide it for good.
+            // Script still sees the registry. A load that lost no script
+            // keeps Chromium's behaviour.
+            if let Some(view) = self.views.get(&id) {
+                let settled = load_lost_a_script(&view.script_log)
+                    && view
+                        .document
+                        .as_ref()
+                        .is_some_and(|d| d.settle_custom_element_definitions());
+                if let (true, Some(bindings)) = (settled, view.bindings.as_ref()) {
+                    bindings.mark_dirty(DomDirty::Style);
+                }
             }
             self.flush_script_dom_writes(id, None)?;
 
@@ -5451,6 +5527,37 @@ impl Engine {
         built
     }
 
+    /// Drops the rules (and `@layer` statements) whose `@media` queries do
+    /// not match `viewport`; with no viewport, every conditional one.
+    fn keep_rules_for_viewport(stylesheets: &mut [Stylesheet], viewport: Option<(f32, f32)>) {
+        for sheet in stylesheets.iter_mut() {
+            // A layer named inside an `@media` block that doesn't apply is
+            // not declared, so its statement goes too. A statement's position
+            // counts the rules before it, so re-count over the rules kept.
+            if !sheet.layer_statements.is_empty() {
+                let mut kept_before = Vec::with_capacity(sheet.rules.len() + 1);
+                let mut kept = 0usize;
+                for rule in &sheet.rules {
+                    kept_before.push(kept);
+                    if rule.media.is_empty()
+                        || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))
+                    {
+                        kept += 1;
+                    }
+                }
+                kept_before.push(kept);
+                sheet.layer_statements.retain_mut(|s| {
+                    s.position = kept_before[s.position.min(kept_before.len() - 1)];
+                    s.media.is_empty() || viewport.is_some_and(|(w, h)| s.applies_at(w, h))
+                });
+            }
+            sheet.rules.retain(|rule| {
+                rule.media.is_empty()
+                    || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))
+            });
+        }
+    }
+
     fn build_layout_from_document(
         &self,
         document: &Document,
@@ -5516,34 +5623,19 @@ impl Engine {
         // Add external stylesheets (loaded from <link> elements)
         stylesheets.extend(external_stylesheets.iter().cloned());
 
-        for sheet in &mut stylesheets {
-            // A layer named inside an `@media` block that doesn't apply is
-            // not declared, so its statement goes too. A statement's position
-            // counts the rules before it, so re-count over the rules kept.
-            if !sheet.layer_statements.is_empty() {
-                let mut kept_before = Vec::with_capacity(sheet.rules.len() + 1);
-                let mut kept = 0usize;
-                for rule in &sheet.rules {
-                    kept_before.push(kept);
-                    if rule.media.is_empty()
-                        || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))
-                    {
-                        kept += 1;
-                    }
-                }
-                kept_before.push(kept);
-                sheet.layer_statements.retain_mut(|s| {
-                    s.position = kept_before[s.position.min(kept_before.len() - 1)];
-                    s.media.is_empty() || viewport.is_some_and(|(w, h)| s.applies_at(w, h))
-                });
-            }
-            sheet.rules.retain(|rule| {
-                rule.media.is_empty()
-                    || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))
-            });
-        }
+        Self::keep_rules_for_viewport(&mut stylesheets, viewport);
         // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
         rustkit_css::assign_layer_order(&mut stylesheets);
+        // The document tree's sheets. Shared, so the build can hand them
+        // back to nodes slotted from the document (`shadow_tree`); the
+        // rules stay where they are, so the rule index still recognizes them.
+        let stylesheets = Rc::new(stylesheets);
+        let _tree_scopes = shadow_tree::BuildScope::install(
+            document,
+            &stylesheets,
+            viewport,
+            self.config.javascript_enabled,
+        );
 
         // Sub-phase marks for the "Cascade timing" line: sheet copy and
         // `@media` filter, custom-property extraction, rule index, walk.
@@ -6153,6 +6245,10 @@ impl Engine {
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
 
+                // Rules of other trees that reach this element: its shadow
+                // tree's `:host` rules, its slot's `::slotted` rules.
+                let own_rules =
+                    shadow_tree::OwnRules::install(node, &tag_lower, attributes, ancestors, sib);
                 // Create computed style based on element, attributes, and stylesheets
                 let (mut style, share_id) = style_share_tracked(|| {
                     memoized_style(node.id, || {
@@ -6168,6 +6264,7 @@ impl Engine {
                         )
                     })
                 });
+                drop(own_rules);
 
                 // CSS computed-value resolution: font-size absolutizes at
                 // style time — em/% against the PARENT's computed font-size,
@@ -6807,11 +6904,22 @@ impl Engine {
                 // host's shadow tree, a slot's assigned nodes. Nodes slotted
                 // here are matched against their own (light-tree)
                 // ancestors, which their host recorded.
+                //
+                // Each tree has its own sheets (`shadow_tree`): a host's
+                // shadow children are matched against its shadow tree's,
+                // from a chain that starts at the shadow root; a slot's
+                // assigned nodes against their host's tree's.
                 let child_nodes = node.flat_children();
-                let host_scope = shadow_tree::HostScope::enter(node, &child_ancestors);
-                let slotted_ancestors = shadow_tree::slotted_ancestors(node, &child_nodes);
-                let children_ancestors: &[Ancestor] =
-                    slotted_ancestors.as_deref().unwrap_or(&child_ancestors);
+                let host_scope =
+                    shadow_tree::HostScope::enter(node, &tag_lower, attributes, sib, &child_ancestors);
+                let slot_scope =
+                    shadow_tree::SlotScope::enter(node, attributes, ancestors, sib, &child_nodes);
+                let (children_sheets, children_ancestors): (&[Stylesheet], &[Ancestor]) =
+                    match (&slot_scope, host_scope.sheets(), host_scope.chain()) {
+                        (Some(slot), _, _) => (slot.sheets(), slot.chain()),
+                        (None, Some(sheets), Some(chain)) => (sheets, chain),
+                        _ => (stylesheets, &child_ancestors),
+                    };
                 let child_element_count = child_nodes
                     .iter()
                     .filter(|c| matches!(c.node_type, NodeType::Element { .. }))
@@ -6878,7 +6986,7 @@ impl Engine {
                     };
                     let child_box = self.build_layout_from_parent_style_and_path(
                         child,
-                        stylesheets,
+                        children_sheets,
                         css_vars,
                         children_ancestors,
                         Some(children_parent_style),
@@ -6945,6 +7053,7 @@ impl Engine {
                 drop(table_hints);
                 drop(share_chain);
                 drop(share_parent);
+                drop(slot_scope);
                 drop(host_scope);
 
                 // Check for ::after pseudo-element
@@ -8024,6 +8133,32 @@ impl Engine {
         // important declaration beats a later one's, and any layer's beats
         // an unlayered one's. Without layers the two orders are the same.
         let important_rules = layered_important_order(&matching_rules);
+        // Rules of other trees that matched this element: its shadow tree's
+        // `:host` rules, its slot's `::slotted` rules (`shadow_tree`). CSS
+        // Cascade 4 §6.1 orders by context before specificity: the outer
+        // tree's normal declarations win, the inner tree's `!important`
+        // ones do. So the inner rules go first in the normal order and last
+        // in the important one.
+        let extras = match shadow_tree::active() {
+            true => shadow_tree::take_extras(),
+            false => Vec::new(),
+        };
+        let (matching_rules, important_rules) = match extras.is_empty() {
+            true => (matching_rules, important_rules),
+            false => {
+                let mut inner: Vec<(&Rule, (usize, usize, usize), usize)> = extras
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| (e.rule(), e.specificity(), usize::MAX - extras.len() + i))
+                    .collect();
+                inner.sort_by(|a, b| (a.0.layer_order, a.1, a.2).cmp(&(b.0.layer_order, b.1, b.2)));
+                let inner_important = layered_important_order(&inner).unwrap_or_else(|| inner.clone());
+                let mut important = important_rules.unwrap_or_else(|| matching_rules.clone());
+                important.extend(inner_important);
+                inner.extend(matching_rules);
+                (inner, Some(important))
+            }
+        };
         let rules_for = |important_pass: bool| match (&important_rules, important_pass) {
             (Some(rules), true) => rules.as_slice(),
             _ => matching_rules.as_slice(),
@@ -8041,7 +8176,8 @@ impl Engine {
         // presentational hints and whether a UA rule hid the element. An
         // earlier element with the same six already has this style. Only
         // under the build's own rule index, whose rule numbers the key holds.
-        let share = match (index.is_some(), parent_style) {
+        // Rules from other trees are not in the key: no sharing with them.
+        let share = match (index.is_some() && extras.is_empty(), parent_style) {
             (true, Some(parent)) => style_share_lookup(parent, || StyleShareKey {
                 parent: 0,
                 tag: tag_name.to_string(),
@@ -12700,13 +12836,15 @@ impl SelectorMatcher {
             // Selectors 4 §14.5: no children at all (whitespace text counts
             // as a child; comments do not).
             "empty" => !sib.has_children,
-            // Stopgap: the spec leaves a custom element undefined until script
-            // upgrades it, but nothing here runs `customElements.define`, so
-            // under that rule a `:not(:defined)` guard hides it forever and the
-            // page paints blank. Treat every element as defined until custom
-            // elements are implemented; then restore `!tag.contains('-')` for
-            // names that have not been upgraded.
-            "defined" => true,
+            // HTML §4.13 / Selectors 4 `:defined`: every element except one
+            // with a valid custom element name whose name script has not
+            // defined (`customElements.define`, recorded in the DOM). A page
+            // whose definitions never run keeps `x:not(:defined)` rules in
+            // force, as Chrome does, except in the cascade for the names a
+            // load that lost a script settled (`shadow_tree::is_defined`).
+            "defined" => {
+                !rustkit_dom::is_valid_custom_element_name(tag) || shadow_tree::is_defined(tag)
+            }
             "lang" => arg.is_some_and(|a| {
                 let want = a
                     .trim()
@@ -28057,11 +28195,14 @@ window.addEventListener('load', function () {
                 .unwrap_or_else(|| panic!("no record for {needle}: {log:#?}"))
         };
         assert_eq!(outcome("classic.js"), ScriptOutcome::Ran);
-        assert_eq!(outcome("missing.js"), ScriptOutcome::FetchFailed("HTTP 404 Not Found".into()));
+        assert_eq!(
+            outcome("missing.js"),
+            ScriptOutcome::FetchFailed(FetchFailure::Status(404))
+        );
         // A module script runs, deferred, in document order with the defer ones.
         assert_eq!(outcome("inline#5"), ScriptOutcome::Ran);
         assert!(
-            matches!(outcome("inline#6"), ScriptOutcome::Skipped(why) if why.starts_with("nomodule")),
+            matches!(outcome("inline#6"), ScriptOutcome::Nomodule),
             "{log:#?}"
         );
         match outcome("inline#7") {
