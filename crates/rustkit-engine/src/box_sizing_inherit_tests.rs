@@ -137,3 +137,35 @@ fn a_pseudo_element_inherits_box_sizing_from_its_element() {
         );
     }
 }
+
+/// Why the reset never reached a `::before`: a rule's selector list was
+/// taken whole, so only its LAST member could name the pseudo-element.
+/// Each line is one list; the 50px box shows the member was matched.
+#[test]
+fn a_pseudo_element_member_is_matched_anywhere_in_a_selector_list() {
+    let width = |css: &str| {
+        measured(css, "<span id=p class=c style='display:inline-block'></span>", WIDTHS)
+    };
+    const BOX: &str = "{content:'';display:block;width:50px}";
+    for list in [
+        "#p:before,.zz:after",
+        ".zz:after,#p:before",
+        "#p::before,.zz",
+        ".zz,#p::after,b",
+        ".zz:before,.c:before,.zz",
+    ] {
+        assert_eq!(width(&format!("{list}{BOX}")), "String(\"p:50\")", "{list}");
+    }
+    // A member for another element, or with no pseudo-element, makes no box.
+    for list in ["#p,.zz:before", ".zz:before,.zz:after", "#p,#p:hover"] {
+        assert_eq!(width(&format!("{list}{BOX}")), "String(\"p:0\")", "{list}");
+    }
+    // Bare members, alone and in a list.
+    for list in [":before", "::after", "*,:before,:after", ".zz,:after"] {
+        assert_eq!(
+            width(&format!("{list}{{padding-left:7px}} #p{{padding:0}} #p::before,#p::after{BOX}")),
+            "String(\"p:57\")",
+            "{list}"
+        );
+    }
+}
