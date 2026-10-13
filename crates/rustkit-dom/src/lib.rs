@@ -291,6 +291,9 @@ pub struct Document {
     /// Custom element names `customElements.define` has defined, for
     /// `:defined` (see `shadow.rs`, `define_custom_element`).
     defined_custom_elements: RefCell<std::collections::HashSet<String>>,
+    /// The page's load has run its scripts: no definition is still to come
+    /// from it (see `shadow.rs`, `settle_custom_element_definitions`).
+    custom_element_definitions_settled: Cell<bool>,
 }
 
 /// Sink for building a Document from HTML parsing.
@@ -501,6 +504,7 @@ impl Document {
             next_id: Cell::new(1),
             shadow_roots: Cell::new(0),
             defined_custom_elements: RefCell::new(std::collections::HashSet::new()),
+            custom_element_definitions_settled: Cell::new(false),
         }
     }
 

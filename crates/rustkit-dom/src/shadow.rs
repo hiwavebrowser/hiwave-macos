@@ -249,6 +249,33 @@ impl Document {
         self.defined_custom_elements.borrow().clone()
     }
 
+    /// The page's load has run its scripts, and with them every
+    /// `customElements.define` it was going to run. A name still undefined
+    /// then most likely belongs to a script our JS engine did not get to
+    /// (skipped over the script budget, failed, or threw where Chromium's
+    /// does not), so from now on it counts as defined: a `:not(:defined)`
+    /// rule meant for the moment before the upgrade must not hide the
+    /// element for good. Returns whether the document has an element this
+    /// changes (one with a valid custom element name never defined).
+    pub fn settle_custom_element_definitions(&self) -> bool {
+        if self.custom_element_definitions_settled.replace(true) {
+            return false;
+        }
+        let defined = self.defined_custom_elements.borrow();
+        let mut changed = false;
+        self.traverse_shadow_including(|node| {
+            if let Some(tag) = node.tag_name() {
+                changed |= is_valid_custom_element_name(tag) && !defined.contains(tag);
+            }
+        });
+        changed
+    }
+
+    /// Has the page's load settled the custom element definitions?
+    pub fn custom_element_definitions_settled(&self) -> bool {
+        self.custom_element_definitions_settled.get()
+    }
+
     /// Has any node of this document ever had a shadow root?
     pub fn has_shadow_roots(&self) -> bool {
         self.shadow_roots.get() > 0
@@ -628,6 +655,25 @@ mod tests {
         assert!(!is_valid_custom_element_name("div"));
         assert!(!is_valid_custom_element_name("font-face"));
         assert!(!is_valid_custom_element_name("X-a"));
+    }
+
+    #[test]
+    fn settling_reports_whether_an_undefined_custom_element_is_left() {
+        let doc = Document::parse_html("<body><x-a></x-a><div></div></body>").unwrap();
+        doc.define_custom_element("x-a");
+        assert!(
+            !doc.settle_custom_element_definitions(),
+            "every custom element is defined"
+        );
+        assert!(doc.custom_element_definitions_settled());
+        let doc = Document::parse_html("<body><x-a></x-a><x-b></x-b></body>").unwrap();
+        doc.define_custom_element("x-a");
+        assert!(!doc.custom_element_definitions_settled());
+        assert!(
+            doc.settle_custom_element_definitions(),
+            "x-b was never defined"
+        );
+        assert!(!doc.settle_custom_element_definitions(), "settles once");
     }
 
     #[test]

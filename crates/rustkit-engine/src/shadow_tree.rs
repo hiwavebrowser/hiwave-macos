@@ -68,6 +68,9 @@ thread_local! {
     /// The custom element names defined in the document being built, for
     /// `:defined`.
     static DEFINED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Has that document's load settled its definitions (every name counts
+    /// as defined)?
+    static SETTLED: Cell<bool> = const { Cell::new(false) };
     /// The slots whose assigned nodes the build is inside, innermost last.
     static SLOTS: RefCell<Vec<SlotEntry>> = const { RefCell::new(Vec::new()) };
     /// Rules from other trees that matched the element whose cascade runs
@@ -163,9 +166,11 @@ pub(crate) fn active() -> bool {
     ACTIVE.get()
 }
 
-/// `:defined` for a valid custom element name: has script defined it?
+/// `:defined` for a valid custom element name: has script defined it, or
+/// has the page's load ended without defining it (rustkit-dom
+/// `settle_custom_element_definitions`)?
 pub(crate) fn is_defined(tag: &str) -> bool {
-    DEFINED.with(|d| d.borrow().contains(tag))
+    SETTLED.get() || DEFINED.with(|d| d.borrow().contains(tag))
 }
 
 /// Alive for one box-tree build: installs the document's defined custom
@@ -184,6 +189,7 @@ impl BuildScope {
         javascript_enabled: bool,
     ) -> Self {
         DEFINED.with(|d| *d.borrow_mut() = document.defined_custom_elements());
+        SETTLED.set(document.custom_element_definitions_settled());
         if !document.has_shadow_roots() {
             return BuildScope { previous: None };
         }

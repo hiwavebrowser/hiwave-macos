@@ -4462,6 +4462,19 @@ impl Engine {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
             }
+            // The load's scripts are over: a custom element they did not
+            // define (a script skipped or failed here that Chromium runs)
+            // stops matching `:not(:defined)`, so a rule that hides it until
+            // its upgrade does not hide it for good.
+            if let Some(view) = self.views.get(&id) {
+                let settled = view
+                    .document
+                    .as_ref()
+                    .is_some_and(|d| d.settle_custom_element_definitions());
+                if let (true, Some(bindings)) = (settled, view.bindings.as_ref()) {
+                    bindings.mark_dirty(DomDirty::Style);
+                }
+            }
             self.flush_script_dom_writes(id, None)?;
 
             // Images were discovered before the scripts ran. One more pass
