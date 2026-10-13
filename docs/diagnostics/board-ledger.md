@@ -12,6 +12,7 @@ A score is entered only when a board run measured it on that sha. Anything unmea
 
 - **/60** is the original 20 sites (`websuite/realsite-top20.json`).
 - **/75** is all 25 sites. [PR #568](https://github.com/hiwavebrowser/hiwave-macos/pull/568) (Atlas, open at this seed, not an ancestor of `50e77c83`) grows the list to 25. The original 20 stay comparable on /60, and the full list is scored on /75. Both denominators are recorded together starting with the 4:30 AM run (`a7564057`, **26/75**).
+- After [PR #617](https://github.com/hiwavebrowser/hiwave-macos/pull/617) (2026-10-08) the list is 26 sites (simonwillison appended). The full score max becomes 78. The table keeps the /75 column. From `3363c677` on, that column holds the full-board score, and the entry notes that the max is 78.
 - #568's body also records a one-load reading of the five new sites on `481db9cb` (3/15). That reading is not a board score and is not a row below.
 
 Seeded 2026-10-06 ET. The 27 and 26 below are that night's record of the github drop. They are not restated in a commit message on these shas.
@@ -26,6 +27,14 @@ Seeded 2026-10-06 ET. The 27 and 26 below are that night's record of the github 
 | [`481db9cb`](#481db9cb--2026-10-06-1300-et) | 2026-10-06 13:00 | 26 | — | — | Same as `e3b833fc`. No drop. /75 not measured (before #568). |
 | [`a7564057`](#a7564057--2026-10-07-0430-et) | 2026-10-07 04:30 | 24 | 26 | github 1→0, wikipedia 2→1 | No engine regression PR. github timing race; wikipedia Chrome oracle drift. |
 | [`a181da05`](#a181da05--2026-10-07-1300-et) | 2026-10-07 13:00 | 26 | 29 | github 0→1, wikipedia 1→2, autotrader 1→2 | Rise. github is #598. wikipedia and autotrader are Chrome oracle drift. |
+| [`7eb35d97`](#7eb35d97--2026-10-08-0430-et) | 2026-10-08 04:30 | 26 | 29 | — | Same as `a181da05`. No per-site change. |
+| [`3363c677`](#3363c677--2026-10-08-1300-et) | 2026-10-08 13:00 | 24 | 29 | google 3→1; simonwillison appears (2) | Drop 26→24. No engine regression PR. Do not blame #617 or #623. Max is 78. |
+| [`65e1e2f4`](#65e1e2f4--2026-10-09-0430-et) | 2026-10-09 04:30 | 26 | 31 | google 1→2, wikipedia 2→3, simonwillison 2→3, autotrader 2→1 | Recover 24→26. Prior google drop recovered. No new blame. Max is 78. |
+| [`cea4c0c6`](#cea4c0c6--2026-10-09-1336-et) | 2026-10-09 13:36 | 26 | 31 | google 2→3, wikipedia 3→2 | No drop. Max is 78. |
+| [`16f97285`](#16f97285--2026-10-09-1729-et) | 2026-10-09 17:29 | 27 | 32 | wikipedia 2→3 | Rise. Max is 78. |
+| [`81ef8b34`](#81ef8b34--2026-10-12-0430-et) | 2026-10-12 04:30 | 26 | 31 | google 3→2 | Drop 27→26. No engine PR. Max is 78. |
+| [`696f9921`](#696f9921--2026-10-12-1300-et) | 2026-10-12 13:00 | 26 | 31 | google 2→3, wikipedia 3→2 | No drop. Max is 78. |
+| [`bbd92964`](#bbd92964--2026-10-13-0458-et) | 2026-10-13 04:58 | 27 | 32 | walmart 1→2 | Rise 26→27. Possible Chrome settling, maybe #683. Max is 78. |
 | _next_ | | TBD | TBD | | |
 
 ## Entries
@@ -191,6 +200,204 @@ First-parent merges on `develop` after `a7564057` through this tip (oldest first
 | `7877dd6f` | 2026-10-07 10:32 | #598 | fix(bindings): EventTarget is constructible (github.com's landing page ended in its error boundary) |
 | `3b5224e0` | 2026-10-07 10:53 | #599 | fix(layout): a border-box flex item with a zero basis grows from its padding and border (H15, ebay's search box) |
 | `a181da05` | 2026-10-07 11:40 | #600 | docs(census): cleanup top100 after #597 (exclusive walls, 429s, retry) |
+
+### `7eb35d97` — 2026-10-08 04:30 ET
+
+`a181da05` → `7eb35d97` → **/60** **26 → 26**, **/75** **29 → 29** → #602, #604, #605, #606, #608, #609, #610, #587, #611, #612, #613, #554.
+
+- Full sha: `7eb35d97d19e68d90a7deec7c7dce62233ce8c6a`
+- This tip is the merge of [#554](https://github.com/hiwavebrowser/hiwave-macos/pull/554) (`perf(engine): turn tree reuse on by default (Z B0, A2 approved)`), merged 2026-10-08 04:08 ET.
+- Board 20261008T083045Z (2026-10-08 04:30 ET). Still the 25-site list, before #617.
+- /60: **26**, same as `a181da05`. /75: **29**.
+- Per-site: none. The score did not move.
+- Localisation: none. There is no measured delta.
+
+First-parent merges on `develop` after `a181da05` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `41fb6d0e` | 2026-10-07 16:55 | #602 | fix(layout): percentage heights resolve against a flex item's definite height, and on controls (H15) |
+| `f998244c` | 2026-10-07 19:51 | #604 | fix(layout): min-height and max-height resolve rem, em and viewport units |
+| `2585d8ef` | 2026-10-07 20:05 | #605 | fix(engine): a style or stylesheet link inside noscript is not a sheet when scripting is on (H14) |
+| `dd99c1be` | 2026-10-07 20:22 | #606 | docs(diagnostics): reduced repro, external svg use (census tech 8) |
+| `05956fda` | 2026-10-07 21:07 | #608 | fix(layout): an unstretched row flex item keeps its min-height |
+| `51bea242` | 2026-10-07 21:08 | #609 | feat(parity-capture): --script-budget-ms for a labelled run at the app's script budget |
+| `4ec32c0d` | 2026-10-07 21:08 | #610 | fix(app): the first wheel burst after launch is logged (driver h6 log check) |
+| `8b6dd2b4` | 2026-10-07 21:24 | #587 | ci: add blocking js-suites lane for rustkit-js and rustkit-bindings (#574 item 5) |
+| `51ad7d4f` | 2026-10-07 22:26 | #611 | fix(css): a content value is its strings, escapes resolved and joined (H17: icon-font glyphs were shown as \f007 text) |
+| `82a5a950` | 2026-10-07 22:37 | #612 | fix(layout): an svg or img sized in rem, em, vw, vh, calc() or min() takes that size; min-width and min-height on them (H17 icon sizing) |
+| `ce163d8e` | 2026-10-07 22:57 | #613 | fix(layout): a flex container with a rem, em, vh or calc() height aligns, stretches and justifies its items in that height (H17 alignment) |
+| `7eb35d97` | 2026-10-08 04:08 | #554 | perf(engine): turn tree reuse on by default (Z B0, A2 approved) |
+
+### `3363c677` — 2026-10-08 13:00 ET
+
+`7eb35d97` → `3363c677` → **/60** **26 → 24**, full **29/78** (first 26-site board after #617) → #615, #616, #614, #617, #618, #620, #623.
+
+- Full sha: `3363c67795e1e89c751800d5181a18ed2d78f8c6`
+- This tip is the merge of [#623](https://github.com/hiwavebrowser/hiwave-macos/pull/623) (`docs(diagnostics): #621 table whitespace rows — infobox reduced page`), merged 2026-10-08 12:04 ET.
+- Board 20261008T170050Z (2026-10-08 13:00 ET).
+- /60: **24** (drop 26 → 24). Full board: **29/78**. This is the first 26-site board after #617. The score table keeps the /75 column; 29 in that column is the full score, and the max is 78.
+- Per-site: google 3 → 1. simonwillison appears at 2.
+- Localisation: no engine regression PR. Do not blame #617 or #623.
+
+**google 3 → 1** (Trace, 2026-10-13, medium confidence). No engine regression PR. Chrome kept the AI-chips homepage on both tips; only the promo line rotated. At `7eb35d97` rustkit already had the H22 conic/rainbow covering the search row, and the score was still 3. At `3363c677` that block grew, and rustkit showed the classic Google Search / I'm Feeling Lucky homepage instead of the AI chips. Google served rustkit a different variant on top of the old conic bug. #632, in the next window, is the H22 reduce for that conic. Do not blame #617 (the list change) or #623 (docs).
+
+There is no separate #621 first-parent merge. The branch `reduce/621-table-whitespace` is this tip's #623, and that pull request is docs. The parser fix that cites #621 is #624, first-parent in the next window.
+
+First-parent merges on `develop` after `7eb35d97` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `d4d82abe` | 2026-10-08 04:59 | #615 | fix(css): a media feature length may be calc(), min(), max(), clamp() or any length unit |
+| `18d12588` | 2026-10-08 09:37 | #616 | fix(js,engine,app): a script still running at the budget is stopped at its next host call (ebay hang) |
+| `6f6496cd` | 2026-10-08 10:03 | #614 | fix(engine): the root element is body's ancestor in the cascade (.client-js .x, html.dark .x) |
+| `baac9807` | 2026-10-08 11:05 | #617 | test: add simonwillison.net/tags/browser-challenge to the real-site list |
+| `f08b881a` | 2026-10-08 11:32 | #618 | docs(diagnostics): H19 float-wrap BEFORE evidence, 5 float shapes |
+| `a0f07ba5` | 2026-10-08 11:38 | #620 | fix(svg,engine): sprite sheets: `<g>` and nested `<svg>` are containers, vector backgrounds are cut to their box, short background lists repeat |
+| `3363c677` | 2026-10-08 12:04 | #623 | docs(diagnostics): #621 table whitespace rows — infobox reduced page |
+
+### `65e1e2f4` — 2026-10-09 04:30 ET
+
+`3363c677` → `65e1e2f4` → **/60** **24 → 26**, full **29/78 → 31/78** (max is 78 after #617) → #628, #624, #619, #631, #632, #630, #625, `2616ec28`, #634.
+
+- Full sha: `65e1e2f4c6f84f883f35ea916249e0ee1f74a8d5`
+- This tip is the merge of [#634](https://github.com/hiwavebrowser/hiwave-macos/pull/634) (`fix(engine): one reset for a new document, before its first layout (H27)`), merged 2026-10-08 22:20 ET.
+- Board 20261009T083029Z (2026-10-09 04:30 ET).
+- /60: **26** (recover 24 → 26). Full board: **31/78**. The score table keeps the /75 column; 31 in that column is the full score, and the max is 78 after #617.
+- Per-site: google 1 → 2, wikipedia 2 → 3, simonwillison 2 → 3, autotrader 2 → 1.
+- Localisation: recovery of the prior google drop. No new blame.
+
+`2616ec28` is on the first-parent line between #625 and #634. The subject is `probe`. It is not a numbered pull request. Git records two parents; the second parent is `atlas/z-flex-percent-basis-indefinite` (flex percent basis).
+
+First-parent commits on `develop` after `3363c677` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `6c9265db` | 2026-10-08 13:08 | #628 | fix(engine,app): the app draws a view only when its frame would differ from the one on screen |
+| `da493810` | 2026-10-08 14:19 | #624 | fix(html): whitespace between table rows no longer splits the tbody or leaves the table open (#621) |
+| `e845c42e` | 2026-10-08 14:21 | #619 | fix(layout): line boxes beside a float are shortened (H19, Wikipedia thumbnails and infoboxes) |
+| `8066f724` | 2026-10-08 14:25 | #631 | fix(app): script budget for live pages is 15 s, down from 60 s |
+| `d357ee92` | 2026-10-08 14:59 | #632 | docs(diagnostics): H22 google search-box conic gradient — reduced page |
+| `ca45f458` | 2026-10-08 15:24 | #630 | feat(layout): table layout, first slice: grid, auto column widths, spans, spacing (#626) |
+| `c9d7ba1b` | 2026-10-08 15:27 | #625 | fix(js,engine): a script stopped at the budget says so in the log, with how long it ran |
+| `2616ec28` | 2026-10-08 15:39 | — | probe |
+| `65e1e2f4` | 2026-10-08 22:20 | #634 | fix(engine): one reset for a new document, before its first layout (H27) |
+
+### `cea4c0c6` — 2026-10-09 13:36 ET
+
+`65e1e2f4` → `cea4c0c6` → **/60** **26 → 26**, full **31/78 → 31/78** (max is 78 after #617) → #635, #636, #637, #638, #639, #640, #645, #646, #633.
+
+- Full sha: `cea4c0c6662da257679d3043c2813775f907ed4b`
+- This tip is the merge of [#633](https://github.com/hiwavebrowser/hiwave-macos/pull/633) (`fix(paint): opacity on boxes, as a group layer (H22)`), merged 2026-10-09 12:50 ET.
+- Board 20261009T173658Z (2026-10-09 13:36 ET).
+- /60: **26**. Full board: **31/78**. The score table keeps the /75 column; 31 in that column is the full score, and the max is 78 after #617.
+- Per-site: google 2 → 3, wikipedia 3 → 2.
+- Localisation: no drop.
+
+First-parent merges on `develop` after `65e1e2f4` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `639220fe` | 2026-10-09 09:14 | #635 | fix(renderer): a frame during which the glyph atlas starts over is built again, on an emptied atlas (H23) |
+| `b5fcd677` | 2026-10-09 09:14 | #636 | fix(cascade): an ancestor's attributes and :not() are tested against that ancestor (microsoft.com blank under #633) |
+| `f54103d9` | 2026-10-09 09:14 | #637 | feat(parity-capture): --live-ms turns the app's live loop after a load; trace the DOM write that dirtied the page (tool) |
+| `ccf6a7b3` | 2026-10-09 11:35 | #638 | fix(engine): white space beside a block-level image or control makes no line (wikipedia logo; clears #622's 14px) |
+| `a973287e` | 2026-10-09 11:35 | #639 | fix(bindings): an IntersectionObserver's first entry waits for the layout a DOM write is owed (found on github.com; does not stop its loop) |
+| `e69a375b` | 2026-10-09 11:35 | #640 | fix(bindings): a live turn runs one round of animation frames, not one per 16 ms it took |
+| `2c0d63ca` | 2026-10-09 11:35 | #645 | fix(bindings): canvas.getContext and media element methods exist (github.com remounted its page every turn) |
+| `230f6c44` | 2026-10-09 12:50 | #646 | Fix standalone engine test compilation and ancestor-slice regression fixture |
+| `cea4c0c6` | 2026-10-09 12:50 | #633 | fix(paint): opacity on boxes, as a group layer (H22) |
+
+### `16f97285` — 2026-10-09 17:29 ET
+
+`cea4c0c6` → `16f97285` → **/60** **26 → 27**, full **31/78 → 32/78** (max is 78 after #617) → #651, #649, #648, #658, #653, #650, #655, #657, #659.
+
+- Full sha: `16f97285eba005640e1feb030ba5fce9a5beaadb`
+- This tip is the merge of [#659](https://github.com/hiwavebrowser/hiwave-macos/pull/659) (`fix: a replaced box with a height and a ratio takes its width from them in flex and the width estimators (H26c)`), merged 2026-10-09 17:27 ET.
+- Board 20261009T212952Z (2026-10-09 17:29 ET).
+- /60: **27** (rise 26 → 27). Full board: **32/78**. The score table keeps the /75 column; 32 in that column is the full score, and the max is 78 after #617.
+- Per-site: wikipedia 2 → 3.
+- Localisation: rise. No other site moved.
+
+First-parent merges on `develop` after `cea4c0c6` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `f13f0414` | 2026-10-09 13:48 | #651 | docs: table AFTER evidence with cell rects (reduce_ pages; caption-side bottom, UA p margin) |
+| `6b7f0b3d` | 2026-10-09 13:48 | #649 | docs: H24 ebay large icons (CSS-sized svg use paints in 300x150 viewport) |
+| `c330c43e` | 2026-10-09 14:46 | #648 | feat(tools): element_diff — per-element box comparison against Chrome, with overlay |
+| `c63b57bd` | 2026-10-09 15:17 | #658 | fix: a CSS-sized svg with a use paints at its box size, not 300x150 (H24) |
+| `9d95aabf` | 2026-10-09 15:48 | #653 | test(layout): sizing equivalence matrix (W7-A) + 7 unit-resolution fixes |
+| `194e48e7` | 2026-10-09 15:48 | #650 | fix(svg): flatten path curves to a device-pixel tolerance and sweep x-disjoint contours apart (W7-D) |
+| `642c9c9f` | 2026-10-09 17:26 | #655 | feat(engine): log why each relayout happened (W7-C) |
+| `bffcfa3f` | 2026-10-09 17:26 | #657 | fix: auto margins on flex items take the free space (H25) |
+| `16f97285` | 2026-10-09 17:27 | #659 | fix: a replaced box with a height and a ratio takes its width from them in flex and the width estimators (H26c) |
+
+### `81ef8b34` — 2026-10-12 04:30 ET
+
+`16f97285` → `81ef8b34` → **/60** **27 → 26**, full **32/78 → 31/78** (max is 78 after #617) → #647, #652, #654.
+
+- Full sha: `81ef8b34c716dece7804375221d78f3a9dd9083b`
+- This tip is the merge of [#654](https://github.com/hiwavebrowser/hiwave-macos/pull/654) (`docs: H26 reddit top defects with reduced pages (grid order/fixed, grid in flex, slot/logo)`), merged 2026-10-09 20:02 ET. The board is the next morning run after the weekend, 2026-10-12 04:30 ET.
+- Board 20261012T083026Z (2026-10-12 04:30 ET).
+- /60: **26** (drop 27 → 26). Full board: **31/78**. The score table keeps the /75 column; 31 in that column is the full score, and the max is 78 after #617.
+- Per-site: google 3 → 2.
+- Localisation: no engine PR.
+
+**google 3 → 2** (Trace, final, high confidence). No engine PR. chrome-a and chrome-b are more stable on this tip than on the previous one. rustkit drew the classic homepage, with no doodle and no chips. Chrome had the AI chips. The missing words are chip labels that the classic page does not have. This flip has gone both ways on earlier tips. #647, #652, and #654 are unrelated to Google.
+
+First-parent merges on `develop` after `16f97285` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `e7f40591` | 2026-10-09 20:01 | #647 | docs: H25 simonwillison gutter (column-flex item auto margins ignored) |
+| `9771bda0` | 2026-10-09 20:02 | #652 | docs: thread ownership design for responsiveness and Phase X (W7-E) |
+| `81ef8b34` | 2026-10-09 20:02 | #654 | docs: H26 reddit top defects with reduced pages (grid order/fixed, grid in flex, slot/logo) |
+
+### `696f9921` — 2026-10-12 13:00 ET
+
+`81ef8b34` → `696f9921` → **/60** **26 → 26**, full **31/78 → 31/78** (max is 78 after #617) → #662, #667, #661.
+
+- Full sha: `696f9921e4f1d92903e1807df3b14e2a53999ac8`
+- This tip is the merge of [#661](https://github.com/hiwavebrowser/hiwave-macos/pull/661) (`fix: receipt.py prints no host paths`), merged 2026-10-12 11:29 ET.
+- Board 20261012T170047Z (2026-10-12 13:00 ET).
+- /60: **26**. Full board: **31/78**. The score table keeps the /75 column; 31 in that column is the full score, and the max is 78 after #617.
+- Per-site: google 2 → 3, wikipedia 3 → 2.
+- Localisation: no drop.
+
+First-parent merges on `develop` after `81ef8b34` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `5feb459a` | 2026-10-12 08:51 | #662 | fix: svg paths and strokes scroll with the page (polygons and lines go through the transform stack) |
+| `d6b449f6` | 2026-10-12 11:03 | #667 | fix: a page that asked to leave is not kept waiting for images its scripts added (I0a) |
+| `696f9921` | 2026-10-12 11:29 | #661 | fix: receipt.py prints no host paths |
+
+### `bbd92964` — 2026-10-13 04:58 ET
+
+`696f9921` → `bbd92964` → **/60** **26 → 27**, full **31/78 → 32/78** (max is 78 after #617) → #669, #671, #672, #670, #673, #680, #683, #682.
+
+- Full sha: `bbd92964176894f9df9a1bb2c8dd0fc0d72295e1`
+- This tip is the merge of [#682](https://github.com/hiwavebrowser/hiwave-macos/pull/682) (`docs: the no-check label parks a pull request`), merged 2026-10-12 23:51 ET.
+- Board 20261013T085801Z (2026-10-13 04:58 ET).
+- /60: **27** (rise 26 → 27). Full board: **32/78**. The score table keeps the /75 column; 32 in that column is the full score, and the max is 78 after #617.
+- Per-site: walmart 1 → 2. google's rustkit capture is identical across this step.
+- Localisation: rise, not a drop. Possible Chrome settling, and maybe #683. Low–medium confidence.
+
+**walmart 1 → 2** (Trace, final, low–medium). This is a rise, not a drop. google's rustkit capture is identical across this step. Possible Chrome settling, and maybe #683 (a brotli response is decoded even when the engine did not ask for it).
+
+First-parent merges on `develop` after `696f9921` through this tip (oldest first):
+
+| Merge | When (ET) | PR | Subject |
+|---|---|---:|---|
+| `a9a0cdbe` | 2026-10-12 17:49 | #669 | test: nested layout matrix, 609 pages of one layout mode inside another against Chromium (D1) |
+| `3f4f8c37` | 2026-10-12 17:49 | #671 | feat: shadow DOM renders through the flat tree (S0 slice 1) |
+| `75f32786` | 2026-10-12 18:21 | #672 | fix: width: fit-content on a block is its shrink-to-fit width, not 0 (D1) |
+| `2b75e93b` | 2026-10-12 19:23 | #670 | fix: gap with two values sets the row gap and the column gap (D1) |
+| `f622466d` | 2026-10-12 20:25 | #673 | fix: an empty block sized only by aspect-ratio keeps its box (D1) |
+| `fe75d982` | 2026-10-12 23:51 | #680 | fix: the GPU test guard's limit is on one test's hold, not on the queue (false failures in loaded full runs) |
+| `96a8f36e` | 2026-10-12 23:51 | #683 | fix: a brotli response is decoded even though we did not ask for it |
+| `bbd92964` | 2026-10-12 23:51 | #682 | docs: the no-check label parks a pull request |
 
 ## Append a tip
 
