@@ -597,13 +597,10 @@ const NEVER_DEFINED_PROBE: &str = "[document.getElementById('n').matches(':defin
     String(customElements.get('x-never')), String(wd), \
     document.querySelectorAll(':not(:defined)').length].join()";
 
-/// Did any of the load's `<script>` elements not run to completion?
+/// Did the engine lose one of the load's `<script>` elements (the settle's
+/// own test, `load_lost_a_script`)?
 fn lost_a_script(page: &Rendered) -> bool {
-    page.engine
-        .script_log(page.view)
-        .unwrap()
-        .iter()
-        .any(|r| !r.source.starts_with("event:") && r.outcome != ScriptOutcome::Ran)
+    load_lost_a_script(page.engine.script_log(page.view).unwrap())
 }
 
 /// Script-facing matching follows the registry, whether or not the load
@@ -830,4 +827,46 @@ fn a_script_lost_on_the_engines_side_settles() {
             "{rest}: {got}"
         );
     }
+}
+
+/// Which outcomes are a lost script. Chromium loses a `nomodule` script
+/// and one answered with any error status too; anything the engine failed
+/// on its own side is lost.
+#[test]
+fn a_lost_script_is_one_chromium_would_have_run() {
+    let record = |source: &str, outcome: ScriptOutcome| ScriptRecord {
+        source: source.into(),
+        bytes: 0,
+        elapsed_ms: 0,
+        outcome,
+    };
+    for outcome in [
+        ScriptOutcome::Ran,
+        ScriptOutcome::Nomodule,
+        ScriptOutcome::FetchFailed(FetchFailure::Status(404)),
+        ScriptOutcome::FetchFailed(FetchFailure::Status(410)),
+        ScriptOutcome::FetchFailed(FetchFailure::Status(503)),
+    ] {
+        assert!(
+            !load_lost_a_script(&[record("http://a/x.js", outcome.clone())]),
+            "{outcome:?}"
+        );
+    }
+    for outcome in [
+        ScriptOutcome::OverBudget,
+        ScriptOutcome::Threw("Error: lost".into()),
+        ScriptOutcome::Skipped("too large to run inside the script budget"),
+        ScriptOutcome::FetchFailed(FetchFailure::Transport("connection refused".into())),
+    ] {
+        assert!(
+            load_lost_a_script(&[record("http://a/x.js", outcome.clone())]),
+            "{outcome:?}"
+        );
+    }
+    // An error that escaped a callback is not a lost script.
+    assert!(!load_lost_a_script(&[record(
+        "timers",
+        ScriptOutcome::Threw("x".into())
+    )]));
+    assert_eq!(FetchFailure::Status(404).to_string(), "HTTP 404 Not Found");
 }
