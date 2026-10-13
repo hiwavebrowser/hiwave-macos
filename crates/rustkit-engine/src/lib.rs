@@ -224,6 +224,8 @@ mod table_engine_tests;
 mod ws_beside_block_replaced_tests;
 #[cfg(all(test, feature = "headless"))]
 mod shadow_tree_tests;
+#[cfg(all(test, feature = "headless"))]
+mod box_sizing_inherit_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
