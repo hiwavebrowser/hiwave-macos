@@ -1111,6 +1111,11 @@ pub enum Display {
     /// Columns and column groups are never rendered; they only carry widths.
     TableColumn,
     TableColumnGroup,
+    /// `contents`: the element generates no box; its children take its
+    /// place. Only the UA style of `<slot>` sets it (author `display:
+    /// contents` is still unsupported, see `parse_display`), and the
+    /// engine's box-tree build removes such boxes, so layout never sees one.
+    Contents,
 }
 
 impl Display {
@@ -1855,6 +1860,16 @@ pub enum Visibility {
     Visible,
     Hidden,
     Collapse,
+}
+
+/// `pointer-events` (CSS UI 4 §8.1; the SVG-only values count as `auto`).
+/// Inherited. A `none` box is no target of a hit test: the point goes to
+/// what is under it, and a descendant can set `auto` again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointerEvents {
+    #[default]
+    Auto,
+    None,
 }
 
 /// Overflow behavior.
@@ -2607,6 +2622,7 @@ pub struct ComputedStyle {
     // Visual
     pub opacity: f32,
     pub visibility: Visibility,
+    pub pointer_events: PointerEvents,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
@@ -2786,6 +2802,7 @@ impl ComputedStyle {
             direction: parent.direction,
             writing_mode: parent.writing_mode,
             visibility: parent.visibility,
+            pointer_events: parent.pointer_events,
             border_spacing: parent.border_spacing,
             border_collapse: parent.border_collapse,
 

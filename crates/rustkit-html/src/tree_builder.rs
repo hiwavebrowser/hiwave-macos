@@ -1978,7 +1978,12 @@ impl<S: TreeSink> TreeBuilder<S> {
             }
             Token::EndTag { name } => {
                 match name.as_str() {
-                    "template" => {
+                    // `title`/`style`/`script` were opened by the "in head"
+                    // rules, whose raw-text end (the spec's "text" mode)
+                    // closes them; there is no text mode here, so their end
+                    // tag goes back to those rules. Ignored, a template's
+                    // `<style>` swallowed everything after it.
+                    "template" | "title" | "style" | "script" => {
                         self.handle_in_head(token)?;
                     }
                     _ => {
