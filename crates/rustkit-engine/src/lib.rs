@@ -27001,8 +27001,11 @@ mod rule_prefilter_tests {
             .collect();
 
         assert_eq!(indexed, plain);
-        // Not vacuous: class, compound-class, id and attribute winners.
-        assert_eq!(plain.iter().filter(|c| c.is_some()).count(), 4, "{plain:?}");
+        // Not vacuous: class, compound-class, id and attribute winners. The
+        // bare `::before` gives every host a `content` (it matched nothing
+        // while an empty base was handed to the matcher: 4 boxes, not 8).
+        assert_eq!(plain.iter().filter(|c| c.is_some()).count(), 8, "{plain:?}");
+        assert_eq!(plain[10], Some(rustkit_css::Color::from_rgb(1, 0, 0)), "bare ::before alone");
     }
 
     #[test]
