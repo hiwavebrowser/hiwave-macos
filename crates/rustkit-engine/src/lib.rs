@@ -190,7 +190,7 @@ pub(crate) mod test_gpu {
                 drop(wait_until_free(&holder, &released, limit));
                 let _ = ready_tx.send(());
             });
-            assert!(helper_has_its_engine(&ready_rx, limit));
+            assert!(helper_has_its_engine(&ready_rx));
             helper.join().unwrap();
             queue.join().unwrap();
         }
@@ -208,7 +208,7 @@ pub(crate) mod test_gpu {
                 let _ = ready_tx.send(());
             });
             let started = std::time::Instant::now();
-            assert!(!helper_has_its_engine(&ready_rx, limit));
+            assert!(!helper_has_its_engine(&ready_rx));
             assert!(started.elapsed() < Duration::from_secs(5));
             assert!(helper.join().is_err());
         }
@@ -226,8 +226,13 @@ pub(crate) mod test_gpu {
 
     /// Wait for a helper thread to say it has its engine. False when it never
     /// will.
-    fn helper_has_its_engine(ready: &std::sync::mpsc::Receiver<()>, guard_limit: Duration) -> bool {
-        ready.recv_timeout(guard_limit + guard_limit / 4).is_ok()
+    ///
+    /// No limit of its own: the helper queues on the guard, whose limit is per
+    /// holder, and a limit here would bring back the limit on the whole queue.
+    /// A helper that fails in the guard panics and drops its sender, which
+    /// ends this wait at once.
+    fn helper_has_its_engine(ready: &std::sync::mpsc::Receiver<()>) -> bool {
+        ready.recv().is_ok()
     }
 
     /// Run `work` against a fresh engine on a helper thread, and fail with
@@ -249,7 +254,7 @@ pub(crate) mod test_gpu {
             let _ = ready_tx.send(());
             let _ = done_tx.send(work(&e));
         });
-        if !helper_has_its_engine(&ready_rx, MAX_WAIT) {
+        if !helper_has_its_engine(&ready_rx) {
             panic!("{what}: the helper thread never got an engine");
         }
         match done_rx.recv_timeout(budget) {
