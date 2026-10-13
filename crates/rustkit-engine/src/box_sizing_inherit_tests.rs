@@ -205,6 +205,16 @@ fn a_pseudo_element_list_member_cascades_with_its_own_specificity() {
             );
         }
     }
+    // The one-colon spelling is a pseudo-element too, (0,0,1): the old
+    // reset `:before { … }` must not beat `span::before`.
+    assert_eq!(
+        width(
+            ".c::before{content:'';display:block;height:5px} \
+             span::before{width:20px} :before{width:50px} span:before{margin-left:3px}",
+            "c"
+        ),
+        "String(\"p:23\")"
+    );
     // The ordinary shape of it.
     assert_eq!(
         width(

@@ -7237,8 +7237,14 @@ impl Engine {
                 };
                 #[cfg(test)]
                 CANDIDATE_VISITS.with(|n| n.set(n.get() + 1));
-                let matched = SelectorMatcher.selector_matches_prepared(
+                // The specificity of the most specific member that matches,
+                // not the list's: `.c::before, #zz .c::before` is (0,1,1) on
+                // a `.c` outside `#zz`.
+                let members = &ix.pseudo_member_specificity[gi][which];
+                let matched = SelectorMatcher.matched_specificity(
                     prepared,
+                    members,
+                    members[0].1,
                     tag_name,
                     attributes,
                     ancestors,
@@ -7247,15 +7253,15 @@ impl Engine {
                 );
                 // No base keys means an empty base, which admits any element.
                 debug_assert!(
-                    !matched
+                    matched.is_none()
                         || ix.pseudo_keys[gi][which]
                             .as_deref()
                             .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes)),
                     "the subject prefilter rejects {:?}, which matches <{tag_name}>",
                     ix.rule(stylesheets, g).selector
                 );
-                if matched {
-                    matching_rules.push((ix.specificity[gi], ix.rule(stylesheets, g)));
+                if let Some(specificity) = matched {
+                    matching_rules.push((specificity, ix.rule(stylesheets, g)));
                 }
             }
         }
@@ -7269,7 +7275,7 @@ impl Engine {
 
                 // The members of the list that end in the pseudo, by their
                 // base selectors (without the pseudo).
-                if let Some((base_selector, bare)) =
+                if let Some((base_selector, bare, members)) =
                     pseudo_list_base(selector, pseudo, single_colon.as_str())
                 {
 
@@ -7278,16 +7284,19 @@ impl Engine {
                     // `.slot:empty::before { content: "…" }`). The cheap
                     // subject prefilter first, exactly as the cascade does.
                     // A bare `::before` has no subject to prefilter on.
-                    if (bare || self.rule_may_match(&base_selector, tag_name, attributes))
-                        && SelectorMatcher.selector_matches(
-                        &base_selector,
+                    if !(bare || self.rule_may_match(&base_selector, tag_name, attributes)) {
+                        continue;
+                    }
+                    if let Some(specificity) = SelectorMatcher.matched_specificity(
+                        &SelectorMatcher.prepared_selector(&base_selector),
+                        &members,
+                        members[0].1,
                         tag_name,
                         attributes,
                         ancestors,
                         siblings_before,
                         sib,
                     ) {
-                        let specificity = SelectorMatcher.selector_specificity(selector);
                         matching_rules.push((specificity, rule));
                     }
                 }
@@ -11399,6 +11408,7 @@ impl Engine {
             keys: Vec::new(),
             pseudo_keys: Vec::new(),
             pseudo_prepared: Vec::new(),
+            pseudo_member_specificity: Vec::new(),
             specificity: Vec::new(),
             member_specificity: Vec::new(),
             prepared: Vec::new(),
@@ -11435,6 +11445,7 @@ impl Engine {
                 ix.prepared.push(prepared);
                 let mut pseudo_keys = [None, None];
                 let mut pseudo_prepared = [None, None];
+                let mut pseudo_members = [Vec::new(), Vec::new()];
                 // Same test as create_pseudo_element's (the single-colon
                 // form covers the double-colon one), per member of the
                 // list. Filed under the keys of the BASE selectors, the ones
@@ -11448,11 +11459,13 @@ impl Engine {
                 .into_iter()
                 .enumerate()
                 {
-                    let Some((base, bare)) = pseudo_list_base(&rule.selector, pseudo, suffix)
+                    let Some((base, bare, members)) =
+                        pseudo_list_base(&rule.selector, pseudo, suffix)
                     else {
                         continue;
                     };
                     pseudo_prepared[which] = Some(SelectorMatcher.prepared_selector(&base));
+                    pseudo_members[which] = members;
                     if bare {
                         buckets.universal.push(g);
                     } else {
@@ -11465,6 +11478,7 @@ impl Engine {
                 }
                 ix.pseudo_keys.push(pseudo_keys);
                 ix.pseudo_prepared.push(pseudo_prepared);
+                ix.pseudo_member_specificity.push(pseudo_members);
             }
         }
         ix
@@ -13022,6 +13036,15 @@ impl SelectorMatcher {
                                         i += 1;
                                     }
                                 }
+                            } else if matches!(
+                                name.as_str(),
+                                "before" | "after" | "first-line" | "first-letter"
+                            ) {
+                                // The CSS2 pseudo-elements in their one-colon
+                                // spelling count as `::before` does: a bare
+                                // `:before` reset was (0,1,0) and beat
+                                // `p::before` (0,0,2).
+                                tags += 1;
                             } else {
                                 // Simple pseudo-class (:hover, :first-child, etc.)
                                 classes += 1;
@@ -29185,6 +29208,10 @@ struct RuleIndex {
     /// matched the base by string, re-hashing it into the prepared cache for
     /// every candidate of every element (~20% of wikipedia's cascade).
     pseudo_prepared: Vec<[Option<Rc<PreparedSelector>>; 2]>,
+    /// Global rule index -> per pseudo, the specificity of each member that
+    /// names it (see `pseudo_list_base`); empty where `pseudo_prepared` is
+    /// None.
+    pseudo_member_specificity: Vec<[PseudoMemberSpecificity; 2]>,
     /// Global rule index -> `selector_specificity` of its selector, so a
     /// matched rule doesn't re-scan its selector string on every element.
     specificity: Vec<(usize, usize, usize)>,
@@ -29364,17 +29391,31 @@ fn pseudo_base_selector<'a>(selector: &'a str, pseudo: &str, single_colon: &str)
         .trim()
 }
 
+/// For the members of a selector list that end in one pseudo-element: each
+/// one's `(position among them, specificity)`, pseudo-element counted, most
+/// specific first (ties keep source order), as `matched_specificity` takes
+/// them. Never empty.
+type PseudoMemberSpecificity = Vec<(usize, (usize, usize, usize))>;
+
 /// The base selectors of the members of a selector list that end in `pseudo`
-/// (`single_colon` covers both spellings), as one list, and whether one of
-/// them is bare (`::before` alone styles every element's). None when no
-/// member ends in it. The list was taken whole, so only its last member
-/// could carry the pseudo: `*, :before, :after { box-sizing: inherit }`
-/// never reached a `::before`, and `a::before, b::after` styled one of two.
-fn pseudo_list_base(selector: &str, pseudo: &str, single_colon: &str) -> Option<(String, bool)> {
+/// (`single_colon` covers both spellings), as one list, whether one of
+/// them is bare (`::before` alone styles every element's), and each one's
+/// own specificity: the rule cascades with that of the most specific member
+/// that matches, never with a member's that names no pseudo-element or
+/// another one. None when no member ends in it. The list was taken whole,
+/// so only its last member could carry the pseudo: `*, :before, :after {
+/// box-sizing: inherit }` never reached a `::before`, and `a::before,
+/// b::after` styled one of two.
+fn pseudo_list_base(
+    selector: &str,
+    pseudo: &str,
+    single_colon: &str,
+) -> Option<(String, bool, PseudoMemberSpecificity)> {
     if !selector.contains(single_colon) {
         return None;
     }
     let mut bases: Vec<&str> = Vec::new();
+    let mut specs: PseudoMemberSpecificity = Vec::new();
     let mut bare = false;
     for member in SelectorMatcher::split_top_level_commas(selector) {
         let member = member.trim();
@@ -29383,9 +29424,11 @@ fn pseudo_list_base(selector: &str, pseudo: &str, single_colon: &str) -> Option<
         }
         let base = pseudo_base_selector(member, pseudo, single_colon);
         bare |= base.is_empty() || base == "*";
+        specs.push((bases.len(), SelectorMatcher.selector_specificity(member)));
         bases.push(if base.is_empty() { "*" } else { base });
     }
-    (!bases.is_empty()).then(|| (bases.join(", "), bare))
+    specs.sort_by(|a, b| b.1.cmp(&a.1));
+    (!bases.is_empty()).then(|| (bases.join(", "), bare, specs))
 }
 
 impl RuleIndex {
