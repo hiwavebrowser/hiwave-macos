@@ -11,8 +11,10 @@
 //! keeps its scheme, host, port and path, never its user name, password,
 //! query, fragment or `;` path parameters (`/a;jsessionid=S/b` is `/a/b`; a
 //! flag keeps the query, fragment and parameters); a `data:` URL keeps only
-//! its MIME type, when it is a common one. A `file:` URL's path is the local path, user name and all. No header, request or response body, form value
-//! or storage is recorded. No text the page chose is recorded by default
+//! its MIME type, when it is a common one. A `file:` URL's path is the local
+//! path, user name and all. A response's MIME type is a name from a fixed
+//! list (else `<type>/other`, else none). No header, request or response
+//! body, form value or storage is recorded. No text the page chose is recorded by default
 //! (pages log and throw cookies, form values and their own URL): a console
 //! message is each argument's type and a string's length; an error is the
 //! thrown value's type, a standard error name (else `Error`), its message's
@@ -883,8 +885,8 @@ impl RequestGuard {
     }
 
     /// The answer arrived. `mime` may carry parameters; only its essence is
-    /// kept, and only when it is a valid `type/subtype` (see
-    /// [`mime_essence`]): anything else is header text and is `null`.
+    /// read, and recorded only as a fixed name (see [`mime_essence`]):
+    /// anything else is the server's text and is `null`.
     pub fn response(
         mut self,
         status: u16,
@@ -1200,17 +1202,78 @@ fn query_tail(query: &str) -> &str {
     &query[query.len() - kept..]
 }
 
-/// A Content-Type's essence, lowercased: the part before any `;`, when it
-/// is exactly `type/subtype` with each side an RFC 9110 token and the whole
-/// at most 64 characters. Anything else (`application/json, token=...`) is
-/// not a MIME type but header text, and is `None`.
+/// The response MIME types a record names; any other is the server's text.
+const RESPONSE_MIME_TYPES: [&str; 42] = [
+    "text/html",
+    "text/css",
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+    "text/ecmascript",
+    "application/ecmascript",
+    "application/json",
+    "application/ld+json",
+    "application/manifest+json",
+    "text/plain",
+    "text/xml",
+    "application/xml",
+    "application/xhtml+xml",
+    "text/event-stream",
+    "image/svg+xml",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+    "image/bmp",
+    "image/x-icon",
+    "image/vnd.microsoft.icon",
+    "font/woff",
+    "font/woff2",
+    "font/ttf",
+    "font/otf",
+    "application/font-woff",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/wav",
+    "audio/webm",
+    "video/mp4",
+    "video/webm",
+    "video/ogg",
+    "application/octet-stream",
+    "application/wasm",
+    "application/pdf",
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+    "text/csv",
+];
+
+/// The registered top-level types: a type not on the list above keeps only
+/// its top-level type, as `<type>/other`.
+const MIME_TOP_LEVEL_TYPES: [&str; 9] =
+    ["application", "audio", "font", "image", "message", "model", "multipart", "text", "video"];
+
+/// A Content-Type's essence as a record names it: one of a fixed list of
+/// types, else `<registered top-level type>/other`, else `None`. Only a
+/// well-formed `type/subtype` (each side an RFC 9110 token) is read at all:
+/// anything else (`application/json, token=...`) is header text. Nothing the
+/// server chose beyond the fixed names is kept.
 pub fn mime_essence(content_type: &str) -> Option<String> {
     let essence = content_type.split(';').next().unwrap_or("").trim();
     let token = |s: &str| {
         !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
     };
     let (kind, subtype) = essence.split_once('/')?;
-    (essence.len() <= 64 && token(kind) && token(subtype)).then(|| essence.to_ascii_lowercase())
+    if !(token(kind) && token(subtype)) {
+        return None;
+    }
+    if let Some(known) = RESPONSE_MIME_TYPES.iter().find(|m| m.eq_ignore_ascii_case(essence)) {
+        return Some(known.to_string());
+    }
+    MIME_TOP_LEVEL_TYPES
+        .iter()
+        .find(|t| t.eq_ignore_ascii_case(kind))
+        .map(|t| format!("{t}/other"))
 }
 
 /// A script position as text gives it: path, line, column.
