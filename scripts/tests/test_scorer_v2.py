@@ -8,6 +8,7 @@ Run: python3 scripts/tests/test_scorer_v2.py
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -116,6 +117,46 @@ class TestScorerV2(unittest.TestCase):
         self.assertEqual(categories.get("reddit"), "BLANK_SHELL")
         self.assertEqual(categories.get("bing"), "MISSING_ART")
         self.assertIn(categories.get("apple"), ("CONTENT_LOADED", "MISSING_ART"))
+
+    def test_score_run_v2_reads_root_json_when_site_json_missing(self):
+        # Live runs park `<sid>.json` beside site dirs; nested-only lookup skipped them.
+        blank = {
+            "id": "youtube",
+            "loads": {"pass": False, "why": "blank frame"},
+            "readable": {"pass": False, "chrome_words": 22, "rustkit_words": 0},
+            "looks_right": {"pass": False},
+            "points": 0,
+            "rustkit": {"script_stats": {"ran": 0, "threw": 0}, "non_background_fraction": 0.0},
+        }
+        nested = {
+            "id": "nested",
+            "loads": {"pass": False},
+            "readable": {"pass": False, "chrome_words": 0, "rustkit_words": 0},
+            "looks_right": {"pass": False},
+            "points": 0,
+            "rustkit": {"script_stats": {"ran": 0, "threw": 0}, "non_background_fraction": 0.0},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "youtube").mkdir()
+            (run_dir / "youtube.json").write_text(json.dumps(blank), encoding="utf-8")
+            nested_dir = run_dir / "nested"
+            nested_dir.mkdir()
+            (nested_dir / "nested.json").write_text(json.dumps(nested), encoding="utf-8")
+            # Prefer the nested record when both exist.
+            (run_dir / "nested.json").write_text(
+                json.dumps({**nested, "points": 99, "id": "nested-root"}),
+                encoding="utf-8",
+            )
+
+            summary = scorer_v2.score_run_v2(run_dir)
+            by_id = {s["id"]: s for s in summary["sites"]}
+            self.assertIn("youtube", by_id)
+            self.assertEqual(by_id["youtube"]["category"], "BLANK_SHELL")
+            self.assertIn("nested", by_id)
+            self.assertEqual(by_id["nested"]["v1_points"], 0)
+            self.assertTrue((run_dir / "youtube" / "youtube.v2.json").exists())
+            self.assertTrue((run_dir / "summary_v2.json").exists())
 
 
 if __name__ == "__main__":

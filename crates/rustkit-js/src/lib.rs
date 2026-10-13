@@ -973,4 +973,34 @@ mod tests {
         let result = runtime.evaluate_script("1 + 1");
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn console_flush_tolerates_hostile_flush_shapes() {
+        // #585 drains via a direct Boa eval of `console._flush()`. A page
+        // that replaces `_flush` with junk must not hang or fail the script.
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg| {
+            recv_clone.lock().unwrap().push(msg.to_string());
+        }));
+
+        for hostile in [
+            "console._flush = () => null;",
+            "console._flush = () => undefined;",
+            "console._flush = () => ({ length: NaN });",
+            "console._flush = () => ({ length: -1 });",
+            "console._flush = () => { throw new Error('nope'); };",
+        ] {
+            runtime.evaluate_script(hostile).unwrap();
+            assert!(
+                runtime.evaluate_script("1 + 1").is_ok(),
+                "hostile flush must not fail the script: {hostile}"
+            );
+        }
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "hostile flush shapes deliver no handler callbacks"
+        );
+    }
 }

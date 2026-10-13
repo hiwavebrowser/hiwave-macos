@@ -170,3 +170,57 @@ fn document_implementation_creates_html_document() {
     );
 }
 
+#[test]
+fn create_html_document_escapes_markup_in_the_title() {
+    // YouTube-class bootstrap builds inert docs with titles that contain
+    // `&`, `<`, and `>`. Those must round-trip as characters, not as markup.
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var doc = document.implementation.createHTMLDocument('a <b> & \"c\"'); \
+             [doc.title, doc.head.querySelector('title').textContent].join('|')"
+        ),
+        "a <b> & \"c\"|a <b> & \"c\""
+    );
+}
+
+#[test]
+fn create_document_returns_an_html_document_and_ignores_its_args() {
+    // Current stub: ns / qname / doctype are ignored; callers still get a
+    // Document with an HTML skeleton (and the page document's doctype ids stay empty).
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var dt = document.implementation.createDocumentType('svg', '-//W3C//DTD SVG 1.1//EN', 'http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd'); \
+             var doc = document.implementation.createDocument('http://www.w3.org/2000/svg', 'svg', dt); \
+             [doc instanceof Document, doc.contentType, doc.title, doc.body !== null, doc.documentElement.localName, \
+              doc.doctype.name, doc.doctype.publicId, doc.doctype.systemId, dt.publicId, dt.systemId].join('|')"
+        ),
+        "true|text/html||true|html|html|||-//W3C//DTD SVG 1.1//EN|http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"
+    );
+    assert_eq!(
+        ev(&b, "[document.doctype.publicId, document.doctype.systemId].join('|')"),
+        "|"
+    );
+}
+
+#[test]
+fn inert_documents_share_the_host_default_view() {
+    // Spec browsing-context-less docs should have defaultView === null.
+    // Today every Document getter returns the host window; pin that so a
+    // silent flip does not land without an intentional change.
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var inert = document.implementation.createHTMLDocument('x'); \
+             var xmlish = document.implementation.createDocument(null, 'root', null); \
+             [inert.defaultView === window, xmlish.defaultView === window, \
+              typeof inert.defaultView, typeof xmlish.defaultView].join()"
+        ),
+        "true,true,object,object"
+    );
+}
+
