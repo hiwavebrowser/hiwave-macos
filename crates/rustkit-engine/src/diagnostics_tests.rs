@@ -208,6 +208,22 @@ fn html_takes_the_layout_roots_geometry_but_no_style() {
 }
 
 #[test]
+fn html_on_a_page_shorter_than_the_viewport_is_as_tall_as_its_content() {
+    // R1 hold item 3: html was given the viewport box (Chromium: {0,0,1280,50}).
+    let (engine, view) =
+        engine_with("<html><body style=\"margin:0\"><div style=\"width:100px;height:50px\"></div></body></html>", 1280, 800);
+    let r = diag(&engine, view, "html");
+    assert_eq!(r["box"]["border_box"], rect(0.0, 0.0, 1280.0, 50.0), "{}", r["notes"]);
+    assert_eq!(r["box"]["content_box"], rect(0.0, 0.0, 1280.0, 50.0));
+    // Root margins do not collapse: body's default 8px margins are inside html.
+    let (engine, view) = engine_with("<html><body><div style=\"height:100px\"></div></body></html>", 1280, 800);
+    assert_eq!(diag(&engine, view, "html")["box"]["border_box"], rect(0.0, 0.0, 1280.0, 116.0));
+    // Taller than the viewport: html is the content's height, not the viewport's.
+    let (engine, view) = engine_with("<html><body style=\"margin:0\"><div style=\"height:2000px\"></div></body></html>", 800, 600);
+    assert_eq!(diag(&engine, view, "html")["box"]["border_box"], rect(0.0, 0.0, 800.0, 2000.0));
+}
+
+#[test]
 fn a_clipped_element_names_its_clipping_ancestor() {
     let (engine, view) = engine_with_page();
     let r = diag(&engine, view, "#wide");
