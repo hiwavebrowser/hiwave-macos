@@ -165,6 +165,14 @@ thread_local! {
 /// Falls back to the flat ratio only when shaping yields no usable metrics
 /// (missing font) -- same behaviour as before this existed.
 pub fn normal_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
+    // `font-size: 0` (the usual way to remove the spaces between
+    // inline-blocks): a face has no extents at size 0, so the line is as
+    // tall as its inline-blocks and no more. The shaper is not asked: it
+    // answers for a default size, and the line was 18px tall around a 10px
+    // inline-block where Chromium 143 has 10.
+    if font_size <= 0.0 {
+        return 0.0;
+    }
     let key = (
         style.font_family.clone(),
         font_size.to_bits(),

@@ -6330,6 +6330,11 @@ impl Engine {
                         rustkit_css::Length::Px(pct / 100.0 * parent_font_px)
                     }
                     rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+                    // `font-size: 0` parses to `Zero`, which is not `Px`:
+                    // layout read it as 16px. A line holding only a 10px
+                    // inline-block was 18 tall (Chromium 143: 10) and text
+                    // meant to be hidden was laid out at full size.
+                    rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
                     // Viewport units and math functions (`4.1vw`,
                     // `calc(2vw + 4px)`, `clamp(2rem, 5vw, 4rem)`) absolutize
                     // here too, against this view's viewport: left alone they
@@ -7576,6 +7581,7 @@ impl Engine {
             rustkit_css::Length::Em(em) => rustkit_css::Length::Px(em * parent_font_px),
             rustkit_css::Length::Percent(pct) => rustkit_css::Length::Px(pct / 100.0 * parent_font_px),
             rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+            rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
             other => other,
         };
 
