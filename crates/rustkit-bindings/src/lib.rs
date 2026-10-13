@@ -1726,6 +1726,12 @@ impl DomBindings {
         self.runtime.borrow_mut().poll_module(handle)
     }
 
+    /// Modules left evaluating at their poll whose evaluation has since
+    /// thrown (see [`JsRuntime::take_late_module_errors`]).
+    pub fn take_late_module_errors(&self) -> Vec<(String, String)> {
+        self.runtime.borrow_mut().take_late_module_errors()
+    }
+
     /// Set `document.readyState` (`loading` / `interactive` / `complete`).
     pub fn set_ready_state(&self, state: &str) -> Result<(), BindingError> {
         self.runtime

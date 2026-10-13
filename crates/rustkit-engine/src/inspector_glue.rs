@@ -110,12 +110,18 @@ pub(crate) fn drain_script_reports(bindings: &DomBindings, inspector: &Inspector
     drain_quiet(bindings, inspector, script);
 }
 
-/// Unhandled rejections and unimplemented members since the last drain:
+/// Late module errors, unhandled rejections and unimplemented members
+/// since the last drain:
 /// Inspector events only, never script log records (the board's counts
 /// stay what they were).
 pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source: &str) {
     if !inspector.is_active() {
         return;
+    }
+    // A module whose top-level `await` outlived its script step and then
+    // threw: that module's uncaught error, as Chromium reports it.
+    for (module, text) in bindings.take_late_module_errors() {
+        script_error(inspector, &text, None, false, &module);
     }
     for rejection in bindings.take_unhandled_rejections() {
         let text = match &rejection.stack {

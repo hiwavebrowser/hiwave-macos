@@ -85,7 +85,9 @@ step (`event:DOMContentLoaded`, `event:load`, `event:resize`,
 `event:<mouse event>`, `timers`, `network`). An error thrown by a listener
 that a script's own dispatch ran (`button.click()`) is that script's, recorded
 when the script ends (after its console lines). A module's error is recorded
-once, never also as an unhandled rejection.
+once, never also as an unhandled rejection, including one thrown after a
+top-level `await` that outlived the module's script step (recorded when the
+step that settled it ends, as the module's).
 
 A thrown value that is not an error is described as kept console text
 describes it (`[object Object]`, a string as it is), never with its

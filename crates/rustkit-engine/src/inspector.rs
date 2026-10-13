@@ -665,7 +665,9 @@ pub fn parse_error_text(text: &str) -> ErrorTextParts {
         Some((head, rest)) => (head, Some(rest)),
         None => (text, None),
     };
-    // Boa appends ` (path:line:col)` to the message line.
+    // Boa appends ` (path:line:col)` to the message line, or ` (native)`
+    // for an error made in a native frame (an `await` resumed by a job).
+    let head = head.strip_suffix(" (native)").unwrap_or(head);
     let (head, head_position) = match head.rfind(" (") {
         Some(at) if head.ends_with(')') => match parse_position(&head[at + 2..head.len() - 1]) {
             Some(position) => (&head[..at], Some(position)),
