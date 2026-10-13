@@ -410,3 +410,101 @@ impl Rendered {
         format!("{}/{}", css(&b.style.color), css(&b.style.background_color))
     }
 }
+
+// ---- A definition that never arrives (macOS receipt, microsoft.com).
+
+/// A header custom element with light children, as on microsoft.com: a
+/// skip link, a banner element and a `header` with a logo. Its sheet hides
+/// it until it is defined; the page's script defines it. Chromium runs the
+/// script (after a first one that runs for 400 ms) and lays it out at
+/// `wrap:0:0:800:55 skip:0:0:1:1 hd:0:1:800:54 logo:79:17:108:23
+/// main:0:55:800:100`, all painted (Chromium 141).
+const UNDEFINED_HEADER: &str = "<!doctype html><html><head><style>body{margin:0;font:16px/20px monospace} \
+    x-hdr:not(:defined){display:block;height:54px;visibility:hidden} x-hdr{display:block}</style></head><body>\
+    <div id=wrap style=\"background:rgb(1,2,3)\"><x-hdr id=hdr>\
+    <a id=skip href=#main style=\"display:block;height:1px;width:1px;background:rgb(10,20,30)\"></a>\
+    <x-banner id=ban></x-banner>\
+    <header id=hd style=\"height:54px;padding-top:16px;box-sizing:border-box;background:rgb(40,50,60)\">\
+    <div id=logo style=\"width:108px;height:23px;margin-left:79px;background:rgb(70,80,90)\"></div></header>\
+    </x-hdr></div><main id=main style=\"height:100px;background:rgb(100,110,120)\"></main>\
+    <script>var t = Date.now(); while (Date.now() - t < 400) {}</script>\
+    <script>customElements.define('x-hdr', class extends HTMLElement {});</script></body></html>";
+
+/// Loads `html` through the navigation path (page scripts, load event),
+/// with `budget_ms` for the page's scripts.
+fn navigate(html: &str, budget_ms: u64) -> Rendered {
+    let server = crate::script_net_tests::serve_routes(vec![("/", "text/html", html.to_string())]);
+    let config = EngineConfig {
+        script_budget_ms: budget_ms,
+        ..EngineConfig::default()
+    };
+    let mut engine = Engine::new(config).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds::new(0, 0, 800, 600))
+        .expect("headless view");
+    let url = url::Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    Rendered { engine, view }
+}
+
+impl Rendered {
+    /// The solid colours the display list fills, as `r,g,b`.
+    fn painted_colours(&self) -> Vec<String> {
+        let list = self.engine.views[&self.view]
+            .display_list
+            .as_ref()
+            .expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::SolidColor(c, _) => {
+                    Some(format!("{},{},{}", c.r, c.g, c.b))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The page's defining script did not run in the engine (here: the first
+/// script spent the page's 200 ms script budget; on a live page also a
+/// script that fails or is skipped), so the header's
+/// definition never arrives. Once the page's scripts are over, its
+/// `:not(:defined)` rule must not keep the header's children unpainted:
+/// they are laid out where Chromium puts them, and painted.
+#[test]
+fn light_children_of_an_element_whose_definition_never_arrives_are_painted() {
+    let mut page = navigate(UNDEFINED_HEADER, 200);
+    assert_eq!(
+        page.js("String(customElements.get('x-hdr'))"),
+        "undefined",
+        "the page's script was meant not to run"
+    );
+    let boxes: Vec<String> = page
+        .boxes()
+        .into_iter()
+        .filter(|(id, _)| id != "hdr" && id != "ban")
+        .map(|(id, b)| format!("{id}:{b}"))
+        .collect();
+    let painted = page.painted_colours();
+    let unpainted: Vec<&str> = [
+        ("wrap", "1,2,3"),
+        ("skip", "10,20,30"),
+        ("hd", "40,50,60"),
+        ("logo", "70,80,90"),
+        ("main", "100,110,120"),
+    ]
+    .into_iter()
+    .filter(|(_, colour)| !painted.iter().any(|c| c == colour))
+    .map(|(id, _)| id)
+    .collect();
+    assert!(
+        unpainted.is_empty() && boxes.join(" ") == "wrap:0:0:800:55 skip:0:0:1:1 hd:0:1:800:54 logo:79:17:108:23 main:0:55:800:100",
+        "laid out at {boxes:?}, against Chromium's wrap:0:0:800:55 skip:0:0:1:1 hd:0:1:800:54 logo:79:17:108:23 main:0:55:800:100;\n\
+         not painted: {unpainted:?}"
+    );
+}
