@@ -1336,6 +1336,84 @@ fn a_page_throwing_an_engine_message_is_never_an_engine_record() {
     assert_eq!(summary.script_errors as usize, throws, "{summary:?}");
 }
 
+/// Fourth R1 hold @ 47fc7abb, rule 4: no message is kept because of what
+/// it says. Every message the engine used to keep by its text, and the
+/// engine's own failure messages, thrown by the page (exactly, and with a
+/// secret appended; as an error and as a string) from a classic script, a
+/// module, a timer, a listener, a promise rejection and an async function,
+/// is a page record with no text.
+#[test]
+fn a_page_throwing_any_engine_message_is_a_page_record_with_no_text() {
+    let messages = [
+        "not a callable function",
+        "not a constructor",
+        "cannot convert 'null' or 'undefined' to object",
+        "value returned for property of object is not a function",
+        "right-hand side of 'instanceof' is not callable",
+        "cannot mix BigInt and other types, use explicit conversions",
+        "BigInt division by zero",
+        "cyclic object value",
+        "cannot convert Symbol to JSON",
+        "Failed to fetch",
+        "Maximum call stack size exceeded",
+        "Illegal invocation",
+        "Failed to execute 'parseFromString' on 'DOMParser': XML documents are not supported yet.",
+        "PAGEIDENT is not defined",
+        "PAGEIDENT is not a function",
+        "PAGEIDENT is not a constructor",
+        "JS engine panic",
+        "import map rejected",
+        "import map: x",
+    ];
+    // (text, thrown as an error object)
+    let mut thrown: Vec<(String, bool)> = Vec::new();
+    for message in messages {
+        for text in [message.to_string(), format!("{message} SECRETAPPENDED")] {
+            thrown.push((text.clone(), true));
+            thrown.push((text, false));
+        }
+    }
+    let json = serde_json::to_string(&thrown.iter().map(|(t, _)| t).collect::<Vec<_>>()).unwrap();
+    let mut page = format!(
+        "<html><body><script>window.M = {json}; window.T = function (i) {{ \
+         return i % 2 === 0 ? new TypeError(M[i]) : M[i]; }};</script>"
+    );
+    for i in 0..thrown.len() {
+        page.push_str(&format!("<script>throw T({i});</script>"));
+        page.push_str(&format!("<script type=module>throw T({i});</script>"));
+    }
+    page.push_str(
+        "<script>for (var i = 0; i < M.length; i++) (function (i) { \
+         setTimeout(function () { throw T(i); }, 0); \
+         window.addEventListener('load', function () { throw T(i); }); \
+         Promise.reject(T(i)); \
+         (async function () { await 0; throw T(i); })(); })(i);</script></body></html>",
+    );
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    let errors: Vec<(&str, &str, Option<&String>)> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { value, name, message, .. } => Some((value.as_str(), name.as_str(), message.as_ref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), thrown.len() * 6, "every throw is recorded: {all}");
+    for (value, name, message) in &errors {
+        assert!(matches!((*value, *name), ("error", "TypeError") | ("string", "")), "{value} {name}: {all}");
+        assert_eq!(*message, None, "{all}");
+    }
+    for (value, _, _) in &errors {
+        assert_ne!(*value, "engine", "{all}");
+    }
+    assert!(!all.contains("SECRETAPPENDED") && !all.contains("PAGEIDENT"), "{all}");
+    for message in messages {
+        let fixed = message.trim_start_matches("PAGEIDENT");
+        assert!(!all.contains(fixed), "{fixed:?} kept: {all}");
+    }
+}
+
 /// What the engine itself refused is still an engine record: an import map
 /// that is not JSON.
 #[test]
