@@ -233,6 +233,32 @@ fn click_activates_checkboxes_radios_and_labels() {
     assert!(b.take_checked_writes().is_empty());
 }
 
+/// The image-wait skip (#667) is gated on `navigation_requested()` — URL
+/// navigations only. A form `submit()` fills `submit_requests` and must not
+/// flip that bit, or a widened gate would drop images on pages that stay.
+#[test]
+fn form_submit_is_not_a_url_navigation_request() {
+    let b = bound();
+    assert!(!b.navigation_requested());
+    ev(&b, "document.getElementById('f').submit(); 0");
+    assert!(
+        !b.navigation_requested(),
+        "submit() must not set navigation_requested"
+    );
+    assert_eq!(b.take_submit_requests().len(), 1);
+    assert!(b.take_navigation_requests().is_empty());
+
+    b.set_location(&url::Url::parse("https://site.test/dir/").unwrap())
+        .unwrap();
+    ev(&b, "location.href = '/next'; 0");
+    assert!(b.navigation_requested());
+    assert_eq!(
+        b.take_navigation_requests(),
+        ["https://site.test/next".to_string()]
+    );
+    assert!(!b.navigation_requested());
+}
+
 // A click on a submit button fires `submit` with the button as submitter
 // and, uncancelled, asks the engine to submit; a reset button resets.
 #[test]
