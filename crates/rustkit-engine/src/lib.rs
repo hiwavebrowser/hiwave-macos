@@ -8340,6 +8340,10 @@ impl Engine {
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
             "line-break" => style.line_break = parent.line_break,
             "visibility" => style.visibility = parent.visibility,
+            // Not inherited by default, and asked for by name on nearly
+            // every page: `*, :before, :after { box-sizing: inherit }`
+            // under `html { box-sizing: border-box }`.
+            "box-sizing" => style.box_sizing = parent.box_sizing,
             "border-spacing" => style.border_spacing = parent.border_spacing,
             "border-collapse" => style.border_collapse = parent.border_collapse,
             "vertical-align" => style.vertical_align = parent.vertical_align,
