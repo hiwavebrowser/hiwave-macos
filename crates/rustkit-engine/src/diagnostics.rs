@@ -536,6 +536,39 @@ fn union(a: Rect, b: Rect) -> Rect {
     Rect { x: l, y: t, width: r - l, height: bt - t }
 }
 
+/// html's own box. The layout root that stands in for html is the viewport
+/// (the initial containing block); html is as wide as the root and as tall
+/// as its in-flow content. Root margins do not collapse, so that content is
+/// its children's margin boxes; html is a formatting context root, so floats
+/// count. The engine lays html out with no margin, border or padding.
+fn html_box(
+    root: &LayoutBox,
+    scroll: (f32, f32),
+    viewport: (u32, u32),
+    layout_box: &mut BoxInfo,
+    paint: &mut PaintInfo,
+    notes: &mut Vec<String>,
+) {
+    let top = root.dimensions.content.y;
+    let bottom = root
+        .children
+        .iter()
+        .filter(|c| !matches!(c.style.position, rustkit_css::Position::Absolute | rustkit_css::Position::Fixed))
+        .map(|c| {
+            let m = c.dimensions.margin_box();
+            m.y + m.height
+        })
+        .fold(top, f32::max);
+    let content = root.dimensions.content;
+    let r = to_viewport(Rect { x: content.x, y: top, width: content.width, height: bottom - top }, scroll);
+    layout_box.border_box = Some(r);
+    layout_box.padding_box = Some(r);
+    layout_box.content_box = Some(r);
+    let (vw, vh) = (viewport.0 as f32, viewport.1 as f32);
+    paint.outside_viewport = Some(r.x + r.w <= 0.0 || r.y + r.h <= 0.0 || r.x >= vw || r.y >= vh);
+    notes.push("html's box: the layout root's width and its in-flow content's height (the root itself is the viewport)".into());
+}
+
 /// The page URL as a record reports it: never a user name or password, and
 /// no query or fragment unless asked. A `data:` URL's payload is the
 /// document itself, so it is reduced to `data:<mime>` even then.
@@ -648,7 +681,7 @@ impl<'a> Builder<'a> {
 
         let (style, layout_box, paint) = match ctx {
             Some(ctx) => {
-                let (mut style, layout_box, paint) = self.boxed(ctx, &mut notes, &mut unavailable);
+                let (mut style, mut layout_box, mut paint) = self.boxed(ctx, &mut notes, &mut unavailable);
                 if tag == "body" && self.body_background_moved(ctx.boxes[0]) {
                     for p in ["background-color", "background-image"] {
                         style.insert(p, None);
@@ -659,6 +692,7 @@ impl<'a> Builder<'a> {
                     }
                 }
                 if self.root_stand_in == Some(raw) {
+                    html_box(ctx.boxes[0], self.src.scroll, self.src.viewport, &mut layout_box, &mut paint, &mut notes);
                     style.values_mut().for_each(|v| *v = None);
                     unavailable.retain(|k, _| !k.starts_with("style."));
                     unavailable.insert("style".into(), "html is laid out by an anonymous root box with the default style".into());
