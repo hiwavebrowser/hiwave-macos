@@ -65,12 +65,13 @@ thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
     /// That build's state.
     static BUILD: RefCell<Option<BuildState>> = const { RefCell::new(None) };
-    /// The custom element names defined in the document being built, for
-    /// `:defined`.
+    /// The custom element names defined in the document last built, for
+    /// `:defined`. Script queries read these too, between builds.
     static DEFINED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-    /// Has that document's load settled its definitions (every name counts
-    /// as defined)?
-    static SETTLED: Cell<bool> = const { Cell::new(false) };
+    /// The names that document's load settled (rustkit-dom
+    /// `settle_custom_element_definitions`), installed only while a build
+    /// runs: they are `:defined` for the cascade, never for script.
+    static SETTLED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// The slots whose assigned nodes the build is inside, innermost last.
     static SLOTS: RefCell<Vec<SlotEntry>> = const { RefCell::new(Vec::new()) };
     /// Rules from other trees that matched the element whose cascade runs
@@ -166,19 +167,23 @@ pub(crate) fn active() -> bool {
     ACTIVE.get()
 }
 
-/// `:defined` for a valid custom element name: has script defined it, or
-/// has the page's load ended without defining it (rustkit-dom
-/// `settle_custom_element_definitions`)?
+/// `:defined` for a valid custom element name: has script defined it, or,
+/// in the cascade only, did a load that lost a script settle the name
+/// (rustkit-dom `settle_custom_element_definitions`)? Outside a build (a
+/// script's `matches`, `querySelector(All)`, `closest`) the settled set is
+/// empty, so script sees the registry alone, as Chromium does.
 pub(crate) fn is_defined(tag: &str) -> bool {
-    SETTLED.get() || DEFINED.with(|d| d.borrow().contains(tag))
+    DEFINED.with(|d| d.borrow().contains(tag)) || SETTLED.with(|s| s.borrow().contains(tag))
 }
 
 /// Alive for one box-tree build: installs the document's defined custom
-/// element names and, when the document has shadow roots, the scope stack
-/// with the document's sheets at the bottom. Restores what was installed
-/// before when dropped.
+/// element names, its settled names (for this build's cascade only) and,
+/// when the document has shadow roots, the scope stack with the document's
+/// sheets at the bottom. Restores the settled names and the scope stack
+/// installed before when dropped; the defined names stay for script.
 pub(crate) struct BuildScope {
     previous: Option<(bool, Option<BuildState>)>,
+    settled_before: HashSet<String>,
 }
 
 impl BuildScope {
@@ -189,9 +194,12 @@ impl BuildScope {
         javascript_enabled: bool,
     ) -> Self {
         DEFINED.with(|d| *d.borrow_mut() = document.defined_custom_elements());
-        SETTLED.set(document.custom_element_definitions_settled());
+        let settled_before = SETTLED.with(|s| s.replace(document.settled_custom_elements()));
         if !document.has_shadow_roots() {
-            return BuildScope { previous: None };
+            return BuildScope {
+                previous: None,
+                settled_before,
+            };
         }
         let state = BuildState {
             current: vec![Rc::new(TreeStyle {
@@ -208,12 +216,16 @@ impl BuildScope {
         };
         let previous = BUILD.with(|b| b.borrow_mut().replace(state));
         let was_active = ACTIVE.replace(true);
-        BuildScope { previous: Some((was_active, previous)) }
+        BuildScope {
+            previous: Some((was_active, previous)),
+            settled_before,
+        }
     }
 }
 
 impl Drop for BuildScope {
     fn drop(&mut self) {
+        SETTLED.with(|s| *s.borrow_mut() = std::mem::take(&mut self.settled_before));
         if let Some((was_active, previous)) = self.previous.take() {
             BUILD.with(|b| *b.borrow_mut() = previous);
             ACTIVE.set(was_active);

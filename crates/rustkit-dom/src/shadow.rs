@@ -237,11 +237,14 @@ pub fn is_valid_custom_element_name(name: &str) -> bool {
 impl Document {
     /// `customElements.define(name, ...)` ran: elements of this name are
     /// `:defined` from now on. (Every connected element of the name is
-    /// upgraded by the define, so the name stands for the elements.)
+    /// upgraded by the define, so the name stands for the elements.) A
+    /// settled name (`settle_custom_element_definitions`) leaves the
+    /// settled set: the registry has it now.
     pub fn define_custom_element(&self, name: &str) {
         self.defined_custom_elements
             .borrow_mut()
             .insert(name.to_string());
+        self.settled_custom_elements.borrow_mut().remove(name);
     }
 
     /// The custom element names defined so far.
@@ -249,31 +252,38 @@ impl Document {
         self.defined_custom_elements.borrow().clone()
     }
 
-    /// The page's load has run its scripts, and with them every
-    /// `customElements.define` it was going to run. A name still undefined
-    /// then most likely belongs to a script our JS engine did not get to
-    /// (skipped over the script budget, failed, or threw where Chromium's
-    /// does not), so from now on it counts as defined: a `:not(:defined)`
-    /// rule meant for the moment before the upgrade must not hide the
-    /// element for good. Returns whether the document has an element this
-    /// changes (one with a valid custom element name never defined).
+    /// A navigation's load has run its scripts and lost at least one (it
+    /// was skipped over the script budget, threw, or could not be fetched
+    /// or run), so a `customElements.define` the page meant to run may
+    /// never come. The custom element names present in the document
+    /// (shadow-including) and undefined at this moment are settled: the
+    /// cascade treats them as `:defined`, so a `:not(:defined)` rule meant
+    /// for the moment before the upgrade does not hide them for good.
+    /// Script-facing matching does not see the settled set, a name that
+    /// first appears later is not in it, and a later real definition takes
+    /// the name out of it (`define_custom_element`). Settles once per
+    /// document; returns whether any name was settled.
     pub fn settle_custom_element_definitions(&self) -> bool {
         if self.custom_element_definitions_settled.replace(true) {
             return false;
         }
         let defined = self.defined_custom_elements.borrow();
-        let mut changed = false;
+        let mut settled = self.settled_custom_elements.borrow_mut();
         self.traverse_shadow_including(|node| {
             if let Some(tag) = node.tag_name() {
-                changed |= is_valid_custom_element_name(tag) && !defined.contains(tag);
+                if is_valid_custom_element_name(tag) && !defined.contains(tag) {
+                    settled.insert(tag.to_string());
+                }
             }
         });
-        changed
+        !settled.is_empty()
     }
 
-    /// Has the page's load settled the custom element definitions?
-    pub fn custom_element_definitions_settled(&self) -> bool {
-        self.custom_element_definitions_settled.get()
+    /// The custom element names the load settled and no definition has
+    /// claimed since (`settle_custom_element_definitions`). For the
+    /// cascade only.
+    pub fn settled_custom_elements(&self) -> std::collections::HashSet<String> {
+        self.settled_custom_elements.borrow().clone()
     }
 
     /// Has any node of this document ever had a shadow root?
@@ -658,22 +668,41 @@ mod tests {
     }
 
     #[test]
-    fn settling_reports_whether_an_undefined_custom_element_is_left() {
+    fn settling_snapshots_the_undefined_custom_element_names_present() {
         let doc = Document::parse_html("<body><x-a></x-a><div></div></body>").unwrap();
         doc.define_custom_element("x-a");
         assert!(
             !doc.settle_custom_element_definitions(),
             "every custom element is defined"
         );
-        assert!(doc.custom_element_definitions_settled());
-        let doc = Document::parse_html("<body><x-a></x-a><x-b></x-b></body>").unwrap();
+        assert!(doc.settled_custom_elements().is_empty());
+
+        let doc = Document::parse_html("<body><x-a></x-a><x-b></x-b><x-c></x-c></body>").unwrap();
         doc.define_custom_element("x-a");
-        assert!(!doc.custom_element_definitions_settled());
+        assert!(doc.settled_custom_elements().is_empty(), "not settled yet");
         assert!(
             doc.settle_custom_element_definitions(),
-            "x-b was never defined"
+            "x-b and x-c were never defined"
         );
+        let names = |doc: &Document| {
+            let mut names: Vec<String> = doc.settled_custom_elements().into_iter().collect();
+            names.sort();
+            names.join(",")
+        };
+        assert_eq!(names(&doc), "x-b,x-c");
+        // A name that first appears later is not settled, not even by a
+        // second call: the snapshot is taken once.
+        let body = doc.body().unwrap();
+        body.append_child(doc.create_node(NodeType::Element {
+            tag_name: "x-d".to_string(),
+            namespace: String::from("http://www.w3.org/1999/xhtml"),
+            attributes: Default::default(),
+        }));
         assert!(!doc.settle_custom_element_definitions(), "settles once");
+        assert_eq!(names(&doc), "x-b,x-c");
+        // A real definition takes its name out of the snapshot.
+        doc.define_custom_element("x-b");
+        assert_eq!(names(&doc), "x-c");
     }
 
     #[test]

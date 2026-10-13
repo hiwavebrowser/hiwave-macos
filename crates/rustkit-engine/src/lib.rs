@@ -1008,6 +1008,20 @@ pub struct ScriptRecord {
     pub outcome: ScriptOutcome,
 }
 
+/// Did one of the load's scripts not run to completion: stopped or skipped
+/// at the script budget, thrown at top level, or not fetched, parsed or
+/// run? Errors that escaped a lifecycle-event listener, a timer or a
+/// network callback (`event:*`, `timers`, `network`), and an import map
+/// that failed (its module scripts log their own outcome), are not a lost
+/// script.
+fn load_lost_a_script(log: &[ScriptRecord]) -> bool {
+    log.iter().any(|record| {
+        let callback = record.source.starts_with("event:")
+            || matches!(record.source.as_str(), "timers" | "network" | "importmap");
+        !callback && record.outcome != ScriptOutcome::Ran
+    })
+}
+
 /// Which part of a click is moving the focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PointFocus {
@@ -4576,15 +4590,19 @@ impl Engine {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
             }
-            // The load's scripts are over: a custom element they did not
-            // define (a script skipped or failed here that Chromium runs)
-            // stops matching `:not(:defined)`, so a rule that hides it until
-            // its upgrade does not hide it for good.
+            // The load's scripts are over. If it lost one (a script skipped
+            // or failed here that Chromium runs), a custom element present
+            // now and still undefined may never get its definition: the
+            // cascade treats its name as `:defined` from now on, so a rule
+            // that hides it until its upgrade does not hide it for good.
+            // Script still sees the registry. A load that lost no script
+            // keeps Chromium's behaviour.
             if let Some(view) = self.views.get(&id) {
-                let settled = view
-                    .document
-                    .as_ref()
-                    .is_some_and(|d| d.settle_custom_element_definitions());
+                let settled = load_lost_a_script(&view.script_log)
+                    && view
+                        .document
+                        .as_ref()
+                        .is_some_and(|d| d.settle_custom_element_definitions());
                 if let (true, Some(bindings)) = (settled, view.bindings.as_ref()) {
                     bindings.mark_dirty(DomDirty::Style);
                 }
@@ -12777,7 +12795,8 @@ impl SelectorMatcher {
             // with a valid custom element name whose name script has not
             // defined (`customElements.define`, recorded in the DOM). A page
             // whose definitions never run keeps `x:not(:defined)` rules in
-            // force, as Chrome does.
+            // force, as Chrome does, except in the cascade for the names a
+            // load that lost a script settled (`shadow_tree::is_defined`).
             "defined" => {
                 !rustkit_dom::is_valid_custom_element_name(tag) || shadow_tree::is_defined(tag)
             }
