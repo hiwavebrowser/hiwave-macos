@@ -403,3 +403,35 @@ fn the_summary_counts_requests_by_type_and_outcome() {
     assert_eq!(requests, r#"{"document":{"2xx":1},"image":{"2xx":1,"4xx":1},"script":{"4xx":1}}"#);
     assert!(summary.failures_by_stage.is_empty());
 }
+
+/// Third R1 hold @ 43dd085c, item 1: a `;` path parameter (a servlet's
+/// `jsessionid`) reaches no request URL and no `navigation_redirect`.
+#[test]
+fn request_and_redirect_urls_lose_their_path_parameters() {
+    let page = r#"<html><body><img src="/a.png;jsessionid=JSESSIONSECRET?sig=Q">
+<link rel=stylesheet href="/s.css;jsessionid=JSESSIONSECRET">
+<script src="/s.js;jsessionid=JSESSIONSECRET"></script><script>
+fetch('/f;jsessionid=JSESSIONSECRET?x=1');
+var x = new XMLHttpRequest(); x.open('GET', '/ct1;p=JSESSIONSECRET'); x.send();
+</script></body></html>"#;
+    let server = serve(vec![
+        Route::redirect("/start", "/;jsessionid=JSESSIONSECRET?token=Q"),
+        Route::html("/;jsessionid=JSESSIONSECRET", page),
+        png("/a.png;jsessionid=JSESSIONSECRET"),
+        Route::ok("/s.css;jsessionid=JSESSIONSECRET", "text/css", "body{}"),
+        Route::ok("/s.js;jsessionid=JSESSIONSECRET", "text/javascript", "1;"),
+        Route::ok("/f;jsessionid=JSESSIONSECRET", "application/json", "{}"),
+        Route::ok("/ct1;p=JSESSIONSECRET", "text/plain", "x"),
+    ]);
+    let (mut engine, view) = engine(EngineConfig::default(), None);
+    runtime().block_on(engine.load_url(view, server.url("/start"))).expect("load_url");
+    runtime().block_on(engine.pump_live(view, 50));
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    assert!(!all.contains("JSESSIONSECRET") && !all.contains("jsessionid"), "{all}");
+    let port = server.port;
+    for url in ["/a.png", "/s.css", "/s.js", "/f", "/ct1"] {
+        assert!(all.contains(&format!("\"url\":\"http://127.0.0.1:{port}{url}\"")), "{url} not requested: {all}");
+    }
+    assert!(all.contains(&format!("\"to\":\"http://127.0.0.1:{port}/\"")), "{all}");
+}
