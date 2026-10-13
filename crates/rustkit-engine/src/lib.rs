@@ -166,6 +166,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 mod relayout_cause;
 use relayout_cause::PendingCauses;
+mod shadow_tree;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
 pub use rustkit_bindings::MutationKind;
 mod script_net;
@@ -218,9 +219,13 @@ mod grid_item_min_max_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_in_flex_tests;
 #[cfg(test)]
+mod nested_layout_matrix_tests;
+#[cfg(test)]
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod ws_beside_block_replaced_tests;
+#[cfg(all(test, feature = "headless"))]
+mod shadow_tree_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
@@ -6595,6 +6600,17 @@ impl Engine {
                     s.display = display;
                     s
                 });
+                // A `display: contents` box (a <slot>) is replaced by its
+                // children in the parent's box, so they are blockified (or
+                // not) by the parent's display, not by `contents`.
+                let unblockified = match parent_style {
+                    Some(p) if display == rustkit_css::Display::Contents => {
+                        let mut s = (*layout_box.style).clone();
+                        s.display = p.display;
+                        Some(s)
+                    }
+                    _ => unblockified,
+                };
 
                 Self::attach_identity(
                     &mut layout_box,
@@ -6673,7 +6689,15 @@ impl Engine {
                 // index, element count) feeds `+`/`~` combinators and positional
                 // pseudo-classes; it counts DOM element children, not layout boxes, since
                 // CSS sibling relationships are defined on the element tree.
-                let child_nodes = node.children();
+                // The flat tree (rustkit-dom `flat_children`): a shadow
+                // host's shadow tree, a slot's assigned nodes. Nodes slotted
+                // here are matched against their own (light-tree)
+                // ancestors, which their host recorded.
+                let child_nodes = node.flat_children();
+                let host_scope = shadow_tree::HostScope::enter(node, &child_ancestors);
+                let slotted_ancestors = shadow_tree::slotted_ancestors(node, &child_nodes);
+                let children_ancestors: &[Ancestor] =
+                    slotted_ancestors.as_deref().unwrap_or(&child_ancestors);
                 let child_element_count = child_nodes
                     .iter()
                     .filter(|c| matches!(c.node_type, NodeType::Element { .. }))
@@ -6742,7 +6766,7 @@ impl Engine {
                         child,
                         stylesheets,
                         css_vars,
-                        &child_ancestors,
+                        children_ancestors,
                         Some(children_parent_style),
                         &preceding_siblings,
                         child_sib,
@@ -6767,6 +6791,16 @@ impl Engine {
                             attributes.get("id").cloned(),
                             state,
                         ));
+                    }
+
+                    // A `display: contents` child (a <slot>) generates no box:
+                    // its children, already filtered by its own build, take
+                    // its place.
+                    if child_box.style.display == rustkit_css::Display::Contents {
+                        for grandchild in child_box.children {
+                            Self::push_child_hoisting_line_breaks(&mut layout_box.children, grandchild);
+                        }
+                        continue;
                     }
 
                     // Determine if box should be included in layout tree
@@ -6797,6 +6831,7 @@ impl Engine {
                 drop(table_hints);
                 drop(share_chain);
                 drop(share_parent);
+                drop(host_scope);
 
                 // Check for ::after pseudo-element
                 if let Some(after_box) = memoized_pseudo_style(node.id, Pseudo::After, || {
@@ -7432,6 +7467,10 @@ impl Engine {
             }
             "span" => {
                 style.display = rustkit_css::Display::Inline;
+            }
+            // HTML §15.3.1: `slot { display: contents }`.
+            "slot" => {
+                style.display = rustkit_css::Display::Contents;
             }
             // Links
             "a" => {
@@ -8952,10 +8991,32 @@ impl Engine {
                 };
             }
             "gap" | "grid-gap" => {
-                // gap shorthand (row-gap column-gap or single value)
-                if let Some(length) = parse_length(value) {
-                    style.row_gap = length.clone();
-                    style.column_gap = length;
+                // `<row-gap> <column-gap>?`: one value sets both. Split at
+                // top-level whitespace so a calc() stays one value; any part
+                // that is no length makes the whole declaration invalid. A
+                // gap is a non-negative length: `parse_length` also takes a
+                // negative one and a bare number as px, which CSS rejects
+                // (a unitless zero is the one unitless length).
+                let gap_length = |part: &str| {
+                    let bare_number = part.parse::<f32>().is_ok_and(|v| v != 0.0);
+                    (!part.starts_with('-') && !bare_number)
+                        .then(|| parse_length(part))
+                        .flatten()
+                };
+                let parts: Vec<_> = split_top_level_whitespace(value)
+                    .into_iter()
+                    .map(gap_length)
+                    .collect();
+                match parts.as_slice() {
+                    [Some(both)] => {
+                        style.row_gap = both.clone();
+                        style.column_gap = both.clone();
+                    }
+                    [Some(row), Some(column)] => {
+                        style.row_gap = row.clone();
+                        style.column_gap = column.clone();
+                    }
+                    _ => {}
                 }
             }
             "row-gap" => {
@@ -10226,7 +10287,7 @@ impl Engine {
     /// display-list splice can paint them. Runs per relayout; already-cached
     /// keys are skipped, so steady-state cost is one serialize per svg.
     fn cache_inline_svgs(&mut self, document: &Document) {
-        for svg_el in document.get_elements_by_tag_name("svg") {
+        for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
             let xml = Self::inline_svg_markup(&svg_el);
             let key = Self::inline_svg_key(&xml);
             if self.svg_cache.contains_key(&key) {
@@ -10252,7 +10313,7 @@ impl Engine {
     /// each svg box resolves its OWN selector prefix from its own identity.
     fn inline_svg_shape_index(&self, document: &Document) -> HashMap<String, InlineSvgShapes> {
         let mut index = HashMap::new();
-        for svg_el in document.get_elements_by_tag_name("svg") {
+        for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
             let key = Self::inline_svg_key(&Self::inline_svg_markup(&svg_el));
             if index.contains_key(&key) {
                 continue;
@@ -10359,8 +10420,8 @@ impl Engine {
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
         let mut images = Vec::new();
 
-        // Find all <img> elements
-        let img_elements = document.get_elements_by_tag_name("img");
+        // Find all <img> elements, shadow trees included
+        let img_elements = document.get_elements_by_tag_name_shadow_including("img");
 
         for img_el in img_elements {
             if let NodeType::Element { attributes, .. } = &img_el.node_type {
@@ -32775,6 +32836,53 @@ mod logical_property_tests {
     }
 }
 
+// `gap` is `<row-gap> <column-gap>?`: one value sets both, two set each.
+// The two-value form was handed whole to `parse_length`, which fails on
+// it, so `gap: 10px 20px` set neither (nested layout matrix,
+// `gap-two-value-shorthand-dropped`).
+#[cfg(test)]
+mod gap_shorthand_tests {
+    use super::*;
+    use rustkit_css::Length;
+
+    #[test]
+    fn gap_with_two_values_sets_the_row_gap_then_the_column_gap() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        for property in ["gap", "grid-gap"] {
+            let mut style = ComputedStyle::new();
+            e.apply_style_property(&mut style, property, "10px 20px");
+            assert_eq!(style.row_gap, Length::Px(10.0), "{property}");
+            assert_eq!(style.column_gap, Length::Px(20.0), "{property}");
+
+            let mut style = ComputedStyle::new();
+            e.apply_style_property(&mut style, property, "calc(4px + 6px) 5%");
+            assert_eq!(style.row_gap, Length::Px(10.0), "{property}");
+            assert_eq!(style.column_gap, Length::Percent(5.0), "{property}");
+        }
+    }
+
+    #[test]
+    fn gap_with_one_value_sets_both_and_a_bad_value_sets_neither() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut style = ComputedStyle::new();
+        e.apply_style_property(&mut style, "gap", "calc(4px + 6px)");
+        assert_eq!(style.row_gap, Length::Px(10.0));
+        assert_eq!(style.column_gap, Length::Px(10.0));
+
+        // Three values, or a second value that is no length: the
+        // declaration is invalid and changes nothing.
+        // A negative length or a bare number other than 0 is invalid in
+        // either position (Chromium 141 ignores `gap: -5px 20px` and
+        // `gap: 10 20`), and so is the one-value form of either.
+        for bad in ["1px 2px 3px", "1px red", "-5px 20px", "10px -1px", "10 20", "-5px", "10"] {
+            let mut style = ComputedStyle::new();
+            e.apply_style_property(&mut style, "gap", bad);
+            assert_eq!(style.row_gap, ComputedStyle::new().row_gap, "{bad}");
+            assert_eq!(style.column_gap, ComputedStyle::new().column_gap, "{bad}");
+        }
+    }
+}
+
 // ── float / clear (realsite B3). Nothing parsed the two properties, and
 //    the main flow loop never placed a float, so every float laid out as a
 //    block and every clearfix did nothing. ──
@@ -34407,17 +34515,19 @@ mod script_selector_tests {
     // A shadow root's tree answers the engine's selector matcher, and (until the
     // flat tree lands) nothing in it is painted.
     #[test]
-    fn a_shadow_root_answers_queries_and_is_not_painted_yet() {
+    fn a_shadow_root_answers_queries_and_is_painted() {
         let (mut engine, view) = loaded(
-            "<html><head><style>body{margin:0}</style></head><body><div id=h><span slot=x id=a>A</span></div>\n             <p id=out>outside</p></body></html>",
+            "<html><head><style>body{margin:0}</style></head><body><div id=h><span slot=x id=a>A</span><b id=gone>B</b></div>\n             <p id=out>outside</p></body></html>",
         );
-        let before = painted_text(&engine, view);
+        assert_eq!(painted_text(&engine, view), "A B outside");
         let mut js = |s: &str| eval(&mut engine, view, s);
         assert_eq!(
             js("var r = document.getElementById('h').attachShadow({ mode: 'open' }); r.innerHTML = '<p class=c id=p>hi</p><slot name=x></slot>'; [r.querySelectorAll('.c').length, r.querySelector('p').id, r.querySelectorAll('p, slot').length, String(document.querySelector('.c')), r.querySelector('slot').assignedElements()[0].id].join()"),
             "1,p,2,null,a"
         );
-        assert_eq!(painted_text(&engine, view), before, "the shadow tree is not in the rendered tree yet");
+        // The flat tree: the shadow tree, the span through its slot, and not
+        // the <b> no slot takes.
+        assert_eq!(painted_text(&engine, view), "hi A outside");
     }
 
     // getComputedStyle answers from the cascade the painter used.

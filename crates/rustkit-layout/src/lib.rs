@@ -48,6 +48,8 @@ mod flex_auto_margin_relayout_tests;
 mod flex_item_min_height_tests;
 
 #[cfg(test)]
+mod fit_content_width_tests;
+#[cfg(test)]
 mod min_max_height_unit_tests;
 
 #[cfg(test)]
@@ -4313,6 +4315,15 @@ impl LayoutBox {
                     // Fill available space (CSS 2.1 §10.3.3)
                     available
                 }
+            }
+            // css-sizing-3 §3.2: `fit-content` is min(max-content,
+            // max(min-content, available)), the shrink-to-fit width, in
+            // every context; unlike `auto` it never fills a block. The
+            // `_` arm below read it as 0 (`Length::to_px`).
+            Length::FitContent => {
+                let available =
+                    (containing_block.content.width - total_margin_border_padding).max(0.0);
+                shrink_to_fit_content_width(self, available)
             }
             _ => {
                 let specified_width =
