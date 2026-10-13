@@ -1862,6 +1862,16 @@ pub enum Visibility {
     Collapse,
 }
 
+/// `pointer-events` (CSS UI 4 §8.1; the SVG-only values count as `auto`).
+/// Inherited. A `none` box is no target of a hit test: the point goes to
+/// what is under it, and a descendant can set `auto` again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointerEvents {
+    #[default]
+    Auto,
+    None,
+}
+
 /// Overflow behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Overflow {
@@ -2612,6 +2622,7 @@ pub struct ComputedStyle {
     // Visual
     pub opacity: f32,
     pub visibility: Visibility,
+    pub pointer_events: PointerEvents,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
@@ -2791,6 +2802,7 @@ impl ComputedStyle {
             direction: parent.direction,
             writing_mode: parent.writing_mode,
             visibility: parent.visibility,
+            pointer_events: parent.pointer_events,
             border_spacing: parent.border_spacing,
             border_collapse: parent.border_collapse,
 

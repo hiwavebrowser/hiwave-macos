@@ -806,8 +806,11 @@ fn a_script_answered_with_an_error_status_does_not_settle() {
 }
 
 /// A script lost on the engine's side still settles: one whose fetch got
-/// no HTTP response at all (nothing listens on the port), and one the
-/// script budget never started (the first script spends it).
+/// no HTTP response at all, and one the script budget never started (the
+/// first script spends it). The first is refused by the engine's address
+/// policy before any connection (a loopback `src` on another port than
+/// the page's: `Address not permitted`), so it never reaches the socket;
+/// no test here reaches a refused connection.
 #[test]
 fn a_script_lost_on_the_engines_side_settles() {
     for (rest, budget_ms) in [
