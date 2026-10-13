@@ -628,6 +628,25 @@ document.getElementById('pw').value = 'TYPEDVALUE';
 <script src=\"/p.js%3Bjsessionid=JSESSIONSECRET/x.js\"></script>\
 <script type=module src=\"/m.js;jsessionid=JSESSIONSECRET?token=SCRIPTQUERY\"></script>",
     );
+    // Fourth R1 hold @ 47fc7abb: script gives an element the cookie as its
+    // id, makes a custom element named after the cookie, and writes to
+    // each. The engine lays a load's writes out between its steps, so each
+    // step's first write is a `relayout` record of its own: the id at
+    // `DOMContentLoaded`, the custom element at `load`, writes to it in a
+    // timer, and one more from the embedder after the load.
+    page.push_str(
+        "<div id=t>x</div><script>
+document.addEventListener('DOMContentLoaded', function () {
+  var d = document.getElementById('t'); d.id = document.cookie; d.setAttribute('data-x', '1');
+});
+window.addEventListener('load', function () {
+  var c = document.createElement('x-' + document.cookie.split('=')[1].toLowerCase());
+  c.id = 'el-' + document.cookie; c.setAttribute('class', 'cls-' + document.cookie);
+  document.body.appendChild(c);
+  setTimeout(function () { c.setAttribute('data-y', '1'); c.textContent = 'SECRET_TEXT'; }, 0);
+});
+</script>",
+    );
     page.push_str("</body></html>");
     let script = "console.log('s'); throw new Error('s');";
     let server = serve(vec![
@@ -638,7 +657,21 @@ document.getElementById('pw').value = 'TYPEDVALUE';
     ]);
     let (mut engine, view) = inspected_engine(EngineConfig::default());
     runtime().block_on(engine.load_url(view, server.url("/?token=HREFQUERY"))).expect("load_url");
+    engine
+        .execute_script(view, "document.getElementById('el-' + document.cookie).style.color = 'red';")
+        .expect("execute_script");
     let records = records(&engine, view);
+    let causes: Vec<&str> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::Relayout { cause, .. } => Some(cause.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        causes.iter().filter(|c| c.starts_with("script_mutation(")).count() >= 4,
+        "the writes are still laid out and recorded: {causes:?}"
+    );
     assert_eq!(
         records.iter().filter(|r| r.event.kind() == "console").count(),
         8,
@@ -665,9 +698,13 @@ document.getElementById('pw').value = 'TYPEDVALUE';
         "URLPASSWORD",
         "JSESSIONSECRET",
         "SCRIPTQUERY",
+        "SECRET_TEXT",
     ] {
         assert!(!all.contains(secret), "{secret} leaked: {all}");
     }
+    // A tag name is lowercased, so the custom element's name holds it so.
+    assert!(!all.contains("cookievalue"), "custom element name leaked: {all}");
+    assert!(!all.contains("sid="), "an id leaked: {all}");
 }
 
 
