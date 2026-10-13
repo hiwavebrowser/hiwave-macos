@@ -9049,10 +9049,32 @@ impl Engine {
                 };
             }
             "gap" | "grid-gap" => {
-                // gap shorthand (row-gap column-gap or single value)
-                if let Some(length) = parse_length(value) {
-                    style.row_gap = length.clone();
-                    style.column_gap = length;
+                // `<row-gap> <column-gap>?`: one value sets both. Split at
+                // top-level whitespace so a calc() stays one value; any part
+                // that is no length makes the whole declaration invalid. A
+                // gap is a non-negative length: `parse_length` also takes a
+                // negative one and a bare number as px, which CSS rejects
+                // (a unitless zero is the one unitless length).
+                let gap_length = |part: &str| {
+                    let bare_number = part.parse::<f32>().is_ok_and(|v| v != 0.0);
+                    (!part.starts_with('-') && !bare_number)
+                        .then(|| parse_length(part))
+                        .flatten()
+                };
+                let parts: Vec<_> = split_top_level_whitespace(value)
+                    .into_iter()
+                    .map(gap_length)
+                    .collect();
+                match parts.as_slice() {
+                    [Some(both)] => {
+                        style.row_gap = both.clone();
+                        style.column_gap = both.clone();
+                    }
+                    [Some(row), Some(column)] => {
+                        style.row_gap = row.clone();
+                        style.column_gap = column.clone();
+                    }
+                    _ => {}
                 }
             }
             "row-gap" => {
@@ -32870,6 +32892,53 @@ mod logical_property_tests {
         assert_eq!(style.border_bottom_color, Color::from_rgb(4, 5, 6));
         e.apply_style_property(&mut style, "border-block-end-color", "rgb(7, 8, 9)");
         assert_eq!(style.border_bottom_color, Color::from_rgb(7, 8, 9));
+    }
+}
+
+// `gap` is `<row-gap> <column-gap>?`: one value sets both, two set each.
+// The two-value form was handed whole to `parse_length`, which fails on
+// it, so `gap: 10px 20px` set neither (nested layout matrix,
+// `gap-two-value-shorthand-dropped`).
+#[cfg(test)]
+mod gap_shorthand_tests {
+    use super::*;
+    use rustkit_css::Length;
+
+    #[test]
+    fn gap_with_two_values_sets_the_row_gap_then_the_column_gap() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        for property in ["gap", "grid-gap"] {
+            let mut style = ComputedStyle::new();
+            e.apply_style_property(&mut style, property, "10px 20px");
+            assert_eq!(style.row_gap, Length::Px(10.0), "{property}");
+            assert_eq!(style.column_gap, Length::Px(20.0), "{property}");
+
+            let mut style = ComputedStyle::new();
+            e.apply_style_property(&mut style, property, "calc(4px + 6px) 5%");
+            assert_eq!(style.row_gap, Length::Px(10.0), "{property}");
+            assert_eq!(style.column_gap, Length::Percent(5.0), "{property}");
+        }
+    }
+
+    #[test]
+    fn gap_with_one_value_sets_both_and_a_bad_value_sets_neither() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut style = ComputedStyle::new();
+        e.apply_style_property(&mut style, "gap", "calc(4px + 6px)");
+        assert_eq!(style.row_gap, Length::Px(10.0));
+        assert_eq!(style.column_gap, Length::Px(10.0));
+
+        // Three values, or a second value that is no length: the
+        // declaration is invalid and changes nothing.
+        // A negative length or a bare number other than 0 is invalid in
+        // either position (Chromium 141 ignores `gap: -5px 20px` and
+        // `gap: 10 20`), and so is the one-value form of either.
+        for bad in ["1px 2px 3px", "1px red", "-5px 20px", "10px -1px", "10 20", "-5px", "10"] {
+            let mut style = ComputedStyle::new();
+            e.apply_style_property(&mut style, "gap", bad);
+            assert_eq!(style.row_gap, ComputedStyle::new().row_gap, "{bad}");
+            assert_eq!(style.column_gap, ComputedStyle::new().column_gap, "{bad}");
+        }
     }
 }
 
