@@ -1060,6 +1060,29 @@ pub enum ScriptOutcome {
     FetchFailed(FetchFailure),
     /// Not started: the page's script budget was spent.
     OverBudget,
+    /// The engine itself failed here, not the page's script. Set only where
+    /// the engine raises the failure: whatever page script throws is
+    /// [`Threw`](Self::Threw), whatever its text says.
+    EngineFailed(EngineFailure),
+}
+
+/// A failure of the engine's own (see [`ScriptOutcome::EngineFailed`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum EngineFailure {
+    /// The JS engine panicked: its state is unknowable, and nothing more
+    /// runs on the page.
+    Panic,
+    /// An import map the engine refused, and why.
+    ImportMap(String),
+}
+
+impl std::fmt::Display for EngineFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineFailure::Panic => f.write_str("JS engine panic"),
+            EngineFailure::ImportMap(why) => write!(f, "import map: {why}"),
+        }
+    }
 }
 
 /// Why an external script's fetch failed.
@@ -3218,15 +3241,15 @@ impl Engine {
         let document = view.url.clone();
         let inspector = view.inspector.clone();
         let live_requests = &mut view.live_requests;
-        let mut threw: Vec<(&str, String)> = Vec::new();
+        let mut threw: Vec<(&str, ScriptOutcome)> = Vec::new();
 
         // Timers first: what they ask of the network is answered this turn.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
         })) {
             Ok(Ok(ran)) => out.timers_ran = ran,
-            Ok(Err(e)) => threw.push(("timers", e.to_string())),
-            Err(_) => threw.push(("timers", "JS engine panic".into())),
+            Ok(Err(e)) => threw.push(("timers", ScriptOutcome::Threw(e.to_string()))),
+            Err(_) => threw.push(("timers", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
         }
         // What the timers threw or left rejected is theirs in the Inspector.
         inspector_glue::drain_errors(bindings, &view.inspector, "timers");
@@ -3244,7 +3267,7 @@ impl Engine {
                             }),
                     );
                 }
-                Err(_) => threw.push(("network", "JS engine panic".into())),
+                Err(_) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
             }
             // Delivery only: a timer a response handler sets runs on a later
             // turn, when its time has passed, and a request it makes starts
@@ -3255,8 +3278,8 @@ impl Engine {
                     bindings.deliver_net_response(request_id, outcome)
                 })) {
                     Ok(Ok(_)) => {}
-                    Ok(Err(e)) => threw.push(("network", e.to_string())),
-                    Err(_) => threw.push(("network", "JS engine panic".into())),
+                    Ok(Err(e)) => threw.push(("network", ScriptOutcome::Threw(e.to_string()))),
+                    Err(_) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
                 }
             }
             out.in_flight = live_requests.len();
@@ -3275,9 +3298,9 @@ impl Engine {
                 )
                 .await;
                 out.requests += found.requests;
-                threw.extend(found.threw.into_iter().map(|message| ("network", message)));
+                threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
                 if found.poisoned {
-                    threw.push(("network", "JS engine panic".into()));
+                    threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
                 }
             }
         }
@@ -3286,19 +3309,21 @@ impl Engine {
         out.next_timer_ms = bindings.next_timer_delay();
         let threw = threw
             .into_iter()
-            .chain(reported.into_iter().map(|message| ("timers", message)));
-        for (source, message) in threw {
+            .chain(reported.into_iter().map(|message| ("timers", ScriptOutcome::Threw(message))));
+        for (source, outcome) in threw {
             if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
                 // The log is full; the Inspector's buffer bounds itself (the
                 // page's errors reached it from their reports above).
-                inspector_glue::engine_error(&view.inspector, &message, source);
+                if let ScriptOutcome::EngineFailed(failure) = &outcome {
+                    inspector_glue::engine_error(&view.inspector, failure, source);
+                }
                 continue;
             }
             let record = ScriptRecord {
                 source: source.to_string(),
                 bytes: 0,
                 elapsed_ms: 0,
-                outcome: ScriptOutcome::Threw(message),
+                outcome,
             };
             inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
         }
@@ -4124,7 +4149,7 @@ impl Engine {
                 Ok(Err(message)) => ScriptOutcome::Threw(message),
                 Err(_) => {
                     poisoned.set(true);
-                    ScriptOutcome::Threw("JS engine panic".into())
+                    ScriptOutcome::EngineFailed(EngineFailure::Panic)
                 }
             };
             // Stopped by the execution deadline, whatever it then reported.
@@ -4173,7 +4198,7 @@ impl Engine {
                         source: "importmap".into(),
                         bytes: text.len(),
                         elapsed_ms: 0,
-                        outcome: ScriptOutcome::Threw(format!("import map: {message}")),
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::ImportMap(message)),
                     };
                     inspector_glue::log_script(log, &inspector, record);
                 }
@@ -4235,6 +4260,11 @@ impl Engine {
                     (Some(position), Some(document)) => format!("{document}#inline-module-{position}"),
                     _ => label.clone(),
                 };
+                // Named by the engine, so its positions read `inline#n`; a
+                // page module whose URL merely ends the same way does not.
+                if module_url != label {
+                    inspector.alias_script(&module_url, &label);
+                }
                 info!(source = %label, bytes = text.len(), "Running module script");
                 let module_started = std::time::Instant::now();
                 let begun = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -4243,7 +4273,7 @@ impl Engine {
                 let (outcome, event) = match begun {
                     Err(_) => {
                         poisoned.set(true);
-                        (ScriptOutcome::Threw("JS engine panic".into()), None)
+                        (ScriptOutcome::EngineFailed(EngineFailure::Panic), None)
                     }
                     // A syntax error: the module graph was never built.
                     Ok(Err(message)) => (ScriptOutcome::Threw(message), Some("error")),
@@ -4271,7 +4301,7 @@ impl Engine {
                         })) {
                             Err(_) => {
                                 poisoned.set(true);
-                                (ScriptOutcome::Threw("JS engine panic".into()), None)
+                                (ScriptOutcome::EngineFailed(EngineFailure::Panic), None)
                             }
                             // Loaded and run (a pending top-level `await` is
                             // still running): the element hears `load`.
@@ -4403,7 +4433,7 @@ impl Engine {
                     source: "network".into(),
                     bytes: 0,
                     elapsed_ms: 0,
-                    outcome: ScriptOutcome::Threw("JS engine panic".into()),
+                    outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                 };
                 inspector_glue::log_script(log, &inspector, record);
                 return;
@@ -4484,7 +4514,7 @@ impl Engine {
                         source: "network".into(),
                         bytes: 0,
                         elapsed_ms: 0,
-                        outcome: ScriptOutcome::Threw("JS engine panic".into()),
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     };
                     inspector_glue::log_script(log, &inspector, record);
                     return;

@@ -923,6 +923,7 @@ fn script_stats(log: &[ScriptRecord]) -> ScriptStats {
             ScriptOutcome::Skipped(_) | ScriptOutcome::Nomodule => stats.skipped += 1,
             ScriptOutcome::FetchFailed(_) => stats.fetch_failed += 1,
             ScriptOutcome::OverBudget => stats.over_budget += 1,
+            ScriptOutcome::EngineFailed(_) => stats.threw += 1,
         }
         stats.bytes += record.bytes as u64;
         stats.elapsed_ms += record.elapsed_ms;
@@ -944,6 +945,8 @@ fn script_log_json(log: &[ScriptRecord]) -> serde_json::Value {
                 ),
                 ScriptOutcome::FetchFailed(m) => ("fetch_failed", Some(m.to_string())),
                 ScriptOutcome::OverBudget => ("over_budget", None),
+                // Reported as before the engine marked its own failures.
+                ScriptOutcome::EngineFailed(failure) => ("threw", Some(failure.to_string())),
             };
             serde_json::json!({
                 "source": r.source,

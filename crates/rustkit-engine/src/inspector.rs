@@ -9,8 +9,9 @@
 //!
 //! Privacy (the log is pasted into public issues and PRs): a URL in an event
 //! keeps its scheme, host, port and path, never its user name, password,
-//! query or fragment (a flag keeps the query and fragment); a `data:` URL
-//! keeps only its MIME type. No header, request or response body, form value
+//! query, fragment or `;` path parameters (`/a;jsessionid=S/b` is `/a/b`; a
+//! flag keeps the query, fragment and parameters); a `data:` URL keeps only
+//! its MIME type, when it is a common one. A `file:` URL's path is the local path, user name and all. No header, request or response body, form value
 //! or storage is recorded. No text the page chose is recorded by default
 //! (pages log and throw cookies, form values and their own URL): a console
 //! message is each argument's type and a string's length; an error is the
@@ -56,8 +57,8 @@ pub struct InspectorConfig {
     /// Size of the ring buffer; past it the oldest event is dropped and
     /// counted.
     pub capacity: usize,
-    /// Keep the query string and fragment of URLs in events. Off by default:
-    /// they carry session ids and tokens.
+    /// Keep the query string, fragment and `;` path parameters of URLs in
+    /// events. Off by default: they carry session ids and tokens.
     pub keep_url_query: bool,
     /// Keep the text of console messages. Off by default: a console line
     /// is then each argument's type, and a string's length (`<string
@@ -618,14 +619,12 @@ impl Inspector {
     /// A position as events show it: the script's URL (an alias resolved,
     /// a URL scrubbed) or its `inline#n` label.
     pub fn location(&self, path: &str, line: u32, column: u32) -> SourceLocation {
-        let url = self
-            .state()
-            .aliases
-            .iter()
-            .find(|(alias, _)| alias == path)
-            .map(|(_, url)| url.clone())
-            .unwrap_or_else(|| self.url_text(path));
-        SourceLocation { url, line, column }
+        SourceLocation { url: self.url_text(path), line, column }
+    }
+
+    /// What the engine named `name` with [`alias_script`](Self::alias_script).
+    fn alias(&self, name: &str) -> Option<String> {
+        self.state().aliases.iter().find(|(alias, _)| alias == name).map(|(_, url)| url.clone())
     }
 
     /// Engine-made text that can name scripts (an error message, a stack):
@@ -738,15 +737,7 @@ impl Inspector {
             out.push_str(&text[rest..start]);
             if lower[start..].starts_with("data:") {
                 let tail = query_tail(&text[start..]);
-                let mime = text[start + 5..]
-                    .split([',', ';'])
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || "/+-.".contains(*c))
-                    .take(64)
-                    .collect::<String>();
-                out.push_str(&format!("data:{mime},…"));
+                out.push_str(&format!("data:{},…", data_mime(&text[start + 5..])));
                 out.push_str(tail);
                 rest = text.len();
                 break;
@@ -792,12 +783,10 @@ impl Inspector {
     /// [`url`](Self::url) for text that may not be a URL (a script label
     /// such as `inline#2`, which is kept as it is).
     pub fn url_text(&self, text: &str) -> String {
-        // An inline module runs as `<document>#inline-module-<n>`: it is the
-        // page's n-th `<script>`, as an inline classic script is.
-        if let Some((_, n)) = text.rsplit_once("#inline-module-") {
-            if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) {
-                return format!("inline#{n}");
-            }
+        // A name the engine gave a script (an inline module runs as
+        // `<document>#inline-module-<n>`, aliased to `inline#n`).
+        if let Some(url) = self.alias(text) {
+            return url;
         }
         if text.starts_with("event:") {
             return cap(text, MAX_SHORT_CHARS).0;
@@ -816,13 +805,7 @@ impl Inspector {
     /// newlines dropped, backslashes as slashes, any scheme). `None` for
     /// anything else: a frame that cannot be read is dropped, never copied.
     pub fn frame_location(&self, path: &str, line: u32, column: u32) -> Option<SourceLocation> {
-        if let Some(url) = self
-            .state()
-            .aliases
-            .iter()
-            .find(|(alias, _)| alias == path)
-            .map(|(_, url)| url.clone())
-        {
+        if let Some(url) = self.alias(path) {
             return Some(SourceLocation { url, line, column });
         }
         let label = |prefix: &str| {
@@ -831,11 +814,6 @@ impl Inspector {
         };
         let url = if label("inline#") || label("script#") {
             path.to_string()
-        } else if let Some((_, n)) = path.rsplit_once("#inline-module-") {
-            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            format!("inline#{n}")
         } else {
             self.url(&Url::parse(path).ok()?)
         };
@@ -1111,24 +1089,14 @@ pub fn cap(text: &str, max: usize) -> (String, bool) {
     }
 }
 
-/// `url` with its credentials always removed, and its query and fragment
-/// unless `keep_query`. A `data:` URL is reduced to `data:<mime>,…`; any
-/// other URL that cannot have a host (`about:`, `blob:`) keeps its scheme
-/// and, for `blob:`, its origin.
+/// `url` with its credentials always removed, and its query, fragment and
+/// `;` path parameters (`;jsessionid=`) unless `keep_query`. A `data:` URL
+/// is reduced to `data:<mime>,…` (a common MIME type only); any other URL
+/// that cannot have a host (`about:`, `blob:`) keeps its scheme and, for
+/// `blob:`, its origin.
 pub fn scrub_url(url: &Url, keep_query: bool) -> String {
     match url.scheme() {
-        "data" => {
-            let rest = &url.as_str()[5..];
-            let mime = rest
-                .split([',', ';'])
-                .next()
-                .unwrap_or("")
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || "/+-.".contains(*c))
-                .take(64)
-                .collect::<String>();
-            format!("data:{mime},…")
-        }
+        "data" => format!("data:{},…", data_mime(&url.as_str()[5..])),
         "blob" => match Url::parse(url.path()) {
             Ok(inner) => format!("blob:{}", inner.origin().ascii_serialization()),
             Err(_) => "blob:".to_string(),
@@ -1141,10 +1109,63 @@ pub fn scrub_url(url: &Url, keep_query: bool) -> String {
             if !keep_query {
                 clean.set_query(None);
                 clean.set_fragment(None);
+                // The parser's path: `\` already reads as `/` for a special
+                // scheme, and tabs and newlines are gone.
+                let path = drop_path_params(clean.path());
+                clean.set_path(&path);
             }
             clean.to_string()
         }
     }
+}
+
+/// MIME types a `data:` URL keeps; any other is the page's text, dropped.
+const DATA_MIME_TYPES: [&str; 18] = [
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+    "text/ecmascript",
+    "application/ecmascript",
+    "text/css",
+    "text/html",
+    "text/plain",
+    "text/xml",
+    "application/json",
+    "application/wasm",
+    "image/svg+xml",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "font/woff2",
+    "application/octet-stream",
+];
+
+/// A `data:` URL's MIME type (`rest` follows `data:`) when it is a known
+/// one, else nothing.
+fn data_mime(rest: &str) -> &'static str {
+    let mime = rest.split([',', ';']).next().unwrap_or("").trim();
+    DATA_MIME_TYPES.iter().find(|m| m.eq_ignore_ascii_case(mime)).copied().unwrap_or("")
+}
+
+/// A path without its `;` parameters (`/cart;jsessionid=S/x` is `/cart/x`):
+/// a servlet puts the session cookie there when cookies are off. Each one
+/// runs from `;` (or `%3B`, to record less) to the end of its segment. The
+/// same rule as the diagnostics half's `report_url`.
+fn drop_path_params(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut rest = path;
+    while !rest.is_empty() {
+        let at = rest.find(';').into_iter().chain(rest.find("%3B")).chain(rest.find("%3b")).min();
+        let Some(at) = at else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        rest = &rest[rest.find('/').unwrap_or(rest.len())..];
+    }
+    out
 }
 
 /// Where `scheme` next starts in `lower` from `from`: anywhere for a
@@ -1429,16 +1450,8 @@ pub fn net_error_kind(error: &rustkit_net::NetError) -> &'static str {
         NetError::InvalidUrl(_) => "invalid_url",
         NetError::RequestFailed(_) | NetError::IoError(_) => "network",
         NetError::HttpError(http) => match http {
-            HttpError::ConnectionFailed(text) => {
-                let text = text.to_ascii_lowercase();
-                if text.contains("no addresses") || text.contains("lookup") || text.contains("resolve")
-                    || text.contains("name or service")
-                {
-                    "dns"
-                } else {
-                    "connect"
-                }
-            }
+            HttpError::LookupFailed(_) => "dns",
+            HttpError::ConnectionFailed(_) => "connect",
             HttpError::IoError(_) => "connect",
             HttpError::TlsError(_) => "tls",
             HttpError::Timeout => "timeout",

@@ -522,8 +522,47 @@ fn urls_in_events_lose_credentials_query_and_fragment() {
     assert_eq!(scrub_url(&url, true), "https://example.test:8443/a/b.js?token=1&x=2#frag");
     let data = Url::parse("data:text/css;base64,Ym9keXt9").unwrap();
     assert_eq!(scrub_url(&data, true), "data:text/css,…");
+    // R1 note @ 6bda3b2c: the MIME type is the page's text unless it is a
+    // common one.
+    for (u, want) in [
+        ("data:TEXT/JavaScript,x", "data:text/javascript,…"),
+        ("data:text/javascriptSECRET,x", "data:,…"),
+        ("data:SECRET/x;base64,AAAA", "data:,…"),
+        ("data:,x", "data:,…"),
+    ] {
+        assert_eq!(scrub_url(&Url::parse(u).unwrap(), false), want, "{u:?}");
+    }
     let blob = Url::parse("blob:https://example.test/1234-5678").unwrap();
     assert_eq!(scrub_url(&blob, false), "blob:https://example.test");
+}
+
+/// Third R1 hold @ 6bda3b2c: a `;` path parameter (a servlet `jsessionid`
+/// is the session cookie) goes with the query, in every segment, unless the
+/// query is kept. The same table as the diagnostics half's `report_url`
+/// (#674), so the two halves of the Inspector agree.
+#[test]
+fn urls_in_events_lose_path_parameters_unless_the_query_is_kept() {
+    let r = |u: &str, q| scrub_url(&Url::parse(u).unwrap(), q);
+    assert_eq!(r("https://shop.test/cart;jsessionid=0123ABCD?x=1", false), "https://shop.test/cart");
+    assert_eq!(r("https://shop.test/cart;jsessionid=0123ABCD?x=1", true), "https://shop.test/cart;jsessionid=0123ABCD?x=1");
+    for (u, want) in [
+        ("https://shop.test/a;jsessionid=S/b;v=1/c.js", "https://shop.test/a/b/c.js"),
+        ("https://shop.test/a;x=1;JSESSIONID=S", "https://shop.test/a"),
+        ("https://shop.test/a%3Bjsessionid=S/b", "https://shop.test/a/b"),
+        ("https://shop.test/a%3bjsessionid=S/b", "https://shop.test/a/b"),
+        ("https://shop.test/a;", "https://shop.test/a"),
+        ("https://shop.test/;jsessionid=S", "https://shop.test/"),
+        ("https:\\\\shop.test\\a;jsessionid=S\\b", "https://shop.test/a/b"),
+        ("https://shop.test/a;jsess\tionid=S\n/b", "https://shop.test/a/b"),
+        ("http://shop.test:8080/a;jsessionid=S#f", "http://shop.test:8080/a"),
+        ("foo://shop.test/a;sid=S/b", "foo://shop.test/a/b"),
+        ("https://u:pw@shop.test/a;jsessionid=S", "https://shop.test/a"),
+        // `data:` and `blob:` keep their own reduction.
+        ("blob:https://shop.test/a;jsessionid=S", "blob:https://shop.test"),
+    ] {
+        assert_eq!(r(u, false), want, "{u:?}");
+    }
+    assert_eq!(r("https://shop.test/a%3Bjsessionid=S/b", true), "https://shop.test/a%3Bjsessionid=S/b");
 }
 
 #[test]
@@ -614,20 +653,34 @@ document.getElementById('pw').value = 'TYPEDVALUE';
     for row in rows {
         page.push_str(&format!("<script>{row}</script>"));
     }
+    // Third R1 hold @ 6bda3b2c: a `;` path parameter (a servlet's
+    // `jsessionid`, the session cookie when cookies are off) in a script's
+    // own URL, plain and percent-encoded, classic and module.
+    page.push_str(
+        "<script src=\"/s.js;jsessionid=JSESSIONSECRET?token=SCRIPTQUERY\"></script>\
+<script src=\"/p.js%3Bjsessionid=JSESSIONSECRET/x.js\"></script>\
+<script type=module src=\"/m.js;jsessionid=JSESSIONSECRET?token=SCRIPTQUERY\"></script>",
+    );
     page.push_str("</body></html>");
-    let server = serve(vec![Route::html("/", page).header("Set-Cookie", "server=SETCOOKIEVALUE")]);
+    let script = "console.log('s'); throw new Error('s');";
+    let server = serve(vec![
+        Route::html("/", page).header("Set-Cookie", "server=SETCOOKIEVALUE"),
+        Route::ok("/s.js;jsessionid=JSESSIONSECRET", "text/javascript", script),
+        Route::ok("/p.js%3Bjsessionid=JSESSIONSECRET/x.js", "text/javascript", script),
+        Route::ok("/m.js;jsessionid=JSESSIONSECRET", "text/javascript", script),
+    ]);
     let (mut engine, view) = inspected_engine(EngineConfig::default());
     runtime().block_on(engine.load_url(view, server.url("/?token=HREFQUERY"))).expect("load_url");
     let records = records(&engine, view);
     assert_eq!(
         records.iter().filter(|r| r.event.kind() == "console").count(),
-        5,
+        8,
         "the calls are still recorded"
     );
-    // 14 throws, 4 rejections, a listener and a timer: all still recorded.
+    // 17 throws, 4 rejections, a listener and a timer: all still recorded.
     assert_eq!(
         records.iter().filter(|r| r.event.kind() == "script_error").count(),
-        20,
+        23,
         "the errors are still recorded: {records:?}"
     );
     let all = serde_json::to_string(&records).unwrap();
@@ -643,6 +696,8 @@ document.getElementById('pw').value = 'TYPEDVALUE';
         "SECRET_SYM",
         "URLSECRET",
         "URLPASSWORD",
+        "JSESSIONSECRET",
+        "SCRIPTQUERY",
     ] {
         assert!(!all.contains(secret), "{secret} leaked: {all}");
     }
@@ -1178,6 +1233,9 @@ delete Error.prototype.toString; delete Error.prototype.toJSON;
 delete Error.prototype.message; delete Error.prototype.name;
 delete Object.prototype.msg; delete Object.prototype.args; delete Object.prototype[Symbol.toPrimitive];
 try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
+</script><script type=module>throw 'import map: ' + document.cookie;
+</script><script type=module>throw 'JS engine panic';
+</script><script type=module>await 0; throw 'import map: x';
 </script></body></html>"#;
     let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
     let records = records(&engine, view);
@@ -1204,7 +1262,18 @@ try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
             "{genuine:?} missing: {errors:?}"
         );
     }
-    assert_eq!(errors.len(), 3, "{errors:?}");
+    // Third R1 hold @ 6bda3b2c: the modules' thrown strings are the page's
+    // own `string` errors, never the engine's.
+    let values: Vec<&str> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { value, .. } => Some(value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(values.iter().filter(|v| **v == "string").count(), 3, "{all}");
+    assert!(!values.contains(&"engine"), "{all}");
+    assert_eq!(errors.len(), 6, "{errors:?}");
     let apis: Vec<String> = engine
         .inspector(view)
         .unwrap()
@@ -1213,4 +1282,88 @@ try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
         .map(|u| format!("{}.{} x{}", u.interface, u.member, u.count))
         .collect();
     assert_eq!(apis, vec!["XMLHttpRequest.open(async=false) x1"]);
+}
+
+/// The engine's own failures (a panic inside the JS engine, an import map
+/// it refused) are recorded as `value: "engine"` where the engine raises
+/// them, never because of what a failure's text says: a page throwing the
+/// engine's very words, from anywhere, is a page error (third R1 hold @
+/// 6bda3b2c).
+#[test]
+fn a_page_throwing_an_engine_message_is_never_an_engine_record() {
+    let mut page = String::from("<html><body><script>document.cookie = 'sid=COOKIEVALUE';</script>");
+    let mut throws = 0;
+    for message in ["JS engine panic", "import map: x", "import map: ' + document.cookie + '"] {
+        for (kind, body) in [
+            ("", format!("throw '{message}';")),
+            ("type=module", format!("throw '{message}';")),
+            ("type=module", format!("await 0; throw '{message}';")),
+            ("", format!("setTimeout(function () {{ throw '{message}'; }}, 0);")),
+            ("", format!("window.addEventListener('load', function () {{ throw '{message}'; }});")),
+            ("", format!("Promise.reject('{message}');")),
+            ("", format!("(async function () {{ throw '{message}'; }})();")),
+            ("", format!("(async function () {{ await 0; throw '{message}'; }})();")),
+        ] {
+            page.push_str(&format!("<script {kind}>{body}</script>"));
+            throws += 1;
+        }
+    }
+    page.push_str("</body></html>");
+    let (mut engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    // And on the live loop, after the load.
+    engine
+        .execute_script(view, "setTimeout(function () { throw 'JS engine panic'; }, 0); setTimeout(function () { throw 'import map: x'; }, 0);")
+        .unwrap();
+    runtime().block_on(engine.pump_live(view, 10));
+    throws += 2;
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    let values: Vec<&str> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { value, .. } => Some(value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(!values.contains(&"engine"), "{all}");
+    assert!(!all.contains("COOKIEVALUE") && !all.contains("JS engine panic") && !all.contains("import map"), "{all}");
+    assert_eq!(values, vec!["string"; throws], "{all}");
+    let summary = InspectorSummary::from_records(&records, &[]);
+    assert_eq!(summary.script_errors as usize, throws, "{summary:?}");
+}
+
+/// What the engine itself refused is still an engine record: an import map
+/// that is not JSON.
+#[test]
+fn an_import_map_the_engine_refused_is_an_engine_record() {
+    let page = "<html><body><script type=importmap>{ not json</script><script type=module>window.x = 1;</script></body></html>";
+    let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let errors = only(&described(&engine, view, server.port), &["script_error"]);
+    assert_eq!(errors, vec!["script_error : import map rejected script=importmap rejection=false"]);
+    let engine_values = records(&engine, view)
+        .iter()
+        .filter(|r| matches!(&r.event, InspectorEvent::ScriptError { value, .. } if value == "engine"))
+        .count();
+    assert_eq!(engine_values, 1);
+}
+
+/// A module whose URL ends in `#inline-module-n` is not the page's n-th
+/// inline script: only the engine names a script `inline#n` (third R1 hold
+/// @ 6bda3b2c, audit).
+#[test]
+fn a_module_url_cannot_pass_for_an_inline_script() {
+    let page = "<html><body><script type=module src=\"/main.js\"></script>\
+<script type=module src=\"/late.js#inline-module-2\"></script></body></html>";
+    let routes = vec![
+        Route::html("/", page),
+        Route::ok("/main.js", "text/javascript", "import './evil.js#inline-module-1';"),
+        Route::ok("/evil.js", "text/javascript", "export const x = 1;\nthrow new Error('evil');"),
+        Route::ok("/late.js", "text/javascript", "await 0;\nthrow new Error('late');"),
+    ];
+    let (engine, view, _server) = load_page(EngineConfig::default(), routes);
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    assert_eq!(records.iter().filter(|r| r.event.kind() == "script_error").count(), 2, "{all}");
+    assert!(!all.contains("inline#") && !all.contains("inline-module"), "{all}");
+    assert!(all.contains("/evil.js:2:") && all.contains("/late.js"), "{all}");
 }
