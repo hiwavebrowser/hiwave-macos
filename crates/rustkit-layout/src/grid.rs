@@ -765,7 +765,18 @@ impl GridLayout {
     /// - Calculate how many repetitions fit in the available space
     /// - Insert the repeated tracks at the stored insert position
     /// - For auto-fit, empty tracks will be collapsed to 0 during sizing
-    pub fn expand_auto_repeats(&mut self, container_width: f32, container_height: f32) {
+    ///
+    /// `row_percent_base` is the container's definite content height, if it
+    /// has one. `container_height` may be only the height of the children
+    /// stacked as blocks (an auto-height grid), and a percentage of that is
+    /// no size: a percentage row track of an indefinite height counts as
+    /// `auto`, one repetition (css-grid-2 §7.2.3.2).
+    pub fn expand_auto_repeats(
+        &mut self,
+        container_width: f32,
+        container_height: f32,
+        row_percent_base: Option<f32>,
+    ) {
         // Expand column auto-repeat
         if let Some(pattern) = self.column_auto_repeat.take() {
             let available = container_width - Self::space_beside_auto_repeat(&self.columns, self.column_gap, container_width);
@@ -781,8 +792,9 @@ impl GridLayout {
 
         // Expand row auto-repeat
         if let Some(pattern) = self.row_auto_repeat.take() {
-            let available = container_height - Self::space_beside_auto_repeat(&self.rows, self.row_gap, container_height);
-            let new_tracks = Self::calculate_auto_repeat_tracks(&pattern, available, self.row_gap, container_height);
+            let percent_base = row_percent_base.unwrap_or(0.0);
+            let available = container_height - Self::space_beside_auto_repeat(&self.rows, self.row_gap, percent_base);
+            let new_tracks = Self::calculate_auto_repeat_tracks(&pattern, available, self.row_gap, percent_base);
 
             // Insert at the stored position
             let insert_at = pattern.insert_position.min(self.rows.len());
@@ -801,7 +813,7 @@ impl GridLayout {
     fn space_beside_auto_repeat(tracks: &[GridTrack], gap: f32, percent_base: f32) -> f32 {
         let share = |percent: f32| {
             if percent_base.is_finite() && percent_base > 0.0 {
-                percent / 100.0 * percent_base
+                percent_of(percent, percent_base)
             } else {
                 0.0
             }
@@ -866,13 +878,15 @@ impl GridLayout {
         }
 
         // Calculate how many repetitions fit
-        // Account for gaps between repetitions
+        // Account for gaps between repetitions. Summed in f64: five f32
+        // tracks of 20% of 203px came to a hair over 203 and one was lost.
+        let (step, available) = (f64::from(gap) + f64::from(single_repetition_size), f64::from(available_space));
         let mut repetitions = 1u32;
-        let mut total_size = single_repetition_size;
+        let mut total_size = f64::from(single_repetition_size);
 
-        while total_size + gap + single_repetition_size <= available_space {
+        while total_size + step <= available {
             repetitions += 1;
-            total_size += gap + single_repetition_size;
+            total_size += step;
         }
 
         // Per spec, at least 1 repetition
@@ -911,7 +925,7 @@ impl GridLayout {
             // to take a share of (css-grid-2 §7.2.3.2). It counted as no
             // size, so `repeat(auto-fit, minmax(25%, 1fr))` was one column.
             TrackSize::Percent(percent) if percent_base.is_finite() && percent_base > 0.0 => {
-                percent / 100.0 * percent_base
+                percent_of(*percent, percent_base)
             }
             TrackSize::MinMax(min, max) => {
                 // Use the definite bound
@@ -950,6 +964,11 @@ impl GridLayout {
                     track.size = 0.0;
                     track.is_flexible = false;
                     track.flex_factor = 0.0;
+                    // Or sizing resolves the percentage again and the
+                    // track is back (`repeat(auto-fit, minmax(25%, 1fr))`
+                    // with two items kept four tracks).
+                    track.percent = None;
+                    track.max_percent = None;
                     trace!("Collapsed empty auto-fit column track {}", i);
                 }
             }
@@ -968,6 +987,11 @@ impl GridLayout {
                     track.size = 0.0;
                     track.is_flexible = false;
                     track.flex_factor = 0.0;
+                    // Or sizing resolves the percentage again and the
+                    // track is back (`repeat(auto-fit, minmax(25%, 1fr))`
+                    // with two items kept four tracks).
+                    track.percent = None;
+                    track.max_percent = None;
                     trace!("Collapsed empty auto-fit row track {}", i);
                 }
             }
@@ -1412,7 +1436,8 @@ pub fn layout_grid_container(
     // of the children stacked as blocks: a 300px grid of three one-line
     // items was laid out as if 60px tall, and `align-content` had no free
     // space to share, nor `stretch` any to give its rows.
-    let container_height = own_definite_height(container).unwrap_or(container_height);
+    let definite_height = own_definite_height(container);
+    let container_height = definite_height.unwrap_or(container_height);
 
     // Compute gaps
     // Against the container's own font size and viewport, not a fixed 16px:
@@ -1435,7 +1460,7 @@ pub fn layout_grid_container(
     grid.set_template_areas(style.grid_template_areas.clone());
 
     // Expand auto-fill/auto-fit patterns now that we have container size
-    grid.expand_auto_repeats(container_width, container_height);
+    grid.expand_auto_repeats(container_width, container_height, definite_height);
 
     // Negative line numbers count back from the end of the EXPLICIT grid
     // (CSS Grid §8.3): with no explicit columns, `-1` is line 1. Resolve
@@ -3906,7 +3931,7 @@ fn size_grid_tracks_filling(
     for track in tracks.iter_mut() {
         // Resolve min percentage (base_size)
         if let Some(pct) = track.percent {
-            let resolved_size = container_size * (pct / 100.0);
+            let resolved_size = percent_of(pct, container_size);
             track.base_size = resolved_size;
             track.size = resolved_size;
             // If no max percentage and not flexible, growth_limit = base_size
@@ -3916,7 +3941,7 @@ fn size_grid_tracks_filling(
         }
         // Resolve max percentage (growth_limit)
         if let Some(pct) = track.max_percent {
-            let resolved_size = container_size * (pct / 100.0);
+            let resolved_size = percent_of(pct, container_size);
             track.growth_limit = resolved_size;
             // If track hasn't been sized yet, use base_size
             if track.size < track.base_size {
@@ -4498,6 +4523,16 @@ fn item_children_flow_inline(item: &LayoutBox) -> bool {
         (Some(only), None) => lone_run(only),
         _ => in_flow.any(inline_level),
     }
+}
+
+/// A percentage track's share of `base`, in 1/64 px rounded down, which is
+/// how Chromium holds a length (LayoutUnit). So n tracks of 100/n percent
+/// always fit their container (20% of 203px five times), `33.34%` of 100px
+/// fits three times as in Chromium, and the sixth 10% track of 201px starts
+/// at 100.47, not 100.5.
+fn percent_of(percent: f32, base: f32) -> f32 {
+    let exact = f64::from(base) * f64::from(percent) / 100.0;
+    ((exact * 64.0).floor() / 64.0) as f32
 }
 
 /// The content-box height a grid container's own style gives it outright: a
@@ -5861,7 +5896,7 @@ mod tests {
         assert_eq!(grid.columns.len(), 0);
 
         // Expand with 500px container width
-        grid.expand_auto_repeats(500.0, 100.0);
+        grid.expand_auto_repeats(500.0, 100.0, Some(100.0));
 
         // Now should have 5 columns
         assert_eq!(grid.columns.len(), 5);
