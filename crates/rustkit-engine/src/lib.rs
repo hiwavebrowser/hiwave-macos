@@ -742,10 +742,9 @@ struct ViewState {
     /// pointer restyle asked for it, so it may keep the laid-out tree
     /// (`Engine::repaint_restyled`).
     restyle_only: bool,
-    /// The box tree of the last full layout as it was built, before layout
-    /// wrote into it, with what else that layout read. Kept only while the
-    /// view's sheets read `:hover` or `:active`.
-    unlaid: Option<UnlaidTree>,
+    /// What the last full layout was built with: the chains and the view's
+    /// size (`Engine::repaint_restyled`).
+    laid_with: Option<LaidWith>,
     /// Where the pointer was at its last move, in viewport coordinates.
     pointer_at: Option<(f32, f32)>,
     /// The primary button is held: between a press and its release.
@@ -846,7 +845,7 @@ impl ViewState {
         self.rule_reads.get_mut().take();
         self.pointer_restyle = false;
         self.restyle_only = false;
-        self.unlaid = None;
+        self.laid_with = None;
         self.pointer_at = None;
         self.primary_button_down = false;
         self.press_target = None;
@@ -1812,7 +1811,7 @@ impl Engine {
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
-            unlaid: None,
+            laid_with: None,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1896,7 +1895,7 @@ impl Engine {
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
-            unlaid: None,
+            laid_with: None,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1989,7 +1988,7 @@ impl Engine {
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
-            unlaid: None,
+            laid_with: None,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -5061,6 +5060,15 @@ impl Engine {
             .map(|v| v.external_stylesheets.clone())
             .unwrap_or_default();
 
+        // A pointer restyle that changed only what is painted keeps the
+        // laid-out tree, and builds no more of the page than the elements
+        // that gained or lost the pseudo-class.
+        if restyle_only
+            && self.repaint_restyled(id, &document, &external_stylesheets, (bounds.width, bounds.height))?
+        {
+            return Ok(true);
+        }
+
         // Build layout tree from DOM with tracing
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
@@ -5068,20 +5076,6 @@ impl Engine {
             // build; cleared immediately after so no later build inherits it.
             self.build_layout_for_view(id, &document, &external_stylesheets)
         };
-
-        // A pointer restyle that changed only what is painted keeps the
-        // laid-out tree.
-        let root_box = if restyle_only {
-            match self.repaint_restyled(id, root_box, (bounds.width, bounds.height))? {
-                None => return Ok(true),
-                Some(tree) => tree,
-            }
-        } else {
-            root_box
-        };
-        let unlaid = self
-            .keeps_unlaid_tree(id)
-            .then(|| root_box.clone());
 
         // Layout computation
         let mut root_box = root_box;
@@ -5187,8 +5181,9 @@ impl Engine {
             .ok_or(EngineError::ViewNotFound(id))?;
         view.held_fixed = Some(root_box.held_fixed_paths());
         view.layout = Some(root_box);
-        view.unlaid = unlaid.map(|tree| UnlaidTree {
-            tree,
+        view.laid_with = Some(LaidWith {
+            hover: view.hover_chain.clone(),
+            active: view.active_chain.clone(),
             size: (bounds.width, bounds.height),
         });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
@@ -5313,58 +5308,158 @@ impl Engine {
         dl
     }
 
-    /// Whether the view's sheets read `:hover` or `:active` at all: only
-    /// then can a pointer restyle happen, and only then is the tree kept
-    /// for [`Self::repaint_restyled`].
-    fn keeps_unlaid_tree(&self, id: EngineViewId) -> bool {
-        let Some(view) = self.views.get(&id) else {
-            return false;
-        };
-        let index = view.rule_reads.borrow();
-        index.as_ref().is_some_and(|index| {
-            [&index.reads.hover, &index.reads.active]
-                .iter()
-                .any(|reads| reads.anywhere || !reads.compounds.is_empty())
-        })
-    }
-
-    /// The short path of a pointer restyle. `fresh` is the tree just built
-    /// with the hovered and pressed chains as they are now. When it differs
-    /// from the tree the view's layout was computed from only in paint
-    /// properties (`ComputedStyle::copy_paint_only`), layout would give
-    /// every box the size and place it already has: those properties are
-    /// copied onto the laid-out boxes, the display list is built from them
-    /// and the view is painted. Returns `None` then, and gives `fresh` back
-    /// when the tree has to be laid out.
+    /// The short path of a pointer restyle: `true` when the view was
+    /// repainted without a layout, `false` when it has to be laid out.
+    ///
+    /// Only the elements that gained or lost `:hover` or `:active` since
+    /// the last layout, and what is under them, can be styled differently
+    /// (a sheet with the pseudo-class before a sibling combinator, or where
+    /// the index cannot place it, takes the full path). Those subtrees are
+    /// built twice, with the chains the layout was built with and with the
+    /// chains as they are now; nothing else of the page is built. When the
+    /// two differ only in paint properties (`ComputedStyle::copy_paint_only`)
+    /// layout would give every box the size and place it already has: the
+    /// properties are copied onto the laid-out boxes, the display list is
+    /// built from them and the view is painted.
     fn repaint_restyled(
         &mut self,
         id: EngineViewId,
-        fresh: LayoutBox,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
         size: (u32, u32),
-    ) -> Result<Option<LayoutBox>, EngineError> {
-        let Some(view) = self.views.get_mut(&id) else {
-            return Ok(Some(fresh));
+    ) -> Result<bool, EngineError> {
+        let miss = |why: &str| {
+            debug!(?id, why, "Pointer restyle needs a layout");
+            LAST_RESTYLE_MISS.with(|last| *last.borrow_mut() = why.to_string());
+            Ok(false)
         };
-        let needs_layout = match (view.unlaid.as_ref(), view.layout.as_ref()) {
-            (Some(kept), Some(_)) if kept.size != size => Some("resized".to_string()),
-            (Some(kept), Some(laid)) => restyle_needs_layout(&kept.tree, &fresh).or_else(|| {
-                (!same_shape(laid, &fresh)).then(|| "layout moved boxes".to_string())
-            }),
-            _ => Some("no kept tree".to_string()),
+        let Some(view) = self.views.get(&id) else {
+            return Ok(false);
         };
-        if let Some(why) = needs_layout {
-            debug!(?id, why = why.as_str(), "Pointer restyle needs a layout");
-            LAST_RESTYLE_MISS.with(|last| *last.borrow_mut() = why);
-            return Ok(Some(fresh));
+        let (Some(with), Some(_)) = (view.laid_with.as_ref(), view.layout.as_ref()) else {
+            return miss("no layout");
+        };
+        if with.size != size {
+            return miss("resized");
         }
-        let (Some(mut laid), Some(kept)) = (view.layout.take(), view.unlaid.take()) else {
-            return Ok(Some(fresh));
+        let unplaced = view.rule_reads.borrow().as_ref().is_none_or(|index| {
+            [&index.reads.hover, &index.reads.active]
+                .iter()
+                .any(|reads| reads.anywhere || reads.siblings)
+        });
+        if unplaced {
+            return miss("a rule reads the pseudo-class beyond the element's subtree");
+        }
+        let before = (with.hover.clone(), with.active.clone());
+        let now = (view.hover_chain.clone(), view.active_chain.clone());
+        // Of the elements in one chain only, the ones a compound with the
+        // pseudo-class can match: no rule sees the others change.
+        let mut changed: Vec<usize> = Self::in_one_chain(&before.0, &now.0)
+            .into_iter()
+            .filter(|raw| Self::chain_change_restyles(view, |reads| &reads.hover, &[*raw]))
+            .collect();
+        changed.extend(
+            Self::in_one_chain(&before.1, &now.1)
+                .into_iter()
+                .filter(|raw| Self::chain_change_restyles(view, |reads| &reads.active, &[*raw])),
+        );
+        changed.sort_unstable();
+        changed.dedup();
+        if changed.is_empty() {
+            // The pointer went and came back between two layouts.
+            if let Some(with) = self.views.get_mut(&id).and_then(|view| view.laid_with.as_mut()) {
+                (with.hover, with.active) = now;
+            }
+            return Ok(true);
+        }
+
+        // The topmost changed elements, and the elements above them: the
+        // build walks down those and builds only what is under a root.
+        let body = document.body().map(|body| body.id.raw());
+        let mut above: HashMap<usize, Vec<usize>> = HashMap::new();
+        for raw in &changed {
+            let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                return miss("a changed element left the document");
+            };
+            let mut chain = Vec::new();
+            let mut parent = node.parent();
+            while let Some(p) = parent {
+                chain.push(p.id.raw());
+                parent = p.parent();
+            }
+            above.insert(*raw, chain);
+        }
+        let roots: Vec<usize> = changed
+            .iter()
+            .copied()
+            .filter(|raw| !above[raw].iter().any(|up| changed.contains(up)))
+            .collect();
+        let mut path = std::collections::HashSet::new();
+        for root in &roots {
+            // The root element and body have no box of their own to patch.
+            if !body.is_some_and(|body| above[root].contains(&body)) {
+                return miss("the root element or body changed");
+            }
+            path.extend(above[root].iter().copied());
+        }
+        let started = std::time::Instant::now();
+        let mut built = Vec::with_capacity(2);
+        let mut walked = 0;
+        for chains in [before, now.clone()] {
+            if let Some(view) = self.views.get_mut(&id) {
+                (view.hover_chain, view.active_chain) = chains;
+            }
+            RESTYLE_BUILD.with(|build| {
+                *build.borrow_mut() = Some(RestyleBuild {
+                    path: path.clone(),
+                    roots: roots.iter().copied().collect(),
+                    found: HashMap::new(),
+                    walked: 0,
+                })
+            });
+            self.build_layout_for_view(id, document, external_stylesheets);
+            let build = RESTYLE_BUILD.with(|build| build.borrow_mut().take());
+            walked += build.as_ref().map_or(0, |build| build.walked);
+            built.push(build.map(|build| build.found).unwrap_or_default());
+        }
+        LAST_RESTYLE_WALKED.with(|last| last.set(walked));
+        // The loop's last state is `now`: the chains are as they were.
+        let (was, is) = (&built[0], &built[1]);
+        for root in &roots {
+            let (Some(was), Some(is)) = (was.get(root), is.get(root)) else {
+                return miss("a changed element was not reached");
+            };
+            if let Some(why) = restyle_needs_layout(was, is) {
+                return miss(&why);
+            }
+        }
+
+        let Some(view) = self.views.get_mut(&id) else {
+            return Ok(false);
         };
-        copy_changed_paint(&mut laid, &kept.tree, &fresh);
+        let Some(mut laid) = view.layout.take() else {
+            return Ok(false);
+        };
+        let placed = roots
+            .iter()
+            .all(|root| box_of_node(&laid, *root).is_some_and(|laid| same_shape(laid, &is[root])));
+        if !placed {
+            view.layout = Some(laid);
+            return miss("layout moved boxes");
+        }
+        for root in &roots {
+            if let Some(laid) = box_of_node_mut(&mut laid, *root) {
+                copy_changed_paint(laid, &was[root], &is[root]);
+            }
+        }
+        let patched = started.elapsed();
         let display_list = self.display_list_for(id, &laid);
+        let listed = started.elapsed();
         let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
         view.layout = Some(laid);
-        view.unlaid = Some(UnlaidTree { tree: fresh, size });
+        if let Some(with) = view.laid_with.as_mut() {
+            (with.hover, with.active) = now;
+        }
         // Script reads of computed style answer from the restyled boxes.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let (geometry, computed) = geometry_snapshot(layout);
@@ -5373,8 +5468,25 @@ impl Engine {
         }
         view.display_list = Some(display_list);
         view.frame_generation += 1;
+        let snapshot = started.elapsed();
         self.render(id)?;
-        Ok(None)
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        let split = [
+            ms(patched),
+            ms(listed - patched),
+            ms(snapshot - listed),
+            ms(started.elapsed() - snapshot),
+        ];
+        debug!(
+            ?id,
+            builds_ms = split[0],
+            display_list_ms = split[1],
+            snapshot_ms = split[2],
+            render_ms = split[3],
+            "Pointer restyle without layout"
+        );
+        LAST_RESTYLE_SPLIT.with(|last| last.set(split));
+        Ok(true)
     }
 
     /// Check if a style has visible styling (dimensions, background, borders, etc.)
@@ -5755,7 +5867,8 @@ impl Engine {
 
         // Unless RUSTKIT_TREE_REUSE=0: the images relayout takes the box tree
         // the sheets relayout built instead of walking the DOM again.
-        let traced = self.style_trace.borrow().is_some();
+        let traced = self.style_trace.borrow().is_some()
+            || RESTYLE_BUILD.with(|build| build.borrow().is_some());
         if !traced && !self.building_view_has_edits() {
             if let Some(tree) = self.reused_tree(&memo_key) {
                 relayout_cause::set_last_build_reused_tree(true);
@@ -7146,18 +7259,22 @@ impl Engine {
                         }
                         _ => SiblingContext::SOLE,
                     };
-                    let child_box = self.build_layout_from_parent_style_and_path(
-                        child,
-                        children_sheets,
-                        css_vars,
-                        children_ancestors,
-                        Some(children_parent_style),
-                        &preceding_siblings,
-                        child_sib,
-                        &child_path,
-                        element_ids,
-                        children_are_foreign,
-                    );
+                    let restyle = restyle_child(node.id.raw(), child.id.raw());
+                    let child_box = match restyle {
+                        RestyleChild::Skip => LayoutBox::new(BoxType::Block, ComputedStyle::new()),
+                        _ => self.build_layout_from_parent_style_and_path(
+                            child,
+                            children_sheets,
+                            css_vars,
+                            children_ancestors,
+                            Some(children_parent_style),
+                            &preceding_siblings,
+                            child_sib,
+                            &child_path,
+                            element_ids,
+                            children_are_foreign,
+                        ),
+                    };
                     if let NodeType::Element {
                         tag_name,
                         attributes,
@@ -7175,6 +7292,21 @@ impl Engine {
                             attributes.get("id").cloned(),
                             state,
                         ));
+                    }
+
+                    // A restyle build keeps the boxes of its roots and none
+                    // of the boxes above or beside them.
+                    match restyle {
+                        RestyleChild::Build => {}
+                        RestyleChild::Root => {
+                            RESTYLE_BUILD.with(|build| {
+                                if let Some(build) = build.borrow_mut().as_mut() {
+                                    build.found.insert(child.id.raw(), child_box);
+                                }
+                            });
+                            continue;
+                        }
+                        RestyleChild::Skip | RestyleChild::Walk => continue,
                     }
 
                     // A `display: contents` child (a <slot>) generates no box:
@@ -30332,6 +30464,9 @@ struct PointerReads {
     /// `:not()`, `:has()`, or an `:is()` member with a combinator): any
     /// element may count.
     anywhere: bool,
+    /// Some selector has a sibling combinator: the pseudo-class on one
+    /// element may style its later siblings and what is under them.
+    siblings: bool,
 }
 
 impl PointerReads {
@@ -30347,6 +30482,7 @@ impl PointerReads {
             if named == 0 {
                 continue;
             }
+            self.siblings |= member.contains(['+', '~']);
             // A `::before` / `::after` rule is matched by its base selector.
             let base = [(":before", "::before"), (":after", "::after")]
                 .into_iter()
@@ -31010,11 +31146,86 @@ thread_local! {
     static LAST_RESTYLE_MISS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
-/// The tree a layout was computed from ([`Engine::repaint_restyled`]).
-struct UnlaidTree {
-    tree: LayoutBox,
+/// What a layout was built with ([`Engine::repaint_restyled`]).
+struct LaidWith {
+    /// The hovered and the pressed chain at that build.
+    hover: Vec<usize>,
+    active: Vec<usize>,
     /// The view's width and height at that layout.
     size: (u32, u32),
+}
+
+/// A build of only the subtrees under `roots` (raw NodeIds), reached by
+/// walking down `path`, the elements above them. The boxes are left in
+/// `found` as their own build returns them, before their parent decides
+/// what to do with them; the tree the build returns is not a page.
+struct RestyleBuild {
+    path: std::collections::HashSet<usize>,
+    roots: std::collections::HashSet<usize>,
+    found: HashMap<usize, LayoutBox>,
+    /// The child nodes the build went into.
+    walked: usize,
+}
+
+thread_local! {
+    static RESTYLE_BUILD: std::cell::RefCell<Option<RestyleBuild>> = const { std::cell::RefCell::new(None) };
+    /// The child nodes the last pointer restyle's two builds went into.
+    static LAST_RESTYLE_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Milliseconds of the last pointer restyle without layout: the two
+    /// builds with the compare and the patch, the display list, the
+    /// geometry snapshot, the render.
+    static LAST_RESTYLE_SPLIT: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
+}
+
+/// What the build in progress does with `child` of `parent` (raw NodeIds):
+/// nothing unless it is a [`RestyleBuild`] and `parent` is on its path.
+#[derive(Clone, Copy, PartialEq)]
+enum RestyleChild {
+    /// An ordinary build, or a parent under a root: build the child.
+    Build,
+    /// Not above a root and not one: it has no box in this build.
+    Skip,
+    /// Above a root: walked for what is under it, its box dropped.
+    Walk,
+    /// A root: built, and its box kept in `found`.
+    Root,
+}
+
+fn restyle_child(parent: usize, child: usize) -> RestyleChild {
+    RESTYLE_BUILD.with(|build| {
+        let mut build = build.borrow_mut();
+        let Some(build) = build.as_mut() else {
+            return RestyleChild::Build;
+        };
+        let what = if !build.path.contains(&parent) {
+            RestyleChild::Build
+        } else if build.roots.contains(&child) {
+            RestyleChild::Root
+        } else if build.path.contains(&child) {
+            RestyleChild::Walk
+        } else {
+            RestyleChild::Skip
+        };
+        if what != RestyleChild::Skip {
+            build.walked += 1;
+        }
+        what
+    })
+}
+
+/// The first box of `tree`, in tree order, that is the box of the node.
+fn box_of_node(tree: &LayoutBox, raw: usize) -> Option<&LayoutBox> {
+    if tree.node_id == Some(raw) {
+        return Some(tree);
+    }
+    tree.children.iter().find_map(|child| box_of_node(child, raw))
+}
+
+fn box_of_node_mut(tree: &mut LayoutBox, raw: usize) -> Option<&mut LayoutBox> {
+    if tree.node_id == Some(raw) {
+        return Some(tree);
+    }
+    tree.children.iter_mut().find_map(|child| box_of_node_mut(child, raw))
 }
 
 /// What the build gives a box besides its style and its children.

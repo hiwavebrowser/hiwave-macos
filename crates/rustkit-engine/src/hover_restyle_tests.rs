@@ -1,8 +1,9 @@
 //! A pointer restyle (`:hover`, `:active`) that changes only what is
-//! painted keeps the laid-out tree: the styles are built again, the paint
-//! properties that changed are copied onto the boxes that are already laid
-//! out, and the page is painted from them. A restyle that changes anything
-//! layout reads is a full relayout, as before.
+//! painted keeps the laid-out tree: the elements that gained or lost the
+//! pseudo-class are built again with what is under them, and nothing else
+//! of the page; the paint properties that changed are copied onto the boxes
+//! that are already laid out, and the page is painted from them. A restyle
+//! that changes anything layout reads is a full relayout, as before.
 //!
 //! Every test that takes the short path compares its result (display list
 //! and laid-out tree) with what a full relayout gives for the same pointer
@@ -77,6 +78,23 @@ fn painted(engine: &Engine, view: EngineViewId) -> (String, String) {
         format!("{:?}", state.display_list.as_ref().expect("list").commands),
         format!("{:?}", state.layout.as_ref().expect("layout")),
     )
+}
+
+/// Fails with the text around the first place two painted states differ.
+fn assert_same(got: &(String, String), want: &(String, String), what: &str) {
+    for (name, got, want) in [("display list", &got.0, &want.0), ("tree", &got.1, &want.1)] {
+        if got == want {
+            continue;
+        }
+        let at = got.bytes().zip(want.bytes()).position(|(a, b)| a != b).unwrap_or(got.len().min(want.len()));
+        let window = |s: &str| {
+            let from = (0..=at.saturating_sub(300)).rev().find(|i| s.is_char_boundary(*i)).unwrap_or(0);
+            let to = (at + 200).min(s.len());
+            let to = (to..=s.len()).find(|i| s.is_char_boundary(*i)).unwrap_or(s.len());
+            s[from..to].to_string()
+        };
+        panic!("{what}: the {name} differs at byte {at}\n   got  ...{}\n   want ...{}", window(got), window(want));
+    }
 }
 
 /// What a full relayout gives for the pointer state the view is in.
@@ -174,4 +192,205 @@ fn a_hover_whose_listener_writes_to_the_page_is_laid_out() {
     hover(&mut engine, view, (10.0, 10.0));
     assert_eq!(skipped(&engine, view), 0, "the listener added text: layout");
     assert_eq!(painted(&engine, view), painted_by_a_full_relayout(&mut engine, view));
+}
+
+/// Forty cards in a 300px column, each 40px tall, whose rules read where a
+/// card and its children sit among their siblings. `NOWHERE` is beside them.
+fn cards(extra_css: &str) -> (Engine, EngineViewId) {
+    let mut html = String::from(
+        "<style>body{margin:0;font:16px/20px sans-serif}\
+         #list{width:300px}\
+         .card{height:38px;border:1px solid gray;color:black}\
+         .card:hover{background:#eee;color:maroon}\
+         .card:nth-child(3):hover{border-color:red}\
+         .card:hover span:nth-of-type(2){background:yellow}\
+         .card:hover b:last-child{color:green}\
+         .card a{color:blue} .card a:hover{text-decoration:underline}\
+         .card:active{background:#ccd}",
+    );
+    html.push_str(extra_css);
+    html.push_str("</style><div id=list>");
+    for i in 0..40 {
+        html.push_str(&format!(
+            "<div class=card><span>card {i}</span> <span>second</span> <a href='/x'>link</a> <b>last</b></div>"
+        ));
+    }
+    html.push_str("</div><p id=after>after the cards</p>");
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 600,
+        })
+        .expect("view");
+    engine.load_html(view, &html).expect("load_html");
+    (engine, view)
+}
+
+/// A point over the text of card `n` (0-based), left of its link.
+fn card(n: usize) -> (f32, f32) {
+    (20.0, n as f32 * 40.0 + 20.0)
+}
+
+fn walked() -> usize {
+    LAST_RESTYLE_WALKED.with(|walked| walked.get())
+}
+
+#[test]
+fn a_hover_builds_the_hovered_card_and_not_the_page() {
+    let (mut engine, view) = cards("");
+    let at_rest = painted(&engine, view);
+    hover(&mut engine, view, card(2));
+    assert_eq!(skipped(&engine, view), 1);
+    // Two builds of: the list, the card, its four children and their text.
+    assert!(walked() < 40, "the two builds went into {} nodes of about 500", walked());
+    let short = painted(&engine, view);
+    assert_ne!(short.0, at_rest.0);
+    assert_eq!(short, painted_by_a_full_relayout(&mut engine, view), "the third card, by position");
+}
+
+#[test]
+fn a_move_from_one_card_to_another_restyles_both() {
+    let (mut engine, view) = cards("");
+    let at_rest = painted(&engine, view);
+    hover(&mut engine, view, card(2));
+    hover(&mut engine, view, card(7));
+    assert_eq!(skipped(&engine, view), 2);
+    assert!(walked() < 80, "{} nodes", walked());
+    let short = painted(&engine, view);
+    assert_same(&short, &painted_by_a_full_relayout(&mut engine, view), "after the move");
+    hover(&mut engine, view, NOWHERE);
+    assert_eq!(skipped(&engine, view), 3);
+    assert_eq!(painted(&engine, view), at_rest);
+}
+
+#[test]
+fn a_hover_inside_a_hovered_card_restyles_the_inner_element() {
+    let (mut engine, view) = cards("");
+    hover(&mut engine, view, card(5));
+    // The link is the third child: past "card 5 second ".
+    let link = engine
+        .execute_script(
+            view,
+            "(function(){var r=document.querySelectorAll('.card')[5].querySelector('a').getBoundingClientRect();\
+             return Math.round(r.left+r.width/2)+','+Math.round(r.top+r.height/2)})()",
+        )
+        .expect("script");
+    let link = link.trim_start_matches("String(\"").trim_end_matches("\")");
+    let (x, y) = link.split_once(',').expect("x,y");
+    hover(&mut engine, view, (x.parse().unwrap(), y.parse().unwrap()));
+    assert_eq!(skipped(&engine, view), 2, "the card stays hovered; the link gains it");
+    assert!(walked() < 20, "{} nodes: the link alone", walked());
+    assert_eq!(painted(&engine, view), painted_by_a_full_relayout(&mut engine, view));
+}
+
+#[test]
+fn a_press_restyles_the_pressed_card() {
+    let (mut engine, view) = cards("");
+    hover(&mut engine, view, card(4));
+    let hovered = painted(&engine, view);
+    let (x, y) = card(4);
+    engine.mouse_down_at_point(view, x, y);
+    assert_eq!(skipped(&engine, view), 2, "a background is paint");
+    let pressed = painted(&engine, view);
+    assert_ne!(pressed.0, hovered.0);
+    assert_same(&pressed, &painted_by_a_full_relayout(&mut engine, view), "pressed");
+}
+
+#[test]
+fn a_hover_rule_with_a_sibling_combinator_takes_the_full_path() {
+    let (mut engine, view) = cards(".card:hover + .card{background:pink}");
+    let at_rest = painted(&engine, view);
+    hover(&mut engine, view, card(2));
+    assert_eq!(skipped(&engine, view), 0, "the next card is not under the hovered one");
+    let hovered = painted(&engine, view);
+    assert_ne!(hovered.0, at_rest.0);
+    assert_eq!(hovered, painted_by_a_full_relayout(&mut engine, view));
+}
+
+/// The review's cost page: 300 inline-block cards, about 5,700 boxes, whose
+/// hover rules change paint only; with `miss`, one of them changes a height.
+fn large_page(miss: bool) -> String {
+    let mut html = String::from(
+        "<style>body{margin:0;font:14px/18px sans-serif}\
+         .card{width:360px;padding:6px;border:1px solid #999;margin:4px;display:inline-block;vertical-align:top}\
+         .card .t{font-weight:bold} .row{display:flex;gap:4px} .row>span{flex:1;background:#eee}\
+         #nohover{height:30px;background:#ccc}\
+         .card:hover{background:#eef;border-color:#00f} .card:hover .t{color:#c00} .card a:hover{text-decoration:underline}",
+    );
+    if miss {
+        html.push_str(".card:hover .row{height:30px}");
+    }
+    html.push_str("</style><div id=nohover>top bar no rule</div>");
+    for i in 0..300 {
+        html.push_str(&format!(
+            "<div class=card><div class=t>Card {i} title with some words that wrap</div>\
+             <p>Body text for card {i}, a sentence or two of text that wraps across lines in the card. <a href='#'>link {i}</a></p>\
+             <div class=row><span>a</span><span>b</span><span>c</span></div><ul><li>one</li><li>two</li></ul></div>"
+        ));
+    }
+    html
+}
+
+/// Timing, not a check: `--release -- --ignored --nocapture
+/// zz_timing_of_a_hover_on_a_large_page`, once with the default and once
+/// with `RUSTKIT_RESTYLE_REPAINT=0` (every pointer restyle laid out, as
+/// before the short path). Prints the median milliseconds of a pointer move
+/// onto a card and off it, of the same on the page whose hover changes a
+/// height, and of a relayout nobody named.
+#[test]
+#[ignore = "timing"]
+fn zz_timing_of_a_hover_on_a_large_page() {
+    fn boxes(b: &LayoutBox) -> usize {
+        1 + b.children.iter().map(boxes).sum::<usize>()
+    }
+    fn median(mut ms: Vec<f64>) -> f64 {
+        ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ms[ms.len() / 2]
+    }
+    for miss in [false, true] {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 1280, height: 800 })
+            .expect("view");
+        engine.load_html(view, &large_page(miss)).expect("load_html");
+        let count = boxes(engine.views.get(&view).unwrap().layout.as_ref().unwrap());
+        let mut moves = Vec::new();
+        let mut split: [Vec<f64>; 4] = Default::default();
+        for rep in 0..30 {
+            for at in [([100.0, 470.0, 840.0][rep % 3], 60.0), (100.0, 15.0)] {
+                let before = skipped(&engine, view);
+                let started = std::time::Instant::now();
+                hover(&mut engine, view, at);
+                moves.push(started.elapsed().as_secs_f64() * 1000.0);
+                if skipped(&engine, view) > before {
+                    let last = LAST_RESTYLE_SPLIT.with(|last| last.get());
+                    for (part, ms) in split.iter_mut().zip(last) {
+                        part.push(ms);
+                    }
+                }
+            }
+        }
+        if !split[0].is_empty() {
+            let [builds, list, snapshot, render] = split.map(median);
+            println!(
+                "HOVERTIMING short path split: builds+compare+patch {builds:.2} display_list {list:.1} snapshot {snapshot:.1} render {render:.1} ms"
+            );
+        }
+        let taken = skipped(&engine, view);
+        let mut relayouts = Vec::new();
+        for _ in 0..15 {
+            let started = std::time::Instant::now();
+            engine.relayout(view).expect("relayout");
+            relayouts.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        println!(
+            "HOVERTIMING miss_page={miss} boxes={count} moves={} short_path={taken} move_median_ms={:.1} relayout_median_ms={:.1}",
+            moves.len(),
+            median(moves),
+            median(relayouts)
+        );
+    }
 }
