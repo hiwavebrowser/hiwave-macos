@@ -6607,6 +6607,55 @@ impl LayoutBox {
     pub fn hit_test_scrolled(&self, viewport_x: f32, viewport_y: f32, scroll: (f32, f32)) -> Option<HitTestResult> {
         let mut held = Vec::new();
         self.hit_test_held_fixed(viewport_x, viewport_y, 0, &mut held);
+        self.top_held_or_page(held, viewport_x, viewport_y, scroll)
+    }
+
+    /// `hit_test_scrolled` with the fixed boxes already found
+    /// (`held_fixed_paths` of this same layout). Finding them visits every
+    /// box, and every pointer move is a hit test: with the paths in hand a
+    /// hit test is those boxes and the pruned walk of the page.
+    pub fn hit_test_scrolled_with(
+        &self,
+        viewport_x: f32,
+        viewport_y: f32,
+        scroll: (f32, f32),
+        held_fixed: &[Vec<usize>],
+    ) -> Option<HitTestResult> {
+        let mut held = Vec::new();
+        for path in held_fixed {
+            let mut ancestors = Vec::with_capacity(path.len());
+            let mut at = self;
+            for &index in path {
+                let Some(child) = at.children.get(index) else {
+                    // Not this layout's paths: find the boxes again.
+                    return self.hit_test_scrolled(viewport_x, viewport_y, scroll);
+                };
+                ancestors.push(at);
+                at = child;
+            }
+            if at.position != Position::Fixed {
+                return self.hit_test_scrolled(viewport_x, viewport_y, scroll);
+            }
+            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, path.len() as u32, false) {
+                hit.viewport_fixed = true;
+                for ancestor in ancestors.iter().rev() {
+                    ancestor.add_as_ancestor(&mut hit);
+                }
+                held.push((at.z_index, hit));
+            }
+        }
+        self.top_held_or_page(held, viewport_x, viewport_y, scroll)
+    }
+
+    /// The hit among those in held fixed boxes (in tree order, each with
+    /// its `z-index`) and the page under them.
+    fn top_held_or_page(
+        &self,
+        held: Vec<(i32, HitTestResult)>,
+        viewport_x: f32,
+        viewport_y: f32,
+        scroll: (f32, f32),
+    ) -> Option<HitTestResult> {
         // `max_by_key` keeps the last of equals: the box painted last.
         let top = held.into_iter().max_by_key(|(z_index, _)| *z_index);
         let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, 0, true);
@@ -6615,6 +6664,17 @@ impl LayoutBox {
             Some((_, hit)) => page().or(Some(hit)),
             None => page(),
         }
+    }
+
+    /// A hit on this box, the root of the layout, for the root element
+    /// `node_id`, whether or not it is a target: what a point of the window
+    /// lands on when no box there is one (`body { pointer-events: none }`
+    /// under an open menu).
+    pub fn hit_as_root_element(&self, node_id: usize, x: f32, y: f32) -> Option<HitTestResult> {
+        let mut hit = self.as_hit(x, y, 0);
+        hit.node_id = Some(node_id);
+        hit.link_href = None;
+        Some(hit)
     }
 
     /// Whether the boxes inside this one are in a transformed box, where a
@@ -6631,12 +6691,30 @@ impl LayoutBox {
             && self.style.pointer_events == rustkit_css::PointerEvents::Auto
     }
 
-    /// Whether the tree under this box has a fixed box the scroll does
-    /// not move: one that `hit_test_held_fixed` would test. The engine
-    /// asks once per layout, so a page with none pays for no such walk.
-    pub fn has_held_fixed_box(&self) -> bool {
-        !self.transforms_descendants()
-            && self.children.iter().any(|child| child.position == Position::Fixed || child.has_held_fixed_box())
+    /// The fixed boxes under this one that the scroll does not move (the
+    /// ones `hit_test_held_fixed` tests), in tree order, each as the child
+    /// indices that lead to it from here. The engine asks once per layout
+    /// and hands them to `hit_test_scrolled_with`, so a page with none
+    /// pays for no walk and a page with some pays for it once.
+    pub fn held_fixed_paths(&self) -> Vec<Vec<usize>> {
+        let mut paths = Vec::new();
+        self.collect_held_fixed(&mut Vec::new(), &mut paths);
+        paths
+    }
+
+    fn collect_held_fixed(&self, at: &mut Vec<usize>, paths: &mut Vec<Vec<usize>>) {
+        if self.transforms_descendants() {
+            return;
+        }
+        for (index, child) in self.children.iter().enumerate() {
+            at.push(index);
+            if child.position == Position::Fixed {
+                paths.push(at.clone());
+            } else {
+                child.collect_held_fixed(at, paths);
+            }
+            at.pop();
+        }
     }
 
     /// Collect a hit at the point, with its `z-index`, for each fixed box
@@ -6715,10 +6793,16 @@ impl LayoutBox {
             return None;
         }
 
+        Some(self.as_hit(x, y, depth))
+    }
+
+    /// This box as the target of a hit at the point.
+    fn as_hit(&self, x: f32, y: f32, depth: u32) -> HitTestResult {
+        let border_box = self.dimensions.border_box();
         // Detect if element is scrollable by checking overflow style
         let is_scrollable = self.detect_overflow();
 
-        Some(HitTestResult {
+        HitTestResult {
             box_type: self.box_type.clone(),
             border_box,
             content_box: self.dimensions.content,
@@ -6733,7 +6817,7 @@ impl LayoutBox {
             link_href: self.link_href.clone(),
             node_id: self.node_id,
             viewport_fixed: false,
-        })
+        }
     }
 
     /// Detect if this element has overflow and should be scrollable.

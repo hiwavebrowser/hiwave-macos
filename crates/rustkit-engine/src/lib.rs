@@ -534,11 +534,12 @@ struct ViewState {
     document: Option<Rc<Document>>,
     #[allow(dead_code)]
     layout: Option<LayoutBox>,
-    /// Whether `layout` is known to have no `position: fixed` box that
-    /// the scroll leaves in place (`LayoutBox::has_held_fixed_box`), read
-    /// when the layout is stored. Hit testing then needs only the pruned
-    /// walk of the page; `false` is always safe.
-    no_held_fixed_boxes: bool,
+    /// Where `layout` has its `position: fixed` boxes that the scroll
+    /// leaves in place (`LayoutBox::held_fixed_paths`), read when the
+    /// layout is stored. With none, a hit test is the pruned walk of the
+    /// page; with some, those boxes and that walk. `None` (not known) is
+    /// always safe: the boxes are then looked for on every hit test.
+    held_fixed: Option<Vec<Vec<usize>>>,
     #[allow(dead_code)]
     display_list: Option<DisplayList>,
     #[allow(dead_code)]
@@ -1607,7 +1608,7 @@ impl Engine {
             http_status: None,
             document: None,
             layout: None,
-            no_held_fixed_boxes: false,
+            held_fixed: None,
             display_list: None,
             frame_generation: 0,
             presented: None,
@@ -1689,7 +1690,7 @@ impl Engine {
             http_status: None,
             document: None,
             layout: None,
-            no_held_fixed_boxes: false,
+            held_fixed: None,
             display_list: None,
             frame_generation: 0,
             presented: None,
@@ -1780,7 +1781,7 @@ impl Engine {
             http_status: None,
             document: None,
             layout: None,
-            no_held_fixed_boxes: false,
+            held_fixed: None,
             display_list: None,
             frame_generation: 0,
             presented: None,
@@ -2485,12 +2486,34 @@ impl Engine {
     /// clicked is what is seen.
     fn hit_at(view: &ViewState, viewport_x: f32, viewport_y: f32) -> Option<rustkit_layout::HitTestResult> {
         let layout = view.layout.as_ref()?;
-        if view.no_held_fixed_boxes {
-            // Every pointer move asks here, and collecting fixed boxes
-            // visits the whole tree: a page with none is not asked to.
-            return layout.hit_test(viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+        let page_point = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+        // Every pointer move asks here, and finding the fixed boxes visits
+        // the whole tree: it is done once, when the layout is stored.
+        let hit = match view.held_fixed.as_deref() {
+            Some([]) => layout.hit_test(page_point.0, page_point.1),
+            Some(held) => layout.hit_test_scrolled_with(viewport_x, viewport_y, view.scroll_offset, held),
+            None => layout.hit_test_scrolled(viewport_x, viewport_y, view.scroll_offset),
+        };
+        // A point of the window always has a target. Where no box is one
+        // (`body { pointer-events: none }` under an open menu, whose
+        // document listener waits for the press outside it), the root
+        // element is, as in Chromium, even when it is `none` itself.
+        // The layout's own root box has no node, so a hit that ends on it
+        // (every box with a node stepped aside) is the same case.
+        let root_element = || Some(view.document.as_ref()?.document_element()?.id.raw());
+        match hit {
+            Some(hit) if hit.node_id.is_some() => Some(hit),
+            Some(mut hit) => {
+                hit.node_id = root_element();
+                Some(hit)
+            }
+            None => {
+                let in_window = viewport_x >= 0.0
+                    && viewport_y >= 0.0
+                    && viewport_x < layout.dimensions.border_box().width;
+                in_window.then(|| layout.hit_as_root_element(root_element()?, page_point.0, page_point.1))?
+            }
         }
-        layout.hit_test_scrolled(viewport_x, viewport_y, view.scroll_offset)
     }
 
     /// VIEWPORT coordinates in the coordinates of the boxes hit there:
@@ -5010,7 +5033,7 @@ impl Engine {
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
-        view.no_held_fixed_boxes = !root_box.has_held_fixed_box();
+        view.held_fixed = Some(root_box.held_fixed_paths());
         view.layout = Some(root_box);
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
         // answer from this layout.

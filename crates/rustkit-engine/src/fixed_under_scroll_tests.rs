@@ -354,17 +354,63 @@ fn a_hidden_box_takes_no_click_and_its_shown_child_does() {
 }
 
 /// A page with no fixed box is hit with the one pruned walk it always
-/// had: the layout says so once, and no pointer move collects fixed boxes.
+/// had, and a page with some is hit at those boxes and with that walk:
+/// the layout says where they are once, and no pointer move looks for them.
 #[test]
-fn only_a_page_with_a_held_fixed_box_pays_for_the_fixed_walk() {
-    let (engine, view, _) = page_list(UNDER);
-    assert!(engine.views[&view].no_held_fixed_boxes, "no fixed box");
-    let (engine, view, _) = page_list(&format!("<div><p style='position:fixed;top:0'>bar</p></div>{UNDER}"));
-    assert!(!engine.views[&view].no_held_fixed_boxes, "a fixed box, deep in the page");
-    let (engine, view, _) = page_list(&format!(
-        "<section style='transform:translate(0,0)'><p style='position:fixed;top:0'>bar</p></section>{UNDER}"
+fn the_held_fixed_boxes_are_found_once_per_layout() {
+    let held = |body: &str| {
+        let (engine, view, _) = page_list(body);
+        let view = &engine.views[&view];
+        let paths = view.held_fixed.clone().expect("known once a layout is stored");
+        assert_eq!(paths, view.layout.as_ref().unwrap().held_fixed_paths());
+        paths.len()
+    };
+    assert_eq!(held(UNDER), 0, "no fixed box");
+    assert_eq!(held(&format!("<div><p style='position:fixed;top:0'>bar</p></div>{UNDER}")), 1, "deep in the page");
+    assert_eq!(
+        held(&format!(
+            "<section style='transform:translate(0,0)'><p style='position:fixed;top:0'>bar</p></section>{UNDER}"
+        )),
+        0,
+        "a fixed box that scrolls with the page"
+    );
+    assert_eq!(
+        held(&format!(
+            "<p style='position:fixed;top:0'>one<span style='position:fixed;top:50px'>inside it</span></p>\
+             <div><div><p style='position:fixed;top:20px'>two</p></div></div>{UNDER}"
+        )),
+        2,
+        "outermost fixed boxes only"
+    );
+}
+
+/// With the paths and without them the answer is the same box, for every
+/// point of a scrolled page with fixed boxes over and under it.
+#[test]
+fn a_hit_test_with_the_paths_is_the_hit_test_that_looks_for_them() {
+    let (mut engine, view, _) = page_list(&format!(
+        "<div><a href='/bar' style='display:block;position:fixed;left:0;top:0;width:200px;height:20px'>bar</a></div>\
+         <div style='position:fixed;left:0;top:0;width:200px;height:100px;pointer-events:none;background:none'>\
+         <a href='/toast' style='display:block;position:absolute;right:0;bottom:0;width:60px;height:20px;pointer-events:auto'>t</a></div>\
+         <a href='/behind' style='display:block;position:fixed;z-index:-1;left:0;top:40px;width:40px;height:20px'>b</a>{UNDER}"
     ));
-    assert!(engine.views[&view].no_held_fixed_boxes, "a fixed box that scrolls with the page");
+    engine.set_scroll_offset(view, 0.0, 50.0).unwrap();
+    let view = &engine.views[&view];
+    let (layout, held) = (view.layout.as_ref().unwrap(), view.held_fixed.as_deref().unwrap());
+    assert_eq!(held.len(), 3);
+    let mut seen = std::collections::BTreeSet::new();
+    for y in (0..100).step_by(5) {
+        for x in (0..200).step_by(10) {
+            let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+            let key = |hit: Option<rustkit_layout::HitTestResult>| {
+                hit.map(|h| (h.node_id, h.link_href, h.viewport_fixed, h.depth, h.ancestors.len()))
+            };
+            let with = key(layout.hit_test_scrolled_with(x, y, view.scroll_offset, held));
+            assert_eq!(with, key(layout.hit_test_scrolled(x, y, view.scroll_offset)), "at {x},{y}");
+            seen.extend(with.and_then(|k| k.1));
+        }
+    }
+    assert_eq!(seen.len(), 3, "the bar, the toast and the page (the z-index: -1 box is under the page's link): {seen:?}");
 }
 
 /// A press and a click at the point, as the page's document listeners
