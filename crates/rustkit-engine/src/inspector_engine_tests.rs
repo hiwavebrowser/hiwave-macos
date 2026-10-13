@@ -598,6 +598,40 @@ fn a_classic_scripts_dynamic_import_still_resolves_against_the_document() {
     }
 }
 
+/// A listener that throws while a script dispatches to it (`click()`) is
+/// that script's in the Inspector, but the script log records it under the
+/// lifecycle step that drains next, as before: the script itself ran, so the
+/// load did not lose it.
+#[test]
+fn a_listener_error_during_a_script_is_not_the_script_throwing() {
+    let page = "<html><body><button>b</button><script>
+var b = document.querySelector('button');
+b.addEventListener('click', function () { throw new Error('cb'); });
+b.click();
+</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let log: Vec<(String, ScriptOutcome)> = engine
+        .script_log(view)
+        .unwrap()
+        .iter()
+        .map(|r| (r.source.clone(), r.outcome.clone()))
+        .collect();
+    assert_eq!(log[0], ("inline#1".to_string(), ScriptOutcome::Ran), "{log:?}");
+    assert!(
+        log.iter().any(|(source, outcome)| source == "event:DOMContentLoaded"
+            && matches!(outcome, ScriptOutcome::Threw(text) if text.starts_with("Error: cb"))),
+        "{log:?}"
+    );
+    let scripts: Vec<String> = records(&engine, view)
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::ScriptError { script, .. } => Some(script),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(scripts, vec!["inline#1".to_string()]);
+}
+
 /// The script log's exception text now names the script where Boa used to
 /// print `unknown`; the board's counts are unchanged (unhandled rejections
 /// and unsupported APIs are Inspector events only, never log records).
