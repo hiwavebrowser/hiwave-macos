@@ -485,3 +485,54 @@ def test_min_width_auto_is_0px_except_on_flex_and_grid_items():
     rec(c, CELL2)["style"]["min-width"] = "auto"
     r = idf.compare(o, c)
     assert (r["first"]["stage"], r["first"]["selector"]) == ("STYLE", CELL2)
+
+
+def _chrome_records(tmp_path, target):
+    """Run chrome_records.mjs on `target`; skip where Chromium cannot launch."""
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    out = tmp_path / "out.json"
+    p = subprocess.run(["node", str(HERE.parent / "chrome_records.mjs"), target, str(out)],
+                       capture_output=True, text=True, timeout=120)
+    if "Executable doesn't exist" in p.stderr or "PARITY_CHROME_PATH set but not found" in p.stderr:
+        pytest.skip("Chromium not installed (set PARITY_CHROME_PATH)")
+    return p, out
+
+
+FAILED_NAV = "https://nonexistent.invalid/p?token=SECRET#frag"
+
+
+def test_a_failed_navigation_keeps_no_query_or_fragment(tmp_path):
+    p, out = _chrome_records(tmp_path, FAILED_NAV)
+    printed = p.stdout + p.stderr + (out.read_text() if out.exists() else "")
+    assert "SECRET" not in printed and "#frag" not in printed, printed
+
+
+def test_a_navigation_error_names_the_target_as_the_record_does():
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    mod = (HERE.parent / "record_scrub.mjs").as_uri()
+    cases = [
+        ["page.goto: net::ERR_NAME_NOT_RESOLVED at https://h.test/p?token=SECRET#frag",
+         "https://h.test/p?token=SECRET#frag", "https://h.test/p"],
+        # A URL the message spells differently (normalised) is still scrubbed.
+        ["page.goto: Timeout 30000ms exceeded.\nnavigating to \"https://h.test/a%20b?sig=SECRET\"",
+         "https://h.test/a b?sig=SECRET", "https://h.test/a b"],
+        ["page.goto: net::ERR_FILE_NOT_FOUND at file:///home/someone/case.html",
+         "file:///home/someone/case.html", "case.html"],
+        ["page.goto: net::ERR_ABORTED at data:text/html,<p>SECRET</p>",
+         "data:text/html,<p>SECRET</p>", "data:text/html"],
+    ]
+    script = (f"const m = await import({json.dumps(mod)});"
+              f"const cases = {json.dumps(cases)};"
+              "console.log(JSON.stringify(cases.map(([msg, t, n]) => m.redactTarget(msg, [t], n))));")
+    p = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    got = json.loads(p.stdout)
+    for g, (_, _, named) in zip(got, cases):
+        assert "SECRET" not in g and "#frag" not in g and "/home/" not in g, g
+        assert named in g, g
