@@ -5008,9 +5008,7 @@ impl LayoutBox {
                     if half_leading > 0.0 {
                         child.shift_inline_content_area(half_leading);
                     }
-                    line_height = line_height
-                        .max(child.get_line_height())
-                        .max(child.tallest_atomic_in_inline());
+                    line_height = line_height.max(child.get_line_height());
                     // The inline's text wrapped onto several line boxes: the
                     // flow must advance past ALL of them, exactly as the
                     // phase-5 split below does for a bare text run. Before
@@ -5046,6 +5044,12 @@ impl LayoutBox {
                         seam = Self::seam_edge(child, true);
                         continue;
                     }
+                    // The atomic inlines inside it are on this line too.
+                    // Not above: wrapped text inside one of them is counted
+                    // there as the inline's own lines, and both together
+                    // made a two-line `inline-block` heading in a link 130
+                    // tall for its 76.
+                    line_height = line_height.max(child.tallest_atomic_in_inline());
                 } else {
                     line_height = line_height.max(child_height);
                 }
@@ -6031,9 +6035,7 @@ impl LayoutBox {
                     if half_leading > 0.0 {
                         child.shift_inline_content_area(half_leading);
                     }
-                    line_height = line_height
-                        .max(child.get_line_height())
-                        .max(child.tallest_atomic_in_inline());
+                    line_height = line_height.max(child.get_line_height());
                     // The inline's text wrapped onto several line boxes: the
                     // flow must advance past ALL of them, exactly as the
                     // phase-5 split below does for a bare text run. Before
@@ -6069,6 +6071,12 @@ impl LayoutBox {
                         seam = Self::seam_edge(child, true);
                         continue;
                     }
+                    // The atomic inlines inside it are on this line too.
+                    // Not above: wrapped text inside one of them is counted
+                    // there as the inline's own lines, and both together
+                    // made a two-line `inline-block` heading in a link 130
+                    // tall for its 76.
+                    line_height = line_height.max(child.tallest_atomic_in_inline());
                 } else {
                     line_height = line_height.max(child_height);
                 }
