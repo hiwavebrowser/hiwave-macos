@@ -276,6 +276,9 @@ fn html_counts_a_bottom_margin_that_collapses_through_body() {
         (doc(" style=\"margin:0;border-bottom:3px solid\"", "<div style=\"height:100px;margin-bottom:40px\"></div>"), 143.0),
         (doc(" style=\"margin:0;display:flex\"", "<div style=\"width:50px;height:100px;margin-bottom:40px\"></div>"), 140.0),
         (doc(" style=\"margin:0;height:100px\"", "<div style=\"height:50px;margin-bottom:200px\"></div>"), 100.0),
+        // Third R1 hold note 1: a box whose `max-height` clamps it closes its
+        // bottom edge (Chromium: 50, the clamped body, not 90).
+        (doc(" style=\"margin:0;max-height:50px\"", "<div style=\"height:100px;margin-bottom:40px\"></div>"), 50.0),
         // Taller than the viewport.
         (doc("", "<div style=\"height:2000px\"></div><div style=\"height:10px;margin-bottom:40px\"></div>"), 2058.0),
     ];
@@ -399,6 +402,68 @@ fn page_urls_lose_query_and_fragment_unless_asked() {
     assert_eq!(diagnostics::report_url(&u, true), "https://example.test/a/b?token=1#frag");
     assert_eq!(diagnostics::scrub_url("https://cdn.test/i.png?sig=x"), "https://cdn.test/i.png");
     assert_eq!(diagnostics::scrub_url("data:image/png;base64,AAAA"), "data:…");
+    // Third R1 hold: a `;` path parameter (a servlet `jsessionid` is the
+    // session cookie) goes with the query, in every segment, unless asked.
+    let r = |u: &str, q| diagnostics::report_url(&Url::parse(u).unwrap(), q);
+    assert_eq!(r("https://shop.test/cart;jsessionid=0123ABCD?x=1", false), "https://shop.test/cart");
+    assert_eq!(r("https://shop.test/cart;jsessionid=0123ABCD?x=1", true), "https://shop.test/cart;jsessionid=0123ABCD?x=1");
+    for (u, want) in [
+        ("https://shop.test/a;jsessionid=S/b;v=1/c.png", "https://shop.test/a/b/c.png"),
+        ("https://shop.test/a;x=1;JSESSIONID=S", "https://shop.test/a"),
+        ("https://shop.test/a%3Bjsessionid=S/b", "https://shop.test/a/b"),
+        ("https://shop.test/a%3bjsessionid=S/b", "https://shop.test/a/b"),
+        ("https://shop.test/a;", "https://shop.test/a"),
+        ("https://shop.test/;jsessionid=S", "https://shop.test/"),
+        ("https:\\\\shop.test\\a;jsessionid=S\\b", "https://shop.test/a/b"),
+        ("https://shop.test/a;jsess\tionid=S\n/b", "https://shop.test/a/b"),
+        ("http://shop.test:8080/a;jsessionid=S#f", "http://shop.test:8080/a"),
+        ("foo://shop.test/a;sid=S/b", "foo://shop.test/a/b"),
+        // `data:` and `blob:` keep their own reduction, with or without the opt-in.
+        ("data:text/html;charset=utf-8,x;y", "data:text/html"),
+        ("blob:https://shop.test/a;jsessionid=S", "blob:https://shop.test"),
+    ] {
+        assert_eq!(r(u, false), want, "{u:?}");
+    }
+    assert_eq!(r("data:text/html;charset=utf-8,x;y", true), "data:text/html");
+    assert_eq!(r("https://shop.test/a%3Bjsessionid=S/b", true), "https://shop.test/a%3Bjsessionid=S/b");
+    for (u, want) in [
+        ("https://cdn.test/a.png;jsessionid=0123ABCD", "https://cdn.test/a.png"),
+        ("https://cdn.test/a.png;JSESSIONID=S?x", "https://cdn.test/a.png"),
+        ("https://cdn.test/a;jsessionid=S/b.png", "https://cdn.test/a/b.png"),
+        ("https://cdn.test/a;x=1;jsessionid=S/b;v=2/c.png#f", "https://cdn.test/a/b/c.png"),
+        ("https://cdn.test/a%3Bjsessionid=S/b.png", "https://cdn.test/a/b.png"),
+        ("https://cdn.test/a.png%3bjsessionid=S", "https://cdn.test/a.png"),
+        ("https://cdn.test/a.png;", "https://cdn.test/a.png"),
+        ("https:\\\\cdn.test\\a;jsessionid=S\\b.png", "https:\\\\cdn.test\\a\\b.png"),
+        ("https://cdn.test/a.png;jsess\tion\rid=S", "https://cdn.test/a.png"),
+        ("//cdn.test/a;jsessionid=S/b.png", "//cdn.test/a/b.png"),
+        ("img/a;jsessionid=S/b.png", "img/a/b.png"),
+        ("/img/a.png;jsessionid=S", "/img/a.png"),
+        ("a.png%3Bjsessionid=S", "a.png"),
+        ("data:image/png;base64,AAAA", "data:…"),
+        ("blob:https://cdn.test/2b8c;jsessionid=S", "blob:https://cdn.test"),
+    ] {
+        assert_eq!(diagnostics::scrub_url(u), want, "{u:?}");
+    }
+}
+
+#[test]
+fn a_session_id_in_a_background_path_does_not_reach_the_record() {
+    // Third R1 hold, the reviewer's in-page reproducer, from a stylesheet
+    // (this engine's inline `style` parser splits at the quoted `;`).
+    for (bg, want) in [
+        ("url('https://cdn.test/a.png;jsessionid=0123ABCD')", "url(\"https://cdn.test/a.png\")"),
+        ("url(\"https://cdn.test/a;jsessionid=0123ABCD/b.png%3Bv=0123ABCD\")", "url(\"https://cdn.test/a/b.png\")"),
+    ] {
+        let (engine, view) = engine_with(
+            &format!("<!DOCTYPE html><style>#d{{width:10px;height:10px;background-image:{bg}}}</style><div id=d></div>"),
+            800,
+            600,
+        );
+        let r = diag(&engine, view, "#d");
+        assert_eq!(r["style"]["background-image"], want, "{bg}");
+        assert!(!r.to_string().contains("0123ABCD"), "{bg}");
+    }
 }
 
 #[test]
@@ -595,6 +660,18 @@ fn urls_lose_user_name_and_password() {
     assert_eq!(diagnostics::scrub_url("https://u:p@cdn.test/i.png?sig=T#f"), "https://cdn.test/i.png");
     assert_eq!(diagnostics::scrub_url("//u:p@cdn.test/i.png"), "//cdn.test/i.png");
     assert_eq!(diagnostics::scrub_url("img/a@2x.png"), "img/a@2x.png");
+    // Third R1 hold: userinfo and a `;jsessionid=` together.
+    let u = Url::parse("https://u:p@shop.test/cart;jsessionid=0123ABCD?x=1").unwrap();
+    assert_eq!(diagnostics::report_url(&u, false), "https://shop.test/cart");
+    assert_eq!(diagnostics::report_url(&u, true), "https://shop.test/cart;jsessionid=0123ABCD?x=1");
+    assert_eq!(diagnostics::scrub_url("https://u:p@cdn.test/a;jsessionid=S/b.png?t=1"), "https://cdn.test/a/b.png");
+    assert_eq!(diagnostics::scrub_url("https:u:p@cdn.test/a.png;jsessionid=S"), "https:cdn.test/a.png");
+    // Third R1 hold note 2: a script URL is all payload; a blob URL keeps
+    // only its origin, as `report_url` does.
+    assert_eq!(diagnostics::scrub_url("javascript:alert(document.cookie)"), "javascript:");
+    assert_eq!(diagnostics::scrub_url("JavaScript:alert(1)"), "javascript:");
+    assert_eq!(diagnostics::scrub_url("blob:https://u:PW@cdn.test/2b8c-uuid"), "blob:https://cdn.test");
+    assert_eq!(diagnostics::scrub_url("blob:2b8c-uuid"), "blob:");
     // Schemes are case-insensitive, and leading whitespace is not part of the URL.
     for u in ["DATA:text/plain,SECRET", "Data:text/plain,SECRET", " \tdata:text/plain,SECRET"] {
         assert_eq!(diagnostics::scrub_url(u), "data:…", "{u:?}");
