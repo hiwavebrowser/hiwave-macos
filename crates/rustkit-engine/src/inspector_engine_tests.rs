@@ -810,8 +810,15 @@ fn urls_anywhere_in_error_text_are_scrubbed() {
     let page = "<html><body><script>
 try { throw new Error(\"fetch failed 'https://u:p@h.test/a?token=SECRET1#f' (https://h.test/b?token=SECRET2) url=https://h.test/c?token=SECRET3.\"); } catch (e) { setTimeout(function () { throw e; }, 0); }
 Promise.reject(new Error('reason https://u:p@h.test/d?token=SECRET4'));
-</script></body></html>";
-    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+Promise.reject(new Error('bad https://h.test/x?a[]=1&token=SECRET_BR'));
+Promise.reject(new Error('paren https://h.test/y?a=(1)&token=SECRET_PA end'));
+Promise.reject(new Error(\"quote https://h.test/z?a='1'&token=SECRET_Q\"));
+Promise.reject(new Error('frag https://h.test/f#a(b)SECRET_FR.'));
+</script><script type=\"module\" src=\"/m.js?a=(1)&token=SECRET_MODPAREN\"></script></body></html>";
+    let (engine, view, _server) = load_page(
+        EngineConfig::default(),
+        vec![Route::html("/", page), Route::ok("/m.js", "text/javascript", "var a = 1;\nthrow new Error('in module');\n")],
+    );
     let messages: Vec<String> = records(&engine, view)
         .into_iter()
         .filter_map(|r| match r.event {
@@ -823,6 +830,11 @@ Promise.reject(new Error('reason https://u:p@h.test/d?token=SECRET4'));
         messages,
         vec![
             "reason https://h.test/d",
+            "bad https://h.test/x",
+            "paren https://h.test/y end",
+            "quote https://h.test/z",
+            "frag https://h.test/f.",
+            "in module",
             "fetch failed 'https://h.test/a' (https://h.test/b) url=https://h.test/c.",
         ]
     );
