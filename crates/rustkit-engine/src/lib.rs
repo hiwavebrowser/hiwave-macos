@@ -286,6 +286,11 @@ pub use diagnostics::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod diagnostics_tests;
+mod inspector_page;
+pub use inspector_page::{
+    diff_root_record, inspector_page_html, inspector_select_script, InspectorInputError, InspectorSelection,
+    INSPECTOR_DIFF_SCHEMA, INSPECTOR_PAGE_TEMPLATE,
+};
 use relayout_cause::PendingCauses;
 mod shadow_tree;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
