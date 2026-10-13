@@ -284,3 +284,71 @@ fn a_hidden_fixed_box_takes_no_click() {
     engine.set_scroll_offset(view, 0.0, 50.0).unwrap();
     assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/under"), "scrolled");
 }
+
+// `pointer-events` and boxes that are not shown (the second hold on #681).
+// Chromium's answers: `tools/parity_oracle/fixed_scroll_click_log.mjs`.
+
+const UNDER: &str = "<a href='/under' style='display:block;height:600px'>under</a>";
+
+/// A fixed box over the whole window with `pointer-events: none` (a
+/// decoration, a notification layer) takes no click at any scroll
+/// position: the page under it does.
+#[test]
+fn a_see_through_fixed_overlay_takes_no_click() {
+    let (mut engine, view, _) = page_list(&format!(
+        "<div style='position:fixed;left:0;top:0;width:200px;height:100px;pointer-events:none;background:none'></div>{UNDER}"
+    ));
+    assert_eq!(path(engine.link_at_point(view, 20.0, 60.0)).as_deref(), Some("/under"), "not scrolled");
+    engine.set_scroll_offset(view, 0.0, 200.0).unwrap();
+    assert_eq!(path(engine.link_at_point(view, 20.0, 60.0)).as_deref(), Some("/under"), "scrolled");
+}
+
+/// A toast container (react-hot-toast's shape) at the bottom of the
+/// window: only a toast that says `pointer-events: auto` is clicked.
+#[test]
+fn a_toast_container_is_clicked_only_on_a_toast_that_asks() {
+    let (mut engine, view, _) = page_list(&format!(
+        "<div style='position:fixed;left:0;right:0;bottom:0;height:60px;pointer-events:none;background:none'>\
+         <a href='/quiet' style='display:block;height:10px'>q</a>\
+         <a href='/toast' style='display:block;height:10px;pointer-events:auto'>t</a></div>{UNDER}"
+    ));
+    engine.set_scroll_offset(view, 0.0, 200.0).unwrap();
+    assert_eq!(path(engine.link_at_point(view, 20.0, 45.0)).as_deref(), Some("/under"), "inherited none");
+    assert_eq!(path(engine.link_at_point(view, 20.0, 55.0)).as_deref(), Some("/toast"), "auto again");
+    assert_eq!(path(engine.link_at_point(view, 20.0, 70.0)).as_deref(), Some("/under"), "the container");
+}
+
+/// The same rule for a box that scrolls with the page, and for a link
+/// that is itself `pointer-events: none` (its text is no target either).
+#[test]
+fn pointer_events_none_is_honoured_in_the_page_too() {
+    let (engine, view, _) = page_list(&format!(
+        "<div style='position:absolute;left:0;top:0;width:200px;height:60px;pointer-events:none;background:none'>\
+         <a href='/off' style='display:block;height:20px'>off</a>\
+         <a href='/on' style='display:block;height:20px;pointer-events:auto'>on</a></div>{UNDER}"
+    ));
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/under"));
+    assert_eq!(path(engine.link_at_point(view, 20.0, 30.0)).as_deref(), Some("/on"));
+    assert_eq!(path(engine.link_at_point(view, 20.0, 50.0)).as_deref(), Some("/under"));
+
+    let (engine, view, _) = page_list(
+        "<p style='margin:0;height:20px'><a href='/off' style='pointer-events:none'>off off off off</a></p>",
+    );
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)), None);
+}
+
+/// A box that is not shown is no target, in the page or held; a child of
+/// it that is `visible` again is.
+#[test]
+fn a_hidden_box_takes_no_click_and_its_shown_child_does() {
+    let (engine, view, _) = page_list(&format!(
+        "<div style='position:absolute;left:0;top:0;width:200px;height:40px;visibility:hidden;background:none'>\
+         <a href='/shown' style='display:block;height:20px;visibility:visible'>shown</a></div>\
+         <div style='position:fixed;left:0;top:50px;width:200px;height:40px;visibility:hidden;background:none'>\
+         <a href='/held' style='display:block;height:20px;visibility:visible'>held</a></div>{UNDER}"
+    ));
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/shown"));
+    assert_eq!(path(engine.link_at_point(view, 20.0, 30.0)).as_deref(), Some("/under"));
+    assert_eq!(path(engine.link_at_point(view, 20.0, 60.0)).as_deref(), Some("/held"));
+    assert_eq!(path(engine.link_at_point(view, 20.0, 80.0)).as_deref(), Some("/under"));
+}
