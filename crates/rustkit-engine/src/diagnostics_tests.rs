@@ -590,6 +590,34 @@ fn urls_lose_user_name_and_password() {
     for u in ["DATA:text/plain,SECRET", "Data:text/plain,SECRET", " \tdata:text/plain,SECRET"] {
         assert_eq!(diagnostics::scrub_url(u), "data:…", "{u:?}");
     }
+    // Second R1 hold item 2: the URL parser drops ASCII tab and newline
+    // anywhere, and leading C0 controls and spaces, before it reads the
+    // scheme, so each of these loads as a `data:` URL.
+    for u in [
+        "da\tta:text/plain,SECRET",
+        "data\t:text/plain,SECRET",
+        "\u{1}data:text/plain,SECRET",
+        "da\nta:text/plain,SECRET",
+        "data\r\n:text/plain,SECRET",
+        "\u{1f}\u{0} D\tA\rT\nA:text/plain,SECRET",
+    ] {
+        assert!(Url::parse(u).is_ok_and(|p| p.scheme() == "data"), "{u:?}");
+        assert_eq!(diagnostics::scrub_url(u), "data:…", "{u:?}");
+    }
+    // Userinfo, query and fragment go on the same view of the URL.
+    for u in [
+        "ht\ttps://u:p@cdn.test/i.png?sig=T#f",
+        "\u{1}https://u:p@cdn.test/i.png?sig=T#f",
+        "https://u:p@cdn.test/i.png?s\nig=T#f",
+        "https://u:p@cdn.test/i.png\t?sig=T",
+        "https://u:p@cdn.test/i.png\n#f",
+        "https:\\\\u:p@cdn.test/i.png",
+        "https:u:p@cdn.test/i.png",
+    ] {
+        let s = diagnostics::scrub_url(u);
+        assert!(!s.contains("u:p") && !s.contains("sig") && !s.contains('#'), "{u:?} gave {s:?}");
+        assert!(s.contains("cdn.test/i.png"), "{u:?} gave {s:?}");
+    }
 }
 
 #[test]
@@ -601,6 +629,20 @@ fn a_mixed_case_data_url_in_a_background_keeps_no_payload() {
     );
     let r = diag(&engine, view, "#d");
     assert!(!r.to_string().contains("SECRET"), "{}", r["style"]["background-image"]);
+}
+
+#[test]
+fn a_data_url_with_a_tab_in_its_scheme_keeps_no_payload() {
+    // Second R1 hold item 2, with literal tab and U+0001 bytes in the CSS.
+    for bg in ["url(\"da\tta:text/plain,SECRET30\")", "url('data\t:text/plain,SECRET30')", "url('\u{1}data:text/plain,SECRET30')"] {
+        let (engine, view) = engine_with(
+            &format!("<!DOCTYPE html><style>#d{{width:10px;height:10px;background-image:{bg}}}</style><div id=d></div>"),
+            800,
+            600,
+        );
+        let r = diag(&engine, view, "#d");
+        assert_eq!(r["style"]["background-image"], "url(\"data:…\")", "{bg:?}");
+    }
 }
 
 #[test]
