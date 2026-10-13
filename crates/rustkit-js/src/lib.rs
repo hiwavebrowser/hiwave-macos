@@ -1350,4 +1350,129 @@ mod tests {
         assert_eq!(runtime.evaluate_script("n").unwrap().is_truthy(), false, "page code ran");
     }
 
+    /// One function declared in `eval` code, which throws after a console
+    /// call, called from the page's script `inline#1`: the error's frames
+    /// and whether it is located, and the console call's position.
+    fn eval_declared_throw(declare: &str, call: &str) -> (Vec<ScriptPosition>, bool, Option<ScriptPosition>) {
+        let mut runtime = JsRuntime::new().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+        runtime.set_error_reports(true, false);
+        let body = "{ console.log(\"c\"); throw new Error(\"x\"); }";
+        let script = format!("1;\neval('{}');\n{call};", declare.replace("BODY", body));
+        assert!(runtime.evaluate_script_named(&script, "inline#1").is_err());
+        let reports = runtime.take_error_reports();
+        assert_eq!(reports.len(), 1, "{script}: {reports:?}");
+        let console = seen.lock().unwrap().clone();
+        assert_eq!(console.len(), 1, "{script}");
+        (reports[0].frames.clone(), reports[0].located, console[0].clone())
+    }
+
+    /// A function's name is the page's (a declaration, a literal or
+    /// computed key, `Object.defineProperty(f, 'name')`): whether its error
+    /// and console call have a place, and which, never depends on it. A
+    /// function `eval` code declared has no script of its own whatever it
+    /// is called, so neither is given its caller's position.
+    #[test]
+    fn a_page_chosen_function_name_never_decides_a_place() {
+        let ordinary = eval_declared_throw("function gg() BODY", "gg()");
+        assert_eq!(ordinary, (vec![ScriptPosition { path: "inline#1".into(), line: 3, column: 3 }], false, None));
+        for (declare, call) in [
+            ("function anonymous() BODY", "anonymous()"),
+            ("var o = { \"f eval at g\": function () BODY }", "o[\"f eval at g\"]()"),
+            ("var o = { \"<eval>\": function () BODY }", "o[\"<eval>\"]()"),
+            ("var o = { [\"<e\" + \"val>\"]: function () BODY }", "o[\"<eval>\"]()"),
+            ("var o = { [\"anony\" + \"mous\"]: function () BODY }", "o.anonymous()"),
+            ("function h() BODY Object.defineProperty(h, \"name\", { value: \"<eval>\" })", "h()"),
+            ("function h() BODY Object.defineProperty(h, \"name\", { value: \"anonymous\" })", "h()"),
+        ] {
+            let (frames, located, console) = eval_declared_throw(declare, call);
+            assert_eq!((frames.len(), located, console), (1, false, None), "{declare}");
+            assert_eq!((frames[0].path.as_str(), frames[0].line), ("inline#1", 3), "{declare}");
+        }
+    }
+
+    /// The same names on functions a page script declared: located where
+    /// they throw, like any other.
+    #[test]
+    fn a_page_function_named_like_engine_code_is_located_where_it_throws() {
+        for (declare, call) in [
+            ("function gg() BODY", "gg()"),
+            ("function anonymous() BODY", "anonymous()"),
+            ("var o = { \"f eval at g\": function () BODY }", "o[\"f eval at g\"]()"),
+            ("var o = { \"<eval>\": function () BODY }", "o[\"<eval>\"]()"),
+            ("function h() BODY Object.defineProperty(h, \"name\", { value: \"<eval>\" })", "h()"),
+        ] {
+            let mut runtime = JsRuntime::new().unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let sink = seen.clone();
+            runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+            runtime.set_error_reports(true, false);
+            let body = "{\nconsole.log('c');\n  throw new Error('x'); }";
+            let script = format!("{};\n{call};", declare.replace("BODY", body));
+            assert!(runtime.evaluate_script_named(&script, "inline#1").is_err());
+            let reports = runtime.take_error_reports();
+            assert!(reports[0].located, "{declare}: {reports:?}");
+            assert_eq!(reports[0].frames[0], ScriptPosition { path: "inline#1".into(), line: 3, column: 9 }, "{declare}");
+            let console = seen.lock().unwrap().clone();
+            assert_eq!(console, vec![Some(ScriptPosition { path: "inline#1".into(), line: 2, column: 12 })], "{declare}");
+        }
+    }
+
+    /// `eval` code and a function built by `new Function` are in no script
+    /// of their own: no place, never their caller's.
+    #[test]
+    fn eval_and_new_function_code_have_no_place() {
+        for script in ["1;\neval('console.log(1); null.q');", "1;\nvar f = new Function('console.log(1); null.q');\nf();"] {
+            let mut runtime = JsRuntime::new().unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let sink = seen.clone();
+            runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+            runtime.set_error_reports(true, false);
+            assert!(runtime.evaluate_script_named(script, "inline#1").is_err());
+            let reports = runtime.take_error_reports();
+            assert_eq!(reports.len(), 1, "{script}");
+            assert!(!reports[0].located, "{script}: {reports:?}");
+            assert_eq!(reports[0].frames.first().map(|f| f.line), Some(2 + script.matches("new Function").count() as u32), "{script}");
+            assert_eq!(seen.lock().unwrap().clone(), vec![None], "{script}");
+        }
+    }
+
+    /// The embedder's own scripts are passed over by where they are, not
+    /// by what their functions are called: an error a function of theirs
+    /// throws is placed at the page's call, whatever the function's name.
+    #[test]
+    fn the_embedders_own_frames_are_passed_over_whatever_their_name() {
+        for name in ["glueThrow", "anonymous"] {
+            let mut runtime = JsRuntime::new().unwrap();
+            runtime
+                .evaluate_with_host(&format!("globalThis.{name}Fn = function {name}() {{ throw new TypeError('g'); }};"))
+                .unwrap();
+            runtime.evaluate_script("globalThis.pathlessFn = function anonymous() { null.q; };").unwrap();
+            runtime.set_error_reports(true, false);
+            for callee in [format!("{name}Fn"), "pathlessFn".to_string()] {
+                assert!(runtime.evaluate_script_named(&format!("1;\n  {callee}();"), "inline#1").is_err());
+                let reports = runtime.take_error_reports();
+                assert!(reports[0].located, "{name} {callee}: {reports:?}");
+                assert_eq!((reports[0].frames[0].line, reports[0].frames[0].column), (2, 3 + callee.len() as u32), "{callee}");
+            }
+        }
+    }
+
+    /// An error's message is text page script can choose (a property key in
+    /// a native error's message): a position or frame line in it is never
+    /// taken for the engine's.
+    #[test]
+    fn a_position_in_an_errors_message_is_never_its_place() {
+        use boa_engine::{JsError as BoaError, JsNativeError};
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_error_reports(true, false);
+        runtime.evaluate_script_named("1;", "inline#1").unwrap();
+        for message in ["cannot redefine property: k (inline#1:9:9)", "k\n    at q (inline#1:9:9)", "k\n    at q (inline#1:9:9)\nz"] {
+            let error = BoaError::from(JsNativeError::typ().with_message(message));
+            let report = runtime.diag.describe_error(&error, &mut runtime.context);
+            assert_eq!((report.frames, report.located), (Vec::new(), false), "{message}");
+        }
+    }
 }
