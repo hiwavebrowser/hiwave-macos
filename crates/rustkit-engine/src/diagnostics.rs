@@ -538,9 +538,11 @@ fn union(a: Rect, b: Rect) -> Rect {
 
 /// html's own box. The layout root that stands in for html is the viewport
 /// (the initial containing block); html is as wide as the root and as tall
-/// as its in-flow content. Root margins do not collapse, so that content is
-/// its children's margin boxes; html is a formatting context root, so floats
-/// count. The engine lays html out with no margin, border or padding.
+/// as its in-flow content. Root margins do not collapse, so that content
+/// ends at its children's bottom margin edges, each with the margins that
+/// collapse through its open bottom edge (`collapsed_bottom`); html is a
+/// formatting context root, so floats in it count. The engine lays html out
+/// with no margin, border or padding.
 fn html_box(
     root: &LayoutBox,
     scroll: (f32, f32),
@@ -554,11 +556,9 @@ fn html_box(
         .children
         .iter()
         .filter(|c| !matches!(c.style.position, rustkit_css::Position::Absolute | rustkit_css::Position::Fixed))
-        .map(|c| {
-            let m = c.dimensions.margin_box();
-            m.y + m.height
-        })
+        .map(collapsed_bottom)
         .fold(top, f32::max);
+    let bottom = root.children.iter().fold(bottom, |b, c| float_bottom(c, b));
     let content = root.dimensions.content;
     let r = to_viewport(Rect { x: content.x, y: top, width: content.width, height: bottom - top }, scroll);
     layout_box.border_box = Some(r);
@@ -567,6 +567,54 @@ fn html_box(
     let (vw, vh) = (viewport.0 as f32, viewport.1 as f32);
     paint.outside_viewport = Some(r.x + r.w <= 0.0 || r.y + r.h <= 0.0 || r.x >= vw || r.y >= vh);
     notes.push("html's box: the layout root's width and its in-flow content's height (the root itself is the viewport)".into());
+}
+
+/// The bottom margin edge of an in-flow block as its BFC root sees it: its
+/// border box's bottom plus its own bottom margin collapsed (CSS 2.1 §8.3.1)
+/// with its last in-flow child's, and so on down, while each bottom edge on
+/// the way is open: no bottom border or padding, `height: auto`, no
+/// `min-height`, not a formatting root. The layout keeps no collapsed value,
+/// so this walks the same tests it uses (`should_collapse_with_last_child`,
+/// `establishes_bfc`).
+fn collapsed_bottom(b: &LayoutBox) -> f32 {
+    use rustkit_layout::{establishes_bfc, should_collapse_with_last_child, CollapsibleMargin};
+    let border_bottom = b.dimensions.margin_box().y + b.dimensions.margin_box().height - b.dimensions.margin.bottom;
+    let mut margin = CollapsibleMargin::from_margin(b.dimensions.margin.bottom);
+    let mut node = b;
+    while should_collapse_with_last_child(&node.style, node.float, node.dimensions.border.bottom, node.dimensions.padding.bottom) {
+        // Out-of-flow boxes take no part; a line box ends the chain.
+        let last = node.children.iter().rev().find(|c| {
+            !matches!(c.style.position, rustkit_css::Position::Absolute | rustkit_css::Position::Fixed)
+                && c.float == rustkit_layout::Float::None
+        });
+        let Some(child) = last else { break };
+        if !matches!(child.box_type, BoxType::Block) || child.style.display.is_atomic_inline() {
+            break;
+        }
+        margin.adjoin(child.dimensions.margin.bottom);
+        // A formatting root adjoins its own margin, but nothing collapses through it.
+        if establishes_bfc(&child.style, child.float) {
+            break;
+        }
+        node = child;
+    }
+    border_bottom + margin.resolve()
+}
+
+/// The lowest float margin edge in the root's formatting context: floats
+/// inside a box that is not itself a formatting root overflow into it.
+fn float_bottom(b: &LayoutBox, bottom: f32) -> f32 {
+    if matches!(b.style.position, rustkit_css::Position::Absolute | rustkit_css::Position::Fixed) {
+        return bottom;
+    }
+    if b.float != rustkit_layout::Float::None {
+        let m = b.dimensions.margin_box();
+        return bottom.max(m.y + m.height);
+    }
+    if rustkit_layout::establishes_bfc(&b.style, b.float) {
+        return bottom;
+    }
+    b.children.iter().fold(bottom, |acc, c| float_bottom(c, acc))
 }
 
 /// The page URL as a record reports it: never a user name or password, and

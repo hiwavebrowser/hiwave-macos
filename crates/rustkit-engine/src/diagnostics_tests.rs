@@ -261,6 +261,16 @@ fn html_counts_a_bottom_margin_that_collapses_through_body() {
             ),
             130.0,
         ),
+        // A floated last child is out of flow, but html is a formatting
+        // root, so the float's margin box overflowing body counts.
+        (
+            doc(
+                " style=\"margin:0\"",
+                "<div style=\"height:100px\"></div><div style=\"float:left;width:10px;height:10px;margin-bottom:50px\"></div>",
+            ),
+            160.0,
+        ),
+        (doc(" style=\"margin:0;overflow:hidden\"", "<div style=\"height:100px;margin-bottom:40px\"></div>"), 140.0),
         // A closed bottom edge keeps the margin inside body.
         (doc(" style=\"margin:0;padding-bottom:5px\"", "<div style=\"height:100px;margin-bottom:40px\"></div>"), 145.0),
         (doc(" style=\"margin:0;border-bottom:3px solid\"", "<div style=\"height:100px;margin-bottom:40px\"></div>"), 143.0),
