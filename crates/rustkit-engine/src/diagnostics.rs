@@ -591,6 +591,13 @@ fn collapsed_bottom(b: &LayoutBox) -> f32 {
         if !matches!(child.box_type, BoxType::Block) || child.style.display.is_atomic_inline() {
             break;
         }
+        // A box that `max-height` clamps below its content closes its bottom
+        // edge, as Chromium does; the layout's test does not look at it.
+        let content = node.dimensions.content;
+        let child_border = child.dimensions.border_box();
+        if child_border.y + child_border.height > content.y + content.height + 0.5 {
+            break;
+        }
         margin.adjoin(child.dimensions.margin.bottom);
         // A formatting root adjoins its own margin, but nothing collapses through it.
         if establishes_bfc(&child.style, child.float) {
@@ -618,7 +625,9 @@ fn float_bottom(b: &LayoutBox, bottom: f32) -> f32 {
 }
 
 /// The page URL as a record reports it: never a user name or password, and
-/// no query or fragment unless asked. A `data:` URL's payload is the
+/// no query, fragment or `;` path parameters (`;jsessionid=`) unless asked.
+/// Known limit: a session ID in a whole path segment (ASP.NET cookieless
+/// sessions, `/(S(…))/page.aspx`) is not recognised and stays. A `data:` URL's payload is the
 /// document itself, so it is reduced to `data:<mime>` even then.
 pub(crate) fn report_url(url: &Url, include_query: bool) -> String {
     match url.scheme() {
@@ -645,8 +654,33 @@ pub(crate) fn report_url(url: &Url, include_query: bool) -> String {
     if !include_query {
         u.set_query(None);
         u.set_fragment(None);
+        // The parser's path: `\` already reads as `/` for a special scheme.
+        let path = drop_path_params(u.path(), false);
+        u.set_path(&path);
     }
     u.to_string()
+}
+
+/// A path without its `;` parameters (`/cart;jsessionid=S/x` is `/cart/x`):
+/// a servlet puts the session cookie there when cookies are off. Each one
+/// runs from `;` (or `%3B`, to record less) to the end of its segment.
+/// The query and fragment must already be cut. `backslash`: `\` also ends a
+/// segment, as it does for a special scheme or a relative URL.
+fn drop_path_params(path: &str, backslash: bool) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut rest = path;
+    while !rest.is_empty() {
+        let at = rest.find(';').into_iter().chain(rest.find("%3B")).chain(rest.find("%3b")).min();
+        let Some(at) = at else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let end = rest.find(|c: char| c == '/' || (backslash && c == '\\')).unwrap_or(rest.len());
+        rest = &rest[end..];
+    }
+    out
 }
 
 impl<'a> Builder<'a> {
@@ -1082,8 +1116,9 @@ fn gradient_name(debug: &str) -> String {
     format!("{}{base}(…)", if repeating { "repeating-" } else { "" })
 }
 
-/// A URL inside a record: no user name or password, no query or fragment,
-/// `data:` contents elided. The URL may be relative, as specified.
+/// A URL inside a record: no user name or password, no query, fragment or
+/// `;` path parameters, `data:` contents elided, `javascript:` and `blob:`
+/// as `report_url` gives them. The URL may be relative, as specified.
 pub(crate) fn scrub_url(u: &str) -> String {
     // Every decision is made on the URL as the parser reads it: it drops
     // ASCII tab and newline anywhere, and leading and trailing C0 controls
@@ -1095,6 +1130,10 @@ pub(crate) fn scrub_url(u: &str) -> String {
     if u.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) || parsed.as_ref().is_some_and(|p| p.scheme() == "data") {
         return "data:…".into();
     }
+    // A script URL is all payload; a blob URL is reported by its origin.
+    if let Some(p) = parsed.as_ref().filter(|p| matches!(p.scheme(), "javascript" | "blob")) {
+        return report_url(p, false);
+    }
     let u = u.split(['?', '#']).next().unwrap_or("");
     // Userinfo can only sit in an authority: after `scheme://` or a leading
     // `//`. The parser reads `\` as `/` there, and for a special scheme
@@ -1103,21 +1142,23 @@ pub(crate) fn scrub_url(u: &str) -> String {
     let scheme_end = u.find(':').filter(|&i| {
         i > 0 && u[..i].chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
     });
+    // `\` ends a path segment where the parser reads it as `/`: a special
+    // scheme, or a relative URL (resolved against an http(s) page).
+    let backslash = scheme_end.is_none() || parsed.as_ref().is_some_and(|p| p.is_special());
     let authority_at = match scheme_end {
         Some(i) if parsed.as_ref().is_some_and(|p| p.is_special() && p.scheme() != "file") => {
             u[i + 1..].find(|c: char| !slash(c)).map_or(u.len(), |j| i + 1 + j)
         }
         Some(i) if u[i + 1..].starts_with("//") => i + 3,
-        Some(_) => return u.to_string(),
+        Some(i) => return format!("{}{}", &u[..=i], drop_path_params(&u[i + 1..], backslash)),
         None if u.starts_with(|c: char| slash(c)) && u[1..].starts_with(|c: char| slash(c)) => 2,
-        None => return u.to_string(),
+        None => return drop_path_params(u, backslash),
     };
     let rest = &u[authority_at..];
     let authority_end = rest.find(slash).unwrap_or(rest.len());
-    match rest[..authority_end].rfind('@') {
-        Some(at) => format!("{}{}", &u[..authority_at], &rest[at + 1..]),
-        None => u.to_string(),
-    }
+    let authority = &rest[..authority_end];
+    let host = authority.rfind('@').map_or(authority, |at| &authority[at + 1..]);
+    format!("{}{host}{}", &u[..authority_at], drop_path_params(&rest[authority_end..], backslash))
 }
 
 fn style_record(
