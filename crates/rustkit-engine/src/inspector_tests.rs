@@ -196,3 +196,26 @@ fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
         r#"{"schema":1,"events":4,"console":{"log":1,"info":0,"warn":0,"error":1,"debug":0},"script_errors":1,"unhandled_rejections":1,"unsupported_apis":{"XMLHttpRequest.open(async=false)":4}}"#
     );
 }
+
+/// A query runs past brackets, parens and quotes to whitespace; a frame's
+/// `:line:col)` and closing punctuation after it are kept, and a frame
+/// whose URL's query holds a `(` is still read as that URL.
+#[test]
+fn a_query_is_scrubbed_up_to_whitespace_or_a_frames_position() {
+    let inspector = buffered(1);
+    for (text, scrubbed) in [
+        ("bad https://h.test/x?a[]=1&t=S", "bad https://h.test/x"),
+        ("see (https://h.test/y?a=(1)&t=S) now", "see (https://h.test/y) now"),
+        ("q 'https://h.test/z?a='1'&t=S'.", "q 'https://h.test/z'."),
+        ("    at f (https://h.test/m.js?a=(1)&t=S:2:7)", "    at f (https://h.test/m.js:2:7)"),
+        ("Error: x (https://h.test/m.js?a=(1)&t=S:2:7)", "Error: x (https://h.test/m.js:2:7)"),
+        ("at https://h.test/m.js?a=(1)&t=S:2:7) end", "at https://h.test/m.js:2:7) end"),
+    ] {
+        assert_eq!(inspector.scrub_text(text), scrubbed, "{text}");
+    }
+    let keeping = Inspector::new(&InspectorConfig { buffer: true, keep_url_query: true, ..Default::default() });
+    assert_eq!(
+        keeping.scrub_text("bad https://u:p@h.test/x?a[]=1&t=S."),
+        "bad https://h.test/x?a[]=1&t=S."
+    );
+}

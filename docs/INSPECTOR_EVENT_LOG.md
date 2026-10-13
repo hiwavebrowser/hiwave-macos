@@ -114,9 +114,11 @@ The log is meant to be pasted into public issues and PRs.
   always removed; query and fragment are removed unless
   `InspectorConfig::keep_url_query` (`parity-capture --event-log-keep-query`)
   is set. A `data:` URL becomes `data:<mime>,…`; a `blob:` URL its origin.
-- URLs inside error messages, rejection reasons and stacks are scrubbed the
-  same way wherever they sit in the text (after a quote, in brackets, after
-  `=`).
+- URLs inside error messages, rejection reasons, stacks and kept console
+  text are scrubbed the same way wherever they sit in the text (after a
+  quote, in brackets, after `=`). Once a URL's query or fragment starts,
+  everything up to whitespace goes with it (brackets, parens and quotes are
+  legal in a query), except a frame's `:line:col)` and closing punctuation.
 - No request or response header, body, cookie, form value or storage content
   is recorded.
 - Console messages carry no page text by default: each argument's type, and
