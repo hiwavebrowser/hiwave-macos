@@ -26672,18 +26672,20 @@ mod rule_prefilter_tests {
     }
 
     #[test]
-    fn every_element_is_defined_until_custom_elements_can_upgrade() {
-        // microsoft: `:not(:defined) { visibility: hidden }` guards its custom
-        // elements until script upgrades them. Nothing here runs
-        // `customElements.define`, so under the spec rule they never upgrade
-        // and the page paints blank. Showing the un-upgraded content is the
-        // closer match to Chrome after script.
+    fn an_undefined_custom_element_name_is_not_defined() {
+        // The registry rule since #677: an element with a valid custom
+        // element name that no script defined is `:not(:defined)`, as in
+        // Chrome. This pinned the rule before it (every element `:defined`,
+        // so microsoft's `:not(:defined) { visibility: hidden }` guard never
+        // hid its header) and has failed on macOS since #677 landed. The
+        // header is shown now by the settle after a load that lost a script
+        // (`shadow_tree_tests`); nothing is settled here.
         let cases: &[(&str, &str, bool)] = &[
             (":defined", "div", true),
             (":not(:defined)", "div", false),
-            (":defined", "ms-header", true),
-            (":not(:defined)", "ms-header", false),
-            ("ms-header:not(:defined)", "ms-header", false),
+            (":defined", "ms-header", false),
+            (":not(:defined)", "ms-header", true),
+            ("ms-header:not(:defined)", "ms-header", true),
         ];
         for (selector, tag, want) in cases {
             let got = SelectorMatcher.selector_matches(selector, tag, &attrs(&[]), &[], &[], SiblingContext::SOLE);
