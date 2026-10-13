@@ -9,8 +9,9 @@
 //!
 //! Privacy (the log is pasted into public issues and PRs): a URL in an event
 //! keeps its scheme, host, port and path, never its user name, password,
-//! query or fragment (a flag keeps the query and fragment); a `data:` URL
-//! keeps only its MIME type. No header, request or response body, form value
+//! query, fragment or `;` path parameters (`/a;jsessionid=S/b` is `/a/b`; a
+//! flag keeps the query, fragment and parameters); a `data:` URL keeps only
+//! its MIME type. A `file:` URL's path is the local path, user name and all. No header, request or response body, form value
 //! or storage is recorded. No text the page chose is recorded by default
 //! (pages log and throw cookies, form values and their own URL): a console
 //! message is each argument's type and a string's length; an error is the
@@ -56,8 +57,8 @@ pub struct InspectorConfig {
     /// Size of the ring buffer; past it the oldest event is dropped and
     /// counted.
     pub capacity: usize,
-    /// Keep the query string and fragment of URLs in events. Off by default:
-    /// they carry session ids and tokens.
+    /// Keep the query string, fragment and `;` path parameters of URLs in
+    /// events. Off by default: they carry session ids and tokens.
     pub keep_url_query: bool,
     /// Keep the text of console messages. Off by default: a console line
     /// is then each argument's type, and a string's length (`<string
@@ -685,8 +686,8 @@ pub fn cap(text: &str, max: usize) -> (String, bool) {
     }
 }
 
-/// `url` with its credentials always removed, and its query and fragment
-/// unless `keep_query`. A `data:` URL is reduced to `data:<mime>,…`; any
+/// `url` with its credentials always removed, and its query, fragment and
+/// `;` path parameters (`;jsessionid=`) unless `keep_query`. A `data:` URL is reduced to `data:<mime>,…`; any
 /// other URL that cannot have a host (`about:`, `blob:`) keeps its scheme
 /// and, for `blob:`, its origin.
 pub fn scrub_url(url: &Url, keep_query: bool) -> String {
@@ -715,10 +716,34 @@ pub fn scrub_url(url: &Url, keep_query: bool) -> String {
             if !keep_query {
                 clean.set_query(None);
                 clean.set_fragment(None);
+                // The parser's path: `\` already reads as `/` for a special
+                // scheme, and tabs and newlines are gone.
+                let path = drop_path_params(clean.path());
+                clean.set_path(&path);
             }
             clean.to_string()
         }
     }
+}
+
+/// A path without its `;` parameters (`/cart;jsessionid=S/x` is `/cart/x`):
+/// a servlet puts the session cookie there when cookies are off. Each one
+/// runs from `;` (or `%3B`, to record less) to the end of its segment. The
+/// same rule as the diagnostics half's `report_url`.
+fn drop_path_params(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut rest = path;
+    while !rest.is_empty() {
+        let at = rest.find(';').into_iter().chain(rest.find("%3B")).chain(rest.find("%3b")).min();
+        let Some(at) = at else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        rest = &rest[rest.find('/').unwrap_or(rest.len())..];
+    }
+    out
 }
 
 /// Where `scheme` next starts in `lower` from `from`: anywhere for a
