@@ -168,6 +168,51 @@ pub(crate) mod test_gpu {
             queue.join().unwrap();
         }
 
+        /// A helper thread queues on the guard like any test. The test that
+        /// waits for it must not give up while the queue is still moving: six
+        /// holders of 200 ms each, a guard limit of 400 ms.
+        #[test]
+        fn a_caller_outlasts_its_helper_queueing_behind_short_holders() {
+            let limit = Duration::from_millis(400);
+            let holder = Arc::new(Mutex::new(Some("holder-0".to_string())));
+            let released = Arc::new(Condvar::new());
+            let (h, r) = (holder.clone(), released.clone());
+            let queue = std::thread::spawn(move || {
+                for next in 1..=6 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let mut now = h.lock().unwrap_or_else(|e| e.into_inner());
+                    *now = (next < 6).then(|| format!("holder-{next}"));
+                    r.notify_all();
+                }
+            });
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let helper = std::thread::spawn(move || {
+                drop(wait_until_free(&holder, &released, limit));
+                let _ = ready_tx.send(());
+            });
+            assert!(helper_has_its_engine(&ready_rx, limit));
+            helper.join().unwrap();
+            queue.join().unwrap();
+        }
+
+        /// A helper stuck behind one holder past the limit fails in the guard
+        /// and never reports; its caller hears of it at once.
+        #[test]
+        fn a_caller_learns_its_helper_failed_in_the_guard() {
+            let limit = Duration::from_millis(200);
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let helper = std::thread::spawn(move || {
+                let holder = Mutex::new(Some("stuck".to_string()));
+                let released = Condvar::new();
+                drop(wait_until_free(&holder, &released, limit));
+                let _ = ready_tx.send(());
+            });
+            let started = std::time::Instant::now();
+            assert!(!helper_has_its_engine(&ready_rx, limit));
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(helper.join().is_err());
+        }
+
         /// One test that keeps the GPU past the limit still fails the waiter,
         /// by name.
         #[test]
@@ -177,6 +222,12 @@ pub(crate) mod test_gpu {
             let released = Condvar::new();
             drop(wait_until_free(&holder, &released, Duration::from_millis(200)));
         }
+    }
+
+    /// Wait for a helper thread to say it has its engine. False when it never
+    /// will.
+    fn helper_has_its_engine(ready: &std::sync::mpsc::Receiver<()>, guard_limit: Duration) -> bool {
+        ready.recv_timeout(guard_limit + guard_limit / 4).is_ok()
     }
 
     /// Run `work` against a fresh engine on a helper thread, and fail with
@@ -198,10 +249,7 @@ pub(crate) mod test_gpu {
             let _ = ready_tx.send(());
             let _ = done_tx.send(work(&e));
         });
-        if ready_rx
-            .recv_timeout(MAX_WAIT + Duration::from_secs(30))
-            .is_err()
-        {
+        if !helper_has_its_engine(&ready_rx, MAX_WAIT) {
             panic!("{what}: the helper thread never got an engine");
         }
         match done_rx.recv_timeout(budget) {
