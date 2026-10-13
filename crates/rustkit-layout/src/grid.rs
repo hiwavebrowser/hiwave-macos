@@ -768,8 +768,8 @@ impl GridLayout {
     pub fn expand_auto_repeats(&mut self, container_width: f32, container_height: f32) {
         // Expand column auto-repeat
         if let Some(pattern) = self.column_auto_repeat.take() {
-            let available = container_width - (self.columns.len().saturating_sub(1)) as f32 * self.column_gap;
-            let new_tracks = Self::calculate_auto_repeat_tracks(&pattern, available, self.column_gap);
+            let available = container_width - Self::space_beside_auto_repeat(&self.columns, self.column_gap, container_width);
+            let new_tracks = Self::calculate_auto_repeat_tracks(&pattern, available, self.column_gap, container_width);
 
             // Insert at the stored position
             let insert_at = pattern.insert_position.min(self.columns.len());
@@ -781,8 +781,8 @@ impl GridLayout {
 
         // Expand row auto-repeat
         if let Some(pattern) = self.row_auto_repeat.take() {
-            let available = container_height - (self.rows.len().saturating_sub(1)) as f32 * self.row_gap;
-            let new_tracks = Self::calculate_auto_repeat_tracks(&pattern, available, self.row_gap);
+            let available = container_height - Self::space_beside_auto_repeat(&self.rows, self.row_gap, container_height);
+            let new_tracks = Self::calculate_auto_repeat_tracks(&pattern, available, self.row_gap, container_height);
 
             // Insert at the stored position
             let insert_at = pattern.insert_position.min(self.rows.len());
@@ -793,13 +793,43 @@ impl GridLayout {
         }
     }
 
+    /// What the tracks written beside an auto-repeat take from the
+    /// container before the repetitions are counted: each one's definite
+    /// size (its max when that is definite, else its min) and the gap that
+    /// separates it from its neighbour. Only the gaps were taken, one too
+    /// few, so `100px repeat(auto-fill, 25%)` got a repetition too many.
+    fn space_beside_auto_repeat(tracks: &[GridTrack], gap: f32, percent_base: f32) -> f32 {
+        let share = |percent: f32| {
+            if percent_base.is_finite() && percent_base > 0.0 {
+                percent / 100.0 * percent_base
+            } else {
+                0.0
+            }
+        };
+        tracks
+            .iter()
+            .map(|track| {
+                let min = track.percent.map(share).unwrap_or(track.base_size);
+                let max = match track.max_percent {
+                    Some(percent) => share(percent),
+                    None if track.growth_limit.is_finite() => track.growth_limit,
+                    None => 0.0,
+                };
+                max.max(min) + gap
+            })
+            .sum()
+    }
+
     /// Calculate how many tracks to create for auto-fill/auto-fit.
     ///
-    /// Returns a Vec of GridTrack to insert.
+    /// Returns a Vec of GridTrack to insert. `percent_base` is the grid
+    /// container's content size on this axis, which a percentage track is
+    /// a share of.
     fn calculate_auto_repeat_tracks(
         pattern: &AutoRepeatPattern,
         available_space: f32,
         gap: f32,
+        percent_base: f32,
     ) -> Vec<GridTrack> {
         if pattern.tracks.is_empty() {
             return Vec::new();
@@ -809,7 +839,7 @@ impl GridLayout {
         let pattern_fixed_size: f32 = pattern
             .tracks
             .iter()
-            .map(|def| Self::get_track_definite_size(&def.size))
+            .map(|def| Self::get_track_definite_size(&def.size, percent_base))
             .sum();
 
         // Include gaps between tracks in one repetition
@@ -874,16 +904,23 @@ impl GridLayout {
 
     /// Get the definite (fixed) size of a track for auto-repeat calculations.
     /// Returns 0 for flexible tracks (fr) since they don't contribute to fixed size.
-    fn get_track_definite_size(size: &TrackSize) -> f32 {
+    fn get_track_definite_size(size: &TrackSize, percent_base: f32) -> f32 {
         match size {
             TrackSize::Px(px) => *px,
+            // A share of the container, when the container has a size
+            // to take a share of (css-grid-2 §7.2.3.2). It counted as no
+            // size, so `repeat(auto-fit, minmax(25%, 1fr))` was one column.
+            TrackSize::Percent(percent) if percent_base.is_finite() && percent_base > 0.0 => {
+                percent / 100.0 * percent_base
+            }
             TrackSize::MinMax(min, max) => {
                 // Use the definite bound
-                let min_size = Self::get_track_definite_size(min);
-                let max_size = Self::get_track_definite_size(max);
-                // If max is definite, use it; otherwise use min
+                let min_size = Self::get_track_definite_size(min, percent_base);
+                let max_size = Self::get_track_definite_size(max, percent_base);
+                // The max when it is definite, floored by the min;
+                // otherwise the min.
                 if max_size > 0.0 {
-                    max_size
+                    max_size.max(min_size)
                 } else {
                     min_size
                 }
@@ -5682,7 +5719,7 @@ mod tests {
             insert_position: 0,
         };
 
-        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0, 500.0);
 
         assert_eq!(tracks.len(), 5);
         for track in &tracks {
@@ -5701,7 +5738,7 @@ mod tests {
             insert_position: 0,
         };
 
-        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 20.0);
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 20.0, 500.0);
 
         assert_eq!(tracks.len(), 4);
     }
@@ -5719,7 +5756,7 @@ mod tests {
             insert_position: 0,
         };
 
-        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0, 500.0);
 
         assert_eq!(tracks.len(), 5);
         // Each track should be flexible
@@ -5742,7 +5779,7 @@ mod tests {
             insert_position: 0,
         };
 
-        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0, 500.0);
 
         // 3 repetitions * 2 tracks = 6 tracks
         assert_eq!(tracks.len(), 6);
@@ -5761,7 +5798,7 @@ mod tests {
             insert_position: 0,
         };
 
-        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 100.0, 0.0);
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 100.0, 0.0, 100.0);
 
         // At least 1 repetition per spec
         assert_eq!(tracks.len(), 1);
@@ -5777,7 +5814,7 @@ mod tests {
             insert_position: 0,
         };
 
-        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0, 500.0);
 
         assert_eq!(tracks.len(), 5);
         for track in &tracks {
@@ -5794,7 +5831,7 @@ mod tests {
             insert_position: 0,
         };
 
-        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0, 500.0);
 
         // With no definite size, we get exactly 1 repetition
         assert_eq!(tracks.len(), 1);
@@ -5842,7 +5879,7 @@ mod tests {
             insert_position: 0,
         };
 
-        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0, 500.0);
 
         // Should have 5 tracks, all marked as auto-fit
         assert_eq!(tracks.len(), 5);
