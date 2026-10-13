@@ -286,7 +286,18 @@ fn only_a_valid_mime_essence_is_kept() {
     for (header, essence) in [
         ("Image/PNG", Some("image/png")),
         ("text/html; charset=utf-8", Some("text/html")),
-        ("application/vnd.api+json", Some("application/vnd.api+json")),
+        // Third R1 hold @ 43dd085c, item 2: only a type from a fixed list;
+        // a server-chosen one keeps its registered top-level type at most.
+        ("application/vnd.api+json", Some("application/other")),
+        ("vnd.user-alice/json", None),
+        ("secretct/junk", None),
+        ("application/x-secret-alice", Some("application/other")),
+        ("application/vnd.user-alice+json", Some("application/other")),
+        ("image/x-secret", Some("image/other")),
+        ("Application/JSON", Some("application/json")),
+        ("text/css", Some("text/css")),
+        ("text/javascript", Some("text/javascript")),
+        ("font/woff2", Some("font/woff2")),
         ("application/json, token=SECRET", None),
         ("text/html charset", None),
         ("text", None),

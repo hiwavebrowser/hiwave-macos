@@ -364,6 +364,7 @@ fn no_header_or_body_reaches_the_log_and_urls_lose_their_query() {
     let page = r#"<html><body><img src="/pic.png?user=ALICE#frag"><script>
 fetch('/api?key=APIKEY', { method: 'POST', headers: { 'Authorization': 'Bearer AUTHTOKEN', 'X-Custom': 'CUSTOMHEADER' }, body: 'REQUESTBODY' });
 fetch('/odd');
+fetch('/alice');
 var x = new XMLHttpRequest(); x.open('GET', '/odd'); x.send();
 </script></body></html>"#;
     let (engine, view, _server) = load(vec![
@@ -372,6 +373,8 @@ var x = new XMLHttpRequest(); x.open('GET', '/odd'); x.send();
         Route::ok("/api", "application/json", "{\"secret\":\"RESPONSEBODY\"}").header("Set-Cookie", "t=APICOOKIE"),
         // A malformed Content-Type is header text, not a MIME essence.
         Route::ok("/odd", "application/json, token=SECRET_CT", "{}"),
+        // A well-formed type the server made up (third R1 hold @ 43dd085c).
+        Route::ok("/alice", "vnd.user-ALICE/json", "{}"),
     ]);
     let records = records(&engine, view);
     let odd: Vec<Option<String>> = records
@@ -381,7 +384,7 @@ var x = new XMLHttpRequest(); x.open('GET', '/odd'); x.send();
             _ => None,
         })
         .collect();
-    assert_eq!(odd, vec![None, None], "{records:?}");
+    assert_eq!(odd, vec![None, None, None], "{records:?}");
     let all = serde_json::to_string(&records).unwrap();
     assert!(!all.to_ascii_lowercase().contains("secret_ct"), "the header leaked: {all}");
     for secret in [
