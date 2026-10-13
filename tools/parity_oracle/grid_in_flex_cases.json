@@ -726,6 +726,78 @@
    "no_text": true,
    "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:100px}#f{display:inline-block}#m{display:grid;grid-template-columns:auto auto}#i0,#i1{overflow:hidden}</style></head><body><div id=c><div id=f><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:150px\"></i></div></div></div></div></body></html>",
    "chrome_boxes": "c:0:0:100:10 f:0:0:100:10 m:0:0:100:10 i0:0:0:50:10 i1:50:0:50:10"
+  },
+  {
+   "name": "header-over-minmax-0-1fr-and-an-empty-auto-column",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:minmax(0,1fr) auto}#i0{grid-column:1/-1}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
+  },
+  {
+   "name": "header-over-minmax-0-1fr-and-an-empty-auto-column-min-width-0-main",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:minmax(0,1fr) auto}#i0{grid-column:1/-1}#i1{min-width:0}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
+  },
+  {
+   "name": "header-over-minmax-0-1fr-and-an-empty-auto-column-min-width-20px-main",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:minmax(0,1fr) auto}#i0{grid-column:1/-1}#i1{min-width:20px}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
+  },
+  {
+   "name": "header-over-1fr-and-an-empty-auto-column",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:1fr auto}#i0{grid-column:1/-1}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
+  },
+  {
+   "name": "header-over-1fr-and-an-empty-auto-column-min-width-0-main",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:1fr auto}#i0{grid-column:1/-1}#i1{min-width:0}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
+  },
+  {
+   "name": "header-over-1fr-and-an-empty-auto-column-min-width-20px-main",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:1fr auto}#i0{grid-column:1/-1}#i1{min-width:20px}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
+  },
+  {
+   "name": "header-over-2fr-and-an-empty-auto-column-min-width-0-main",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:2fr auto}#i0{grid-column:1/-1}#i1{min-width:0}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
+  },
+  {
+   "name": "header-over-1fr-and-an-empty-max-content-column-min-width-0-main",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:1fr max-content}#i0{grid-column:1/-1}#i1{min-width:0}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
+  },
+  {
+   "name": "header-over-1fr-and-an-empty-fit-content-column-min-width-20px-main",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:1fr fit-content(300px)}#i0{grid-column:1/-1}#i1{min-width:20px}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
+  },
+  {
+   "name": "header-over-1fr-and-a-fit-content-column-of-10px-min-width-0-main",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:1fr fit-content(300px)}#i0{grid-column:1/-1}#i1{min-width:0}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div><div id=i2><i style=\"width:10px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:590:10 i2:590:10:10:10"
+  },
+  {
+   "name": "header-over-minmax-0-1fr-and-an-auto-column-of-10px",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:minmax(0,1fr) auto}#i0{grid-column:1/-1}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:150px\"></i></div><div id=i1><i style=\"width:300px\"></i></div><div id=i2><i style=\"width:10px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:590:10 i2:590:10:10:10"
+  },
+  {
+   "name": "wide-header-over-minmax-0-1fr-and-an-empty-auto-column",
+   "no_text": true,
+   "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:minmax(0,1fr) auto}#i0{grid-column:1/-1}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:400px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
   }
  ],
  "chrome": "143.0.7499.4"
