@@ -57,6 +57,11 @@ pub struct GridTrack {
     /// wide for any other reason (`0px`, an empty `auto` track) keeps both
     /// of its gutters; the size alone does not say which this is.
     pub collapsed: bool,
+    /// A flexible track whose minimum is a length or a percentage
+    /// (`minmax(0, 1fr)`), not the `auto` minimum of a plain `1fr`. Items
+    /// do not size it (css-grid-1 §12.5 sizes only tracks with an intrinsic
+    /// min sizing function): its base size is that minimum and no more.
+    pub flexible_with_fixed_min: bool,
     /// Final computed size.
     pub size: f32,
     /// Position (offset from container start).
@@ -159,6 +164,9 @@ impl GridTrack {
             fit_content_limit,
             is_auto_fit: false,
             collapsed: false,
+            flexible_with_fixed_min: flex_factor > 0.0
+                && matches!(size, TrackSize::MinMax(min, _)
+                    if matches!(min.as_ref(), TrackSize::Px(_) | TrackSize::Percent(_))),
             size: base_size,
             position: 0.0,
             line_names: Vec::new(),
@@ -3192,8 +3200,9 @@ pub fn layout_grid_container(
 /// max-content constraint and the container's width is their sum plus the
 /// gaps. A length track is itself; `minmax(a, b)` is its minimum under
 /// min-content and its maximum under max-content; a content-sized track is
-/// the largest contribution of the items in its column; flexible tracks
-/// share one `fr` size, the largest any of them needs for its items.
+/// the largest contribution of the items in its column; a flexible track is
+/// its base size under min-content, and under max-content the tracks share
+/// one `fr` size, the largest any of them needs.
 ///
 /// The generic walk took the widest child, as if the items were stacked: an
 /// auto-width grid that is a flex item was as wide as its longest word
@@ -3223,17 +3232,34 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
     let columns = template.tracks.len();
     // The largest contribution of the items that auto-placement puts in a
     // column: item i goes to column i mod n.
+    // Walked once per column and constraint: a track below asks up to three
+    // times.
+    let mut contributions = vec![(0.0f32, 0.0f32); columns];
+    for (i, c) in items.iter().enumerate() {
+        let (low, high) = &mut contributions[i % columns];
+        *low = low.max(estimate_min_content_width(c));
+        *high = high.max(estimate_max_content_width(c));
+    }
     let content = |column: usize, min: bool| -> f32 {
-        items
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| i % columns == column)
-            .map(|(_, c)| if min { estimate_min_content_width(c) } else { estimate_max_content_width(c) })
-            .fold(0.0f32, f32::max)
+        let (low, high) = contributions[column];
+        if min { low } else { high }
     };
     let mut total = 0.0f32;
-    // The one `fr` size the flexible tracks share, and their factors' sum.
-    let (mut fr_size, mut fr_sum) = (0.0f32, 0.0f32);
+    // The flexible tracks, as (base size, factor), and the one `fr` size
+    // they share under a max-content constraint.
+    //
+    // css-grid-1 section 12.7: under a min-content constraint the flex
+    // fraction is zero, so a flexible track is its base size: its minimum
+    // (`minmax(0, 1fr)` is 0), or the min-content of its items for a plain
+    // `<n>fr`, whose minimum is `auto`. Under a max-content constraint the
+    // fraction is the largest any track needs (section 12.7.1: its base
+    // size over its factor, and its items' max-content over the factor,
+    // neither factor counted below 1), and a track is that fraction times
+    // its factor, never less than its base size. Chromium 148: `0.5fr`
+    // around a 100px word is 100 wide, two `minmax(100px, 1fr)` around 50
+    // and 150 are 300, and two `minmax(0, 1fr)` shrink to their container.
+    let mut flexible: Vec<(f32, f32)> = Vec::new();
+    let mut fr_size = 0.0f32;
     for (column, track) in template.tracks.iter().enumerate() {
         let sized = |size: &TrackSize, min: bool| -> Option<f32> {
             match size {
@@ -3245,19 +3271,15 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
                 _ => None,
             }
         };
-        let flexible = |fr: f32, fr_size: &mut f32, fr_sum: &mut f32| {
+        let mut flex = |base: f32, fr: f32| {
             let fr = fr.max(0.0);
-            *fr_sum += fr;
-            // A factor below 1 does not shrink the track under its content.
-            *fr_size = fr_size.max(content(column, min) / fr.max(1.0));
+            fr_size = fr_size.max(base.max(content(column, false)) / fr.max(1.0));
+            flexible.push((base, fr));
         };
         match &track.size {
-            TrackSize::Fr(fr) => flexible(*fr, &mut fr_size, &mut fr_sum),
+            TrackSize::Fr(fr) => flex(content(column, true), *fr),
             TrackSize::MinMax(low, high) => match high.as_ref() {
-                TrackSize::Fr(fr) => {
-                    total += sized(low, true).unwrap_or(0.0);
-                    flexible(*fr, &mut fr_size, &mut fr_sum);
-                }
+                TrackSize::Fr(fr) => flex(sized(low, true).unwrap_or(0.0), *fr),
                 high => {
                     let low = sized(low, true).unwrap_or(0.0);
                     total += if min { low } else { sized(high, false).unwrap_or(low).max(low) };
@@ -3267,7 +3289,10 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
         }
     }
     let gap = layout_box.length_to_px(&style.column_gap, 0.0);
-    Some(total + fr_size * fr_sum + gap * (columns as f32 - 1.0))
+    for (base, fr) in flexible {
+        total += if min { base } else { base.max(fr_size * fr) };
+    }
+    Some(total + gap * (columns as f32 - 1.0))
 }
 
 /// Size grid tracks using the track sizing algorithm.
@@ -3973,8 +3998,12 @@ fn distribute_span_contributions(
             let growable: Vec<usize> = (start..end)
                 .filter(|&i| {
                     let t = &tracks[i];
-                    t.is_min_content || t.is_max_content || t.is_flexible
-                        || t.growth_limit > t.base_size
+                    // `minmax(0, 1fr)`: a fixed minimum, which no item
+                    // grows. Chromium 148 gives two such columns 50 each in
+                    // a 100px grid around 150px words; here each was 150.
+                    !t.flexible_with_fixed_min
+                        && (t.is_min_content || t.is_max_content || t.is_flexible
+                            || t.growth_limit > t.base_size)
                 })
                 .collect();
             if growable.is_empty() {
