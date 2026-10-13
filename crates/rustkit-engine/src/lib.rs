@@ -7103,22 +7103,22 @@ impl Engine {
 
         let index = active_rule_index(stylesheets);
         let indexed = index.as_ref().and_then(|ix| match pseudo {
-            "::before" => Some(&ix.before),
-            "::after" => Some(&ix.after),
+            "::before" => Some((&ix.before, 0)),
+            "::after" => Some((&ix.after, 1)),
             _ => None,
         });
         // Only the pseudo rules filed under this element's id, classes,
         // attribute names or tag (by their base selector), plus the universal
         // ones: github's ~1,000 `::before`/`::after` rules were walked in full
         // for every element, half of all cascade time.
-        if let (Some(ix), Some(buckets)) = (index.as_ref(), indexed) {
+        if let (Some(ix), Some((buckets, which))) = (index.as_ref(), indexed) {
             // Every rule in these buckets ends in the pseudo, and the index
             // holds its prepared base selector and specificity. As in the
             // cascade, a candidate goes straight to the matcher: the bucket
             // it came from already stands in for the subject prefilter.
             for g in buckets.candidates(tag_name, attributes) {
                 let gi = g as usize;
-                let Some(prepared) = ix.pseudo_prepared[gi].as_deref() else {
+                let Some(prepared) = ix.pseudo_prepared[gi][which].as_deref() else {
                     continue;
                 };
                 #[cfg(test)]
@@ -7134,7 +7134,7 @@ impl Engine {
                 // No base keys means an empty base, which admits any element.
                 debug_assert!(
                     !matched
-                        || ix.pseudo_keys[gi]
+                        || ix.pseudo_keys[gi][which]
                             .as_deref()
                             .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes)),
                     "the subject prefilter rejects {:?}, which matches <{tag_name}>",
@@ -7153,21 +7153,20 @@ impl Engine {
             {
                 let selector = &rule.selector;
 
-                // Check for explicit pseudo-element in selector
-                if selector.ends_with(pseudo) || selector.ends_with(single_colon.as_str()) {
-                    // Get the base selector (without pseudo)
-                    let base_selector =
-                        pseudo_base_selector(selector, pseudo, single_colon.as_str());
+                // The members of the list that end in the pseudo, by their
+                // base selectors (without the pseudo).
+                if let Some((base_selector, bare)) =
+                    pseudo_list_base(selector, pseudo, single_colon.as_str())
+                {
 
                     // Check if base selector matches this element, with the
                     // host's real sibling context (`li:first-child::before`,
                     // `.slot:empty::before { content: "…" }`). The cheap
                     // subject prefilter first, exactly as the cascade does.
                     // A bare `::before` has no subject to prefilter on.
-                    if (base_selector.trim().is_empty()
-                        || self.rule_may_match(base_selector.trim(), tag_name, attributes))
+                    if (bare || self.rule_may_match(&base_selector, tag_name, attributes))
                         && SelectorMatcher.selector_matches(
-                        base_selector.trim(),
+                        &base_selector,
                         tag_name,
                         attributes,
                         ancestors,
@@ -7261,8 +7260,12 @@ impl Engine {
                         rustkit_css::PropertyValue::Inherit => continue,
                         rustkit_css::PropertyValue::Initial => continue,
                     };
-                    self.apply_style_property(
+                    // `inherit` takes the generating element's value, as an
+                    // element's does its parent's: `:before, :after
+                    // { box-sizing: inherit }` is half of the common reset.
+                    self.apply_cascaded(
                         &mut pseudo_style,
+                        parent,
                         &declaration.property,
                         value_str,
                     );
@@ -9829,6 +9832,9 @@ impl Engine {
             // Not inherited, so `unset` lands here too: the initial value is
             // `auto`, no ratio.
             "aspect-ratio" => style.aspect_ratio = None,
+            // Not inherited either: `initial` and `unset` undo a reset's
+            // `* { box-sizing: inherit }`.
+            "box-sizing" => style.box_sizing = rustkit_css::BoxSizing::ContentBox,
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
@@ -11313,31 +11319,34 @@ impl Engine {
                 let positional = ix.reads.note(&prepared);
                 ix.reads.positional.push(positional);
                 ix.prepared.push(prepared);
-                let mut pseudo_keys = None;
-                let mut pseudo_prepared = None;
+                let mut pseudo_keys = [None, None];
+                let mut pseudo_prepared = [None, None];
                 // Same test as create_pseudo_element's (the single-colon
-                // form covers the double-colon one). Filed under the keys of
-                // the BASE selector, the one create_pseudo_element prefilters:
-                // an empty base (bare `::before`) can match any element; a
-                // base with no keys never passes `rule_may_match`.
-                for (suffix, pseudo, buckets) in [
+                // form covers the double-colon one), per member of the
+                // list. Filed under the keys of the BASE selectors, the ones
+                // create_pseudo_element prefilters: a bare `::before` can
+                // match any element; a base with no keys never passes
+                // `rule_may_match`.
+                for (which, (suffix, pseudo, buckets)) in [
                     (":before", "::before", &mut ix.before),
                     (":after", "::after", &mut ix.after),
-                ] {
-                    if !rule.selector.ends_with(suffix) {
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let Some((base, bare)) = pseudo_list_base(&rule.selector, pseudo, suffix)
+                    else {
                         continue;
-                    }
-                    let base = pseudo_base_selector(&rule.selector, pseudo, suffix);
-                    pseudo_prepared = Some(SelectorMatcher.prepared_selector(base.trim()));
-                    if base.is_empty() {
+                    };
+                    pseudo_prepared[which] = Some(SelectorMatcher.prepared_selector(&base));
+                    if bare {
                         buckets.universal.push(g);
                     } else {
-                        // create_pseudo_element prefilters the TRIMMED base.
-                        let keys = self.subject_keys(base.trim());
+                        let keys = self.subject_keys(&base);
                         for key in keys.iter() {
                             buckets.file(key, g);
                         }
-                        pseudo_keys = Some(keys);
+                        pseudo_keys[which] = Some(keys);
                     }
                 }
                 ix.pseudo_keys.push(pseudo_keys);
@@ -29052,12 +29061,13 @@ struct RuleIndex {
     /// Computed once here so `rule_may_match` doesn't re-hash the selector
     /// string for every candidate of every element (24% of github's cascade).
     keys: Vec<Rc<Vec<SubjectKey>>>,
-    pseudo_keys: Vec<Option<Rc<Vec<SubjectKey>>>>,
+    /// Both per pseudo, `[::before, ::after]`: one list can hold both.
+    pseudo_keys: Vec<[Option<Rc<Vec<SubjectKey>>>; 2]>,
     /// Global rule index -> for a `:before`/`:after` rule, its prepared
     /// (trimmed) base selector, empty base included. `pseudo_element_style`
     /// matched the base by string, re-hashing it into the prepared cache for
     /// every candidate of every element (~20% of wikipedia's cascade).
-    pseudo_prepared: Vec<Option<Rc<PreparedSelector>>>,
+    pseudo_prepared: Vec<[Option<Rc<PreparedSelector>>; 2]>,
     /// Global rule index -> `selector_specificity` of its selector, so a
     /// matched rule doesn't re-scan its selector string on every element.
     specificity: Vec<(usize, usize, usize)>,
@@ -29235,6 +29245,30 @@ fn pseudo_base_selector<'a>(selector: &'a str, pseudo: &str, single_colon: &str)
         .trim_end_matches(pseudo)
         .trim_end_matches(single_colon)
         .trim()
+}
+
+/// The base selectors of the members of a selector list that end in `pseudo`
+/// (`single_colon` covers both spellings), as one list, and whether one of
+/// them is bare (`::before` alone styles every element's). None when no
+/// member ends in it. The list was taken whole, so only its last member
+/// could carry the pseudo: `*, :before, :after { box-sizing: inherit }`
+/// never reached a `::before`, and `a::before, b::after` styled one of two.
+fn pseudo_list_base(selector: &str, pseudo: &str, single_colon: &str) -> Option<(String, bool)> {
+    if !selector.contains(single_colon) {
+        return None;
+    }
+    let mut bases: Vec<&str> = Vec::new();
+    let mut bare = false;
+    for member in SelectorMatcher::split_top_level_commas(selector) {
+        let member = member.trim();
+        if !member.ends_with(single_colon) {
+            continue;
+        }
+        let base = pseudo_base_selector(member, pseudo, single_colon);
+        bare |= base.is_empty() || base == "*";
+        bases.push(if base.is_empty() { "*" } else { base });
+    }
+    (!bases.is_empty()).then(|| (bases.join(", "), bare))
 }
 
 impl RuleIndex {

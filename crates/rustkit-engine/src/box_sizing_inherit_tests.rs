@@ -157,13 +157,13 @@ fn a_pseudo_element_member_is_matched_anywhere_in_a_selector_list() {
         assert_eq!(width(&format!("{list}{BOX}")), "String(\"p:50\")", "{list}");
     }
     // A member for another element, or with no pseudo-element, makes no box.
-    for list in ["#p,.zz:before", ".zz:before,.zz:after", "#p,#p:hover"] {
+    for list in ["i,.zz:before", ".zz:before,.zz:after", "i:hover,.zz:after,i"] {
         assert_eq!(width(&format!("{list}{BOX}")), "String(\"p:0\")", "{list}");
     }
     // Bare members, alone and in a list.
     for list in [":before", "::after", "*,:before,:after", ".zz,:after"] {
         assert_eq!(
-            width(&format!("{list}{{padding-left:7px}} #p{{padding:0}} #p::before,#p::after{BOX}")),
+            width(&format!("{list}{{margin-left:7px}} #p{{margin:0}} #p::before,#p::after{BOX}")),
             "String(\"p:57\")",
             "{list}"
         );
