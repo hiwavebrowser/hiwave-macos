@@ -428,30 +428,7 @@ fn the_display_list_paints_what_chromium_paints() {
         };
         let name = c["name"].as_str().unwrap();
         let page = render(&data, name, viewport);
-        let painted = page.painted_colours();
-        for entry in chrome.split(' ') {
-            let (id, want) = entry.split_once(':').unwrap();
-            let background = page.colors_of(id);
-            let got = match background.split_once('/') {
-                Some((_, bg)) => {
-                    let rgb = bg
-                        .trim_start_matches("rgba(")
-                        .trim_start_matches("rgb(")
-                        .trim_end_matches(')');
-                    let rgb: Vec<&str> = rgb.split(',').take(3).collect();
-                    match painted.contains(&rgb.join(",")) {
-                        true => "P",
-                        false => "-",
-                    }
-                }
-                None => "-",
-            };
-            if got != want {
-                wrong.push(format!(
-                    "{name} #{id}: engine {got}, chrome {want} ({background})"
-                ));
-            }
-        }
+        wrong.extend(page.painted_against(name, chrome));
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
@@ -513,6 +490,37 @@ impl Rendered {
             })
             .collect()
     }
+
+    /// Each `id:P` or `id:-` of Chromium's `chrome_painted` that the
+    /// display list does not agree with, as `case #id: engine .., chrome ..`.
+    fn painted_against(&self, name: &str, chrome: &str) -> Vec<String> {
+        let painted = self.painted_colours();
+        let mut wrong = Vec::new();
+        for entry in chrome.split(' ') {
+            let (id, want) = entry.split_once(':').unwrap();
+            let background = self.colors_of(id);
+            let got = match background.split_once('/') {
+                Some((_, bg)) => {
+                    let rgb = bg
+                        .trim_start_matches("rgba(")
+                        .trim_start_matches("rgb(")
+                        .trim_end_matches(')');
+                    let rgb: Vec<&str> = rgb.split(',').take(3).collect();
+                    match painted.contains(&rgb.join(",")) {
+                        true => "P",
+                        false => "-",
+                    }
+                }
+                None => "-",
+            };
+            if got != want {
+                wrong.push(format!(
+                    "{name} #{id}: engine {got}, chrome {want} ({background})"
+                ));
+            }
+        }
+        wrong
+    }
 }
 
 /// The page's defining script did not run in the engine (here: the first
@@ -552,4 +560,164 @@ fn light_children_of_an_element_whose_definition_never_arrives_are_painted() {
         "laid out at {boxes:?}, against Chromium's wrap:0:0:800:55 skip:0:0:1:1 hd:0:1:800:54 logo:79:17:108:23 main:0:55:800:100;\n\
          not painted: {unpainted:?}"
     );
+}
+
+// ---- The settle is narrow (R1 HOLD @ 3f1ff2b7): it changes the cascade
+//      only, only after a load that lost a script, and only for the names
+//      present and undefined when the load's scripts were over.
+
+/// The reviewer's page: a custom element no script ever defines, hidden by
+/// its own `:not(:defined)` rule, and a script that waits for it. With
+/// `lost`, a script before it throws at top level: the load lost a script.
+/// `x-new` is a name that first appears after the load.
+fn never_defined_page(lost: bool) -> String {
+    format!(
+        "<!doctype html><style>body{{margin:0}} x-never:not(:defined){{visibility:hidden}} \
+         x-new:not(:defined){{visibility:hidden}}</style>\
+         <x-never id=n><span style='display:block;width:10px;height:10px;background:rgb(1,1,1)'></span></x-never>\
+         {}<script>var wd; customElements.whenDefined('x-never').then(function(){{wd=1}})</script>",
+        if lost { "<script>throw new Error('lost')</script>" } else { "" }
+    )
+}
+
+/// What the reviewer's script reads after the load. Chromium 141 (and this
+/// branch at `a43800ed`): `false,undefined,undefined,1`.
+const NEVER_DEFINED_PROBE: &str = "[document.getElementById('n').matches(':defined'), \
+    String(customElements.get('x-never')), String(wd), \
+    document.querySelectorAll(':not(:defined)').length].join()";
+
+/// Did any of the load's `<script>` elements not run to completion?
+fn lost_a_script(page: &Rendered) -> bool {
+    page.engine
+        .script_log(page.view)
+        .unwrap()
+        .iter()
+        .any(|r| !r.source.starts_with("event:") && r.outcome != ScriptOutcome::Ran)
+}
+
+/// Script-facing matching follows the registry, whether or not the load
+/// lost a script: `matches`, `querySelectorAll` and `closest` see the
+/// never-defined element as `:not(:defined)`, and so does a new element of
+/// another name, as in Chromium.
+#[test]
+fn script_sees_a_never_defined_element_as_not_defined_after_the_load() {
+    for lost in [true, false] {
+        let mut page = navigate(&never_defined_page(lost), 5_000);
+        assert_eq!(lost_a_script(&page), lost, "lost={lost}");
+        assert_eq!(
+            page.js(NEVER_DEFINED_PROBE),
+            "false,undefined,undefined,1",
+            "lost={lost}"
+        );
+        assert_eq!(
+            page.js(
+                "[document.querySelector('span').closest(':not(:defined)').id, \
+                  document.body.appendChild(document.createElement('x-new')).matches(':defined')].join()"
+            ),
+            "n,false",
+            "lost={lost}"
+        );
+    }
+}
+
+/// Every script ran and the element is never defined: Chromium keeps its
+/// `:not(:defined){visibility:hidden}` content unpainted, and so do we.
+#[test]
+fn a_load_whose_scripts_all_ran_keeps_not_defined_content_hidden() {
+    let page = navigate(&never_defined_page(false), 5_000);
+    assert!(!lost_a_script(&page));
+    assert!(
+        !page.painted_colours().iter().any(|c| c == "1,1,1"),
+        "x-never's child is painted"
+    );
+}
+
+/// After a load that lost a script, the never-defined element present then
+/// is `:defined` for style (its child is painted). An element of a name
+/// that first appears later is not, for style or for script.
+#[test]
+fn a_name_that_first_appears_after_the_settle_follows_the_registry() {
+    let mut page = navigate(&never_defined_page(true), 5_000);
+    assert!(lost_a_script(&page));
+    assert!(
+        page.painted_colours().iter().any(|c| c == "1,1,1"),
+        "the settle did not reach x-never's child"
+    );
+    assert_eq!(
+        page.js(
+            "var nw = document.createElement('x-new'); nw.id = 'nw'; \
+             nw.innerHTML = \"<span style='display:block;width:10px;height:10px;background:rgb(2,2,2)'></span>\"; \
+             document.body.appendChild(nw); String(nw.matches(':defined'))"
+        ),
+        "false"
+    );
+    // The append was laid out (`execute_script` flushes); ask again after it.
+    assert_eq!(
+        page.js("String(document.getElementById('nw').matches(':defined'))"),
+        "false"
+    );
+    assert!(
+        !page.painted_colours().iter().any(|c| c == "2,2,2"),
+        "x-new's child is painted: a later name was settled"
+    );
+    assert!(page.painted_colours().iter().any(|c| c == "1,1,1"));
+}
+
+/// A settled name whose real definition arrives after the load (a timer
+/// past the timer horizon): the upgrade runs once, its shadow content is
+/// painted, and the light child no slot takes is no longer painted.
+#[test]
+fn a_late_definition_of_a_settled_name_upgrades_once() {
+    let html = "<!doctype html><style>body{margin:0} x-late{display:block} \
+        x-late:not(:defined){visibility:hidden}</style>\
+        <x-late id=l><div style='width:10px;height:10px;background:rgb(3,3,3)'></div></x-late>\
+        <script>throw new Error('lost')</script>\
+        <script>var made = 0, connected = 0; setTimeout(function () { \
+          customElements.define('x-late', class extends HTMLElement { \
+            constructor() { super(); made++; this.attachShadow({mode: 'open'}).innerHTML = \
+              \"<div style='width:10px;height:10px;background:rgb(4,4,4)'></div>\"; } \
+            connectedCallback() { connected++; } }); }, 8000)</script>";
+    let mut page = navigate(html, 5_000);
+    assert!(lost_a_script(&page));
+    assert!(
+        page.painted_colours().iter().any(|c| c == "3,3,3"),
+        "settled: the light child shows until the definition arrives"
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let pumped = rt.block_on(page.engine.pump_live(page.view, 9_000));
+    assert_eq!(pumped.timers_ran, 1);
+    assert_eq!(
+        page.js("[made, connected, document.getElementById('l').matches(':defined')].join()"),
+        "1,1,true"
+    );
+    let painted = page.painted_colours();
+    assert!(
+        painted.iter().any(|c| c == "4,4,4"),
+        "shadow content not painted"
+    );
+    assert!(
+        !painted.iter().any(|c| c == "3,3,3"),
+        "the unslotted light child is still painted"
+    );
+}
+
+/// The component page, loaded the way the browser loads it (`load_url`),
+/// with every script running: each element painted or not as Chromium's
+/// committed `chrome_painted` says (`c-hold` stays hidden by its own
+/// `:not(:defined)` rule).
+#[test]
+fn the_component_page_on_the_navigation_path_paints_what_chromium_paints() {
+    let (data, _) = cases();
+    let c = case(&data, "component-page");
+    let page = navigate(c["html"].as_str().unwrap(), 5_000);
+    assert!(
+        !lost_a_script(&page),
+        "{:#?}",
+        page.engine.script_log(page.view)
+    );
+    let wrong = page.painted_against("component-page", c["chrome_painted"].as_str().unwrap());
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
