@@ -834,7 +834,8 @@ impl RequestGuard {
     }
 
     /// The answer arrived. `mime` may carry parameters; only its essence is
-    /// kept.
+    /// kept, and only when it is a valid `type/subtype` (see
+    /// [`mime_essence`]): anything else is header text and is `null`.
     pub fn response(
         mut self,
         status: u16,
@@ -844,10 +845,7 @@ impl RequestGuard {
         from_cache: bool,
     ) {
         self.done = true;
-        let mime = mime
-            .map(|m| m.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
-            .filter(|m| !m.is_empty())
-            .map(|m| cap(&m, 64).0);
+        let mime = mime.and_then(mime_essence);
         let event = InspectorEvent::Response {
             id: self.id,
             status,
@@ -1156,6 +1154,19 @@ fn query_tail(query: &str) -> &str {
     }
     let kept = query.len() - query.trim_end_matches(|c: char| ".,;:!?'\"`)]}>".contains(c)).len();
     &query[query.len() - kept..]
+}
+
+/// A Content-Type's essence, lowercased: the part before any `;`, when it
+/// is exactly `type/subtype` with each side an RFC 9110 token and the whole
+/// at most 64 characters. Anything else (`application/json, token=...`) is
+/// not a MIME type but header text, and is `None`.
+pub fn mime_essence(content_type: &str) -> Option<String> {
+    let essence = content_type.split(';').next().unwrap_or("").trim();
+    let token = |s: &str| {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    };
+    let (kind, subtype) = essence.split_once('/')?;
+    (essence.len() <= 64 && token(kind) && token(subtype)).then(|| essence.to_ascii_lowercase())
 }
 
 /// `path:line:col`, the path possibly holding colons itself.

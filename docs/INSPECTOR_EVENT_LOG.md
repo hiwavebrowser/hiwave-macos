@@ -54,7 +54,7 @@ field that is `null` today may hold a value later.
 | `relayout` | `cause` (the value of the `relayout cause=` log line), `took_ms` |
 | `navigation_redirect` | `from`, `to`, `status`: one per redirect the document followed, between its `request` and `response` |
 | `request` | `id` (per view, from 1), `url`, `method`, `resource_type`, `initiator` |
-| `response` | `id`, `status`, `mime` (essence only), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms` |
+| `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms` |
 | `failure` | `id`, `stage`, `reason`, `duration_ms` |
 
 `location` is `null` or `{ "url", "line", "column" }` (1-based). `url` is the

@@ -274,3 +274,23 @@ fn a_query_is_scrubbed_up_to_whitespace_or_a_frames_position() {
         "bad https://h.test/x?a[]=1&t=S."
     );
 }
+
+/// Only a valid `type/subtype` is a response's MIME type; header text
+/// that is not one is never kept.
+#[test]
+fn only_a_valid_mime_essence_is_kept() {
+    for (header, essence) in [
+        ("Image/PNG", Some("image/png")),
+        ("text/html; charset=utf-8", Some("text/html")),
+        ("application/vnd.api+json", Some("application/vnd.api+json")),
+        ("application/json, token=SECRET", None),
+        ("text/html charset", None),
+        ("text", None),
+        ("a/b/c", None),
+        ("/x", None),
+        ("", None),
+    ] {
+        assert_eq!(mime_essence(header).as_deref(), essence, "{header}");
+    }
+    assert_eq!(mime_essence(&format!("a/{}", "b".repeat(70))), None);
+}
