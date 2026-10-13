@@ -223,6 +223,57 @@ fn html_on_a_page_shorter_than_the_viewport_is_as_tall_as_its_content() {
     assert_eq!(diag(&engine, view, "html")["box"]["border_box"], rect(0.0, 0.0, 800.0, 2000.0));
 }
 
+/// html's height on 1280x800 against Chromium's `getBoundingClientRect`.
+fn html_height(page: &str) -> serde_json::Value {
+    let (engine, view) = engine_with(page, 1280, 800);
+    diag(&engine, view, "html")["box"]["border_box"]["h"].clone()
+}
+
+#[test]
+fn html_counts_a_bottom_margin_that_collapses_through_body() {
+    // Second R1 hold item 1: a last child's bottom margin collapses through
+    // body's open bottom edge and stops at html (Chromium: 1050, not 1010).
+    let doc = |body: &str, inner: &str| format!("<!DOCTYPE html><html><body{body}>{inner}</body></html>");
+    let cases = [
+        // The reviewer's reproducer.
+        (doc(" style=\"margin:0\"", "<div style=\"height:1000px\"></div><div style=\"height:10px;margin-bottom:40px\"></div>"), 1050.0),
+        // A text-free `<p>`: max(16, body's 8) below the content.
+        (doc("", "<div style=\"height:100px;margin-bottom:16px\"></div>"), 124.0),
+        // Three levels deep, through body's own 5px.
+        (
+            doc(
+                " style=\"margin:0 0 5px\"",
+                "<div style=\"margin-bottom:10px\"><div style=\"margin-bottom:30px\"><div style=\"height:20px;margin-bottom:25px\"></div></div></div>",
+            ),
+            50.0,
+        ),
+        // Negative margins: the largest positive plus the most negative.
+        (doc(" style=\"margin:0 0 10px\"", "<div style=\"height:100px;margin-bottom:-30px\"></div>"), 80.0),
+        (
+            doc(" style=\"margin:0 0 -5px\"", "<div style=\"margin-bottom:-20px\"><div style=\"height:100px;margin-bottom:40px\"></div></div>"),
+            120.0,
+        ),
+        // Out of flow: an abspos last child's margin does not collapse.
+        (
+            doc(
+                " style=\"margin:0\"",
+                "<div style=\"height:100px;margin-bottom:30px\"></div><div style=\"position:absolute;width:10px;height:10px;margin-bottom:50px\"></div>",
+            ),
+            130.0,
+        ),
+        // A closed bottom edge keeps the margin inside body.
+        (doc(" style=\"margin:0;padding-bottom:5px\"", "<div style=\"height:100px;margin-bottom:40px\"></div>"), 145.0),
+        (doc(" style=\"margin:0;border-bottom:3px solid\"", "<div style=\"height:100px;margin-bottom:40px\"></div>"), 143.0),
+        (doc(" style=\"margin:0;display:flex\"", "<div style=\"width:50px;height:100px;margin-bottom:40px\"></div>"), 140.0),
+        (doc(" style=\"margin:0;height:100px\"", "<div style=\"height:50px;margin-bottom:200px\"></div>"), 100.0),
+        // Taller than the viewport.
+        (doc("", "<div style=\"height:2000px\"></div><div style=\"height:10px;margin-bottom:40px\"></div>"), 2058.0),
+    ];
+    for (page, want) in cases {
+        assert_eq!(html_height(&page), want, "{page}");
+    }
+}
+
 #[test]
 fn html_without_a_doctype_notes_that_chromium_is_in_quirks_mode() {
     let page = "<html><body style=\"margin:0\"><div style=\"height:50px\"></div></body></html>";
