@@ -332,6 +332,8 @@ mod grid_item_abspos_tests;
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_auto_repeat_percent_tests;
 #[cfg(test)]
 mod nested_layout_matrix_tests;
 #[cfg(test)]
