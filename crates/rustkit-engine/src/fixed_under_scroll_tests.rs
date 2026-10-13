@@ -366,3 +366,96 @@ fn only_a_page_with_a_held_fixed_box_pays_for_the_fixed_walk() {
     ));
     assert!(engine.views[&view].no_held_fixed_boxes, "a fixed box that scrolls with the page");
 }
+
+/// A press and a click at the point, as the page's document listeners
+/// logged them (`type:id-or-tag`).
+fn logged_press(root_css: &str, x: f32, y: f32) -> String {
+    let (mut engine, view, _) = page_list(&format!(
+        "<style>{root_css}</style>\
+         <div id=menu style='pointer-events:auto;height:30px;width:100px;background:none'>menu</div>\
+         <div id=content style='height:100px;background:none'>page</div>\
+         <script>var log=[];['mousedown','click'].forEach(function(t){{\
+         document.addEventListener(t,function(e){{log.push(t+':'+(e.target.id||e.target.tagName))}})}})</script>"
+    ));
+    engine.mouse_down_at_point(view, x, y);
+    engine.click_at_point(view, x, y);
+    engine.execute_script(view, "log.join(' ')").expect("script")
+}
+
+/// The modal-menu pattern: `body { pointer-events: none }` while a menu
+/// is open, closed by a document listener that hears a press outside it.
+/// No box under the point is a target then, and the event goes to the
+/// root element (Chromium 141: `mousedown:HTML click:HTML`), also when
+/// the root is `none` itself. It must not go to the box under the point,
+/// and it must not be dropped.
+#[test]
+fn a_point_where_no_box_is_a_target_reaches_the_root_element() {
+    for root_css in ["body{pointer-events:none}", "html,body{pointer-events:none}"] {
+        assert_eq!(
+            logged_press(root_css, 150.0, 60.0),
+            "String(\"mousedown:HTML click:HTML\")",
+            "outside the menu, {root_css}"
+        );
+        assert_eq!(
+            logged_press(root_css, 20.0, 10.0),
+            "String(\"mousedown:menu click:menu\")",
+            "on the menu, {root_css}"
+        );
+    }
+}
+
+/// The same answer from the element lookup the pointer paths share, at
+/// the top of the page and scrolled, and with a see-through fixed overlay
+/// as the only box there.
+#[test]
+fn the_element_at_a_point_with_no_target_is_the_root_element() {
+    let (mut engine, view, _) = page_list(
+        "<style>body{pointer-events:none}</style>\
+         <div style='position:fixed;left:0;top:0;width:200px;height:100px;background:none'></div>\
+         <p id=text>text</p>",
+    );
+    let root = engine.views[&view].document.as_ref().unwrap().document_element().unwrap().id.raw();
+    assert_eq!(engine.element_at_point(view, 150.0, 60.0), Some(root));
+    engine.set_scroll_offset(view, 0.0, 300.0).unwrap();
+    assert_eq!(engine.element_at_point(view, 150.0, 60.0), Some(root));
+}
+
+/// Microseconds per `element_at_point` on the review's page: 3000 rows in
+/// a 400x300 view scrolled by 4000, 2000 calls at moving points. Printed,
+/// not asserted (`--release -- --ignored --nocapture`).
+#[test]
+#[ignore = "a timing, run by hand in a release build"]
+fn timing_of_a_hit_test_with_and_without_a_fixed_box() {
+    for (name, extra) in [
+        ("no fixed box", ""),
+        ("one fixed bar", "<div style='position:fixed;top:0;left:0;right:0;height:20px'>bar</div>"),
+        (
+            "full-window pointer-events:none overlay",
+            "<div style='position:fixed;top:0;left:0;right:0;bottom:0;pointer-events:none'></div>",
+        ),
+    ] {
+        let rows: String = (0..3000).map(|n| format!("<div style='height:4px'><span>{n}</span></div>")).collect();
+        let page = format!("<html><body style='margin:0'>{extra}{rows}</body></html>");
+        let server = serve_routes(vec![("/", "text/html", page)]);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(engine.load_url(view, url)).expect("load_url");
+        engine.set_scroll_offset(view, 0.0, 4000.0).unwrap();
+        let mut runs = Vec::new();
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let mut found = 0usize;
+            for n in 0..2000u32 {
+                let (x, y) = ((n * 7 % 400) as f32, (n * 13 % 300) as f32);
+                found += usize::from(engine.element_at_point(view, x, y).is_some());
+            }
+            runs.push(format!("{:.1}", start.elapsed().as_secs_f64() * 1e6 / 2000.0));
+            assert_eq!(found, 2000);
+        }
+        eprintln!("TIMING {name}: {} us per call", runs.join(", "));
+    }
+}
