@@ -363,13 +363,27 @@ fn a_repeated_get_is_answered_from_the_cache() {
 fn no_header_or_body_reaches_the_log_and_urls_lose_their_query() {
     let page = r#"<html><body><img src="/pic.png?user=ALICE#frag"><script>
 fetch('/api?key=APIKEY', { method: 'POST', headers: { 'Authorization': 'Bearer AUTHTOKEN', 'X-Custom': 'CUSTOMHEADER' }, body: 'REQUESTBODY' });
+fetch('/odd');
+var x = new XMLHttpRequest(); x.open('GET', '/odd'); x.send();
 </script></body></html>"#;
     let (engine, view, _server) = load(vec![
         Route::html("/", page).header("Set-Cookie", "sid=SETCOOKIE"),
         png("/pic.png"),
         Route::ok("/api", "application/json", "{\"secret\":\"RESPONSEBODY\"}").header("Set-Cookie", "t=APICOOKIE"),
+        // A malformed Content-Type is header text, not a MIME essence.
+        Route::ok("/odd", "application/json, token=SECRET_CT", "{}"),
     ]);
-    let all = serde_json::to_string(&records(&engine, view)).unwrap();
+    let records = records(&engine, view);
+    let odd: Vec<Option<String>> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::Response { mime, .. } if mime.as_deref() != Some("text/html") && mime.as_deref() != Some("image/png") && mime.as_deref() != Some("application/json") => Some(mime.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(odd, vec![None, None], "{records:?}");
+    let all = serde_json::to_string(&records).unwrap();
+    assert!(!all.to_ascii_lowercase().contains("secret_ct"), "the header leaked: {all}");
     for secret in [
         "ALICE", "frag", "APIKEY", "AUTHTOKEN", "Authorization", "CUSTOMHEADER", "REQUESTBODY", "RESPONSEBODY", "SETCOOKIE",
         "APICOOKIE", "Set-Cookie",
