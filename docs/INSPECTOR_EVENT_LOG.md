@@ -101,7 +101,9 @@ script reaches it: `XMLHttpRequest.open(async=false)`,
 `XMLHttpRequest.responseXML` (read on a finished response whose type is XML,
 or HTML with `responseType = 'document'`: anywhere else it is `null` in
 every browser), `CustomElementRegistry.define(extends)`,
-`ReadableStream.getReader(byob)`, `DOMParser.parseFromString(XML)`. One event
+`ReadableStream.getReader(byob)`, `DOMParser.parseFromString(XML)`. Only
+these members are ever recorded (`rustkit_bindings::UNSUPPORTED_MEMBERS`):
+page script can reach the reporter, but cannot add names or text. One event
 per member per page; `Inspector::unsupported_apis()` and the summary carry the
 counts. Property reads that fall through to `undefined` are not detected:
 that needs a hook on every property access (see the PR that added this).

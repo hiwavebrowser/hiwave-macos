@@ -372,6 +372,17 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// so a page's `setTimeout(f, 2000)` runs without the load waiting 2s of wall
 /// time. Promise reactions run when the enclosing evaluation returns, not
 /// between two timer callbacks.
+/// The Web API members the bindings report as unimplemented when page
+/// script reaches them (`__rustkit_unsupported` in the bindings' scripts).
+/// Nothing else is ever reported: page script can call the reporter too.
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 5] = [
+    ("XMLHttpRequest", "open(async=false)"),
+    ("XMLHttpRequest", "responseXML"),
+    ("CustomElementRegistry", "define(extends)"),
+    ("ReadableStream", "getReader(byob)"),
+    ("DOMParser", "parseFromString(XML)"),
+];
+
 const PAGE_LIFECYCLE_JS: &str = r#"
 (function () {
     var errors = [];
@@ -401,13 +412,23 @@ const PAGE_LIFECYCLE_JS: &str = r#"
 
     // Web API members the bindings know they do not implement, reached by
     // page script: `interface.member` -> count and the first caller's
-    // position (only while the console notes positions). Bounded by the
-    // number of instrumented members.
-    var unsupported = {};
+    // position (only while the console notes positions). Page script can
+    // call this too, so only the instrumented members count (the same list
+    // as `UNSUPPORTED_MEMBERS`): the table never holds page text and never
+    // outgrows the list.
+    var allowed = Object.create(null);
+    allowed['XMLHttpRequest.open(async=false)'] = true;
+    allowed['XMLHttpRequest.responseXML'] = true;
+    allowed['CustomElementRegistry.define(extends)'] = true;
+    allowed['ReadableStream.getReader(byob)'] = true;
+    allowed['DOMParser.parseFromString(XML)'] = true;
+    var unsupported = Object.create(null);
     var unsupportedKeys = [];
     var where = typeof __rustkit_console_where === 'function' ? __rustkit_console_where : null;
     window.__rustkit_unsupported = function (iface, member) {
+        if (typeof iface !== 'string' || typeof member !== 'string') return;
         var key = iface + '.' + member;
+        if (allowed[key] !== true) return;
         var seen = unsupported[key];
         if (seen) { seen.n++; return; }
         var at = null;
@@ -1480,7 +1501,8 @@ impl DomBindings {
     }
 
     /// Unimplemented Web API members page script reached since the last
-    /// call: `(interface, member, times, first caller's position)`.
+    /// call: `(interface, member, times, first caller's position)`. Only
+    /// [`UNSUPPORTED_MEMBERS`] are ever returned.
     pub fn take_unsupported_apis(&self) -> Vec<(String, String, u64, Option<rustkit_js::ScriptPosition>)> {
         #[derive(serde::Deserialize)]
         struct Reached {
@@ -1498,6 +1520,7 @@ impl DomBindings {
         serde_json::from_str::<Vec<Reached>>(&json)
             .unwrap_or_default()
             .into_iter()
+            .filter(|r| UNSUPPORTED_MEMBERS.contains(&(r.i.as_str(), r.m.as_str())))
             .map(|r| {
                 let at = r.at.and_then(|at| {
                     let mut parts = at.split('\u{1}');
@@ -2531,6 +2554,15 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("undefinedFn"), "{errors:?}");
         assert!(bindings.take_reported_errors().is_empty(), "drained");
+    }
+
+    /// The reporter's allow-list in script is `UNSUPPORTED_MEMBERS`.
+    #[test]
+    fn the_unsupported_allow_list_matches_in_script_and_rust() {
+        for (interface, member) in UNSUPPORTED_MEMBERS {
+            assert!(PAGE_LIFECYCLE_JS.contains(&format!("allowed['{interface}.{member}'] = true;")));
+        }
+        assert_eq!(PAGE_LIFECYCLE_JS.matches("allowed['").count(), UNSUPPORTED_MEMBERS.len());
     }
 
     /// A listener's error text keeps a U+0000 of its own unless the stack
