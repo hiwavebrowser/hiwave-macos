@@ -78,3 +78,20 @@ export function reportTarget(target, isUrl, keepQuery, cwd) {
   const rel = posix.relative(cwd, target);
   return rel && !rel.startsWith('..') ? rel : posix.basename(target);
 }
+
+/** A message (a navigation error, an exception) as a result may carry it:
+ * each target, as given or as a URL spells it, becomes the record's name
+ * for it, and any other URL left in it is scrubbed. */
+export function redactTarget(msg, targets, named) {
+  let s = String(msg);
+  const forms = new Set();
+  for (const t of targets) {
+    if (!t) continue;
+    forms.add(String(t));
+    try { forms.add(new URL(t).href); } catch { /* not a URL: the form as given */ }
+  }
+  for (const f of [...forms].sort((a, b) => b.length - a.length)) s = s.split(f).join(named);
+  // A data: payload runs to the end of the line, spaces and all.
+  s = s.replace(/data:([^,\s]*),[^\n]*/gi, (_, m) => `data:${m.split(';')[0]}`);
+  return s.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*/gi, (u) => (u === named ? u : scrubUrl(u, null)));
+}

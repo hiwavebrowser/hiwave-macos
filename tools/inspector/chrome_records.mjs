@@ -29,7 +29,7 @@ import { chromium } from '../parity_oracle/node_modules/playwright/index.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { backgroundImage, reportTarget } from './record_scrub.mjs';
+import { backgroundImage, redactTarget, reportTarget } from './record_scrub.mjs';
 import {
   createDeterministicContext,
   getDeterministicLaunchOptions,
@@ -324,9 +324,11 @@ async function main() {
   );
   const result = { target: named, status: 'ok', error: null };
   const browser = await chromium.launch(getDeterministicLaunchOptions());
+  let url;
+  // An error message quotes the target in full: name it as the record does.
+  const redact = (e) => redactTarget(String(e.message || e).split('\n')[0], [opts.target, url], named);
   try {
     let context;
-    let url;
     if (isUrl) {
       url = opts.target;
       context = await browser.newContext({
@@ -349,7 +351,7 @@ async function main() {
     try {
       response = await page.goto(url, { waitUntil: isUrl ? 'load' : 'networkidle', timeout: NAV_TIMEOUT_MS });
     } catch (e) {
-      result.nav_error = String(e.message || e).split('\n')[0];
+      result.nav_error = redact(e);
     }
     // An error page is recorded (it is what loaded) but the run is not ok.
     if (response && response.status() >= 400) {
@@ -386,7 +388,7 @@ async function main() {
     await context.close();
   } catch (e) {
     result.status = 'error';
-    result.error = String(e.message || e).split('\n')[0];
+    result.error = redact(e);
   } finally {
     await browser.close();
   }
