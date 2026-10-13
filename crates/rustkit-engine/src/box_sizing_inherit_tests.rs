@@ -90,3 +90,50 @@ fn box_sizing_is_not_inherited_without_the_keyword() {
     rt.block_on(engine.load_url(view, url)).expect("load_url");
     assert_eq!(engine.execute_script(view, WIDTHS).expect("script"), "String(\"p:300 k:120\")");
 }
+
+/// `initial` and `unset` (box-sizing is not inherited, so both mean the
+/// initial value) put a box back to `content-box` under the reset, and its
+/// children inherit that. Chromium 141: 230 and content-box for both boxes.
+/// Before the `inherit` arm the reset did nothing, so the missing initial
+/// value did not show.
+#[test]
+fn box_sizing_initial_and_unset_are_content_box_under_the_inheriting_reset() {
+    for keyword in ["initial", "unset"] {
+        assert_eq!(
+            measured(
+                &format!(
+                    ".b{{width:200px;padding:10px;border:5px solid}} .x{{box-sizing:{keyword}}}"
+                ),
+                "<div id=a class='b x'><div id=k class=b>x</div></div>",
+                "[].map.call(document.querySelectorAll('[id]'), function (e) { \
+                 return e.id + ':' + e.getBoundingClientRect().width + ',' + \
+                 getComputedStyle(e).boxSizing; }).join(' ')",
+            ),
+            "String(\"a:230,content-box k:230,content-box\")",
+            "box-sizing: {keyword}"
+        );
+    }
+}
+
+/// The reset's `:before, :after { box-sizing: inherit }` half: a generated
+/// box takes its element's value, so its width is its border box. Chromium
+/// 141: the inline-block that holds it is 100 wide (130 as content-box).
+#[test]
+fn a_pseudo_element_inherits_box_sizing_from_its_element() {
+    for pseudo in ["before", "after"] {
+        assert_eq!(
+            measured(
+                &format!(
+                    "#p::{pseudo}{{content:'';display:block;width:100px;padding:10px;border:5px solid}} \
+                     #q{{box-sizing:content-box}} \
+                     #q::{pseudo}{{content:'';display:block;width:100px;padding:10px;border:5px solid}}"
+                ),
+                "<span id=p style='display:inline-block'></span>\
+                 <span id=q style='display:inline-block'></span>",
+                WIDTHS,
+            ),
+            "String(\"p:100 q:130\")",
+            "::{pseudo}"
+        );
+    }
+}
