@@ -26,11 +26,14 @@ Ignore everything else: feature → `master`, stacked bases (`athena/*`,
 `atlas/*`, etc.), and any other non-`develop` base that is not the
 `develop` → `master` case above.
 
-**`no-check` label.** Before anything else, read the PR's labels. If the PR
-carries the label `no-check`, it is a standing or parked PR: do nothing. Do not
-stamp PASS or FAIL, do not comment, do not edit an earlier stamp, do not add or
-remove labels. Removing the label is what puts the PR back in scope; on the
-next update after that, review it as usual.
+**`no-check` label.** Before the gate checks, read the PR's labels. If the PR
+carries the label `no-check`, it is a standing or parked PR: do not stamp PASS
+or FAIL, do not comment, and do not edit an earlier stamp. The one exception:
+if HEAD differs from the SHA in the latest `R2-STAMP`, remove `r2-pass` as on
+any new push, so a parked PR never shows a pass for a head no gate has checked.
+Do not add or remove any other label. Only the project lead adds or removes
+`no-check`. Removing the `no-check` label is itself an update: review the PR at
+its current HEAD then, as usual.
 
 ### Record HEAD first
 
