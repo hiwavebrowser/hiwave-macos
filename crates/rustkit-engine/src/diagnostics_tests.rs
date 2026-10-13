@@ -416,6 +416,15 @@ fn a_data_page_url_keeps_only_its_mime_type() {
 }
 
 #[test]
+fn script_blob_and_comma_less_data_page_urls_keep_no_payload() {
+    let r = |u: &str| diagnostics::report_url(&Url::parse(u).unwrap(), true);
+    assert_eq!(r("javascript:alert(document.cookie)"), "javascript:");
+    assert_eq!(r("data:SECRETNOCOMMA"), "data:");
+    assert_eq!(r("blob:https://user:PW@example.test/2b8c-uuid"), "blob:https://example.test");
+    assert_eq!(r("blob:2b8c-uuid"), "blob:");
+}
+
+#[test]
 fn sizes_follow_box_sizing_and_relative_lengths_resolve_to_px() {
     let (engine, view) = engine_with_page();
     let r = diag(&engine, view, "#sized");

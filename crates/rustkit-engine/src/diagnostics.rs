@@ -566,7 +566,7 @@ fn html_box(
     layout_box.content_box = Some(r);
     let (vw, vh) = (viewport.0 as f32, viewport.1 as f32);
     paint.outside_viewport = Some(r.x + r.w <= 0.0 || r.y + r.h <= 0.0 || r.x >= vw || r.y >= vh);
-    notes.push("html's box: the layout root's width and its in-flow content's height (the root itself is the viewport)".into());
+    notes.push("html's box: the layout root's width and its in-flow content's height (the root itself is the viewport); the engine applies none of html's own margin, border, padding or height".into());
 }
 
 /// The bottom margin edge of an in-flow block as its BFC root sees it: its
@@ -621,9 +621,23 @@ fn float_bottom(b: &LayoutBox, bottom: f32) -> f32 {
 /// no query or fragment unless asked. A `data:` URL's payload is the
 /// document itself, so it is reduced to `data:<mime>` even then.
 pub(crate) fn report_url(url: &Url, include_query: bool) -> String {
-    if url.scheme() == "data" {
-        let mime = url.path().split([',', ';']).next().unwrap_or("").trim();
-        return format!("data:{mime}");
+    match url.scheme() {
+        // With no comma there is no media type, only payload.
+        "data" => {
+            let mime = url.path().split_once(',').map_or("", |(m, _)| m.split(';').next().unwrap_or("").trim());
+            return format!("data:{mime}");
+        }
+        // A script URL is all payload.
+        "javascript" => return "javascript:".into(),
+        // `set_username` cannot reach the userinfo inside a blob URL: report
+        // only its origin (no userinfo, no UUID).
+        "blob" => {
+            return match url.origin() {
+                o @ url::Origin::Tuple(..) => format!("blob:{}", o.ascii_serialization()),
+                url::Origin::Opaque(_) => "blob:".into(),
+            }
+        }
+        _ => {}
     }
     let mut u = url.clone();
     let _ = u.set_username("");
