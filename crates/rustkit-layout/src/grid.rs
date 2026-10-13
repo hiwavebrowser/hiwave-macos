@@ -1778,12 +1778,20 @@ pub fn layout_grid_container(
     // and columns do not read each other in this phase, and a row
     // contribution that is a real layout (the L0 fragments below) needs
     // the item's inline size.
+    let columns_under_a_span = tracks_under_a_span(
+        grid.columns.len(),
+        items.iter().map(|item| ((item.column_start - 1).max(0) as usize, item.column_span.max(1) as usize)),
+    );
     let column_contributions: Vec<(usize, usize, f32)> = items
         .iter()
         .map(|item| {
             let start = (item.column_start - 1).max(0) as usize;
             let span = item.column_span.max(1) as usize;
-            let flexible = (start..start + span).all(|i| grid.columns.get(i).is_some_and(|t| t.is_flexible));
+            // A flexible column that a spanning item also covers keeps the
+            // content floor of its own items (see `tracks_under_a_span`).
+            let flexible = (start..start + span).all(|i| {
+                grid.columns.get(i).is_some_and(|t| t.is_flexible) && !columns_under_a_span[i]
+            });
             let contribution = if flexible {
                 item.get_flexible_width_contribution(container_width)
             } else {
@@ -4058,6 +4066,27 @@ pub(crate) fn horizontal_padding_border(style: &ComputedStyle) -> f32 {
         + intrinsic_len_px(&style.border_right_width, fs)
 }
 
+/// Per track: does an item spanning more than one track cover it?
+///
+/// A flexible track under a spanning item keeps the floor its own items put
+/// under it (their content, and for `minmax(0, 1fr)` too). The spanning
+/// item's contribution is shared among every growable track it covers, the
+/// content-sized ones included; with the flexible track left at 0, a
+/// full-width header over `minmax(0, 1fr) auto` gave the empty `auto`
+/// column half the header's width (main 525 in 600; Chromium 143 600).
+/// css-grid-1 §12.5 step 4 would have the header grow only the flexible
+/// track; until spans do that, the floor keeps the content track at its
+/// own size.
+fn tracks_under_a_span(len: usize, placements: impl Iterator<Item = (usize, usize)>) -> Vec<bool> {
+    let mut under = vec![false; len];
+    for (start, span) in placements.filter(|p| p.1 > 1) {
+        for covered in under.iter_mut().skip(start).take(span) {
+            *covered = true;
+        }
+    }
+    under
+}
+
 /// css-grid-1 §12.5 (intrinsic track sizes), items processed by span count:
 /// each `(start, span, contribution)` grows the base sizes of the tracks it
 /// spans until they (plus the spanned gutters, which the item already owns)
@@ -4078,6 +4107,7 @@ fn distribute_span_contributions(
     max_span: usize,
 ) {
     const EPS: f32 = 0.01;
+    let under_a_span = tracks_under_a_span(tracks.len(), contributions.iter().map(|c| (c.0, c.1)));
     // Per track: has an item of a smaller span already sized it?
     let mut sized = vec![false; tracks.len()];
     for span in 1..=max_span {
@@ -4108,8 +4138,10 @@ fn distribute_span_contributions(
                     // out, the whole contribution went to the content track
                     // beside it, and a header across `auto minmax(0, 1fr)`
                     // made the sidebar as wide as the header's text (150
-                    // and 450 in 600; Chromium 40 and 560).
-                    (span > 1 || !t.flexible_with_fixed_min)
+                    // and 450 in 600; Chromium 40 and 560). And a track
+                    // under a spanning item keeps its own items' floor
+                    // (`tracks_under_a_span`).
+                    (span > 1 || !t.flexible_with_fixed_min || under_a_span[i])
                         && (t.is_min_content || t.is_max_content || t.is_flexible
                             || t.growth_limit > t.base_size)
                 })

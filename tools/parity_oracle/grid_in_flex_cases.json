@@ -797,7 +797,8 @@
    "name": "wide-header-over-minmax-0-1fr-and-an-empty-auto-column",
    "no_text": true,
    "html": "<!doctype html><html><head><style>body{margin:0;font-size:0;line-height:0}i{display:inline-block;height:10px}#c{width:600px}#m{display:grid;grid-template-columns:minmax(0,1fr) auto}#i0{grid-column:1/-1}</style></head><body><div id=c><div id=m><div id=i0><i style=\"width:400px\"></i></div><div id=i1><i style=\"width:300px\"></i></div></div></div></body></html>",
-   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10"
+   "chrome_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:600:10",
+   "engine_boxes": "c:0:0:600:20 m:0:0:600:20 i0:0:0:600:10 i1:0:10:550:10"
   }
  ],
  "chrome": "143.0.7499.4"

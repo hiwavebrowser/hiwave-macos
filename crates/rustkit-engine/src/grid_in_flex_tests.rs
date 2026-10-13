@@ -88,6 +88,12 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// are 150 in a 100px float (Chromium 100; the estimate gave 300). Each of
 /// these pages has `engine_boxes` in the case file, the walk's answer, and
 /// the tests hold the engine to it until the estimate covers the shape.
+///
+/// The last is a header wider than the main item, across `minmax(0, 1fr)`
+/// and an empty `auto` column: what the main item does not hold of the
+/// header is shared with the empty column (main 550 of 600; Chromium 600,
+/// css-grid-1 §12.5 step 4 grows only the flexible track). Pinned, as
+/// before this file existed.
 const GAPS: &[&str] = &[
     "percent-height-item-sharing-an-area-in-a-row",
     "bing-textarea-and-its-replica-in-a-row",
@@ -119,6 +125,7 @@ const GAPS: &[&str] = &[
     "quarter-fr-and-2fr-tracks-min-width-20px-items-in-a-wide-float",
     "quarter-fr-and-2fr-tracks-in-a-wide-float",
     "half-fr-and-quarter-fr-tracks-in-a-wide-float",
+    "wide-header-over-minmax-0-1fr-and-an-empty-auto-column",
 ];
 
 /// The pages are checked in six tests, a sixth each. As one test they
