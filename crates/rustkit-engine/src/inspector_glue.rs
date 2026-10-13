@@ -132,17 +132,20 @@ pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source:
 
 /// A Boa stack without the frames that are not the page's: native
 /// functions, the engine's own (unnamed) glue scripts, and `eval` code
-/// (Boa names no script for it; the frame that called `eval` stays).
+/// (Boa names no script for it; the frame that called `eval` stays). Only
+/// frame lines (`at name (path:line:col)`) are kept: anything else in the
+/// text is not a frame.
 fn page_frames(stack: &str) -> String {
     stack
         .lines()
         .filter(|line| {
             let line = line.trim_end();
-            !(line.ends_with("(native)")
-                || line.contains("(unknown at ")
-                || line.contains(" (:")
-                || line.contains("eval at")
-                || line.trim().is_empty())
+            let frame = line.trim_start().starts_with("at ") && line.ends_with(')');
+            frame
+                && !(line.ends_with("(native)")
+                    || line.contains("(unknown at ")
+                    || line.contains(" (:")
+                    || line.contains("eval at"))
         })
         .collect::<Vec<_>>()
         .join("\n")

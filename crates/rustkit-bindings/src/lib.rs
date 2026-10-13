@@ -379,9 +379,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // `String(e)`; with the engine's Inspector listening, also the error's
     // stack after a U+0000 (`take_reported_error_details` splits it off).
     var withStacks = false;
+    // A thrown value as the engine describes it (`describe::text`): an
+    // error's `Name: message`, any other object `[object Object]`. Taken
+    // before any page script runs; runs none of the page's code.
+    var describeValue = typeof __rustkit_console_format === 'function' ? __rustkit_console_format : null;
     window.__rustkit_error_text = function (e) {
         var msg;
-        try { msg = String(e); } catch (_) { return '<unprintable exception>'; }
+        try { msg = describeValue ? describeValue(e) : String(e); } catch (_) { return '<unprintable exception>'; }
         if (withStacks && e !== null && typeof e === 'object') {
             try {
                 var stack = e.stack;

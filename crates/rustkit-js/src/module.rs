@@ -171,7 +171,7 @@ impl ModuleHost {
 fn describe(error: &boa_engine::JsError, context: &mut Context) -> String {
     match error.try_native(context) {
         Ok(native) => native.to_string(),
-        Err(_) => error.to_string(),
+        Err(_) => crate::describe::error_text(error, context),
     }
 }
 

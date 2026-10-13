@@ -87,6 +87,10 @@ that a script's own dispatch ran (`button.click()`) is that script's, recorded
 when the script ends (after its console lines). A module's error is recorded
 once, never also as an unhandled rejection.
 
+A thrown value that is not an error is described as kept console text
+describes it (`[object Object]`, a string as it is), never with its
+properties; `name` is then empty.
+
 `stack` holds the page's frames only (`    at name (url:line:col)` lines; no
 native, engine or `eval` frames), capped at 4096 characters.
 

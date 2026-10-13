@@ -63,6 +63,50 @@ fn error_head(object: &JsObject) -> String {
     }
 }
 
+/// An error object, or an object made from a constructor whose prototype
+/// is the realm's `Error.prototype` (the bindings' `DOMException`). Reads
+/// internal prototype links only: no Proxy trap runs.
+fn is_error_like(object: &JsObject, context: &Context) -> bool {
+    if object.is::<Error>() {
+        return true;
+    }
+    let error_prototype = context.intrinsics().constructors().error().prototype();
+    let mut current = object.prototype();
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        let Some(prototype) = current else { return false };
+        if JsObject::equals(&prototype, &error_prototype) {
+            return true;
+        }
+        current = prototype.prototype();
+    }
+    false
+}
+
+/// A thrown value's text for the script log and the Inspector. An error
+/// object with string `name` and `message` is Boa's own text (`Name:
+/// message (path:line:col)` and its frames); any other value is described
+/// as a console line describes it (`[object Object]`, never its
+/// properties), followed by the frames Boa recorded where it was thrown.
+pub(crate) fn error_text(error: &boa_engine::JsError, context: &mut Context) -> String {
+    let full = error.to_string();
+    let Some(value) = error.as_opaque() else {
+        return full;
+    };
+    if let Some(object) = value.as_object() {
+        let strings = ["name", "message"]
+            .iter()
+            .all(|key| inherited_data_property(&object, key).is_none_or(|v| v.is_string()));
+        if object.is::<Error>() && strings {
+            return full;
+        }
+    }
+    // Boa's text is the value's display, then one `\n    at ...` line per
+    // frame: keep the frames only.
+    let shown = value.display().to_string();
+    let frames = full.strip_prefix(shown.as_str()).unwrap_or("");
+    format!("{}{frames}", text(value, context))
+}
+
 /// A value as a console line shows it.
 pub(crate) fn text(value: &JsValue, context: &mut Context) -> String {
     if let Some(text) = primitive_text(value, context) {
@@ -71,7 +115,7 @@ pub(crate) fn text(value: &JsValue, context: &mut Context) -> String {
     let Some(object) = value.as_object() else {
         return String::new();
     };
-    if object.is::<Error>() {
+    if is_error_like(&object, context) {
         error_head(&object)
     } else if object.is_array() {
         "[object Array]".to_string()
@@ -99,7 +143,7 @@ const STANDARD_ERROR_NAMES: [&str; 9] = [
 /// a string (and an error's message) only as its length, a number only as
 /// its type. `true`, `false`, `null` and `undefined` carry no page text and
 /// are shown as they are; an object by its tag, as in [`text`].
-pub(crate) fn redacted_text(value: &JsValue) -> String {
+pub(crate) fn redacted_text(value: &JsValue, context: &Context) -> String {
     if let Some(s) = value.as_string() {
         return format!("<string len={}>", s.to_std_string_escaped().chars().count());
     }
@@ -121,7 +165,7 @@ pub(crate) fn redacted_text(value: &JsValue) -> String {
     let Some(object) = value.as_object() else {
         return "undefined".to_string();
     };
-    if object.is::<Error>() {
+    if is_error_like(&object, context) {
         let name = inherited_data_property(&object, "name")
             .and_then(|v| string_of(&v))
             .filter(|n| STANDARD_ERROR_NAMES.contains(&n.as_str()))
@@ -183,9 +227,9 @@ pub(crate) fn console_format(
 pub(crate) fn console_format_redacted(
     _this: &JsValue,
     args: &[JsValue],
-    _context: &mut Context,
+    context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    Ok(join_line(args, redacted_text))
+    Ok(join_line(args, |arg| redacted_text(arg, context)))
 }
 
 fn join_line(args: &[JsValue], mut describe: impl FnMut(&JsValue) -> String) -> JsValue {

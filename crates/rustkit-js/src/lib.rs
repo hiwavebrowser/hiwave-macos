@@ -471,7 +471,7 @@ impl JsRuntime {
                 }
                 Err(err) => {
                     self.flush_console_logs();
-                    let msg = err.to_string();
+                    let msg = describe::error_text(&err, &mut self.context);
                     Err(JsError::ExecutionError(msg))
                 }
             }
@@ -593,7 +593,7 @@ impl JsRuntime {
                         for arg_idx in 0..args_count {
                             if let Ok(arg) = args_obj.get(arg_idx, &mut self.context) {
                                 msg_parts.push(match self.console_redacted {
-                                    true => describe::redacted_text(&arg),
+                                    true => describe::redacted_text(&arg, &self.context),
                                     false => describe::text(&arg, &mut self.context),
                                 });
                             }
@@ -1191,6 +1191,31 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let err = runtime.evaluate_script_named("1;\n  null.x;", "inline#2").unwrap_err();
         assert!(err.to_string().contains("(inline#2:2:"), "{err}");
+    }
+
+    /// A thrown value that is not an error is described (`[object Object]`,
+    /// the string itself), never pretty-printed with its properties, and
+    /// keeps its frames; an error-like object (a prototype of
+    /// `Error.prototype`) keeps its name and message.
+    #[test]
+    fn a_thrown_non_error_is_described_not_printed() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let err = runtime
+            .evaluate_script_named("1;\nthrow {user: 'a', token: 'SECRET'};", "inline#1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[object Object]\n    at <main> (inline#1:2:"), "{err}");
+        assert!(!err.contains("SECRET"), "{err}");
+        let err = runtime.evaluate_script_named("throw 'plain';", "inline#2").unwrap_err().to_string();
+        assert!(err.contains("plain\n    at <main> (inline#2:1:"), "{err}");
+        let err = runtime
+            .evaluate_script_named(
+                "function D(m, n) { this.message = m; this.name = n; }\nD.prototype = Object.create(Error.prototype);\nthrow new D('no', 'NotSupportedError');",
+                "inline#3",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NotSupportedError: no\n    at <main> (inline#3:3:"), "{err}");
     }
 
     #[test]
