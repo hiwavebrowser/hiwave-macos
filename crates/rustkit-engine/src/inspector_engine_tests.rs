@@ -489,6 +489,16 @@ fn urls_in_events_lose_credentials_query_and_fragment() {
     assert_eq!(scrub_url(&url, true), "https://example.test:8443/a/b.js?token=1&x=2#frag");
     let data = Url::parse("data:text/css;base64,Ym9keXt9").unwrap();
     assert_eq!(scrub_url(&data, true), "data:text/css,…");
+    // R1 note @ 6bda3b2c: the MIME type is the page's text unless it is a
+    // common one.
+    for (u, want) in [
+        ("data:TEXT/JavaScript,x", "data:text/javascript,…"),
+        ("data:text/javascriptSECRET,x", "data:,…"),
+        ("data:SECRET/x;base64,AAAA", "data:,…"),
+        ("data:,x", "data:,…"),
+    ] {
+        assert_eq!(scrub_url(&Url::parse(u).unwrap(), false), want, "{u:?}");
+    }
     let blob = Url::parse("blob:https://example.test/1234-5678").unwrap();
     assert_eq!(scrub_url(&blob, false), "blob:https://example.test");
 }

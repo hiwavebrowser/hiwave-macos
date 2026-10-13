@@ -11,7 +11,7 @@
 //! keeps its scheme, host, port and path, never its user name, password,
 //! query, fragment or `;` path parameters (`/a;jsessionid=S/b` is `/a/b`; a
 //! flag keeps the query, fragment and parameters); a `data:` URL keeps only
-//! its MIME type. A `file:` URL's path is the local path, user name and all. No header, request or response body, form value
+//! its MIME type, when it is a common one. A `file:` URL's path is the local path, user name and all. No header, request or response body, form value
 //! or storage is recorded. No text the page chose is recorded by default
 //! (pages log and throw cookies, form values and their own URL): a console
 //! message is each argument's type and a string's length; an error is the
@@ -546,15 +546,7 @@ impl Inspector {
             out.push_str(&text[rest..start]);
             if lower[start..].starts_with("data:") {
                 let tail = query_tail(&text[start..]);
-                let mime = text[start + 5..]
-                    .split([',', ';'])
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || "/+-.".contains(*c))
-                    .take(64)
-                    .collect::<String>();
-                out.push_str(&format!("data:{mime},…"));
+                out.push_str(&format!("data:{},…", data_mime(&text[start + 5..])));
                 out.push_str(tail);
                 rest = text.len();
                 break;
@@ -672,23 +664,13 @@ pub fn cap(text: &str, max: usize) -> (String, bool) {
 }
 
 /// `url` with its credentials always removed, and its query, fragment and
-/// `;` path parameters (`;jsessionid=`) unless `keep_query`. A `data:` URL is reduced to `data:<mime>,…`; any
-/// other URL that cannot have a host (`about:`, `blob:`) keeps its scheme
-/// and, for `blob:`, its origin.
+/// `;` path parameters (`;jsessionid=`) unless `keep_query`. A `data:` URL
+/// is reduced to `data:<mime>,…` (a common MIME type only); any other URL
+/// that cannot have a host (`about:`, `blob:`) keeps its scheme and, for
+/// `blob:`, its origin.
 pub fn scrub_url(url: &Url, keep_query: bool) -> String {
     match url.scheme() {
-        "data" => {
-            let rest = &url.as_str()[5..];
-            let mime = rest
-                .split([',', ';'])
-                .next()
-                .unwrap_or("")
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || "/+-.".contains(*c))
-                .take(64)
-                .collect::<String>();
-            format!("data:{mime},…")
-        }
+        "data" => format!("data:{},…", data_mime(&url.as_str()[5..])),
         "blob" => match Url::parse(url.path()) {
             Ok(inner) => format!("blob:{}", inner.origin().ascii_serialization()),
             Err(_) => "blob:".to_string(),
@@ -709,6 +691,35 @@ pub fn scrub_url(url: &Url, keep_query: bool) -> String {
             clean.to_string()
         }
     }
+}
+
+/// MIME types a `data:` URL keeps; any other is the page's text, dropped.
+const DATA_MIME_TYPES: [&str; 18] = [
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+    "text/ecmascript",
+    "application/ecmascript",
+    "text/css",
+    "text/html",
+    "text/plain",
+    "text/xml",
+    "application/json",
+    "application/wasm",
+    "image/svg+xml",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "font/woff2",
+    "application/octet-stream",
+];
+
+/// A `data:` URL's MIME type (`rest` follows `data:`) when it is a known
+/// one, else nothing.
+fn data_mime(rest: &str) -> &'static str {
+    let mime = rest.split([',', ';']).next().unwrap_or("").trim();
+    DATA_MIME_TYPES.iter().find(|m| m.eq_ignore_ascii_case(mime)).copied().unwrap_or("")
 }
 
 /// A path without its `;` parameters (`/cart;jsessionid=S/x` is `/cart/x`):
