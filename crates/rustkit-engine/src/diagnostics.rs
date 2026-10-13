@@ -978,7 +978,9 @@ fn gradient_name(debug: &str) -> String {
 /// A URL inside a record: no user name or password, no query or fragment,
 /// `data:` contents elided. The URL may be relative, as specified.
 pub(crate) fn scrub_url(u: &str) -> String {
-    if u.starts_with("data:") {
+    // Schemes are case-insensitive; leading whitespace is not part of a URL.
+    let u = u.trim_start();
+    if u.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) {
         return "data:…".into();
     }
     let u = u.split(['?', '#']).next().unwrap_or("");
