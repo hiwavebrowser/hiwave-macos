@@ -108,13 +108,13 @@ trap):
   `TypeMismatchError`, `NetworkError`, `EncodingError`,
   `InvalidAccessError`; `rustkit_js::STANDARD_ERROR_NAMES`). Any other name
   is `Error`.
-- `message` is `null`, except for a message the engine raises itself,
-  matched against a fixed list (`not a callable function`, `not a
-  constructor`, `cannot convert 'null' or 'undefined' to object`, `Failed to
-  fetch`, ...; `rustkit_js::engine_message`). A message with a part that can
-  come from the page (`x is not defined`, `x is not a function`) is kept as
-  its fixed part only: `… is not defined`. The engine's own failures (`JS
-  engine panic`, `import map rejected`) have `value` `engine`.
+- `message` is `null` for every error that reached page script, whoever
+  raised it: page code can catch an engine error and rethrow it, or throw
+  the engine's very words (`Failed to fetch`, `x is not defined`), so no
+  message is ever kept, or chosen, because of what its text says. Only the
+  engine's own failures, which the engine marks where it raises them
+  (`EngineFailure`, never by their text), have a message: `JS engine panic`
+  or `import map rejected`, with `value` `engine`.
 - `stack` is the page's frames, innermost first, one `    at url:line:col`
   line each, capped at 4096 characters: no function names (a page can name a
   function anything), and only frames in a script the engine evaluated
@@ -170,8 +170,8 @@ The log is meant to be pasted into public issues and PRs.
   scheme alone (`javascript:`). What the parser cannot read is dropped.
 - Errors carry no page text by default (see `script_error` above): the
   thrown value's type, a standard name, a message's length, frame positions.
-  Messages are not scrubbed: they are left out. Only the engine's own fixed
-  messages are kept.
+  Messages are not scrubbed: they are left out. Only the engine's own
+  failures, marked where the engine raises them, carry a fixed message.
 - A `relayout` cause is engine words, a mutation kind and a standard HTML tag
   name; never an element's `id`, class, attribute or custom element name.
 - No other field holds a name the page chose: event types in `script` are

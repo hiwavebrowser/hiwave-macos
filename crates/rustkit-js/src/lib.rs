@@ -23,7 +23,7 @@ mod rejections;
 #[cfg(feature = "boa")]
 mod diag;
 #[cfg(feature = "boa")]
-pub use diag::{engine_message, standard_name, STANDARD_ERROR_NAMES};
+pub use diag::{standard_name, STANDARD_ERROR_NAMES};
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
 
@@ -128,8 +128,8 @@ pub struct ErrorReport {
     /// for a value that is not an error.
     pub name: Option<&'static str>,
     /// The message text: only with error text kept
-    /// ([`JsRuntime::set_error_reports`]), or when it is one of the engine's
-    /// own messages ([`engine_message`]).
+    /// ([`JsRuntime::set_error_reports`]). Never chosen by what the text
+    /// says: an error that reached page script is the page's.
     pub message: Option<String>,
     /// The message's length in characters (an error's `message`, a thrown
     /// string).

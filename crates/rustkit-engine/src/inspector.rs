@@ -17,10 +17,11 @@
 //! message is each argument's type and a string's length; an error is the
 //! thrown value's type, a standard error name (else `Error`), its message's
 //! length, and the positions of the page's frames (script, line, column;
-//! never a function name). An error message is kept only when it is one of
-//! the engine's own fixed messages. A relayout's cause is engine words, a
-//! mutation kind and a standard HTML tag name, never an element's id or a
-//! custom element name. [`InspectorConfig::keep_console_text`]
+//! never a function name). No error message is kept, whatever it says;
+//! only the engine's own failures, marked where the engine raises them,
+//! carry a fixed one. A relayout's cause is engine words, a mutation kind
+//! and a standard HTML tag name, never an element's id or a custom element
+//! name. [`InspectorConfig::keep_console_text`]
 //! and [`InspectorConfig::keep_error_text`] keep the page's text: never for a
 //! log that will be shared.
 //!

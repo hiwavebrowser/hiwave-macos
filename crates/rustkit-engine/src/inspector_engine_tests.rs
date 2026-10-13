@@ -259,7 +259,7 @@ fn a_throw_names_its_error_script_line_and_column() {
     let lines = described(&engine, view, server.port);
     assert_eq!(
         only(&lines, &["script_error"]),
-        vec!["script_error TypeError: cannot convert 'null' or 'undefined' to object @/app.js:3:8 script=/app.js rejection=false"]
+        vec!["script_error TypeError: <error len=46> @/app.js:3:8 script=/app.js rejection=false"]
     );
     let all = serde_json::to_string(&records(&engine, view)).unwrap();
     assert!(!all.contains("SECRET") && !all.contains("frag"), "{all}");
@@ -289,7 +289,7 @@ window.addEventListener('load', function onLoad() {
     let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
     assert_eq!(
         only(&described(&engine, view, server.port), &["script_error"]),
-        vec!["script_error TypeError: cannot convert 'null' or 'undefined' to object @inline#1:4:12 script=event:load rejection=false"]
+        vec!["script_error TypeError: <error len=46> @inline#1:4:12 script=event:load rejection=false"]
     );
     // The stack names the page's frames only, not the engine's own glue.
     let stack = records(&engine, view)
@@ -867,9 +867,9 @@ null.modinl;
         only(&lines, &["console", "script_error"]),
         vec![
             "console Log mod-inline-log @inline#1:3:11",
-            "script_error TypeError: cannot convert 'null' or 'undefined' to object @inline#1:4:6 script=inline#1 rejection=false",
+            "script_error TypeError: <error len=46> @inline#1:4:6 script=inline#1 rejection=false",
             "console Log ext-mod-log @/mod.js:2:9",
-            "script_error TypeError: cannot convert 'null' or 'undefined' to object @/mod.js:4:8 script=/mod.js rejection=false",
+            "script_error TypeError: <error len=46> @/mod.js:4:8 script=/mod.js rejection=false",
         ]
     );
     let summary = InspectorSummary::from_records(&records(&engine, view), &[]);
@@ -904,7 +904,7 @@ eval(\"console.log('in-eval')\");
             "console Log onclick-log",
             "console Log after-click @inline#1:3:9",
             "console Log in-eval",
-            "script_error TypeError: cannot convert 'null' or 'undefined' to object script=inline#1 rejection=false",
+            "script_error TypeError: <error len=46> script=inline#1 rejection=false",
             "console Log second-script @inline#2:1:9",
         ]
     );
@@ -924,7 +924,7 @@ var x = 1;
     let errors = only(&described(&engine, view, server.port), &["script_error"]);
     assert_eq!(
         errors,
-        vec!["script_error TypeError: cannot convert 'null' or 'undefined' to object script=inline#1 rejection=false"]
+        vec!["script_error TypeError: <error len=46> script=inline#1 rejection=false"]
     );
     let stack = records(&engine, view)
         .into_iter()
@@ -1137,11 +1137,10 @@ throw new Error('TLA_MICRO');
 // ---- Review R1 hold, round 2 (#676 @ 56cbdfed) ----
 
 /// A thrown or rejected value is recorded as its type, a standard error
-/// name (any other name is `Error`), and its message's length; only the
-/// engine's own messages are kept, and a message with a part from the page
-/// (`x is not defined`) only as its fixed part.
+/// name (any other name is `Error`), and its message's length, whoever
+/// raised it.
 #[test]
-fn an_error_is_its_type_standard_name_and_length_unless_the_engine_wrote_it() {
+fn an_error_is_its_type_standard_name_and_length() {
     let page = "<html><body><script>
 var e = new TypeError('page text'); e.name = 'SECRET_NAME'; throw e;
 </script><script>throw new DOMException('m', 'NotFoundError');
@@ -1160,8 +1159,10 @@ var e = new TypeError('page text'); e.name = 'SECRET_NAME'; throw e;
             "script_error : <number> @inline#4:1:7 script=inline#4 rejection=false",
             // Boa has no position for this one (`inline#5:?:?`): a frame it
             // cannot read is dropped.
-            "script_error ReferenceError: … is not defined script=inline#5 rejection=false",
-            "script_error TypeError: not a callable function @inline#6:1:9 script=inline#6 rejection=false",
+            "script_error ReferenceError: <error len=38> script=inline#5 rejection=false",
+            // Fourth R1 hold @ 47fc7abb: no message is kept by its text,
+            // the engine's own words included.
+            "script_error TypeError: <error len=23> @inline#6:1:9 script=inline#6 rejection=false",
         ]
     );
 }

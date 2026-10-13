@@ -7,8 +7,12 @@
 //! else `Error`), a message only as its length, and the page's frames only as
 //! `path:line:column` of scripts the engine evaluated. A message is kept only
 //! when the embedder asked for error text ([`Diagnostics::keep_text`], unsafe
-//! for a log that will be shared), or when it is one of the engine's own
-//! fixed messages ([`engine_message`]), whose kept form holds no page text.
+//! for a log that will be shared). Nothing here reads a message's text to
+//! decide anything: an error that reached page script, whatever raised it,
+//! is the page's (page code can catch an engine error and rethrow it, or
+//! throw the engine's very words), so it is never kept as an engine message.
+//! The engine's own failures are marked where it raises them, outside this
+//! module (`rustkit_engine::EngineFailure`).
 //!
 //! Everything here is filled from native code: the reporter the bindings'
 //! own scripts call is handed to them in a closure (see
@@ -80,41 +84,6 @@ pub const STANDARD_ERROR_NAMES: [&str; 28] = [
     "EncodingError",
     "InvalidAccessError",
 ];
-
-/// Messages the engine raises with no part of the page in them, kept as
-/// they are.
-const ENGINE_MESSAGES: [&str; 13] = [
-    "not a callable function",
-    "not a constructor",
-    "cannot convert 'null' or 'undefined' to object",
-    "value returned for property of object is not a function",
-    "right-hand side of 'instanceof' is not callable",
-    "cannot mix BigInt and other types, use explicit conversions",
-    "BigInt division by zero",
-    "cyclic object value",
-    "cannot convert Symbol to JSON",
-    "Failed to fetch",
-    "Maximum call stack size exceeded",
-    "Illegal invocation",
-    "Failed to execute 'parseFromString' on 'DOMParser': XML documents are not supported yet.",
-];
-
-/// Engine messages with a part that comes from the page's source or data
-/// (`x is not defined`): kept as the fixed part only, the rest `…`.
-const ENGINE_SUFFIXES: [&str; 3] = [" is not defined", " is not a function", " is not a constructor"];
-
-/// `message` as the record may keep it without page text: an engine
-/// message, whole when it is fixed, else its fixed part. `None` for
-/// anything else.
-pub fn engine_message(message: &str) -> Option<String> {
-    if ENGINE_MESSAGES.contains(&message) {
-        return Some(message.to_string());
-    }
-    ENGINE_SUFFIXES
-        .iter()
-        .find(|suffix| message.len() > suffix.len() && message.ends_with(*suffix))
-        .map(|suffix| format!("…{suffix}"))
-}
 
 /// A thrown value's `name` as a report keeps it.
 pub fn standard_name(name: Option<&str>) -> &'static str {
@@ -286,10 +255,7 @@ impl Diagnostics {
                 report.name = Some(standard_name(name.as_deref()));
                 if let Some(message) = crate::describe::error_message(&object) {
                     report.message_len = Some(message.chars().count());
-                    report.message = match keep {
-                        true => Some(message),
-                        false => engine_message(&message),
-                    };
+                    report.message = keep.then_some(message);
                 }
             } else {
                 report.value = match () {
@@ -403,10 +369,7 @@ impl Diagnostics {
                 ErrorReport {
                     value: "error",
                     name: Some("Error"),
-                    message: match self.keep_text.get() {
-                        true => Some(message.to_string()),
-                        false => engine_message(message),
-                    },
+                    message: self.keep_text.get().then(|| message.to_string()),
                     message_len: Some(message.chars().count()),
                     frames: Vec::new(),
                     located: false,
