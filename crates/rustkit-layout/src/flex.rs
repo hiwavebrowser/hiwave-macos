@@ -272,7 +272,7 @@ fn definite_inner_main_size(container: &LayoutBox) -> Option<f32> {
 }
 
 /// Whether a length has a percentage anywhere in it.
-fn has_percentage(l: &Length) -> bool {
+pub(crate) fn has_percentage(l: &Length) -> bool {
     match l {
         Length::Percent(_) => true,
         Length::Calc(sum) => sum.percent != 0.0,
@@ -373,7 +373,7 @@ pub fn layout_flex_container_in(
     container_box: &Dimensions,
     positioning_cb: Option<&Dimensions>,
 ) {
-    layout_flex_container_at(container, container_box, positioning_cb, None)
+    layout_flex_container_at(container, container_box, positioning_cb, None, None)
 }
 
 /// As [`layout_flex_container`], for a container that is a grid item whose
@@ -381,7 +381,23 @@ pub fn layout_flex_container_in(
 /// edges). The container's box must already carry that height.
 pub(crate) fn layout_flex_container_at_used_height(container: &mut LayoutBox, used_inner_height: f32) {
     let container_box = container.dimensions.clone();
-    layout_flex_container_at(container, &container_box, None, Some(used_inner_height));
+    layout_flex_container_at(container, &container_box, None, Some(used_inner_height), None);
+}
+
+/// As [`layout_flex_container`], for a container on the block path whose
+/// `height` carries a percentage that the block pass resolved against a
+/// definite containing block (`html, body, #app { height: 100% }`).
+///
+/// `definite_inner_main_size` reads style alone and cannot see that number,
+/// so a `height: 100%` column was indefinite here: its items' own percentage
+/// heights had nothing to resolve against, and google's logo block
+/// (`height: calc(100% - 560px)`) fell to its `min-height`.
+pub(crate) fn layout_flex_container_at_resolved_percent_height(
+    container: &mut LayoutBox,
+    inner_height: f32,
+) {
+    let container_box = container.dimensions.clone();
+    layout_flex_container_at(container, &container_box, None, None, Some(inner_height));
 }
 
 /// As [`layout_flex_container_in`], for a container that is itself a flex
@@ -400,13 +416,15 @@ fn layout_flex_container_at(
     container_box: &Dimensions,
     positioning_cb: Option<&Dimensions>,
     used_inner_height: Option<f32>,
+    resolved_percent_inner_height: Option<f32>,
 ) {
     // Resolved once, up front, and read by both the main-size choice below
     // and step 11d's redistribution: these take `&LayoutBox`, and from the
     // moment the item list borrows `container.children` mutably no whole-box
     // borrow is available again.
-    let style_definite_inner_main =
-        used_inner_height.or_else(|| definite_inner_main_size(container));
+    let style_definite_inner_main = used_inner_height
+        .or(resolved_percent_inner_height.filter(|_| !container.style.flex_direction.is_row()))
+        .or_else(|| definite_inner_main_size(container));
     let style_min_inner_main = min_inner_main_size(container);
 
     let style = &container.style;
@@ -781,6 +799,7 @@ fn layout_flex_container_at(
                         &child_containing,
                         None,
                         used_inner_height,
+                        None,
                     );
                     // Absolutely positioned children are skipped by the flex
                     // item collection; lay them out against the item's FINAL
@@ -904,6 +923,27 @@ fn layout_flex_container_at(
                         // (CSS 2.1 §10.5), not against the item's flow cursor.
                         definite_cross_height.or(fixed_by_flex),
                     );
+                    // A grid container that is a flex item: the flow above
+                    // only measured its items, as the block path's own flow
+                    // does before its grid pass. Without the pass here the
+                    // items stayed stacked as blocks, whatever the tracks
+                    // (reddit's feed: the sidebar under the feed, H26b).
+                    //
+                    // Its height is the one the flex algorithm decided, when
+                    // it decided one. The flow above has just written the
+                    // items' stacked height over it, and a grid whose
+                    // `height` is not `auto` takes what it is handed as its
+                    // own height: google's logo block (two items in one
+                    // cell, `height: calc(100% - 560px)`) was laid out 184
+                    // tall, 92 + 92, in a 150px box, and on a doodle day 460.
+                    if item.layout_box.style.display.is_grid() {
+                        let inner = item.layout_box.dimensions.content;
+                        let height = resolved_main_height
+                            .or(definite_cross_height)
+                            .or(fixed_by_flex)
+                            .unwrap_or(inner.height);
+                        crate::grid::layout_grid_container(item.layout_box, inner.width, height);
+                    }
                     // A flex item is a formatting-context root, so its last
                     // in-flow child's bottom margin never collapses through
                     // it (CSS 2.1 §8.3.1) — it stays INSIDE the item. The
@@ -1105,6 +1145,7 @@ fn layout_flex_container_at(
                             &child_containing,
                             None,
                             Some(content_height),
+                            None,
                         );
                     } else if has_percent_height_child(item.layout_box) {
                         // The same for a block item: its children's
@@ -1308,6 +1349,7 @@ fn layout_flex_container_at(
                             &child_containing,
                             None,
                             Some(used),
+                            None,
                         );
                     }
                 }
