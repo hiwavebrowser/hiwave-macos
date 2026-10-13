@@ -945,6 +945,29 @@ eval(\"console.log('in-eval')\");
     assert!(!all.contains("eval at"), "{all}");
 }
 
+/// Fifth R1 hold @ 5beb2615: a function's name is the page's. A function
+/// `eval` code declared has no place whatever it is called, in a script or
+/// in a timer: `anonymous` is placed as `gg` is, never at its caller's.
+#[test]
+fn a_function_named_anonymous_is_placed_as_any_other() {
+    let page = "<html><body><script>eval('function gg(){ console.log(\"gg\"); throw new Error(\"x\"); }'); gg();</script>\
+<script>eval('function anonymous(){ console.log(\"anonymous\"); throw new Error(\"x\"); }'); anonymous();</script>\
+<script>setTimeout(function () { eval('function gt(){ throw new Error(\"x\"); }'); gt(); }, 0);\
+setTimeout(function () { eval('function anonymous(){ throw new Error(\"x\"); }'); anonymous(); }, 0);</script></body></html>";
+    let (engine, view, server) = load_page(console_text(), vec![Route::html("/", page)]);
+    let lines = only(&described(&engine, view, server.port), &["console", "script_error"]);
+    assert_eq!(lines.len(), 6, "{lines:?}");
+    assert!(lines.iter().all(|l| !l.contains(" @")), "{lines:?}");
+    let located: Vec<_> = records(&engine, view)
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::ScriptError { location, .. } => Some(location),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(located, vec![None, None, None, None]);
+}
+
 /// A throw inside `eval` code has no place (Boa names no script for it),
 /// and is not given the `eval` call's; its stack keeps the page's frames.
 #[test]

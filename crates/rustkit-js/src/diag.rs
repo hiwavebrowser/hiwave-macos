@@ -47,6 +47,13 @@ const MAX_REPORTED_TEXTS: usize = 1024;
 const MAX_KNOWN_PATHS: usize = 4096;
 /// Frames kept per report.
 const MAX_FRAMES: usize = 32;
+
+/// The path every script the embedder evaluates (not the page's) runs as:
+/// its frames are told apart by where they are, never by what a function
+/// is called. No page script is ever given it: theirs are `inline#N` or
+/// the URL they came from, and it parses as neither.
+pub(crate) const EMBEDDER_PATH: &str = "rustkit#embedder";
+
 /// Console calls held between flushes; past it the oldest is dropped.
 const MAX_CONSOLE_PENDING: usize = 1024;
 /// Distinct unsupported members held.
@@ -295,13 +302,19 @@ impl Diagnostics {
             .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
     }
 
-    /// The frames of Boa's stack text (`    at name (path:line:col)` lines)
-    /// that are in a script the engine evaluated, as positions, and whether
-    /// the innermost of the page's frames is one of them (not when it is
-    /// `eval` code or a handler built from a string: those have no place
-    /// of their own and are never given their caller's). A function name is
-    /// never kept, and a line that is not a whole frame is dropped, never
-    /// copied: a name the page made can hold a newline.
+    /// The frames of Boa's stack text (`    at name (position)` lines) that
+    /// are in a script the engine evaluated, as positions, and whether the
+    /// innermost of the page's frames is one of them. Which frame is what is
+    /// read from its position, the text Boa writes for the frame's source
+    /// (after the last ` (`, past any name): a native function (`native`)
+    /// and the embedder's own scripts ([`EMBEDDER_PATH`]) are passed over;
+    /// any other frame is the page's, and one in no script the engine
+    /// evaluated (`eval` code, `eval at :l:c`; a function `eval` code
+    /// declared or `new Function` built, an `on*` attribute's handler among
+    /// them, `unknown at :l:c`) has no place of its own and is never given
+    /// its caller's. A function name is never read or kept, and a line that
+    /// is not a whole frame is dropped, never copied: a name the page made
+    /// can hold a newline.
     pub(crate) fn frames(&self, stack: &str) -> (Vec<ScriptPosition>, bool) {
         let known = self.known_paths.borrow();
         let mut frames = Vec::new();
@@ -311,25 +324,26 @@ impl Diagnostics {
             let Some(frame) = line.strip_prefix("    at ") else { continue };
             let Some(inner) = frame.strip_suffix(')') else { continue };
             let Some(open) = inner.rfind(" (") else { continue };
-            let (name, position) = (&inner[..open], &inner[open + 2..]);
-            let parsed = position.rsplit_once(':').and_then(|(rest, column)| {
-                let (path, line_number) = rest.rsplit_once(':')?;
-                Some((path, line_number.parse().ok()?, column.parse().ok()?))
-            });
-            match parsed {
-                Some((path, line, column)) if known.contains(path) => {
+            let position = &inner[open + 2..];
+            if position == "native" || position.starts_with("native at ") {
+                continue;
+            }
+            // `path:line:column`, or `path:?:?` where Boa has no position.
+            let Some((rest, column)) = position.rsplit_once(':') else { continue };
+            let Some((path, line_number)) = rest.rsplit_once(':') else { continue };
+            if path == EMBEDDER_PATH {
+                continue;
+            }
+            match (known.contains(path), line_number.parse(), column.parse()) {
+                (true, Ok(line), Ok(column)) => {
                     located.get_or_insert(true);
                     if frames.len() < MAX_FRAMES {
                         frames.push(ScriptPosition { path: path.to_string(), line, column });
                     }
                 }
-                // Code with no script of its own: `eval` code, a function
-                // built from a string (an `on*` attribute's handler).
-                _ if name == "<eval>" || name.contains("eval at") || name == "anonymous" => {
+                _ => {
                     located.get_or_insert(false);
                 }
-                // Native functions and the engine's own unnamed glue.
-                _ => {}
             }
         }
         (frames, located.unwrap_or(false))
@@ -351,12 +365,24 @@ impl Diagnostics {
                 let mut report = self.describe(&value, None, false, context);
                 if report.frames.is_empty() {
                     // No backtrace on the object: Boa's text has the frame
-                    // lines, or the position on the message line.
-                    let (head, rest) = full.split_once('\n').unwrap_or((full.as_str(), ""));
+                    // lines, or the position, after the error's own name and
+                    // message (which can hold any text, newlines and
+                    // positions too): read only what follows them.
+                    let after = error
+                        .as_native()
+                        .and_then(|native| {
+                            let message = native.message().trim();
+                            let head = match message.is_empty() {
+                                true => native.kind().to_string(),
+                                false => format!("{}: {message}", native.kind()),
+                            };
+                            full.strip_prefix(head.as_str())
+                        })
+                        .unwrap_or("");
+                    let (at, rest) = after.split_once('\n').unwrap_or((after, ""));
                     (report.frames, report.located) = self.frames(rest);
                     if report.frames.is_empty() {
-                        let at = head.strip_suffix(')').and_then(|h| h.rfind(" (").map(|open| &h[open + 2..]));
-                        if let Some(at) = at {
+                        if let Some(at) = at.strip_prefix(" (").and_then(|at| at.strip_suffix(')')) {
                             (report.frames, report.located) = self.frames(&format!("    at <main> ({at})"));
                         }
                     }
@@ -383,16 +409,17 @@ impl Diagnostics {
 
 /// The position of the innermost script frame on the VM's stack: the
 /// caller of the native that asks. When that frame is in no named script
-/// (`eval` code, an `on*` attribute's handler) the answer is `None`, never
-/// an outer caller's position; with `skip_unnamed` (the embedder's own
-/// unnamed glue is the caller) unnamed frames are passed over instead.
-/// Reads the VM's frames only; runs no script.
+/// (`eval` code, an `on*` attribute's handler) or in the embedder's own
+/// ([`EMBEDDER_PATH`]) the answer is `None`, never an outer caller's
+/// position; with `skip_unnamed` (the embedder's own script is the caller)
+/// such frames are passed over instead. Reads the VM's frames only; runs no
+/// script.
 pub(crate) fn caller_position(context: &mut Context, skip_unnamed: bool) -> Option<ScriptPosition> {
     use boa_engine::vm::SourcePath;
     for frame in context.stack_trace() {
         let location = frame.position();
         let path = match &location.path {
-            SourcePath::Path(path) => path.to_string_lossy().into_owned(),
+            SourcePath::Path(path) if path.as_os_str() != EMBEDDER_PATH => path.to_string_lossy().into_owned(),
             _ if skip_unnamed => continue,
             _ => return None,
         };
