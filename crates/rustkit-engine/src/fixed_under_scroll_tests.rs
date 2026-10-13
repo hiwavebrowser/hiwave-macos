@@ -213,8 +213,10 @@ fn a_fixed_bar_is_clicked_from_outside_its_parents_box() {
 #[test]
 fn pointer_events_and_focus_reach_a_fixed_box_after_a_scroll() {
     let (mut engine, view, _) = page_list(
-        "<button id=b style='position:fixed;left:0;top:0;width:100px;height:20px;border:0;padding:0'></button>\
-         <input id=i style='position:fixed;left:100px;top:0;width:80px;height:16px;border:0;padding:0'>\
+        "<div style='position:fixed;left:0;top:0;width:100px;height:20px;background:none'>\
+         <button id=b style='display:block;width:100px;height:20px;border:0;padding:0;margin:0'></button></div>\
+         <div style='position:fixed;left:100px;top:0;width:80px;height:20px;background:none'>\
+         <input id=i style='display:block;width:80px;height:20px;border:0;padding:0;margin:0'></div>\
          <p id=p style='margin:0;height:300px'></p>\
          <script>var log = [];\
          ['pointerdown','mousedown','pointerup','mouseup','click','mousemove'].forEach(function (type) {\
