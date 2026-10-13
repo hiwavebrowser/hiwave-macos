@@ -211,3 +211,49 @@ fn a_zero_font_size_is_zero_and_not_sixteen() {
         "listed as a gap but matches Chrome now, take it off the list: {gaps_that_pass:?}"
     );
 }
+
+/// An inline-block whose text wraps, inside a link: cnn's lead headline
+/// (`<a><h2 style="display:inline-block">`). The block loops count wrapped
+/// text under an inline child as that child's own lines, so the
+/// inline-block's height must not be added to them: the title block was 130
+/// tall for its 76, and the stories under it sat 54px low.
+///
+/// These pages have text at 20px/38px, so only heights are compared, and
+/// only on macOS, where the two words are known to wrap in 80px and fit in
+/// 300px.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_wrapped_inline_block_in_a_link_is_counted_once() {
+    const HEADING: &str = r#"<a href=#><b style="display:inline-block">aaaa bbbb</b></a>"#;
+    // (name, width of the block, the link's wrapper, Chromium's boxes)
+    let pages = [
+        ("two lines", 80, ("", ""), "x:0:0:80:76 y:0:76:1280:5"),
+        ("one line", 300, ("", ""), "x:0:0:300:38 y:0:38:1280:5"),
+        ("two lines, the link in a span", 80, ("<span>", "</span>"), "x:0:0:80:76 y:0:76:1280:5"),
+    ];
+    let engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut documents = Vec::new();
+    let mut wrong = Vec::new();
+    for (name, width, (open, close), chrome) in pages {
+        let html = format!(
+            "<!doctype html><html><head><style>body{{margin:0}}#x{{width:{width}px;font:20px/38px Helvetica}}</style></head>\
+             <body><div id=x>{open}{HEADING}{close}</div><div id=y style=\"height:5px\"></div></body></html>"
+        );
+        let document = Document::parse_html(&html).expect("parse");
+        let rects = super::nested_layout_matrix_tests::engine_rects(&engine, &document, &["x", "y"]);
+        documents.push(document);
+        let got = ["x", "y"]
+            .iter()
+            .zip(&rects)
+            .map(|(id, r)| match r {
+                Some(r) => format!("{id}:{}:{}:{}:{}", r[0].round(), r[1].round(), r[2].round(), r[3].round()),
+                None => format!("{id}:none"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if got != chrome {
+            wrong.push(format!("{name}\n   engine {got}\n   chrome {chrome}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} of 3 wrong:\n{}", wrong.len(), wrong.join("\n"));
+}
