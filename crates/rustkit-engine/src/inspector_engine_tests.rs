@@ -527,16 +527,47 @@ console.log('{\"type\":\"navigation_start\"}\\n<' + 'script>alert(1)<' + '/scrip
 
 #[test]
 fn no_cookie_storage_or_form_value_reaches_the_log() {
-    let page = "<html><body><form><input id=pw type=password value=hunter2></form><script>
+    // Round 1 (console) and the R1 round-2 tables on #676 @ 56cbdfed
+    // (thrown and rejected values, URL shapes the text scrubber missed),
+    // one `<script>` per row so every row runs.
+    let rows: &[&str] = &[
+        "console.log(document.cookie);",
+        "console.log(location.href);",
+        "console.log(document.getElementById('pw').value);",
+        "console.info('stored', localStorage.getItem('k'));",
+        "console.log(new Error('see https://x.test/p?token=ERRQUERY'));",
+        "throw new Error(document.cookie);",
+        "throw document.cookie;",
+        "throw new Error('q ' + location.search);",
+        "throw document.getElementById('pw').value;",
+        "Promise.reject(document.cookie);",
+        "Promise.reject(new Error('rej ' + location.search));",
+        "Promise.reject(document.getElementById('pw').value);",
+        "(async () => { throw new Error('async ' + document.cookie); })();",
+        "window.addEventListener('load', function () { throw new Error('load ' + document.cookie); });",
+        "setTimeout(function () { throw 'timer ' + location.search; }, 0);",
+        "var e = new Error('named'); e.name = 'SECRET_NAME'; throw e;",
+        "throw Symbol('SECRET_SYM');",
+        "throw new Error('http://[::1]:9/x?token=URLSECRET_V6');",
+        "throw new Error('ht\\ttps://h.test/x?token=URLSECRET_TAB');",
+        "throw new Error('da\\tta:text/plain,URLSECRET_DATATAB');",
+        "throw new Error('//h.test/x?token=URLSECRET_PROTOREL');",
+        "throw new Error('/api?token=URLSECRET_REL');",
+        "throw new Error('https://h.test/a\"b?token=URLSECRET_QUOTE');",
+        "throw new Error('https:\\\\h.test\\\\x?token=URLSECRET_BACKSLASH');",
+        "throw new Error('ftp://u:URLPASSWORD@h.test/x?token=URLSECRET_FTP');",
+    ];
+    let mut page = String::from(
+        "<html><body><form><input id=pw type=password value=hunter2></form><script>
 document.cookie = 'sid=COOKIEVALUE';
 try { localStorage.setItem('k', 'STOREDVALUE'); } catch (e) {}
 document.getElementById('pw').value = 'TYPEDVALUE';
-console.log(document.cookie);
-console.log(location.href);
-console.log(document.getElementById('pw').value);
-console.info('stored', localStorage.getItem('k'));
-console.log(new Error('see https://x.test/p?token=ERRQUERY'));
-</script></body></html>";
+</script>",
+    );
+    for row in rows {
+        page.push_str(&format!("<script>{row}</script>"));
+    }
+    page.push_str("</body></html>");
     let server = serve(vec![Route::html("/", page).header("Set-Cookie", "server=SETCOOKIEVALUE")]);
     let (mut engine, view) = inspected_engine(EngineConfig::default());
     runtime().block_on(engine.load_url(view, server.url("/?token=HREFQUERY"))).expect("load_url");
@@ -546,8 +577,26 @@ console.log(new Error('see https://x.test/p?token=ERRQUERY'));
         5,
         "the calls are still recorded"
     );
+    // 14 throws, 4 rejections, a listener and a timer: all still recorded.
+    assert_eq!(
+        records.iter().filter(|r| r.event.kind() == "script_error").count(),
+        20,
+        "the errors are still recorded: {records:?}"
+    );
     let all = serde_json::to_string(&records).unwrap();
-    for secret in ["COOKIEVALUE", "STOREDVALUE", "TYPEDVALUE", "hunter2", "SETCOOKIEVALUE", "HREFQUERY", "ERRQUERY"] {
+    for secret in [
+        "COOKIEVALUE",
+        "STOREDVALUE",
+        "TYPEDVALUE",
+        "hunter2",
+        "SETCOOKIEVALUE",
+        "HREFQUERY",
+        "ERRQUERY",
+        "SECRET_NAME",
+        "SECRET_SYM",
+        "URLSECRET",
+        "URLPASSWORD",
+    ] {
         assert!(!all.contains(secret), "{secret} leaked: {all}");
     }
 }
@@ -975,3 +1024,4 @@ throw new Error('TLA_MICRO');
         ]
     );
 }
+
