@@ -156,3 +156,105 @@ fn a_fixed_box_inside_a_clipping_box_stays_put_and_the_clip_scrolls() {
     assert!(dark(&scrolled, 120, 20), "the clipped block, 50 up: 10 to 30");
     assert!(!dark(&scrolled, 120, 40), "and still cut at the clipping box's edge");
 }
+
+/// The reviewer's page on #681: a fixed link across the top of the window
+/// and, 40 down the page, a link that scrolls under it.
+const BAR_OVER_A_LINK: &str = "<a href='/bar' style='display:block;position:fixed;left:0;top:0;width:200px;height:20px'>bar</a>\
+     <div style='height:40px;background:none'></div>\
+     <a href='/under' style='display:block;height:100px'>under</a>";
+
+fn path(link: Option<String>) -> Option<String> {
+    link.map(|link| Url::parse(&link).expect("url").path().to_string())
+}
+
+/// The bar is drawn at the top of the window after a scroll, so a click
+/// there is a click on the bar and not on the link drawn under it.
+#[test]
+fn a_click_on_a_fixed_bar_after_a_scroll_reaches_the_bar() {
+    let (mut engine, view, _) = page_list(BAR_OVER_A_LINK);
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/bar"));
+    engine.set_scroll_offset(view, 0.0, 50.0).unwrap();
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/bar"), "on the bar");
+    assert_eq!(path(engine.link_at_point(view, 20.0, 30.0)).as_deref(), Some("/under"), "below the bar");
+    let outcome = engine.click_at_point(view, 20.0, 10.0);
+    assert_eq!(path(outcome.navigate).as_deref(), Some("/bar"), "the click follows the bar");
+}
+
+/// A bar fixed 60 down the window would have scrolled to 10 down. A click
+/// there reaches the page, and a click where the bar is drawn reaches it.
+#[test]
+fn a_fixed_bar_is_not_clicked_where_it_would_have_scrolled_to() {
+    let (mut engine, view, _) = page_list(
+        "<a href='/bar' style='display:block;position:fixed;left:0;top:60px;width:200px;height:20px'>bar</a>\
+         <a href='/under' style='display:block;height:300px'>under</a>",
+    );
+    engine.set_scroll_offset(view, 0.0, 50.0).unwrap();
+    assert_eq!(path(engine.link_at_point(view, 20.0, 20.0)).as_deref(), Some("/under"), "its place in the page");
+    assert_eq!(path(engine.link_at_point(view, 20.0, 70.0)).as_deref(), Some("/bar"), "where it is drawn");
+}
+
+/// A fixed box is not inside its parent's box: a header fixed to the top
+/// from deep in the page, or from a parent with no height, is clicked
+/// where it is drawn, scrolled or not.
+#[test]
+fn a_fixed_bar_is_clicked_from_outside_its_parents_box() {
+    let (mut engine, view, _) = page_list(
+        "<div style='height:300px;background:none'></div>\
+         <div style='height:0'><a href='/bar' style='display:block;position:fixed;left:0;top:0;width:200px;height:20px'>bar</a></div>",
+    );
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/bar"), "not scrolled");
+    engine.set_scroll_offset(view, 0.0, 50.0).unwrap();
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/bar"), "scrolled");
+}
+
+/// The press, the release, the click and the pointer moves all go to the
+/// fixed button under the pointer, with offsets from the button's own
+/// corner, and a fixed field takes the focus.
+#[test]
+fn pointer_events_and_focus_reach_a_fixed_box_after_a_scroll() {
+    let (mut engine, view, _) = page_list(
+        "<button id=b style='position:fixed;left:0;top:0;width:100px;height:20px;border:0;padding:0'></button>\
+         <input id=i style='position:fixed;left:100px;top:0;width:80px;height:16px;border:0;padding:0'>\
+         <p id=p style='margin:0;height:300px'></p>\
+         <script>var log = [];\
+         ['pointerdown','mousedown','pointerup','mouseup','click','mousemove'].forEach(function (type) {\
+           document.addEventListener(type, function (e) { log.push(type + ':' + e.target.id + ':' + e.offsetY); });\
+         });</script>",
+    );
+    engine.set_scroll_offset(view, 0.0, 50.0).unwrap();
+    engine.mouse_move_at_point(view, 20.0, 10.0);
+    engine.mouse_down_at_point(view, 20.0, 10.0);
+    engine.click_at_point(view, 20.0, 10.0);
+    assert_eq!(
+        engine.execute_script(view, "log.join(' ')").expect("script"),
+        "String(\"mousemove:b:10 pointerdown:b:10 mousedown:b:10 pointerup:b:10 mouseup:b:10 click:b:10\")"
+    );
+    assert_eq!(engine.focus_at_point(view, 120.0, 8.0).as_deref(), Some("input"), "the fixed field");
+}
+
+/// A fixed box inside a transformed box moves with the page (it is drawn
+/// that way above), so it is clicked where it scrolled to.
+#[test]
+fn a_fixed_box_under_a_transformed_ancestor_is_clicked_where_it_scrolled_to() {
+    let (mut engine, view, _) = page_list(
+        "<section style='transform:translate(0,0);height:300px'>\
+         <a href='/bar' style='display:block;position:fixed;left:0;top:60px;width:200px;height:20px'>bar</a>\
+         </section>",
+    );
+    engine.set_scroll_offset(view, 0.0, 50.0).unwrap();
+    assert_eq!(path(engine.link_at_point(view, 20.0, 20.0)).as_deref(), Some("/bar"), "60 down the page");
+    assert_eq!(path(engine.link_at_point(view, 20.0, 70.0)), None, "nothing where it was");
+}
+
+/// A fixed box that is not shown (a closed menu, a dialog's backdrop)
+/// takes no click from the page under it.
+#[test]
+fn a_hidden_fixed_box_takes_no_click() {
+    let (mut engine, view, _) = page_list(
+        "<div style='position:fixed;left:0;top:0;width:200px;height:100px;visibility:hidden;background:none'></div>\
+         <a href='/under' style='display:block;height:300px'>under</a>",
+    );
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/under"), "not scrolled");
+    engine.set_scroll_offset(view, 0.0, 50.0).unwrap();
+    assert_eq!(path(engine.link_at_point(view, 20.0, 10.0)).as_deref(), Some("/under"), "scrolled");
+}
