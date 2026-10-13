@@ -9,11 +9,17 @@
 //! `minmax(0, <px>)` columns inside a flex row. The grid was as wide as its
 //! longest word (46px) and its two items were stacked in one column, so the
 //! sidebar sat below the feed.
+//!
+//! The four tests that load every page into a view run on macOS, where the
+//! shaper is the one the pinned boxes assume. The pages marked `no_text`
+//! (words are inline-blocks of a fixed width, `font-size: 0`) depend on no
+//! shaper and are also checked on every OS, without a view or a script.
 
 use super::*;
 
 /// The expression `grid_flexible_row_log.mjs` evaluates in Chromium
 /// (`BOXES_XYWH`).
+#[cfg(all(target_os = "macos", feature = "headless"))]
 const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'), function (e) {\
     var r = e.getBoundingClientRect();\
     return e.id + ':' + Math.round(r.left) + ':' + Math.round(r.top) + ':' + Math.round(r.width) + ':' + Math.round(r.height);\
@@ -56,6 +62,7 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 ///
 /// `percent-height-row-is-not-touched`: a `height: 50%` item of a row that
 /// is 400 tall is 110; Chromium has 200.
+#[cfg(all(target_os = "macos", feature = "headless"))]
 const GAPS: &[&str] = &[
     "percent-height-item-sharing-an-area-in-a-row",
     "bing-textarea-and-its-replica-in-a-row",
@@ -67,6 +74,7 @@ const GAPS: &[&str] = &[
 /// The pages are checked in four tests, a quarter each. As one test they
 /// held the GPU for over 120 s on a loaded machine (31 pages at more than a
 /// second each), and the tests queued behind it failed in the GPU test guard.
+#[cfg(all(target_os = "macos", feature = "headless"))]
 const PARTS: usize = 4;
 
 #[test]
@@ -128,4 +136,46 @@ fn pages_are_as_in_chrome(part: usize) {
         gaps_that_pass.is_empty(),
         "listed as a gap but matches Chrome now, take it off the list: {gaps_that_pass:?}"
     );
+}
+
+/// The `no_text` pages, laid out as `relayout` lays out a view and read as
+/// `getBoundingClientRect` reads the layout (the nested layout matrix's
+/// way), so this needs no view, GPU or shaper and runs on every OS.
+#[test]
+fn text_free_pages_are_as_in_chrome_on_every_os() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tools/parity_oracle/grid_in_flex_cases.json"))
+            .expect("case file");
+    let engine = Engine::new(EngineConfig::default()).expect("engine");
+    // The style memo is keyed by the document's address: keep every
+    // document alive so no later page can reuse an earlier one's address.
+    let mut documents = Vec::new();
+    let mut wrong = Vec::new();
+    let mut checked = 0;
+    for case in data["cases"].as_array().expect("cases") {
+        if case["no_text"].as_bool() != Some(true) {
+            continue;
+        }
+        checked += 1;
+        let name = case["name"].as_str().unwrap();
+        let chrome = case["chrome_boxes"].as_str().expect("run grid_flexible_row_log.mjs --write");
+        let ids: Vec<&str> = chrome.split(' ').map(|b| b.split(':').next().unwrap()).collect();
+        let document = Document::parse_html(case["html"].as_str().unwrap()).expect("parse");
+        let rects = super::nested_layout_matrix_tests::engine_rects(&engine, &document, &ids);
+        documents.push(document);
+        let got = ids
+            .iter()
+            .zip(&rects)
+            .map(|(id, r)| match r {
+                Some(r) => format!("{id}:{}:{}:{}:{}", r[0].round(), r[1].round(), r[2].round(), r[3].round()),
+                None => format!("{id}:none"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if got != chrome {
+            wrong.push(format!("{name}\n   engine {got}\n   chrome {chrome}"));
+        }
+    }
+    assert!(checked > 0, "no page is marked no_text");
+    assert!(wrong.is_empty(), "{} of {checked} wrong:\n{}", wrong.len(), wrong.join("\n"));
 }
