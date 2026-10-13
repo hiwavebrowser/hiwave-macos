@@ -1601,6 +1601,39 @@ mod tests {
         assert!(decode("gzip", b"not gzip".to_vec()).is_err());
     }
 
+    /// `"hello hello hello hello world"` fifty times (1450 bytes), as Node's
+    /// `zlib.brotliCompressSync` encodes it.
+    const BROTLI_HELLO: [u8; 26] = [
+        0x1b, 0xa9, 0x05, 0xe0, 0x8c, 0x94, 0x6e, 0xde, 0x44, 0x55, 0x86, 0x96, 0x6c, 0x20, 0x6f,
+        0x39, 0xc8, 0x3c, 0x86, 0xd5, 0x81, 0x13, 0xe2, 0x88, 0x8f, 0x1a,
+    ];
+
+    /// Some servers send `Content-Encoding: br` to a client that did not ask
+    /// for it (seen on web fonts in a hand test); the body must still reach
+    /// the caller as the resource's bytes.
+    #[test]
+    fn content_encoding_decodes_brotli_sent_unasked() {
+        let text = b"hello hello hello hello world".repeat(50);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", HeaderValue::from_static("br"));
+        headers.insert("content-length", HeaderValue::from_static("26"));
+        let decoded = decode_content_encoding(Bytes::from(BROTLI_HELLO.to_vec()), &mut headers).unwrap();
+        assert_eq!(&decoded[..], &text[..]);
+        assert!(headers.get("content-encoding").is_none());
+        assert!(headers.get("content-length").is_none());
+
+        // The size cap holds for brotli as for gzip: 26 bytes must not become
+        // more than the caller allows.
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", HeaderValue::from_static("br"));
+        let capped = decode_content_encoding_capped(Bytes::from(BROTLI_HELLO.to_vec()), &mut headers, Some(1000));
+        assert!(matches!(capped, Err(HttpError::BodyTooLarge(1000))));
+
+        // We still do not ask for it.
+        assert!(!ACCEPT_ENCODING.contains("br"));
+    }
+
     #[test]
     fn test_default_config() {
         let config = ClientConfig2::default();
