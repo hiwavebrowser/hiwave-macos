@@ -1,7 +1,7 @@
 # Inspector fixtures
 
 Inputs for the HiWave Inspector page (`crates/hiwave-app/src/ui/inspector_rustkit.html`)
-and its parity case (`inspector_rustkit` in `cases/registry.json`).
+and its parity case, `inspector_rustkit` (not registered yet: see the end).
 
 | file | what it is |
 |---|---|
@@ -20,5 +20,24 @@ cargo build --release -p parity-capture
 cp /tmp/inspector/inspector.html fixtures/inspector/inspector_page.html
 ```
 
-Then recapture the case's Chromium baseline with the pinned Chrome:
-`PARITY_CHROME_PATH=<Chrome for Testing 148.0.7778.216> python3 scripts/generate_baselines.py --case inspector_rustkit`.
+## Registering the parity case
+
+The case needs a Chromium baseline from the pinned Chrome (Chrome for Testing
+148.0.7778.216, macOS), which a Linux container cannot make. On a Mac:
+
+1. Add to `cases/registry.json`, after `shelf`:
+   ```json
+   "inspector_rustkit": {
+     "html": "fixtures/inspector/inspector_page.html",
+     "width": 1280,
+     "height": 800,
+     "scope": "builtins",
+     "capture_args": ["--run-inline-scripts"]
+   }
+   ```
+   `capture_args` reaches the capture through `parity_lib.capture_args_for`
+   (guarded by `scripts/tests/test_capture_args_reach_the_capture.py`).
+2. `PARITY_CHROME_PATH=<pinned Chrome> python3 scripts/generate_baselines.py --case inspector_rustkit`
+3. The gating corpus grows from 26 to 27 cases: the census, receipt and board
+   guards in `scripts/tests` that pin 26 need the new count.
+4. `python3 scripts/audit_baselines.py` and `python3 scripts/parity_test.py --case inspector_rustkit`.
