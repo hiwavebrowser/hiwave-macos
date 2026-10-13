@@ -186,6 +186,8 @@ pub struct JsRuntime {
     timers: Arc<Mutex<HashMap<TimerId, PendingTimer>>>,
     globals: HashMap<String, JsValue>,
     deadline: std::rc::Rc<ExecutionDeadline>,
+    /// Console arguments reach the handler as type and length only.
+    console_redacted: bool,
     #[cfg(feature = "boa")]
     rejections: std::rc::Rc<rejections::RejectionHooks>,
 }
@@ -232,6 +234,7 @@ impl JsRuntime {
             timers: Arc::new(Mutex::new(HashMap::new())),
             globals: HashMap::new(),
             deadline: std::rc::Rc::default(),
+            console_redacted: false,
             #[cfg(feature = "boa")]
             rejections,
         };
@@ -284,12 +287,29 @@ impl JsRuntime {
     /// notes where it was called from (one walk of the call stack per call).
     pub fn set_console_handler(&mut self, handler: ConsoleHandler) {
         self.console_handler = Some(Arc::new(handler));
+        self.start_console_capture();
+    }
+
+    /// Hand the handler each console argument's type, and a string's length,
+    /// instead of its text (see `describe::redacted_text`): for an embedder
+    /// that records console calls where page text must not go. Off by
+    /// default. Set it before any page script runs.
+    pub fn set_console_redaction(&mut self, on: bool) {
+        self.console_redacted = on;
+        if self.console_handler.is_some() {
+            self.start_console_capture();
+        }
+    }
+
+    fn start_console_capture(&mut self) {
         #[cfg(feature = "boa")]
         {
             use boa_engine::Source;
-            let _ = self.context.eval(Source::from_bytes(
-                "if (console && console.__rustkit_capture) console.__rustkit_capture();",
-            ));
+            let script = format!(
+                "if (console && console.__rustkit_capture) console.__rustkit_capture({});",
+                self.console_redacted
+            );
+            let _ = self.context.eval(Source::from_bytes(script.as_bytes()));
         }
     }
 
@@ -331,7 +351,9 @@ impl JsRuntime {
         let console_script = r#"
             var console = (function () {
                 var where = typeof __rustkit_console_where === 'function' ? __rustkit_console_where : null;
-                var format = typeof __rustkit_console_format === 'function' ? __rustkit_console_format : null;
+                var verbatim = typeof __rustkit_console_format === 'function' ? __rustkit_console_format : null;
+                var redacted = typeof __rustkit_console_format_redacted === 'function' ? __rustkit_console_format_redacted : null;
+                var format = verbatim;
                 var capturing = false;
                 function method(level) {
                     return function () {
@@ -356,7 +378,10 @@ impl JsRuntime {
                     }
                 };
                 Object.defineProperty(console, '__rustkit_capture', {
-                    value: function () { capturing = !!(where && format); }
+                    value: function (redact) {
+                        format = redact ? redacted : verbatim;
+                        capturing = !!(where && format);
+                    }
                 });
                 return console;
             })();
@@ -377,6 +402,13 @@ impl JsRuntime {
                     js_string!("__rustkit_console_format"),
                     0,
                     NativeFunction::from_fn_ptr(describe::console_format),
+                )
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            self.context
+                .register_global_callable(
+                    js_string!("__rustkit_console_format_redacted"),
+                    0,
+                    NativeFunction::from_fn_ptr(describe::console_format_redacted),
                 )
                 .map_err(|e| JsError::ExecutionError(e.to_string()))?;
             self.context
@@ -439,7 +471,7 @@ impl JsRuntime {
                 }
                 Err(err) => {
                     self.flush_console_logs();
-                    let msg = err.to_string();
+                    let msg = describe::error_text(&err, &mut self.context);
                     Err(JsError::ExecutionError(msg))
                 }
             }
@@ -560,7 +592,10 @@ impl JsRuntime {
                         let args_count = (args_len_val.as_number().unwrap_or(0.0).max(0.0) as u32).min(MAX_FLUSH_ARGS);
                         for arg_idx in 0..args_count {
                             if let Ok(arg) = args_obj.get(arg_idx, &mut self.context) {
-                                msg_parts.push(describe::text(&arg, &mut self.context));
+                                msg_parts.push(match self.console_redacted {
+                                    true => describe::redacted_text(&arg, &self.context),
+                                    false => describe::text(&arg, &mut self.context),
+                                });
                             }
                         }
                     }
@@ -1156,6 +1191,31 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let err = runtime.evaluate_script_named("1;\n  null.x;", "inline#2").unwrap_err();
         assert!(err.to_string().contains("(inline#2:2:"), "{err}");
+    }
+
+    /// A thrown value that is not an error is described (`[object Object]`,
+    /// the string itself), never pretty-printed with its properties, and
+    /// keeps its frames; an error-like object (a prototype of
+    /// `Error.prototype`) keeps its name and message.
+    #[test]
+    fn a_thrown_non_error_is_described_not_printed() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let err = runtime
+            .evaluate_script_named("1;\nthrow {user: 'a', token: 'SECRET'};", "inline#1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[object Object]\n    at <main> (inline#1:2:"), "{err}");
+        assert!(!err.contains("SECRET"), "{err}");
+        let err = runtime.evaluate_script_named("throw 'plain';", "inline#2").unwrap_err().to_string();
+        assert!(err.contains("plain\n    at <main> (inline#2:1:"), "{err}");
+        let err = runtime
+            .evaluate_script_named(
+                "function D(m, n) { this.message = m; this.name = n; }\nD.prototype = Object.create(Error.prototype);\nthrow new D('no', 'NotSupportedError');",
+                "inline#3",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NotSupportedError: no\n    at <main> (inline#3:3:"), "{err}");
     }
 
     #[test]

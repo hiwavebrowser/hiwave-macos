@@ -11,8 +11,10 @@
 //! keeps its scheme, host, port and path, never its user name, password,
 //! query or fragment (a flag keeps the query and fragment); a `data:` URL
 //! keeps only its MIME type. No header, request or response body, form value
-//! or storage is recorded. Console messages are page-controlled text: they are
-//! capped and stored as-is, never interpreted.
+//! or storage is recorded. A console message is, by default, each argument's
+//! type and a string's length only (pages log cookies, form values and their
+//! own URL); with [`InspectorConfig::keep_console_text`] it is the text,
+//! capped, URLs in it scrubbed, never interpreted.
 //!
 //! The buffer is behind a mutex shared with the embedder ([`Engine::inspector`]
 //! hands out an `Arc`), so another thread can take a snapshot while the page's
@@ -52,6 +54,11 @@ pub struct InspectorConfig {
     /// Keep the query string and fragment of URLs in events. Off by default:
     /// they carry session ids and tokens.
     pub keep_url_query: bool,
+    /// Keep the text of console messages. Off by default: a console line
+    /// is then each argument's type, and a string's length (`<string
+    /// len=12>`), since pages log cookies, form values and their own URL.
+    /// When on, URLs in the text are still scrubbed as event URLs are.
+    pub keep_console_text: bool,
 }
 
 impl Default for InspectorConfig {
@@ -60,6 +67,7 @@ impl Default for InspectorConfig {
             buffer: false,
             capacity: DEFAULT_CAPACITY,
             keep_url_query: false,
+            keep_console_text: false,
         }
     }
 }
@@ -352,6 +360,7 @@ struct State {
 pub struct Inspector {
     active: AtomicBool,
     keep_url_query: bool,
+    keep_console_text: bool,
     state: Mutex<State>,
 }
 
@@ -360,6 +369,7 @@ impl Inspector {
         Arc::new(Self {
             active: AtomicBool::new(config.buffer),
             keep_url_query: config.keep_url_query,
+            keep_console_text: config.keep_console_text,
             state: Mutex::new(State {
                 buffer: config.buffer,
                 capacity: config.capacity.max(1),
@@ -597,7 +607,10 @@ impl Inspector {
             if i > 0 {
                 out.push('\n');
             }
-            let rewritten = line.rfind('(').and_then(|open| {
+            // A position's path holds no space, so the last ` (` opens it
+            // even when the path's query holds a `(`.
+            let rewritten = line.rfind(" (").and_then(|space| {
+                let open = space + 1;
                 let inner = line[open + 1..].strip_suffix(')')?;
                 let (path, l, c) = parse_position(inner)?;
                 let at = self.location(&path, l, c);
@@ -674,33 +687,66 @@ impl Inspector {
         }
     }
 
-    /// Every URL in `text` scrubbed, wherever it starts.
+    /// Every URL in `text` scrubbed, wherever it starts. A URL's path runs
+    /// to whitespace, a quote or a bracket; once its query or fragment
+    /// starts, everything up to whitespace is the query (brackets, parens
+    /// and quotes are legal in it), less a trailing `:line:col)` position
+    /// or closing punctuation. A `data:` URL becomes `data:<mime>,…`, its
+    /// payload (which may hold spaces) dropped to the end of the line.
     fn scrub_urls(&self, text: &str) -> String {
-        const SCHEMES: [&str; 5] = ["https://", "http://", "wss://", "ws://", "file://"];
+        const SCHEMES: [&str; 6] = ["https://", "http://", "wss://", "ws://", "file://", "data:"];
         let lower = text.to_ascii_lowercase();
         let mut out = String::with_capacity(text.len());
         let mut rest = 0;
         while rest < text.len() {
             let next = SCHEMES
                 .iter()
-                .filter_map(|scheme| lower[rest..].find(scheme).map(|i| rest + i))
+                .filter_map(|scheme| find_scheme(&lower, rest, scheme))
                 .min();
             let Some(start) = next else { break };
-            // A URL runs to whitespace, a quote or a bracket; trailing
-            // sentence punctuation is not part of it.
-            let mut end = text[start..]
-                .find(|c: char| c.is_whitespace() || "'\"`<>()[]{}".contains(c))
+            out.push_str(&text[rest..start]);
+            if lower[start..].starts_with("data:") {
+                let tail = query_tail(&text[start..]);
+                let mime = text[start + 5..]
+                    .split([',', ';'])
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || "/+-.".contains(*c))
+                    .take(64)
+                    .collect::<String>();
+                out.push_str(&format!("data:{mime},…"));
+                out.push_str(tail);
+                rest = text.len();
+                break;
+            }
+            let stop = text[start..]
+                .find(|c: char| c.is_whitespace() || "'\"`<>()[]{}?#".contains(c))
                 .map(|i| start + i)
                 .unwrap_or(text.len());
-            while end > start && text[..end].ends_with(['.', ',', ';', ':', '!', '?']) {
-                end -= 1;
-            }
-            out.push_str(&text[rest..start]);
-            match Url::parse(&text[start..end]) {
+            // `(url, kept tail, where the text resumes)`.
+            let (url_end, tail, end) = if text[stop..].starts_with(['?', '#']) {
+                let end = text[stop..]
+                    .find(char::is_whitespace)
+                    .map(|i| stop + i)
+                    .unwrap_or(text.len());
+                let tail = query_tail(&text[stop..end]);
+                let url_end = if self.keep_url_query { end - tail.len() } else { stop };
+                (url_end, tail, end)
+            } else {
+                // Trailing sentence punctuation is not part of the URL.
+                let mut end = stop;
+                while end > start && text[..end].ends_with(['.', ',', ';', ':', '!']) {
+                    end -= 1;
+                }
+                (end, "", end)
+            };
+            match Url::parse(&text[start..url_end]) {
                 Ok(url) => out.push_str(&self.url(&url)),
                 // Not a URL after all: keep the scheme, drop what follows.
                 Err(_) => out.push_str(&text[start..start + text[start..].find("//").map_or(0, |i| i + 2)]),
             }
+            out.push_str(tail);
             rest = end;
         }
         out.push_str(&text[rest..]);
@@ -731,10 +777,17 @@ impl Inspector {
         }
     }
 
-    /// A console call (`message` is capped here).
+    /// Whether console messages keep their text (see
+    /// [`InspectorConfig::keep_console_text`]).
+    pub fn keeps_console_text(&self) -> bool {
+        self.keep_console_text
+    }
+
+    /// A console call (`message` is capped here, and URLs in it scrubbed).
     pub fn console(&self, level: ConsoleLevel, message: &str, location: Option<SourceLocation>) {
-        self.emit_with(|_| {
+        self.emit_with(|inspector| {
             let (message, truncated) = cap(message, MAX_MESSAGE_CHARS);
+            let message = inspector.scrub_text(&message);
             InspectorEvent::Console { level, message, truncated, location }
         });
     }
@@ -1040,7 +1093,9 @@ pub fn parse_error_text(text: &str) -> ErrorTextParts {
         Some((head, rest)) => (head, Some(rest)),
         None => (text, None),
     };
-    // Boa appends ` (path:line:col)` to the message line.
+    // Boa appends ` (path:line:col)` to the message line, or ` (native)`
+    // for an error made in a native frame (an `await` resumed by a job).
+    let head = head.strip_suffix(" (native)").unwrap_or(head);
     let (head, head_position) = match head.rfind(" (") {
         Some(at) if head.ends_with(')') => match parse_position(&head[at + 2..head.len() - 1]) {
             Some(position) => (&head[..at], Some(position)),
@@ -1063,11 +1118,44 @@ pub fn parse_error_text(text: &str) -> ErrorTextParts {
     let position = stack
         .and_then(|s| s.lines().next())
         .and_then(|line| {
-            let open = line.rfind('(')?;
-            parse_position(line[open + 1..].strip_suffix(')')?)
+            // The path holds no space; its query may hold a `(`.
+            let open = line.rfind(" (")?;
+            parse_position(line[open + 2..].strip_suffix(')')?)
         })
         .or(head_position);
     (name, message, position, stack.map(str::to_string))
+}
+
+/// Where `scheme` next starts in `lower` from `from`: anywhere for a
+/// `scheme://`, and for `data:` only where no letter or digit comes right
+/// before it (`metadata:` is a word).
+fn find_scheme(lower: &str, from: usize, scheme: &str) -> Option<usize> {
+    let mut at = from;
+    loop {
+        let found = at + lower[at..].find(scheme)?;
+        let word_before = lower[..found].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric());
+        if scheme.ends_with("//") || !word_before {
+            return Some(found);
+        }
+        at = found + scheme.len();
+    }
+}
+
+/// What ends a URL's query in text and is not part of it: a frame's
+/// `:line:col)`, else closing punctuation (`'`, `)`, `.`, ...).
+fn query_tail(query: &str) -> &str {
+    if let Some(inner) = query.strip_suffix(')') {
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        if let Some((rest, column)) = inner.rsplit_once(':') {
+            if let Some((_, line)) = rest.rsplit_once(':') {
+                if digits(line) && digits(column) {
+                    return &query[query.len() - line.len() - column.len() - 3..];
+                }
+            }
+        }
+    }
+    let kept = query.len() - query.trim_end_matches(|c: char| ".,;:!?'\"`)]}>".contains(c)).len();
+    &query[query.len() - kept..]
 }
 
 /// `path:line:col`, the path possibly holding colons itself.

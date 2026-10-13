@@ -154,6 +154,9 @@ pub(crate) struct ModuleEntry {
     load: JsPromise,
     evaluation: Option<JsPromise>,
     failed: Option<String>,
+    /// A poll answered `Evaluating` (a top-level `await`) and the outcome
+    /// has not been taken since: [`JsRuntime::take_late_module_errors`].
+    awaiting: bool,
 }
 
 #[derive(Default)]
@@ -171,7 +174,7 @@ impl ModuleHost {
 fn describe(error: &boa_engine::JsError, context: &mut Context) -> String {
     match error.try_native(context) {
         Ok(native) => native.to_string(),
-        Err(_) => error.to_string(),
+        Err(_) => crate::describe::error_text(error, context),
     }
 }
 
@@ -240,6 +243,7 @@ impl JsRuntime {
                 load,
                 evaluation: None,
                 failed: None,
+                awaiting: false,
             },
         );
         Ok(ModuleHandle(url.to_string()))
@@ -362,21 +366,58 @@ impl JsRuntime {
             Some(p) => p,
             None => return ModuleState::Loading,
         };
-        match evaluation.state() {
+        let state = evaluation.state();
+        if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
+            entry.awaiting = matches!(state, PromiseState::Pending);
+        }
+        match state {
             PromiseState::Pending => ModuleState::Evaluating,
             PromiseState::Fulfilled(_) => ModuleState::Done,
-            PromiseState::Rejected(reason) => {
-                // The engine's own record of the stack goes after the
-                // message, as Boa's text for a classic script's error has it
-                // (read through the realm's getter: no page code runs).
-                let mut message = describe_value(&reason, &mut self.context);
-                let getter = self.rejections.stack_getter.borrow().clone();
-                if let (_, Some(stack)) = crate::describe::error_report(&reason, getter.as_ref(), &mut self.context) {
-                    message.push('\n');
-                    message.push_str(stack.trim_end());
+            PromiseState::Rejected(reason) => ModuleState::Threw(self.thrown_text(&reason)),
+        }
+    }
+
+    /// A module evaluation's rejection as the module's error text, the
+    /// engine's own record of the stack after the message, as Boa's text
+    /// for a classic script's error has it (read through the realm's
+    /// getter: no page code runs).
+    fn thrown_text(&mut self, reason: &JsValue) -> String {
+        let mut message = describe_value(reason, &mut self.context);
+        let getter = self.rejections.stack_getter.borrow().clone();
+        if let (_, Some(stack)) = crate::describe::error_report(reason, getter.as_ref(), &mut self.context) {
+            message.push('\n');
+            message.push_str(stack.trim_end());
+        }
+        message
+    }
+
+    /// The modules a poll left `Evaluating` (a top-level `await` still
+    /// waiting) whose evaluation has since thrown: `(module URL, error
+    /// text)`, each once, in no particular order. A browser reports such an
+    /// error as the module's uncaught error. Modules that finished cleanly
+    /// stop being watched.
+    pub fn take_late_module_errors(&mut self) -> Vec<(String, String)> {
+        let mut settled = Vec::new();
+        for (url, entry) in self.modules.entries.iter_mut() {
+            if !entry.awaiting {
+                continue;
+            }
+            match entry.evaluation.as_ref().map(JsPromise::state) {
+                Some(PromiseState::Pending) => {}
+                Some(PromiseState::Rejected(reason)) => {
+                    entry.awaiting = false;
+                    settled.push((url.clone(), reason));
                 }
-                ModuleState::Threw(message)
+                _ => entry.awaiting = false,
             }
         }
+        settled.sort_by(|a, b| a.0.cmp(&b.0));
+        settled
+            .into_iter()
+            .map(|(url, reason)| {
+                let text = self.thrown_text(&reason);
+                (url, text)
+            })
+            .collect()
     }
 }

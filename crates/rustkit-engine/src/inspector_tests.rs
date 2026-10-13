@@ -13,7 +13,7 @@ fn console(message: &str) -> InspectorEvent {
 }
 
 fn buffered(capacity: usize) -> std::sync::Arc<Inspector> {
-    Inspector::new(&InspectorConfig { buffer: true, capacity, keep_url_query: false })
+    Inspector::new(&InspectorConfig { buffer: true, capacity, ..Default::default() })
 }
 
 #[test]
@@ -249,5 +249,28 @@ fn a_dropped_request_is_over_budget_only_past_its_deadline() {
             (FailureStage::Cancelled, "abandoned (navigation or view closed)".to_string()),
             (FailureStage::OverBudget, "subresource budget spent".to_string()),
         ]
+    );
+}
+
+/// A query runs past brackets, parens and quotes to whitespace; a frame's
+/// `:line:col)` and closing punctuation after it are kept, and a frame
+/// whose URL's query holds a `(` is still read as that URL.
+#[test]
+fn a_query_is_scrubbed_up_to_whitespace_or_a_frames_position() {
+    let inspector = buffered(1);
+    for (text, scrubbed) in [
+        ("bad https://h.test/x?a[]=1&t=S", "bad https://h.test/x"),
+        ("see (https://h.test/y?a=(1)&t=S) now", "see (https://h.test/y) now"),
+        ("q 'https://h.test/z?a='1'&t=S'.", "q 'https://h.test/z'."),
+        ("    at f (https://h.test/m.js?a=(1)&t=S:2:7)", "    at f (https://h.test/m.js:2:7)"),
+        ("Error: x (https://h.test/m.js?a=(1)&t=S:2:7)", "Error: x (https://h.test/m.js:2:7)"),
+        ("at https://h.test/m.js?a=(1)&t=S:2:7) end", "at https://h.test/m.js:2:7) end"),
+    ] {
+        assert_eq!(inspector.scrub_text(text), scrubbed, "{text}");
+    }
+    let keeping = Inspector::new(&InspectorConfig { buffer: true, keep_url_query: true, ..Default::default() });
+    assert_eq!(
+        keeping.scrub_text("bad https://u:p@h.test/x?a[]=1&t=S."),
+        "bad https://h.test/x?a[]=1&t=S."
     );
 }

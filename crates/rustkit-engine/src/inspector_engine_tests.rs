@@ -192,6 +192,14 @@ pub(crate) fn describe(record: &InspectorRecord, port: u16) -> String {
     }
 }
 
+/// The default config, with console messages kept as text (for the tests
+/// that follow what a page logged).
+fn console_text() -> EngineConfig {
+    let mut config = EngineConfig::default();
+    config.inspector.keep_console_text = true;
+    config
+}
+
 fn load_page(config: EngineConfig, routes: Vec<Route>) -> (Engine, EngineViewId, TestServer) {
     let server = serve(routes);
     let (mut engine, view) = inspected_engine(config);
@@ -233,11 +241,12 @@ fn a_page_load_is_recorded_in_order() {
             "first_layout",
             "first_paint",
             "relayout initial_load",
-            "console Log one 2 @inline#1:2:9",
-            "console Info two @inline#1:3:9",
-            "console Warn three @inline#1:4:9",
-            "console Error four @inline#1:5:9",
-            "console Debug five @inline#1:6:9",
+            // By default a line is its arguments' types and lengths.
+            "console Log <string len=3> <number> @inline#1:2:9",
+            "console Info <string len=3> @inline#1:3:9",
+            "console Warn <string len=5> @inline#1:4:9",
+            "console Error <string len=4> @inline#1:5:9",
+            "console Debug <string len=4> @inline#1:6:9",
             "load_finished over_budget=0",
         ]
     );
@@ -349,7 +358,7 @@ fn a_new_navigation_starts_a_new_page_in_the_same_log() {
         Route::html("/", "<html><body><script>console.log('first')</script></body></html>"),
         Route::html("/next", "<html><body><script>console.log('second')</script></body></html>"),
     ]);
-    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    let (mut engine, view) = inspected_engine(console_text());
     let rt = runtime();
     rt.block_on(engine.load_url(view, server.url("/"))).unwrap();
     rt.block_on(engine.load_url(view, server.url("/next"))).unwrap();
@@ -521,7 +530,7 @@ fn console_messages_are_capped_and_kept_as_text() {
 console.log('x'.repeat(5000));
 console.log('{\"type\":\"navigation_start\"}\\n<' + 'script>alert(1)<' + '/script>');
 </script></body></html>";
-    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let (engine, view, _server) = load_page(console_text(), vec![Route::html("/", page)]);
     let consoles: Vec<(String, bool)> = records(&engine, view)
         .into_iter()
         .filter_map(|r| match r.event {
@@ -555,17 +564,50 @@ fn no_cookie_storage_or_form_value_reaches_the_log() {
 document.cookie = 'sid=COOKIEVALUE';
 try { localStorage.setItem('k', 'STOREDVALUE'); } catch (e) {}
 document.getElementById('pw').value = 'TYPEDVALUE';
+console.log(document.cookie);
+console.log(location.href);
+console.log(document.getElementById('pw').value);
+console.info('stored', localStorage.getItem('k'));
+console.log(new Error('see https://x.test/p?token=ERRQUERY'));
 </script></body></html>";
-    let (engine, view, _server) = load_page(
-        EngineConfig::default(),
-        vec![Route::html("/", page).header("Set-Cookie", "server=SETCOOKIEVALUE")],
+    let server = serve(vec![Route::html("/", page).header("Set-Cookie", "server=SETCOOKIEVALUE")]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    runtime().block_on(engine.load_url(view, server.url("/?token=HREFQUERY"))).expect("load_url");
+    let records = records(&engine, view);
+    assert_eq!(
+        records.iter().filter(|r| r.event.kind() == "console").count(),
+        5,
+        "the calls are still recorded"
     );
-    let all = serde_json::to_string(&records(&engine, view)).unwrap();
-    for secret in ["COOKIEVALUE", "STOREDVALUE", "TYPEDVALUE", "hunter2", "SETCOOKIEVALUE"] {
+    let all = serde_json::to_string(&records).unwrap();
+    for secret in ["COOKIEVALUE", "STOREDVALUE", "TYPEDVALUE", "hunter2", "SETCOOKIEVALUE", "HREFQUERY", "ERRQUERY"] {
         assert!(!all.contains(secret), "{secret} leaked: {all}");
     }
 }
 
+
+/// A console line is its arguments' types (and a string's length) unless
+/// console text is asked for; even then a URL in it loses its query.
+#[test]
+fn console_text_is_kept_only_when_asked_and_its_urls_are_scrubbed() {
+    let page = "<html><body><script>
+console.log('https://h.test/p?token=Q', 'x', 12, true, null, undefined, {a: 1}, [1], new TypeError('a secret'));
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let mut lines = Vec::new();
+    for config in [EngineConfig::default(), console_text()] {
+        let (mut engine, view) = inspected_engine(config);
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        lines.push(only(&described(&engine, view, server.port), &["console"]));
+    }
+    assert_eq!(
+        lines,
+        vec![
+            vec!["console Log <string len=24> <string len=1> <number> true null undefined [object Object] [object Array] <TypeError message len=8> @inline#1:2:9"],
+            vec!["console Log https://h.test/p x 12 true null undefined [object Object] [object Array] TypeError: a secret @inline#1:2:9"],
+        ]
+    );
+}
 
 // ---- Neighbouring behaviour: what naming the page's scripts must not change ----
 
@@ -692,7 +734,7 @@ var c = 3;
 null.modinl;
 </script><script type=\"module\" src=\"/mod.js\"></script></body></html>";
     let (engine, view, server) = load_page(
-        EngineConfig::default(),
+        console_text(),
         vec![
             Route::html("/", page),
             Route::ok("/mod.js", "text/javascript", "var a = 1;\nconsole.log('ext-mod-log');\nvar b = 2;\n  null.modext;\n"),
@@ -732,7 +774,7 @@ fn handler_and_eval_code_are_never_given_their_callers_position() {
 console.log('after-click');
 eval(\"console.log('in-eval')\");
 </script><script>console.log('second-script');</script></body></html>";
-    let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let (engine, view, server) = load_page(console_text(), vec![Route::html("/", page)]);
     let lines = only(&described(&engine, view, server.port), &["console", "script_error"]);
     assert_eq!(
         lines,
@@ -781,7 +823,7 @@ fn logging_runs_no_page_code() {
 var p = new Proxy({}, { get() { n += 1; throw new Error('trap'); } }); console.log(p);
 Promise.reject({ toString() { n += 1000; return 'r'; } });</script>
 <script>console.info('n seen by script 2 = ' + n);</script></body></html>";
-    let (engine, view, server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let (engine, view, server) = load_page(console_text(), vec![Route::html("/", page)]);
     let lines = only(&described(&engine, view, server.port), &["console", "script_error"]);
     assert_eq!(
         lines,
@@ -801,8 +843,15 @@ fn urls_anywhere_in_error_text_are_scrubbed() {
     let page = "<html><body><script>
 try { throw new Error(\"fetch failed 'https://u:p@h.test/a?token=SECRET1#f' (https://h.test/b?token=SECRET2) url=https://h.test/c?token=SECRET3.\"); } catch (e) { setTimeout(function () { throw e; }, 0); }
 Promise.reject(new Error('reason https://u:p@h.test/d?token=SECRET4'));
-</script></body></html>";
-    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+Promise.reject(new Error('bad https://h.test/x?a[]=1&token=SECRET_BR'));
+Promise.reject(new Error('paren https://h.test/y?a=(1)&token=SECRET_PA end'));
+Promise.reject(new Error(\"quote https://h.test/z?a='1'&token=SECRET_Q\"));
+Promise.reject(new Error('frag https://h.test/f#a(b)SECRET_FR.'));
+</script><script type=\"module\" src=\"/m.js?a=(1)&token=SECRET_MODPAREN\"></script></body></html>";
+    let (engine, view, _server) = load_page(
+        EngineConfig::default(),
+        vec![Route::html("/", page), Route::ok("/m.js", "text/javascript", "var a = 1;\nthrow new Error('in module');\n")],
+    );
     let messages: Vec<String> = records(&engine, view)
         .into_iter()
         .filter_map(|r| match r.event {
@@ -814,6 +863,11 @@ Promise.reject(new Error('reason https://u:p@h.test/d?token=SECRET4'));
         messages,
         vec![
             "reason https://h.test/d",
+            "bad https://h.test/x",
+            "paren https://h.test/y end",
+            "quote https://h.test/z",
+            "frag https://h.test/f.",
+            "in module",
             "fetch failed 'https://h.test/a' (https://h.test/b) url=https://h.test/c.",
         ]
     );
@@ -845,4 +899,112 @@ var y = new XMLHttpRequest(); y.open('GET', '/doc.xml'); y.onload = function () 
     );
     let counts: Vec<u64> = engine.inspector(view).unwrap().unsupported_apis().iter().map(|u| u.count).collect();
     assert_eq!(counts, vec![2]);
+}
+
+// ---- Review R1 hold (#676 @ bf40c73c) ----
+
+/// A thrown value that is not an error is described as console values are
+/// (`[object Object]`), never with its properties, and `stack` holds only
+/// frame lines.
+#[test]
+fn a_thrown_non_error_is_described_without_its_properties() {
+    let page = "<html><body><script>throw {user:'a', token:'SECRET_OBJ'}</script>
+<script>setTimeout(function () { throw {token: 'SECRET_TIMER'}; }, 0);</script>
+<script type=\"module\">throw {token: 'SECRET_MOD'};</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let errors: Vec<(String, String, Option<String>)> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { name, message, stack, .. } => {
+                Some((name.clone(), message.clone(), stack.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    for (name, message, stack) in &errors {
+        assert_eq!((name.as_str(), message.as_str()), ("", "[object Object]"), "{errors:?}");
+        for line in stack.as_deref().unwrap_or("").lines() {
+            assert!(line.starts_with("    at ") && line.ends_with(')'), "not a frame line: {line:?}");
+        }
+    }
+    let all = serde_json::to_string(&records).unwrap();
+    assert!(!all.contains("SECRET") && !all.contains("user"), "{all}");
+}
+
+/// A `data:` URL inside error text keeps only its MIME type, as a `data:`
+/// URL field does; a word that merely ends in `data:` is not one.
+#[test]
+fn a_data_url_in_error_text_keeps_only_its_mime_type() {
+    let page = "<html><body><script>
+Promise.reject(new Error('load data:text/plain;base64,U0VDUkVU,SECRET_B64 failed'));
+Promise.reject(new Error('metadata: kept'));
+throw 'data:text/plain,SECRET_DATA';
+</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let messages: Vec<String> = records(&engine, view)
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::ScriptError { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages, vec!["data:text/plain,…", "load data:text/plain,…", "metadata: kept"]);
+    let all = serde_json::to_string(&records(&engine, view)).unwrap();
+    assert!(!all.contains("SECRET") && !all.contains("U0VDUkVU"), "{all}");
+}
+
+/// Page script cannot write its own text into `unsupported_api` events or
+/// the summary, nor grow the table: only the bindings' own members count.
+#[test]
+fn page_script_cannot_forge_unsupported_api_events() {
+    let page = "<html><body><script>
+document.cookie = 'sid=COOKIE_LOG';
+if (window.__rustkit_unsupported) window.__rustkit_unsupported(document.cookie, 'FORGED');
+for (var i = 0; i < 2000; i++) { try { window.__rustkit_unsupported('X' + i, 'm'); } catch (e) {} }
+try { new XMLHttpRequest().open('GET', '/x', false); } catch (e) {}
+</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let apis = engine.inspector(view).unwrap().unsupported_apis();
+    let names: Vec<String> = apis.iter().map(|u| format!("{}.{}", u.interface, u.member)).collect();
+    assert_eq!(names, vec!["XMLHttpRequest.open(async=false)"]);
+    let summary = InspectorSummary::from_records(&records, &apis);
+    assert_eq!(summary.unsupported_apis.keys().collect::<Vec<_>>(), vec!["XMLHttpRequest.open(async=false)"]);
+    let all = serde_json::to_string(&records).unwrap();
+    assert!(!all.contains("COOKIE_LOG") && !all.contains("FORGED"), "{all}");
+}
+
+/// A module's error after a top-level `await` is an uncaught error of that
+/// module, as Chromium reports it, whether the `await` waited for a task
+/// (a timer) or only a microtask; once each, never as a rejection.
+#[test]
+fn a_module_error_after_a_top_level_await_is_recorded_once() {
+    let page = "<html><body><script type=\"module\">
+await new Promise(function (r) { setTimeout(r, 5); });
+console.log('m-after');
+throw new Error('TLA_TIMER');
+</script><script type=\"module\">
+await Promise.resolve();
+throw new Error('TLA_MICRO');
+</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let mut errors: Vec<(String, String, String, bool)> = records(&engine, view)
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::ScriptError { name, message, script, unhandled_rejection, .. } => {
+                Some((name, message, script, unhandled_rejection))
+            }
+            _ => None,
+        })
+        .collect();
+    errors.sort();
+    assert_eq!(
+        errors,
+        vec![
+            ("Error".to_string(), "TLA_MICRO".to_string(), "inline#2".to_string(), false),
+            ("Error".to_string(), "TLA_TIMER".to_string(), "inline#1".to_string(), false),
+        ]
+    );
 }

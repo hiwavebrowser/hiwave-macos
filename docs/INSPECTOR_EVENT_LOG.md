@@ -73,17 +73,29 @@ the position of the code that called them; an error's `stack` still lists the
 page frames around them.
 
 `message` of a `console` event is built when the call is made and runs none
-of the page's code: strings, numbers and other primitives as they are,
-`Symbol(x)`, an error as `Name: message` from its own data properties, any
-other object as a tag (`[object Object]`, `[object Array]`,
-`[object Function]`). Unhandled rejections are described the same way.
+of the page's code. By default it holds no page text: a string is
+`<string len=N>`, a number `<number>` (`<bigint>`, `<symbol>`), `true`,
+`false`, `null` and `undefined` as they are, an error
+`<TypeError message len=N>` (a name the engine does not give is `Error`), any
+other object a tag (`[object Object]`, `[object Array]`,
+`[object Function]`). With `InspectorConfig::keep_console_text`
+(`parity-capture --event-log-console-text`) it is the text: primitives as
+they are, `Symbol(x)`, an error as `Name: message` from its own data
+properties, objects as the same tags, and URLs in it scrubbed (see Privacy).
+Unhandled rejections are described as the kept text is.
 
 `script` names what ran the code: a script URL, `inline#n`, or the engine
 step (`event:DOMContentLoaded`, `event:load`, `event:resize`,
 `event:<mouse event>`, `timers`, `network`). An error thrown by a listener
 that a script's own dispatch ran (`button.click()`) is that script's, recorded
 when the script ends (after its console lines). A module's error is recorded
-once, never also as an unhandled rejection.
+once, never also as an unhandled rejection, including one thrown after a
+top-level `await` that outlived the module's script step (recorded when the
+step that settled it ends, as the module's).
+
+A thrown value that is not an error is described as kept console text
+describes it (`[object Object]`, a string as it is), never with its
+properties; `name` is then empty.
 
 `stack` holds the page's frames only (`    at name (url:line:col)` lines; no
 native, engine or `eval` frames), capped at 4096 characters.
@@ -142,7 +154,9 @@ script reaches it: `XMLHttpRequest.open(async=false)`,
 `XMLHttpRequest.responseXML` (read on a finished response whose type is XML,
 or HTML with `responseType = 'document'`: anywhere else it is `null` in
 every browser), `CustomElementRegistry.define(extends)`,
-`ReadableStream.getReader(byob)`, `DOMParser.parseFromString(XML)`. One event
+`ReadableStream.getReader(byob)`, `DOMParser.parseFromString(XML)`. Only
+these members are ever recorded (`rustkit_bindings::UNSUPPORTED_MEMBERS`):
+page script can reach the reporter, but cannot add names or text. One event
 per member per page; `Inspector::unsupported_apis()` and the summary carry the
 counts. Property reads that fall through to `undefined` are not detected:
 that needs a hook on every property access (see the PR that added this).
@@ -155,16 +169,23 @@ The log is meant to be pasted into public issues and PRs.
   always removed; query and fragment are removed unless
   `InspectorConfig::keep_url_query` (`parity-capture --event-log-keep-query`)
   is set. A `data:` URL becomes `data:<mime>,…`; a `blob:` URL its origin.
-- URLs inside error messages, rejection reasons and stacks are scrubbed the
-  same way wherever they sit in the text (after a quote, in brackets, after
-  `=`).
+- URLs inside error messages, rejection reasons, stacks and kept console
+  text are scrubbed the same way wherever they sit in the text (after a
+  quote, in brackets, after `=`). Once a URL's query or fragment starts,
+  everything up to whitespace goes with it (brackets, parens and quotes are
+  legal in a query), except a frame's `:line:col)` and closing punctuation.
+  A `data:` URL in text becomes `data:<mime>,…` and the rest of its line
+  goes with its payload.
 - No request or response header, body, cookie, form value or storage content
   is recorded: a request has its method and URL, a response its status, MIME
   essence and sizes. Failure reasons are fixed engine phrases, never the
   network error's own text (which can name hosts and paths).
-- Console messages are page-controlled text: capped at 1024 characters and
-  stored as they are, never interpreted. A page can put anything in them,
-  including a URL with its query: read them as untrusted text.
+- Console messages carry no page text by default: each argument's type, and
+  a string's length. Pages log cookies, form values and their own URL.
+  `InspectorConfig::keep_console_text` (`parity-capture
+  --event-log-console-text`) keeps the text, capped at 1024 characters,
+  URLs in it scrubbed, never interpreted: never for a log that will be
+  shared.
 
 ## `parity-capture --event-log <file> --event-summary`
 
