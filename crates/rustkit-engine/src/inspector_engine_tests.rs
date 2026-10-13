@@ -493,6 +493,35 @@ fn urls_in_events_lose_credentials_query_and_fragment() {
     assert_eq!(scrub_url(&blob, false), "blob:https://example.test");
 }
 
+/// Third R1 hold @ 6bda3b2c: a `;` path parameter (a servlet `jsessionid`
+/// is the session cookie) goes with the query, in every segment, unless the
+/// query is kept. The same table as the diagnostics half's `report_url`
+/// (#674), so the two halves of the Inspector agree.
+#[test]
+fn urls_in_events_lose_path_parameters_unless_the_query_is_kept() {
+    let r = |u: &str, q| scrub_url(&Url::parse(u).unwrap(), q);
+    assert_eq!(r("https://shop.test/cart;jsessionid=0123ABCD?x=1", false), "https://shop.test/cart");
+    assert_eq!(r("https://shop.test/cart;jsessionid=0123ABCD?x=1", true), "https://shop.test/cart;jsessionid=0123ABCD?x=1");
+    for (u, want) in [
+        ("https://shop.test/a;jsessionid=S/b;v=1/c.js", "https://shop.test/a/b/c.js"),
+        ("https://shop.test/a;x=1;JSESSIONID=S", "https://shop.test/a"),
+        ("https://shop.test/a%3Bjsessionid=S/b", "https://shop.test/a/b"),
+        ("https://shop.test/a%3bjsessionid=S/b", "https://shop.test/a/b"),
+        ("https://shop.test/a;", "https://shop.test/a"),
+        ("https://shop.test/;jsessionid=S", "https://shop.test/"),
+        ("https:\\\\shop.test\\a;jsessionid=S\\b", "https://shop.test/a/b"),
+        ("https://shop.test/a;jsess\tionid=S\n/b", "https://shop.test/a/b"),
+        ("http://shop.test:8080/a;jsessionid=S#f", "http://shop.test:8080/a"),
+        ("foo://shop.test/a;sid=S/b", "foo://shop.test/a/b"),
+        ("https://u:pw@shop.test/a;jsessionid=S", "https://shop.test/a"),
+        // `data:` and `blob:` keep their own reduction.
+        ("blob:https://shop.test/a;jsessionid=S", "blob:https://shop.test"),
+    ] {
+        assert_eq!(r(u, false), want, "{u:?}");
+    }
+    assert_eq!(r("https://shop.test/a%3Bjsessionid=S/b", true), "https://shop.test/a%3Bjsessionid=S/b");
+}
+
 #[test]
 fn the_navigation_url_keeps_its_query_only_when_asked() {
     let server = serve(vec![Route::html("/", "<html><body>x</body></html>")]);
@@ -581,20 +610,34 @@ document.getElementById('pw').value = 'TYPEDVALUE';
     for row in rows {
         page.push_str(&format!("<script>{row}</script>"));
     }
+    // Third R1 hold @ 6bda3b2c: a `;` path parameter (a servlet's
+    // `jsessionid`, the session cookie when cookies are off) in a script's
+    // own URL, plain and percent-encoded, classic and module.
+    page.push_str(
+        "<script src=\"/s.js;jsessionid=JSESSIONSECRET?token=SCRIPTQUERY\"></script>\
+<script src=\"/p.js%3Bjsessionid=JSESSIONSECRET/x.js\"></script>\
+<script type=module src=\"/m.js;jsessionid=JSESSIONSECRET?token=SCRIPTQUERY\"></script>",
+    );
     page.push_str("</body></html>");
-    let server = serve(vec![Route::html("/", page).header("Set-Cookie", "server=SETCOOKIEVALUE")]);
+    let script = "console.log('s'); throw new Error('s');";
+    let server = serve(vec![
+        Route::html("/", page).header("Set-Cookie", "server=SETCOOKIEVALUE"),
+        Route::ok("/s.js;jsessionid=JSESSIONSECRET", "text/javascript", script),
+        Route::ok("/p.js%3Bjsessionid=JSESSIONSECRET/x.js", "text/javascript", script),
+        Route::ok("/m.js;jsessionid=JSESSIONSECRET", "text/javascript", script),
+    ]);
     let (mut engine, view) = inspected_engine(EngineConfig::default());
     runtime().block_on(engine.load_url(view, server.url("/?token=HREFQUERY"))).expect("load_url");
     let records = records(&engine, view);
     assert_eq!(
         records.iter().filter(|r| r.event.kind() == "console").count(),
-        5,
+        8,
         "the calls are still recorded"
     );
-    // 14 throws, 4 rejections, a listener and a timer: all still recorded.
+    // 17 throws, 4 rejections, a listener and a timer: all still recorded.
     assert_eq!(
         records.iter().filter(|r| r.event.kind() == "script_error").count(),
-        20,
+        23,
         "the errors are still recorded: {records:?}"
     );
     let all = serde_json::to_string(&records).unwrap();
@@ -610,6 +653,8 @@ document.getElementById('pw').value = 'TYPEDVALUE';
         "SECRET_SYM",
         "URLSECRET",
         "URLPASSWORD",
+        "JSESSIONSECRET",
+        "SCRIPTQUERY",
     ] {
         assert!(!all.contains(secret), "{secret} leaked: {all}");
     }
