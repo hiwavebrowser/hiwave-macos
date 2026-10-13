@@ -54,6 +54,71 @@
    "name": "auto-fill-percent-max-of-minmax",
    "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:600px;gap:10px;grid-template-columns:repeat(auto-fill,minmax(50px,30%))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li></ul><div id=after>x</div></body></html>",
    "chrome_boxes": "g:0:0:600:50 i1:0:0:180:20 i2:190:0:180:20 i3:380:0:180:20 i4:0:30:180:20 after:0:50:1280:18"
+  },
+  {
+   "name": "auto-fill-percent-rows-of-an-auto-height",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}li{width:20px}#g{grid-auto-flow:column;grid-template-rows:repeat(auto-fill,25%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li><li id=i5></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:20 i1:0:0:20:20 i2:256:0:20:20 i3:512:0:20:20 i4:768:0:20:20 i5:1024:0:20:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fill-minmax-percent-auto-rows-of-an-auto-height",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}li{width:20px}#g{grid-auto-flow:column;grid-template-rows:repeat(auto-fill,minmax(25%,auto))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li><li id=i5></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:20 i1:0:0:20:20 i2:256:0:20:20 i3:512:0:20:20 i4:768:0:20:20 i5:1024:0:20:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-minmax-percent-rows-of-an-auto-height",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{grid-auto-flow:column;grid-template-rows:repeat(auto-fit,minmax(25%,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:20 i1:0:0:427:20 i2:427:0:427:20 i3:853:0:427:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fill-percent-rows-of-a-px-height",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}li{width:20px;height:auto}#g{height:400px;grid-auto-flow:column;grid-template-rows:repeat(auto-fill,25%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li><li id=i5></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:400 i1:0:0:20:100 i2:0:100:20:100 i3:0:200:20:100 i4:0:300:20:100 i5:640:0:20:100 after:0:400:1280:18"
+  },
+  {
+   "name": "auto-fill-20-percent-at-203",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:203px;grid-template-columns:repeat(auto-fill,20%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li><li id=i5></li><li id=i6></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:203:40 i1:0:0:41:20 i2:41:0:41:20 i3:81:0:41:20 i4:122:0:41:20 i5:162:0:41:20 i6:0:20:41:20 after:0:40:1280:18"
+  },
+  {
+   "name": "auto-fit-minmax-20-percent-at-203",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:203px;grid-template-columns:repeat(auto-fit,minmax(20%,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li><li id=i5></li><li id=i6></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:203:40 i1:0:0:41:20 i2:41:0:41:20 i3:81:0:41:20 i4:122:0:41:20 i5:162:0:41:20 i6:0:20:41:20 after:0:40:1280:18"
+  },
+  {
+   "name": "auto-fill-10-percent-at-201",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:201px;grid-template-columns:repeat(auto-fill,10%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li><li id=i5></li><li id=i6></li><li id=i7></li><li id=i8></li><li id=i9></li><li id=i10></li><li id=i11></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:201:40 i1:0:0:20:20 i2:20:0:20:20 i3:40:0:20:20 i4:60:0:20:20 i5:80:0:20:20 i6:100:0:20:20 i7:121:0:20:20 i8:141:0:20:20 i9:161:0:20:20 i10:181:0:20:20 i11:0:20:20:20 after:0:40:1280:18"
+  },
+  {
+   "name": "auto-fill-5-percent-at-206",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:206px;grid-template-columns:repeat(auto-fill,5%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li><li id=i5></li><li id=i6></li><li id=i7></li><li id=i8></li><li id=i9></li><li id=i10></li><li id=i11></li><li id=i12></li><li id=i13></li><li id=i14></li><li id=i15></li><li id=i16></li><li id=i17></li><li id=i18></li><li id=i19></li><li id=i20></li><li id=i21></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:206:40 i1:0:0:10:20 i2:10:0:10:20 i3:21:0:10:20 i4:31:0:10:20 i5:41:0:10:20 i6:51:0:10:20 i7:62:0:10:20 i8:72:0:10:20 i9:82:0:10:20 i10:93:0:10:20 i11:103:0:10:20 i12:113:0:10:20 i13:124:0:10:20 i14:134:0:10:20 i15:144:0:10:20 i16:154:0:10:20 i17:165:0:10:20 i18:175:0:10:20 i19:185:0:10:20 i20:196:0:10:20 i21:0:20:10:20 after:0:40:1280:18"
+  },
+  {
+   "name": "auto-fill-33.34-percent-at-100",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:100px;grid-template-columns:repeat(auto-fill,33.34%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:100:40 i1:0:0:33:20 i2:33:0:33:20 i3:67:0:33:20 i4:0:20:33:20 after:0:40:1280:18"
+  },
+  {
+   "name": "auto-fill-33.4-percent-at-100",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:100px;grid-template-columns:repeat(auto-fill,33.4%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li><li id=i3></li><li id=i4></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:100:40 i1:0:0:33:20 i2:33:0:33:20 i3:0:20:33:20 i4:33:20:33:20 after:0:40:1280:18"
+  },
+  {
+   "name": "auto-fit-minmax-percent-fewer-items-than-tracks",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;grid-template-columns:repeat(auto-fit,minmax(25%,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:20 i1:0:0:284:20 i2:284:0:284:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-percent-fewer-items-centred",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;justify-content:center;grid-template-columns:repeat(auto-fit,25%)}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:20 i1:142:0:142:20 i2:284:0:142:20 after:0:20:1280:18"
+  },
+  {
+   "name": "auto-fit-percent-fewer-items-with-a-gap",
+   "html": "<!doctype html><html><head><style>body{margin:0}ul{margin:0;padding:0;list-style:none;display:grid}li{height:20px}#g{width:568px;gap:24px;grid-template-columns:repeat(auto-fit,minmax(20%,1fr))}</style></head><body><ul id=g><li id=i1></li><li id=i2></li></ul><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:568:20 i1:0:0:272:20 i2:296:0:272:20 after:0:20:1280:18"
   }
  ],
  "chrome": "143.0.7499.4"
