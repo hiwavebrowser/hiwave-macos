@@ -46,6 +46,7 @@ const SIDEBAR_WIDTH: f64 = 220.0;
 mod ipc;
 mod state;
 mod webview;
+mod window_stall;
 
 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
 mod webview_rustkit;
@@ -219,6 +220,8 @@ enum UserEvent {
     ClearCellar,
     // Decay ticker
     DecayTick,
+    // The stall log's ping (window_stall.rs); only sent with HIWAVE_STALL_LOG=1
+    WindowThreadPing,
     // Focus mode events
     EnterFocusMode,
     ExitFocusMode,
@@ -2023,6 +2026,13 @@ fn main() {
         }
     });
     info!("Started focus mode auto-trigger checker");
+
+    // How long the window thread goes without turning this loop, written to
+    // the log when asked for. The real-window responsiveness checks read it.
+    let stall_log = window_stall::enabled().then(|| {
+        let ping_proxy = proxy.clone();
+        window_stall::start(move || ping_proxy.send_event(UserEvent::WindowThreadPing).is_ok())
+    });
 
     // Last known cursor position in WINDOW logical coordinates. tao reports
     // MouseInput without a position, so the CursorMoved stream is what makes
@@ -4148,6 +4158,11 @@ fn main() {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
                             let _ = settings_wv.evaluate_script(&script);
+                        }
+                    }
+                    UserEvent::WindowThreadPing => {
+                        if let Some((answered, clock)) = stall_log.as_ref() {
+                            answered.now(clock);
                         }
                     }
                     UserEvent::DecayTick => {

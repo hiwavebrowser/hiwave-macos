@@ -73,6 +73,49 @@ of a run (about a minute for all checks).
 | `h8` | H8 error page | `h8_error.html`, which the server answers with 403: its script and its image | no |
 | `h16_click_nav` | H14, H16 navigation from a loaded page | `h16_a.html` (red) to `h16_b.html` (green): the user's click on a link, and four routes the page starts itself (`link.click()`, `location.href = url`, a submit button's `click()`, `form.submit()`) | the link click only |
 | `h19_spin` | H19 a script that does not end (ebay hang, 2026-10-08) | `h19_spin.html`: a script inside nested `forEach` callbacks that would run for hours; the load must finish at the app's 60 s script budget (the check takes a minute) | no |
+| `i0a_script` | I0(a) the window stays usable: a script that does not end | `i0a_spin.html`: ticks after the load; when the driver says so, a timer callback starts a loop that would run for hours | controls only |
+| `i0a_layout` | I0(a): very expensive layout | `i0a_layout.html?n=150`: 3000 wrapping flex items, every one resized each 700 ms | controls only |
+| `i0a_nav` | I0(a): repeated navigation while loading | `i0a_nav.html?n=1` to `?n=5`: each visit starts the next, then meets a script held 1.5 s and an image held 3 s | controls only |
+| `i0a_close` | I0(a): closing a busy tab | `i0a_spin.html`, then Cmd+W | yes |
+| `i0a_newtab` | I0(a): a new tab while another tab's script does not end | `i0a_spin.html`, then Cmd+T; the spinning page is replaced and must stop | yes |
+| `h24_svg_scroll` | H24 ebay icons stay put while the page scrolls | `h24_svg_scroll.html`: a cyan svg triangle on the first screen; a polygon, a path and two lines 1500 px down; the page scrolls itself when the driver says so | no (frames) |
+| `fixed_scroll` | `position: fixed` content scrolls away | `fixed_scroll.html`: a magenta bar fixed to the top over three 1500 px bands; the page scrolls itself when the driver says so | no (frames) |
+
+### The I0(a) checks
+
+Each of the five makes a page misbehave and asks whether the person still has
+control. There are three fixture pages for the five checks: `i0a_script`,
+`i0a_close` and `i0a_newtab` all use `i0a_spin.html`. `i0a_script` also asks that a request
+the page made in the turn its script was stopped in is still answered to it. Two measures, reported apart:
+
+- **The stall log** (needs nothing from the seat). The driver starts the app
+  with `HIWAVE_STALL_LOG=1`; a helper thread in the app then posts a ping to
+  the window's event loop every 100 ms and logs `Window thread holding ms=N`
+  and `Window thread held ms=N` for any ping that waited 200 ms or more
+  (`crates/hiwave-app/src/window_stall.rs`). While a ping waits, a click, a
+  key, a scroll or a resize waits too. A hold can be up to 100 ms longer than
+  the figure. With the flag on the loop wakes ten times a second, so the other
+  checks leave it off.
+- **The controls** (input, unlocked screen): a resize, in `i0a_close` Cmd+W
+  and in `i0a_newtab` Cmd+T, each answered within 200 ms. A quiet stall log
+  is not a pass for them: a loop that turns can still draw nothing.
+
+The app has one content view. A new tab loads its start page into that view,
+so the page that was there is gone; closing the new tab loads the old address
+again from the start. That is why only `i0a_newtab` sends Cmd+T. The first
+run with real input (2026-10-12, at `0b8c43b8`) sent it in all four checks:
+in `i0a_script` the page then never ticked again, its request was never
+answered and its image was gone, and in `i0a_nav` the last frame showed the
+start page. The app's log shows the start page loading into the same view in
+each. The engine test
+`input_after_a_stopped_turn_leaves_timers_and_answers_running` covers the
+other reading (input after a stopped turn leaving the page dead): it passes.
+**The checks as changed here have not run with real input.**
+
+Timers a page sets during its load are run by the load itself, so
+`i0a_spin.html` waits for the driver's word (a beacon answered with `spin`)
+before it starts. Stop, tab switch and scrolling another tab are not driven
+yet: the app has one content view, so there is no other tab to scroll.
 
 Pages use targets that fill the viewport or flat colours counted over the
 whole frame, so no check depends on where the content view sits inside the

@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>I0a a script that does not end, started after the load</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  img { display: block; width: 400px; height: 200px; margin: 10px; }
+</style>
+<!-- The page loads, shows its image and ticks. When the server tells it to,
+     it says it is about to spin, and one second later a timer callback starts
+     a loop that would take hours (the shape of h19_spin, after the load
+     instead of during it). The window must stay usable while it runs. -->
+<p id="p">A timer on this page starts a script that does not end by itself.</p>
+<img src="/img/00ff00.png" alt="">
+<script>
+  var n = 0, armed = false;
+  function spin() {
+    var spun = 0;
+    var row = new Array(100000).fill(0);
+    row.forEach(function () {
+      row.forEach(function () {
+        spun++;
+        if (spun % 4096 === 0) { document.getElementById('p'); }
+      });
+    });
+  }
+  // Timers set during the load are run by the load itself, so the start is
+  // the server's to give: the driver answers a tick with "spin" once the
+  // load has finished.
+  setInterval(function () {
+    n += 1;
+    fetch('/beacon?i0a-spin-tick-' + n).then(function (r) { return r.text(); }).then(function (reply) {
+      if (armed || reply !== 'spin') { return; }
+      armed = true;
+      fetch('/beacon?i0a-spin-armed');
+      // Asked in the turn the spin is stopped in (the two timers are due
+      // together and run in this order): the answer must still reach the
+      // page. Until 2026-10-12 it was dropped with the stopped turn.
+      setTimeout(function () {
+        var x = new XMLHttpRequest();
+        x.open('GET', '/beacon?i0a-spin-asked');
+        x.onload = function () { document.getElementById('p'); fetch('/beacon?i0a-spin-answered'); };
+        x.send();
+      }, 1000);
+      setTimeout(spin, 1000);
+    }, function () {});
+  }, 200);
+</script>

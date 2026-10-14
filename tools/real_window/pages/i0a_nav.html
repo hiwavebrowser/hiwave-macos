@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>I0a a page that is left while it is still loading</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  img { display: block; width: 400px; height: 200px; margin: 10px; }
+</style>
+<!-- Each visit starts a navigation to the next one (?n=1 to ?n=5) and then
+     meets a script the server holds for 1.5 s and an image it holds for 3 s,
+     so every page but the last is left while it is still loading. The last
+     one shows the green image. The window must stay usable throughout. -->
+<p>Visit <span id="n"></span> of 5.</p>
+<script>
+  var n = parseInt((location.search.match(/n=(\d+)/) || [0, '1'])[1], 10);
+  document.getElementById('n').textContent = n;
+  fetch('/beacon?i0a-nav-start-' + n);
+  if (n < 5) { location.href = '/i0a_nav.html?n=' + (n + 1); }
+</script>
+<script src="/slow?ms=1500&amp;i0a-nav-script"></script>
+<script>
+  fetch('/beacon?i0a-nav-after-script-' + n);
+  var img = document.createElement('img');
+  // A different address each visit: an image already fetched is not waited for.
+  img.src = (n < 5) ? '/slowimg/ff0000.png?ms=3000&n=' + n : '/img/00ff00.png';
+  document.body.appendChild(img);
+  if (n === 5) { fetch('/beacon?i0a-nav-last'); }
+</script>
