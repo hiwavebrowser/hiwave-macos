@@ -3479,6 +3479,26 @@ impl LayoutBox {
                     below = below.max(b);
                 }
             });
+            // The inline boxes inside it are on the line too, each as a
+            // line of text in its own font (CSS2 10.8.1 counts every
+            // inline box on the line). Left out, `<span><b style="font-
+            // size:16px">Hi</b></span>` under `font-size: 0` gave the line
+            // only the span's 0px font and the next block was laid over
+            // the text (develop's 16px strut hid it); the same for nav
+            // links whose font is restored inside a `font-size: 0` row.
+            for c in &self.children {
+                if c.style.display == rustkit_css::Display::None
+                    || c.float != Float::None
+                    || matches!(c.position, Position::Absolute | Position::Fixed)
+                    || !matches!(c.box_type, BoxType::Inline)
+                {
+                    continue;
+                }
+                if let Some((a, b)) = c.line_member_baseline_extents() {
+                    above = above.max(a);
+                    below = below.max(b);
+                }
+            }
             return Some((above, below));
         }
         let h = self.dimensions.margin_box().height;
