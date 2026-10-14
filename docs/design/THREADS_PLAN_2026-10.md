@@ -136,30 +136,87 @@ doc's.
 
 | # | scope | user task it makes pass | size | where | after |
 |---|---|---|---|---|---|
-| T0 (M0) | **Land PR #666**: 5 s budget on every live turn, input dispatch and `execute_script` | a post-load runaway (h20, the eBay `forEach` spin) frees the window within 5 s instead of never | S, written | Atlas-Mac rerun of the corrected `i0a` checks, then merge | Pete's decision 1 |
+| T0 (M0) | **Land PR #666**: a 5 s budget per live turn and per input event, on script that makes host calls. A temporary mitigation with stated limits (below), not a responsiveness guarantee. Adds two tests first: one click whose three handlers each spin, and an interval that overruns every time | a post-load runaway that calls the host (h20, the eBay `forEach` spin) is cut off after 5 s per turn instead of never | S, written | Atlas-Mac rerun of the corrected `i0a` checks, then merge | Pete's decision 1 |
 | T1 | **Relayout stage timer**: `build / layout / display_list / snapshot / render` ms on every `relayout cause=` line, from the spans that already exist (`lib.rs:5036, 5045, 5121, 5240, 5260`); coalesce pointer moves per drain | we learn which stage owns eBay's 509 ms; a fast sweep across listings costs one relayout per drain, not one per move | S | cloud | none |
-| T2 (M0b) | **Scroll paints before the page hears it**: `scroll_view` updates the offset and re-presents the last commit; the relayout follows | a wheel tick on eBay search moves the page on the next frame, not after 509 ms | S | lane; Atlas-Mac check | none |
-| T3 | **Phase X step 1**: delete `webview-fallback` and the non-macOS wry content path | nothing felt; removes 23 cfg branches M4 would otherwise have to carry | S | cloud | none |
+| T2 (M0b) | **Scroll paints before the page hears it**: `scroll_view` updates the offset and re-presents the last commit; the relayout follows | once the window thread processes a wheel event, the page moves on that frame instead of after the relayout it triggers. It cannot help a wheel event that arrives while the thread is already blocked; M4b fixes that | S | lane; Atlas-Mac check | none |
+| T3 | **Phase X step 1, narrowed**: delete only the `webview-fallback` feature (system WebKit drawing *content* on macOS; `hiwave-app/Cargo.toml:28`, 23 cfg branches). The non-macOS wry content path (`main.rs:1220`) is **not** touched: Windows and Linux keep it | nothing felt; M4 then has one macOS content path to convert | S | cloud | none |
 | P1 | **#687**: paint-only hover takes the short path (held on the unpainted focus change) | hovering a cnn or eBay listing no longer rebuilds the page | M, in review | lane | none |
 | P2 | **Lazy geometry snapshot**: build the JS-visible box map on first read, not on every relayout (35 ms of every relayout on the author's Mac) | every relayout on every site drops ~35 ms | M | cloud | T1 |
 | P3 | **Render without clones**: no `commands.clone()` for image upload (`lib.rs:14110`) or scroll (`:14177`); scroll as a renderer offset | wheel on the Wikipedia portal re-presents without copying 2.2M commands | M | cloud, Atlas-Mac check | T1 |
-| D1 | **Decode pool**: two `rustkit-decode` threads; `fetch_raster_image` sends bytes, gets `Arc<LoadedImage>` back as a message | image decode never stalls script or layout; eBay's 84 and cnn's 41 images decode in parallel | S | cloud | none |
+| D1 | **Decode pool**: two `rustkit-decode` threads behind a bounded queue (64 jobs; when full the page thread decodes inline). A job carries its `nav_id`; a result for a superseded navigation is dropped. The page thread never waits on a result: layout uses the placeholder size and relays out on arrival, as `image_loaded` does today | image decode never stalls script or layout; eBay's 84 and cnn's 41 images decode in parallel | S | cloud | none |
 | M1 | **Boa VM interrupt + `ThreadStamp` / `ViewControl` + watchdog thread**: vendor `boa_engine` 0.22.0 with the ~30-line patch; delete the stale, unused `boa_gc` / `boa_parser` patches (`Cargo.lock` lists them `[[patch.unused]]`) | a pure spin with no host calls (h20b, `while(true){}`) stops within budget + 250 ms | S-M | cloud | T0 |
 | M2 | **Ordered, view-tagged input queue** replacing the three statics in `rustkit-viewhost/src/macos.rs` | scroll-then-click and type-then-click arrive in order; a flick in tab A never lands in tab B | M | lane | none |
-| M3 | **Engine split**: `PageEngine` + `Presenter` on one thread, in two PRs (pure move, then `FrameCommit`) | nothing felt: h1-h16 and the 26-case campaign identical; it is the price of M4 | L | lane | P3 |
+| M3 | **Engine split**: `PageEngine` + `Presenter` on one thread, in two PRs (pure move, then `FrameCommit`). Includes the **W-gate log**: every window-thread hold of 50 ms or more, by stage, and input-to-present latency | nothing felt: h1-h16 and the 26-case campaign identical; it is the price of M4 | L | lane | P3 |
 | M3b | **Cooperative load cancel**: `nav_id`, `cancel_nav`, the check between scripts and subresource phases | engine test: a load with a spinning script and twenty slow subresources is cancelled within 200 ms | M | cloud | M1 |
 | **M4** | **One content thread** behind `HIWAVE_CONTENT_THREAD=1`, default after one hand-test day: `RustKitView` becomes a `PageHandle`; the loop runs inside the page runtime's `block_on` | **the responsiveness milestone**: URL bar, chrome clicks, window drag and tab switch answer within 100 ms while h19 spins or eBay relayouts; Stop ends a spin within 1 s | L (protocol PR, then thread PR) | lane; Atlas-Mac | M1, M2, M3, M3b, T3 |
-| M4b | **Presenter-owned scroll** (the doc's optional M9b, promoted): the Presenter draws committed offset + unacknowledged wheel deltas; commits carry `scroll_ack` | with h20 spinning in the front tab a wheel flick moves the last frame within one frame | M | lane; Atlas-Mac | M4 |
-| M4c | **Busy bar + native accelerators**: "this page is busy — Stop" after 2 s of one turn; Esc / Cmd+. / Cmd+W on the window thread | the user sees why a page is slow and can stop it without a beachball | S | lane | M4 |
+| M4b | **Presenter-owned scroll** (the doc's optional M9b, promoted), root scroller only; rules and cases below | with h20 spinning in the front tab a wheel flick moves the last frame within one frame, and a click after the flick lands on what the user saw | M | lane; Atlas-Mac | M4 |
+| M4c | **Busy bar + native accelerators**: "this page is busy — Stop" after 2 s of one turn; Esc / Cmd+. / Cmd+W on the window thread. Stop policy changes here (section 7, decision 1) | the user sees why a page is slow and can stop it without a beachball | S | lane | M4 |
+| R1 | **Resource ownership audit**, before a second live document exists: web-font slot per document; image ids, glyph caches, the SVG cache, resource callbacks and frame dependencies each get a named owner and a release rule (invariant 11) | nothing felt; two live documents cannot overwrite each other's fonts or images | M | cloud | M3 |
 | M5 | **One retained view per tab** | clicking tab 1 while tab 2 spins shows tab 1's last frame within 100 ms; switching tabs no longer reloads | M | lane; Atlas-Mac | M4b |
-| M6 | **One page thread per tab**, cap active + 7 most recent (owner question 3) | tab 1 keeps ticking while tab 2 spins; a new tab loads during the spin | L | lane; Atlas-Mac | M5 |
-| M7 | **Chrome document as a page thread** (Phase X step 2), `HIWAVE_RUSTKIT_CHROME=1` | all of the above through a RustKit-drawn tab strip; a chrome script forced to spin does not stop Cmd+W | L, two PRs | lane; Atlas-Mac | M4c, M6 |
-| M8 | **`ViewHostMac` replaces tao** (Phase X step 3) | tasks 1-7 on a build with no tao and no wry | L | lane; Atlas-Mac | M2, M7 |
-| M9 | Optional render thread; only if T1's `render` share stays above 40% of a hover relayout after P3 | Wikipedia portal wheel-to-present under one frame | M | lane; Atlas-Mac | M6 |
+| M6 | **One page thread per tab**, cap active + 7 most recent and a memory budget (owner question 3); abandonment rules of invariant 10. **Project A ends here** | tab 1 keeps ticking while tab 2 spins; a new tab loads during the spin | L | lane; Atlas-Mac | M5 |
+| M7 | *Project B.* **Chrome document as a page thread** (Phase X step 2), `HIWAVE_RUSTKIT_CHROME=1` | all of the above through a RustKit-drawn tab strip; a chrome script forced to spin does not stop Cmd+W | L, two PRs | lane; Atlas-Mac | M4c, M6 |
+| M8 | *Project B.* **`ViewHostMac` replaces tao** (Phase X step 3) | tasks 1-7 on a build with no tao and no wry | L | lane; Atlas-Mac | M2, M7 |
+| M9 | Render thread: renderer execute, image upload, acquire and present off the window thread (Surface creation stays on it). **Triggered by the W-gate**, not by a share of a relayout | no window-thread hold over 50 ms and input-to-present under 32 ms at p95 on eBay search, cnn and the Wikipedia portal | M | lane; Atlas-Mac | W-gate at M4; before M5 if it fails |
 
 Lanes in parallel from day one: cloud takes T1, T3, P2, P3, D1, M1, M3b (none needs a
 screen); the lane takes T2, P1, M2, then M3 and M4. Atlas runs the real-window checks
 when the Mac is free. Pete hand-tests each landed step in the weekly build.
+
+**T0's limits, as #666 states them.** The budget is per event and per turn, not per user
+action: one click is `mousedown`, `mouseup` and `click`, each with its own 5 s, so up to
+about 15 s. An interval that overruns every time is stopped every time, so it holds the
+window 5 s out of every 5 and starves the page's other timers. Script with no host calls
+is not stopped at all until M1. The parity campaign runs with interruption off, so it
+says nothing about the budget. T0 is worth landing; it bounds the common eBay-style spin.
+It does not make the window responsive. M4 does.
+
+**The W-gate.** At M4, with the content thread on, read the window-stall log on eBay
+search, cnn and the Wikipedia portal. If any stage holds the window 50 ms or more, or
+input-to-present exceeds 32 ms at p95, M9 moves ahead of M5. A percentage of a relayout is
+not the test: 20% of a second is a freeze and 60% of 2 ms is nothing.
+
+**What a scroll frame does (M4b).** Today a scroll re-executes the whole display list at
+a new offset, which is proportional to the page: 2.2M commands on the Wikipedia portal. P3
+removes the copies, not the execution. M4b's scroll frame must be bounded by the viewport,
+not the page: the Presenter keeps the last rendered frame as a texture taller than the
+viewport and a scroll frame translates and blits it, re-executing only when the retained
+band is exhausted or a new commit arrives. If the W-gate shows the re-execute path is
+already under 8 ms on all three sites, the retained band is deferred.
+
+**M4b correctness rules.** Sequence order alone is not enough; these are acceptance cases:
+
+- *Flick then click.* A click carries the Presenter's visible offset and the commit
+  generation the user saw. The page thread applies that offset before hit-testing, so the
+  click lands on what was on screen, even if `max_scroll` changed in between.
+- *Fixed and sticky.* Fixed boxes are a separate layer in the commit (the engine already
+  holds them apart, #681) and are not translated. Sticky boxes are translated with the
+  page and clamped by the bounds the commit carries.
+- *Nested scrollers.* Not predicted at first: a wheel over a nested scroll container goes
+  to the page as today. Listed as a known limit.
+- *`scrollTo()` during a flick.* The commit's `scroll_ack` names the last wheel sequence
+  the page applied; a commit with a script-set offset replaces the Presenter's offset and
+  drops deltas at or below that sequence.
+- *Resize or navigation with wheel events outstanding.* Unacknowledged deltas are dropped
+  on a new `nav_id` and re-clamped on resize.
+
+## 5b. Schedule: the critical path
+
+The earlier "four lane-weeks to M4" was a target, not a forecast. By this plan's own
+sizes M3 (two PRs) and M4 (two PRs) are each two lane-weeks and sequential: four weeks of
+writing alone, before M2, review, integration and Mac time.
+
+| step | writing | review rounds (this week's PRs took 3 to 5, about a day each) | Mac checks | running total |
+|---|---|---|---|---|
+| M2 input queue | 1 week, lane | 3 to 5 days | half a day | week 2 |
+| M3a pure move | 1 week, lane (after M2) | 3 to 5 days | campaign A/B | week 3-4 |
+| M3b FrameCommit + W-gate log | 1 week | 3 to 5 days | half a day | week 5 |
+| M1, M3b cancel, R1, D1, P2, P3, T1, T3 | cloud, in parallel | their own rounds | none | not on the path if started now |
+| M4a protocol | 1 week | 3 to 5 days | h1-h16 | week 6-7 |
+| M4b thread, flag on | 1 week | 3 to 5 days | a hand-test day, W-gate read | week 8 |
+
+Forecast: **M4 default-on in about eight weeks**, six if review rounds halve; M4b, M4c,
+M5 and M6 add four to six more. The one lane is the constraint. A second Mac-capable
+worker on M2 while the lane does M3a would take two weeks off.
 
 What the page-side PRs buy, from the measurements: tree reuse alone took one eBay
 relayout from 509 ms to 337 ms, so build and cascade are at least 170 ms of the 509;
@@ -168,25 +225,30 @@ T1 replaces these bounds with a split per site.
 
 ## 6. First felt win
 
-This week, two things: T0 turns an unbounded freeze on a runaway page into a 5 s one
-(the branch exists; it needs Pete's decision and the real-window rerun), and T2 makes
-the wheel move the page on the next frame even on eBay search. The responsiveness
-milestone, M4, is four lane-weeks out if M1, M2, M3 and M3b run in parallel as above;
-six if they run in series.
+This week, two modest things: T0 bounds the common post-load spin at 5 s per turn (with
+the limits above), and T2 makes a processed wheel event move the page on that frame.
+Neither makes the window responsive. The first step that does is M4, about eight weeks
+out on the critical path in 5b; P1 (#687) lands sooner and removes most of the
+half-second hovers on its own.
 
 ## 7. Decisions needed from Pete
 
-1. **5 s live-turn budget (T0).** Recommended: yes. It is temporary; from M4c the busy
-   bar replaces the automatic kill with the user's own Stop.
-2. **Vendor a patched Boa 0.22 (M1).** Recommended: yes; it is the only way to stop a
-   pure spin, and the patch is 30 lines with a test. Offer it upstream.
-3. **How many tabs keep a live page thread (M6).** Recommended: active + 7, folded into
-   Tab Decay.
-4. **Process per tab.** Recommended: no, not now; invariant 8 keeps the door open.
-5. **Chrome on its own page thread (M7).** Recommended: yes; the window thread then never
-   runs script, which is what the watchdog relies on.
-6. **Promote presenter-owned scroll (M4b) from optional to right after M4.** Recommended:
-   yes; it is the single Chrome property users feel most after "the app did not freeze".
+1. **Stop policy.** Now (T0): 5 s automatic per turn, with the limits stated. From M4c:
+   the front tab is never killed automatically while the busy bar is showing; the user's
+   Stop is immediate. A background tab keeps the 5 s automatic stop, and any tab is
+   stopped at 30 s as a backstop. Recommended: yes to all three.
+2. **Vendor a patched Boa 0.22 (M1).** Recommended: yes. The patch is small but its risk
+   is not measured in lines: it lands with tests for the interrupt race, for unwinding out
+   of nested calls and jobs, and for the context being usable afterwards.
+3. **How many tabs keep a live page thread (M6).** Recommended: active + 7 as the first
+   setting, plus a memory budget that discards the least recent tab sooner on a small
+   machine.
+4. **Process per tab.** Recommended: no for this project, with the bounded abandonment
+   rules of invariant 10.
+5. **Shell replacement (M7, M8) as its own project after M6.** Recommended: yes. When it
+   runs, the chrome goes on its own page thread, not the window thread.
+6. **Promote presenter-owned scroll (M4b) to right after M4.** Recommended: yes, with the
+   hit-testing and positioned-content cases as acceptance.
 
 ## 8. What this does not solve
 
@@ -200,6 +262,10 @@ six if they run in series.
   thread boundary at best, a segfault takes the app.
 - Windows and Linux content: stays on wry until a host lane lands there.
 - Web Workers, service workers, IME and drag-and-drop on the RustKit content view.
+- Nested scroll containers do not get presenter-owned scroll in Project A.
+- A page's own network stalls while its thread runs a long turn, unless the net thread is
+  promoted (invariant 7).
+- An abandoned thread's CPU and memory are not reclaimed without a restart.
 
 ## 9. Risks and how each is retired
 
@@ -207,24 +273,46 @@ six if they run in series.
 |---|---|
 | The 509 ms split is unknown, so P1-P3 are ranked on bounds | T1 lands first and is read before P2/P3 are prioritised |
 | M3 is the largest change: a 36k-line `lib.rs` where render, `create_view`, `set_view_bounds` and image upload assume the engine owns the compositor | two PRs, the first a pure move with the campaign identical A/B; compile-time `assert_send` on every type that crosses |
-| Off-main present on Metal is unexercised | M9 is optional and last; M4 keeps present on the window thread |
+| Off-main present on Metal is unexercised | M4 keeps present on the window thread; M9 lands behind a flag with a resize-tearing check in the real window |
+| The Presenter stalls the window on a heavy page | the W-gate at M4 measures it and moves M9 forward |
+| Presenter scroll and page layout disagree: wrong-target clicks, drifting fixed headers | the five M4b cases are real-window acceptance checks |
+| Abandoned threads pile up | capped at two, epoch-fenced, restart prompt (invariant 10) |
 | Per-page tokio runtimes stall h2 if the loop leaves `block_on` | invariant 7, with an engine test that holds a request across a long turn |
-| The process-global web-font slot (`rustkit-text/src/webfonts.rs:284-290`) breaks with two live documents | made per-document in M5's first PR |
+| Process-global resources (the web-font slot at `rustkit-text/src/webfonts.rs:284-290`, image ids, glyph and SVG caches) break with two live documents | R1, before M5 |
 | The vendored Boa drifts from upstream | one file, one patch, a test that fails if the hook is missing; upstream PR filed |
 | Watchdog kills a legitimate 6 s handler | the busy bar at 2 s (M4c) lets the user decide; the automatic kill goes away with it |
 | The real-window driver's input path is unproven on a granted seat | it now is: 13 checks, 142 assertions, passed on the Mac 2026-10-13 |
 
 ## 10. Acceptance
 
-The plan is done when, in the built app on macOS, by hand and by `tools/real_window`:
+By hand and by `tools/real_window`, in the built app on macOS.
+
+### 10A. Project A, responsiveness (done at M6)
 
 - [ ] Task 1: tab 2 spins; tab 1 shows within 100 ms and keeps ticking.
 - [ ] Task 2: Stop, Esc and Cmd+. end a spin within 1 s; the page stays usable.
 - [ ] Task 3: Cmd+W closes a spinning tab within 1 s.
 - [ ] Task 4: during a spinning load, typing in the URL bar, opening a tab and dragging the window answer within 100 ms.
-- [ ] Task 5: a pure `while(true){}` spin is stopped within budget + 250 ms.
+- [ ] Task 5: on a pure `while(true){}` spin, the user's Stop takes effect within 250 ms; a background tab is stopped automatically at 5 s and any tab at 30 s.
 - [ ] Task 6: a page the server holds for 20 s does not freeze tab switch or the shelf.
 - [ ] Task 7: input arrives in order and in the right tab.
 - [ ] Task 8: h1-h16 pass; the 26-case campaign is identical A/B; Wikipedia, YouTube and eBay look as before.
-- [ ] Task 9: tasks 1-7 pass with the RustKit chrome and no tao in the build.
-- [ ] Scrolling never waits on a page: a flick during a 509 ms relayout moves the page within one frame.
+- [ ] One click whose three handlers each spin, and an interval that always overruns: the window answers within 100 ms throughout.
+- [ ] Scroll: a flick during a 509 ms relayout moves the page within one frame; a click right after it hits what was on screen; a fixed header stays put; `scrollTo()` mid-flick wins.
+- [ ] W-gate: no window-thread hold of 50 ms or more, input-to-present under 32 ms at p95, on eBay search, cnn and the Wikipedia portal.
+- [ ] A third abandoned thread produces the restart prompt, not a fourth thread; no late result from an abandoned page reaches a live document.
+
+### 10B. Project B, shell replacement (M7, M8)
+
+- [ ] Task 9: every 10A item passes with the RustKit chrome and no tao or wry in the macOS build.
+- [ ] A chrome script forced to spin does not stop Cmd+W or page scrolling.
+- [ ] IME composition, clipboard and drag-in work on the RustKit views.
+
+## 11. Diagnostics
+
+The Inspector's diagnostic snapshot (landed in #674) gains a `threads` block as the
+milestones land: stage timings per relayout (T1), input queue depth and oldest event age
+(M2), frame age and commit generation per view (M3), `nav_id` and `nav_epoch` (M3b), the
+interrupt reason and who set it (M1), window-thread holds (M3), abandoned threads (M6).
+It is read by the real-window checks and shown in the Inspector page; no milestone waits
+on the Inspector.
