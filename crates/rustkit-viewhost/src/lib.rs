@@ -107,6 +107,7 @@ impl ViewId {
 
     /// The id a view carries in its native object (the macOS content view's
     /// ivar), read back when the view records an input.
+    #[cfg(target_os = "macos")]
     pub(crate) fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
