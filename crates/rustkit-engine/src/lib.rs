@@ -2171,9 +2171,10 @@ impl Engine {
         Ok(())
     }
 
-    /// Scroll a view by the given delta.
+    /// Scroll a view by the given delta (the user's wheel, keys or scrollbar).
     ///
-    /// Returns true if the scroll caused a change (and thus needs a re-render).
+    /// Returns true if the offset changed. A changed offset is presented
+    /// here, before the page is told, so the caller has nothing to draw.
     pub fn scroll_view(
         &mut self,
         id: EngineViewId,
@@ -2197,20 +2198,32 @@ impl Engine {
 
         view.scroll_offset = (new_x, new_y);
 
-        let changed = view.scroll_offset != old_offset;
-        if changed {
-            debug!(?id, ?old_offset, new_offset = ?view.scroll_offset, "View scrolled");
-            if let Some(bindings) = view.bindings.as_ref() {
-                bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
-                // The page hears the scroll, and its observers report.
-                bindings.notify_scrolled();
-            }
+        if view.scroll_offset == old_offset {
+            return Ok(false);
         }
-        if changed {
-            self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll))?;
-        }
+        let (offset, max) = (view.scroll_offset, view.max_scroll_offset);
+        debug!(?id, ?old_offset, new_offset = ?offset, "View scrolled");
 
-        Ok(changed)
+        // The frame moves first, from the display list as it stands: scroll
+        // is a render-time translate, so nothing has to be laid out for it.
+        // The page hears the scroll after that, and the relayout its
+        // listeners cause follows with a frame of its own. Until 2026-10-14
+        // the order was the reverse, and a wheel event waited for the
+        // page's scroll handlers and their relayout (about 500 ms each on
+        // eBay search) before anything moved. A failed draw is not the
+        // scroll's failure: the frame on record is stale, so the next wake
+        // draws it (`render_changed_views`).
+        if let Err(e) = self.render(id) {
+            debug!(?id, ?e, "Render at the new scroll offset failed; the next wake draws it");
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.set_scroll_state(offset, max);
+            // The page hears the scroll, and its observers report.
+            bindings.notify_scrolled();
+        }
+        self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll))?;
+
+        Ok(true)
     }
 
     /// Hit-test a click in VIEWPORT coordinates and return the link URL it
