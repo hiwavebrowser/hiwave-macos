@@ -162,6 +162,12 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
         r#"<div id=x><i id=p style="display:inline-block;width:100px;height:30px"></i><span><b id=s><i id=q style="display:inline-block;width:50px;height:10px"></i></b></span></div><div id=y style="height:5px"></div>"#,
         "x:0:0:1280:30 p:0:0:100:30 s:100:30:50:0 q:100:20:50:10 y:0:30:1280:5",
     ),
+    (
+        "an empty span with a line-height beside an inline-block",
+        "",
+        r#"<div id=x><span style="line-height:40px"></span><i id=q style="display:inline-block;width:100px;height:10px"></i></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:40 y:0:40:1280:5",
+    ),
 ];
 
 /// Pages that do not match Chromium yet. One that starts to match fails the
@@ -171,7 +177,16 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
 /// out in one row and does not break across lines, so the second
 /// inline-block stays beside the first, past the 150px block, and the block
 /// is one line tall (10; Chromium 20).
-const GAPS: &[&str] = &["two lines of inline-blocks in a span"];
+///
+/// `an empty span with a line-height beside an inline-block`: the tree
+/// build keeps no box for an inline with nothing in it, so its line-height
+/// cannot reach the line; the block is the inline-block's 10 for
+/// Chromium's 40 (develop 16, from the strut). Low impact: nothing is drawn
+/// over anything. CSS2 10.8 counts the empty inline box.
+const GAPS: &[&str] = &[
+    "two lines of inline-blocks in a span",
+    "an empty span with a line-height beside an inline-block",
+];
 
 #[test]
 fn a_zero_font_size_is_zero_and_not_sixteen() {
