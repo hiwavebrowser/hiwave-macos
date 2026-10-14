@@ -257,3 +257,73 @@ fn a_wrapped_inline_block_in_a_link_is_counted_once() {
     }
     assert!(wrong.is_empty(), "{} of 3 wrong:\n{}", wrong.len(), wrong.join("\n"));
 }
+
+/// Text whose font size is restored on an inline box INSIDE another inline
+/// box, under a `font-size: 0` block: the second hold's pages (`<span><b
+/// style="font-size:16px">Hi</b></span>`, nav links `<a><span style=
+/// "font-size:14px">Home</span></a>`). The outer inline's own font is 0px,
+/// so only the nested inline's text can give the line its height; left
+/// out, the block was 0 tall and the next block was laid over the text
+/// (develop 16, from the strut it no longer has). The line-heights are
+/// explicit so the heights do not depend on a face's metrics; the hold's
+/// Chromium 141 values with `normal` were 18 / 16 / 20 / 50.
+///
+/// These pages have text, so only heights are compared, and only on macOS
+/// (the Linux stub shaper gives the text no box of its own).
+#[test]
+#[cfg(target_os = "macos")]
+fn text_restored_inside_a_nested_inline_box_gives_the_line_its_height() {
+    // (name, the block's content, Chromium's boxes: #x then #y)
+    let pages = [
+        (
+            "bold text in a span",
+            r#"<span><b style="font-size:16px;line-height:20px">Hi</b></span>"#,
+            "x:0:0:1280:20 y:0:20:1280:5",
+        ),
+        (
+            "a nav link whose font is restored in the link",
+            r#"<a href=#><span style="font-size:14px;line-height:16px">Home</span></a>"#,
+            "x:0:0:1280:16 y:0:16:1280:5",
+        ),
+        (
+            "text three inline boxes deep",
+            r#"<span><a href=#><b style="font-size:16px;line-height:20px">Hi</b></a></span>"#,
+            "x:0:0:1280:20 y:0:20:1280:5",
+        ),
+        (
+            "large text in a span",
+            r#"<span><b style="font:40px/50px Helvetica">Hi</b></span>"#,
+            "x:0:0:1280:50 y:0:50:1280:5",
+        ),
+        (
+            "restored text and an inline-block in one span",
+            r#"<span><b style="font-size:16px;line-height:20px">Hi</b><i style="display:inline-block;width:10px;height:5px"></i></span>"#,
+            "x:0:0:1280:20 y:0:20:1280:5",
+        ),
+    ];
+    let engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut documents = Vec::new();
+    let mut wrong = Vec::new();
+    for (name, body, chrome) in pages {
+        let html = format!(
+            "<!doctype html><html><head><style>body{{margin:0;font-size:0}}</style></head>\
+             <body><div id=x>{body}</div><div id=y style=\"height:5px\"></div></body></html>"
+        );
+        let document = Document::parse_html(&html).expect("parse");
+        let rects = super::nested_layout_matrix_tests::engine_rects(&engine, &document, &["x", "y"]);
+        documents.push(document);
+        let got = ["x", "y"]
+            .iter()
+            .zip(&rects)
+            .map(|(id, r)| match r {
+                Some(r) => format!("{id}:{}:{}:{}:{}", r[0].round(), r[1].round(), r[2].round(), r[3].round()),
+                None => format!("{id}:none"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if got != chrome {
+            wrong.push(format!("{name}\n   engine {got}\n   chrome {chrome}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} of {} wrong:\n{}", wrong.len(), pages.len(), wrong.join("\n"));
+}
