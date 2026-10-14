@@ -315,6 +315,8 @@ mod resize_coalesce_tests;
 mod flex_percent_basis_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
+#[cfg(all(test, feature = "headless"))]
+mod scroll_paints_first_tests;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -655,6 +657,10 @@ struct ViewState {
     /// Counts the display lists this view has been given.
     frame_generation: u64,
     presented: Option<PresentedFrame>,
+    /// Counts the frames this view has presented (a diagnostic: the threads
+    /// plan's per-view frame count; the tests read it to see how many draws
+    /// one input cost).
+    frames_presented: u64,
     viewhost_id: ViewId,
     url: Option<Url>,
     title: Option<String>,
@@ -1791,6 +1797,7 @@ impl Engine {
             display_list: None,
             frame_generation: 0,
             presented: None,
+            frames_presented: 0,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -1873,6 +1880,7 @@ impl Engine {
             display_list: None,
             frame_generation: 0,
             presented: None,
+            frames_presented: 0,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -1964,6 +1972,7 @@ impl Engine {
             display_list: None,
             frame_generation: 0,
             presented: None,
+            frames_presented: 0,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -14211,6 +14220,7 @@ impl Engine {
 
         if let Some(view) = self.views.get_mut(&id) {
             view.presented = Some(presented);
+            view.frames_presented += 1;
         }
         Ok(())
     }
