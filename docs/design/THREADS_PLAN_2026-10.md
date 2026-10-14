@@ -231,7 +231,12 @@ Neither makes the window responsive. The first step that does is M4, about eight
 out on the critical path in 5b; P1 (#687) lands sooner and removes most of the
 half-second hovers on its own.
 
-## 7. Decisions needed from Pete
+## 7. Decisions (approved)
+
+**Approved by Pete, 2026-10-13: "You have a go on this plan."** All six recommendations
+below stand as decided. Release rule that goes with it: no weekly release until this plan
+is completed; the next release is the weekend release after Project A's acceptance (10A)
+passes. Develop keeps moving and Pete keeps hand-testing it.
 
 1. **Stop policy.** Now (T0): 5 s automatic per turn, with the limits stated. From M4c:
    the front tab is never killed automatically while the busy bar is showing; the user's
