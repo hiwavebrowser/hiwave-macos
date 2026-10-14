@@ -45,7 +45,7 @@ use crate::input_queue::{PendingClick, PendingKey, PendingScroll, PointerInput};
 
 /// The name of the ivar each `RustKitContentView` carries its [`ViewId`] in.
 #[cfg(target_os = "macos")]
-const VIEW_ID_IVAR: &str = "rkViewId";
+pub(crate) const VIEW_ID_IVAR: &str = "rkViewId";
 
 #[cfg(target_os = "macos")]
 pub fn drain_pending_clicks() -> Vec<PendingClick> {

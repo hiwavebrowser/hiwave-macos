@@ -755,6 +755,10 @@ impl ViewHost {
                 "Failed to create NSView".to_string(),
             ));
         }
+        // The view records its inputs tagged with this id (threads plan M2).
+        unsafe {
+            (*view).set_ivar::<u64>(crate::macos::VIEW_ID_IVAR, view_id.raw());
+        }
 
         // Configure the view for layer-backed rendering
         // NOTE: Don't manually create CAMetalLayer - let wgpu manage it
@@ -1061,6 +1065,10 @@ impl ViewHost {
                     let _ = DestroyWindow(hwnd);
                 }
             }
+
+            // An input recorded for this view must not reach whatever
+            // view comes next (threads plan M2).
+            input_queue::retire_view_input(view_id);
 
             info!(?view_id, "View destroyed");
             Ok(())
