@@ -26556,6 +26556,85 @@ mod selector_is_escape_tests {
     }
 }
 
+/// Portable pins for `pseudo_list_base` (#684). Headless
+/// `box_sizing_inherit_tests` cover the full cascade; these prove the
+/// selector-list half without a GPU.
+#[cfg(test)]
+mod pseudo_list_base_tests {
+    use super::*;
+
+    #[test]
+    fn a_pseudo_member_anywhere_in_a_selector_list_is_collected() {
+        // Indexed path: pseudo="::before", single_colon=":before" (the
+        // single-colon form covers the double-colon one).
+        let (base, bare, specs) =
+            pseudo_list_base("*, :before, :after", "::before", ":before").expect("before");
+        assert_eq!(base, "*");
+        assert!(bare, "`:before` alone is bare");
+        assert_eq!(specs.len(), 1);
+
+        let (base, bare, specs) =
+            pseudo_list_base("*, :before, :after", "::after", ":after").expect("after");
+        assert_eq!(base, "*");
+        assert!(bare);
+        assert_eq!(specs.len(), 1);
+
+        let (base, bare, specs) =
+            pseudo_list_base("a::before, b::after", "::before", ":before").expect("a::before");
+        assert_eq!(base, "a");
+        assert!(!bare);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].0, 0);
+
+        let (base, bare, specs) =
+            pseudo_list_base("a::before, b::after", "::after", ":after").expect("b::after");
+        assert_eq!(base, "b");
+        assert!(!bare);
+        assert_eq!(specs.len(), 1);
+    }
+
+    #[test]
+    fn a_bare_pseudo_rule_is_universal_and_a_list_without_it_is_none() {
+        let (base, bare, _) =
+            pseudo_list_base("::before", "::before", ":before").expect("bare ::before");
+        assert_eq!(base, "*");
+        assert!(bare);
+
+        let (base, bare, _) =
+            pseudo_list_base(":before", "::before", ":before").expect("bare :before");
+        assert_eq!(base, "*");
+        assert!(bare);
+
+        assert!(pseudo_list_base("div, span", "::before", ":before").is_none());
+        assert!(pseudo_list_base("a::after", "::before", ":before").is_none());
+    }
+
+    #[test]
+    fn each_pseudo_member_keeps_its_own_specificity_most_specific_first() {
+        // `div::before, #id::before` must cascade with the id member's
+        // specificity when that member matches — never the list's max
+        // taken from a non-pseudo sibling (the #684 failure mode).
+        let (base, bare, specs) =
+            pseudo_list_base("div::before, #id::before", "::before", ":before")
+                .expect("two before members");
+        assert_eq!(base, "div, #id");
+        assert!(!bare);
+        assert_eq!(specs.len(), 2);
+        // Most specific first: #id::before ahead of div::before.
+        assert_eq!(specs[0].0, 1);
+        assert_eq!(
+            specs[0].1,
+            SelectorMatcher.selector_specificity("#id::before")
+        );
+        assert_eq!(specs[1].0, 0);
+        assert_eq!(
+            specs[1].1,
+            SelectorMatcher.selector_specificity("div::before")
+        );
+        assert!(specs[0].1 > specs[1].1);
+    }
+}
+
 // Real Engine (Compositor wants a device) — macOS only, like
 // element_identity_tests.
 #[cfg(all(test, target_os = "macos"))]
