@@ -310,6 +310,142 @@ fn a_hover_rule_with_a_sibling_combinator_takes_the_full_path() {
     assert_eq!(hovered, painted_by_a_full_relayout(&mut engine, view));
 }
 
+/// A field in a 40px row and, under it, a box whose hover rule changes
+/// paint only; `extra_css` adds each test's `:active` or `:focus` rules.
+fn field_page(extra_css: &str) -> (Engine, EngineViewId) {
+    let html = format!(
+        "<style>body{{margin:0;font:16px/20px sans-serif}} #x{{height:30px;background:tan}} #x:hover{{background:red}} {extra_css}</style>\
+         <div style='height:40px'><input id=i></div><div id=x>x</div>"
+    );
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 600,
+        })
+        .expect("view");
+    engine.load_html(view, &html).expect("load_html");
+    (engine, view)
+}
+
+/// Points over the field and over the box under it.
+const FIELD: (f32, f32) = (20.0, 10.0);
+const BOX: (f32, f32) = (20.0, 55.0);
+
+/// Whether the laid-out tree carries a focused control with its caret.
+fn caret_drawn(painted: &(String, String)) -> bool {
+    painted.1.contains("focused_caret: Some(")
+}
+
+fn last_miss() -> String {
+    LAST_RESTYLE_MISS.with(|why| why.borrow().clone())
+}
+
+#[test]
+fn a_press_that_focuses_a_field_paints_its_caret() {
+    let (mut engine, view) = field_page("input:active{background:#eee}");
+    assert!(!caret_drawn(&painted(&engine, view)));
+    engine.mouse_down_at_point(view, FIELD.0, FIELD.1);
+    assert!(engine.focused_node(view).is_some(), "the press focused the field");
+    assert_eq!(restyles(&engine, view), 1, "the sheet reads :active on the field");
+    assert_eq!(skipped(&engine, view), 0, "the focus moved since the last layout: the full path");
+    assert_eq!(last_miss(), "focus moved");
+    let pressed = painted(&engine, view);
+    assert!(caret_drawn(&pressed), "the field is painted focused, with its caret");
+    assert_same(&pressed, &painted_by_a_full_relayout(&mut engine, view), "pressed");
+}
+
+#[test]
+fn a_hover_after_a_click_into_a_field_paints_the_focus() {
+    let (mut engine, view) = field_page("");
+    engine.click_at_point(view, FIELD.0, FIELD.1);
+    assert!(engine.focused_node(view).is_some(), "the click focused the field");
+    // No rule read the click, so nothing was laid out for it: the focus is
+    // not painted until the next relayout (as on develop, where that
+    // relayout is always a full one).
+    assert_eq!(restyles(&engine, view), 0);
+    assert!(!caret_drawn(&painted(&engine, view)));
+    hover(&mut engine, view, BOX);
+    assert_eq!(restyles(&engine, view), 1);
+    assert_eq!(skipped(&engine, view), 0, "the focus moved since the last layout: the full path");
+    assert_eq!(last_miss(), "focus moved");
+    let hovered = painted(&engine, view);
+    assert!(caret_drawn(&hovered), "the hover's relayout paints the focus and the caret");
+    assert_same(&hovered, &painted_by_a_full_relayout(&mut engine, view), "hovered after the click");
+    // That layout recorded the focus: the next paint-only move takes the
+    // short path and keeps the caret.
+    hover(&mut engine, view, NOWHERE);
+    assert_eq!(skipped(&engine, view), 1);
+    let left = painted(&engine, view);
+    assert!(caret_drawn(&left));
+    assert_same(&left, &painted_by_a_full_relayout(&mut engine, view), "left the box");
+}
+
+#[test]
+fn a_press_elsewhere_blurs_the_field_in_paint() {
+    let (mut engine, view) = field_page("#x:active{background:red}");
+    engine.mouse_down_at_point(view, FIELD.0, FIELD.1);
+    engine.relayout(view).expect("relayout");
+    assert!(caret_drawn(&painted(&engine, view)), "the focused field is laid out and painted");
+    engine.mouse_down_at_point(view, BOX.0, BOX.1);
+    assert_eq!(engine.focused_node(view), None, "a press on the box takes the focus away");
+    assert_eq!(skipped(&engine, view), 0, "the focus moved since the last layout: the full path");
+    assert_eq!(last_miss(), "focus moved");
+    let blurred = painted(&engine, view);
+    assert!(!caret_drawn(&blurred), "no caret on a field that lost the focus");
+    assert_same(&blurred, &painted_by_a_full_relayout(&mut engine, view), "blurred");
+}
+
+#[test]
+fn focus_rules_after_a_click_paint_as_a_full_relayout_does() {
+    // `:focus`, `:focus-visible` and `:focus-within` are not matched by
+    // the engine yet (the same on develop): what is checked is that the
+    // short path never shows something a full relayout does not, with the
+    // caret, when a page has those rules.
+    let (mut engine, view) = field_page(
+        "#i:focus{background:yellow} #i:focus-visible{outline:2px solid blue} div:focus-within{background:pink}",
+    );
+    engine.click_at_point(view, FIELD.0, FIELD.1);
+    hover(&mut engine, view, BOX);
+    assert_eq!(skipped(&engine, view), 0, "the focus moved: the full path");
+    let hovered = painted(&engine, view);
+    assert!(caret_drawn(&hovered));
+    assert_same(&hovered, &painted_by_a_full_relayout(&mut engine, view), "focus rules, hovered");
+    hover(&mut engine, view, NOWHERE);
+    assert_eq!(skipped(&engine, view), 1);
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "focus rules, left");
+}
+
+#[test]
+fn a_label_click_that_focuses_a_textarea_paints_its_caret() {
+    let html = "<style>body{margin:0;font:16px/20px sans-serif} label{display:block;height:20px} label:active{color:red}\
+                #x{height:30px;background:tan} #x:hover{background:red}</style>\
+                <label for=t>name</label><div style='height:60px'><textarea id=t rows=2></textarea></div><div id=x>x</div>";
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 600,
+        })
+        .expect("view");
+    engine.load_html(view, html).expect("load_html");
+    // The press restyles the label; the release gives the textarea the focus.
+    engine.click_at_point(view, 10.0, 10.0);
+    assert!(engine.focused_node(view).is_some(), "the label's click focused its textarea");
+    hover(&mut engine, view, (20.0, 95.0));
+    let hovered = painted(&engine, view);
+    assert!(caret_drawn(&hovered), "the textarea is painted focused, with its caret");
+    assert_same(&hovered, &painted_by_a_full_relayout(&mut engine, view), "hovered after the label click");
+    hover(&mut engine, view, NOWHERE);
+    let left = painted(&engine, view);
+    assert!(caret_drawn(&left));
+    assert_same(&left, &painted_by_a_full_relayout(&mut engine, view), "left the box");
+}
+
 /// The review's cost page: 300 inline-block cards, about 5,700 boxes, whose
 /// hover rules change paint only; with `miss`, one of them changes a height.
 fn large_page(miss: bool) -> String {
