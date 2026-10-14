@@ -18,6 +18,7 @@ use std::sync::Arc;
 use rustkit_bindings::{DomBindings, DomDirty};
 // Re-export IpcMessage for external use
 pub use rustkit_bindings::IpcMessage;
+#[cfg(test)]
 use rustkit_compositor::Compositor;
 
 /// Test-only: create a `Compositor` while holding this crate's GPU guard.
@@ -279,6 +280,7 @@ use rustkit_layout::{
 use std::borrow::Cow;
 use std::cell::Cell;
 mod relayout_cause;
+mod presenter;
 mod diagnostics;
 pub use diagnostics::{
     DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
@@ -287,6 +289,7 @@ pub use diagnostics::{
 #[cfg(all(test, feature = "headless"))]
 mod diagnostics_tests;
 use relayout_cause::PendingCauses;
+use presenter::{Frame, Presenter};
 mod shadow_tree;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
 pub use rustkit_bindings::MutationKind;
@@ -353,11 +356,10 @@ mod shadow_tree_tests;
 mod box_sizing_inherit_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
-use rustkit_renderer::Renderer;
 pub use rustkit_renderer::RenderStats;
 #[cfg(windows)]
 pub use rustkit_renderer::CaptureMetadata as ScreenshotMetadata;
-use rustkit_viewhost::{Bounds, ViewHost, ViewHostTrait, ViewId, WindowHandle};
+use rustkit_viewhost::{Bounds, ViewId, WindowHandle};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
@@ -1485,9 +1487,9 @@ impl SiblingContext {
 /// The main browser engine.
 pub struct Engine {
     config: EngineConfig,
-    viewhost: ViewHost,
-    compositor: Compositor,
-    renderer: Option<Renderer>,
+    /// The window thread's half: view host, compositor, renderer. The
+    /// page side (everything below) hands it frames; see `presenter.rs`.
+    presenter: Presenter,
     loader: Arc<ResourceLoader>,
     image_manager: Arc<ImageManager>,
     /// Webfont loader. PER-ENGINE AND Arc-SHARED per the 2026-08-08 design
@@ -1507,11 +1509,6 @@ pub struct Engine {
     /// [`Engine::set_style_recording`] for why this is a side table rather
     /// than a field on `ComputedStyle`.
     style_trace: std::cell::RefCell<Option<Vec<StyleRecord>>>,
-    /// Views whose most recent render attempt failed. A view entering this
-    /// set logs one `warn!`; leaving it logs recovery. Without this, a
-    /// persistently failing render (e.g. a wedged surface) freezes the
-    /// screen while the log stays silent.
-    render_failing: std::collections::HashSet<EngineViewId>,
     /// View currently being laid out, so the view-agnostic recursive builder
     /// can read that view's edit states (and only that view's).
     building_view: std::cell::Cell<Option<EngineViewId>>,
@@ -1663,16 +1660,8 @@ impl Engine {
     ) -> Result<Self, EngineError> {
         info!("Initializing RustKit Engine");
 
-        // Initialize ViewHost
-        let viewhost = ViewHost::new();
-
-        // Initialize Compositor (unit tests serialise device creation; see
-        // `test_compositor`)
-        #[cfg(test)]
-        let compositor = test_compositor();
-        #[cfg(not(test))]
-        let compositor = Compositor::new();
-        let compositor = compositor.map_err(|e| EngineError::RenderError(e.to_string()))?;
+        // The view host, the compositor and the renderer.
+        let presenter = Presenter::new(config.background_color)?;
 
         // Initialize ResourceLoader
         let loader_config = LoaderConfig {
@@ -1689,35 +1678,19 @@ impl Engine {
         // Initialize ImageManager
         let image_manager = Arc::new(ImageManager::new());
 
-        // Initialize Renderer
-        let renderer = Renderer::new(
-            compositor.device_arc(),
-            compositor.queue_arc(),
-            compositor.surface_format(),
-        )
-        .map_err(|e| EngineError::RenderError(e.to_string()))?;
-
         // Event channel
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-        info!(
-            adapter = ?compositor.adapter_info().name,
-            "Engine initialized with GPU renderer"
-        );
-
         Ok(Self {
             config,
-            viewhost,
-            compositor,
-            renderer: Some(renderer),
+            presenter,
             loader,
             image_manager,
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),event_tx,
+            font_loader: Arc::new(FontLoader::new()),
+            event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -1761,18 +1734,10 @@ impl Engine {
         debug!(?id, ?bounds, "Creating view");
 
         // Create viewhost view (using trait method)
-        let viewhost_id = <ViewHost as ViewHostTrait>::create_view(&self.viewhost, parent, bounds)
-            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+        let viewhost_id = self.presenter.create_host_view(parent, bounds)?;
 
         // Create compositor surface
-        let hwnd = <ViewHost as ViewHostTrait>::get_hwnd(&self.viewhost, viewhost_id)
-            .map_err(|e| EngineError::ViewError(e.to_string()))?;
-
-        unsafe {
-            self.compositor
-                .create_surface_for_hwnd(viewhost_id, hwnd, bounds.width, bounds.height)
-                .map_err(|e| EngineError::RenderError(e.to_string()))?;
-        }
+        self.presenter.attach_surface(viewhost_id, bounds)?;
 
         // Create navigation state machine
         let (nav_tx, nav_rx) = mpsc::unbounded_channel();
@@ -1829,9 +1794,7 @@ impl Engine {
         self.views.insert(id, view_state);
 
         // Render initial background
-        self.compositor
-            .render_solid_color(viewhost_id, self.config.background_color)
-            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+        self.presenter.clear_to_background(viewhost_id)?;
 
         info!(?id, "View created");
         Ok(id)
@@ -1854,8 +1817,7 @@ impl Engine {
     ) -> Result<EngineViewId, EngineError> {
         // TODO: Implement macOS view creation in Phase 3
         // For now, use trait method which will call the stub implementation
-        let viewhost_id = <ViewHost as ViewHostTrait>::create_view(&self.viewhost, parent, bounds)
-            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+        let viewhost_id = self.presenter.create_host_view(parent, bounds)?;
 
         // Create view state (without compositor surface for now)
         let (nav_tx, nav_rx) = mpsc::unbounded_channel();
@@ -1911,22 +1873,11 @@ impl Engine {
         let id = view_state.id;
         self.views.insert(id, view_state);
 
-        // Get raw window handle for compositor
-        let raw_handle =
-            <ViewHost as ViewHostTrait>::get_raw_window_handle(&self.viewhost, viewhost_id)
-                .map_err(|e| EngineError::ViewError(e.to_string()))?;
-
         // Create compositor surface
-        unsafe {
-            self.compositor
-                .create_surface_for_raw_handle(viewhost_id, raw_handle, bounds.width, bounds.height)
-                .map_err(|e| EngineError::RenderError(e.to_string()))?;
-        }
+        self.presenter.attach_surface(viewhost_id, bounds)?;
 
         // Render initial background
-        self.compositor
-            .render_solid_color(viewhost_id, self.config.background_color)
-            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+        self.presenter.clear_to_background(viewhost_id)?;
 
         info!(?id, "View created (macOS)");
         Ok(id)
@@ -1944,9 +1895,7 @@ impl Engine {
         debug!(?id, ?bounds, "Creating headless view");
 
         // Create headless texture instead of surface
-        self.compositor
-            .create_headless_texture(viewhost_id, bounds.width, bounds.height)
-            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+        self.presenter.create_headless_texture(viewhost_id, bounds)?;
 
         // Create navigation state machine
         let (nav_tx, nav_rx) = mpsc::unbounded_channel();
@@ -2002,9 +1951,7 @@ impl Engine {
         self.views.insert(id, view_state);
 
         // Render initial background to headless texture
-        self.compositor
-            .render_solid_color(viewhost_id, self.config.background_color)
-            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+        self.presenter.clear_to_background(viewhost_id)?;
 
         info!(?id, "Headless view created");
         Ok(id)
@@ -2016,13 +1963,9 @@ impl Engine {
             .views
             .remove(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
-        self.render_failing.remove(&id);
 
-        // Destroy compositor surface
-        let _ = self.compositor.destroy_surface(view.viewhost_id);
-
-        // Destroy viewhost view
-        let _ = <ViewHost as ViewHostTrait>::destroy_view(&self.viewhost, view.viewhost_id);
+        // Destroy compositor surface and viewhost view
+        self.presenter.destroy_view(id, view.viewhost_id);
 
         info!(?id, "View destroyed");
         Ok(())
@@ -2078,31 +2021,15 @@ impl Engine {
 
         debug!(?id, ?bounds, is_headless, "Resizing view");
 
+        self.presenter.apply_bounds(viewhost_id, is_headless, bounds)?;
+
         if is_headless {
-            // Headless view: recreate headless texture with new size
-            // First destroy old texture
-            self.compositor.destroy_headless_texture(viewhost_id).ok(); // Ignore errors if it doesn't exist
-
-            // Create new texture with new size
-            self.compositor
-                .create_headless_texture(viewhost_id, bounds.width, bounds.height)
-                .map_err(|e| EngineError::RenderError(e.to_string()))?;
-
             // Update headless_bounds in view state
             let view = self
                 .views
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
             view.headless_bounds = Some(bounds);
-        } else {
-            // Regular view: resize viewhost and surface
-            self.viewhost
-                .set_bounds(viewhost_id, bounds)
-                .map_err(|e| EngineError::ViewError(e.to_string()))?;
-
-            self.compositor
-                .resize_surface(viewhost_id, bounds.width, bounds.height)
-                .map_err(|e| EngineError::RenderError(e.to_string()))?;
         }
         Ok(())
     }
@@ -3645,7 +3572,7 @@ impl Engine {
         let view = self.views.get(&id)?;
         let bounds = match view.headless_bounds {
             Some(b) => b,
-            None => self.viewhost.get_bounds(view.viewhost_id).ok()?,
+            None => self.presenter.host_bounds(view.viewhost_id).ok()?,
         };
         Some((bounds.width as f32, bounds.height as f32))
     }
@@ -3738,7 +3665,7 @@ impl Engine {
     /// all. Two systems, both required.
     pub fn grab_keyboard(&self, id: EngineViewId) {
         if let Some(view) = self.views.get(&id) {
-            let _ = <ViewHost as ViewHostTrait>::focus_view(&self.viewhost, view.viewhost_id);
+            self.presenter.grab_keyboard(view.viewhost_id);
         }
     }
 
@@ -3780,9 +3707,7 @@ impl Engine {
 
         debug!(?id, "Focusing view");
 
-        self.viewhost
-            .focus(view.viewhost_id)
-            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+        self.presenter.focus(view.viewhost_id)?;
 
         Ok(())
     }
@@ -3793,9 +3718,7 @@ impl Engine {
 
         debug!(?id, visible, "Setting view visibility");
 
-        self.viewhost
-            .set_visible(view.viewhost_id, visible)
-            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+        self.presenter.set_visible(view.viewhost_id, visible)?;
 
         Ok(())
     }
@@ -5001,9 +4924,7 @@ impl Engine {
         let bounds = if let Some(headless_bounds) = view.headless_bounds {
             headless_bounds
         } else {
-            self.viewhost
-                .get_bounds(view.viewhost_id)
-                .map_err(|e| EngineError::ViewError(e.to_string()))?
+            self.presenter.host_bounds(view.viewhost_id)?
         };
 
         debug!(
@@ -13315,7 +13236,7 @@ impl Engine {
         frame.generation == view.frame_generation
             && frame.scroll_offset == view.scroll_offset
             && view.pending_resize.is_none()
-            && self.compositor.get_surface_size(view.viewhost_id).ok() == Some(frame.surface)
+            && self.presenter.surface_size(view.viewhost_id).ok() == Some(frame.surface)
             && !frame.missing_images.iter().any(|url| self.image_manager.is_cached(url))
             && frame.at.elapsed() < PRESENTED_FRAME_MAX_AGE
     }
@@ -13328,24 +13249,8 @@ impl Engine {
                 continue;
             }
             drawn += 1;
-            match self.render(id) {
-                Ok(()) => {
-                    if self.render_failing.remove(&id) {
-                        info!(?id, "View render recovered");
-                    }
-                }
-                Err(e) => {
-                    // Warn once per failure episode, not per frame: a wedged
-                    // surface renders at event rate and would flood the log,
-                    // but total silence is how a frozen screen goes
-                    // undiagnosed for a whole session.
-                    if self.render_failing.insert(id) {
-                        warn!(?id, error = %e, "View render failing; frames are NOT being presented (will log again on recovery)");
-                    } else {
-                        trace!(?id, error = %e, "View render still failing");
-                    }
-                }
-            }
+            let result = self.render(id);
+            self.presenter.note_render_result(id, &result);
         }
         drawn
     }
@@ -13362,41 +13267,7 @@ impl Engine {
 
         info!(?id, path, "Capturing frame");
 
-        // Get surface size
-        let (width, height) = self
-            .compositor
-            .get_surface_size(viewhost_id)
-            .map_err(|e| EngineError::RenderError(e.to_string()))?;
-
-        if width == 0 || height == 0 {
-            return Err(EngineError::RenderError(
-                "Cannot capture zero-size frame".into(),
-            ));
-        }
-
-        // If we have a display list and renderer, render to offscreen texture
-        match (&display_list, &mut self.renderer) {
-            (Some(display_list), Some(renderer)) => {
-                // Update viewport size for correct coordinate transforms
-                renderer.set_viewport_size(width, height);
-
-                // Capture with actual display list rendering
-                self.compositor
-                    .capture_frame_with_renderer(
-                        viewhost_id,
-                        path,
-                        renderer,
-                        &display_list.commands,
-                    )
-                    .map_err(|e| EngineError::RenderError(e.to_string()))
-            }
-            _ => {
-                // Fallback to magenta test pattern if no display list
-                self.compositor
-                    .capture_frame_to_file(viewhost_id, path)
-                    .map_err(|e| EngineError::RenderError(e.to_string()))
-            }
-        }
+        self.presenter.capture_frame(viewhost_id, display_list.as_ref(), path)
     }
 
     /// Export the layout tree for a view as JSON.
@@ -13425,8 +13296,8 @@ impl Engine {
 
         // Get viewport size from compositor
         let (width, height) = self
-            .compositor
-            .get_surface_size(view.viewhost_id)
+            .presenter
+            .surface_size(view.viewhost_id)
             .unwrap_or((0, 0));
 
         let wrapper = layout_export_wrapper(layout_json, width, height);
@@ -13794,9 +13665,7 @@ impl Engine {
             })
             .collect();
 
-        let (width, height) = self
-            .compositor
-            .get_surface_size(view.viewhost_id)
+        let (width, height) = self.presenter.surface_size(view.viewhost_id)
             .unwrap_or((0, 0));
 
         let wrapper = serde_json::json!({
@@ -14003,10 +13872,14 @@ impl Engine {
     /// Batch sizes and stack depths of the last frame (shell diagnostics /
     /// screenshot harness).
     pub fn get_render_stats(&self) -> RenderStats {
-        self.renderer
-            .as_ref()
-            .map(|r| r.get_render_stats())
-            .unwrap_or_default()
+        self.presenter.render_stats()
+    }
+
+    /// The renderer, for tests that read its caches (glyph atlas resets,
+    /// uploaded images).
+    #[cfg(test)]
+    pub(crate) fn renderer_mut(&mut self) -> Option<&mut rustkit_renderer::Renderer> {
+        self.presenter.renderer_mut()
     }
 
     /// Render a view's current display list to `output_path` as PNG (plus a
@@ -14024,38 +13897,17 @@ impl Engine {
         let bounds = if let Some(headless_bounds) = view.headless_bounds {
             headless_bounds
         } else {
-            self.viewhost
-                .get_bounds(viewhost_id)
-                .map_err(|e| EngineError::ViewError(e.to_string()))?
+            self.presenter.host_bounds(viewhost_id)?
         };
 
-        if bounds.width == 0 || bounds.height == 0 {
-            return Err(EngineError::RenderError(format!(
-                "Cannot capture screenshot of zero-sized view: {}x{}",
-                bounds.width, bounds.height
-            )));
-        }
-
-        if let Some(renderer) = &mut self.renderer {
-            renderer.set_viewport_size(bounds.width, bounds.height);
-            let commands = display_list
-                .map(|dl| dl.commands.as_slice())
-                .unwrap_or(&[]);
-            renderer
-                .execute_and_capture(commands, output_path)
-                .map_err(|e| EngineError::RenderError(e.to_string()))
-        } else {
-            Err(EngineError::RenderError("No renderer available".to_string()))
-        }
+        self.presenter.capture_screenshot(bounds, display_list, output_path)
     }
 
     /// Get the native window handle (HWND) for a view.
     #[cfg(windows)]
     pub fn get_view_hwnd(&self, id: EngineViewId) -> Result<HWND, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        self.viewhost
-            .get_hwnd(view.viewhost_id)
-            .map_err(|e| EngineError::ViewError(e.to_string()))
+        self.presenter.hwnd(view.viewhost_id)
     }
 
     /// Render a view (internal).
@@ -14067,240 +13919,23 @@ impl Engine {
         // have laid out since this one did.
         self.install_web_fonts(id);
 
-        // Extract needed values from view, avoiding long-lived borrows
-        let (viewhost_id, has_display_list, cmd_count, is_headless) = {
-            let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-            (
-                view.viewhost_id,
-                view.display_list.is_some(),
-                view.display_list
-                    .as_ref()
-                    .map(|dl| dl.commands.len())
-                    .unwrap_or(0),
-                view.headless_bounds.is_some(),
-            )
+        // The page side's part of a frame: what the presenter draws from.
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let frame = Frame {
+            viewhost_id: view.viewhost_id,
+            is_headless: view.headless_bounds.is_some(),
+            display_list: view.display_list.as_ref(),
+            generation: view.frame_generation,
+            scroll_offset: view.scroll_offset,
         };
 
-        trace!(
-            ?id,
-            has_display_list,
-            cmd_count,
-            is_headless,
-            "Rendering view"
-        );
+        // The presenter's: upload, execute, present.
+        let presented = self.presenter.present(id, frame, &self.image_manager)?;
 
-        // Get surface size and update renderer viewport before rendering
-        let (surface_width, surface_height) = {
-            let _surface_span = tracing::debug_span!("get_surface_size").entered();
-            self.compositor
-                .get_surface_size(viewhost_id)
-                .map_err(|e| EngineError::RenderError(e.to_string()))?
-        };
-
-        if let Some(renderer) = &mut self.renderer {
-            renderer.set_viewport_size(surface_width, surface_height);
-        }
-
-        // What this frame is drawn from, kept when it has been presented.
-        let (generation, frame_scroll) = self
-            .views
-            .get(&id)
-            .map(|v| (v.frame_generation, v.scroll_offset))
-            .unwrap_or_default();
-        let mut missing_images = Vec::new();
-
-        // Upload images from cache to renderer before drawing
-        // Need to re-borrow view here to get display_list
-        if let Some(view) = self.views.get(&id) {
-            if let Some(display_list) = &view.display_list {
-                // Clone commands to break the borrow on self.views
-                let commands = display_list.commands.clone();
-                // Borrow is dropped when scope ends
-                missing_images = self.upload_display_list_images(&commands);
-            }
-        }
-        let presented = PresentedFrame {
-            generation,
-            scroll_offset: frame_scroll,
-            surface: (surface_width, surface_height),
-            missing_images,
-            at: std::time::Instant::now(),
-        };
-
-        // Re-get display_list reference for rendering
-        let display_list = self.views.get(&id).and_then(|v| v.display_list.as_ref());
-
-        // Render based on whether view is headless or not
-        if is_headless {
-            // Headless rendering path - no surface, no present
-            let texture_view = {
-                let _texture_span = tracing::debug_span!("get_headless_texture_view").entered();
-                self.compositor
-                    .get_headless_texture_view(viewhost_id)
-                    .map_err(|e| EngineError::RenderError(e.to_string()))?
-            };
-
-            let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
-            if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
-                renderer
-                    .execute(&display_list.commands, &texture_view)
-                    .map_err(|e| EngineError::RenderError(e.to_string()))?;
-            } else if let Some(renderer) = &mut self.renderer {
-                // No display list, render empty (will clear to white or debug color)
-                renderer
-                    .execute(&[], &texture_view)
-                    .map_err(|e| EngineError::RenderError(e.to_string()))?;
-            } else {
-                // Fallback to compositor solid color
-                self.compositor
-                    .render_solid_color(viewhost_id, self.config.background_color)
-                    .map_err(|e| EngineError::RenderError(e.to_string()))?;
-            }
-
-            // No present() needed for headless - texture is already updated
-        } else {
-            // Regular surface rendering path
-            let (output, texture_view) = {
-                let _texture_span = tracing::debug_span!("get_surface_texture").entered();
-                self.compositor
-                    .get_surface_texture(viewhost_id)
-                    .map_err(|e| EngineError::RenderError(e.to_string()))?
-            };
-
-            // Scroll is applied at render time as a whole-page translate:
-            // the display list stays in document coordinates and the GPU
-            // shifts it by the clamped offset scroll_view() maintains.
-            let scroll_offset = self
-                .views
-                .get(&id)
-                .map(|v| v.scroll_offset)
-                .unwrap_or((0.0, 0.0));
-
-            // Render using display list if available, otherwise just clear to background
-            {
-                let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
-                if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
-                    if scroll_offset == (0.0, 0.0) {
-                        renderer
-                            .execute(&display_list.commands, &texture_view)
-                            .map_err(|e| EngineError::RenderError(e.to_string()))?;
-                    } else {
-                        let scrolled = scrolled_commands(&display_list.commands, scroll_offset);
-                        renderer
-                            .execute(&scrolled, &texture_view)
-                            .map_err(|e| EngineError::RenderError(e.to_string()))?;
-                    }
-                } else if let Some(renderer) = &mut self.renderer {
-                    // No display list, render empty (will clear to white or debug color)
-                    renderer
-                        .execute(&[], &texture_view)
-                        .map_err(|e| EngineError::RenderError(e.to_string()))?;
-                } else {
-                    // Fallback to compositor solid color (shouldn't normally happen)
-                    drop(output); // Release the texture
-                    self.compositor
-                        .render_solid_color(viewhost_id, self.config.background_color)
-                        .map_err(|e| EngineError::RenderError(e.to_string()))?;
-                    return Ok(());
-                }
-            }
-
-            // Present surface texture
-            self.compositor.present(output);
-        }
-
-        if let Some(view) = self.views.get_mut(&id) {
+        if let (Some(presented), Some(view)) = (presented, self.views.get_mut(&id)) {
             view.presented = Some(presented);
         }
         Ok(())
-    }
-
-    /// Upload images referenced in display commands to the renderer's texture cache.
-    ///
-    /// This scans the display list for BackgroundImage and Image commands and ensures
-    /// any cached images are uploaded to the GPU before rendering.
-    /// For data: URLs, images are loaded synchronously on-demand.
-    ///
-    /// Returns the network images the list names that are not in the cache
-    /// yet: the frame is drawn without them.
-    fn upload_display_list_images(&mut self, commands: &[rustkit_layout::DisplayCommand]) -> Vec<Url> {
-        use std::collections::HashSet;
-        use std::time::Duration;
-
-        let mut missing = Vec::new();
-        // Early exit if no renderer
-        let Some(renderer) = &mut self.renderer else {
-            return missing;
-        };
-
-        // Collect unique image URLs from display list
-        // (url, image, whether it is uploaded as a mask texture)
-        let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>, bool)> =
-            Vec::new();
-        let mut urls_seen = HashSet::new();
-
-        for cmd in commands {
-            // Extract URL from BackgroundImage, Image and MaskedColor commands
-            let (url, mask) = match cmd {
-                rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => (url, false),
-                rustkit_layout::DisplayCommand::Image { url, .. } => (url, false),
-                rustkit_layout::DisplayCommand::MaskedColor { url, .. } => (url, true),
-                _ => continue,
-            };
-
-            if !urls_seen.insert((url.clone(), mask)) {
-                continue; // Already processed
-            }
-
-            // Skip if already in renderer
-            if if mask { renderer.has_mask_image(url) } else { renderer.has_image(url) } {
-                continue;
-            }
-
-            // Try to parse as URL
-            let Ok(parsed_url) = url::Url::parse(url) else {
-                tracing::warn!(%url, "Invalid URL for image");
-                continue;
-            };
-
-            // Try to get from cache or load data: URLs synchronously
-            let image = if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
-                Some(cached)
-            } else if parsed_url.scheme() == "data" {
-                // For data: URLs, load synchronously since they don't require network
-                match self.image_manager.load_blocking(parsed_url.clone()) {
-                    Ok(img) => Some(img),
-                    Err(e) => {
-                        tracing::warn!(?e, %url, "Failed to decode data URL image");
-                        None
-                    }
-                }
-            } else {
-                // Image not cached and not a data: URL - it will render when loaded
-                missing.push(parsed_url.clone());
-                None
-            };
-
-            if let Some(img) = image {
-                urls_to_upload.push((url.clone(), img, mask));
-            }
-        }
-
-        // Now upload all collected images
-        for (url_str, image, mask) in urls_to_upload {
-            let frame = image.current_frame(Duration::ZERO);
-            let uploaded = if mask {
-                renderer.upload_mask_image(&url_str, frame.width(), frame.height(), frame.data())
-            } else {
-                renderer.upload_image(&url_str, frame.width(), frame.height(), frame.data())
-            };
-            if let Err(e) = uploaded {
-                tracing::warn!(?e, %url_str, "Failed to upload image to renderer");
-            } else {
-                tracing::debug!(%url_str, "Uploaded image to renderer");
-            }
-        }
-        missing
     }
 
     /// Execute JavaScript in a view.
@@ -14512,7 +14147,7 @@ impl Engine {
 
     /// Get GPU info.
     pub fn gpu_info(&self) -> String {
-        format!("{:?}", self.compositor.adapter_info())
+        self.presenter.gpu_info()
     }
 
     /// Handle a view event from the viewhost.
@@ -17136,7 +16771,7 @@ fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
 /// translate. A `position: fixed` box does not move with the page, so its
 /// run (`PushViewportFixed` to `PopViewportFixed`) is drawn inside the
 /// opposite translate.
-fn scrolled_commands(
+pub(crate) fn scrolled_commands(
     commands: &[rustkit_layout::DisplayCommand],
     scroll_offset: (f32, f32),
 ) -> Vec<rustkit_layout::DisplayCommand> {
@@ -18096,9 +17731,7 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -18106,7 +17739,6 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -18840,9 +18472,8 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            font_loader: Arc::new(FontLoader::new()),
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -18850,7 +18481,6 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -18914,9 +18544,7 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -18924,7 +18552,6 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -19005,15 +18632,12 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -19191,9 +18815,8 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            font_loader: Arc::new(FontLoader::new()),
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -19201,7 +18824,6 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -19287,9 +18909,8 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            font_loader: Arc::new(FontLoader::new()),
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -19297,7 +18918,6 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -19403,9 +19023,8 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            font_loader: Arc::new(FontLoader::new()),
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -19413,7 +19032,6 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -19483,9 +19101,8 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            font_loader: Arc::new(FontLoader::new()),
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -19493,7 +19110,6 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -19557,15 +19173,13 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            font_loader: Arc::new(FontLoader::new()),
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -19647,15 +19261,12 @@ mod tests {
             font_loader: Arc::new(FontLoader::new()),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
-            viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
         };
 
@@ -19751,15 +19362,12 @@ mod tests {
                 config: EngineConfig::default(),
                 views: HashMap::new(),
                 font_loader: Arc::new(FontLoader::new()),
-                viewhost: ViewHost::new(),
-                compositor,
-                renderer: None,
+                presenter: Presenter::layout_only(compositor),
                 loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
                 image_manager: Arc::new(ImageManager::new()),
                 event_tx,
                 event_rx: Some(event_rx),
                 style_trace: std::cell::RefCell::new(None),
-                render_failing: std::collections::HashSet::new(),
                 svg_cache: std::collections::HashMap::new(),
                 building_focus: std::cell::Cell::new(None),
                 building_view: std::cell::Cell::new(None),
@@ -19857,15 +19465,12 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -19940,15 +19545,13 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            font_loader: Arc::new(FontLoader::new()),
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -20026,15 +19629,12 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -20112,15 +19712,12 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -20192,15 +19789,12 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -20273,15 +19867,13 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            font_loader: Arc::new(FontLoader::new()),
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
@@ -22814,15 +22406,12 @@ mod web_font_tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
+            presenter: Presenter::layout_only(compositor),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
