@@ -1,4 +1,10 @@
-# Threads plan (2026-10-13)
+# Threads plan (2026-10-13, revision 2)
+
+Revision 2 folds in the outside review of 2026-10-13 (Codex): the responsiveness
+project now ends at M6 and the shell replacement (M7, M8) is its own project; T0's
+guarantee is stated with its limits; the render-thread trigger is a window-stall
+measurement, not a percentage; abandonment, scroll correctness and resource ownership
+have explicit rules; the schedule is a critical path with review rounds counted.
 
 The decision layer on top of `THREAD_OWNERSHIP_2026-10.md` (the design, by section and
 milestone id). That document says how; this one says what we are doing, in what order,
@@ -18,6 +24,13 @@ therefore a frozen window. We are deciding to move all page work to threads the 
 thread never waits on, in an order where each step lands as one reviewed PR and the
 first user-felt change arrives this week. We are also deciding which Chromium roles are
 worth copying in a single-process browser, and which are not.
+
+**Two projects, not one.** Project A, *responsiveness*: T0 to M6, including
+presenter-owned scroll and the busy bar. It keeps the existing shell (tao, the wry chrome)
+and is done when section 10A passes. Project B, *shell replacement* (Phase X steps 2 and
+3): M7 and M8, with its own acceptance (10B) and its own schedule, started after Project A
+has survived a week of normal use. A constrains B only in this: the input queue (M2) and
+the Presenter (M3) are built so the view host can take them over without a rewrite.
 
 ## 2. Chrome's threads and ours
 
@@ -89,10 +102,30 @@ Invariants, each checked against the pinned sources (`Cargo.lock` at develop):
    is required, there is no way around it.
 7. Every page thread runs its message loop **inside** `block_on` of its own current-thread
    tokio runtime; spawned h2 drivers (`rustkit-http/src/lib.rs:518-527`) only progress
-   there. A page thread that leaves `block_on` stalls its own HTTP/2.
+   there. A page thread that leaves `block_on` stalls its own HTTP/2. Staying inside is
+   necessary, not sufficient: a long synchronous script or layout turn also stops that
+   runtime, so the page's own network makes no progress during it. That is measured at M4
+   (h2 pings and timeouts across a 5 s turn); if it fails, the shared net thread moves from
+   optional to before M5.
 8. Every cross-thread message is plain data or an `Arc` of an immutable object. No
    `Rc`, no reference, no `Arc` to page state. This keeps a later process split a
-   transport change (owner question 4).
+   transport change (owner question 4). It does not make a process split *only* a
+   transport change: shared `Arc` caches, GPU resources, crash recovery and resource
+   ownership would each need their own design.
+9. **The Presenter is still on the window thread until M9**, so the window can still
+   stall on renderer execution, image upload, surface acquire and present. This is
+   measured, not assumed away: from M3 every window-thread hold of 50 ms or more is logged
+   with its stage (the stall log #666 adds), and section 5's W-gate decides M9.
+10. **Abandonment is containment, not recovery.** A page thread stuck in one native call
+    is detached after 2 s without an acknowledgement; it keeps its CPU and memory until it
+    returns. Rules: every abandoned thread is tracked with what it retains; its view's
+    epoch is bumped so no late message, commit, decode result or network callback from it
+    can reach a live document; at most two abandoned threads may exist, and a third
+    abandonment shows "HiWave needs to restart to recover" instead of spawning another;
+    the busy bar says a restart reclaims the resources.
+11. **A retained frame owns what it draws.** A `FrameCommit` holds `Arc`s to every image,
+    glyph run and SVG it references, so it stays drawable after navigation replaces the
+    page state; resources are released when the last commit that names them is dropped.
 
 ## 5. Order of work
 
