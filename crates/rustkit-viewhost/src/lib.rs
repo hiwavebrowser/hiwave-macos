@@ -28,8 +28,9 @@ pub use traits::{ViewHostTrait, WindowHandle};
 #[cfg(target_os = "macos")]
 pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
-pub use macos::{
-    drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, PendingClick, PendingKey,
+pub use macos::{drain_pending_clicks, drain_pending_keys, drain_pending_scrolls};
+pub use input_queue::{
+    drain_input, retire_view_input, InputEvent, InputKind, PendingClick, PendingKey,
     PendingScroll, PointerInput,
 };
 
@@ -102,6 +103,12 @@ impl ViewId {
     /// Get the raw ID value.
     pub fn raw(&self) -> u64 {
         self.0
+    }
+
+    /// The id a view carries in its native object (the macOS content view's
+    /// ivar), read back when the view records an input.
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self(raw)
     }
 }
 

@@ -129,21 +129,13 @@ impl InputQueue {
         seq
     }
 
-    /// Take everything recorded so far.
-    ///
-    /// At this commit the drain hands the kinds out grouped, pointer events
-    /// first, then wheels, then keys, which is the order the app drained the
-    /// three queues it replaced; the next commit drains in `seq` order.
+    /// Take everything recorded so far, in arrival (`seq`) order across
+    /// every kind and view. Until 2026-10-14 the app drained three queues
+    /// one after another (clicks, then wheels, then keys), so a click made
+    /// after a wheel burst reached the page before the burst, and a key
+    /// typed before a click after it (#575).
     pub fn drain(&mut self) -> Vec<InputEvent> {
-        let events = std::mem::take(&mut self.events);
-        let rank = |e: &InputEvent| match e.kind {
-            InputKind::Pointer(_) => 0,
-            InputKind::Wheel(_) => 1,
-            InputKind::Key(_) => 2,
-        };
-        let mut grouped = events;
-        grouped.sort_by_key(rank);
-        grouped
+        std::mem::take(&mut self.events)
     }
 
     /// Take the recorded events of one kind, leaving the others queued (for
