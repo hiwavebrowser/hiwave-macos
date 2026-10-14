@@ -18,6 +18,8 @@
 
 mod traits;
 
+pub mod input_queue;
+
 #[cfg(target_os = "macos")]
 mod macos;
 
