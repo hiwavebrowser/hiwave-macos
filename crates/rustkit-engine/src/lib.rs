@@ -5184,6 +5184,7 @@ impl Engine {
         view.laid_with = Some(LaidWith {
             hover: view.hover_chain.clone(),
             active: view.active_chain.clone(),
+            focused: view.focused_node.map(|node| node.raw()),
             size: (bounds.width, bounds.height),
         });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
@@ -5341,6 +5342,13 @@ impl Engine {
         };
         if with.size != size {
             return miss("resized");
+        }
+        // A press or a click moved the focus since the page was painted:
+        // both builds below would read the focus as it is now, and the
+        // patch copies paint properties only, so the caret and the focus
+        // state would never be drawn (or a blurred field would keep them).
+        if with.focused != view.focused_node.map(|node| node.raw()) {
+            return miss("focus moved");
         }
         let unplaced = view.rule_reads.borrow().as_ref().is_none_or(|index| {
             [&index.reads.hover, &index.reads.active]
@@ -31146,11 +31154,19 @@ thread_local! {
     static LAST_RESTYLE_MISS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
-/// What a layout was built with ([`Engine::repaint_restyled`]).
+/// What a layout was built with ([`Engine::repaint_restyled`]): the state
+/// the page was last PAINTED in. Anything `build_layout_for_view` reads
+/// that can change without a relayout cause of its own belongs here, or
+/// the short path compares two builds that both read the current value
+/// and never paints the change.
 struct LaidWith {
     /// The hovered and the pressed chain at that build.
     hover: Vec<usize>,
     active: Vec<usize>,
+    /// The focused node (raw NodeId) at that build: a press or a click
+    /// moves the focus with no relayout of its own, and the next relayout
+    /// must paint the caret and the focus state.
+    focused: Option<usize>,
     /// The view's width and height at that layout.
     size: (u32, u32),
 }
