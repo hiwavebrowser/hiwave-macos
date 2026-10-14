@@ -280,3 +280,80 @@ document.getElementById('p').addEventListener('click', function () {{ {SPIN} }})
         r#"String("Script stopped: it ran past 200 ms (timers)|Script stopped: it ran past 200 ms (event:click)")"#
     );
 }
+
+/// The budget is per EVENT, not per user action (the CLEAR's first
+/// non-blocking note, T0 of the threads plan): one click is a press, a
+/// release and a click, each its own turn with its own budget, so a page
+/// whose three handlers each do not end holds the window three budgets,
+/// not one. Pinned so the figure is known: with the 5 s budget that is 15 s
+/// for one click.
+#[test]
+fn one_click_whose_three_handlers_each_spin_is_stopped_three_times() {
+    let page = format!(
+        "<html><body style=\"margin:0\"><p id=p style=\"margin:0;height:100px\">alive</p><script>
+var p = document.getElementById('p');
+p.addEventListener('pointerdown', function () {{ window.pd = true; }});
+p.addEventListener('mousedown', function () {{ {SPIN} }});
+p.addEventListener('mouseup', function () {{ {SPIN} }});
+p.addEventListener('click', function () {{ {SPIN} }});
+</script></body></html>"
+    );
+    let (mut engine, view) = load(config(), page);
+    let started = std::time::Instant::now();
+    // The user's click: the press (pointerdown, mousedown), then the
+    // release (pointerup, mouseup, click).
+    engine.mouse_down_at_point(view, 20.0, 20.0);
+    engine.click_at_point(view, 20.0, 20.0);
+    let took = started.elapsed();
+    assert_eq!(
+        over_budget(&engine, view),
+        ["event:mousedown", "event:mouseup", "event:click"],
+        "{:#?}",
+        engine.script_log(view)
+    );
+    assert_eq!(engine.execute_script(view, "window.pd === true").unwrap(), "Boolean(true)", "pointerdown was heard");
+    assert!(
+        took >= std::time::Duration::from_millis(600) && took < std::time::Duration::from_millis(3000),
+        "three budgets of 200 ms, each stopped at a host call: {took:?}"
+    );
+    // The page is still a page.
+    assert_eq!(engine.execute_script(view, "document.title = 'x'; window.started === true").unwrap(), "Boolean(true)");
+}
+
+/// An interval whose callback never ends is stopped on every turn it runs
+/// in, and runs again on the next turn (the CLEAR's second non-blocking
+/// note): the budget bounds each hold, it does not take the interval off
+/// the page. A timeout due beside it is pinned too, so what such a page
+/// starves is on record.
+#[test]
+fn an_interval_that_overruns_every_time_is_stopped_every_time() {
+    let page = format!(
+        "<html><body><p id=p>alive</p><script>
+window.ticks = 0; window.after = false;
+setTimeout(function () {{
+  setInterval(function () {{ window.ticks++; {SPIN} }}, 10);
+  setTimeout(function () {{ window.after = true; }}, 30);
+}}, 60000);
+</script></body></html>"
+    );
+    let (mut engine, view) = load(config(), page);
+    let rt = runtime();
+    rt.block_on(engine.pump_live(view, 60_000));
+    let started = std::time::Instant::now();
+    turns(&rt, &mut engine, view, 4);
+    let took = started.elapsed();
+    let stops = over_budget(&engine, view);
+    assert!(stops.len() >= 3, "the interval ran and was stopped on each turn: {stops:?} {:#?}", engine.script_log(view));
+    assert!(stops.iter().all(|s| s == "timers"), "{stops:?}");
+    assert!(took < std::time::Duration::from_millis(4 * 500), "each turn held at most one budget: {took:?}");
+    let ticks = engine.execute_script(view, "window.ticks").unwrap();
+    assert_eq!(ticks, format!("Number({}.0)", stops.len()), "one callback start per stop");
+    // The timeout due 30 ms after the interval started: whether it runs
+    // beside an interval that overruns every turn.
+    assert_eq!(
+        engine.execute_script(view, "window.after").unwrap(),
+        "Boolean(true)",
+        "the later timeout is starved by the overrunning interval: {:#?}",
+        engine.script_log(view)
+    );
+}
