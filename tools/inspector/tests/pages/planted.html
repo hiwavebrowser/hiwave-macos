@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>inspector planted differences</title>
+<style>
+  body { margin: 0; font: 16px Arial, sans-serif; }
+  #hero { height: 80px; background: rgb(200, 220, 255); }
+  #row { display: flex; gap: 10px; width: 400px; }
+  #row > div { flex: 1; height: 40px; background: #eee; }
+  #grid { display: grid; grid-template-columns: 100px 200px; }
+  #grid > p { margin: 0; height: 30px; }
+  #rel { position: relative; height: 60px; }
+  #abs { position: absolute; left: 10px; top: 5px; width: 50px; height: 20px; }
+  .card { padding: 8px; color: rgb(20, 20, 20); }
+</style>
+</head>
+<body>
+  <div id="hero">Hero</div>
+  <div id="row"><div class="cell">a</div><div class="cell">b</div><div class="cell">c</div></div>
+  <div id="grid"><p>one</p><p>two</p></div>
+  <div id="rel"><span id="abs">abs</span></div>
+  <section><div class="card">first card</div><div class="card">second card</div></section>
+</body>
+</html>

@@ -281,6 +281,13 @@ use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
 mod relayout_cause;
+mod diagnostics;
+pub use diagnostics::{
+    DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
+    DEFAULT_MAX_ELEMENTS, STYLE_PROPERTIES,
+};
+#[cfg(all(test, feature = "headless"))]
+mod diagnostics_tests;
 use relayout_cause::PendingCauses;
 mod shadow_tree;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
