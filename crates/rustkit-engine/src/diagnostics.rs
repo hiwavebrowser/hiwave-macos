@@ -1439,7 +1439,7 @@ impl Engine {
         let mut unavailable = BTreeMap::new();
         let viewport = match view.headless_bounds {
             Some(b) => (b.width, b.height),
-            None => self.compositor.get_surface_size(view.viewhost_id).unwrap_or((0, 0)),
+            None => self.presenter.surface_size(view.viewhost_id).unwrap_or((0, 0)),
         };
         let commit = option_env!("HIWAVE_BUILD_COMMIT").map(str::to_string);
         if commit.is_none() {

@@ -30,11 +30,9 @@ fn page_list(body: &str) -> (Engine, EngineViewId, Vec<DisplayCommand>) {
 fn capture(engine: &mut Engine, view: EngineViewId, commands: &[DisplayCommand], tag: &str) -> Vec<u8> {
     let viewhost_id = engine.views[&view].viewhost_id;
     let path = std::env::temp_dir().join(format!("rustkit-fixed-{tag}-{}.ppm", std::process::id()));
-    let renderer = engine.renderer.as_mut().expect("renderer");
-    renderer.set_viewport_size(200, 100);
     engine
-        .compositor
-        .capture_frame_with_renderer(viewhost_id, path.to_str().unwrap(), renderer, commands)
+        .presenter
+        .capture_commands(viewhost_id, (200, 100), path.to_str().unwrap(), commands)
         .expect("capture");
     let ppm = std::fs::read(&path).expect("frame");
     let _ = std::fs::remove_file(&path);
