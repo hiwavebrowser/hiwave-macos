@@ -29,6 +29,16 @@ fn serve() -> Server {
 /// precedence. A route whose path starts with `/held` answers after
 /// 300 ms.
 pub(crate) fn serve_routes(routes: Vec<(&'static str, &'static str, String)>) -> Server {
+    serve_byte_routes(
+        routes
+            .into_iter()
+            .map(|(path, content_type, body)| (path, content_type, body.into_bytes()))
+            .collect(),
+    )
+}
+
+/// [`serve_routes`] with bodies that need not be text (images).
+pub(crate) fn serve_byte_routes(routes: Vec<(&'static str, &'static str, Vec<u8>)>) -> Server {
     let routes = Arc::new(routes);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -75,7 +85,7 @@ pub(crate) fn serve_routes(routes: Vec<(&'static str, &'static str, String)>) ->
                 }
                 let content_type = fixed.map(|(_, ct, _)| *ct).unwrap_or("text/plain");
                 let body = if let Some((_, _, body)) = fixed {
-                    body.clone().into_bytes()
+                    body.clone()
                 } else if path == "/echo" {
                     request[header_end..].to_vec()
                 } else {
