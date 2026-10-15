@@ -983,8 +983,9 @@ pub struct EngineConfig {
     /// `interrupt_scripts_at_budget`). Scripts run after every
     /// subresource today, so this comes out of the page's load time.
     /// Module fetches once the scripts run (a module's imports, `import()`)
-    /// are not charged to it and not refused by it: they are bounded by
-    /// `subresource_budget_ms` each time the engine fetches them.
+    /// are not charged to it and not refused because script time ran out.
+    /// One load shares a single network window of `subresource_budget_ms`
+    /// for every such fetch.
     pub script_budget_ms: u64,
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
@@ -3445,11 +3446,14 @@ impl Engine {
             // for again on the next.
             if let Some(document) = document.as_ref().filter(|_| !spent()) {
                 let mut modules_fetched = 0;
+                // One turn, one window: the same 2s the live path had when
+                // the deadline was computed here. Not the load's window.
+                let module_fetches = script_net::ModuleFetchBudget::new(LIVE_NETWORK_BUDGET);
                 let found = script_net::pump_modules(
                     bindings,
                     &policy,
                     &loader,
-                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
+                    &module_fetches,
                     None,
                     document,
                     &mut modules_fetched,
@@ -4294,9 +4298,13 @@ impl Engine {
             interrupts: self.config.interrupt_scripts_at_budget,
         };
         let clock = &clock;
-        // Module fetches are network fetches: bounded like a subresource
-        // phase, never refused because script spent the budget.
-        let module_budget = std::time::Duration::from_millis(self.config.subresource_budget_ms);
+        // One network window for every module fetch on this load. A fresh
+        // `subresource_budget_ms` per script let a chain of imports wait
+        // that long each time. Script time does not spend the window, and
+        // the window does not spend the script budget.
+        let module_fetches = script_net::ModuleFetchBudget::new(std::time::Duration::from_millis(
+            self.config.subresource_budget_ms,
+        ));
         let horizon_ms = self.config.timer_horizon_ms;
         let loop_limit = self.config.script_loop_iteration_limit;
         let net_rounds = self.config.script_network_rounds;
@@ -4491,7 +4499,7 @@ impl Engine {
                                     bindings,
                                     policy,
                                     &loader,
-                                    tokio::time::Instant::now() + module_budget,
+                                    &module_fetches,
                                     Some(clock),
                                     document,
                                     &mut count,
@@ -4609,6 +4617,7 @@ impl Engine {
             let document = document_url.clone();
             let modules_fetched = &modules_fetched;
             let inspector = &inspector;
+            let module_fetches = &module_fetches;
             async move {
                 match policy {
                     Some(policy) => {
@@ -4627,7 +4636,7 @@ impl Engine {
                                 net_rounds,
                                 timers,
                                 document.as_ref(),
-                                (now + module_budget, Some(clock)),
+                                (module_fetches, Some(clock)),
                                 &mut count,
                                 inspector,
                             ),

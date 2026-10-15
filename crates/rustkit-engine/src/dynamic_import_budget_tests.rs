@@ -140,3 +140,118 @@ fn a_runaway_chunk_is_still_stopped_at_the_budget() {
     // The page is still a page.
     assert_eq!(engine.execute_script(view, "1 + 1").unwrap(), "Number(2.0)");
 }
+
+/// How many module scripts the chain below is. Each one is its own graph,
+/// so each used to open a fresh module-fetch window.
+const HANGING_MODULE_SCRIPTS: usize = 8;
+
+/// `page` at `/`. `/hang/…` accepts the socket and never answers, so the
+/// fetch waits until the engine's own deadline drops it.
+fn serve_hanging(page: String) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let page = page.clone();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let mut request = Vec::new();
+                let mut buf = [0u8; 2048];
+                let header_end = loop {
+                    if let Some(i) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                };
+                let head = String::from_utf8_lossy(&request[..header_end]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                if path.starts_with("/hang/") {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+                    let mut sink = [0u8; 64];
+                    while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
+                    return;
+                }
+                let (status, content_type, body): (&str, &str, &str) = if path == "/" {
+                    ("200 OK", "text/html; charset=utf-8", &page)
+                } else {
+                    ("404 Not Found", "text/plain", "missing")
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body.as_bytes());
+            });
+        }
+    });
+    port
+}
+
+fn hanging_module_chain(scripts: usize) -> String {
+    let mut page = String::from("<!doctype html><html><head>");
+    for i in 0..scripts {
+        page.push_str(&format!(
+            "<script type=\"module\">import '/hang/m{i}.js';</script>"
+        ));
+    }
+    page.push_str("</head><body></body></html>");
+    page
+}
+
+/// A chain of module scripts whose imports never answer. The load may spend
+/// `subresource_budget_ms` in total waiting on those fetches, not that long
+/// once per script. Before the shared window, eight scripts at 1s each kept
+/// the load busy for about 8s.
+#[test]
+fn a_chain_of_slow_module_fetches_stays_within_the_subresource_budget() {
+    const BUDGET_MS: u64 = 1_000;
+    let config = EngineConfig {
+        script_budget_ms: 300,
+        subresource_budget_ms: BUDGET_MS,
+        ..EngineConfig::default()
+    };
+    let port = serve_hanging(hanging_module_chain(HANGING_MODULE_SCRIPTS));
+    let mut engine = Engine::new(config).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 100,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let took = started.elapsed();
+    let records = engine.script_log(view).expect("script log").to_vec();
+    assert!(
+        took < std::time::Duration::from_millis(2_500),
+        "chain of module fetches exceeded one subresource budget ({took:?}): {records:#?}"
+    );
+    assert!(
+        took >= std::time::Duration::from_millis(BUDGET_MS - 200),
+        "the shared module-fetch window was not waited out ({took:?}): {records:#?}"
+    );
+    let timed_out = records
+        .iter()
+        .filter(|record| match &record.outcome {
+            ScriptOutcome::Threw(message) => message.contains("module fetch timed out"),
+            _ => false,
+        })
+        .count();
+    assert_eq!(
+        timed_out, HANGING_MODULE_SCRIPTS,
+        "every link should have been attempted and then stopped by the shared window: {records:#?}"
+    );
+    assert_eq!(engine.execute_script(view, "1 + 1").unwrap(), "Number(2.0)");
+}

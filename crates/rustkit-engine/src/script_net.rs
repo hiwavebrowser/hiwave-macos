@@ -370,27 +370,55 @@ impl ScriptClock<'_> {
     }
 }
 
+/// The time one load may spend waiting on module fetches.
+///
+/// Module fetches are not charged to the script budget, and they are not
+/// refused because that budget is spent. They used to get a fresh
+/// `subresource_budget_ms` on every call, so a page of module scripts waited
+/// that long once per script. Every call on a load shares this window: a
+/// call's deadline is `now + remaining`, and the time it spends waiting is
+/// charged here. Script that runs between calls does not spend it.
+pub(crate) struct ModuleFetchBudget {
+    left: Cell<Duration>,
+}
+
+impl ModuleFetchBudget {
+    pub(crate) fn new(budget: Duration) -> Self {
+        Self { left: Cell::new(budget) }
+    }
+
+    fn deadline(&self) -> tokio::time::Instant {
+        tokio::time::Instant::now() + self.left.get()
+    }
+
+    fn charge(&self, waited: Duration) {
+        self.left.set(self.left.get().saturating_sub(waited));
+    }
+}
+
 /// Fetch what a started module graph has asked for, level by level, until it
 /// asks for nothing more. Every fetch is the policy's module entry point;
 /// this decides nothing. A module that is refused, mistyped, missing or too
 /// many is supplied as an error, so the graph fails as a whole and none of
 /// its code runs.
 ///
-/// `deadline` is a network deadline, not the script budget: a page whose
-/// own scripts spent the budget may still `import()` the code it needs.
-/// `clock` (the load path) is given back the time the fetches take.
-/// `fetched` counts the modules already pulled in on this page.
+/// `budget` is the load's module-fetch window (see [`ModuleFetchBudget`]),
+/// not the script budget. `clock` (the load path) is given back the time the
+/// fetches take. `fetched` counts the modules already pulled in on this page.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump_modules(
     bindings: &DomBindings,
     policy: &FetchPolicy,
     loader: &ResourceLoader,
-    deadline: tokio::time::Instant,
+    budget: &ModuleFetchBudget,
     clock: Option<&ScriptClock<'_>>,
     document: &Url,
     fetched: &mut usize,
     inspector: &Arc<Inspector>,
 ) -> Pump {
+    // One deadline for every round of this call. Later calls on the same
+    // load see what this one waited, not a fresh budget.
+    let deadline = budget.deadline();
     let mut out = Pump::default();
     for _ in 0..MAX_MODULE_ROUNDS {
         let Ok(urls) = catch_unwind(AssertUnwindSafe(|| bindings.take_module_requests())) else {
@@ -426,10 +454,12 @@ pub(crate) async fn pump_modules(
                 Err(_) => Err("module fetch timed out".to_string()),
             }
         }));
+        let wait_started = tokio::time::Instant::now();
         let outcomes = match clock {
             Some(clock) => clock.uncharged(level).await,
             None => level.await,
         };
+        budget.charge(wait_started.elapsed());
 
         for (url, outcome) in urls.iter().zip(outcomes) {
             if catch_unwind(AssertUnwindSafe(|| bindings.supply_module(url, outcome))).is_err() {
@@ -456,7 +486,7 @@ pub(crate) async fn pump_all(
     rounds: u32,
     timers: Option<(u64, u32)>,
     document: Option<&Url>,
-    modules: (tokio::time::Instant, Option<&ScriptClock<'_>>),
+    modules: (&ModuleFetchBudget, Option<&ScriptClock<'_>>),
     modules_fetched: &mut usize,
     inspector: &Arc<Inspector>,
 ) -> Pump {
@@ -466,8 +496,8 @@ pub(crate) async fn pump_all(
         let net = pump(bindings, policy, loader, deadline, rounds, timers, inspector).await;
         let modules = match document {
             Some(document) => {
-                let (module_deadline, clock) = modules;
-                pump_modules(bindings, policy, loader, module_deadline, clock, document, modules_fetched, inspector).await
+                let (budget, clock) = modules;
+                pump_modules(bindings, policy, loader, budget, clock, document, modules_fetched, inspector).await
             }
             None => Pump::default(),
         };
