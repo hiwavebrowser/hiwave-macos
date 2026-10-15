@@ -59,9 +59,9 @@ pub struct FrameCommit {
     /// `ViewState::frame_generation` of `list`: counts the display lists
     /// the view has been given.
     pub generation: u64,
-    /// `ViewState::nav_generation` of the document `list` was built from
-    /// (`nav_id` once M3b lands): a commit from a navigation the page has
-    /// since left is still drawable, and still named.
+    /// `ViewState::nav_id` (M3b) of the document `list` was built from: a
+    /// commit from a navigation the page has since left is still drawable,
+    /// and still named.
     pub nav_generation: u64,
     /// `None` before the view's first layout: the background is drawn.
     pub list: Option<Arc<DisplayList>>,

@@ -15141,7 +15141,7 @@ impl Engine {
         if moved {
             let commit = FrameCommit {
                 generation: view.frame_generation,
-                nav_generation: view.nav_generation,
+                nav_generation: view.nav_id,
                 list: view.display_list.clone(),
                 scroll_offset: view.scroll_offset,
                 max_scroll_offset: view.max_scroll_offset,

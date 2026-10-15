@@ -39,7 +39,7 @@ fn a_load_commits_the_frame_it_presents() {
     let state = &engine.views[&view];
     let commit = engine.latest_commit(view).expect("the load committed a frame");
     assert_eq!(commit.generation, state.frame_generation);
-    assert_eq!(commit.nav_generation, state.nav_generation);
+    assert_eq!(commit.nav_generation, state.nav_id);
     assert_eq!(commit.scroll_offset, (0.0, 0.0));
     assert_eq!(commit.max_scroll_offset, (0.0, 800.0), "1000 px page in a 200 px view");
     assert_eq!(commit.laid_out_for, (400, 200));
