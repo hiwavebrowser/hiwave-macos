@@ -50,7 +50,7 @@ impl ContentWebViewOps for Arc<wry::WebView> {
 }
 
 // Implement for RustKitView
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 impl ContentWebViewOps for super::webview_rustkit::RustKitView {
     fn load_url(&self, url: &str) -> Result<(), String> {
         self.wry_load_url(url)
@@ -70,7 +70,7 @@ impl ContentWebViewOps for super::webview_rustkit::RustKitView {
 }
 
 // Implement for Arc<RustKitView>
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 impl ContentWebViewOps for Arc<super::webview_rustkit::RustKitView> {
     fn load_url(&self, url: &str) -> Result<(), String> {
         self.wry_load_url(url)
@@ -108,4 +108,3 @@ impl ContentWebViewOps for Arc<super::content_webview_enum::ContentWebView> {
         (**self).set_bounds(rect)
     }
 }
-

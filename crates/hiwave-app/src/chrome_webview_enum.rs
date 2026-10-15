@@ -3,7 +3,7 @@
 //! Similar to ContentWebView, this provides a unified interface for the chrome
 //! UI that can use either RustKit or WRY (WebKit) as the rendering backend.
 
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 use super::webview_rustkit_chrome::RustKitChromeView;
 use std::sync::Arc;
 use wry::Rect;
@@ -16,22 +16,17 @@ pub trait ChromeWebViewOps {
 }
 
 /// Unified chrome webview type (RustKit + WRY support)
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 #[allow(dead_code)]
 pub enum ChromeWebView {
     RustKit(RustKitChromeView),
     Wry(wry::WebView),
 }
 
-/// WebKit fallback mode - just wrap WRY WebView
-#[cfg(all(target_os = "macos", feature = "webview-fallback"))]
-#[allow(dead_code)]
-pub type ChromeWebView = wry::WebView;
-
 #[cfg(not(target_os = "macos"))]
 pub type ChromeWebView = wry::WebView;
 
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 impl ChromeWebViewOps for ChromeWebView {
     fn evaluate_script(&self, script: &str) -> Result<(), String> {
         match self {
@@ -53,7 +48,7 @@ impl ChromeWebViewOps for ChromeWebView {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 impl ChromeWebView {
     /// Process events (for RustKit)
     #[allow(dead_code)]
@@ -82,18 +77,6 @@ impl ChromeWebView {
     }
 }
 
-// WebKit fallback mode implementation
-#[cfg(all(target_os = "macos", feature = "webview-fallback"))]
-impl ChromeWebViewOps for ChromeWebView {
-    fn evaluate_script(&self, script: &str) -> Result<(), String> {
-        wry::WebView::evaluate_script(self, script).map_err(|e| format!("{}", e))
-    }
-
-    fn set_bounds(&self, rect: Rect) -> Result<(), String> {
-        wry::WebView::set_bounds(self, rect).map_err(|e| format!("{}", e))
-    }
-}
-
 // Non-macOS implementation
 #[cfg(not(target_os = "macos"))]
 impl ChromeWebViewOps for ChromeWebView {
@@ -107,7 +90,7 @@ impl ChromeWebViewOps for ChromeWebView {
 }
 
 // Implement for Arc<ChromeWebView>
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 impl ChromeWebViewOps for Arc<ChromeWebView> {
     fn evaluate_script(&self, script: &str) -> Result<(), String> {
         (**self).evaluate_script(script)
@@ -115,17 +98,6 @@ impl ChromeWebViewOps for Arc<ChromeWebView> {
 
     fn set_bounds(&self, rect: Rect) -> Result<(), String> {
         (**self).set_bounds(rect)
-    }
-}
-
-#[cfg(all(target_os = "macos", feature = "webview-fallback"))]
-impl ChromeWebViewOps for Arc<ChromeWebView> {
-    fn evaluate_script(&self, script: &str) -> Result<(), String> {
-        wry::WebView::evaluate_script(self, script).map_err(|e| format!("{}", e))
-    }
-
-    fn set_bounds(&self, rect: Rect) -> Result<(), String> {
-        wry::WebView::set_bounds(self, rect).map_err(|e| format!("{}", e))
     }
 }
 
@@ -139,4 +111,3 @@ impl ChromeWebViewOps for Arc<ChromeWebView> {
         wry::WebView::set_bounds(self, rect).map_err(|e| format!("{}", e))
     }
 }
-
