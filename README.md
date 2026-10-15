@@ -166,12 +166,11 @@ cargo run -p hiwave-app
 
 ### Run Modes
 
-HiWave supports two rendering modes on macOS:
+On macOS, page content is always rendered by RustKit:
 
 | Mode | Command | Description |
 |------|---------|-------------|
-| **RustKit** (default) | `./scripts/run-rustkit.sh` | Pure Rust browser engine for content with engine-level ad blocking |
-| **WebKit Fallback** | `./scripts/run-webkit.sh` | System WebKit for all rendering (debugging/compatibility) |
+| **RustKit** | `./scripts/run-rustkit.sh` | Pure Rust browser engine for content with engine-level ad blocking |
 
 #### RustKit Mode (Default)
 ```bash
@@ -187,20 +186,6 @@ RustKit mode uses our pure-Rust browser engine for content rendering:
 - 🚀 Hardware-accelerated GPU rendering via wgpu
 - 🛡️ Engine-level ad/tracker blocking (requests blocked before they leave the browser)
 - 🔧 Full control over the rendering pipeline
-
-#### WebKit Fallback Mode
-```bash
-# Using convenience script
-./scripts/run-webkit.sh
-
-# Or directly with cargo
-cargo run -p hiwave-app --no-default-features --features webview-fallback
-```
-
-WebKit fallback uses Apple's system WebKit for all rendering:
-- ✅ Maximum compatibility with macOS system features
-- 🔍 Useful for debugging RustKit-specific issues
-- 🌐 Full WebKit web compatibility
 
 ---
 

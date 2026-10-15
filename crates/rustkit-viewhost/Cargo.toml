@@ -67,3 +67,7 @@ harness = false
 [[test]]
 name = "macos_wheel_recorded"
 harness = false
+
+[[test]]
+name = "macos_input_order"
+harness = false
