@@ -2490,8 +2490,71 @@ impl std::fmt::Debug for CustomProperties {
     }
 }
 
+impl ComputedStyle {
+    /// Take from `from` the properties that change what is painted and
+    /// nothing else: no box is sized, placed, created or dropped by them,
+    /// and no stacking context comes or goes. The list is deliberately
+    /// short (`opacity`, `transform`, `visibility` and background images
+    /// are not on it); a property left off costs a layout, never a wrong
+    /// frame.
+    pub fn copy_paint_only(&mut self, from: &ComputedStyle) {
+        self.color = from.color;
+        self.background_color = from.background_color;
+        self.border_top_color = from.border_top_color;
+        self.border_right_color = from.border_right_color;
+        self.border_bottom_color = from.border_bottom_color;
+        self.border_left_color = from.border_left_color;
+        self.text_decoration_line = from.text_decoration_line;
+        self.text_decoration_color = from.text_decoration_color;
+        self.text_decoration_style = from.text_decoration_style;
+        self.text_decoration_thickness = from.text_decoration_thickness.clone();
+        self.webkit_text_fill_color = from.webkit_text_fill_color;
+        self.box_shadows = from.box_shadows.clone();
+        self.transition_property = from.transition_property.clone();
+        self.transition_duration = from.transition_duration;
+        self.transition_timing_function = from.transition_timing_function.clone();
+        self.transition_delay = from.transition_delay;
+        // Custom properties are substituted into the values above and
+        // below at the cascade; nothing later reads them but script.
+        self.custom_properties = from.custom_properties.clone();
+    }
+
+    /// Whether the properties [`Self::copy_paint_only`] lists are the same
+    /// in both, custom properties aside (comparing those flattens both
+    /// sets, hundreds of entries on a themed page).
+    pub fn same_paint(&self, other: &ComputedStyle) -> bool {
+        self.color == other.color
+            && self.background_color == other.background_color
+            && self.border_top_color == other.border_top_color
+            && self.border_right_color == other.border_right_color
+            && self.border_bottom_color == other.border_bottom_color
+            && self.border_left_color == other.border_left_color
+            && self.text_decoration_line == other.text_decoration_line
+            && self.text_decoration_color == other.text_decoration_color
+            && self.text_decoration_style == other.text_decoration_style
+            && self.text_decoration_thickness == other.text_decoration_thickness
+            && self.webkit_text_fill_color == other.webkit_text_fill_color
+            && self.box_shadows == other.box_shadows
+            && self.transition_property == other.transition_property
+            && self.transition_duration == other.transition_duration
+            && self.transition_timing_function == other.transition_timing_function
+            && self.transition_delay == other.transition_delay
+    }
+
+    /// Whether `self` and `other` differ, if at all, only in the
+    /// properties [`Self::copy_paint_only`] lists.
+    pub fn differs_only_in_paint(&self, other: &ComputedStyle) -> bool {
+        // With `self`'s paint properties and its custom property set (the
+        // same `Arc`, so that comparison is a pointer check) the rest
+        // must be equal.
+        let mut masked = other.clone();
+        masked.copy_paint_only(self);
+        masked == *self
+    }
+}
+
 /// Computed style for an element.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ComputedStyle {
     // Box model
     pub display: Display,
