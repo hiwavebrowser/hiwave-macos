@@ -468,7 +468,7 @@ impl ImageManager {
             },
             Err(body) => {
                 self.decode_pool.note_inline();
-                decode_pixels(&body, self.max_dimensions)
+                decode_pool::decode_pixels_caught(&body, self.max_dimensions)
             }
         };
         if !self.decode_pool.is_current(nav) {
@@ -496,6 +496,11 @@ impl ImageManager {
     /// navigations are dropped.
     pub fn begin_navigation(&self, view: u64, nav_id: u64) {
         self.decode_pool.begin_navigation(view, nav_id);
+    }
+
+    /// `view` was destroyed: forget its navigation.
+    pub fn forget_view(&self, view: u64) {
+        self.decode_pool.forget_view(view);
     }
 
     /// The decode pool's counters.

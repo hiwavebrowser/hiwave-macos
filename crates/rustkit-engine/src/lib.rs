@@ -2114,6 +2114,7 @@ impl Engine {
             .remove(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
         self.render_failing.remove(&id);
+        self.image_manager.forget_view(id.0);
 
         // Destroy compositor surface
         let _ = self.compositor.destroy_surface(view.viewhost_id);

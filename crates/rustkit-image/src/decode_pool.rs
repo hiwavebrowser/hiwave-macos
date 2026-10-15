@@ -18,6 +18,8 @@
 //!   that arrives after its navigation was superseded is dropped by the
 //!   receiver, never cached.
 //! - The threads start on the first job and end when the pool is dropped.
+//!   The pool belongs to an `ImageManager`, so each engine has its own: a
+//!   second engine (the opt-in RustKit chrome) starts two more threads.
 
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -112,6 +114,12 @@ impl DecodePool {
         table.insert(view, nav_id);
     }
 
+    /// `view` is gone: drop its entry. Its in-flight fetches died with it.
+    pub fn forget_view(&self, view: u64) {
+        let mut table = self.navs.0.lock().unwrap_or_else(|e| e.into_inner());
+        table.remove(&view);
+    }
+
     /// Whether `nav` is still its view's latest navigation.
     pub fn is_current(&self, nav: DecodeNav) -> bool {
         self.navs.is_current(nav)
@@ -177,6 +185,20 @@ impl DecodePool {
     }
 }
 
+/// [`crate::decode_pixels`], with a codec that panics on hostile bytes
+/// failing this image instead of unwinding the thread. Both the pool and
+/// the page thread's inline decode (queue full) use it, so the two paths
+/// fail the same way.
+pub(crate) fn decode_pixels_caught(
+    bytes: &[u8],
+    max_dimensions: (u32, u32),
+) -> ImageResult<DecodedPixels> {
+    catch_unwind(AssertUnwindSafe(|| {
+        crate::decode_pixels(bytes, max_dimensions)
+    }))
+    .unwrap_or_else(|_| Err(ImageError::DecodeError("decoder panicked".into())))
+}
+
 fn decode_thread(receiver: &Mutex<Receiver<DecodeJob>>, navs: &NavTable, counters: &Counters) {
     loop {
         // The lock is held only while waiting for the next job.
@@ -188,13 +210,7 @@ fn decode_thread(receiver: &Mutex<Receiver<DecodeJob>>, navs: &NavTable, counter
         let Ok(job) = job else { return };
         counters.pooled.fetch_add(1, Ordering::Relaxed);
         let reply = if navs.is_current(job.nav) {
-            // A codec that panics on hostile bytes fails this image, not the
-            // thread: the page thread would otherwise have unwound.
-            let decoded = catch_unwind(AssertUnwindSafe(|| {
-                crate::decode_pixels(&job.bytes, job.max_dimensions)
-            }))
-            .unwrap_or_else(|_| Err(ImageError::DecodeError("decoder panicked".into())));
-            DecodeReply::Decoded(decoded)
+            DecodeReply::Decoded(decode_pixels_caught(&job.bytes, job.max_dimensions))
         } else {
             counters.superseded.fetch_add(1, Ordering::Relaxed);
             DecodeReply::Superseded
@@ -335,6 +351,15 @@ mod tests {
                 .await
                 .expect("other view");
         });
+    }
+
+    #[test]
+    fn a_destroyed_view_leaves_no_entry() {
+        let pool = DecodePool::new();
+        pool.begin_navigation(5, 2);
+        assert!(!pool.is_current(DecodeNav { view: 5, nav_id: 1 }));
+        pool.forget_view(5);
+        assert!(pool.navs.0.lock().unwrap().is_empty());
     }
 
     #[test]
