@@ -291,3 +291,71 @@ fn a_new_document_starts_its_own_counts() {
     assert_eq!(s.by_first_cause.to_string(), "{initial_load:1}");
     assert!(s.mutations.is_empty());
 }
+
+/// Collects what a `fmt` subscriber writes, for reading the log lines back.
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The `relayout cause=` lines logged while `run` ran on this thread.
+fn relayout_lines(run: impl FnOnce()) -> Vec<String> {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, run);
+    let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    log.lines()
+        .filter(|line| line.contains("relayout cause="))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The number after `name=` in a log line.
+fn field_ms(line: &str, name: &str) -> Option<f64> {
+    let at = line.find(&format!(" {name}="))? + name.len() + 2;
+    line[at..].split_whitespace().next()?.parse().ok()
+}
+
+#[test]
+fn every_relayout_line_carries_the_five_stage_times() {
+    let (mut engine, view) = engine_and_view();
+    let lines = relayout_lines(|| {
+        engine
+            .load_html(view, "<style>p{color:red}</style><p>hello</p>")
+            .expect("load_html");
+        engine.relayout(view).expect("relayout");
+    });
+    assert_eq!(lines.len(), 2, "one line per relayout: {lines:#?}");
+    for line in &lines {
+        let took = field_ms(line, "took_ms").expect("took_ms");
+        let mut sum = 0.0;
+        for stage in [
+            "build_ms",
+            "layout_ms",
+            "display_list_ms",
+            "snapshot_ms",
+            "render_ms",
+        ] {
+            let ms = field_ms(line, stage).unwrap_or_else(|| panic!("{stage} missing: {line}"));
+            assert!(ms >= 0.0, "{stage} in {line}");
+            sum += ms;
+        }
+        // Each is rounded to 0.1 ms: five roundings, and the stages run
+        // inside the relayout that took_ms times.
+        assert!(sum <= took + 0.3, "stages sum past took_ms: {line}");
+    }
+}
