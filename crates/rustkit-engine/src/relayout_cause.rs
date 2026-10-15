@@ -230,6 +230,9 @@ pub struct RelayoutStats {
     pub mutations: CauseCounts,
     /// Relayouts whose build took the kept box tree.
     pub trees_reused: u32,
+    /// Relayouts that kept the laid-out tree: the build changed only what
+    /// is painted, so the layout pass was skipped.
+    pub layouts_skipped: u32,
     /// Time spent in them, layout and the paint it ends with.
     pub total_ms: f64,
     /// The most recent relayout's first cause.

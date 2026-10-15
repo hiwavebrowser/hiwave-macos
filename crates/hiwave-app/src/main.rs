@@ -46,6 +46,7 @@ const SIDEBAR_WIDTH: f64 = 220.0;
 mod ipc;
 mod state;
 mod webview;
+mod window_stall;
 
 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
 mod webview_rustkit;
@@ -219,6 +220,8 @@ enum UserEvent {
     ClearCellar,
     // Decay ticker
     DecayTick,
+    // The stall log's ping (window_stall.rs); only sent with HIWAVE_STALL_LOG=1
+    WindowThreadPing,
     // Focus mode events
     EnterFocusMode,
     ExitFocusMode,
@@ -2024,6 +2027,13 @@ fn main() {
     });
     info!("Started focus mode auto-trigger checker");
 
+    // How long the window thread goes without turning this loop, written to
+    // the log when asked for. The real-window responsiveness checks read it.
+    let stall_log = window_stall::enabled().then(|| {
+        let ping_proxy = proxy.clone();
+        window_stall::start(move || ping_proxy.send_event(UserEvent::WindowThreadPing).is_ok())
+    });
+
     // Last known cursor position in WINDOW logical coordinates. tao reports
     // MouseInput without a position, so the CursorMoved stream is what makes
     // a click locatable.
@@ -2380,13 +2390,23 @@ fn main() {
                     // the view consumes the wheel, so only one of the two
                     // fires for an event. Until 2026-10-06 the wheel reached
                     // neither in the built app (hand-test item H6).
+                    // One scroll per drain: the engine presents the moved
+                    // frame inside `scroll_by` and the page hears one
+                    // scroll event for it, so the wheel deltas that arrived
+                    // since the last wake are summed first, as a browser's
+                    // per-frame scroll does; a burst costs one draw, not one
+                    // per event.
+                    let (mut dx, mut dy, mut events) = (0.0f32, 0.0f32, 0u32);
                     for scroll in rustkit_viewhost::drain_pending_scrolls() {
                         if wheel_burst_started() {
                             info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
                         }
-                        if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
-                            trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
-                        }
+                        dx += scroll.dx as f32;
+                        dy += scroll.dy as f32;
+                        events += 1;
+                    }
+                    if events > 0 && view.scroll_by(dx, dy) {
+                        trace!(dx, dy, events, "content scrolled");
                     }
                     for key in rustkit_viewhost::drain_pending_keys() {
                         if key.cmd {
@@ -4148,6 +4168,11 @@ fn main() {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
                             let _ = settings_wv.evaluate_script(&script);
+                        }
+                    }
+                    UserEvent::WindowThreadPing => {
+                        if let Some((answered, clock)) = stall_log.as_ref() {
+                            answered.now(clock);
                         }
                     }
                     UserEvent::DecayTick => {
