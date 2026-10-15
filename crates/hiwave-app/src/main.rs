@@ -11,11 +11,11 @@ mod platform;
 
 use std::sync::{Arc, Mutex};
 // Used only by the WRY-content IPC/nav block, which is compiled out of the
-// default macos+rustkit build. Deleting this as an "unused import" broke
-// `--features webview-fallback` with E0433 at the two should_block call
-// sites: a green default build says nothing about a cfg arm your target
-// omits. Gate must match those sites, not the default target.
-#[cfg(any(not(target_os = "macos"), feature = "webview-fallback"))]
+// macOS build (non-macOS only). Deleting this as an "unused import" breaks
+// that build with E0433 at the two should_block call sites: a green macOS
+// build says nothing about a cfg arm your target omits. Gate must match
+// those sites, not the default target.
+#[cfg(not(target_os = "macos"))]
 use hiwave_shield::ResourceType;
 use muda::{Menu, MenuEvent};
 use platform::get_platform_manager;
@@ -48,11 +48,11 @@ mod state;
 mod webview;
 mod window_stall;
 
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit;
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod shield_adapter;
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit_chrome;
 
 mod content_webview_trait;
@@ -526,7 +526,7 @@ fn load_report_page(content: &impl ContentWebViewOps) {
 /// ~50 events/s; the rest stay trace). One clock for both wheel paths, the
 /// window loop's and the content view's. Restores the diagnosability #100
 /// accidentally removed when the #95 diagnostic line was replaced with wiring.
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 fn wheel_burst_started() -> bool {
     // `None` until the first wheel event: a clock started at that event made
     // the first burst of a session look like the middle of one, and it was
@@ -544,12 +544,7 @@ fn wheel_burst_started() -> bool {
 
 // The real-window driver's h6 check reads "wheel burst started" from the app
 // log after the first wheel it sends to a freshly launched app.
-#[cfg(all(
-    test,
-    target_os = "macos",
-    feature = "rustkit",
-    not(feature = "webview-fallback")
-))]
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod wheel_burst_tests {
     use super::wheel_burst_started;
 
@@ -1195,7 +1190,7 @@ fn main() {
             .unwrap_or_else(|| NEW_TAB_URL.to_string())
     };
     // RustKit content webview (macOS with rustkit feature, default)
-    #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
     let content_webview = {
         use webview_rustkit::RustKitView;
         use rustkit_viewhost::Bounds;
@@ -1220,7 +1215,7 @@ fn main() {
         UnifiedContentWebView::RustKit(Arc::new(rustkit_view))
     };
     
-    #[cfg(any(not(target_os = "macos"), feature = "webview-fallback"))]
+    #[cfg(not(target_os = "macos"))]
     let wry_content_webview = {
         let content_proxy = _content_proxy;
         let content_proxy2 = _content_proxy2;
@@ -1602,17 +1597,10 @@ fn main() {
         .expect("Failed to create Content WebView")
     };
 
-    // WebKit fallback content webview (macOS with webview-fallback feature)
-    #[cfg(all(target_os = "macos", feature = "webview-fallback"))]
-    let content_webview: UnifiedContentWebView = {
-        info!("Creating WebKit content webview (fallback mode)");
-        Arc::new(wry_content_webview)
-    };
-    
     #[cfg(not(target_os = "macos"))]
     let content_webview = UnifiedContentWebView::Wry(Arc::new(wry_content_webview));
 
-    #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
     {
         if !is_new_tab_url(&initial_url) {
             // DEFERRED, not loaded here (2026-08-05). This call used to run
@@ -1634,16 +1622,6 @@ fn main() {
             let _ = proxy.send_event(UserEvent::Navigate(initial_url.clone()));
         }
         info!("Content WebView created (RustKit)");
-    }
-    
-    #[cfg(all(target_os = "macos", feature = "webview-fallback"))]
-    {
-        if !is_new_tab_url(&initial_url) {
-            if let Err(e) = content_webview.load_url(&initial_url) {
-                error!("Failed to load initial URL: {}", e);
-            }
-        }
-        info!("Content WebView created (WebKit fallback)");
     }
     
     #[cfg(not(target_os = "macos"))]
@@ -2064,7 +2042,7 @@ fn main() {
                 // page content arrive here; flicks over UI chrome do not).
                 // Forward them to the engine; render happens on
                 // MainEventsCleared, which this event wakes.
-                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                #[cfg(all(target_os = "macos", feature = "rustkit"))]
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                     if wheel_burst_started() {
                         info!(?delta, "wheel burst started (window loop)");
@@ -2108,7 +2086,7 @@ fn main() {
                 // rule the wheel path established. Translate window logical
                 // coordinates into the content view's viewport space, then
                 // ask the engine what link (if any) sits there.
-                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                #[cfg(all(target_os = "macos", feature = "rustkit"))]
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                     let (cx, cy) = cursor_position.get();
                     let content_x = cx - *sidebar_width_for_events.lock().unwrap();
@@ -2163,7 +2141,7 @@ fn main() {
                 // (Whether unfocused keys arrive at all on macOS is the
                 // diagnostic half — the wheel needed a live session to
                 // answer the same question.)
-                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                #[cfg(all(target_os = "macos", feature = "rustkit"))]
                 if key_event.state == tao::event::ElementState::Pressed {
                     if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                         use tao::keyboard::Key;
@@ -2327,7 +2305,7 @@ fn main() {
                     right_sidebar_open,
                 );
             }
-            #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+            #[cfg(all(target_os = "macos", feature = "rustkit"))]
             Event::MainEventsCleared => {
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
@@ -2578,7 +2556,7 @@ fn main() {
                             // WRY fallback (page JS does not execute in
                             // RustKit, so the old evaluate_script stub was a
                             // silent no-op — live finding 2026-08-07).
-                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            #[cfg(feature = "rustkit")]
                             if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
                                 if !v.nav_back() {
                                     info!("GoBack: nowhere to go");
@@ -2586,8 +2564,6 @@ fn main() {
                             } else {
                                 let _ = content_for_events.evaluate_script("history.back();");
                             }
-                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
-                            let _ = content_for_events.evaluate_script("history.back();");
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
@@ -2602,7 +2578,7 @@ fn main() {
                             // WRY fallback (page JS does not execute in
                             // RustKit, so the old evaluate_script stub was a
                             // silent no-op — live finding 2026-08-07).
-                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            #[cfg(feature = "rustkit")]
                             if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
                                 if !v.nav_forward() {
                                     info!("GoForward: nowhere to go");
@@ -2610,8 +2586,6 @@ fn main() {
                             } else {
                                 let _ = content_for_events.evaluate_script("history.forward();");
                             }
-                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
-                            let _ = content_for_events.evaluate_script("history.forward();");
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
@@ -2626,7 +2600,7 @@ fn main() {
                             // WRY fallback (page JS does not execute in
                             // RustKit, so the old evaluate_script stub was a
                             // silent no-op — live finding 2026-08-07).
-                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            #[cfg(feature = "rustkit")]
                             if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
                                 if !v.nav_reload() {
                                     info!("Reload: nowhere to go");
@@ -2634,8 +2608,6 @@ fn main() {
                             } else {
                                 let _ = content_for_events.evaluate_script("location.reload();");
                             }
-                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
-                            let _ = content_for_events.evaluate_script("location.reload();");
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
