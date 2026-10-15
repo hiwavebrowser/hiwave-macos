@@ -255,3 +255,51 @@ fn a_chain_of_slow_module_fetches_stays_within_the_subresource_budget() {
     );
     assert_eq!(engine.execute_script(view, "1 + 1").unwrap(), "Number(2.0)");
 }
+
+/// The same chain with `import()` instead of a static import, and with the
+/// live app's interrupts on: each combination shares the one window too
+/// (R1 HOLD on #706 measured 9.1–9.3 s for each before).
+#[test]
+fn hung_imports_share_one_window_with_import_calls_and_interrupts() {
+    for interrupts in [false, true] {
+        for dynamic in [false, true] {
+            let config = EngineConfig {
+                script_budget_ms: 300,
+                subresource_budget_ms: 1_000,
+                interrupt_scripts_at_budget: interrupts,
+                ..EngineConfig::default()
+            };
+            let page = if dynamic {
+                (0..HANGING_MODULE_SCRIPTS)
+                    .map(|i| format!("<script type=\"module\">import('/hang/m{i}.js').catch(() => {{}});</script>"))
+                    .collect()
+            } else {
+                hanging_module_chain(HANGING_MODULE_SCRIPTS)
+            };
+            let port = serve_hanging(page);
+            let mut engine = Engine::new(config).expect("engine");
+            let view = engine
+                .create_headless_view(Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 100,
+                })
+                .expect("view");
+            let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let started = std::time::Instant::now();
+            rt.block_on(engine.load_url(view, url)).expect("load_url");
+            let took = started.elapsed();
+            // About 1 s alone; the defect is at least 8 s. The margin is for
+            // a loaded test machine.
+            assert!(
+                took < std::time::Duration::from_secs(4),
+                "interrupts {interrupts}, import() {dynamic}: the load took {took:?}"
+            );
+        }
+    }
+}

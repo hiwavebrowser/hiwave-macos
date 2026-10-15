@@ -86,7 +86,11 @@ deeply nested source, `JSON.stringify` of a deeply nested array, a Proxy whose
 target is another Proxy forwarding with no trap (`[[Get]]` and friends recurse
 natively down the chain), `[[Get]]` up a very long prototype chain (of any
 objects, plain ones included), and `Array.prototype.flat` with a large depth on deeply nested
-arrays.
+arrays. Each of these aborts the process with a stack overflow, as on the
+unpatched version. Follow-up: call the floor check from these internal methods.
+Also not this patch: `async function f(){ await f() } f()` at the limit panics
+with `EnginePanic: cannot fail per spec` (`vm/opcode/await/mod.rs`), as on the
+unpatched version.
 
 **Tests.** `crates/rustkit-js/tests/recursion_limits.rs`: the deepest call that
 returns is the limit, one deeper throws a catchable `RangeError`, `finally`
