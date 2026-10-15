@@ -156,18 +156,21 @@ impl ThreadStamp {
         // The previous turn's `turn = 0` is ordered before these: a watchdog
         // that reads them sees `turn` change and skips the tick.
         fence(Ordering::Release);
+        let started = now_us();
+        let budget_us = budget.as_micros().min(u64::MAX as u128) as u64;
         self.turn_view.store(view.id, Ordering::Relaxed);
-        self.turn_started_us.store(now_us(), Ordering::Relaxed);
-        self.turn_budget_us.store(
-            budget.as_micros().min(u64::MAX as u128) as u64,
-            Ordering::Relaxed,
-        );
+        self.turn_started_us.store(started, Ordering::Relaxed);
+        self.turn_budget_us.store(budget_us, Ordering::Relaxed);
         self.turn.store(id, Ordering::Release);
-        // Pairs with the watchdog's fence between setting `parked` and its
-        // last look: either it sees this turn or this sees it parked.
+        // Pairs with the watchdog's fence between publishing when it will
+        // next wake and its last look: either it sees this turn or this sees
+        // when it wakes, and wakes it if that is after this turn's budget
+        // (it may be sleeping a whole tick after stopping another turn).
         fence(Ordering::SeqCst);
         if let Some(watchdog) = self.watchdog.upgrade() {
-            if watchdog.parked.swap(false, Ordering::Relaxed) {
+            let parked = watchdog.parked.swap(false, Ordering::Relaxed);
+            let wakes = watchdog.wake_at_us.load(Ordering::Relaxed);
+            if parked || started.saturating_add(budget_us) < wakes {
                 if let Some(thread) = watchdog.thread.get() {
                     thread.unpark();
                 }
@@ -223,6 +226,9 @@ struct Shared {
     views: Mutex<HashMap<u64, Weak<ViewControl>>>,
     /// Set by the watchdog before it parks with no turn open.
     parked: AtomicBool,
+    /// When the watchdog next wakes on its own (`now_us`); `u64::MAX`
+    /// while parked with no turn open.
+    wake_at_us: AtomicU64,
     thread: OnceLock<std::thread::Thread>,
     /// Turns the watchdog has stopped (a diagnostic).
     stopped: AtomicU64,
@@ -355,15 +361,20 @@ fn run(shared: Weak<Shared>) {
         let Some(live) = shared.upgrade() else {
             return;
         };
-        live.parked.store(false, Ordering::Relaxed);
-        let mut wait = live.scan();
-        if wait.is_none() {
-            // Nothing open: park until a page thread publishes a turn. The
-            // flag is set before the last look, so a turn published after
-            // that look finds it set and unparks this thread.
-            live.parked.store(true, Ordering::Relaxed);
-            fence(Ordering::SeqCst);
-            wait = live.scan();
+        let first = live.scan();
+        // Say when this thread wakes next (never, with nothing open), then
+        // look once more: a turn published after that look sees it and
+        // unparks this thread if its budget ends sooner.
+        let wake_at = first.map_or(u64::MAX, |wait| {
+            now_us().saturating_add(wait.as_micros() as u64)
+        });
+        live.wake_at_us.store(wake_at, Ordering::Relaxed);
+        live.parked.store(first.is_none(), Ordering::Relaxed);
+        fence(Ordering::SeqCst);
+        let wait = live.scan();
+        if wait.is_none() != first.is_none() {
+            // A turn opened or closed between the looks: look again.
+            continue;
         }
         drop(live);
         match wait {
@@ -474,6 +485,40 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(!view.stops(next));
         stamp.end_turn();
+    }
+
+    #[test]
+    fn a_short_turn_opened_while_the_watchdog_sleeps_a_tick_is_stopped_on_time() {
+        // After stopping a turn the watchdog sleeps a whole tick; a turn
+        // whose budget ends sooner (the grace turn after a stop) wakes it.
+        let watchdog = Watchdog::spawn();
+        let stamp = watchdog.thread_stamp();
+        let view = watchdog.view_control();
+        let first = stamp.begin_turn(&view, Duration::from_millis(0));
+        let started = Instant::now();
+        while !view.stops(first) {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "the first stop never came"
+            );
+            std::thread::yield_now();
+        }
+        stamp.end_turn();
+        let started = Instant::now();
+        let short = stamp.begin_turn(&view, Duration::from_millis(30));
+        while !view.stops(short) {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "the short turn was never stopped"
+            );
+            std::thread::yield_now();
+        }
+        let took = started.elapsed();
+        stamp.end_turn();
+        assert!(
+            took < Duration::from_millis(200),
+            "stopped after {took:?}, a tick late"
+        );
     }
 
     #[test]
