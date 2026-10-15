@@ -387,6 +387,8 @@ mod ws_beside_block_replaced_tests;
 mod shadow_tree_tests;
 #[cfg(all(test, feature = "headless"))]
 mod box_sizing_inherit_tests;
+#[cfg(all(test, feature = "headless"))]
+mod lazy_geometry_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 pub use rustkit_renderer::RenderStats;
@@ -745,7 +747,7 @@ struct ViewState {
     http_status: Option<u16>,
     document: Option<Rc<Document>>,
     #[allow(dead_code)]
-    layout: Option<LayoutBox>,
+    layout: Option<Rc<LayoutBox>>,
     /// Where `layout` has its `position: fixed` boxes that the scroll
     /// leaves in place (`LayoutBox::held_fixed_paths`), read when the
     /// layout is stored. With none, a hit test is the pruned walk of the
@@ -5691,7 +5693,7 @@ impl Engine {
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
         view.held_fixed = Some(root_box.held_fixed_paths());
-        view.layout = Some(root_box);
+        view.layout = Some(Rc::new(root_box));
         view.laid_with = Some(LaidWith {
             hover: view.hover_chain.clone(),
             active: view.active_chain.clone(),
@@ -5699,12 +5701,10 @@ impl Engine {
             size: (bounds.width, bounds.height),
         });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
-        // answer from this layout.
+        // answer from this layout, measured on the first read.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let _snapshot_time = time_stage(Stage::Snapshot);
-            let (geometry, computed) = geometry_snapshot(layout);
-            bindings.set_geometry(geometry);
-            bindings.set_computed_styles(computed);
+            publish_geometry(bindings, layout);
         }
         view.display_list = Some(display_list);
         view.frame_generation += 1;
@@ -5971,7 +5971,7 @@ impl Engine {
             return miss("layout moved boxes");
         }
         for root in &roots {
-            if let Some(laid) = box_of_node_mut(&mut laid, *root) {
+            if let Some(laid) = box_of_node_mut(Rc::make_mut(&mut laid), *root) {
                 copy_changed_paint(laid, &was[root], &is[root]);
             }
         }
@@ -5986,9 +5986,7 @@ impl Engine {
         // Script reads of computed style answer from the restyled boxes.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let _snapshot_time = time_stage(Stage::Snapshot);
-            let (geometry, computed) = geometry_snapshot(layout);
-            bindings.set_geometry(geometry);
-            bindings.set_computed_styles(computed);
+            publish_geometry(bindings, layout);
         }
         view.display_list = Some(display_list);
         view.frame_generation += 1;
@@ -15251,9 +15249,7 @@ impl Engine {
         }
         if let Some(view) = self.views.get(&id) {
             if let Some(layout) = view.layout.as_ref() {
-                let (geometry, computed) = geometry_snapshot(layout);
-                bindings.set_geometry(geometry);
-                bindings.set_computed_styles(computed);
+                publish_geometry(bindings, layout);
             }
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
@@ -18041,6 +18037,29 @@ fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
         walk(body, !(html_clips && clips(body)), &mut bottom);
     }
     bottom
+}
+
+/// Hand script the geometry of `layout` without measuring it: the snapshot
+/// is built on the first read (`DomBindings::set_geometry_source`). The
+/// source holds the layout weakly, so it never keeps an old tree alive or
+/// makes `Rc::make_mut` copy one; a layout replaced or patched in place
+/// is republished before script runs again.
+fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>) {
+    let layout = Rc::downgrade(layout);
+    bindings.set_geometry_source(Box::new(move || {
+        let Some(layout) = layout.upgrade() else {
+            return Default::default();
+        };
+        let _snapshot_time = time_stage(Stage::Snapshot);
+        let started = std::time::Instant::now();
+        let snapshot = geometry_snapshot(&layout);
+        debug!(
+            elements = snapshot.0.len(),
+            ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Geometry snapshot built on first read"
+        );
+        snapshot
+    }));
 }
 
 /// Where the layout put every element, by DOM node, for script geometry reads
@@ -23392,7 +23411,7 @@ mod link_click_tests {
 
         {
             let view = engine.views.get_mut(&id).expect("view");
-            view.layout = Some(root);
+            view.layout = Some(Rc::new(root));
             view.url = Some(Url::parse("https://example.com/page").unwrap());
             view.max_scroll_offset = (0.0, 1400.0);
         }
@@ -24264,7 +24283,7 @@ mod node_identity_tests {
         {
             let view = engine.views.get_mut(&id).expect("view");
             view.document = Some(doc);
-            view.layout = Some(layout);
+            view.layout = Some(Rc::new(layout));
         }
 
         assert_eq!(engine.focus_at_point(id, 10.0, 10.0).as_deref(), Some("input"));
@@ -26400,7 +26419,7 @@ mod form_typing_tests {
         let layout = engine.build_layout_for_view(id, &doc, &[]);
         let view = engine.views.get_mut(&id).expect("view");
         view.document = Some(doc);
-        view.layout = Some(layout);
+        view.layout = Some(Rc::new(layout));
         (engine, id)
     }
 

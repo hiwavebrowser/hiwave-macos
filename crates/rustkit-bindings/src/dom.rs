@@ -57,6 +57,11 @@ pub struct BoxGeometry {
     pub position: u8,
 }
 
+/// Builds the geometry and computed-style maps of the layout it was made
+/// for (`DomBindings::set_geometry_source`).
+pub type GeometrySource =
+    Box<dyn FnOnce() -> (HashMap<usize, BoxGeometry>, HashMap<usize, String>)>;
+
 /// The document the host functions read, and its generation.
 #[derive(Default)]
 pub(crate) struct DomHost {
@@ -70,6 +75,11 @@ pub(crate) struct DomHost {
     /// The computed style of each laid-out element, by NodeId, as
     /// `name\tvalue` lines (`DomBindings::set_computed_styles`).
     pub(crate) computed: HashMap<usize, String>,
+    /// What builds `geometry` and `computed` from the last layout, until
+    /// script first reads either (`DomBindings::set_geometry_source`).
+    pub(crate) geometry_source: Option<GeometrySource>,
+    /// How many times a pending source was built (`DomBindings::geometry_builds`).
+    pub(crate) geometry_builds: u64,
     /// HTML §4.10.5.4 "dirty value" of the `<input>`/`<textarea>` controls
     /// that script or the user changed, by NodeId. A control missing here
     /// shows its default value (the `value` attribute, or a textarea's text).
@@ -101,6 +111,15 @@ pub(crate) struct DomHost {
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
 
 impl DomHost {
+    /// Build the geometry and computed styles from the pending source, if
+    /// the layout changed since script last read them.
+    pub(crate) fn ensure_geometry(&mut self) {
+        if let Some(source) = self.geometry_source.take() {
+            (self.geometry, self.computed) = source();
+            self.geometry_builds += 1;
+        }
+    }
+
     /// Bind `document`, returning the new generation.
     pub(crate) fn bind(&mut self, document: Rc<Document>) -> u32 {
         let templates = self.templates.get_mut();
@@ -1039,6 +1058,9 @@ pub(crate) fn install(
         "__rustkit_dom_info",
         3,
         Box::new(move |args| {
+            if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom")) {
+                h.borrow_mut().ensure_geometry();
+            }
             let host = h.borrow();
             match (host.node(args), string_arg(args, 2)) {
                 (Some(_), Some("laidout")) => {
@@ -2105,7 +2127,8 @@ const WRAPPERS_JS: &str = r#"
     });
 
     // Layout geometry (CSSOM View). The engine publishes where each element's
-    // box is after a layout (`set_geometry`); a read answers from the last
+    // box is after a layout (`set_geometry_source`, built on the first read);
+    // a read answers from the last
     // layout, so it can be stale between a script's own DOM writes and the
     // next layout. An element with no box (display:none, not rendered, or
     // measured before any layout) reads as all zeros, and has no offsetParent.
