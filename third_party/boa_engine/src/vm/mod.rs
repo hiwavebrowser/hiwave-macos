@@ -89,6 +89,11 @@ pub struct Vm {
     pub(crate) interrupt_turn: u64,
     // END HIWAVE PATCH
 
+    // HIWAVE PATCH (stack): the lowest native stack address a call may
+    // start at (0 = unchecked). See PATCHES.md.
+    pub(crate) native_stack_floor: usize,
+    // END HIWAVE PATCH
+
     /// This is used to assign a native (rust) function as the active function,
     /// because we don't push a frame for them.
     pub(crate) native_active_function: Option<JsObject>,
@@ -426,6 +431,7 @@ impl Vm {
             runtime_limits: RuntimeLimits::default(),
             interrupt: None,   // HIWAVE PATCH (interrupt)
             interrupt_turn: 0, // HIWAVE PATCH (interrupt)
+            native_stack_floor: 0, // HIWAVE PATCH (stack)
             native_active_function: None,
             host_call_depth: 0,
             shadow_stack: ShadowStack::default(),
@@ -1030,14 +1036,29 @@ impl Context {
         // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking
         // `Context::run()` recursively (for example, accessor calls).
         // Subtract 1 to exclude the dummy frame at index 0.
+        //
+        // HIWAVE PATCH (stack): these three throw a catchable `RangeError`,
+        // as V8's "Maximum call stack size exceeded" does, not an
+        // uncatchable `RuntimeLimitError`: pages (React among them) catch it.
         let recursion_depth = (self.vm.frames.len() - 1).saturating_add(self.vm.host_call_depth);
         if self.vm.runtime_limits.recursion_limit() <= recursion_depth {
-            return Err(RuntimeLimitError::Recursion.into());
+            return Err(stack_exceeded());
         }
         // Must throw if the stack size exceeds the defined maximum length.
         if self.vm.runtime_limits.stack_size_limit() <= self.vm.stack.stack.len() {
-            return Err(RuntimeLimitError::StackSize.into());
+            return Err(stack_exceeded());
         }
+        // Script frames live on the heap, but every host call that re-enters
+        // the VM (a getter, a `map` callback) recurses on the native stack:
+        // throw before that stack runs out, whatever the frame count.
+        if self.vm.native_stack_floor != 0 {
+            let marker = 0u8;
+            let here = std::hint::black_box(std::ptr::addr_of!(marker)) as usize;
+            if here < self.vm.native_stack_floor {
+                return Err(stack_exceeded());
+            }
+        }
+        // END HIWAVE PATCH
 
         Ok(())
     }
@@ -1056,6 +1077,14 @@ impl Context {
     }
     // END HIWAVE PATCH
 }
+
+// HIWAVE PATCH (stack)
+fn stack_exceeded() -> JsError {
+    JsNativeError::range()
+        .with_message("Maximum call stack size exceeded")
+        .into()
+}
+// END HIWAVE PATCH
 
 /// Yields once to the executor.
 fn yield_now() -> impl Future<Output = ()> {
