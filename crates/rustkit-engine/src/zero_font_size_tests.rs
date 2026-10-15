@@ -168,6 +168,40 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
         r#"<div id=x><span style="line-height:40px"></span><i id=q style="display:inline-block;width:100px;height:10px"></i></div><div id=y style="height:5px"></div>"#,
         "x:0:0:1280:40 y:0:40:1280:5",
     ),
+    // An out-of-flow atomic inline inside an inline box is not content of
+    // the line: the empty `<span>` or `<a>` around a positioned icon or
+    // badge must not be kept, or it gives the line a strut and the next
+    // block moves down one line (round-3 hold; Chromium 0).
+    (
+        "an absolute inline-block in a span, then a block",
+        "#x{font-size:16px;line-height:20px}",
+        r#"<div id=x><span><i style="position:absolute;display:inline-block;width:20px;height:20px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:0 y:0:0:1280:5",
+    ),
+    (
+        "an absolute inline-block in a link, then a block",
+        "#x{font-size:16px;line-height:20px}",
+        r#"<div id=x><a href=#><i style="position:absolute;display:inline-block;width:20px;height:20px"></i></a></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:0 y:0:0:1280:5",
+    ),
+    (
+        "a fixed inline-flex in a span, then a block",
+        "#x{font-size:16px;line-height:20px}",
+        r#"<div id=x><span><i style="position:fixed;display:inline-flex;width:20px;height:20px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:0 y:0:0:1280:5",
+    ),
+    (
+        "an absolute inline-block in a span at font-size 0",
+        "",
+        r#"<div id=x><span><i style="position:absolute;display:inline-block;width:20px;height:20px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:0 y:0:0:1280:5",
+    ),
+    (
+        "an absolute inline-block in a span beside an in-flow one",
+        "#x{font-size:16px;line-height:20px}",
+        r#"<div id=x><span><i style="position:absolute;display:inline-block;width:20px;height:20px"></i>{ib}</span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:20 y:0:20:1280:5",
+    ),
 ];
 
 /// Pages that do not match Chromium yet. One that starts to match fails the
