@@ -336,6 +336,26 @@ mod tests {
     }
 
     #[test]
+    fn a_coalesced_burst_keeps_the_arrival_time_of_its_first_event() {
+        // The W-gate's input-to-present figure is measured from `at`. A
+        // trackpad flick queued while the window is held coalesces into one
+        // wheel; it must be timed from the first tick, not the last (#704
+        // review), or a 600 ms hold reads as a few ms.
+        let view = ViewId::new();
+        let mut q = InputQueue::default();
+        q.push(view, wheel(-10.0));
+        q.push(view, mv(1.0));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let later = Instant::now();
+        q.push(view, wheel(-10.0));
+        q.push(view, mv(2.0));
+        let out = q.drain();
+        assert_eq!(kinds(&out), ["wheel", "pointer"]);
+        assert!(out[0].at < later, "the wheel burst is timed from its first tick");
+        assert!(out[1].at < later, "the move burst is timed from its first move");
+    }
+
+    #[test]
     fn a_click_or_another_view_ends_the_coalescing_of_moves_and_wheels() {
         let view = ViewId::new();
         let other = ViewId::new();

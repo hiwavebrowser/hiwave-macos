@@ -121,6 +121,30 @@ thread_local! {
     /// The last hold the outermost guard reported, for tests.
     #[cfg(test)]
     static LAST_HOLD: Cell<Option<(&'static str, f64)>> = const { Cell::new(None) };
+    /// The last outermost entry that closed, reported or not, for tests.
+    #[cfg(test)]
+    static LAST_ENTRY: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// The last hold the outermost guard reported on this thread (entry,
+/// milliseconds), for tests.
+#[cfg(test)]
+pub(crate) fn last_hold() -> Option<(&'static str, f64)> {
+    LAST_HOLD.with(|c| c.get())
+}
+
+/// The last outermost entry that closed on this thread, whatever its
+/// length, for tests.
+#[cfg(test)]
+pub(crate) fn last_entry() -> Option<&'static str> {
+    LAST_ENTRY.with(|c| c.get())
+}
+
+/// Forgets both, for tests.
+#[cfg(test)]
+pub(crate) fn clear_last() {
+    LAST_HOLD.with(|c| c.set(None));
+    LAST_ENTRY.with(|c| c.set(None));
 }
 
 /// Adds `ms` of `stage` to the hold in progress (called by the relayout
@@ -187,6 +211,8 @@ impl Drop for WindowHold {
         }
         let total_ms = self.started.elapsed().as_secs_f64() * 1000.0;
         let stages = HOLD_MS.with(|c| c.replace(HoldMs::default()));
+        #[cfg(test)]
+        LAST_ENTRY.with(|c| c.set(Some(self.entry)));
         if let Some(line) = hold_line(self.entry, total_ms, &stages) {
             #[cfg(test)]
             LAST_HOLD.with(|c| c.set(Some((self.entry, total_ms))));
@@ -279,13 +305,32 @@ mod tests {
         stages.add(HoldStage::Acquire, 16.0);
         stages.add(HoldStage::Acquire, 16.0);
         let line = hold_line("live_turn", 612.0, &stages).expect("reported");
+        // The presenter's three stages are a breakdown of `render`, so
+        // they are not counted again: `other` is 612 - 300 - 40.
         assert_eq!(
             line,
-            "Window thread hold entry=live_turn ms=612 build_ms=0.0 layout_ms=300.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=40.0 acquire_ms=32.0 execute_ms=0.0 present_ms=0.0 other_ms=240.0"
+            "Window thread hold entry=live_turn ms=612 build_ms=0.0 layout_ms=300.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=40.0 acquire_ms=32.0 execute_ms=0.0 present_ms=0.0 other_ms=272.0"
         );
-        // Stages that overlap (render contains acquire) cannot push
-        // `other` below zero.
-        assert_eq!(stages.other_ms(100.0), 0.0);
+        assert_eq!(stages.other_ms(100.0), 60.0, "40 ms of render, 60 of script");
+        // A 100 ms turn with 40 ms of script and a 60 ms render of which
+        // 55 was the execute (the review's case): the script is `other`.
+        let mut turn = HoldMs::default();
+        turn.add(HoldStage::Render, 60.0);
+        turn.add(HoldStage::Execute, 55.0);
+        assert_eq!(turn.other_ms(100.0), 40.0);
+        // Nothing can push `other` below zero.
+        assert_eq!(turn.other_ms(50.0), 0.0);
+    }
+
+    #[test]
+    fn every_entry_records_its_name_and_only_a_long_one_is_reported() {
+        clear_last();
+        {
+            let _h = hold("render_view");
+            add(HoldStage::Render, 1.0);
+        }
+        assert_eq!(last_entry(), Some("render_view"), "recorded whatever its length");
+        assert_eq!(last_hold(), None, "under the threshold: not reported");
     }
 
     #[test]
