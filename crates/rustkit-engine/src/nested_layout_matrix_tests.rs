@@ -65,7 +65,7 @@ fn expected_failures() -> HashMap<String, String> {
 /// The border box of each element named in `ids`, with `document` laid out as
 /// `relayout` lays a view out, as `getBoundingClientRect` would report it;
 /// `None` where the element has no box.
-fn engine_rects(engine: &Engine, document: &Document, ids: &[&str]) -> Vec<Option<[f32; 4]>> {
+pub(super) fn engine_rects(engine: &Engine, document: &Document, ids: &[&str]) -> Vec<Option<[f32; 4]>> {
     let mut root = engine.build_layout_from_document(document, &[]);
     root.set_viewport(1280.0, 800.0);
     let cb = Dimensions {

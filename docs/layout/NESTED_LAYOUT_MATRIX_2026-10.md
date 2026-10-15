@@ -5,6 +5,14 @@ develop **378 match Chromium and 231 do not**. On the PR #663 branch
 (`atlas/z-grid-in-flex-width`, head `7e9b2b34`) **417 match and 192 do
 not**: #663 makes 39 cases match and makes none fail.
 
+Update, 2026-10-12, on the #663 branch with develop `2b75e93b` merged in
+(#670, #672 and #673 landed in between): **449 match and 160 do not.** 48
+lines left the ledger with this branch and none joined it: 28 of
+`grid-item-of-flex-laid-out-as-block`, 17 of
+`grid-max-content-width-no-grid-arm` and all 3 of
+`grid-auto-rows-skips-first-row`. The cause sections below are as written
+for develop.
+
 ## What is in the matrix
 
 - Generator: `tools/parity_oracle/nested_layout_matrix.mjs`. Run it with no
