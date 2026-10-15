@@ -27,6 +27,8 @@ rustkit-http = { path = "../rustkit-http" }
 rustkit-image = { path = "../rustkit-image" }
 rustkit-svg = { path = "../rustkit-svg" }
 rustkit-renderer = { path = "../rustkit-renderer" }
+# The presenter names the texture a frame is drawn into
+wgpu = "24"
 
 # Async runtime
 tokio = { version = "1.42", features = ["sync", "time", "rt"] }
