@@ -36,6 +36,12 @@ pub enum HttpError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
 
+    /// The host name did not resolve (or resolved to no address). The same
+    /// text as [`ConnectionFailed`](Self::ConnectionFailed); its own variant
+    /// so a caller tells the two apart without reading the text.
+    #[error("Connection failed: {0}")]
+    LookupFailed(String),
+
     #[error("TLS error: {0}")]
     TlsError(String),
 
