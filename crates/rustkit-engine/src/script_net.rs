@@ -13,11 +13,13 @@
 //! in that same order, so a run does not depend on which response was
 //! fastest.
 
+use std::cell::Cell;
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -317,18 +319,74 @@ pub(crate) const MAX_MODULES_PER_PAGE: usize = 2_000;
 /// modules concurrently).
 const MAX_MODULE_ROUNDS: u32 = 64;
 
+/// The load's script budget counted in script time (#666, #699): the time
+/// spent waiting on module fetches is given back, by moving the budget's
+/// start later by the wait. With `interrupts`, the execution deadline and
+/// the watchdog's turn stand down for the wait and are armed again with
+/// what is left, so a chunk that arrives after a slow fetch still runs.
+/// Script that has spent the budget gains nothing: a turn with nothing left
+/// does not stand down.
+pub(crate) struct ScriptClock<'a> {
+    pub bindings: &'a DomBindings,
+    /// When the budget started, moved later by every wait.
+    pub started: &'a Cell<Instant>,
+    pub budget: Duration,
+    pub interrupts: bool,
+}
+
+impl ScriptClock<'_> {
+    /// The script time left.
+    pub fn remaining(&self) -> Duration {
+        self.budget.saturating_sub(self.started.get().elapsed())
+    }
+
+    /// Await `wait`, a network wait, without charging it to the budget.
+    async fn uncharged<T>(&self, wait: impl Future<Output = T>) -> T {
+        // Dropped (the navigation was cancelled mid-wait) or not, the turn
+        // is armed again, so the caller's `end_script_turn` stays paired.
+        struct Resume<'c, 'a> {
+            clock: &'c ScriptClock<'a>,
+            from: Instant,
+            paused: bool,
+        }
+        impl Drop for Resume<'_, '_> {
+            fn drop(&mut self) {
+                let clock = self.clock;
+                clock.started.set(clock.started.get() + self.from.elapsed());
+                if self.paused {
+                    let left = clock.remaining();
+                    clock.bindings.set_execution_deadline(Some(Instant::now() + left));
+                    crate::begin_script_turn(clock.bindings, left);
+                }
+            }
+        }
+        let paused = self.interrupts && !self.remaining().is_zero();
+        if paused {
+            crate::end_script_turn(self.bindings);
+            self.bindings.set_execution_deadline(None);
+        }
+        let _resume = Resume { clock: self, from: Instant::now(), paused };
+        wait.await
+    }
+}
+
 /// Fetch what a started module graph has asked for, level by level, until it
 /// asks for nothing more. Every fetch is the policy's module entry point;
 /// this decides nothing. A module that is refused, mistyped, missing or too
 /// many is supplied as an error, so the graph fails as a whole and none of
 /// its code runs.
 ///
+/// `deadline` is a network deadline, not the script budget: a page whose
+/// own scripts spent the budget may still `import()` the code it needs.
+/// `clock` (the load path) is given back the time the fetches take.
 /// `fetched` counts the modules already pulled in on this page.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump_modules(
     bindings: &DomBindings,
     policy: &FetchPolicy,
     loader: &ResourceLoader,
     deadline: tokio::time::Instant,
+    clock: Option<&ScriptClock<'_>>,
     document: &Url,
     fetched: &mut usize,
     inspector: &Arc<Inspector>,
@@ -348,14 +406,14 @@ pub(crate) async fn pump_modules(
         // Within the page's module cap, fetch the level concurrently.
         let room = MAX_MODULES_PER_PAGE.saturating_sub(*fetched);
         *fetched += urls.len().min(room);
-        let outcomes = futures::future::join_all(urls.iter().enumerate().map(|(i, url)| async move {
+        let level = futures::future::join_all(urls.iter().enumerate().map(|(i, url)| async move {
             if i >= room {
                 return Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})"));
             }
             let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
             let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
             let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
-            inspector::answer_module(guard, &fetched);
+            inspector::answer_module(guard, &fetched, FailureStage::Timeout);
             match fetched {
                 Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
                     final_url: module.final_url.to_string(),
@@ -365,10 +423,13 @@ pub(crate) async fn pump_modules(
                     debug!(%url, ?denial, "Module fetch denied");
                     Err(NETWORK_ERROR.to_string())
                 }
-                Err(_) => Err("script budget spent".to_string()),
+                Err(_) => Err("module fetch timed out".to_string()),
             }
-        }))
-        .await;
+        }));
+        let outcomes = match clock {
+            Some(clock) => clock.uncharged(level).await,
+            None => level.await,
+        };
 
         for (url, outcome) in urls.iter().zip(outcomes) {
             if catch_unwind(AssertUnwindSafe(|| bindings.supply_module(url, outcome))).is_err() {
@@ -395,6 +456,7 @@ pub(crate) async fn pump_all(
     rounds: u32,
     timers: Option<(u64, u32)>,
     document: Option<&Url>,
+    modules: (tokio::time::Instant, Option<&ScriptClock<'_>>),
     modules_fetched: &mut usize,
     inspector: &Arc<Inspector>,
 ) -> Pump {
@@ -404,7 +466,8 @@ pub(crate) async fn pump_all(
         let net = pump(bindings, policy, loader, deadline, rounds, timers, inspector).await;
         let modules = match document {
             Some(document) => {
-                pump_modules(bindings, policy, loader, deadline, document, modules_fetched, inspector).await
+                let (module_deadline, clock) = modules;
+                pump_modules(bindings, policy, loader, module_deadline, clock, document, modules_fetched, inspector).await
             }
             None => Pump::default(),
         };

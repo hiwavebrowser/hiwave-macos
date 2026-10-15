@@ -1,0 +1,23 @@
+<!doctype html>
+<!--
+  A page that spends its script budget the way a large app bundle does
+  (x.com's entry bundle, 2026-10), then loads its code-split chunks with
+  chained dynamic import()s. Each chunk is served from a /held path, which
+  the test server answers after 300 ms. Served by
+  crates/rustkit-engine/src/dynamic_import_budget_tests.rs, which replaces
+  __SPEND_MS__ with how long the bundle runs.
+-->
+<html><head>
+<script>
+var log = [];
+var t0 = Date.now();
+while (Date.now() - t0 < __SPEND_MS__) {}
+log.push('bundle');
+import('/held/chunk-a.js').then(
+  function (m) { return m.next(); }
+).then(
+  function (last) { log.push('done:' + last); },
+  function (e) { log.push('failed:' + e.message); }
+);
+</script>
+</head><body><p id="p">app shell</p></body></html>
