@@ -1187,13 +1187,17 @@ pub(crate) fn install(
         }),
     )?;
 
-    runtime.evaluate_script(WRAPPERS_JS)?;
+    // Its listener and handler errors go to the host natives (`__rk`).
+    runtime.evaluate_with_host(WRAPPERS_JS)?;
     shadow::install(runtime, host, dirty)?;
     node_apis::install(runtime, host)
 }
 
 /// Wrapper prototypes, the identity cache, and the `document` read
 /// surface. `window.__rustkit_dom_reset(gen)` rebinds it to a new document.
+#[cfg(test)]
+pub(crate) const WRAPPERS_JS_FOR_TESTS: &str = WRAPPERS_JS;
+
 const WRAPPERS_JS: &str = r#"
 (function (g) {
     var N = {
@@ -2649,9 +2653,7 @@ const WRAPPERS_JS: &str = r#"
         try {
             return typeof cb === 'function' ? cb.call(t, event) : cb.handleEvent(event);
         } catch (e) {
-            var msg;
-            try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
-            if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
+            try { __rk.reportError(e); } catch (_) {}
         }
     }
     // An element's on<type> handler: the property when one was assigned
@@ -2676,9 +2678,7 @@ const WRAPPERS_JS: &str = r#"
                 c.fn = new Function('event',
                     'with (this.ownerDocument || {}) { with (this) {\n' + src + '\n} }');
             } catch (e) {
-                var msg;
-                try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
-                if (g.__rustkit_errors) g.__rustkit_errors.push(msg);
+                try { __rk.reportError(e); } catch (_) {}
             }
         }
         return c.fn;
@@ -2822,6 +2822,7 @@ const WRAPPERS_JS: &str = r#"
         type = String(type);
         if (type === 'text/xml' || type === 'application/xml' ||
             type === 'application/xhtml+xml' || type === 'image/svg+xml') {
+            __rk.unsupported('DOMParser', 'parseFromString(XML)');
             throw new DOMException("Failed to execute 'parseFromString' on 'DOMParser': " +
                 "XML documents are not supported yet.", 'NotSupportedError');
         }

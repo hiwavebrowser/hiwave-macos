@@ -51,11 +51,11 @@ impl DomBindings {
     pub fn enable_net_bridge(&self) -> Result<(), BindingError> {
         self.runtime
             .borrow_mut()
-            .evaluate_script(include_str!("web_net_bridge.js"))?;
+            .evaluate_with_host(include_str!("web_net_bridge.js"))?;
         // The surfaces built on the bridge exist only where the bridge does.
         self.runtime
             .borrow_mut()
-            .evaluate_script(include_str!("web_xhr.js"))?;
+            .evaluate_with_host(include_str!("web_xhr.js"))?;
         self.runtime
             .borrow_mut()
             .evaluate_script(include_str!("web_fetch.js"))?;

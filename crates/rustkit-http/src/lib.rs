@@ -36,6 +36,12 @@ pub enum HttpError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
 
+    /// The host name did not resolve (or resolved to no address). The same
+    /// text as [`ConnectionFailed`](Self::ConnectionFailed); its own variant
+    /// so a caller tells the two apart without reading the text.
+    #[error("Connection failed: {0}")]
+    LookupFailed(String),
+
     #[error("TLS error: {0}")]
     TlsError(String),
 
@@ -74,6 +80,12 @@ pub struct Response {
     pub body: Bytes,
     /// Final URL (after redirects).
     pub url: Url,
+    /// Body bytes as they came over the wire, before any
+    /// `Content-Encoding` was undone (`body.len()` after).
+    pub encoded_body_size: u64,
+    /// The redirects followed to get here, in order: each URL that answered
+    /// with a redirect, and its status.
+    pub redirect_chain: Vec<(Url, StatusCode)>,
 }
 
 impl Response {
@@ -452,8 +464,11 @@ impl Client {
                     .join(location)
                     .map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
                 debug!(from = %url, to = %redirect_url, "Following redirect");
-                return Box::pin(self.request_url(Method::GET, redirect_url, HeaderMap::new(), None, redirect_count + 1))
-                    .await;
+                let mut followed =
+                    Box::pin(self.request_url(Method::GET, redirect_url, HeaderMap::new(), None, redirect_count + 1))
+                        .await?;
+                followed.redirect_chain.insert(0, (url, response.status));
+                return Ok(followed);
             }
         }
 
@@ -463,6 +478,8 @@ impl Client {
             headers: response.headers,
             body: response.body,
             url,
+            encoded_body_size: response.encoded_len,
+            redirect_chain: Vec::new(),
         })
     }
 
@@ -571,6 +588,7 @@ impl Client {
             let _ = recv.flow_control().release_capacity(chunk.len());
         }
 
+        let encoded_len = collected.len() as u64;
         let body = decode_content_encoding_capped(Bytes::from(collected), &mut response_headers, self.max_body)?;
 
         Ok(RawResponse {
@@ -578,6 +596,7 @@ impl Client {
             version: Version::HTTP_2,
             headers: response_headers,
             body,
+            encoded_len,
         })
     }
 
@@ -742,6 +761,7 @@ image/avif,image/webp,*/*;q=0.8",
 
         // Read body
         let body = read_body(&mut reader, &response_headers, self.max_body).await?;
+        let encoded_len = body.len() as u64;
         let body = decode_content_encoding_capped(body, &mut response_headers, self.max_body)?;
 
         trace!(status = %status, body_len = body.len(), "Response received");
@@ -751,6 +771,7 @@ image/avif,image/webp,*/*;q=0.8",
             version,
             headers: response_headers,
             body,
+            encoded_len,
         })
     }
 }
@@ -767,6 +788,8 @@ struct RawResponse {
     version: Version,
     headers: HeaderMap,
     body: Bytes,
+    /// Body length before `Content-Encoding` was undone.
+    encoded_len: u64,
 }
 
 impl RawResponse {
@@ -1426,6 +1449,8 @@ mod tests {
             headers,
             body: Bytes::from("Hello"),
             url: Url::parse("https://example.com").unwrap(),
+            encoded_body_size: 5,
+            redirect_chain: Vec::new(),
         };
 
         assert!(response.is_success());
@@ -1467,7 +1492,7 @@ mod tests {
         ));
     }
 
-    fn gzip(data: &[u8]) -> Vec<u8> {
+    pub(super) fn gzip(data: &[u8]) -> Vec<u8> {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::Write::write_all(&mut enc, data).unwrap();
         enc.finish().unwrap()
@@ -1780,6 +1805,42 @@ mod governed_tests {
         assert_eq!(r.status.as_u16(), 302);
         assert_eq!(r.header("location"), Some(&format!("http://127.0.0.1:{target_port}/x")[..]));
         assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_followed_redirect_chain_and_the_encoded_size_are_kept() {
+        let body = super::tests::gzip(b"<p>the real page</p>");
+        let mut reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        reply.extend_from_slice(&body);
+        let (target_port, _) = serve(reply).await;
+        let hop = format!(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1:{target_port}/end\r\nContent-Length: 0\r\n\r\n"
+        );
+        let (hop_port, _) = serve(hop.into_bytes()).await;
+        let first = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{hop_port}/hop\r\nContent-Length: 0\r\n\r\n"
+        );
+        let (port, _) = serve(first.into_bytes()).await;
+        let r = client().get(&format!("http://127.0.0.1:{port}/start")).await.unwrap();
+        assert_eq!(r.text().unwrap(), "<p>the real page</p>");
+        assert_eq!(r.encoded_body_size, body.len() as u64);
+        let chain: Vec<(String, u16)> = r
+            .redirect_chain
+            .iter()
+            .map(|(url, status)| (url.to_string(), status.as_u16()))
+            .collect();
+        assert_eq!(
+            chain,
+            vec![
+                (format!("http://127.0.0.1:{port}/start"), 302),
+                (format!("http://127.0.0.1:{hop_port}/hop"), 301),
+            ]
+        );
+        assert_eq!(r.url.as_str(), format!("http://127.0.0.1:{target_port}/end"));
     }
 
     #[tokio::test]
