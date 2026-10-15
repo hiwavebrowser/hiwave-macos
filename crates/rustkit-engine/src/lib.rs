@@ -281,6 +281,8 @@ use std::borrow::Cow;
 use std::cell::Cell;
 mod relayout_cause;
 mod presenter;
+#[cfg(test)]
+mod send_bounds_tests;
 mod diagnostics;
 pub use diagnostics::{
     DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
