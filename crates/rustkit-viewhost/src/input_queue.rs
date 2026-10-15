@@ -293,6 +293,50 @@ mod tests {
     }
 
     #[test]
+    fn a_wheel_burst_interleaved_with_moves_is_one_wheel_and_one_move() {
+        // A wheel turned while the pointer drifts: `W M W M W M`. The page
+        // must hear one scroll (the sum) and one hover (the last point).
+        let view = ViewId::new();
+        let mut q = InputQueue::default();
+        for step in 1..=3 {
+            q.push(view, wheel(-10.0));
+            q.push(view, mv(step as f64));
+        }
+        let out = q.drain();
+        assert_eq!(kinds(&out), ["wheel", "pointer"], "one wheel, one move");
+        match out[0].kind {
+            InputKind::Wheel(w) => assert_eq!(w.dy, -30.0, "the burst was summed across the moves"),
+            _ => unreachable!(),
+        }
+        match out[1].kind {
+            InputKind::Pointer(p) => assert_eq!(p.x, 3.0, "the last move wins"),
+            _ => unreachable!(),
+        }
+        assert!(out[0].seq < out[1].seq, "the wheel keeps its earlier place");
+    }
+
+    #[test]
+    fn a_click_or_another_view_ends_the_coalescing_of_moves_and_wheels() {
+        let view = ViewId::new();
+        let other = ViewId::new();
+        let mut q = InputQueue::default();
+        q.push(view, wheel(-10.0));
+        q.push(view, mv(1.0));
+        q.push(view, click(true));
+        q.push(view, wheel(-5.0));
+        assert_eq!(kinds(&q.drain()), ["wheel", "pointer", "pointer", "wheel"], "a press keeps the sides apart");
+        q.push(view, wheel(-10.0));
+        q.push(other, mv(1.0));
+        q.push(view, wheel(-5.0));
+        let out = q.drain();
+        assert_eq!(kinds(&out), ["wheel", "pointer", "wheel"], "another view's move keeps the sides apart");
+        q.push(view, mv(1.0));
+        q.push(view, InputKind::Pointer(PendingClick { x: 0.0, y: 0.0, down: false, input: PointerInput::Leave }));
+        q.push(view, mv(2.0));
+        assert_eq!(q.drain().len(), 3, "the pointer leaving keeps the sides apart");
+    }
+
+    #[test]
     fn a_wheel_queued_for_a_gone_view_is_dropped() {
         let gone = ViewId::new();
         let live = ViewId::new();
