@@ -84,8 +84,8 @@ between two calls. The interrupt stays uncatchable.
 checked by nothing new; the reserve is all it has. Known cases: the parser on
 deeply nested source, `JSON.stringify` of a deeply nested array, a Proxy whose
 target is another Proxy forwarding with no trap (`[[Get]]` and friends recurse
-natively down the chain), `[[Get]]` up a very long prototype chain of proxies or
-exotic objects, and `Array.prototype.flat` with a large depth on deeply nested
+natively down the chain), `[[Get]]` up a very long prototype chain (of any
+objects, plain ones included), and `Array.prototype.flat` with a large depth on deeply nested
 arrays.
 
 **Tests.** `crates/rustkit-js/tests/recursion_limits.rs`: the deepest call that
