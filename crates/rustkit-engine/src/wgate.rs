@@ -23,7 +23,9 @@
 //!    ```
 //!
 //!    `other_ms` is what no stage claims: script, timers, network
-//!    settling, the hit test. A nested entry (a relayout inside a click)
+//!    settling, the hit test. The presenter's three stages run inside
+//!    `render` and are its breakdown, so `other` is the hold less the
+//!    five relayout stages. A nested entry (a relayout inside a click)
 //!    is counted by the outer one and reports nothing itself.
 //!
 //! 2. **Input to present.** The app notes each input event's arrival
@@ -75,6 +77,8 @@ pub(crate) enum HoldStage {
 }
 
 const STAGES: usize = 8;
+/// The first five of [`HoldStage`]: the ones that add up to a hold.
+const RELAYOUT_STAGES: usize = 5;
 
 /// Milliseconds a hold spent in each stage.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -87,8 +91,11 @@ impl HoldMs {
         self.ms[stage as usize] += ms;
     }
 
+    /// What the stages claim: the five relayout stages only. The
+    /// presenter's three run inside `render` (`Stage::Render` times all
+    /// of `Engine::render`), so they are its breakdown, not more time.
     fn staged(&self) -> f64 {
-        self.ms.iter().sum()
+        self.ms[..RELAYOUT_STAGES].iter().sum()
     }
 
     /// What no stage claims, of a hold that took `total_ms`.

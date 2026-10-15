@@ -73,8 +73,9 @@ pub enum InputKind {
 }
 
 /// An input as the app drains it: `seq` is its place in arrival order
-/// across every kind and every view, `at` when the view recorded it, and
-/// `view` the content view it was delivered to.
+/// across every kind and every view, `at` when the view recorded it (for
+/// a coalesced burst, its first event), and `view` the content view it
+/// was delivered to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputEvent {
     pub seq: u64,
@@ -117,7 +118,9 @@ impl InputQueue {
                 }
                 _ => unreachable!("coalesces_into pairs like with like"),
             }
-            queued.at = Instant::now();
+            // `at` stays the first event's: input-to-present is measured
+            // from when the user acted, not from the last tick of a burst
+            // queued while the window was held.
             return queued.seq;
         }
         let seq = self.next_seq;

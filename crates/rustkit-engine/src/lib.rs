@@ -14144,8 +14144,11 @@ impl SelectorMatcher {
 }
 
 impl Engine {
-    /// Render a view (public API for continuous rendering).
+    /// Render a view (public API for continuous rendering: the chrome's
+    /// render path and the capture tool). A W-gate entry like the
+    /// app's other draws (`render_views`).
     pub fn render_view(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let _hold = wgate::hold("render_view");
         self.render(id)
     }
 
@@ -14925,6 +14928,10 @@ impl Engine {
         id: EngineViewId,
         script: &str,
     ) -> Result<String, EngineError> {
+        // The app runs page code from the window thread here (the chrome's
+        // IPC path, a toolbar's `history.back()`): a W-gate entry, so a
+        // listener that spins without writing to the DOM is still seen.
+        let _hold = wgate::hold("script");
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         let bindings = view
