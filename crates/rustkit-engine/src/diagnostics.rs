@@ -1467,7 +1467,7 @@ impl Engine {
             .ok_or_else(|| EngineError::RenderError("No document available".into()))?;
         Ok(DiagnosticsSource {
             document,
-            layout: view.layout.as_ref(),
+            layout: view.layout.as_deref(),
             scroll: view.scroll_offset,
             viewport: page.viewport,
             checked: &view.checked_states,

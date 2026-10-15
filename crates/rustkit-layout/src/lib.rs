@@ -7614,7 +7614,7 @@ pub enum DisplayCommand {
     /// viewport. What follows, up to the matching `PopViewportFixed`, does
     /// not move when the page scrolls. The pair draws nothing and the list
     /// stays in document coordinates: whoever draws a scrolled page undoes
-    /// the scroll for this run (the engine's `scrolled_commands`). Runs do
+    /// the scroll for this run (`Renderer::set_scroll_offset`). Runs do
     /// not nest: a fixed box inside one is already held.
     PushViewportFixed,
     /// End of a `PushViewportFixed` run.
@@ -8353,10 +8353,10 @@ fn parse_length(value: &str) -> Option<f32> {
 #[derive(Debug, Clone)]
 pub struct DisplayList {
     /// In document coordinates, for a page that is not scrolled. Whatever
-    /// draws or reads a scrolled page goes through the engine's
-    /// `scrolled_commands`, which moves the list and holds the
-    /// `PushViewportFixed` runs still (they are no-ops to the renderer);
-    /// a point is tested with `LayoutBox::hit_test_scrolled`.
+    /// draws a scrolled page draws this same list with the renderer's
+    /// scroll offset set (`Renderer::set_scroll_offset`), which moves the
+    /// list and holds the `PushViewportFixed` runs still; a point is
+    /// tested with `LayoutBox::hit_test_scrolled`.
     pub commands: Vec<DisplayCommand>,
     /// Root element font size for rem unit calculations
     root_font_size: f32,

@@ -321,6 +321,11 @@ mod inspector_network_tests;
 mod relayout_cause_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod decode_pool_tests;
+mod nav_cancel;
+pub use nav_cancel::NavCanceller;
+use nav_cancel::{load_phase, LoadInProgress, NavWatch};
+#[cfg(all(test, feature = "headless"))]
+mod load_cancel_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -360,6 +365,8 @@ mod polygon_transform_tests;
 #[cfg(all(test, feature = "headless"))]
 mod fixed_under_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
+mod render_no_clone_tests;
+#[cfg(all(test, feature = "headless"))]
 mod hover_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
@@ -389,6 +396,8 @@ mod ws_beside_block_replaced_tests;
 mod shadow_tree_tests;
 #[cfg(all(test, feature = "headless"))]
 mod box_sizing_inherit_tests;
+#[cfg(all(test, feature = "headless"))]
+mod lazy_geometry_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 pub use rustkit_renderer::RenderStats;
@@ -747,7 +756,7 @@ struct ViewState {
     http_status: Option<u16>,
     document: Option<Rc<Document>>,
     #[allow(dead_code)]
-    layout: Option<LayoutBox>,
+    layout: Option<Rc<LayoutBox>>,
     /// Where `layout` has its `position: fixed` boxes that the scroll
     /// leaves in place (`LayoutBox::held_fixed_paths`), read when the
     /// layout is stored. With none, a hit test is the pruned walk of the
@@ -770,29 +779,26 @@ struct ViewState {
     /// Lives as long as the view; each new document's bindings get it.
     control: Arc<rustkit_js::ViewControl>,
     navigation: NavigationStateMachine,
-    /// Monotonic navigation generation, bumped by `Engine::stop` and by each
-    /// new `load_url`.
+    /// This view's newest navigation (threads plan M3b): one more for each
+    /// `load_url` or `load_html`, never for Stop. A load captures it before
+    /// its first await and re-checks it, and the view's cancel watermark
+    /// (`ViewControl::cancel_nav`), at every await and between its scripts
+    /// and subresource phases. A newer navigation, `Engine::stop` or a
+    /// [`NavCanceller`] on another thread makes the load stale, and a stale
+    /// load abandons without touching view state.
     ///
-    /// This is how STOP works, and the shape is deliberate. `load_url` is an
-    /// `async fn` that awaits the network; there is no way to reach inside a
-    /// future that is already suspended. So instead of trying to kill the
-    /// task, the load CAPTURES this counter before it awaits and re-checks it
-    /// after every await point. A `stop` (or a newer navigation) bumps the
-    /// counter, the in-flight load notices it is stale at the next boundary,
-    /// and abandons without touching view state.
-    ///
-    /// The alternative — an `AbortHandle` per load — needs the load to own a
-    /// spawned task, which it does not: `load_url` borrows `&mut self`. A
-    /// generation counter needs no task ownership and cannot leave a
-    /// half-applied navigation behind, because every mutation is gated on it.
-    ///
-    /// NOTE: this stops the ENGINE applying the result. It does not abort the
-    /// socket — `rustkit-net`'s `fetch` has no cancellation surface today, so
-    /// the request still completes in the background and its bytes are
-    /// discarded. Stated rather than implied: this is stop-as-observed, not
-    /// stop-as-transport. Closing that needs a cancel token threaded into the
-    /// loader and is a separate unit.
-    nav_generation: u64,
+    /// Fetches still out when a load is cancelled are dropped with the
+    /// load's future; their responses never reach the engine.
+    nav_id: u64,
+    /// Wakes a load waiting on the network when its navigation is
+    /// cancelled from another thread ([`NavCanceller`]).
+    nav_signal: Arc<tokio::sync::Notify>,
+    /// The decode pool's key (D1): a decode that comes back with an older
+    /// one is dropped. Bridged to `nav_id`, not replaced by it: it moves on
+    /// with every new `nav_id` and also on every Stop and observed cancel,
+    /// so Stop on a loaded page still drops the decodes it has out while
+    /// later images on the same document (and `nav_id`) decode normally.
+    decode_epoch: u64,
     #[allow(dead_code)]
     nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
     /// Currently focused DOM node.
@@ -1980,7 +1986,9 @@ impl Engine {
             frames_presented: 0,
             bindings: None,
             navigation,
-            nav_generation: 0,
+            nav_id: 0,
+            nav_signal: Arc::new(tokio::sync::Notify::new()),
+            decode_epoch: 0,
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
@@ -2065,7 +2073,9 @@ impl Engine {
             frames_presented: 0,
             bindings: None,
             navigation,
-            nav_generation: 0,
+            nav_id: 0,
+            nav_signal: Arc::new(tokio::sync::Notify::new()),
+            decode_epoch: 0,
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
@@ -2149,7 +2159,9 @@ impl Engine {
             frames_presented: 0,
             bindings: None,
             navigation,
-            nav_generation: 0,
+            nav_id: 0,
+            nav_signal: Arc::new(tokio::sync::Notify::new()),
+            decode_epoch: 0,
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
@@ -2844,7 +2856,7 @@ impl Engine {
 
     /// The box under VIEWPORT coordinates in the page as the window shows
     /// it: scrolled, with its `position: fixed` boxes where they are drawn
-    /// (`scrolled_commands`). Every pointer path asks here, so what is
+    /// (`Renderer::set_scroll_offset`). Every pointer path asks here, so what is
     /// clicked is what is seen.
     fn hit_at(view: &ViewState, viewport_x: f32, viewport_y: f32) -> Option<rustkit_layout::HitTestResult> {
         let layout = view.layout.as_ref()?;
@@ -4249,6 +4261,7 @@ impl Engine {
         fetched: Vec<FetchedScript>,
         budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
+        watch: Option<&NavWatch>,
     ) {
         // The page's scripts run on the view's bindings and log, taken out of
         // the view for the run so that the engine can lay the page out again
@@ -4270,7 +4283,8 @@ impl Engine {
             // call in it.
             begin_script_turn(&bindings, budget);
         }
-        self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log).await;
+        self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log, watch)
+            .await;
         if self.config.interrupt_scripts_at_budget {
             end_script_turn(&bindings);
         }
@@ -4290,6 +4304,7 @@ impl Engine {
         policy: Option<Arc<FetchPolicy>>,
         bindings: &DomBindings,
         log: &mut Vec<ScriptRecord>,
+        watch: Option<&NavWatch>,
     ) {
         let started = std::time::Instant::now();
         let horizon_ms = self.config.timer_horizon_ms;
@@ -4402,7 +4417,16 @@ impl Engine {
         // What listeners reported while a script ran, for the script log at
         // the next lifecycle step.
         let mut carried: Vec<String> = Vec::new();
-        for (label, _, source, node_id, is_module) in runnable {
+        for (index, (label, _, source, node_id, is_module)) in runnable.into_iter().enumerate() {
+            // Between two scripts: a cancelled load runs none of the rest.
+            #[cfg(test)]
+            load_phase(&format!("script:{index}"));
+            #[cfg(not(test))]
+            let _ = index;
+            if nav_cancel::cancelled(watch) {
+                debug!(source = %label, "Navigation cancelled: the rest of its scripts do not run");
+                return;
+            }
             let text = match source {
                 Ok(text) => text,
                 Err(outcome) => {
@@ -4472,16 +4496,20 @@ impl Engine {
                         if let (Some(policy), Some(document)) = (&policy, &document_url) {
                             let remaining = budget.saturating_sub(started.elapsed());
                             let mut count = modules_fetched.get();
-                            let found = script_net::pump_modules(
-                                bindings,
-                                policy,
-                                &loader,
-                                tokio::time::Instant::now() + remaining,
-                                document,
-                                &mut count,
-                                &inspector,
+                            let found = nav_cancel::unless_cancelled(
+                                watch,
+                                script_net::pump_modules(
+                                    bindings,
+                                    policy,
+                                    &loader,
+                                    tokio::time::Instant::now() + remaining,
+                                    document,
+                                    &mut count,
+                                    &inspector,
+                                ),
                             )
                             .await;
+                            let Some(found) = found else { return };
                             modules_fetched.set(count);
                             if found.poisoned {
                                 poisoned.set(true);
@@ -4574,7 +4602,7 @@ impl Engine {
             // keeps it for the next lifecycle step (`carried`).
             inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &source);
         }
-        if poisoned.get() {
+        if poisoned.get() || nav_cancel::cancelled(watch) {
             return;
         }
 
@@ -4598,26 +4626,32 @@ impl Engine {
                         let mut count = modules_fetched.get();
                         // Network requests and dynamic imports alternate:
                         // one can start the other.
-                        let found = script_net::pump_all(
-                            bindings,
-                            &policy,
-                            &loader,
-                            tokio::time::Instant::now() + remaining,
-                            net_rounds,
-                            timers,
-                            document.as_ref(),
-                            &mut count,
-                            inspector,
+                        let found = nav_cancel::unless_cancelled(
+                            watch,
+                            script_net::pump_all(
+                                bindings,
+                                &policy,
+                                &loader,
+                                tokio::time::Instant::now() + remaining,
+                                net_rounds,
+                                timers,
+                                document.as_ref(),
+                                &mut count,
+                                inspector,
+                            ),
                         )
                         .await;
                         modules_fetched.set(count);
-                        Some(found)
+                        found
                     }
                     None => None,
                 }
             }
         };
         let after_scripts = pump(None).await;
+        if nav_cancel::cancelled(watch) {
+            return;
+        }
         if let Some(found) = after_scripts {
             if found.poisoned {
                 let record = ScriptRecord {
@@ -4667,6 +4701,9 @@ impl Engine {
             }),
         ];
         for (source, step) in steps {
+            if nav_cancel::cancelled(watch) {
+                return;
+            }
             // What the scripts (or the previous step) wrote is laid out
             // before the next step runs, so its script reads fresh geometry.
             self.refresh_layout_for_script(id, bindings);
@@ -4771,15 +4808,32 @@ impl Engine {
             .start_navigation(request)
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
 
-        // STOP support: take this load's generation BEFORE the first await.
-        // Anything that bumps the view's generation while we are suspended
-        // (Engine::stop, or a newer load) makes this load stale, and a
-        // stale load must not touch view state.
-        let generation = {
-            view.nav_generation = view.nav_generation.wrapping_add(1);
-            view.nav_generation
+        // This load's navigation, taken BEFORE the first await. A newer
+        // load, Stop, or a cancel from another thread makes it stale, and
+        // a stale load must not touch view state (M3b).
+        let watch = self.begin_nav(id)?;
+        let _in_progress = LoadInProgress {
+            control: watch.canceller.control().clone(),
+            nav_id: watch.nav_id,
         };
-        self.image_manager.begin_navigation(id.0, generation);
+        // Boxed: the load's state is large, and the debug build's stack
+        // is not.
+        let result = Box::pin(self.load_url_for_nav(id, url, &watch)).await;
+        if self.nav_superseded(id, watch.nav_id) {
+            self.load_cancelled(id, watch.nav_id);
+        }
+        result
+    }
+
+    /// The rest of [`Engine::load_url_with_disposition`], for navigation
+    /// `watch.nav_id`.
+    async fn load_url_for_nav(
+        &mut self,
+        id: EngineViewId,
+        url: Url,
+        watch: &NavWatch,
+    ) -> Result<(), EngineError> {
+        let generation = watch.nav_id;
 
         // Emit event
         let _ = self.event_tx.send(EngineEvent::NavigationStarted {
@@ -4789,11 +4843,16 @@ impl Engine {
 
         // Fetch the URL
         let request = Request::get(url.clone()).destination(RequestDestination::Document);
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let guard = view
             .inspector
             .begin_request(&url, "GET", ResourceType::Document, Some("navigation"))
             .map(|g| g.dropped_as(FailureStage::Cancelled, "navigation superseded"));
-        let response = match self.loader.fetch(request).await {
+        let Some(fetched) = watch.unless_cancelled(self.loader.fetch(request)).await else {
+            debug!(?id, %url, "Navigation cancelled during the document fetch");
+            return Ok(());
+        };
+        let response = match fetched {
             Ok(response) => response,
             Err(e) => {
                 inspector::fail_net(guard, &e);
@@ -4839,7 +4898,10 @@ impl Engine {
         let mut error_page = None;
         if !status.is_success() {
             let body = match response.take() {
-                Some(response) => response.text().await.unwrap_or_default(),
+                Some(response) => match watch.unless_cancelled(response.text()).await {
+                    Some(text) => text.unwrap_or_default(),
+                    None => return Ok(()),
+                },
                 None => String::new(),
             };
             if let Some(received) = received.take() {
@@ -4895,14 +4957,18 @@ impl Engine {
         // Parse HTML
         let html = match (error_page, response) {
             (Some(body), _) => body,
-            (None, Some(response)) => match response.text().await {
-                Ok(text) => {
+            (None, Some(response)) => match watch.unless_cancelled(response.text()).await {
+                None => {
+                    debug!(?id, %url, "Navigation cancelled while its body was read");
+                    return Ok(());
+                }
+                Some(Ok(text)) => {
                     if let Some(received) = received.take() {
                         received.read(text.len());
                     }
                     text
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     if let Some(received) = received.take() {
                         received.fail(FailureStage::Decode, "body is not UTF-8");
                     }
@@ -4920,6 +4986,13 @@ impl Engine {
         let document =
             Document::parse_html(&html).map_err(|e| EngineError::RenderError(e.to_string()))?;
         let document = Rc::new(document);
+        load_phase("parse");
+        // A cancel that arrived during the parse: the parsed document never
+        // replaces the one the view shows.
+        if self.nav_superseded(id, generation) {
+            debug!(?id, %url, "Navigation abandoned after the parse");
+            return Ok(());
+        }
 
         // Get title
         let title = document.title();
@@ -4936,6 +5009,14 @@ impl Engine {
         view.header_referrer_policy = header_referrer_policy;
         view.http_status = Some(status.as_u16());
         view.reset_for_new_document();
+        // The commit: the interrupt word is this document's from here, and
+        // a cancel now stops its script (M3b). Until this, a cancel ends
+        // the load at its next await and leaves the shown page's script.
+        view.control.commit_nav(generation);
+        // Not laid out yet. Set to whether the first layout waits for the
+        // sheets below; a cancel that comes first lays it out
+        // (`load_cancelled`), or the frame keeps the previous page's.
+        view.initial_layout_deferred = true;
         view.inspector.emit_with(|inspector| InspectorEvent::NavigationCommit {
             url: Some(inspector.url(&url)),
             status: Some(status.as_u16()),
@@ -4993,9 +5074,7 @@ impl Engine {
                 .views
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
-            // A new document: a "no more script" stop on the view ends
-            // with the document it was for.
-            view.control.clear_all();
+            // The word was handed to this document at the commit above.
             bindings.set_view_control(Some(view.control.clone()));
             view.bindings = Some(bindings);
             view.script_policy = script_policy.clone();
@@ -5053,7 +5132,7 @@ impl Engine {
             None
         };
         let subresources = async {
-            let result = self.load_subresources(id).await;
+            let result = self.load_subresources_for(id, Some(watch)).await;
             (result, std::time::Instant::now())
         };
         let scripts = async move {
@@ -5062,7 +5141,14 @@ impl Engine {
                 None => None,
             }
         };
-        let ((subresources, subresources_done), scripts) = futures::join!(subresources, scripts);
+        // A cancel drops every fetch still out, the page's scripts too.
+        let Some(((subresources, subresources_done), scripts)) = watch
+            .unless_cancelled(Box::pin(async { futures::join!(subresources, scripts) }))
+            .await
+        else {
+            debug!(?id, %url, "Navigation cancelled during its subresources");
+            return Ok(());
+        };
         drop(style_memo);
         // This will trigger additional relayouts as resources arrive
         if let Err(e) = subresources {
@@ -5108,7 +5194,8 @@ impl Engine {
                 std::time::Duration::from_millis(self.config.script_budget_ms)
                     .saturating_sub(fetch_done.saturating_duration_since(subresources_done))
             };
-            self.run_page_scripts(id, fetched, budget, script_policy).await;
+            self.run_page_scripts(id, fetched, budget, script_policy, Some(watch))
+                .await;
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
@@ -5148,7 +5235,13 @@ impl Engine {
             }
             let added = match leaving {
                 true => Ok(0),
-                false => self.load_images_added_by_scripts(id).await,
+                false => match watch
+                    .unless_cancelled(self.load_images_added_by_scripts(id))
+                    .await
+                {
+                    Some(added) => added,
+                    None => return Ok(()),
+                },
             };
             match added {
                 Ok(0) => {}
@@ -5164,6 +5257,13 @@ impl Engine {
                 debug!(?id, %url, "Navigation abandoned after script-added images");
                 return Ok(());
             }
+        }
+
+        // The load is over. A cancel that came before this is reported by
+        // it; one that comes after finds no load and changes nothing.
+        if !watch.canceller.control().end_load(generation) {
+            debug!(?id, %url, "Navigation cancelled as it finished");
+            return Ok(());
         }
 
         // Finish navigation
@@ -5207,6 +5307,13 @@ impl Engine {
     /// without making an HTTP request.
     pub fn load_html(&mut self, id: EngineViewId, html: &str) -> Result<(), EngineError> {
         let _hold = wgate::hold("load_html");
+        // A navigation of its own (M3b). Nothing in it awaits, so the only
+        // cancel that can reach it is the interrupt word stopping a script.
+        let watch = self.begin_nav(id)?;
+        let _in_progress = LoadInProgress {
+            control: watch.canceller.control().clone(),
+            nav_id: watch.nav_id,
+        };
         let view = self
             .views
             .get_mut(&id)
@@ -5263,6 +5370,8 @@ impl Engine {
         view.header_referrer_policy = None;
         view.http_status = None;
         view.reset_for_new_document();
+        // The commit: the interrupt word is this document's from here (M3b).
+        view.control.commit_nav(watch.nav_id);
         view.inspector.emit(InspectorEvent::NavigationCommit { url: None, status: None });
         let inspector = view.inspector.clone();
 
@@ -5302,9 +5411,7 @@ impl Engine {
                 .views
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
-            // A new document: a "no more script" stop on the view ends
-            // with the document it was for.
-            view.control.clear_all();
+            // The word was handed to this document at the commit above.
             bindings.set_view_control(Some(view.control.clone()));
             view.bindings = Some(bindings);
         }
@@ -5619,7 +5726,7 @@ impl Engine {
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
         view.held_fixed = Some(root_box.held_fixed_paths());
-        view.layout = Some(root_box);
+        view.layout = Some(Rc::new(root_box));
         view.laid_with = Some(LaidWith {
             hover: view.hover_chain.clone(),
             active: view.active_chain.clone(),
@@ -5627,12 +5734,10 @@ impl Engine {
             size: (bounds.width, bounds.height),
         });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
-        // answer from this layout.
+        // answer from this layout, measured on the first read.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let _snapshot_time = time_stage(Stage::Snapshot);
-            let (geometry, computed) = geometry_snapshot(layout);
-            bindings.set_geometry(geometry);
-            bindings.set_computed_styles(computed);
+            publish_geometry(bindings, layout);
         }
         view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
@@ -5899,7 +6004,7 @@ impl Engine {
             return miss("layout moved boxes");
         }
         for root in &roots {
-            if let Some(laid) = box_of_node_mut(&mut laid, *root) {
+            if let Some(laid) = box_of_node_mut(Rc::make_mut(&mut laid), *root) {
                 copy_changed_paint(laid, &was[root], &is[root]);
             }
         }
@@ -5914,9 +6019,7 @@ impl Engine {
         // Script reads of computed style answer from the restyled boxes.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let _snapshot_time = time_stage(Stage::Snapshot);
-            let (geometry, computed) = geometry_snapshot(layout);
-            bindings.set_geometry(geometry);
-            bindings.set_computed_styles(computed);
+            publish_geometry(bindings, layout);
         }
         view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
@@ -10933,8 +11036,9 @@ impl Engine {
     /// Stop the in-flight navigation for a view.
     ///
     /// Returns `true` if the view exists. Safe and idempotent when nothing is
-    /// loading — stopping an idle view simply bumps the generation, which no
-    /// in-flight load is holding.
+    /// loading: stopping an idle view cancels nothing and only drops the
+    /// image decodes it has out. A load in progress is cancelled through
+    /// the view's [`NavCanceller`], as the window thread does from M4.
     ///
     /// WHAT THIS DOES AND DOES NOT DO, because the distinction is the whole
     /// honesty of the feature:
@@ -10952,8 +11056,16 @@ impl Engine {
     pub fn stop(&mut self, id: EngineViewId) -> bool {
         match self.views.get_mut(&id) {
             Some(view) => {
-                view.nav_generation = view.nav_generation.wrapping_add(1);
-                self.image_manager.begin_navigation(id.0, view.nav_generation);
+                // A load in progress is cancelled: its running script is
+                // interrupted and none of its later scripts or subresources
+                // reach the document (M3b).
+                if view.control.loading_nav() != 0 {
+                    NavCanceller::new(view.control.clone(), view.nav_signal.clone())
+                        .cancel_nav(view.nav_id);
+                }
+                // Decodes out for this document are dropped either way (D1).
+                view.decode_epoch = view.decode_epoch.wrapping_add(1);
+                self.image_manager.begin_navigation(id.0, view.decode_epoch);
                 // Only a load that was actually in flight has anything to
                 // report: the state machine must leave Provisional/Committed
                 // (or `is_loading` stays true until the next start), and UI
@@ -10975,7 +11087,10 @@ impl Engine {
                         error: "stopped".to_string(),
                     });
                 } else {
-                    trace!(?id, "Stop on an idle view: generation bumped, nothing to cancel");
+                    trace!(
+                        ?id,
+                        "Stop on an idle view: decodes dropped, nothing to cancel"
+                    );
                 }
                 true
             }
@@ -10983,24 +11098,119 @@ impl Engine {
         }
     }
 
-    /// Has this navigation been superseded by a `stop` or a newer load?
+    /// A handle that cancels this view's navigations from any thread
+    /// (threads plan M3b): the window thread's Stop and a new navigation
+    /// requested while the page thread is still loading the last one.
+    pub fn nav_canceller(&self, id: EngineViewId) -> Option<NavCanceller> {
+        let view = self.views.get(&id)?;
+        Some(NavCanceller::new(
+            view.control.clone(),
+            view.nav_signal.clone(),
+        ))
+    }
+
+    /// The view's newest navigation id; 0 before its first navigation.
+    pub fn nav_id(&self, id: EngineViewId) -> Option<u64> {
+        self.views.get(&id).map(|view| view.nav_id)
+    }
+
+    /// Cancel navigation `nav_id` of the view and every earlier one, as
+    /// [`NavCanceller::cancel_nav`] does from another thread. Whether a
+    /// load in progress was cancelled.
+    pub fn cancel_nav(&self, id: EngineViewId, nav_id: u64) -> bool {
+        self.nav_canceller(id)
+            .is_some_and(|canceller| canceller.cancel_nav(nav_id))
+    }
+
+    /// Start the view's next navigation: a new `nav_id`, which cancels a
+    /// load of an earlier one still marked in progress (its future was
+    /// dropped), and a new decode epoch.
+    fn begin_nav(&mut self, id: EngineViewId) -> Result<NavWatch, EngineError> {
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
+        let canceller = NavCanceller::new(view.control.clone(), view.nav_signal.clone());
+        canceller.cancel_nav(view.control.loading_nav());
+        view.nav_id = view.nav_id.wrapping_add(1);
+        view.control.begin_nav(view.nav_id);
+        view.decode_epoch = view.decode_epoch.wrapping_add(1);
+        self.image_manager.begin_navigation(id.0, view.decode_epoch);
+        Ok(NavWatch {
+            canceller,
+            nav_id: view.nav_id,
+        })
+    }
+
+    /// The page thread has seen that navigation `nav_id`'s load was
+    /// cancelled: no more of its script runs (the live loop included), its
+    /// decodes still out are dropped, and the navigation fails as
+    /// "cancelled" if Stop has not already failed it. Nothing for a load
+    /// superseded by a newer navigation, which owns the view now.
+    fn load_cancelled(&mut self, id: EngineViewId, nav_id: u64) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if view.nav_id != nav_id || !view.control.nav_cancelled(nav_id) {
+            return;
+        }
+        // Before the commit the word is the shown page's, whose script
+        // keeps running: the cancel is of the load, not of that page.
+        let committed = view.control.nav_committed(nav_id);
+        if committed {
+            view.control.stop_all();
+        }
+        // A cancel during a render-blocking sheet (or before the first
+        // layout) leaves the committed document never laid out: lay it out
+        // as it is, unstyled as Chrome shows a stopped one, so the frame and
+        // hit-testing are not the previous page's.
+        let unlaid = committed && std::mem::take(&mut view.initial_layout_deferred);
+        view.decode_epoch = view.decode_epoch.wrapping_add(1);
+        self.image_manager.begin_navigation(id.0, view.decode_epoch);
+        if view.navigation.is_loading() {
+            info!(?id, nav_id, "Navigation cancelled");
+            view.inspector
+                .emit_with(|inspector| InspectorEvent::LoadEndedEarly {
+                    url: view.url.as_ref().map(|u| inspector.url(u)),
+                    reason: EndReason::NavigatedAway,
+                    detail: "cancelled".into(),
+                });
+            let _ = view.navigation.fail_navigation("cancelled".to_string());
+            let _ = self.event_tx.send(EngineEvent::NavigationFailed {
+                view_id: id,
+                url: view
+                    .url
+                    .clone()
+                    .unwrap_or_else(|| Url::parse("about:blank").expect("about:blank parses")),
+                error: "cancelled".to_string(),
+            });
+        }
+        if unlaid {
+            if let Err(e) = self.relayout_for(id, RelayoutCause::InitialLoad) {
+                warn!(?e, "Failed to lay out a cancelled load's document");
+            }
+        }
+    }
+
+    /// Has this navigation been superseded by a newer one, or cancelled
+    /// (Stop, [`NavCanceller`])?
     ///
     /// A view that vanished mid-load counts as superseded — the alternative is
     /// writing into a view that no longer exists.
-    fn nav_superseded(&self, id: EngineViewId, generation: u64) -> bool {
+    fn nav_superseded(&self, id: EngineViewId, nav_id: u64) -> bool {
         match self.views.get(&id) {
-            Some(view) => view.nav_generation != generation,
+            Some(view) => view.nav_id != nav_id || view.control.nav_cancelled(nav_id),
             None => true,
         }
     }
 
-    /// The navigation an image decode started now belongs to. A decode that
-    /// comes back after the view's generation moved on (a newer load, Stop)
-    /// is dropped by the image manager.
+    /// The decode epoch an image decode started now belongs to. A decode
+    /// that comes back after the view's epoch moved on (a newer load, Stop,
+    /// a cancel) is dropped by the image manager.
     fn decode_nav(&self, id: EngineViewId) -> rustkit_image::DecodeNav {
         rustkit_image::DecodeNav {
             view: id.0,
-            nav_id: self.views.get(&id).map_or(0, |view| view.nav_generation),
+            nav_id: self.views.get(&id).map_or(0, |view| view.decode_epoch),
         }
     }
 
@@ -11061,17 +11271,14 @@ impl Engine {
         }
     }
 
-    /// Test hook: advance a view's navigation generation and return the new
-    /// value, exactly as `load_url` does before its first await.
+    /// Test hook: start a navigation and return its id, exactly as
+    /// `load_url` does before its first await; the load stays in progress.
     ///
     /// Exists so the stop CONTRACT can be tested without standing up a network
     /// fetch. Kept `cfg(test)` so it cannot become a production back door.
     #[cfg(test)]
     fn bump_nav_generation_for_test(&mut self, id: EngineViewId) -> u64 {
-        let view = self.views.get_mut(&id).expect("view exists");
-        view.nav_generation = view.nav_generation.wrapping_add(1);
-        self.image_manager.begin_navigation(id.0, view.nav_generation);
-        view.nav_generation
+        self.begin_nav(id).expect("view exists").nav_id
     }
 
     /// Whether a `<style>` or `<link>` found in the tree is one the page
@@ -11991,6 +12198,17 @@ impl Engine {
 
     /// Load all subresources (stylesheets, images) for a view.
     pub async fn load_subresources(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        self.load_subresources_for(id, None).await
+    }
+
+    /// [`Engine::load_subresources`] for a load that may be cancelled: each
+    /// phase (sheets, fonts, images) races its fetches against the cancel
+    /// and is checked before what it fetched is applied.
+    async fn load_subresources_for(
+        &mut self,
+        id: EngineViewId,
+        watch: Option<&NavWatch>,
+    ) -> Result<(), EngineError> {
         // Load external stylesheets.
         //
         // The assignment below is UNCONDITIONAL on purpose. It used to sit
@@ -12003,7 +12221,12 @@ impl Engine {
         // Found by Athena on hiwave-windows (her #54 -> #59) and reported
         // across the fleet; this tree is the one she ported the shape FROM,
         // so it had the defect first.
-        let external_stylesheets = self.load_external_stylesheets(id).await?;
+        let Some(external_stylesheets) =
+            nav_cancel::unless_cancelled(watch, self.load_external_stylesheets(id)).await
+        else {
+            return Ok(());
+        };
+        let external_stylesheets = external_stylesheets?;
         let count = external_stylesheets.len();
 
         // Relayout is needed when we HAVE new sheets, and equally when we
@@ -12018,7 +12241,10 @@ impl Engine {
         let mut deferred = false;
         if let Some(view) = self.views.get_mut(&id) {
             view.external_stylesheets = external_stylesheets;
-            deferred = std::mem::take(&mut view.initial_layout_deferred);
+            // Read, not taken: a cancel before the relayout below (which
+            // may drop this future at any await) finds it still set and
+            // lays the document out (`load_cancelled`).
+            deferred = view.initial_layout_deferred;
         }
 
         if count > 0 {
@@ -12029,7 +12255,13 @@ impl Engine {
 
         // Web fonts: faces declared in the external sheets that just arrived
         // (plus any inline data: faces not yet loaded), then the network ones.
-        let fonts_loaded = self.load_local_web_fonts(id) + self.load_remote_web_fonts(id).await;
+        let local_fonts = self.load_local_web_fonts(id);
+        let Some(remote_fonts) =
+            nav_cancel::unless_cancelled(watch, self.load_remote_web_fonts(id)).await
+        else {
+            return Ok(());
+        };
+        let fonts_loaded = local_fonts + remote_fonts;
         if fonts_loaded > 0 {
             info!(count = fonts_loaded, "Loaded web fonts");
         }
@@ -12044,6 +12276,9 @@ impl Engine {
         // A deferred first layout happens here even if every sheet failed.
         if count > 0 || had_previous || fonts_loaded > 0 || deferred {
             if deferred {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.initial_layout_deferred = false;
+                }
                 self.note_relayout_cause(id, RelayoutCause::InitialLoad);
             }
             if count > 0 || had_previous {
@@ -12056,8 +12291,15 @@ impl Engine {
         }
 
         // Load images
-        let image_count = self.load_images(id).await?;
-        if image_count > 0 {
+        if nav_cancel::cancelled(watch) {
+            return Ok(());
+        }
+        let Some(image_count) = nav_cancel::unless_cancelled(watch, self.load_images(id)).await
+        else {
+            return Ok(());
+        };
+        let image_count = image_count?;
+        if image_count > 0 && !nav_cancel::cancelled(watch) {
             info!(count = image_count, "Loaded images");
             // Trigger repaint for images
             self.relayout_for(id, RelayoutCause::ImageLoaded { count: image_count })?;
@@ -15087,9 +15329,7 @@ impl Engine {
         }
         if let Some(view) = self.views.get(&id) {
             if let Some(layout) = view.layout.as_ref() {
-                let (geometry, computed) = geometry_snapshot(layout);
-                bindings.set_geometry(geometry);
-                bindings.set_computed_styles(computed);
+                publish_geometry(bindings, layout);
             }
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
@@ -17770,11 +18010,14 @@ fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
     ]
 }
 
-/// The list the window draws for a page scrolled by `scroll_offset`: the
-/// page's own list, which stays in document coordinates, inside one
-/// translate. A `position: fixed` box does not move with the page, so its
-/// run (`PushViewportFixed` to `PopViewportFixed`) is drawn inside the
-/// opposite translate.
+/// The list the window drew for a page scrolled by `scroll_offset`, until
+/// the renderer took the scroll as an offset (threads plan P3): the page's
+/// own list, which stays in document coordinates, inside one translate. A
+/// `position: fixed` box does not move with the page, so its run
+/// (`PushViewportFixed` to `PopViewportFixed`) is drawn inside the opposite
+/// translate. Kept for tests, as the reference the offset must match pixel
+/// for pixel; nothing draws it.
+#[cfg(test)]
 pub(crate) fn scrolled_commands(
     commands: &[rustkit_layout::DisplayCommand],
     scroll_offset: (f32, f32),
@@ -17877,6 +18120,29 @@ fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
         walk(body, !(html_clips && clips(body)), &mut bottom);
     }
     bottom
+}
+
+/// Hand script the geometry of `layout` without measuring it: the snapshot
+/// is built on the first read (`DomBindings::set_geometry_source`). The
+/// source holds the layout weakly, so it never keeps an old tree alive or
+/// makes `Rc::make_mut` copy one; a layout replaced or patched in place
+/// is republished before script runs again.
+fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>) {
+    let layout = Rc::downgrade(layout);
+    bindings.set_geometry_source(Box::new(move || {
+        let Some(layout) = layout.upgrade() else {
+            return Default::default();
+        };
+        let _snapshot_time = time_stage(Stage::Snapshot);
+        let started = std::time::Instant::now();
+        let snapshot = geometry_snapshot(&layout);
+        debug!(
+            elements = snapshot.0.len(),
+            ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Geometry snapshot built on first read"
+        );
+        snapshot
+    }));
 }
 
 /// Where the layout put every element, by DOM node, for script geometry reads
@@ -23228,7 +23494,7 @@ mod link_click_tests {
 
         {
             let view = engine.views.get_mut(&id).expect("view");
-            view.layout = Some(root);
+            view.layout = Some(Rc::new(root));
             view.url = Some(Url::parse("https://example.com/page").unwrap());
             view.max_scroll_offset = (0.0, 1400.0);
         }
@@ -24100,7 +24366,7 @@ mod node_identity_tests {
         {
             let view = engine.views.get_mut(&id).expect("view");
             view.document = Some(doc);
-            view.layout = Some(layout);
+            view.layout = Some(Rc::new(layout));
         }
 
         assert_eq!(engine.focus_at_point(id, 10.0, 10.0).as_deref(), Some("input"));
@@ -26236,7 +26502,7 @@ mod form_typing_tests {
         let layout = engine.build_layout_for_view(id, &doc, &[]);
         let view = engine.views.get_mut(&id).expect("view");
         view.document = Some(doc);
-        view.layout = Some(layout);
+        view.layout = Some(Rc::new(layout));
         (engine, id)
     }
 
@@ -28668,10 +28934,10 @@ mod stop_navigation_tests {
     //! STOP: cancel an in-flight navigation.
     //!
     //! The load path is an `async fn` holding `&mut self`, so there is no task
-    //! to abort and no handle to cancel. Stop therefore works by GENERATION:
-    //! a load captures the view's counter before its first await and re-checks
-    //! it after every await; `stop` bumps the counter, and the stale load
-    //! abandons without touching view state.
+    //! to abort. A load captures its `nav_id` before its first await and
+    //! re-checks it, and the view's cancel watermark, after every await;
+    //! `stop` cancels it, and the stale load abandons without touching view
+    //! state (M3b; the cross-thread cases are in `load_cancel_tests`).
     //!
     //! These tests pin the CONTRACT, not the mechanism, so a future switch to
     //! a real cancel token does not have to rewrite them.

@@ -308,7 +308,7 @@ impl std::io::Write for Captured {
 }
 
 /// The `relayout cause=` lines logged while `run` ran on this thread.
-fn relayout_lines(run: impl FnOnce()) -> Vec<String> {
+pub(crate) fn relayout_lines(run: impl FnOnce()) -> Vec<String> {
     let captured = Captured::default();
     let writer = captured.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -325,7 +325,7 @@ fn relayout_lines(run: impl FnOnce()) -> Vec<String> {
 }
 
 /// The number after `name=` in a log line.
-fn field_ms(line: &str, name: &str) -> Option<f64> {
+pub(crate) fn field_ms(line: &str, name: &str) -> Option<f64> {
     let at = line.find(&format!(" {name}="))? + name.len() + 2;
     line[at..].split_whitespace().next()?.parse().ok()
 }

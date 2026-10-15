@@ -70,7 +70,7 @@ mod web_crypto;
 mod web_scroll;
 mod web_url;
 
-pub use dom::{BoxGeometry, SelectorMatchFn};
+pub use dom::{BoxGeometry, GeometrySource, SelectorMatchFn};
 pub mod events;
 
 pub use events::{
@@ -1264,7 +1264,25 @@ impl DomBindings {
     /// `clientWidth/Height` and `scrollWidth/Height`. The engine calls this
     /// after a layout; script reads answer from the last one published.
     pub fn set_geometry(&self, geometry: std::collections::HashMap<usize, BoxGeometry>) {
-        self.dom_host.borrow_mut().geometry = geometry;
+        let mut host = self.dom_host.borrow_mut();
+        host.geometry_source = None;
+        host.geometry = geometry;
+    }
+
+    /// Publish a new layout without measuring it: `source` builds the maps
+    /// `set_geometry` and `set_computed_styles` take, and runs on the first
+    /// script read of geometry or computed style after this call, once. The
+    /// maps of the previous layout are dropped here, so no read sees them.
+    pub fn set_geometry_source(&self, source: GeometrySource) {
+        let mut host = self.dom_host.borrow_mut();
+        host.geometry.clear();
+        host.computed.clear();
+        host.geometry_source = Some(source);
+    }
+
+    /// How many times a source from `set_geometry_source` was built.
+    pub fn geometry_builds(&self) -> u64 {
+        self.dom_host.borrow().geometry_builds
     }
 
     /// Publish the view's scroll offset and the furthest it can scroll, for
@@ -1302,7 +1320,9 @@ impl DomBindings {
     /// Publish the computed style of each laid-out element (raw NodeId to
     /// `name\tvalue` lines joined by newlines), for `getComputedStyle`.
     pub fn set_computed_styles(&self, styles: std::collections::HashMap<usize, String>) {
-        self.dom_host.borrow_mut().computed = styles;
+        let mut host = self.dom_host.borrow_mut();
+        host.geometry_source = None;
+        host.computed = styles;
     }
 
     /// Set the document.
