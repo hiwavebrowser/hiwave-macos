@@ -175,3 +175,40 @@ setTimeout(function () { var t0 = Date.now(); while (Date.now() - t0 < 400) {} w
         "Boolean(true)"
     );
 }
+
+/// A turn the watchdog stops reaches the Inspector the way T0's host-call
+/// refusal does: the listener's console line, the engine's stop note, and
+/// one `script_error` under the turn's source.
+#[test]
+fn a_stopped_listener_is_a_script_error_in_the_inspector() {
+    let page = "<html><body style=\"margin:0\"><p id=p style=\"margin:0;height:100px\">alive</p><script>
+document.getElementById('p').addEventListener('click', function () { console.log('spin'); while (true) {} });
+</script></body></html>";
+    let mut config = config();
+    config.inspector.keep_console_text = true;
+    config.inspector.keep_error_text = true;
+    let server =
+        crate::inspector_engine_tests::serve(vec![crate::inspector_engine_tests::Route::html(
+            "/", page,
+        )]);
+    let (mut engine, view) = crate::inspector_engine_tests::inspected_engine(config);
+    runtime()
+        .block_on(engine.load_url(view, server.url("/")))
+        .expect("load_url");
+    engine.click_at_point(view, 20.0, 20.0);
+    assert_eq!(over_budget(&engine, view), ["event:click"]);
+    let lines: Vec<String> = crate::inspector_engine_tests::records(&engine, view)
+        .iter()
+        .map(|record| crate::inspector_engine_tests::describe(record, server.port))
+        .filter(|line| line.starts_with("console") || line.starts_with("script_error"))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "console Log spin @inline#1:2:78",
+            "console Warn Script stopped: it ran past 300 ms (event:click)",
+            "script_error Error: the script was interrupted script=event:click rejection=false",
+        ],
+        "{lines:#?}"
+    );
+}
