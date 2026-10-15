@@ -94,39 +94,59 @@ pub struct InputQueue {
 impl InputQueue {
     /// Record `kind` for `view`. Returns the event's `seq`.
     ///
-    /// Coalescing is adjacent-only, within one view: a pointer move that
-    /// follows a pointer move replaces it (the page needs where the pointer
-    /// is, not every point it crossed since the last turn), and a wheel that
-    /// follows a wheel is summed into it (a trackpad flick is ~50 events a
-    /// second and the page needs where it ends up). Anything else in
-    /// between keeps both, so a click after a burst stays after it.
+    /// Coalescing, within one view: a pointer move replaces the queued
+    /// pointer move (the page needs where the pointer is, not every point
+    /// it crossed since the last turn), and a wheel is summed into the
+    /// queued wheel (a trackpad flick is ~50 events a second and the page
+    /// needs where it ends up). A move and a wheel commute: a wheel turned
+    /// while the pointer drifts queues as `W M W M`, and a drain must still
+    /// cost the page one hover and one scroll, not one of each per event
+    /// (#693 review). Anything else between them (a press, a release, the
+    /// pointer leaving, a key, another view's event) keeps both sides apart,
+    /// so a click after a burst stays after it.
     pub fn push(&mut self, view: ViewId, kind: InputKind) -> u64 {
-        if let Some(last) = self.events.last_mut() {
-            if last.view == view {
-                match (&mut last.kind, &kind) {
-                    (InputKind::Pointer(prev), InputKind::Pointer(next))
-                        if prev.input == PointerInput::Move && next.input == PointerInput::Move =>
-                    {
-                        *prev = *next;
-                        last.at = Instant::now();
-                        return last.seq;
-                    }
-                    (InputKind::Wheel(prev), InputKind::Wheel(next)) => {
-                        prev.dx += next.dx;
-                        prev.dy += next.dy;
-                        prev.x = next.x;
-                        prev.y = next.y;
-                        last.at = Instant::now();
-                        return last.seq;
-                    }
-                    _ => {}
+        if let Some(at) = self.coalesces_into(view, &kind) {
+            let queued = &mut self.events[at];
+            match (&mut queued.kind, &kind) {
+                (InputKind::Pointer(prev), InputKind::Pointer(next)) => *prev = *next,
+                (InputKind::Wheel(prev), InputKind::Wheel(next)) => {
+                    prev.dx += next.dx;
+                    prev.dy += next.dy;
+                    prev.x = next.x;
+                    prev.y = next.y;
                 }
+                _ => unreachable!("coalesces_into pairs like with like"),
             }
+            queued.at = Instant::now();
+            return queued.seq;
         }
         let seq = self.next_seq;
         self.next_seq += 1;
         self.events.push(InputEvent { seq, at: Instant::now(), view, kind });
         seq
+    }
+
+    /// Where `kind` merges, if anywhere: the nearest queued event of its own
+    /// kind for `view`, looking back past that view's moves and wheels only.
+    fn coalesces_into(&self, view: ViewId, kind: &InputKind) -> Option<usize> {
+        fn is_move(kind: &InputKind) -> bool {
+            matches!(kind, InputKind::Pointer(p) if p.input == PointerInput::Move)
+        }
+        fn is_wheel(kind: &InputKind) -> bool {
+            matches!(kind, InputKind::Wheel(_))
+        }
+        if !is_move(kind) && !is_wheel(kind) {
+            return None;
+        }
+        for (at, queued) in self.events.iter().enumerate().rev() {
+            if queued.view != view || !(is_move(&queued.kind) || is_wheel(&queued.kind)) {
+                return None;
+            }
+            if is_move(&queued.kind) == is_move(kind) {
+                return Some(at);
+            }
+        }
+        None
     }
 
     /// Take everything recorded so far, in arrival (`seq`) order across
