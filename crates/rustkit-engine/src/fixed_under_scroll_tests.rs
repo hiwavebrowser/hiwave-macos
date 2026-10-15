@@ -1,9 +1,12 @@
 //! A `position: fixed` box stays where it is in the window while the page
 //! scrolls under it. The page's scroll is one translate around the whole
-//! list (`scrolled_commands`, the window path of `render_view`), so until
-//! this file a fixed header left the screen with the first screen of the
-//! page. Seen in the real window on 2026-10-12 (`fixed_scroll`: the bar's
-//! area after the scroll was 0).
+//! list, so until this file a fixed header left the screen with the first
+//! screen of the page. Seen in the real window on 2026-10-12
+//! (`fixed_scroll`: the bar's area after the scroll was 0).
+//!
+//! The window draws the scroll as a renderer offset (threads plan P3); every
+//! scrolled frame here is drawn that way and must match, byte for byte, the
+//! copied list the window drew before (`scrolled_commands`).
 
 use super::*;
 use crate::script_net_tests::serve_routes;
@@ -39,6 +42,24 @@ fn capture(engine: &mut Engine, view: EngineViewId, commands: &[DisplayCommand],
     ppm
 }
 
+/// The view's list drawn by the window's path at `offset`, checked against
+/// the list the window drew before P3 (`scrolled_commands`).
+fn capture_at(engine: &mut Engine, view: EngineViewId, offset: (f32, f32), tag: &str) -> Vec<u8> {
+    let list = engine.views[&view].display_list.as_ref().expect("display list").commands.clone();
+    let before = capture(engine, view, &scrolled_commands(&list, offset), &format!("{tag}-copied"));
+    let viewhost_id = engine.views[&view].viewhost_id;
+    let path = std::env::temp_dir().join(format!("rustkit-fixed-{tag}-offset-{}.ppm", std::process::id()));
+    let display_list = engine.views[&view].display_list.as_ref().expect("display list");
+    engine
+        .presenter
+        .draw_scrolled(viewhost_id, display_list, offset, Some(path.to_str().unwrap()))
+        .expect("capture");
+    let ppm = std::fs::read(&path).expect("frame");
+    let _ = std::fs::remove_file(&path);
+    assert!(ppm == before, "{tag}: the offset draws what the copied list drew");
+    ppm
+}
+
 /// Whether the pixel is dark, in a `P6` frame 200 wide and 100 tall.
 fn dark(ppm: &[u8], x: usize, y: usize) -> bool {
     let pixels = 200 * 100 * 3;
@@ -57,7 +78,7 @@ fn a_fixed_box_stays_put_while_the_page_scrolls() {
     let at_top = capture(&mut engine, view, &list, "top");
     assert!(dark(&at_top, 20, 10) && dark(&at_top, 120, 80), "the bar at the top, the block 60 down");
 
-    let scrolled = capture(&mut engine, view, &scrolled_commands(&list, (0.0, 50.0)), "scrolled");
+    let scrolled = capture_at(&mut engine, view, (0.0, 50.0), "scrolled");
     assert!(dark(&scrolled, 120, 30), "the block is drawn 50 up");
     assert!(!dark(&scrolled, 120, 80), "and not where it was");
     assert!(dark(&scrolled, 20, 10), "the fixed bar is still at the top of the window");
@@ -67,7 +88,7 @@ fn a_fixed_box_stays_put_while_the_page_scrolls() {
 /// and so does a fixed box that is deep in the scrolling content.
 #[test]
 fn a_fixed_box_keeps_its_contents_and_can_sit_deep_in_the_page() {
-    let (mut engine, view, list) = page_list(
+    let (mut engine, view, _) = page_list(
         "<div style='position:fixed;left:0;top:0;width:100px;height:10px'>\
            <div style='position:absolute;left:0;top:20px;width:20px;height:20px'></div>\
            <div style='position:fixed;left:40px;top:20px;width:20px;height:20px'></div>\
@@ -75,7 +96,7 @@ fn a_fixed_box_keeps_its_contents_and_can_sit_deep_in_the_page() {
          <div style='height:300px;background:none'></div>\
          <section><div style='position:fixed;left:160px;top:60px;width:20px;height:20px'></div></section>",
     );
-    let scrolled = capture(&mut engine, view, &scrolled_commands(&list, (0.0, 50.0)), "nested");
+    let scrolled = capture_at(&mut engine, view, (0.0, 50.0), "nested");
     assert!(dark(&scrolled, 50, 5), "the bar");
     assert!(dark(&scrolled, 10, 30), "its absolutely positioned child");
     assert!(dark(&scrolled, 50, 30), "the fixed box inside it is not moved twice");
@@ -85,9 +106,9 @@ fn a_fixed_box_keeps_its_contents_and_can_sit_deep_in_the_page() {
 /// Across as well as down.
 #[test]
 fn a_fixed_box_stays_put_when_the_page_scrolls_sideways() {
-    let (mut engine, view, list) =
+    let (mut engine, view, _) =
         page_list("<div style='position:fixed;left:100px;top:40px;width:40px;height:20px'></div>");
-    let scrolled = capture(&mut engine, view, &scrolled_commands(&list, (30.0, 20.0)), "sideways");
+    let scrolled = capture_at(&mut engine, view, (30.0, 20.0), "sideways");
     assert!(dark(&scrolled, 120, 50), "where it was");
     assert!(!dark(&scrolled, 85, 25), "not 30 left and 20 up");
 }
@@ -134,7 +155,7 @@ fn a_fixed_box_under_a_transformed_ancestor_moves_with_the_page() {
     assert_eq!(marks(&list), (0, 0), "{list:?}");
     let at_top = capture(&mut engine, view, &list, "transformed-top");
     assert!(dark(&at_top, 40, 70), "10 right of its left, 60 down");
-    let scrolled = capture(&mut engine, view, &scrolled_commands(&list, (0.0, 50.0)), "transformed");
+    let scrolled = capture_at(&mut engine, view, (0.0, 50.0), "transformed");
     assert!(dark(&scrolled, 40, 20) && !dark(&scrolled, 40, 70), "drawn 50 up");
 }
 
@@ -143,13 +164,13 @@ fn a_fixed_box_under_a_transformed_ancestor_moves_with_the_page() {
 /// box in the clipping box is still clipped.
 #[test]
 fn a_fixed_box_inside_a_clipping_box_stays_put_and_the_clip_scrolls() {
-    let (mut engine, view, list) = page_list(
+    let (mut engine, view, _) = page_list(
         "<div style='height:60px;background:none'></div>\
          <section style='overflow:hidden;height:20px'>\
            <div style='position:fixed;left:0;top:0;width:40px;height:20px'></div>\
            <div style='margin-left:100px;width:40px;height:60px'></div></section>",
     );
-    let scrolled = capture(&mut engine, view, &scrolled_commands(&list, (0.0, 50.0)), "clip");
+    let scrolled = capture_at(&mut engine, view, (0.0, 50.0), "clip");
     assert!(dark(&scrolled, 20, 10), "the fixed box, outside the clip and at the top of the window");
     assert!(dark(&scrolled, 120, 20), "the clipped block, 50 up: 10 to 30");
     assert!(!dark(&scrolled, 120, 40), "and still cut at the clipping box's edge");

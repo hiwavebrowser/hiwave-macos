@@ -432,6 +432,12 @@ pub struct Renderer {
     /// Stack of 2D transform matrices and their origins.
     /// Each entry is (matrix [a,b,c,d,e,f], origin (x,y)).
     transform_stack: Vec<([f32; 6], (f32, f32))>,
+    /// The page's scroll offset, applied while a list is executed (see
+    /// `set_scroll_offset`).
+    scroll_offset: (f32, f32),
+    /// Address and length of the last list `execute` drew, so a test can
+    /// tell the list it handed over was drawn in place and not copied.
+    last_list: (usize, usize),
     /// Open `PushOpacity` scopes on the paths that fade per command.
     opacity_scopes: OpacityScopes,
     /// Layer textures for opacity scopes, by nesting depth.
@@ -704,6 +710,8 @@ impl Renderer {
             clip_pieces: Vec::new(),
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
+            scroll_offset: (0.0, 0.0),
+            last_list: (0, 0),
             opacity_scopes: OpacityScopes::default(),
             opacity_layer_pool: Vec::new(),
             opacity_layer_size: (0, 0),
@@ -1365,12 +1373,43 @@ impl Renderer {
         self.queue.submit(std::iter::once(encoder.finish()));
     }
 
+    /// Draw the lists that follow scrolled by `offset`: the list stays in
+    /// document coordinates and the whole of it is drawn inside one
+    /// translate by `-offset`, except a `position: fixed` run
+    /// (`PushViewportFixed` to `PopViewportFixed`), which is drawn inside
+    /// the opposite translate so it stays put in the window. Kept until
+    /// changed, like the viewport size; `(0, 0)` draws the list as it is.
+    ///
+    /// Before this, the engine built that list itself (`scrolled_commands`):
+    /// a copy of every command on every scrolled frame, 2.2M of them on
+    /// the Wikipedia portal.
+    pub fn set_scroll_offset(&mut self, offset: (f32, f32)) {
+        self.scroll_offset = offset;
+    }
+
+    /// Address and length of the last list `execute` drew.
+    pub fn last_executed_list(&self) -> (*const DisplayCommand, usize) {
+        (self.last_list.0 as *const DisplayCommand, self.last_list.1)
+    }
+
+    /// The translate a scrolled list is drawn in, as `set_scroll_offset`
+    /// describes it: `sign` -1 for the page, +1 for a fixed run.
+    fn scroll_translate(&mut self, sign: f32) {
+        let (x, y) = self.scroll_offset;
+        self.push_transform([1.0, 0.0, 0.0, 1.0, sign * x, sign * y], (0.0, 0.0));
+    }
+
+    fn scrolled(&self) -> bool {
+        self.scroll_offset != (0.0, 0.0)
+    }
+
     /// Execute a display list and render to a target.
     pub fn execute(
         &mut self,
         commands: &[DisplayCommand],
         target: &wgpu::TextureView,
     ) -> Result<(), RendererError> {
+        self.last_list = (commands.as_ptr() as usize, commands.len());
         let resets = self.glyph_cache.resets();
         self.execute_once(commands, target)?;
         if self.glyph_cache.resets() == resets {
@@ -1414,6 +1453,9 @@ impl Renderer {
         self.stacking_contexts.clear();
         self.transform_stack.clear();
         self.opacity_scopes.clear();
+        if self.scrolled() {
+            self.scroll_translate(-1.0);
+        }
 
         // Check if there are any blur backdrop filters that need GPU processing
         let has_blur_filters = commands.iter().any(|cmd| {
@@ -1478,6 +1520,7 @@ impl Renderer {
                 }
                 self.process_command(cmd);
             }
+            self.end_scroll_translate();
             // A list that ends inside a scope still shows what it drew.
             while !layers.is_empty() {
                 self.end_opacity_layer(target, &mut layers, &mut cleared)?;
@@ -1490,6 +1533,14 @@ impl Renderer {
         }
 
         Ok(())
+    }
+
+    /// The pop of the page translate `execute_once` pushed, after the
+    /// list's last command (where the old `scrolled_commands` list had it).
+    fn end_scroll_translate(&mut self) {
+        if self.scrolled() {
+            self.pop_transform();
+        }
     }
 
     /// True when `cmd` is a solid fill whose rect overlaps a glyph quad
@@ -1564,6 +1615,7 @@ impl Renderer {
             // Process command normally (including non-blur backdrop filters)
             self.process_command(cmd);
         }
+        self.end_scroll_translate();
 
         // Flush remaining batches to intermediate
         if !self.color_vertices.is_empty()
@@ -1611,6 +1663,7 @@ impl Renderer {
                 self.process_command(cmd);
             }
         }
+        self.end_scroll_translate();
 
         // Flush any remaining batched content
         if !self.color_vertices.is_empty()
@@ -2744,9 +2797,18 @@ impl Renderer {
                 }
             }
 
-            // Marks only: a list for a scrolled page arrives with these
-            // already turned into the translate that undoes the scroll.
-            DisplayCommand::PushViewportFixed | DisplayCommand::PopViewportFixed => {}
+            // A fixed run undoes the page's scroll (`set_scroll_offset`);
+            // unscrolled, these are marks only.
+            DisplayCommand::PushViewportFixed => {
+                if self.scrolled() {
+                    self.scroll_translate(1.0);
+                }
+            }
+            DisplayCommand::PopViewportFixed => {
+                if self.scrolled() {
+                    self.pop_transform();
+                }
+            }
 
             DisplayCommand::GradientText {
                 text,

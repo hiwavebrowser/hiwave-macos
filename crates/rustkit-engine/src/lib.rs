@@ -353,6 +353,8 @@ mod polygon_transform_tests;
 #[cfg(all(test, feature = "headless"))]
 mod fixed_under_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
+mod render_no_clone_tests;
+#[cfg(all(test, feature = "headless"))]
 mod hover_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
@@ -2821,7 +2823,7 @@ impl Engine {
 
     /// The box under VIEWPORT coordinates in the page as the window shows
     /// it: scrolled, with its `position: fixed` boxes where they are drawn
-    /// (`scrolled_commands`). Every pointer path asks here, so what is
+    /// (`Renderer::set_scroll_offset`). Every pointer path asks here, so what is
     /// clicked is what is seen.
     fn hit_at(view: &ViewState, viewport_x: f32, viewport_y: f32) -> Option<rustkit_layout::HitTestResult> {
         let layout = view.layout.as_ref()?;
@@ -17692,11 +17694,14 @@ fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
     ]
 }
 
-/// The list the window draws for a page scrolled by `scroll_offset`: the
-/// page's own list, which stays in document coordinates, inside one
-/// translate. A `position: fixed` box does not move with the page, so its
-/// run (`PushViewportFixed` to `PopViewportFixed`) is drawn inside the
-/// opposite translate.
+/// The list the window drew for a page scrolled by `scroll_offset`, until
+/// the renderer took the scroll as an offset (threads plan P3): the page's
+/// own list, which stays in document coordinates, inside one translate. A
+/// `position: fixed` box does not move with the page, so its run
+/// (`PushViewportFixed` to `PopViewportFixed`) is drawn inside the opposite
+/// translate. Kept for tests, as the reference the offset must match pixel
+/// for pixel; nothing draws it.
+#[cfg(test)]
 pub(crate) fn scrolled_commands(
     commands: &[rustkit_layout::DisplayCommand],
     scroll_offset: (f32, f32),

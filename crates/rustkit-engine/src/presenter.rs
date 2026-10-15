@@ -59,6 +59,10 @@ pub(crate) struct Presenter {
     /// `EngineConfig::background_color`: what a view shows before its
     /// first frame.
     background_color: [f64; 4],
+    /// Images handed to the renderer so far (tests: one upload per image,
+    /// however often the frame is drawn).
+    #[cfg(test)]
+    pub(crate) images_uploaded: usize,
 }
 
 impl Presenter {
@@ -95,6 +99,8 @@ impl Presenter {
             renderer: Some(renderer),
             render_failing: HashSet::new(),
             background_color,
+            #[cfg(test)]
+            images_uploaded: 0,
         })
     }
 
@@ -108,6 +114,7 @@ impl Presenter {
             renderer: None,
             render_failing: HashSet::new(),
             background_color: super::EngineConfig::default().background_color,
+            images_uploaded: 0,
         }
     }
 
@@ -338,11 +345,7 @@ impl Presenter {
 
         // Upload images from cache to renderer before drawing
         if let Some(display_list) = display_list {
-            // The clone is the page side's old way of ending its borrow of
-            // the view; it is not needed here and P3 (render without
-            // clones) removes it. Kept so this PR stays a move.
-            let commands = display_list.commands.clone();
-            missing_images = self.upload_display_list_images(images, &commands);
+            missing_images = self.upload_display_list_images(images, &display_list.commands);
         }
         let presented = PresentedFrame {
             generation,
@@ -363,15 +366,9 @@ impl Presenter {
             };
 
             let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
-            if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
-                renderer
-                    .execute(&display_list.commands, &texture_view)
-                    .map_err(|e| EngineError::RenderError(e.to_string()))?;
-            } else if let Some(renderer) = &mut self.renderer {
-                // No display list, render empty (will clear to white or debug color)
-                renderer
-                    .execute(&[], &texture_view)
-                    .map_err(|e| EngineError::RenderError(e.to_string()))?;
+            if let Some(renderer) = &mut self.renderer {
+                // A headless view is drawn unscrolled, as it always was.
+                Self::execute(renderer, display_list, (0.0, 0.0), &texture_view)?;
             } else {
                 // Fallback to compositor solid color
                 self.compositor
@@ -390,28 +387,16 @@ impl Presenter {
             };
 
             // Scroll is applied at render time as a whole-page translate:
-            // the display list stays in document coordinates and the GPU
-            // shifts it by the clamped offset scroll_view() maintains.
+            // the display list stays in document coordinates and the
+            // renderer shifts it by the clamped offset scroll_view()
+            // maintains (`Renderer::set_scroll_offset`), so a scrolled
+            // frame draws the page's own list, not a copy of it.
 
             // Render using display list if available, otherwise just clear to background
             {
                 let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
-                if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
-                    if scroll_offset == (0.0, 0.0) {
-                        renderer
-                            .execute(&display_list.commands, &texture_view)
-                            .map_err(|e| EngineError::RenderError(e.to_string()))?;
-                    } else {
-                        let scrolled = super::scrolled_commands(&display_list.commands, scroll_offset);
-                        renderer
-                            .execute(&scrolled, &texture_view)
-                            .map_err(|e| EngineError::RenderError(e.to_string()))?;
-                    }
-                } else if let Some(renderer) = &mut self.renderer {
-                    // No display list, render empty (will clear to white or debug color)
-                    renderer
-                        .execute(&[], &texture_view)
-                        .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                if let Some(renderer) = &mut self.renderer {
+                    Self::execute(renderer, display_list, scroll_offset, &texture_view)?;
                 } else {
                     // Fallback to compositor solid color (shouldn't normally happen)
                     drop(output); // Release the texture
@@ -427,6 +412,59 @@ impl Presenter {
         }
 
         Ok(Some(presented))
+    }
+
+    /// Execute `display_list` (or nothing, which clears to the background)
+    /// at `scroll_offset` into `target`: the one draw both kinds of view
+    /// share. The list is borrowed, never copied.
+    fn execute(
+        renderer: &mut Renderer,
+        display_list: Option<&DisplayList>,
+        scroll_offset: (f32, f32),
+        target: &wgpu::TextureView,
+    ) -> Result<(), EngineError> {
+        let commands = display_list.map(|dl| dl.commands.as_slice()).unwrap_or(&[]);
+        renderer.set_scroll_offset(scroll_offset);
+        let drawn = renderer
+            .execute(commands, target)
+            .map_err(|e| EngineError::RenderError(e.to_string()));
+        renderer.set_scroll_offset((0.0, 0.0));
+        drawn
+    }
+
+    /// Draw `display_list` at `scroll_offset` into a headless view's
+    /// texture through the window path's draw (`execute`), and write it to
+    /// `path` as PPM when one is given. A headless view's own frames are
+    /// drawn unscrolled; this is how a test sees a scrolled window frame.
+    #[cfg(test)]
+    pub(crate) fn draw_scrolled(
+        &mut self,
+        viewhost_id: ViewId,
+        display_list: &DisplayList,
+        scroll_offset: (f32, f32),
+        path: Option<&str>,
+    ) -> Result<(), EngineError> {
+        let (width, height) = self.surface_size(viewhost_id)?;
+        let renderer = self.renderer.as_mut().expect("renderer");
+        renderer.set_viewport_size(width, height);
+        match path {
+            None => {
+                let target = self
+                    .compositor
+                    .get_headless_texture_view(viewhost_id)
+                    .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                Self::execute(renderer, Some(display_list), scroll_offset, &target)
+            }
+            Some(path) => {
+                renderer.set_scroll_offset(scroll_offset);
+                let captured = self
+                    .compositor
+                    .capture_frame_with_renderer(viewhost_id, path, renderer, &display_list.commands)
+                    .map_err(|e| EngineError::RenderError(e.to_string()));
+                renderer.set_scroll_offset((0.0, 0.0));
+                captured
+            }
+        }
     }
 
     /// The renderer, for tests that read its caches.
@@ -528,6 +566,7 @@ impl Presenter {
         }
 
         // Now upload all collected images
+        let mut uploaded_count = 0;
         for (url_str, image, mask) in urls_to_upload {
             let frame = image.current_frame(Duration::ZERO);
             let uploaded = if mask {
@@ -538,9 +577,15 @@ impl Presenter {
             if let Err(e) = uploaded {
                 tracing::warn!(?e, %url_str, "Failed to upload image to renderer");
             } else {
+                uploaded_count += 1;
                 tracing::debug!(%url_str, "Uploaded image to renderer");
             }
         }
+        #[cfg(test)]
+        {
+            self.images_uploaded += uploaded_count;
+        }
+        let _ = uploaded_count;
         missing
     }
 
