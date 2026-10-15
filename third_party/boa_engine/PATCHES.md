@@ -66,7 +66,7 @@ native stack), but every host call that re-enters the VM (`JsObject::call` and
 nested `Context::run` on the native stack, about 1.2 KiB per level in release
 and 6.5 KiB in debug. 10,000 such levels overflow an 8 MiB main thread.
 
-**What.** About 40 lines in two files:
+**What.** About 40 lines in two source files, plus their tests:
 
 | file | change |
 |---|---|
@@ -80,9 +80,13 @@ thread's real stack bounds (`pthread_getattr_np` / `pthread_get_stackaddr_np`)
 plus a reserve of a quarter of the stack (256 KiB to 1 MiB) for native work
 between two calls. The interrupt stays uncatchable.
 
-**Not covered.** Native code that recurses without making a call (the parser on
-deeply nested source, `JSON.stringify` of a deeply nested array) is checked by
-nothing new; the reserve is all it has.
+**Not covered.** Native code that recurses without making a function call is
+checked by nothing new; the reserve is all it has. Known cases: the parser on
+deeply nested source, `JSON.stringify` of a deeply nested array, a Proxy whose
+target is another Proxy forwarding with no trap (`[[Get]]` and friends recurse
+natively down the chain), `[[Get]]` up a very long prototype chain of proxies or
+exotic objects, and `Array.prototype.flat` with a large depth on deeply nested
+arrays.
 
 **Tests.** `crates/rustkit-js/tests/recursion_limits.rs`: the deepest call that
 returns is the limit, one deeper throws a catchable `RangeError`, `finally`
