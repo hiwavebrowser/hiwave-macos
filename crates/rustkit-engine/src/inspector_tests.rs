@@ -188,7 +188,62 @@ fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
     let summary = InspectorSummary::from_records(&records, &unsupported);
     assert_eq!(
         serde_json::to_string(&summary).unwrap(),
-        r#"{"schema":1,"events":4,"console":{"log":1,"info":0,"warn":0,"error":1,"debug":0},"script_errors":1,"unhandled_rejections":1,"unsupported_apis":{"XMLHttpRequest.open(async=false)":4}}"#
+        r#"{"schema":2,"events":4,"console":{"log":1,"info":0,"warn":0,"error":1,"debug":0},"script_errors":1,"unhandled_rejections":1,"unsupported_apis":{"XMLHttpRequest.open(async=false)":4},"requests":{},"failures_by_stage":{}}"#
+    );
+}
+
+#[test]
+fn a_request_guard_answers_once_and_a_dropped_one_fails() {
+    let inspector = buffered(16);
+    let url = url::Url::parse("https://a.test/x.png?q=1").unwrap();
+    let answered = inspector.begin_request(&url, "GET", ResourceType::Image, Some("parser")).unwrap();
+    answered.response(200, Some("image/png; charset=binary"), Some(10), Some(10), false);
+    let dropped = inspector
+        .begin_request(&url, "GET", ResourceType::Image, None)
+        .unwrap()
+        .dropped_as(FailureStage::OverBudget, "subresource budget spent");
+    drop(dropped);
+    let failed = inspector.begin_request(&url, "GET", ResourceType::Fetch, Some("script")).unwrap();
+    failed.fail(FailureStage::Cors, "CORS check failed for https://b.test/?secret=1");
+    assert_eq!(inspector.open_requests(), 0);
+    let events: Vec<InspectorEvent> = inspector.snapshot_since(0).records.into_iter().map(|r| r.event).collect();
+    assert!(matches!(&events[0], InspectorEvent::Request { id: 1, url, .. } if url == "https://a.test/x.png"));
+    assert!(matches!(&events[1], InspectorEvent::Response { id: 1, status: 200, mime: Some(m), .. } if m == "image/png"));
+    assert!(matches!(&events[3], InspectorEvent::Failure { id: 2, stage: FailureStage::OverBudget, .. }));
+    assert!(
+        matches!(&events[5], InspectorEvent::Failure { id: 3, stage: FailureStage::Cors, reason, .. } if reason == "CORS check failed for https://b.test/")
+    );
+    // Off: no guard, nothing built.
+    let off = Inspector::new(&InspectorConfig::default());
+    assert!(off.begin_request(&url, "GET", ResourceType::Image, None).is_none());
+}
+
+/// A guard with a budget deadline tells the two drops apart: before the
+/// deadline it was abandoned (a navigation, a closed view), at or after it
+/// the budget ran out.
+#[test]
+fn a_dropped_request_is_over_budget_only_past_its_deadline() {
+    let inspector = buffered(16);
+    let url = url::Url::parse("https://a.test/x.png").unwrap();
+    let later = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let passed = tokio::time::Instant::now();
+    drop(inspector.begin_request(&url, "GET", ResourceType::Image, None).unwrap().over_budget_at(later, "subresource budget spent"));
+    drop(inspector.begin_request(&url, "GET", ResourceType::Image, None).unwrap().over_budget_at(passed, "subresource budget spent"));
+    let stages: Vec<(FailureStage, String)> = inspector
+        .snapshot_since(0)
+        .records
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::Failure { stage, reason, .. } => Some((stage, reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stages,
+        vec![
+            (FailureStage::Cancelled, "abandoned (navigation or view closed)".to_string()),
+            (FailureStage::OverBudget, "subresource budget spent".to_string()),
+        ]
     );
 }
 
@@ -215,6 +270,37 @@ fn a_query_is_scrubbed_up_to_whitespace_or_a_frames_position() {
     );
 }
 
+/// Only a valid `type/subtype` is a response's MIME type; header text
+/// that is not one is never kept.
+#[test]
+fn only_a_valid_mime_essence_is_kept() {
+    for (header, essence) in [
+        ("Image/PNG", Some("image/png")),
+        ("text/html; charset=utf-8", Some("text/html")),
+        // Third R1 hold @ 43dd085c, item 2: only a type from a fixed list;
+        // a server-chosen one keeps its registered top-level type at most.
+        ("application/vnd.api+json", Some("application/other")),
+        ("vnd.user-alice/json", None),
+        ("secretct/junk", None),
+        ("application/x-secret-alice", Some("application/other")),
+        ("application/vnd.user-alice+json", Some("application/other")),
+        ("image/x-secret", Some("image/other")),
+        ("Application/JSON", Some("application/json")),
+        ("text/css", Some("text/css")),
+        ("text/javascript", Some("text/javascript")),
+        ("font/woff2", Some("font/woff2")),
+        ("application/json, token=SECRET", None),
+        ("text/html charset", None),
+        ("text", None),
+        ("a/b/c", None),
+        ("/x", None),
+        ("", None),
+    ] {
+        assert_eq!(mime_essence(header).as_deref(), essence, "{header}");
+    }
+    assert_eq!(mime_essence(&format!("a/{}", "b".repeat(70))), None);
+}
+
 /// A network error's stage comes from the error's kind, never its text: a
 /// connection failure whose text says `lookup` (a host name, a server's
 /// words) is still `connect` (third R1 hold @ 6bda3b2c, audit).
@@ -228,4 +314,25 @@ fn a_network_errors_kind_is_never_read_from_its_text() {
     }
     let lookup = NetError::HttpError(HttpError::LookupFailed("nowhere.test: no addresses".into()));
     assert_eq!(net_error_kind(&lookup), "dns");
+}
+
+/// A request's method is a standard one, else `OTHER`: a page chooses it
+/// (R1 note @ 43dd085c).
+#[test]
+fn a_requests_method_is_a_standard_one_or_other() {
+    let inspector = buffered(16);
+    let url = url::Url::parse("https://a.test/x").unwrap();
+    for method in ["GET", "post", "PATCH", "SECRETMETH", ""] {
+        drop(inspector.begin_request(&url, method, ResourceType::Fetch, Some("script")));
+    }
+    let methods: Vec<String> = inspector
+        .snapshot_since(0)
+        .records
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::Request { method, .. } => Some(method),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(methods, vec!["GET", "POST", "PATCH", "OTHER", "OTHER"]);
 }

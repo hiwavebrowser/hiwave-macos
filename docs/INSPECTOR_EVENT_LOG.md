@@ -3,8 +3,8 @@
 The engine keeps a per-view, ordered record of what a page load did: what
 Chrome's Console panel shows (console calls, uncaught errors, unhandled
 rejections), what the engine does not implement that the page used, and the
-navigation and lifecycle markers. The Network half (requests and their
-outcomes) is documented in the section added with it.
+navigation and lifecycle markers, and what Chrome's Network panel shows: every
+request the engine makes, and exactly one response or failure for it.
 
 Code: `crates/rustkit-engine/src/inspector.rs` (types, buffer, sinks) and
 `inspector_glue.rs` (where page script reaches it).
@@ -52,6 +52,10 @@ field that is `null` today may hold a value later.
 | `first_layout` | — |
 | `first_paint` | — |
 | `relayout` | `cause` (engine words only, below), `took_ms` |
+| `navigation_redirect` | `from`, `to`, `status`: one per redirect the document followed, between its `request` and `response` |
+| `request` | `id` (per view, from 1), `url`, `method`, `resource_type`, `initiator` |
+| `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms` |
+| `failure` | `id`, `stage`, `reason`, `duration_ms` |
 
 `location` is `null` or `{ "url", "line", "column" }` (1-based). `url` is the
 script's URL, or `inline#n` for the page's n-th `<script>` when it is inline,
@@ -141,6 +145,53 @@ and `<tag>` is the element's tag when it is a standard HTML element (or `svg`,
 `id`, class, attribute names and values are never recorded. (The engine's
 `relayout cause=` trace line, which is not the Inspector's, keeps `tag#id`.)
 
+### Requests
+
+Every request the engine makes is a `request`, and exactly one `response` or
+`failure` with the same `id` follows (an engine test checks this on every
+network test; a debug assertion catches a second answer). The engine records a
+request through a guard that answering consumes and that records a failure if
+it is dropped unanswered, so a fetch whose future is dropped (a budget
+deadline, a navigation) is still answered.
+
+`resource_type`: `document`, `stylesheet`, `script` (classic), `module`
+(a module script or an import), `image`, `font`, `fetch`, `xhr`, `other`.
+
+`initiator`: `navigation` (the document), `parser` (the document's markup),
+`css` (a stylesheet's `url()`: fonts, background images), `script` (page
+script: `fetch`, XHR, `import`, images scripts added).
+
+A response with an error status (`404`) is a `response`: the server answered.
+`encoded_size` is the body as transferred (before gzip/deflate were undone),
+`null` from the cache or for script requests; `decoded_size` is what the
+engine read, `null` when it did not read the body.
+
+`failure.stage`:
+
+| stage | when |
+|---|---|
+| `dns` | the host name did not resolve |
+| `connect` | no connection, or the connection broke mid-body |
+| `tls` | the TLS handshake failed |
+| `timeout` | the network did not answer in time (live script requests: 30 s) |
+| `http_error` | not usable HTTP (malformed, too many redirects) |
+| `policy` | refused by a rule: the shield, the private-network rule, mixed content, CSP, a malformed or oversized request, a request cap |
+| `cors` | a script request another origin did not allow (or a `same-origin` request to another origin) |
+| `mime` | a module script not served with a JavaScript MIME type |
+| `decode` | the body arrived and was not usable: not UTF-8, an image that does not decode, an SVG that does not parse |
+| `cancelled` | abandoned before its budget ran out: the page navigated away or the view closed (reason `abandoned (navigation or view closed)`), or the navigation was superseded |
+| `over_budget` | the subresource phase's or the script budget ran out first, or the response was over the size cap |
+
+Not recorded as separate requests: CORS preflights and the hops of a script
+request's redirects (the policy follows them inside one request), `data:` URLs
+of images, stylesheets and fonts, and images the image cache already holds. A
+`fetch()` or XHR of a `data:` URL is a request, shown as `data:<mime>,…`.
+
+A previous page's live script requests are dropped when the new document is
+committed, so their `cancelled` failures come after the new page's
+`navigation_start` (and its document request), before its `navigation_commit`.
+If the new document cannot be fetched, the old page and its requests stay.
+
 ### Unsupported APIs
 
 Recorded where the bindings know they do not implement something and page
@@ -185,7 +236,9 @@ The log is meant to be pasted into public issues and PRs.
   wherever they sit in it (after a quote, in brackets, after `=`): a
   convenience, not a guarantee; the text is the page's.
 - No request or response header, body, cookie, form value or storage content
-  is recorded.
+  is recorded: a request has its method and URL, a response its status, MIME
+  essence and sizes. Failure reasons are fixed engine phrases, never the
+  network error's own text (which can name hosts and paths).
 - Nothing page script can reach switches redaction off, writes into the
   console, error or unsupported-member queues, or changes what a record
   says. The `console` methods are native functions; the redaction flag and
@@ -218,20 +271,24 @@ and `schema` goes up when one is.
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "events": 42,
   "console": { "log": 3, "info": 0, "warn": 1, "error": 2, "debug": 0 },
   "script_errors": 4,
   "unhandled_rejections": 1,
-  "unsupported_apis": { "XMLHttpRequest.open(async=false)": 3 }
+  "unsupported_apis": { "XMLHttpRequest.open(async=false)": 3 },
+  "requests": { "document": { "2xx": 1 }, "image": { "2xx": 12, "4xx": 1, "failed": 2 } },
+  "failures_by_stage": { "over_budget": 1, "policy": 1 }
 }
 ```
 
 | field | meaning |
 |---|---|
-| `schema` | layout version (1) |
+| `schema` | layout version (2; 1 had no `requests` or `failures_by_stage`) |
 | `events` | records in the load's log |
 | `console` | console calls by level |
 | `script_errors` | uncaught exceptions plus unhandled rejections |
 | `unhandled_rejections` | of `script_errors`, the rejections |
 | `unsupported_apis` | `Interface.member` to how often page script reached it |
+| `requests` | resource type to outcome to count; outcome is the response's status class (`2xx`, `3xx`, `4xx`, `5xx`, `other`) or `failed` |
+| `failures_by_stage` | failed requests by `failure.stage` |

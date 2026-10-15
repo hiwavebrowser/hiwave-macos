@@ -366,6 +366,14 @@ pub struct Response {
     pub headers: HeaderMap,
     pub content_type: Option<Mime>,
     pub content_length: Option<u64>,
+    /// Answered from the loader's memory cache, without a request.
+    pub from_cache: bool,
+    /// Body bytes as transferred, before `Content-Encoding` was undone;
+    /// `None` when nothing was transferred (cache, `data:`).
+    pub encoded_body_size: Option<u64>,
+    /// Redirects followed to get here: each URL that redirected, and its
+    /// status.
+    pub redirect_chain: Vec<(Url, StatusCode)>,
     body: ResponseBody,
 }
 
@@ -671,6 +679,9 @@ impl ResourceLoader {
                 headers,
                 content_type: content_type.parse::<Mime>().ok(),
                 content_length: Some(body.len() as u64),
+                from_cache: false,
+                encoded_body_size: None,
+                redirect_chain: Vec::new(),
                 body: ResponseBody::Full(Bytes::from(body)),
             });
         }
@@ -694,6 +705,9 @@ impl ResourceLoader {
                     headers: cached.headers,
                     content_type,
                     content_length: Some(cached.body.len() as u64),
+                    from_cache: true,
+                    encoded_body_size: None,
+                    redirect_chain: Vec::new(),
                     body: ResponseBody::Full(cached.body),
                 });
             }
@@ -826,6 +840,9 @@ impl ResourceLoader {
             headers: http_response.headers,
             content_type,
             content_length,
+            from_cache: false,
+            encoded_body_size: Some(http_response.encoded_body_size),
+            redirect_chain: http_response.redirect_chain,
             body: ResponseBody::Full(http_response.body),
         })
     }

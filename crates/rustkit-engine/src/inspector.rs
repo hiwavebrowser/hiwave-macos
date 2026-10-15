@@ -11,8 +11,10 @@
 //! keeps its scheme, host, port and path, never its user name, password,
 //! query, fragment or `;` path parameters (`/a;jsessionid=S/b` is `/a/b`; a
 //! flag keeps the query, fragment and parameters); a `data:` URL keeps only
-//! its MIME type, when it is a common one. A `file:` URL's path is the local path, user name and all. No header, request or response body, form value
-//! or storage is recorded. No text the page chose is recorded by default
+//! its MIME type, when it is a common one. A `file:` URL's path is the local
+//! path, user name and all. A response's MIME type is a name from a fixed
+//! list (else `<type>/other`, else none). No header, request or response
+//! body, form value or storage is recorded. No text the page chose is recorded by default
 //! (pages log and throw cookies, form values and their own URL): a console
 //! message is each argument's type and a string's length; an error is the
 //! thrown value's type, a standard error name (else `Error`), its message's
@@ -121,6 +123,87 @@ pub enum EndReason {
     Failed,
 }
 
+/// What a request fetches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceType {
+    Document,
+    Stylesheet,
+    Script,
+    Module,
+    Image,
+    Font,
+    Fetch,
+    Xhr,
+    Other,
+}
+
+impl ResourceType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResourceType::Document => "document",
+            ResourceType::Stylesheet => "stylesheet",
+            ResourceType::Script => "script",
+            ResourceType::Module => "module",
+            ResourceType::Image => "image",
+            ResourceType::Font => "font",
+            ResourceType::Fetch => "fetch",
+            ResourceType::Xhr => "xhr",
+            ResourceType::Other => "other",
+        }
+    }
+}
+
+/// Where a request failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureStage {
+    /// The host name did not resolve.
+    Dns,
+    /// No connection (refused, reset, unreachable).
+    Connect,
+    Tls,
+    /// The network did not answer in time.
+    Timeout,
+    /// The server's answer was not usable HTTP (malformed, too many
+    /// redirects). An answer with an error status is a `response`.
+    HttpError,
+    /// Refused by a rule before or while fetching: the shield, the
+    /// private-network rule, mixed content, CSP, a request cap.
+    Policy,
+    /// A cross-origin script request the server did not allow.
+    Cors,
+    /// The response's MIME type is not one this kind of resource may have.
+    Mime,
+    /// The body arrived but could not be read as what it should be (text,
+    /// an image).
+    Decode,
+    /// Abandoned: the page navigated away, the script aborted it, or the
+    /// engine stopped waiting for a reason of its own.
+    Cancelled,
+    /// The page's script budget or a subresource phase's budget ran out
+    /// before it finished.
+    OverBudget,
+}
+
+impl FailureStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FailureStage::Dns => "dns",
+            FailureStage::Connect => "connect",
+            FailureStage::Tls => "tls",
+            FailureStage::Timeout => "timeout",
+            FailureStage::HttpError => "http_error",
+            FailureStage::Policy => "policy",
+            FailureStage::Cors => "cors",
+            FailureStage::Mime => "mime",
+            FailureStage::Decode => "decode",
+            FailureStage::Cancelled => "cancelled",
+            FailureStage::OverBudget => "over_budget",
+        }
+    }
+}
+
 /// One thing that happened. Serialized with a `type` tag and the fields in
 /// declaration order; new fields are only ever appended, and a field that
 /// is `null` today may hold a value later.
@@ -190,6 +273,43 @@ pub enum InspectorEvent {
     /// log line's value without page text (a script write's kind and, for
     /// a listed HTML element, its tag; never an id).
     Relayout { cause: String, took_ms: f64 },
+    /// The document's request was redirected (one per hop, in order,
+    /// between its `request` and its `response`).
+    NavigationRedirect { from: String, to: String, status: u16 },
+    /// The engine made a request. Exactly one `response` or `failure` with
+    /// the same `id` follows.
+    Request {
+        /// Per view, from 1.
+        id: u64,
+        url: String,
+        method: String,
+        resource_type: ResourceType,
+        /// What asked for it: `parser` (the document's markup), `css` (a
+        /// stylesheet's `url()`), `script` (page script), `navigation`.
+        initiator: Option<String>,
+    },
+    /// The request's answer arrived (any status, 4xx and 5xx included).
+    Response {
+        id: u64,
+        status: u16,
+        /// The MIME type's essence (`text/css`), parameters dropped.
+        mime: Option<String>,
+        /// Body bytes as transferred, before content decoding; `null` when
+        /// none were (cache, unknown).
+        encoded_size: Option<u64>,
+        /// Body bytes after decoding, when the engine read the body.
+        decoded_size: Option<u64>,
+        from_cache: bool,
+        duration_ms: f64,
+    },
+    /// The request ended without a usable answer.
+    Failure {
+        id: u64,
+        stage: FailureStage,
+        /// A short reason in the engine's words (no header, body or query).
+        reason: String,
+        duration_ms: f64,
+    },
 }
 
 impl InspectorEvent {
@@ -206,6 +326,10 @@ impl InspectorEvent {
             InspectorEvent::FirstLayout => "first_layout",
             InspectorEvent::FirstPaint => "first_paint",
             InspectorEvent::Relayout { .. } => "relayout",
+            InspectorEvent::NavigationRedirect { .. } => "navigation_redirect",
+            InspectorEvent::Request { .. } => "request",
+            InspectorEvent::Response { .. } => "response",
+            InspectorEvent::Failure { .. } => "failure",
         }
     }
 }
@@ -262,6 +386,10 @@ struct State {
     /// The names page scripts are evaluated under that are not their URL
     /// (`script#3`), and the URL each stands for (as events show it).
     aliases: Vec<(String, String)>,
+    /// The last request id given out (per view, never reused).
+    last_request_id: u64,
+    /// Requests recorded and not yet answered.
+    open_requests: std::collections::HashSet<u64>,
 }
 
 /// A view's recorder and ring buffer. See the module docs.
@@ -292,6 +420,8 @@ impl Inspector {
                 laid_out: false,
                 painted: false,
                 aliases: Vec::new(),
+                last_request_id: 0,
+                open_requests: std::collections::HashSet::new(),
             }),
         })
     }
@@ -533,6 +663,74 @@ impl Inspector {
         out
     }
 
+    /// Record a request the engine is about to make. The returned guard
+    /// records its one `response` or `failure`; dropped unanswered (the
+    /// fetch's future was dropped: a deadline, a navigation) it records a
+    /// failure at the stage set with [`RequestGuard::dropped_as`],
+    /// `cancelled` by default. `None`, and nothing built, when nobody
+    /// listens.
+    pub fn begin_request(
+        self: &Arc<Self>,
+        url: &Url,
+        method: &str,
+        resource_type: ResourceType,
+        initiator: Option<&str>,
+    ) -> Option<RequestGuard> {
+        if !self.is_active() {
+            return None;
+        }
+        let url = self.url(url);
+        // The page chooses the method: a standard one, else `OTHER`.
+        let method = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+            .into_iter()
+            .find(|m| m.eq_ignore_ascii_case(method))
+            .unwrap_or("OTHER")
+            .to_string();
+        let initiator = initiator.map(|i| cap(i, MAX_SHORT_CHARS).0);
+        let mut state = self.state();
+        state.last_request_id += 1;
+        let id = state.last_request_id;
+        state.open_requests.insert(id);
+        Self::push_locked(&mut state, InspectorEvent::Request { id, url, method, resource_type, initiator });
+        drop(state);
+        Some(RequestGuard {
+            inspector: self.clone(),
+            id,
+            started: Instant::now(),
+            dropped_as: FailureStage::Cancelled,
+            dropped_reason: "abandoned (navigation or view closed)",
+            budget: None,
+            done: false,
+        })
+    }
+
+    /// Requests recorded and not yet answered.
+    pub fn open_requests(&self) -> usize {
+        self.state().open_requests.len()
+    }
+
+    fn finish_request(&self, id: u64, event: InspectorEvent) {
+        let mut state = self.state();
+        let was_open = state.open_requests.remove(&id);
+        debug_assert!(was_open, "request {id} answered twice, or never recorded");
+        Self::push_locked(&mut state, event);
+    }
+
+    /// The document's redirects, as `navigation_redirect` events.
+    pub fn redirects(&self, chain: &[(Url, u16)], final_url: &Url) {
+        if !self.is_active() || chain.is_empty() {
+            return;
+        }
+        for (i, (from, status)) in chain.iter().enumerate() {
+            let to = chain.get(i + 1).map(|(next, _)| next).unwrap_or(final_url);
+            self.push(InspectorEvent::NavigationRedirect {
+                from: self.url(from),
+                to: self.url(to),
+                status: *status,
+            });
+        }
+    }
+
     /// Every URL in `text` scrubbed, wherever it starts. A URL's path runs
     /// to whitespace, a quote or a bracket; once its query or fragment
     /// starts, everything up to whitespace is the query (brackets, parens
@@ -658,6 +856,241 @@ impl Inspector {
     }
 }
 
+/// One request's outcome, still to be recorded (see
+/// [`Inspector::begin_request`]). Answering consumes it, so a request can
+/// only be answered once; dropping it unanswered records a failure, so it
+/// cannot be answered never.
+pub struct RequestGuard {
+    inspector: Arc<Inspector>,
+    id: u64,
+    started: Instant,
+    dropped_as: FailureStage,
+    dropped_reason: &'static str,
+    /// Dropped at or past this deadline, it ran out of a budget.
+    budget: Option<(Instant, &'static str)>,
+    done: bool,
+}
+
+impl RequestGuard {
+    /// The request's id in the events.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The stage and reason recorded if this is dropped unanswered.
+    pub fn dropped_as(mut self, stage: FailureStage, reason: &'static str) -> Self {
+        self.dropped_as = stage;
+        self.dropped_reason = reason;
+        self
+    }
+
+    /// Dropped unanswered at or after `deadline` (the budget that bounds the
+    /// fetch ran out), it is recorded `over_budget` with `reason`; dropped
+    /// before it (a navigation, a closed view), at the drop stage.
+    pub fn over_budget_at(mut self, deadline: tokio::time::Instant, reason: &'static str) -> Self {
+        self.budget = Some((deadline.into_std(), reason));
+        self
+    }
+
+    fn duration_ms(&self) -> f64 {
+        round_ms(self.started.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    /// The answer arrived. `mime` may carry parameters; only its essence is
+    /// read, and recorded only as a fixed name (see [`mime_essence`]):
+    /// anything else is the server's text and is `null`.
+    pub fn response(
+        mut self,
+        status: u16,
+        mime: Option<&str>,
+        encoded_size: Option<u64>,
+        decoded_size: Option<u64>,
+        from_cache: bool,
+    ) {
+        self.done = true;
+        let mime = mime.and_then(mime_essence);
+        let event = InspectorEvent::Response {
+            id: self.id,
+            status,
+            mime,
+            encoded_size,
+            decoded_size,
+            from_cache,
+            duration_ms: self.duration_ms(),
+        };
+        self.inspector.finish_request(self.id, event);
+    }
+
+    /// The request failed at `stage`. `reason` is engine text; URLs in it
+    /// are scrubbed and it is capped.
+    pub fn fail(mut self, stage: FailureStage, reason: &str) {
+        self.done = true;
+        let reason = self.inspector.scrub_text(&cap(reason, MAX_SHORT_CHARS).0);
+        let event = InspectorEvent::Failure { id: self.id, stage, reason, duration_ms: self.duration_ms() };
+        self.inspector.finish_request(self.id, event);
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let (stage, reason) = match self.budget {
+            Some((deadline, reason)) if Instant::now() >= deadline => (FailureStage::OverBudget, reason),
+            _ => (self.dropped_as, self.dropped_reason),
+        };
+        let event = InspectorEvent::Failure {
+            id: self.id,
+            stage,
+            reason: reason.to_string(),
+            duration_ms: self.duration_ms(),
+        };
+        self.inspector.finish_request(self.id, event);
+    }
+}
+
+impl RequestGuard {
+    /// The response's status line arrived; its body is still to be read.
+    pub fn received(self, response: &rustkit_net::Response) -> ReceivedResponse {
+        let mime = response
+            .content_type
+            .as_ref()
+            .map(|m| m.essence_str().to_string())
+            .or_else(|| response.headers.get("content-type").and_then(|v| v.to_str().ok()).map(str::to_string));
+        ReceivedResponse {
+            status: response.status.as_u16(),
+            mime,
+            encoded_size: response.encoded_body_size,
+            from_cache: response.from_cache,
+            guard: self,
+        }
+    }
+}
+
+/// A request whose response arrived and whose body is being read: record
+/// it with the decoded size once read, or as a failure if the body is not
+/// usable. Dropped, it records the guard's drop stage.
+pub struct ReceivedResponse {
+    guard: RequestGuard,
+    status: u16,
+    mime: Option<String>,
+    encoded_size: Option<u64>,
+    from_cache: bool,
+}
+
+impl ReceivedResponse {
+    /// The body was read: `decoded_size` bytes.
+    pub fn read(self, decoded_size: usize) {
+        self.guard.response(
+            self.status,
+            self.mime.as_deref(),
+            self.encoded_size,
+            Some(decoded_size as u64),
+            self.from_cache,
+        );
+    }
+
+    /// The response is recorded without reading its body.
+    pub fn unread(self) {
+        self.guard
+            .response(self.status, self.mime.as_deref(), self.encoded_size, None, self.from_cache);
+    }
+
+    /// The body arrived and was not usable (`HTTP <status>` is prefixed).
+    pub fn fail(self, stage: FailureStage, reason: &str) {
+        let reason = format!("HTTP {}: {reason}", self.status);
+        self.guard.fail(stage, &reason);
+    }
+}
+
+/// Record `response` for `guard` (if any), its body `decoded_size` bytes.
+pub fn answer(guard: Option<RequestGuard>, response: &rustkit_net::Response, decoded_size: usize) {
+    if let Some(guard) = guard {
+        guard.received(response).read(decoded_size);
+    }
+}
+
+/// Record a module fetch through the page's policy: its source arrived,
+/// the policy refused it, or the script budget ran out (`Err(Elapsed)`).
+pub fn answer_module(
+    guard: Option<RequestGuard>,
+    fetched: &Result<Result<rustkit_net::policy::ModuleSource, rustkit_net::policy::Denial>, tokio::time::error::Elapsed>,
+) {
+    let Some(guard) = guard else { return };
+    match fetched {
+        Ok(Ok(module)) => guard.response(
+            module.status,
+            module.content_type.as_ref().and_then(|v| v.to_str().ok()),
+            None,
+            Some(module.body_len as u64),
+            false,
+        ),
+        // The server answered; the engine will not run an error page.
+        Ok(Err(rustkit_net::policy::Denial::BadStatus(status))) => guard.response(*status, None, None, None, false),
+        Ok(Err(denial)) => {
+            let (stage, reason) = denial_stage(denial);
+            guard.fail(stage, reason);
+        }
+        Err(_) => guard.fail(FailureStage::OverBudget, "script budget spent"),
+    }
+}
+
+/// Fail `guard` (if any) for a network error.
+pub fn fail_net(guard: Option<RequestGuard>, error: &rustkit_net::NetError) {
+    if let Some(guard) = guard {
+        let (stage, reason) = net_error_stage(error);
+        guard.fail(stage, reason);
+    }
+}
+
+/// The stage of a script request's refusal.
+pub fn denial_stage(denial: &rustkit_net::policy::Denial) -> (FailureStage, &'static str) {
+    use rustkit_net::policy::Denial;
+    match denial {
+        Denial::Scheme(_) => (FailureStage::Policy, "scheme not allowed"),
+        Denial::BadRequest(_) => (FailureStage::Policy, "malformed request"),
+        Denial::PrivateNetwork(_) => (FailureStage::Policy, "private network"),
+        Denial::MixedContent => (FailureStage::Policy, "mixed content"),
+        Denial::Csp => (FailureStage::Policy, "content security policy"),
+        Denial::SameOriginOnly => (FailureStage::Cors, "same-origin request to another origin"),
+        Denial::Cors(_) => (FailureStage::Cors, "CORS check failed"),
+        Denial::Preflight(_) => (FailureStage::Cors, "CORS preflight failed"),
+        Denial::Redirect(_) => (FailureStage::Policy, "redirect not allowed"),
+        Denial::TooManyRedirects => (FailureStage::HttpError, "too many redirects"),
+        Denial::RequestTooLarge => (FailureStage::Policy, "request body too large"),
+        Denial::ResponseTooLarge => (FailureStage::OverBudget, "response too large"),
+        Denial::Timeout => (FailureStage::Timeout, "timed out"),
+        Denial::BudgetExhausted => (FailureStage::OverBudget, "page request budget spent"),
+        Denial::Shield => (FailureStage::Policy, "blocked by the shield"),
+        Denial::BadMime(_) => (FailureStage::Mime, "not a JavaScript MIME type"),
+        Denial::BadStatus(_) => (FailureStage::HttpError, "module answered with an error status"),
+        Denial::Network(_) => (FailureStage::Connect, "network error"),
+        Denial::Cancelled => (FailureStage::Cancelled, "cancelled"),
+    }
+}
+
+/// The stage of a network error, and a reason with nothing from the
+/// error's own text (which can name hosts and paths).
+pub fn net_error_stage(error: &rustkit_net::NetError) -> (FailureStage, &'static str) {
+    match net_error_kind(error) {
+        "dns" => (FailureStage::Dns, "host not found"),
+        "connect" => (FailureStage::Connect, "could not connect"),
+        "tls" => (FailureStage::Tls, "TLS failed"),
+        "timeout" => (FailureStage::Timeout, "timed out"),
+        "policy" => match error {
+            rustkit_net::NetError::Blocked => (FailureStage::Policy, "blocked by the shield"),
+            _ => (FailureStage::Policy, "address not allowed"),
+        },
+        "redirect" => (FailureStage::HttpError, "too many redirects"),
+        "over_budget" => (FailureStage::OverBudget, "response too large"),
+        "http" => (FailureStage::HttpError, "invalid response"),
+        "invalid_url" => (FailureStage::Policy, "invalid or unsupported URL"),
+        "cancelled" => (FailureStage::Cancelled, "cancelled"),
+        _ => (FailureStage::Connect, "network error"),
+    }
+}
+
 fn round_ms(ms: f64) -> f64 {
     (ms * 1000.0).round() / 1000.0
 }
@@ -779,6 +1212,80 @@ fn query_tail(query: &str) -> &str {
     }
     let kept = query.len() - query.trim_end_matches(|c: char| ".,;:!?'\"`)]}>".contains(c)).len();
     &query[query.len() - kept..]
+}
+
+/// The response MIME types a record names; any other is the server's text.
+const RESPONSE_MIME_TYPES: [&str; 42] = [
+    "text/html",
+    "text/css",
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+    "text/ecmascript",
+    "application/ecmascript",
+    "application/json",
+    "application/ld+json",
+    "application/manifest+json",
+    "text/plain",
+    "text/xml",
+    "application/xml",
+    "application/xhtml+xml",
+    "text/event-stream",
+    "image/svg+xml",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+    "image/bmp",
+    "image/x-icon",
+    "image/vnd.microsoft.icon",
+    "font/woff",
+    "font/woff2",
+    "font/ttf",
+    "font/otf",
+    "application/font-woff",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/wav",
+    "audio/webm",
+    "video/mp4",
+    "video/webm",
+    "video/ogg",
+    "application/octet-stream",
+    "application/wasm",
+    "application/pdf",
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+    "text/csv",
+];
+
+/// The registered top-level types: a type not on the list above keeps only
+/// its top-level type, as `<type>/other`.
+const MIME_TOP_LEVEL_TYPES: [&str; 9] =
+    ["application", "audio", "font", "image", "message", "model", "multipart", "text", "video"];
+
+/// A Content-Type's essence as a record names it: one of a fixed list of
+/// types, else `<registered top-level type>/other`, else `None`. Only a
+/// well-formed `type/subtype` (each side an RFC 9110 token) is read at all:
+/// anything else (`application/json, token=...`) is header text. Nothing the
+/// server chose beyond the fixed names is kept.
+pub fn mime_essence(content_type: &str) -> Option<String> {
+    let essence = content_type.split(';').next().unwrap_or("").trim();
+    let token = |s: &str| {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    };
+    let (kind, subtype) = essence.split_once('/')?;
+    if !(token(kind) && token(subtype)) {
+        return None;
+    }
+    if let Some(known) = RESPONSE_MIME_TYPES.iter().find(|m| m.eq_ignore_ascii_case(essence)) {
+        return Some(known.to_string());
+    }
+    MIME_TOP_LEVEL_TYPES
+        .iter()
+        .find(|t| t.eq_ignore_ascii_case(kind))
+        .map(|t| format!("{t}/other"))
 }
 
 /// A script position as text gives it: path, line, column.
@@ -936,10 +1443,15 @@ pub struct InspectorSummary {
     pub unhandled_rejections: u64,
     /// `Interface.member` to how often page script reached it.
     pub unsupported_apis: std::collections::BTreeMap<String, u64>,
+    /// Requests by resource type, then by outcome: the response's status
+    /// class (`2xx`, `3xx`, `4xx`, `5xx`, `other`) or `failed`.
+    pub requests: std::collections::BTreeMap<String, std::collections::BTreeMap<String, u64>>,
+    /// Failed requests by stage.
+    pub failures_by_stage: std::collections::BTreeMap<String, u64>,
 }
 
-/// The summary layout version.
-pub const SUMMARY_SCHEMA: u32 = 1;
+/// The summary layout version (2: `requests`, `failures_by_stage`).
+pub const SUMMARY_SCHEMA: u32 = 2;
 
 impl InspectorSummary {
     /// Count `records`; the unsupported members' counts come from
@@ -950,8 +1462,28 @@ impl InspectorSummary {
             events: records.len() as u64,
             ..Default::default()
         };
+        let mut types = std::collections::HashMap::new();
         for record in records {
             match &record.event {
+                InspectorEvent::Request { id, resource_type, .. } => {
+                    types.insert(*id, resource_type.as_str());
+                }
+                InspectorEvent::Response { id, status, .. } => {
+                    let outcome = match status {
+                        200..=299 => "2xx",
+                        300..=399 => "3xx",
+                        400..=499 => "4xx",
+                        500..=599 => "5xx",
+                        _ => "other",
+                    };
+                    let kind = types.get(id).copied().unwrap_or("other");
+                    *summary.requests.entry(kind.into()).or_default().entry(outcome.into()).or_insert(0) += 1;
+                }
+                InspectorEvent::Failure { id, stage, .. } => {
+                    let kind = types.get(id).copied().unwrap_or("other");
+                    *summary.requests.entry(kind.into()).or_default().entry("failed".into()).or_insert(0) += 1;
+                    *summary.failures_by_stage.entry(stage.as_str().into()).or_insert(0) += 1;
+                }
                 InspectorEvent::Console { level, .. } => {
                     let counter = match level {
                         ConsoleLevel::Log => &mut summary.console.log,

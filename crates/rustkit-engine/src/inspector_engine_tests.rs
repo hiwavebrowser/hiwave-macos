@@ -16,7 +16,7 @@ pub(crate) struct Route {
     pub path: &'static str,
     pub status: u16,
     pub content_type: &'static str,
-    pub body: String,
+    pub body: Vec<u8>,
     /// Answer after this long.
     pub delay_ms: u64,
     /// Extra response headers.
@@ -27,7 +27,10 @@ pub(crate) struct Route {
 #[allow(dead_code)]
 impl Route {
     pub fn ok(path: &'static str, content_type: &'static str, body: impl Into<String>) -> Self {
-        Route { path, status: 200, content_type, body: body.into(), delay_ms: 0, headers: Vec::new() }
+        Route { path, status: 200, content_type, body: body.into().into_bytes(), delay_ms: 0, headers: Vec::new() }
+    }
+    pub fn bytes(path: &'static str, content_type: &'static str, body: Vec<u8>) -> Self {
+        Route { path, status: 200, content_type, body, delay_ms: 0, headers: Vec::new() }
     }
     pub fn html(path: &'static str, body: impl Into<String>) -> Self {
         Self::ok(path, "text/html", body)
@@ -115,7 +118,7 @@ pub(crate) fn serve(routes: Vec<Route>) -> TestServer {
                 }
                 head.push_str("\r\n");
                 let _ = stream.write_all(head.as_bytes());
-                let _ = stream.write_all(route.body.as_bytes());
+                let _ = stream.write_all(&route.body);
             });
         }
     });
@@ -174,6 +177,21 @@ pub(crate) fn describe(record: &InspectorRecord, port: u16) -> String {
         InspectorEvent::FirstLayout => "first_layout".into(),
         InspectorEvent::FirstPaint => "first_paint".into(),
         InspectorEvent::Relayout { cause, .. } => format!("relayout {cause}"),
+        InspectorEvent::NavigationRedirect { from, to, status } => {
+            format!("navigation_redirect {} -> {} {status}", local(from), local(to))
+        }
+        InspectorEvent::Request { id, url, method, resource_type, initiator } => format!(
+            "request #{id} {method} {} {} by={}",
+            resource_type.as_str(),
+            local(url),
+            initiator.as_deref().unwrap_or("-")
+        ),
+        InspectorEvent::Response { id, status, mime, from_cache, .. } => format!(
+            "response #{id} {status} {}{}",
+            mime.as_deref().unwrap_or("-"),
+            if *from_cache { " cache" } else { "" }
+        ),
+        InspectorEvent::Failure { id, stage, reason, .. } => format!("failure #{id} {} {reason}", stage.as_str()),
     }
 }
 
@@ -230,6 +248,8 @@ fn a_page_load_is_recorded_in_order() {
         described(&engine, view, server.port),
         vec![
             "navigation_start /",
+            "request #1 GET document / by=navigation",
+            "response #1 200 text/html",
             "navigation_commit / 200",
             "first_layout",
             "first_paint",
@@ -381,7 +401,15 @@ fn a_document_that_cannot_be_fetched_ends_the_load_early() {
     let url = Url::parse(&format!("http://127.0.0.1:{closed}/")).unwrap();
     assert!(runtime().block_on(engine.load_url(view, url)).is_err());
     let lines = described(&engine, view, closed);
-    assert_eq!(lines, vec!["navigation_start /", "load_ended_early Failed"]);
+    assert_eq!(
+        lines,
+        vec![
+            "navigation_start /",
+            "request #1 GET document / by=navigation",
+            "failure #1 connect could not connect",
+            "load_ended_early Failed"
+        ]
+    );
 }
 
 #[test]
@@ -391,7 +419,12 @@ fn an_empty_error_response_ends_the_load_early() {
     assert!(runtime().block_on(engine.load_url(view, server.url("/"))).is_err());
     assert_eq!(
         described(&engine, view, server.port),
-        vec!["navigation_start /", "load_ended_early Failed"]
+        vec![
+            "navigation_start /",
+            "request #1 GET document / by=navigation",
+            "response #1 404 text/html",
+            "load_ended_early Failed"
+        ]
     );
 }
 

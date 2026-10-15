@@ -107,6 +107,11 @@ pub struct ScriptResponse {
 pub struct ModuleSource {
     pub final_url: Url,
     pub source: String,
+    /// The response's status (2xx) and `Content-Type`, for diagnostics.
+    pub status: u16,
+    pub content_type: Option<http::HeaderValue>,
+    /// Body bytes as received.
+    pub body_len: usize,
 }
 
 /// Why a request was refused. Script sees an error event / `TypeError`.
@@ -540,7 +545,14 @@ impl FetchPolicy {
         // Modules are always UTF-8, whatever the charset label says.
         let text = String::from_utf8_lossy(&r.body);
         let source = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
-        Ok(ModuleSource { final_url: r.url, source })
+        Ok(ModuleSource {
+            final_url: r.url,
+            source,
+            status: r.status,
+            // A header clone shares its bytes: nothing is allocated here.
+            content_type: r.headers.get(http::header::CONTENT_TYPE).cloned(),
+            body_len: r.body.len(),
+        })
     }
 
     fn validate_shape(&self, req: &ScriptRequest) -> Result<(), Denial> {

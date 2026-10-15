@@ -113,7 +113,8 @@ struct Args {
     event_log: Option<String>,
 
     /// Add `event_summary` to the result: counts over the Inspector events
-    /// (console calls by level, script errors, unsupported APIs by member).
+    /// (console calls by level, script errors, unsupported APIs by member,
+    /// requests by type and outcome, failures by stage).
     #[arg(long)]
     event_summary: bool,
 
