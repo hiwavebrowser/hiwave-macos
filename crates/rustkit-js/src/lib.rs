@@ -9,11 +9,13 @@
 //! 3. **Safe interop**: Controlled boundary between Rust and JS
 //! 4. **Async support**: Event loop integration
 
+pub mod control;
 mod import_map;
 #[cfg(feature = "boa")]
 mod module;
 #[cfg(feature = "boa")]
 pub use module::{FetchedModule, ModuleHandle, ModuleState};
+pub use control::{ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
 mod executor;
 #[cfg(feature = "boa")]
@@ -199,6 +201,30 @@ struct ExecutionDeadline {
     hit: std::cell::Cell<bool>,
     /// How long after `at` the first refused host call came.
     late: std::cell::Cell<Option<std::time::Duration>>,
+    /// The view's interrupt word ([`JsRuntime::set_view_control`]), which
+    /// another thread may set. Boa reads it itself, at every call
+    /// (host calls included) and loop back-edge; this copy says whether it
+    /// was what stopped the script.
+    control: std::cell::RefCell<Option<Arc<control::ViewControl>>>,
+    /// The turn running now ([`JsRuntime::begin_turn`]); 0 = none.
+    turn: std::cell::Cell<u64>,
+    /// Whether Boa compares the word with `turn` now: not during
+    /// bookkeeping ([`JsRuntime::evaluate_bookkeeping`]).
+    armed: std::cell::Cell<bool>,
+    /// The stamp the open turn is on, for the grace turn after a stop.
+    stamp: std::cell::RefCell<Option<Arc<control::ThreadStamp>>>,
+    /// Whether this turn's grace turn has been opened.
+    graced: std::cell::Cell<bool>,
+}
+
+impl ExecutionDeadline {
+    /// Whether the view's interrupt word stops the running turn.
+    fn interrupted(&self) -> bool {
+        self.control
+            .borrow()
+            .as_ref()
+            .is_some_and(|control| control.stops(self.turn.get()))
+    }
 }
 
 /// JavaScript runtime that wraps the underlying engine.
@@ -315,9 +341,9 @@ impl JsRuntime {
     pub fn run_jobs(&mut self) -> Result<(), JsError> {
         #[cfg(feature = "boa")]
         {
-            self.context
-                .run_jobs()
-                .map_err(|e| JsError::ExecutionError(e.to_string()))
+            let result = self.context.run_jobs();
+            self.consume_interrupt();
+            result.map_err(|e| JsError::ExecutionError(e.to_string()))
         }
         #[cfg(not(feature = "boa"))]
         {
@@ -523,10 +549,12 @@ impl JsRuntime {
                     .context
                     .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH))),
             };
+            self.consume_interrupt();
             // Promise reactions (`.then`, `await`) are jobs Boa queues but
             // does not run on its own; a page's async code never resumes
             // without this.
             let job_result = self.context.run_jobs();
+            self.consume_interrupt();
 
             match result {
                 Ok(value) => {
@@ -593,9 +621,117 @@ impl JsRuntime {
     }
 
     /// Whether the deadline has stopped a host call since it was last set
-    /// or asked about.
+    /// or asked about, or the view's interrupt word stops the running turn
+    /// (which stays true until the turn ends).
     pub fn take_deadline_hit(&mut self) -> bool {
-        self.deadline.hit.replace(false)
+        self.deadline.hit.replace(false) | self.deadline.interrupted()
+    }
+
+    /// Give this runtime its view's control block: from now on another
+    /// thread can stop the running turn by its interrupt word, at the next
+    /// call (host calls included) or loop back-edge, the vendored Boa's
+    /// patch. `None` takes it away.
+    pub fn set_view_control(&mut self, control: Option<Arc<control::ViewControl>>) {
+        #[cfg(feature = "boa")]
+        self.context
+            .set_interrupt_word(control.as_ref().map(|c| c.word().clone()));
+        *self.deadline.control.borrow_mut() = control;
+    }
+
+    /// Open a turn on `stamp` for this runtime's view, with `budget` before
+    /// the watchdog stops it, and return its id. Without a view control
+    /// nothing is published and the id is 0. Every `begin_turn` is paired
+    /// with an [`JsRuntime::end_turn`] on the same stamp.
+    pub fn begin_turn(&mut self, stamp: &Arc<control::ThreadStamp>, budget: Duration) -> u64 {
+        let Some(control) = self.deadline.control.borrow().clone() else {
+            return 0;
+        };
+        let turn = stamp.begin_turn(&control, budget);
+        *self.deadline.stamp.borrow_mut() = Some(stamp.clone());
+        self.deadline.graced.set(false);
+        self.set_turn(turn);
+        turn
+    }
+
+    /// Close what [`JsRuntime::begin_turn`] opened.
+    pub fn end_turn(&mut self, stamp: &control::ThreadStamp) {
+        if self.deadline.control.borrow().is_none() {
+            return;
+        }
+        stamp.end_turn();
+        let open = stamp.current_turn();
+        if open == 0 {
+            *self.deadline.stamp.borrow_mut() = None;
+        }
+        self.set_turn(open);
+    }
+
+    /// The turn the interrupt word is compared with.
+    fn set_turn(&mut self, turn: u64) {
+        self.deadline.turn.set(turn);
+        self.arm(turn != 0);
+    }
+
+    /// Whether Boa stops the running turn by the word (`ALL` it always does).
+    fn arm(&mut self, armed: bool) {
+        self.deadline.armed.set(armed);
+        #[cfg(feature = "boa")]
+        self.context
+            .set_interrupt_turn(if armed { self.deadline.turn.get() } else { 0 });
+    }
+
+    /// Called each time script returns to Rust. The first time a turn's
+    /// script has been stopped (by the word, or by the deadline's host-call
+    /// refusal, which the watchdog's word then follows by a moment), the
+    /// rest of the turn moves to a grace turn of
+    /// [`STOP_GRACE`](control::STOP_GRACE): the stop has ended the script
+    /// that ran too long, and what the turn's finished script queued (an
+    /// XHR's `send` registers its request in a promise reaction) still runs,
+    /// as it did before the word existed. The watchdog stops the grace turn
+    /// too, and that stop is final. `take_deadline_hit` reports the stop.
+    #[cfg(feature = "boa")]
+    pub(crate) fn consume_interrupt(&mut self) {
+        if !self.deadline.armed.get() || self.deadline.graced.get() {
+            return;
+        }
+        if !(self.deadline.interrupted() || self.deadline.hit.get()) {
+            return;
+        }
+        self.deadline.hit.set(true);
+        self.deadline.graced.set(true);
+        let control = self.deadline.control.borrow().clone();
+        let stamp = self.deadline.stamp.borrow().clone();
+        if let (Some(control), Some(stamp)) = (control, stamp) {
+            stamp.end_turn();
+            let grace = stamp.begin_turn(&control, control::STOP_GRACE);
+            self.set_turn(grace);
+        }
+    }
+
+    /// Evaluate the embedder's own bookkeeping script (reading a queue or a
+    /// table the page's script filled), which the interrupt word never
+    /// stops: a stop landing in it would lose what it reads, such as the
+    /// requests a stopped turn's callbacks made. Only for short script that
+    /// calls none of the page's functions. Runs no promise jobs (they are
+    /// the page's, and run at the next evaluation); [`ALL`](control::ALL)
+    /// still stops it.
+    pub fn evaluate_bookkeeping(&mut self, source: &str) -> Result<JsValue, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let armed = self.deadline.armed.get();
+            self.arm(false);
+            let result = self.context.eval(boa_engine::Source::from_bytes(source));
+            self.arm(armed);
+            match result {
+                Ok(value) => Ok(self.convert_boa_value(&value)),
+                Err(err) => Err(JsError::ExecutionError(err.to_string())),
+            }
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = source;
+            Err(JsError::NotInitialized)
+        }
     }
 
     /// How long after the deadline the host call that stopped script came,

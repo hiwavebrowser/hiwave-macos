@@ -75,7 +75,7 @@ impl DomBindings {
     /// Take every request queued since the last call, in the order the page
     /// made them. Empty when the bridge is not enabled.
     pub fn take_net_requests(&self) -> Vec<NetRequest> {
-        let taken = self.runtime.borrow_mut().evaluate_script(
+        let taken = self.runtime.borrow_mut().evaluate_bookkeeping(
             "window.__rustkit_net ? window.__rustkit_net.take() : '[]'",
         );
         match taken {
@@ -138,7 +138,7 @@ impl DomBindings {
         match self
             .runtime
             .borrow_mut()
-            .evaluate_script("window.__rustkit_net ? window.__rustkit_net.waiting() : 0")
+            .evaluate_bookkeeping("window.__rustkit_net ? window.__rustkit_net.waiting() : 0")
         {
             Ok(JsValue::Number(n)) => n as usize,
             _ => 0,

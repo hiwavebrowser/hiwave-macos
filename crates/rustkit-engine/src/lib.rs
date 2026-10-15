@@ -338,6 +338,8 @@ mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod vm_interrupt_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
@@ -745,6 +747,10 @@ struct ViewState {
     display_list: Option<DisplayList>,
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
+    /// The view's stop state: the interrupt word another thread (the
+    /// watchdog, later the user's Stop) sets to end its running script.
+    /// Lives as long as the view; each new document's bindings get it.
+    control: Arc<rustkit_js::ViewControl>,
     navigation: NavigationStateMachine,
     /// Monotonic navigation generation, bumped by `Engine::stop` and by each
     /// new `load_url`.
@@ -1254,15 +1260,39 @@ fn log_script_stopped(source: &str, elapsed_ms: u64, late: Option<std::time::Dur
     );
 }
 
+thread_local! {
+    /// This thread's stamp for the watchdog (`rustkit_js::Watchdog`): which
+    /// turn of script it is running and since when. One per thread because
+    /// a thread runs one turn at a time, whichever engine or view it is for.
+    static SCRIPT_STAMP: Arc<rustkit_js::ThreadStamp> = rustkit_js::Watchdog::shared().thread_stamp();
+}
+
+/// Opens a turn of script on `bindings` for the watchdog, which stops it
+/// past `budget` wherever it is, host call or not (threads plan M1).
+fn begin_script_turn(bindings: &DomBindings, budget: std::time::Duration) {
+    SCRIPT_STAMP.with(|stamp| bindings.begin_turn(stamp, budget));
+}
+
+/// Closes what [`begin_script_turn`] opened.
+fn end_script_turn(bindings: &DomBindings) {
+    SCRIPT_STAMP.with(|stamp| bindings.end_turn(stamp));
+}
+
 /// Starts the live turn budget (`EngineConfig::live_turn_budget_ms`) for the
 /// script about to run on `bindings`, and returns when it started. `None`
 /// when scripts are not interrupted (the board).
+///
+/// The budget is kept twice: by the deadline, which refuses host calls
+/// past it, and by the watchdog thread, which sets the view's interrupt
+/// word and so also stops script that never calls the host.
 fn arm_live_turn(config: &EngineConfig, bindings: &DomBindings) -> Option<std::time::Instant> {
     if !config.interrupt_scripts_at_budget {
         return None;
     }
     let now = std::time::Instant::now();
-    bindings.set_execution_deadline(Some(now + std::time::Duration::from_millis(config.live_turn_budget_ms)));
+    let budget = std::time::Duration::from_millis(config.live_turn_budget_ms);
+    bindings.set_execution_deadline(Some(now + budget));
+    begin_script_turn(bindings, budget);
     Some(now)
 }
 
@@ -1278,9 +1308,11 @@ fn end_live_turn(
     source: &str,
 ) -> Option<ScriptRecord> {
     let started = armed?;
+    // Read before the turn ends: the interrupt word stops only its turn.
     let hit = bindings.take_deadline_hit();
     let late = bindings.take_deadline_overrun();
     bindings.set_execution_deadline(None);
+    end_script_turn(bindings);
     if !hit {
         return None;
     }
@@ -1290,7 +1322,9 @@ fn end_live_turn(
     // limit as well.
     let note = format!("Script stopped: it ran past {} ms ({source})", config.live_turn_budget_ms);
     bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
+    begin_script_turn(bindings, STOP_NOTE_BUDGET);
     let _ = bindings.evaluate(&format!("console.warn({})", serde_json::Value::String(note)));
+    end_script_turn(bindings);
     bindings.set_execution_deadline(None);
     Some(ScriptRecord {
         source: source.to_string(),
@@ -1950,6 +1984,7 @@ impl Engine {
         // Create view state
         let view_state = ViewState {
             id,
+            control: rustkit_js::Watchdog::shared().view_control(),
             viewhost_id,
             url: None,
             title: None,
@@ -2036,6 +2071,7 @@ impl Engine {
 
         let view_state = ViewState {
             id: EngineViewId::new(),
+            control: rustkit_js::Watchdog::shared().view_control(),
             viewhost_id,
             url: None,
             title: None,
@@ -2131,6 +2167,7 @@ impl Engine {
 
         let view_state = ViewState {
             id,
+            control: rustkit_js::Watchdog::shared().view_control(),
             viewhost_id,
             url: None,
             title: None,
@@ -4276,8 +4313,14 @@ impl Engine {
         // ends the script that is running when it is spent.
         if self.config.interrupt_scripts_at_budget {
             bindings.set_execution_deadline(Some(std::time::Instant::now() + budget));
+            // The watchdog keeps the same budget for script with no host
+            // call in it.
+            begin_script_turn(&bindings, budget);
         }
         self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log).await;
+        if self.config.interrupt_scripts_at_budget {
+            end_script_turn(&bindings);
+        }
         bindings.set_execution_deadline(None);
         if let Some(view) = self.views.get_mut(&id) {
             log.append(&mut view.script_log);
@@ -4996,6 +5039,10 @@ impl Engine {
                 .views
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
+            // A new document: a "no more script" stop on the view ends
+            // with the document it was for.
+            view.control.clear_all();
+            bindings.set_view_control(Some(view.control.clone()));
             view.bindings = Some(bindings);
             view.script_policy = script_policy.clone();
         }
@@ -5300,6 +5347,10 @@ impl Engine {
                 .views
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
+            // A new document: a "no more script" stop on the view ends
+            // with the document it was for.
+            view.control.clear_all();
+            bindings.set_view_control(Some(view.control.clone()));
             view.bindings = Some(bindings);
         }
 
