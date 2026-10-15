@@ -4976,6 +4976,14 @@ impl Engine {
         view.header_referrer_policy = header_referrer_policy;
         view.http_status = Some(status.as_u16());
         view.reset_for_new_document();
+        // The commit: the interrupt word is this document's from here, and
+        // a cancel now stops its script (M3b). Until this, a cancel ends
+        // the load at its next await and leaves the shown page's script.
+        view.control.commit_nav(generation);
+        // Not laid out yet. Set to whether the first layout waits for the
+        // sheets below; a cancel that comes first lays it out
+        // (`load_cancelled`), or the frame keeps the previous page's.
+        view.initial_layout_deferred = true;
         view.inspector.emit_with(|inspector| InspectorEvent::NavigationCommit {
             url: Some(inspector.url(&url)),
             status: Some(status.as_u16()),
@@ -5033,9 +5041,7 @@ impl Engine {
                 .views
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
-            // A new document: a "no more script" stop on the view ends
-            // with the document it was for.
-            view.control.clear_all();
+            // The word was handed to this document at the commit above.
             bindings.set_view_control(Some(view.control.clone()));
             view.bindings = Some(bindings);
             view.script_policy = script_policy.clone();
@@ -5330,6 +5336,8 @@ impl Engine {
         view.header_referrer_policy = None;
         view.http_status = None;
         view.reset_for_new_document();
+        // The commit: the interrupt word is this document's from here (M3b).
+        view.control.commit_nav(watch.nav_id);
         view.inspector.emit(InspectorEvent::NavigationCommit { url: None, status: None });
         let inspector = view.inspector.clone();
 
@@ -5369,9 +5377,7 @@ impl Engine {
                 .views
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
-            // A new document: a "no more script" stop on the view ends
-            // with the document it was for.
-            view.control.clear_all();
+            // The word was handed to this document at the commit above.
             bindings.set_view_control(Some(view.control.clone()));
             view.bindings = Some(bindings);
         }
@@ -11117,7 +11123,17 @@ impl Engine {
         if view.nav_id != nav_id || !view.control.nav_cancelled(nav_id) {
             return;
         }
-        view.control.stop_all();
+        // Before the commit the word is the shown page's, whose script
+        // keeps running: the cancel is of the load, not of that page.
+        let committed = view.control.nav_committed(nav_id);
+        if committed {
+            view.control.stop_all();
+        }
+        // A cancel during a render-blocking sheet (or before the first
+        // layout) leaves the committed document never laid out: lay it out
+        // as it is, unstyled as Chrome shows a stopped one, so the frame and
+        // hit-testing are not the previous page's.
+        let unlaid = committed && std::mem::take(&mut view.initial_layout_deferred);
         view.decode_epoch = view.decode_epoch.wrapping_add(1);
         self.image_manager.begin_navigation(id.0, view.decode_epoch);
         if view.navigation.is_loading() {
@@ -11137,6 +11153,11 @@ impl Engine {
                     .unwrap_or_else(|| Url::parse("about:blank").expect("about:blank parses")),
                 error: "cancelled".to_string(),
             });
+        }
+        if unlaid {
+            if let Err(e) = self.relayout_for(id, RelayoutCause::InitialLoad) {
+                warn!(?e, "Failed to lay out a cancelled load's document");
+            }
         }
     }
 
@@ -12189,7 +12210,10 @@ impl Engine {
         let mut deferred = false;
         if let Some(view) = self.views.get_mut(&id) {
             view.external_stylesheets = external_stylesheets;
-            deferred = std::mem::take(&mut view.initial_layout_deferred);
+            // Read, not taken: a cancel before the relayout below (which
+            // may drop this future at any await) finds it still set and
+            // lays the document out (`load_cancelled`).
+            deferred = view.initial_layout_deferred;
         }
 
         if count > 0 {
@@ -12221,6 +12245,9 @@ impl Engine {
         // A deferred first layout happens here even if every sheet failed.
         if count > 0 || had_previous || fonts_loaded > 0 || deferred {
             if deferred {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.initial_layout_deferred = false;
+                }
                 self.note_relayout_cause(id, RelayoutCause::InitialLoad);
             }
             if count > 0 || had_previous {

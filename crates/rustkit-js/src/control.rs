@@ -67,6 +67,10 @@ pub struct ViewControl {
     nav: AtomicU64,
     /// The navigation whose load is in progress; 0 = none.
     loading_nav: AtomicU64,
+    /// The newest navigation whose document has replaced the view's; 0 =
+    /// none. Until `loading_nav` commits, the word belongs to the previous
+    /// document's script, which a cancel of the new load must not stop.
+    committed_nav: AtomicU64,
     /// Held while `loading_nav` is read or written together with the
     /// interrupt word, so a cancel for a load that just ended cannot set
     /// [`ALL`] on the next document after it cleared the word.
@@ -84,6 +88,7 @@ impl ViewControl {
             cancel_nav: AtomicU64::new(0),
             nav: AtomicU64::new(0),
             loading_nav: AtomicU64::new(0),
+            committed_nav: AtomicU64::new(0),
             nav_lock: Mutex::new(()),
             nav_epoch: AtomicU64::new(0),
         }
@@ -128,6 +133,25 @@ impl ViewControl {
         self.loading_nav.store(nav_id, Ordering::SeqCst);
     }
 
+    /// Navigation `nav_id`'s document has replaced the view's: from here
+    /// the word is its script's. Lifts [`ALL`], which ended with the
+    /// previous document, unless `nav_id` was cancelled already, whose
+    /// script then never starts. Called by the page thread only.
+    pub fn commit_nav(&self, nav_id: u64) {
+        let _held = self.nav_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.committed_nav.store(nav_id, Ordering::SeqCst);
+        if self.nav_cancelled(nav_id) {
+            self.stop_all();
+        } else {
+            self.clear_all();
+        }
+    }
+
+    /// Whether `nav_id`'s document has replaced the view's.
+    pub fn nav_committed(&self, nav_id: u64) -> bool {
+        nav_id != 0 && self.committed_nav.load(Ordering::SeqCst) == nav_id
+    }
+
     /// The load of `nav_id` is over. Whether it ended uncancelled: a
     /// cancel that arrives after this finds no load and leaves the word
     /// alone, and one that arrived before it is reported here.
@@ -140,10 +164,13 @@ impl ViewControl {
     }
 
     /// Cancel navigation `nav_id` and every earlier one, from any thread.
-    /// If its load is in progress the interrupt word is set to [`ALL`], so
-    /// a script of that load that is running now stops at its next call or
-    /// loop back-edge, and none of its later scripts starts; the next
-    /// document clears it. Whether a load in progress was cancelled.
+    /// If its load is in progress and has committed its document, the
+    /// interrupt word is set to [`ALL`], so a script of that load that is
+    /// running now stops at its next call or loop back-edge, and none of
+    /// its later scripts starts; the next document clears it. Before the
+    /// commit the word is the previous document's and is left alone: the
+    /// load ends at its next await. Whether a load in progress was
+    /// cancelled.
     pub fn cancel_nav(&self, nav_id: u64) -> bool {
         if nav_id == 0 {
             return false;
@@ -152,7 +179,7 @@ impl ViewControl {
         self.cancel_nav.fetch_max(nav_id, Ordering::SeqCst);
         let loading = self.loading_nav.load(Ordering::SeqCst);
         let hit = loading != 0 && loading <= nav_id;
-        if hit {
+        if hit && self.committed_nav.load(Ordering::SeqCst) == loading {
             self.stop_all();
         }
         hit
@@ -457,10 +484,37 @@ mod tests {
         let control = ViewControl::new();
         control.begin_nav(3);
         assert!(!control.nav_cancelled(3));
+        control.commit_nav(3);
         assert!(control.cancel_nav(3), "the load in progress was hit");
         assert!(control.nav_cancelled(3) && control.nav_cancelled(2));
         assert!(control.stops(42), "its running script stops");
         assert!(!control.end_load(3), "the load reports the cancel");
+    }
+
+    #[test]
+    fn a_cancel_before_the_commit_spares_the_previous_document() {
+        let control = ViewControl::new();
+        control.begin_nav(1);
+        control.commit_nav(1);
+        assert!(control.end_load(1));
+        control.begin_nav(2);
+        assert!(control.cancel_nav(2), "the load in progress was hit");
+        assert!(control.nav_cancelled(2));
+        assert!(!control.stops(42), "the shown document keeps its script");
+        assert!(!control.end_load(2), "the load reports the cancel");
+    }
+
+    #[test]
+    fn a_commit_after_the_cancel_stops_the_new_documents_script() {
+        let control = ViewControl::new();
+        control.begin_nav(1);
+        assert!(control.cancel_nav(1));
+        assert!(!control.stops(42));
+        control.commit_nav(1);
+        assert!(
+            control.stops(42),
+            "none of the cancelled load's script runs"
+        );
     }
 
     #[test]

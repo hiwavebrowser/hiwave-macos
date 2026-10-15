@@ -613,3 +613,96 @@ fn each_navigation_gets_the_next_nav_id_and_stop_does_not() {
         "no load left in progress"
     );
 }
+
+/// The view's display list, to compare frames by.
+fn frame_of(engine: &Engine, view: EngineViewId) -> String {
+    format!("{:?}", engine.views[&view].display_list)
+}
+
+#[test]
+fn a_cancel_during_a_render_blocking_sheet_lays_out_the_committed_document() {
+    let first = "<html><head><title>first</title></head><body><p>first</p></body></html>";
+    let second = "<html><head><title>second</title><link rel=stylesheet href=/held/a.css>\
+</head><body><p>second</p></body></html>";
+    let server = serve(vec![
+        ("/first", first.to_string()),
+        ("/second", second.to_string()),
+        ("/next", NEXT.to_string()),
+    ]);
+    let (mut engine, view) = engine_and_view();
+    let mut rx = engine.take_event_receiver().unwrap();
+    let rt = runtime();
+    rt.block_on(engine.load_url(view, server.url("/first")))
+        .unwrap();
+    let first_frame = frame_of(&engine, view);
+    let _ = events(&mut rx);
+
+    let canceller = engine.nav_canceller(view).unwrap();
+    let requested = server.held_requested.clone();
+    let cancel = std::thread::spawn(move || {
+        wait_until_held(&requested, 1);
+        assert!(canceller.cancel_current());
+    });
+    rt.block_on(engine.load_url(view, server.url("/second")))
+        .unwrap();
+    cancel.join().unwrap();
+
+    let seen = events(&mut rx);
+    assert!(cancelled(&seen), "{seen:?}");
+    // The document committed before the sheet was asked for: it stays,
+    // and the frame is of it, laid out without the sheet.
+    assert_eq!(engine.get_url(view), Some(server.url("/second")));
+    assert_eq!(engine.get_title(view).as_deref(), Some("second"));
+    assert!(!engine.views[&view].initial_layout_deferred);
+    assert!(
+        engine.views[&view].external_stylesheets.is_empty(),
+        "the held sheet was not applied"
+    );
+    assert_ne!(
+        frame_of(&engine, view),
+        first_frame,
+        "the frame is the committed document's, not the previous page's"
+    );
+    assert_next_navigation_loads(&mut engine, view, &server, &mut rx, &rt);
+}
+
+#[test]
+fn a_cancel_before_the_commit_leaves_the_shown_pages_script_running() {
+    let first = "<html><head><title>first</title></head><body><p>first</p>\
+<script>function f() { return 1; } window.n = 1;</script></body></html>";
+    let server = serve(vec![
+        ("/first", first.to_string()),
+        ("/next", NEXT.to_string()),
+    ]);
+    let (mut engine, view) = engine_and_view();
+    let mut rx = engine.take_event_receiver().unwrap();
+    let rt = runtime();
+    rt.block_on(engine.load_url(view, server.url("/first")))
+        .unwrap();
+    assert_eq!(
+        engine.execute_script(view, "f() + window.n").unwrap(),
+        "Number(2.0)"
+    );
+    let _ = events(&mut rx);
+
+    // The document itself is held: the cancel lands before the commit.
+    let canceller = engine.nav_canceller(view).unwrap();
+    let requested = server.held_requested.clone();
+    let cancel = std::thread::spawn(move || {
+        wait_until_held(&requested, 1);
+        assert!(canceller.cancel_current());
+    });
+    rt.block_on(engine.load_url(view, server.url("/held/second")))
+        .unwrap();
+    cancel.join().unwrap();
+
+    let seen = events(&mut rx);
+    assert!(cancelled(&seen), "{seen:?}");
+    assert_eq!(engine.get_url(view), Some(server.url("/first")));
+    assert_eq!(
+        engine.execute_script(view, "f() + window.n").unwrap(),
+        "Number(2.0)",
+        "the shown page's script still runs"
+    );
+    assert_next_navigation_loads(&mut engine, view, &server, &mut rx, &rt);
+}
