@@ -206,6 +206,7 @@ impl PhaseHook {
 impl Drop for PhaseHook {
     fn drop(&mut self) {
         nav_cancel::LOAD_PHASE_HOOK.with(|h| *h.borrow_mut() = None);
+        let _ = nav_cancel::take_stop_at_phase();
     }
 }
 
@@ -223,6 +224,12 @@ fn cancelled(events: &[EngineEvent]) -> bool {
     events
         .iter()
         .any(|e| matches!(e, EngineEvent::NavigationFailed { error, .. } if error == "cancelled"))
+}
+
+fn stopped(events: &[EngineEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, EngineEvent::NavigationFailed { error, .. } if error == "stopped"))
 }
 
 fn sources(engine: &Engine, view: EngineViewId) -> Vec<(String, ScriptOutcome)> {
@@ -375,6 +382,62 @@ fn a_load_held_on_twenty_slow_subresources_is_cancelled_within_200_ms() {
 #[test]
 fn a_load_spinning_in_its_script_is_cancelled_within_200_ms() {
     cancel_a_spinning_load_with_twenty_slow_subresources(Point::Spinning);
+}
+
+#[test]
+fn a_stop_during_the_parse_fails_as_stopped_and_leaves_the_shown_document() {
+    let first = "<html><head><title>first</title></head><body><p>first</p></body></html>";
+    let second = "<html><head><title>second</title></head><body><p>second</p>\
+<script>document.title = 'second ran';</script></body></html>";
+    let server = serve(vec![
+        ("/first", first.to_string()),
+        ("/second", second.to_string()),
+        ("/next", NEXT.to_string()),
+    ]);
+    let (mut engine, view) = engine_and_view();
+    let mut rx = engine.take_event_receiver().unwrap();
+    let rt = runtime();
+    rt.block_on(engine.load_url(view, server.url("/first")))
+        .unwrap();
+    let first_document = engine.views[&view].document.clone().unwrap();
+    let layouts = engine.relayout_stats(view).unwrap().clone();
+    let decode_before = engine.decode_nav(view);
+    let _ = events(&mut rx);
+
+    // Stop at parse: same path as the window-thread Stop button, which must
+    // emit "stopped" (not the cooperative-cancel "cancelled") and bump the
+    // decode epoch so in-flight decodes of this load are dropped.
+    let _hook = PhaseHook::set(move |phase| {
+        if phase == "parse" {
+            nav_cancel::request_stop_at_phase();
+        }
+    });
+    rt.block_on(engine.load_url(view, server.url("/second")))
+        .unwrap();
+    drop(_hook);
+
+    let seen = events(&mut rx);
+    assert!(stopped(&seen), "{seen:?}");
+    assert!(!cancelled(&seen), "{seen:?}");
+    assert!(!page_loaded(&seen, &server.url("/second")), "{seen:?}");
+    let shown = engine.views[&view].document.clone().unwrap();
+    assert!(
+        Rc::ptr_eq(&shown, &first_document),
+        "the parsed document was not installed"
+    );
+    assert_eq!(engine.get_url(view), Some(server.url("/first")));
+    assert_eq!(engine.get_title(view).as_deref(), Some("first"));
+    assert_eq!(
+        engine.relayout_stats(view).unwrap(),
+        &layouts,
+        "nothing of the stopped load was laid out"
+    );
+    assert_ne!(
+        engine.decode_nav(view),
+        decode_before,
+        "Stop bumps the decode epoch even when the document never committed"
+    );
+    assert_next_navigation_loads(&mut engine, view, &server, &mut rx, &rt);
 }
 
 #[test]

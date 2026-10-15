@@ -153,6 +153,70 @@ fn geometry_is_replaced_not_merged_by_the_next_publish() {
 }
 
 #[test]
+fn a_geometry_source_clears_old_maps_builds_once_and_serves_later_reads() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let (b, doc) = bound();
+    let outer = id(&doc, "outer");
+    let mut stale = HashMap::new();
+    stale.insert(outer, geom(0.0, 0.0, 10.0, 10.0));
+    b.set_geometry(stale);
+    let mut stale_styles = HashMap::new();
+    stale_styles.insert(outer, styles(&[("display", "flex")]));
+    b.set_computed_styles(stale_styles);
+    assert_eq!(ev(&b, "document.getElementById('outer').offsetWidth"), "10");
+
+    let builds = Arc::new(AtomicUsize::new(0));
+    let counted = builds.clone();
+    b.set_geometry_source(Box::new(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        let mut geometry = HashMap::new();
+        geometry.insert(outer, geom(0.0, 0.0, 40.0, 40.0));
+        let mut computed = HashMap::new();
+        computed.insert(outer, styles(&[("display", "block")]));
+        (geometry, computed)
+    }));
+    assert_eq!(b.geometry_builds(), 0);
+    // Publishing a source drops the previous maps: the first read must not
+    // see width 10 / display flex from the eager publish above.
+    assert_eq!(ev(&b, "document.getElementById('outer').offsetWidth"), "40");
+    assert_eq!(
+        ev(&b, "getComputedStyle(document.getElementById('outer')).display"),
+        "block"
+    );
+    assert_eq!(b.geometry_builds(), 1);
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    assert_eq!(ev(&b, "document.getElementById('outer').offsetWidth"), "40");
+    assert_eq!(
+        b.geometry_builds(),
+        1,
+        "later reads share the one build"
+    );
+}
+
+#[test]
+fn set_geometry_drops_a_pending_source_without_building_it() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let (b, doc) = bound();
+    let outer = id(&doc, "outer");
+    let builds = Arc::new(AtomicUsize::new(0));
+    let counted = builds.clone();
+    b.set_geometry_source(Box::new(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        (HashMap::new(), HashMap::new())
+    }));
+    let mut eager = HashMap::new();
+    eager.insert(outer, geom(0.0, 0.0, 22.0, 22.0));
+    b.set_geometry(eager);
+    assert_eq!(ev(&b, "document.getElementById('outer').offsetWidth"), "22");
+    assert_eq!(b.geometry_builds(), 0);
+    assert_eq!(builds.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn the_root_element_measures_the_viewport_and_the_document() {
     let (b, doc) = bound();
     b.evaluate("window.innerWidth = 1280; window.innerHeight = 800;").unwrap();
