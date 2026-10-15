@@ -318,7 +318,12 @@ mod tests {
             line,
             "Window thread hold entry=live_turn ms=612 build_ms=0.0 layout_ms=300.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=40.0 acquire_ms=32.0 execute_ms=0.0 present_ms=0.0 other_ms=272.0"
         );
-        assert_eq!(stages.other_ms(100.0), 60.0, "40 ms of render, 60 of script");
+        // Without the layout: a 100 ms hold with a 40 ms render whose
+        // acquire took 32 has 60 ms of `other`, not 28.
+        let mut draw = HoldMs::default();
+        draw.add(HoldStage::Render, 40.0);
+        draw.add(HoldStage::Acquire, 32.0);
+        assert_eq!(draw.other_ms(100.0), 60.0, "40 ms of render, 60 of script");
         // A 100 ms turn with 40 ms of script and a 60 ms render of which
         // 55 was the execute (the review's case): the script is `other`.
         let mut turn = HoldMs::default();
