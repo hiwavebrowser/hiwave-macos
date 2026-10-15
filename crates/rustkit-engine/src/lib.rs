@@ -320,10 +320,14 @@ mod resize_coalesce_tests;
 mod flex_percent_basis_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
+#[cfg(all(test, feature = "headless"))]
+mod scroll_paints_first_tests;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(all(test, feature = "headless"))]
 mod nav_state_reset_tests;
+#[cfg(all(test, feature = "headless"))]
+mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -332,6 +336,8 @@ mod glyph_atlas_overflow_tests;
 mod polygon_transform_tests;
 #[cfg(all(test, feature = "headless"))]
 mod fixed_under_scroll_tests;
+#[cfg(all(test, feature = "headless"))]
+mod hover_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -344,10 +350,14 @@ mod grid_item_abspos_tests;
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
+#[cfg(test)]
+mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
 #[cfg(test)]
 mod nested_layout_matrix_tests;
+#[cfg(test)]
+mod zero_font_size_tests;
 #[cfg(test)]
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -659,6 +669,10 @@ struct ViewState {
     /// Counts the display lists this view has been given.
     frame_generation: u64,
     presented: Option<PresentedFrame>,
+    /// Counts the frames this view has presented (a diagnostic: the threads
+    /// plan's per-view frame count; the tests read it to see how many draws
+    /// one input cost).
+    frames_presented: u64,
     viewhost_id: ViewId,
     url: Option<Url>,
     title: Option<String>,
@@ -747,6 +761,13 @@ struct ViewState {
     html_clips: std::cell::Cell<bool>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
+    /// Set by `relayout` for the build it is about to run: nothing but a
+    /// pointer restyle asked for it, so it may keep the laid-out tree
+    /// (`Engine::repaint_restyled`).
+    restyle_only: bool,
+    /// What the last full layout was built with: the chains and the view's
+    /// size (`Engine::repaint_restyled`).
+    laid_with: Option<LaidWith>,
     /// Where the pointer was at its last move, in viewport coordinates.
     pointer_at: Option<(f32, f32)>,
     /// The primary button is held: between a press and its release.
@@ -814,14 +835,15 @@ impl ViewState {
             .map(relayout_cause::summary_url)
             .unwrap_or_default();
         info!(
-            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1}",
+            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={}",
             url,
             stats.relayouts,
             stats.by_first_cause,
             stats.by_cause,
             stats.mutations,
             stats.trees_reused,
-            stats.total_ms
+            stats.total_ms,
+            stats.layouts_skipped
         );
     }
 
@@ -845,6 +867,8 @@ impl ViewState {
         self.active_chain.clear();
         self.rule_reads.get_mut().take();
         self.pointer_restyle = false;
+        self.restyle_only = false;
+        self.laid_with = None;
         self.pointer_at = None;
         self.primary_button_down = false;
         self.press_target = None;
@@ -918,6 +942,13 @@ pub struct EngineConfig {
     /// the budget is a different frame. The live app turns it on, where a
     /// script that does not end is a window that does not answer.
     pub interrupt_scripts_at_budget: bool,
+    /// Wall-clock budget for the script one turn of the live loop runs
+    /// after the load (`pump_live`: timer callbacks and response handlers),
+    /// and for the listeners of one input event (a mouse event, a key, the
+    /// `input` of a typed key, a `resize`). Read only with
+    /// `interrupt_scripts_at_budget`; script still running when it is spent
+    /// is stopped at its next call into the host.
+    pub live_turn_budget_ms: u64,
     /// The embedder loads the URL a page's script asks for
     /// ([`Engine::take_script_navigation`]), as the live app does. A load
     /// whose scripts have asked to leave then does not wait for the images
@@ -942,6 +973,7 @@ impl Default for EngineConfig {
             script_network_rounds: 8,
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
+            live_turn_budget_ms: 5_000,
             follows_script_navigation: false,
         }
     }
@@ -978,6 +1010,10 @@ const LIVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// throws on every tick would otherwise grow it for as long as the page is
 /// open.
 const MAX_LIVE_SCRIPT_RECORDS: usize = 2_000;
+
+/// How long the console line about a stopped script may take
+/// ([`end_live_turn`]).
+const STOP_NOTE_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How a page `<script>` is scheduled, per its `type`, `src`, `async`
 /// and `defer` attributes.
@@ -1133,6 +1169,52 @@ fn log_script_stopped(source: &str, elapsed_ms: u64, late: Option<std::time::Dur
         late_ms = late.map(|late| late.as_millis() as u64).unwrap_or(0),
         "Script stopped at the script budget"
     );
+}
+
+/// Starts the live turn budget (`EngineConfig::live_turn_budget_ms`) for the
+/// script about to run on `bindings`, and returns when it started. `None`
+/// when scripts are not interrupted (the board).
+fn arm_live_turn(config: &EngineConfig, bindings: &DomBindings) -> Option<std::time::Instant> {
+    if !config.interrupt_scripts_at_budget {
+        return None;
+    }
+    let now = std::time::Instant::now();
+    bindings.set_execution_deadline(Some(now + std::time::Duration::from_millis(config.live_turn_budget_ms)));
+    Some(now)
+}
+
+/// Ends what [`arm_live_turn`] started: lifts the deadline, so the page's
+/// later script runs, and returns the record of the script it stopped, if
+/// it stopped one. The page's console gets a line too: the stopped script
+/// cannot catch the stop, so without it nothing the page's author can read
+/// says why a callback ended part-way.
+fn end_live_turn(
+    config: &EngineConfig,
+    armed: Option<std::time::Instant>,
+    bindings: &DomBindings,
+    source: &str,
+) -> Option<ScriptRecord> {
+    let started = armed?;
+    let hit = bindings.take_deadline_hit();
+    let late = bindings.take_deadline_overrun();
+    bindings.set_execution_deadline(None);
+    if !hit {
+        return None;
+    }
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    log_script_stopped(source, elapsed_ms, late);
+    // `console.warn` may be the page's own function by now, so it gets a
+    // limit as well.
+    let note = format!("Script stopped: it ran past {} ms ({source})", config.live_turn_budget_ms);
+    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
+    let _ = bindings.evaluate(&format!("console.warn({})", serde_json::Value::String(note)));
+    bindings.set_execution_deadline(None);
+    Some(ScriptRecord {
+        source: source.to_string(),
+        bytes: 0,
+        elapsed_ms,
+        outcome: ScriptOutcome::OverBudget,
+    })
 }
 
 /// Classify a `<script>` element. `None` for data blocks
@@ -1758,6 +1840,7 @@ impl Engine {
             display_list: None,
             frame_generation: 0,
             presented: None,
+            frames_presented: 0,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -1772,6 +1855,8 @@ impl Engine {
             rule_reads: std::cell::RefCell::new(None),
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
+            restyle_only: false,
+            laid_with: None,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1837,6 +1922,7 @@ impl Engine {
             display_list: None,
             frame_generation: 0,
             presented: None,
+            frames_presented: 0,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -1851,6 +1937,8 @@ impl Engine {
             rule_reads: std::cell::RefCell::new(None),
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
+            restyle_only: false,
+            laid_with: None,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -1915,6 +2003,7 @@ impl Engine {
             display_list: None,
             frame_generation: 0,
             presented: None,
+            frames_presented: 0,
             bindings: None,
             navigation,
             nav_generation: 0,
@@ -1929,6 +2018,8 @@ impl Engine {
             rule_reads: std::cell::RefCell::new(None),
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
+            restyle_only: false,
+            laid_with: None,
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
@@ -2054,14 +2145,19 @@ impl Engine {
 
         if let Some(view) = self.views.get_mut(&id) {
             if let Some(bindings) = view.bindings.as_ref() {
-                let fired = bindings
-                    .set_dimensions(bounds.width as f64, bounds.height as f64)
-                    .and_then(|()| {
-                        bindings.fire_lifecycle_event(
-                            rustkit_bindings::LifecycleTarget::Window,
-                            "resize",
-                        )
-                    });
+                let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
+                let armed = arm_live_turn(&self.config, bindings);
+                let fired = sized.and_then(|()| {
+                    bindings.fire_lifecycle_event(
+                        rustkit_bindings::LifecycleTarget::Window,
+                        "resize",
+                    )
+                });
+                let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
+                // A stopped listener's error is the stop itself, which has
+                // its own record.
+                let fired = if stopped.is_some() { Ok(()) } else { fired };
+                view.script_log.extend(stopped);
                 if let Err(e) = fired {
                     view.script_log.push(ScriptRecord {
                         source: "event:resize".into(),
@@ -2091,9 +2187,10 @@ impl Engine {
         Ok(())
     }
 
-    /// Scroll a view by the given delta.
+    /// Scroll a view by the given delta (the user's wheel, keys or scrollbar).
     ///
-    /// Returns true if the scroll caused a change (and thus needs a re-render).
+    /// Returns true if the offset changed. A changed offset is presented
+    /// here, before the page is told, so the caller has nothing to draw.
     pub fn scroll_view(
         &mut self,
         id: EngineViewId,
@@ -2117,20 +2214,32 @@ impl Engine {
 
         view.scroll_offset = (new_x, new_y);
 
-        let changed = view.scroll_offset != old_offset;
-        if changed {
-            debug!(?id, ?old_offset, new_offset = ?view.scroll_offset, "View scrolled");
-            if let Some(bindings) = view.bindings.as_ref() {
-                bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
-                // The page hears the scroll, and its observers report.
-                bindings.notify_scrolled();
-            }
+        if view.scroll_offset == old_offset {
+            return Ok(false);
         }
-        if changed {
-            self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll))?;
-        }
+        let (offset, max) = (view.scroll_offset, view.max_scroll_offset);
+        debug!(?id, ?old_offset, new_offset = ?offset, "View scrolled");
 
-        Ok(changed)
+        // The frame moves first, from the display list as it stands: scroll
+        // is a render-time translate, so nothing has to be laid out for it.
+        // The page hears the scroll after that, and the relayout its
+        // listeners cause follows with a frame of its own. Until 2026-10-14
+        // the order was the reverse, and a wheel event waited for the
+        // page's scroll handlers and their relayout (about 500 ms each on
+        // eBay search) before anything moved. A failed draw is not the
+        // scroll's failure: the frame on record is stale, so the next wake
+        // draws it (`render_changed_views`).
+        if let Err(e) = self.render(id) {
+            debug!(?id, ?e, "Render at the new scroll offset failed; the next wake draws it");
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.set_scroll_state(offset, max);
+            // The page hears the scroll, and its observers report.
+            bindings.notify_scrolled();
+        }
+        self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll))?;
+
+        Ok(true)
     }
 
     /// Hit-test a click in VIEWPORT coordinates and return the link URL it
@@ -3057,15 +3166,22 @@ impl Engine {
             return true;
         };
         let source = format!("event:{event_type}");
-        let not_cancelled = match bindings.fire_mouse_event(target, event_type, data) {
+        let armed = arm_live_turn(&self.config, bindings);
+        let fired = bindings.fire_mouse_event(target, event_type, data);
+        let stopped = end_live_turn(&self.config, armed, bindings, &source);
+        let not_cancelled = match fired {
             Ok(not_cancelled) => not_cancelled,
             Err(e) => {
-                view.script_log.push(ScriptRecord {
-                    source: source.clone(),
-                    bytes: 0,
-                    elapsed_ms: 0,
-                    outcome: ScriptOutcome::Threw(e.to_string()),
-                });
+                // A stopped listener's error is the stop itself, which has
+                // its own record.
+                if stopped.is_none() {
+                    view.script_log.push(ScriptRecord {
+                        source: source.clone(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(e.to_string()),
+                    });
+                }
                 true
             }
         };
@@ -3077,6 +3193,7 @@ impl Engine {
                 outcome: ScriptOutcome::Threw(message),
             });
         }
+        view.script_log.extend(stopped);
         debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
         not_cancelled
     }
@@ -3110,15 +3227,33 @@ impl Engine {
         let document = view.url.clone();
         let live_requests = &mut view.live_requests;
         let mut threw: Vec<(&str, String)> = Vec::new();
+        // One budget for all the script this turn runs. This thread is the
+        // window's: until 2026-10-12 a callback that did not end held it
+        // for as long as it ran.
+        let armed = arm_live_turn(&self.config, bindings);
+        let budget = std::time::Duration::from_millis(self.config.live_turn_budget_ms);
+        // Whether the turn's budget is gone. The deadline stays set to the
+        // end of the turn, so from then on any script the turn starts is
+        // refused at its first host call: none is started.
+        let spent = || armed.is_some_and(|started| started.elapsed() >= budget);
+        // Where in `threw` the error that unwound a stopped script is. The
+        // stop has its own record, and the error reads as the loop limit's.
+        let mut unwound = None;
 
         // Timers first: what they ask of the network is answered this turn.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
         })) {
             Ok(Ok(ran)) => out.timers_ran = ran,
-            Ok(Err(e)) => threw.push(("timers", e.to_string())),
+            Ok(Err(e)) => {
+                unwound = spent().then_some(threw.len());
+                threw.push(("timers", e.to_string()));
+            }
             Err(_) => threw.push(("timers", "JS engine panic".into())),
         }
+        // Whose script spent the budget: a timer's, or a response handler's
+        // below.
+        let spent_by_timers = spent();
         if let Some(policy) = policy {
             // Start what the page has asked for since the last turn. No turn
             // waits for an answer: this thread is the window's.
@@ -3136,20 +3271,41 @@ impl Engine {
             // Delivery only: a timer a response handler sets runs on a later
             // turn, when its time has passed, and a request it makes starts
             // on the next.
-            for (request_id, outcome) in script_net::settle_live(live_requests, LIVE_NETWORK_SLICE).await {
+            //
+            // An answer is handed over only while the turn has budget left.
+            // The bridge forgets a request before it calls the page's
+            // handler, so an answer handed to a turn that was stopped (by a
+            // timer, or by the handler of the answer before it) was lost:
+            // the handler's first host call was refused and the request
+            // never finished (#666 review). What is not handed over waits,
+            // in order, for the next turn.
+            let mut answers = script_net::settle_live(live_requests, LIVE_NETWORK_SLICE).await.into_iter();
+            while !spent() {
+                let Some((request_id, outcome)) = answers.next() else {
+                    break;
+                };
                 out.requests += 1;
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     bindings.deliver_net_response(request_id, outcome)
                 })) {
                     Ok(Ok(_)) => {}
-                    Ok(Err(e)) => threw.push(("network", e.to_string())),
+                    Ok(Err(e)) => {
+                        if spent() {
+                            unwound = Some(threw.len());
+                        }
+                        threw.push(("network", e.to_string()));
+                    }
                     Err(_) => threw.push(("network", "JS engine panic".into())),
                 }
             }
+            for (at, answer) in answers.enumerate() {
+                live_requests.insert(at, Box::pin(std::future::ready(answer)));
+            }
             out.in_flight = live_requests.len();
             // The modules a dynamic `import()` asked for are still fetched
-            // inside the turn.
-            if let Some(document) = document.as_ref() {
+            // inside the turn, unless its budget is gone: they are asked
+            // for again on the next.
+            if let Some(document) = document.as_ref().filter(|_| !spent()) {
                 let mut modules_fetched = 0;
                 let found = script_net::pump_modules(
                     bindings,
@@ -3167,8 +3323,17 @@ impl Engine {
                 }
             }
         }
+        let stopped_in = if spent_by_timers { "timers" } else { "network" };
+        // A turn that ran out of budget held work back (answers, modules,
+        // the timers behind the one that was stopped): the next is due.
+        let held_back = spent();
+        let stopped = end_live_turn(&self.config, armed, bindings, stopped_in);
+        if let Some(at) = unwound.filter(|_| stopped.is_some()) {
+            threw.remove(at);
+        }
         threw.extend(bindings.take_reported_errors().into_iter().map(|message| ("timers", message)));
-        out.next_timer_ms = bindings.next_timer_delay();
+        out.next_timer_ms = if held_back { Some(0) } else { bindings.next_timer_delay() };
+        view.script_log.extend(stopped);
         for (source, message) in threw {
             if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
                 break;
@@ -3270,12 +3435,18 @@ impl Engine {
         if matches!(result, KeyHandleResult::ValueChanged) {
             // Script reads `value` from the bindings; keep it current,
             // then tell the page.
+            let mut stopped = None;
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
                 bindings.sync_control_value(focused.raw(), state.value());
                 let typed = (!key.is_empty() && !ctrl).then_some(key);
+                let armed = arm_live_turn(&self.config, bindings);
                 if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
                     debug!(?id, error = %e, "input listener threw");
                 }
+                stopped = end_live_turn(&self.config, armed, bindings, "event:input");
+            }
+            if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
+                view.script_log.push(stopped);
             }
             if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
                 debug!(?id, error = %e, "relayout after input event failed");
@@ -3425,10 +3596,15 @@ impl Engine {
             shift_key: shift,
             ..Default::default()
         };
+        let armed = arm_live_turn(&self.config, bindings);
         let not_cancelled = bindings.fire_key_event(node, event_type, &data).unwrap_or_else(|e| {
             debug!(?id, event_type, error = %e, "key listener threw");
             true
         });
+        let stopped = end_live_turn(&self.config, armed, bindings, &format!("event:{event_type}"));
+        if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
+            view.script_log.push(stopped);
+        }
         if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
             debug!(?id, error = %e, "relayout after key event failed");
         }
@@ -4868,6 +5044,9 @@ impl Engine {
         // A pending pointer restyle is covered by this build, whoever asked.
         let mut causes = match self.views.get_mut(&id) {
             Some(view) => {
+                view.restyle_only = restyle_repaint_enabled()
+                    && view.pointer_restyle
+                    && view.relayout_pending.is_empty();
                 if view.pointer_restyle {
                     view.relayout_pending.note(RelayoutCause::HoverOrFocus);
                 }
@@ -4880,7 +5059,7 @@ impl Engine {
         }
         relayout_cause::set_last_build_reused_tree(false);
 
-        self.relayout_uncounted(id)?;
+        let layout_skipped = self.relayout_uncounted(id)?;
 
         let took_ms = started.elapsed().as_secs_f64() * 1000.0;
         let tree_reused = relayout_cause::last_build_reused_tree();
@@ -4891,24 +5070,32 @@ impl Engine {
             .unwrap_or_default();
         info!(
             ?id,
-            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1}",
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} layout_skipped={}",
             cause,
             causes.counts,
             causes.mutations,
             tree_reused,
-            took_ms
+            took_ms,
+            layout_skipped
         );
         if let Some(view) = self.views.get_mut(&id) {
             view.relayout_stats.record(&causes, tree_reused, took_ms);
+            if layout_skipped {
+                view.relayout_stats.layouts_skipped =
+                    view.relayout_stats.layouts_skipped.saturating_add(1);
+            }
         }
         Ok(())
     }
 
-    /// The relayout itself: build, lay out, paint.
-    fn relayout_uncounted(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+    /// The relayout itself: build, lay out, paint. Returns whether the
+    /// layout pass was skipped (the build changed only what is painted).
+    fn relayout_uncounted(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         // This build reads the hovered and pressed chains as they are now.
+        let mut restyle_only = false;
         if let Some(view) = self.views.get_mut(&id) {
             view.pointer_restyle = false;
+            restyle_only = std::mem::take(&mut view.restyle_only);
         }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
@@ -4960,6 +5147,15 @@ impl Engine {
             .get(&id)
             .map(|v| v.external_stylesheets.clone())
             .unwrap_or_default();
+
+        // A pointer restyle that changed only what is painted keeps the
+        // laid-out tree, and builds no more of the page than the elements
+        // that gained or lost the pseudo-class.
+        if restyle_only
+            && self.repaint_restyled(id, &document, &external_stylesheets, (bounds.width, bounds.height))?
+        {
+            return Ok(true);
+        }
 
         // Build layout tree from DOM with tracing
         let root_box = {
@@ -5047,98 +5243,7 @@ impl Engine {
         debug_layout_box(&root_box, 0);
 
         // Generate display list
-        let display_list = {
-            let _display_list_span = tracing::info_span!("build_display_list").entered();
-            let mut dl = DisplayList::build(&root_box);
-            // Splice cached SVG documents in place of their Image commands.
-            // Done once per layout (not per frame): the renderer only speaks
-            // raster textures, so vector images become their own command
-            // runs positioned in the image's dest_rect.
-            // Normalize resource URLs to absolute, then splice SVGs.
-            //
-            // CSS `url(...)` is parsed without a base (the parser is a free
-            // function with no document in scope), and `<img>` boxes carry
-            // whatever the build produced. The loader caches under ABSOLUTE
-            // urls, so any relative key here misses the cache and then fails
-            // to parse in the paint path — `Invalid URL for image`, once per
-            // image per frame. Rewriting here means the renderer only ever
-            // sees keys that match what the loader stored.
-            let mut expanded = Vec::with_capacity(dl.commands.len());
-            for mut cmd in dl.commands.drain(..) {
-                match &mut cmd {
-                    rustkit_layout::DisplayCommand::Image { url, .. }
-                    | rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
-                    | rustkit_layout::DisplayCommand::MaskedColor { url, .. } => {
-                        if let Some(abs) = self.resolve_resource_url_in(id, url) {
-                            *url = abs.to_string();
-                        }
-                        self.cache_data_svg(url);
-                    }
-                    _ => {}
-                }
-                match &cmd {
-                    rustkit_layout::DisplayCommand::Image {
-                        url,
-                        dest_rect,
-                        current_color,
-                        ..
-                    } => {
-                        if let Some(svg) = self.svg_cache.get(url) {
-                            // The box's CSS color is what `currentColor`
-                            // resolves to inside an inline <svg>; an <img>'s
-                            // color is the initial black either way, so the
-                            // raster lane is unaffected by passing it through.
-                            expanded.extend(svg.render_with_color(
-                                dest_rect.x,
-                                dest_rect.y,
-                                dest_rect.width,
-                                dest_rect.height,
-                                *current_color,
-                            ));
-                            continue;
-                        }
-                    }
-                    rustkit_layout::DisplayCommand::BackgroundImage {
-                        url,
-                        rect,
-                        size,
-                        position,
-                        offset,
-                        repeat,
-                    } => {
-                        if let Some(svg) = self.svg_cache.get(url) {
-                            expanded.extend(svg_background_commands(svg, *rect, size, *position, *offset, *repeat));
-                            continue;
-                        }
-                    }
-                    // A vector mask is spliced like a vector background,
-                    // its paint recoloured to the masked colour with its
-                    // alpha kept (`mask-mode: alpha`). A raster mask stays
-                    // a `MaskedColor` for the renderer.
-                    rustkit_layout::DisplayCommand::MaskedColor {
-                        color,
-                        url,
-                        rect,
-                        size,
-                        position,
-                        offset,
-                        repeat,
-                    } => {
-                        if let Some(svg) = self.svg_cache.get(url) {
-                            let mut cmds =
-                                svg_background_commands(svg, *rect, size, *position, *offset, *repeat);
-                            rustkit_layout::tint_mask_commands(&mut cmds, *color);
-                            expanded.extend(cmds);
-                            continue;
-                        }
-                    }
-                    _ => {}
-                }
-                expanded.push(cmd);
-            }
-            dl.commands = expanded;
-            dl
-        };
+        let display_list = self.display_list_for(id, &root_box);
 
         debug!(
             ?id,
@@ -5164,6 +5269,12 @@ impl Engine {
             .ok_or(EngineError::ViewNotFound(id))?;
         view.held_fixed = Some(root_box.held_fixed_paths());
         view.layout = Some(root_box);
+        view.laid_with = Some(LaidWith {
+            hover: view.hover_chain.clone(),
+            active: view.active_chain.clone(),
+            focused: view.focused_node.map(|node| node.raw()),
+            size: (bounds.width, bounds.height),
+        });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
         // answer from this layout.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
@@ -5189,7 +5300,289 @@ impl Engine {
         // Render
         self.render(id)?;
 
-        Ok(())
+        Ok(false)
+    }
+
+    /// The display list of a laid-out tree, as the renderer takes it.
+    fn display_list_for(&mut self, id: EngineViewId, root_box: &LayoutBox) -> DisplayList {
+        let _display_list_span = tracing::info_span!("build_display_list").entered();
+        let mut dl = DisplayList::build(root_box);
+        // Splice cached SVG documents in place of their Image commands.
+        // Done once per layout (not per frame): the renderer only speaks
+        // raster textures, so vector images become their own command
+        // runs positioned in the image's dest_rect.
+        // Normalize resource URLs to absolute, then splice SVGs.
+        //
+        // CSS `url(...)` is parsed without a base (the parser is a free
+        // function with no document in scope), and `<img>` boxes carry
+        // whatever the build produced. The loader caches under ABSOLUTE
+        // urls, so any relative key here misses the cache and then fails
+        // to parse in the paint path — `Invalid URL for image`, once per
+        // image per frame. Rewriting here means the renderer only ever
+        // sees keys that match what the loader stored.
+        let mut expanded = Vec::with_capacity(dl.commands.len());
+        for mut cmd in dl.commands.drain(..) {
+            match &mut cmd {
+                rustkit_layout::DisplayCommand::Image { url, .. }
+                | rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
+                | rustkit_layout::DisplayCommand::MaskedColor { url, .. } => {
+                    if let Some(abs) = self.resolve_resource_url_in(id, url) {
+                        *url = abs.to_string();
+                    }
+                    self.cache_data_svg(url);
+                }
+                _ => {}
+            }
+            match &cmd {
+                rustkit_layout::DisplayCommand::Image {
+                    url,
+                    dest_rect,
+                    current_color,
+                    ..
+                } => {
+                    if let Some(svg) = self.svg_cache.get(url) {
+                        // The box's CSS color is what `currentColor`
+                        // resolves to inside an inline <svg>; an <img>'s
+                        // color is the initial black either way, so the
+                        // raster lane is unaffected by passing it through.
+                        expanded.extend(svg.render_with_color(
+                            dest_rect.x,
+                            dest_rect.y,
+                            dest_rect.width,
+                            dest_rect.height,
+                            *current_color,
+                        ));
+                        continue;
+                    }
+                }
+                rustkit_layout::DisplayCommand::BackgroundImage {
+                    url,
+                    rect,
+                    size,
+                    position,
+                    offset,
+                    repeat,
+                } => {
+                    if let Some(svg) = self.svg_cache.get(url) {
+                        expanded.extend(svg_background_commands(svg, *rect, size, *position, *offset, *repeat));
+                        continue;
+                    }
+                }
+                // A vector mask is spliced like a vector background,
+                // its paint recoloured to the masked colour with its
+                // alpha kept (`mask-mode: alpha`). A raster mask stays
+                // a `MaskedColor` for the renderer.
+                rustkit_layout::DisplayCommand::MaskedColor {
+                    color,
+                    url,
+                    rect,
+                    size,
+                    position,
+                    offset,
+                    repeat,
+                } => {
+                    if let Some(svg) = self.svg_cache.get(url) {
+                        let mut cmds =
+                            svg_background_commands(svg, *rect, size, *position, *offset, *repeat);
+                        rustkit_layout::tint_mask_commands(&mut cmds, *color);
+                        expanded.extend(cmds);
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            expanded.push(cmd);
+        }
+        dl.commands = expanded;
+        dl
+    }
+
+    /// The short path of a pointer restyle: `true` when the view was
+    /// repainted without a layout, `false` when it has to be laid out.
+    ///
+    /// Only the elements that gained or lost `:hover` or `:active` since
+    /// the last layout, and what is under them, can be styled differently
+    /// (a sheet with the pseudo-class before a sibling combinator, or where
+    /// the index cannot place it, takes the full path). Those subtrees are
+    /// built twice, with the chains the layout was built with and with the
+    /// chains as they are now; nothing else of the page is built. When the
+    /// two differ only in paint properties (`ComputedStyle::copy_paint_only`)
+    /// layout would give every box the size and place it already has: the
+    /// properties are copied onto the laid-out boxes, the display list is
+    /// built from them and the view is painted.
+    fn repaint_restyled(
+        &mut self,
+        id: EngineViewId,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+        size: (u32, u32),
+    ) -> Result<bool, EngineError> {
+        let miss = |why: &str| {
+            debug!(?id, why, "Pointer restyle needs a layout");
+            LAST_RESTYLE_MISS.with(|last| *last.borrow_mut() = why.to_string());
+            Ok(false)
+        };
+        let Some(view) = self.views.get(&id) else {
+            return Ok(false);
+        };
+        let (Some(with), Some(_)) = (view.laid_with.as_ref(), view.layout.as_ref()) else {
+            return miss("no layout");
+        };
+        if with.size != size {
+            return miss("resized");
+        }
+        // A press or a click moved the focus since the page was painted:
+        // both builds below would read the focus as it is now, and the
+        // patch copies paint properties only, so the caret and the focus
+        // state would never be drawn (or a blurred field would keep them).
+        if with.focused != view.focused_node.map(|node| node.raw()) {
+            return miss("focus moved");
+        }
+        let unplaced = view.rule_reads.borrow().as_ref().is_none_or(|index| {
+            [&index.reads.hover, &index.reads.active]
+                .iter()
+                .any(|reads| reads.anywhere || reads.siblings)
+        });
+        if unplaced {
+            return miss("a rule reads the pseudo-class beyond the element's subtree");
+        }
+        let before = (with.hover.clone(), with.active.clone());
+        let now = (view.hover_chain.clone(), view.active_chain.clone());
+        // Of the elements in one chain only, the ones a compound with the
+        // pseudo-class can match: no rule sees the others change.
+        let mut changed: Vec<usize> = Self::in_one_chain(&before.0, &now.0)
+            .into_iter()
+            .filter(|raw| Self::chain_change_restyles(view, |reads| &reads.hover, &[*raw]))
+            .collect();
+        changed.extend(
+            Self::in_one_chain(&before.1, &now.1)
+                .into_iter()
+                .filter(|raw| Self::chain_change_restyles(view, |reads| &reads.active, &[*raw])),
+        );
+        changed.sort_unstable();
+        changed.dedup();
+        if changed.is_empty() {
+            // The pointer went and came back between two layouts.
+            if let Some(with) = self.views.get_mut(&id).and_then(|view| view.laid_with.as_mut()) {
+                (with.hover, with.active) = now;
+            }
+            return Ok(true);
+        }
+
+        // The topmost changed elements, and the elements above them: the
+        // build walks down those and builds only what is under a root.
+        let body = document.body().map(|body| body.id.raw());
+        let mut above: HashMap<usize, Vec<usize>> = HashMap::new();
+        for raw in &changed {
+            let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                return miss("a changed element left the document");
+            };
+            let mut chain = Vec::new();
+            let mut parent = node.parent();
+            while let Some(p) = parent {
+                chain.push(p.id.raw());
+                parent = p.parent();
+            }
+            above.insert(*raw, chain);
+        }
+        let roots: Vec<usize> = changed
+            .iter()
+            .copied()
+            .filter(|raw| !above[raw].iter().any(|up| changed.contains(up)))
+            .collect();
+        let mut path = std::collections::HashSet::new();
+        for root in &roots {
+            // The root element and body have no box of their own to patch.
+            if !body.is_some_and(|body| above[root].contains(&body)) {
+                return miss("the root element or body changed");
+            }
+            path.extend(above[root].iter().copied());
+        }
+        let started = std::time::Instant::now();
+        let mut built = Vec::with_capacity(2);
+        let mut walked = 0;
+        for chains in [before, now.clone()] {
+            if let Some(view) = self.views.get_mut(&id) {
+                (view.hover_chain, view.active_chain) = chains;
+            }
+            RESTYLE_BUILD.with(|build| {
+                *build.borrow_mut() = Some(RestyleBuild {
+                    path: path.clone(),
+                    roots: roots.iter().copied().collect(),
+                    found: HashMap::new(),
+                    walked: 0,
+                })
+            });
+            self.build_layout_for_view(id, document, external_stylesheets);
+            let build = RESTYLE_BUILD.with(|build| build.borrow_mut().take());
+            walked += build.as_ref().map_or(0, |build| build.walked);
+            built.push(build.map(|build| build.found).unwrap_or_default());
+        }
+        LAST_RESTYLE_WALKED.with(|last| last.set(walked));
+        // The loop's last state is `now`: the chains are as they were.
+        let (was, is) = (&built[0], &built[1]);
+        for root in &roots {
+            let (Some(was), Some(is)) = (was.get(root), is.get(root)) else {
+                return miss("a changed element was not reached");
+            };
+            if let Some(why) = restyle_needs_layout(was, is) {
+                return miss(&why);
+            }
+        }
+
+        let Some(view) = self.views.get_mut(&id) else {
+            return Ok(false);
+        };
+        let Some(mut laid) = view.layout.take() else {
+            return Ok(false);
+        };
+        let placed = roots
+            .iter()
+            .all(|root| box_of_node(&laid, *root).is_some_and(|laid| same_shape(laid, &is[root])));
+        if !placed {
+            view.layout = Some(laid);
+            return miss("layout moved boxes");
+        }
+        for root in &roots {
+            if let Some(laid) = box_of_node_mut(&mut laid, *root) {
+                copy_changed_paint(laid, &was[root], &is[root]);
+            }
+        }
+        let patched = started.elapsed();
+        let display_list = self.display_list_for(id, &laid);
+        let listed = started.elapsed();
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        view.layout = Some(laid);
+        if let Some(with) = view.laid_with.as_mut() {
+            (with.hover, with.active) = now;
+        }
+        // Script reads of computed style answer from the restyled boxes.
+        if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
+            let (geometry, computed) = geometry_snapshot(layout);
+            bindings.set_geometry(geometry);
+            bindings.set_computed_styles(computed);
+        }
+        view.display_list = Some(display_list);
+        view.frame_generation += 1;
+        let snapshot = started.elapsed();
+        self.render(id)?;
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        let split = [
+            ms(patched),
+            ms(listed - patched),
+            ms(snapshot - listed),
+            ms(started.elapsed() - snapshot),
+        ];
+        debug!(
+            ?id,
+            builds_ms = split[0],
+            display_list_ms = split[1],
+            snapshot_ms = split[2],
+            render_ms = split[3],
+            "Pointer restyle without layout"
+        );
+        LAST_RESTYLE_SPLIT.with(|last| last.set(split));
+        Ok(true)
     }
 
     /// Check if a style has visible styling (dimensions, background, borders, etc.)
@@ -5372,6 +5765,23 @@ impl Engine {
                     return true;
                 }
                 BoxType::Inline | BoxType::Block | BoxType::AnonymousBlock => {
+                    // An inline-block (or inline-flex, inline-grid) that
+                    // was kept is content on the line whatever it holds: a
+                    // sized, empty one is an icon. Without this a `<span>`
+                    // or `<a>` around only such a box was dropped with it,
+                    // and a block holding nothing else went too. An
+                    // absolutely or fixed positioned one is out of the flow
+                    // and not on the line: the inline box around only that
+                    // is empty, and keeping it gave the line a strut (a
+                    // positioned badge in a link moved the next block down).
+                    if child.style.display.is_atomic_inline()
+                        && !matches!(
+                            child.position,
+                            rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+                        )
+                    {
+                        return true;
+                    }
                     // Recursively check children
                     if Self::has_content_children(child) {
                         return true;
@@ -5570,7 +5980,8 @@ impl Engine {
 
         // Unless RUSTKIT_TREE_REUSE=0: the images relayout takes the box tree
         // the sheets relayout built instead of walking the DOM again.
-        let traced = self.style_trace.borrow().is_some();
+        let traced = self.style_trace.borrow().is_some()
+            || RESTYLE_BUILD.with(|build| build.borrow().is_some());
         if !traced && !self.building_view_has_edits() {
             if let Some(tree) = self.reused_tree(&memo_key) {
                 relayout_cause::set_last_build_reused_tree(true);
@@ -6260,6 +6671,11 @@ impl Engine {
                         rustkit_css::Length::Px(pct / 100.0 * parent_font_px)
                     }
                     rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+                    // `font-size: 0` parses to `Zero`, which is not `Px`:
+                    // layout read it as 16px. A line holding only a 10px
+                    // inline-block was 18 tall (Chromium 143: 10) and text
+                    // meant to be hidden was laid out at full size.
+                    rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
                     // Viewport units and math functions (`4.1vw`,
                     // `calc(2vw + 4px)`, `clamp(2rem, 5vw, 4rem)`) absolutize
                     // here too, against this view's viewport: left alone they
@@ -6961,18 +7377,22 @@ impl Engine {
                         }
                         _ => SiblingContext::SOLE,
                     };
-                    let child_box = self.build_layout_from_parent_style_and_path(
-                        child,
-                        children_sheets,
-                        css_vars,
-                        children_ancestors,
-                        Some(children_parent_style),
-                        &preceding_siblings,
-                        child_sib,
-                        &child_path,
-                        element_ids,
-                        children_are_foreign,
-                    );
+                    let restyle = restyle_child(node.id.raw(), child.id.raw());
+                    let child_box = match restyle {
+                        RestyleChild::Skip => LayoutBox::new(BoxType::Block, ComputedStyle::new()),
+                        _ => self.build_layout_from_parent_style_and_path(
+                            child,
+                            children_sheets,
+                            css_vars,
+                            children_ancestors,
+                            Some(children_parent_style),
+                            &preceding_siblings,
+                            child_sib,
+                            &child_path,
+                            element_ids,
+                            children_are_foreign,
+                        ),
+                    };
                     if let NodeType::Element {
                         tag_name,
                         attributes,
@@ -6990,6 +7410,21 @@ impl Engine {
                             attributes.get("id").cloned(),
                             state,
                         ));
+                    }
+
+                    // A restyle build keeps the boxes of its roots and none
+                    // of the boxes above or beside them.
+                    match restyle {
+                        RestyleChild::Build => {}
+                        RestyleChild::Root => {
+                            RESTYLE_BUILD.with(|build| {
+                                if let Some(build) = build.borrow_mut().as_mut() {
+                                    build.found.insert(child.id.raw(), child_box);
+                                }
+                            });
+                            continue;
+                        }
+                        RestyleChild::Skip | RestyleChild::Walk => continue,
                     }
 
                     // A `display: contents` child (a <slot>) generates no box:
@@ -7023,8 +7458,23 @@ impl Engine {
                         | BoxType::LineBreak => true,
                     };
 
-                    if should_include && (!closed_details || details_summary == Some(child_index)) {
+                    let shown = !closed_details || details_summary == Some(child_index);
+                    if should_include && shown {
                         Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
+                    } else if shown && matches!(child_box.box_type, BoxType::Inline) {
+                        // An inline box with nothing in the flow is dropped,
+                        // and so was everything in it. What it positions out
+                        // of the flow stays: a badge in an otherwise empty
+                        // link still paints, at the link's place, and the
+                        // line hears nothing of it (#689 review, round 3).
+                        for out_of_flow in child_box.children.into_iter().filter(|grandchild| {
+                            matches!(
+                                grandchild.position,
+                                rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+                            )
+                        }) {
+                            Self::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
+                        }
                     }
                 }
                 drop(table_hints);
@@ -7506,6 +7956,7 @@ impl Engine {
             rustkit_css::Length::Em(em) => rustkit_css::Length::Px(em * parent_font_px),
             rustkit_css::Length::Percent(pct) => rustkit_css::Length::Px(pct / 100.0 * parent_font_px),
             rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+            rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
             other => other,
         };
 
@@ -13936,6 +14387,7 @@ impl Engine {
 
         if let (Some(presented), Some(view)) = (presented, self.views.get_mut(&id)) {
             view.presented = Some(presented);
+            view.frames_presented += 1;
         }
         Ok(())
     }
@@ -14676,6 +15128,13 @@ impl EngineBuilder {
     /// (`EngineConfig::interrupt_scripts_at_budget`).
     pub fn interrupt_scripts_at_budget(mut self, interrupt: bool) -> Self {
         self.config.interrupt_scripts_at_budget = interrupt;
+        self
+    }
+
+    /// Budget for the script of one live turn or one input event
+    /// (`EngineConfig::live_turn_budget_ms`).
+    pub fn live_turn_budget_ms(mut self, ms: u64) -> Self {
+        self.config.live_turn_budget_ms = ms;
         self
     }
 
@@ -29815,6 +30274,9 @@ struct PointerReads {
     /// `:not()`, `:has()`, or an `:is()` member with a combinator): any
     /// element may count.
     anywhere: bool,
+    /// Some selector has a sibling combinator: the pseudo-class on one
+    /// element may style its later siblings and what is under them.
+    siblings: bool,
 }
 
 impl PointerReads {
@@ -29830,6 +30292,7 @@ impl PointerReads {
             if named == 0 {
                 continue;
             }
+            self.siblings |= member.contains(['+', '~']);
             // A `::before` / `::after` rule is matched by its base selector.
             let base = [(":before", "::before"), (":after", "::after")]
                 .into_iter()
@@ -30477,6 +30940,195 @@ fn note_snapshot_image(image_box: &LayoutBox, width: Option<f32>, height: Option
             }
         }
     });
+}
+
+/// Unless `RUSTKIT_RESTYLE_REPAINT=0`: a pointer restyle that changes only
+/// paint keeps the laid-out tree. Read once.
+fn restyle_repaint_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_RESTYLE_REPAINT").is_none_or(|v| v != "0"))
+}
+
+thread_local! {
+    /// Why the last pointer restyle on this thread was laid out in full
+    /// (`restyle_needs_layout`, or the view was resized, or no tree was
+    /// kept). Diagnostics.
+    static LAST_RESTYLE_MISS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// What a layout was built with ([`Engine::repaint_restyled`]): the state
+/// the page was last PAINTED in. Anything `build_layout_for_view` reads
+/// that can change without a relayout cause of its own belongs here, or
+/// the short path compares two builds that both read the current value
+/// and never paints the change.
+struct LaidWith {
+    /// The hovered and the pressed chain at that build.
+    hover: Vec<usize>,
+    active: Vec<usize>,
+    /// The focused node (raw NodeId) at that build: a press or a click
+    /// moves the focus with no relayout of its own, and the next relayout
+    /// must paint the caret and the focus state.
+    focused: Option<usize>,
+    /// The view's width and height at that layout.
+    size: (u32, u32),
+}
+
+/// A build of only the subtrees under `roots` (raw NodeIds), reached by
+/// walking down `path`, the elements above them. The boxes are left in
+/// `found` as their own build returns them, before their parent decides
+/// what to do with them; the tree the build returns is not a page.
+struct RestyleBuild {
+    path: std::collections::HashSet<usize>,
+    roots: std::collections::HashSet<usize>,
+    found: HashMap<usize, LayoutBox>,
+    /// The child nodes the build went into.
+    walked: usize,
+}
+
+thread_local! {
+    static RESTYLE_BUILD: std::cell::RefCell<Option<RestyleBuild>> = const { std::cell::RefCell::new(None) };
+    /// The child nodes the last pointer restyle's two builds went into.
+    static LAST_RESTYLE_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Milliseconds of the last pointer restyle without layout: the two
+    /// builds with the compare and the patch, the display list, the
+    /// geometry snapshot, the render.
+    static LAST_RESTYLE_SPLIT: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
+}
+
+/// What the build in progress does with `child` of `parent` (raw NodeIds):
+/// nothing unless it is a [`RestyleBuild`] and `parent` is on its path.
+#[derive(Clone, Copy, PartialEq)]
+enum RestyleChild {
+    /// An ordinary build, or a parent under a root: build the child.
+    Build,
+    /// Not above a root and not one: it has no box in this build.
+    Skip,
+    /// Above a root: walked for what is under it, its box dropped.
+    Walk,
+    /// A root: built, and its box kept in `found`.
+    Root,
+}
+
+fn restyle_child(parent: usize, child: usize) -> RestyleChild {
+    RESTYLE_BUILD.with(|build| {
+        let mut build = build.borrow_mut();
+        let Some(build) = build.as_mut() else {
+            return RestyleChild::Build;
+        };
+        let what = if !build.path.contains(&parent) {
+            RestyleChild::Build
+        } else if build.roots.contains(&child) {
+            RestyleChild::Root
+        } else if build.path.contains(&child) {
+            RestyleChild::Walk
+        } else {
+            RestyleChild::Skip
+        };
+        if what != RestyleChild::Skip {
+            build.walked += 1;
+        }
+        what
+    })
+}
+
+/// The first box of `tree`, in tree order, that is the box of the node.
+fn box_of_node(tree: &LayoutBox, raw: usize) -> Option<&LayoutBox> {
+    if tree.node_id == Some(raw) {
+        return Some(tree);
+    }
+    tree.children.iter().find_map(|child| box_of_node(child, raw))
+}
+
+fn box_of_node_mut(tree: &mut LayoutBox, raw: usize) -> Option<&mut LayoutBox> {
+    if tree.node_id == Some(raw) {
+        return Some(tree);
+    }
+    tree.children.iter_mut().find_map(|child| box_of_node_mut(child, raw))
+}
+
+/// What the build gives a box besides its style and its children.
+fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
+    let rest = |x: &LayoutBox| {
+        format!(
+            "{:?}",
+            (
+                &x.box_type,
+                &x.offsets,
+                &x.stacking_context,
+                &x.root_element_height,
+                &x.table_span,
+                &x.float,
+                &x.clear,
+            )
+        )
+    };
+    a.node_id == b.node_id
+        && a.children.len() == b.children.len()
+        && a.position == b.position
+        && a.z_index == b.z_index
+        && a.element_id == b.element_id
+        && a.identity == b.identity
+        && a.link_href == b.link_href
+        && a.focused_caret == b.focused_caret
+        && rest(a) == rest(b)
+}
+
+/// Why a tree as built (not laid out) cannot take the layout of `kept`:
+/// a box of it is not the box `kept` has there ("boxes"), or its style
+/// differs in a property that is not paint ("style: <the first one>").
+/// `None` when the two are the same boxes with styles that differ, if at
+/// all, only in paint properties.
+fn restyle_needs_layout(kept: &LayoutBox, fresh: &LayoutBox) -> Option<String> {
+    if !built_alike(kept, fresh) {
+        return Some("boxes".to_string());
+    }
+    if !kept.style.differs_only_in_paint(&fresh.style) {
+        // Named for the log only, on the way to a full layout.
+        let (a, b) = (format!("{:#?}", kept.style), format!("{:#?}", fresh.style));
+        // The pretty form has one top-level field per four-space line.
+        let mut field = "?";
+        for (a, b) in a.lines().zip(b.lines()) {
+            if a.starts_with("    ") && !a.starts_with("     ") {
+                field = a.trim().split(':').next().unwrap_or("?");
+            }
+            if a != b {
+                break;
+            }
+        }
+        return Some(format!("style: {field}"));
+    }
+    kept.children
+        .iter()
+        .zip(&fresh.children)
+        .find_map(|(kept, fresh)| restyle_needs_layout(kept, fresh))
+}
+
+/// Whether a laid-out tree still has the boxes of the tree it was laid out
+/// from, in their places: layout wrote sizes into them and moved none.
+fn same_shape(laid: &LayoutBox, fresh: &LayoutBox) -> bool {
+    laid.node_id == fresh.node_id
+        && laid.children.len() == fresh.children.len()
+        && std::mem::discriminant(&laid.box_type) == std::mem::discriminant(&fresh.box_type)
+        && laid
+            .children
+            .iter()
+            .zip(&fresh.children)
+            .all(|(laid, fresh)| same_shape(laid, fresh))
+}
+
+/// Copy onto `laid` the paint properties of every box whose paint changed
+/// between `kept` and `fresh` (three trees of one shape), and every box's
+/// custom property set. Layout writes resolved values into a laid-out
+/// box's style, so the style is not replaced whole.
+fn copy_changed_paint(laid: &mut LayoutBox, kept: &LayoutBox, fresh: &LayoutBox) {
+    if kept.style.same_paint(&fresh.style) {
+        laid.style.custom_properties = fresh.style.custom_properties.clone();
+    } else {
+        laid.style.copy_paint_only(&fresh.style);
+    }
+    for ((laid, kept), fresh) in laid.children.iter_mut().zip(&kept.children).zip(&fresh.children) {
+        copy_changed_paint(laid, kept, fresh);
+    }
 }
 
 /// Count the boxes of `kept` that differ from the box at the same place in
@@ -34151,7 +34803,7 @@ mod grid_template_areas_tests {
     }
 
     #[test]
-    fn an_unknown_area_name_auto_places() {
+    fn an_unknown_area_name_is_the_first_implicit_line() {
         for root in laid_out(concat!(
             r#"<body style="margin:0"><div style="display:grid;width:200px;"#,
             r#"grid-template-columns:100px 100px;grid-template-areas:'a b'">"#,
@@ -34159,10 +34811,14 @@ mod grid_template_areas_tests {
             r#"<div id="y" style="grid-area:a;height:10px"></div>"#,
             r#"</div></body>"#,
         )) {
-            // `y` claims area a (column 1); `nope` auto-places into the
-            // first free cell, column 2.
+            // `y` claims area a (column 1). `nope` names no area, so its
+            // lines are the first implicit ones after the explicit grid:
+            // a third column and a second row. Until 2026-10-12 this test
+            // asked for auto-placement into column 2, which no browser does
+            // (pinned Chromium: `unknown-area-name-beside-declared-areas-
+            // in-a-block` in grid_in_flex_cases.json).
             assert_eq!(rect(&root, "y").0, 0.0);
-            assert_eq!(rect(&root, "x").0, 100.0);
+            assert_eq!((rect(&root, "x").0, rect(&root, "x").1), (200.0, 10.0));
         }
     }
 

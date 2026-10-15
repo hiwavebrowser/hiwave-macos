@@ -46,6 +46,7 @@ const SIDEBAR_WIDTH: f64 = 220.0;
 mod ipc;
 mod state;
 mod webview;
+mod window_stall;
 
 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
 mod webview_rustkit;
@@ -219,6 +220,8 @@ enum UserEvent {
     ClearCellar,
     // Decay ticker
     DecayTick,
+    // The stall log's ping (window_stall.rs); only sent with HIWAVE_STALL_LOG=1
+    WindowThreadPing,
     // Focus mode events
     EnterFocusMode,
     ExitFocusMode,
@@ -2024,6 +2027,13 @@ fn main() {
     });
     info!("Started focus mode auto-trigger checker");
 
+    // How long the window thread goes without turning this loop, written to
+    // the log when asked for. The real-window responsiveness checks read it.
+    let stall_log = window_stall::enabled().then(|| {
+        let ping_proxy = proxy.clone();
+        window_stall::start(move || ping_proxy.send_event(UserEvent::WindowThreadPing).is_ok())
+    });
+
     // Last known cursor position in WINDOW logical coordinates. tao reports
     // MouseInput without a position, so the CursorMoved stream is what makes
     // a click locatable.
@@ -2332,7 +2342,16 @@ fn main() {
                     // events delivered to a child NSView do not surface as
                     // tao window events (measured with a synthetic
                     // sendEvent:, 2026-08-07).
-                    for click in rustkit_viewhost::drain_pending_clicks() {
+                    // One queue, drained in arrival order across clicks,
+                    // the wheel and keys (threads plan M2, #575): until
+                    // 2026-10-14 three queues were drained one after another,
+                    // so a click made after a wheel burst reached the page
+                    // before the burst, and a key typed before a click after
+                    // it. An event for a view that is gone was dropped by the
+                    // viewhost when the view was destroyed.
+                    for event in rustkit_viewhost::drain_input() {
+                        match event.kind {
+                        rustkit_viewhost::InputKind::Pointer(click) => {
                         // The page hears the click before the browser
                         // acts on it: mousedown on press; mouseup and click
                         // on release, and only then focus and the link,
@@ -2374,21 +2393,24 @@ fn main() {
                             info!(%url, "Link clicked");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
-                    }
-                    // The wheel, from the content view's own `scrollWheel:`.
-                    // The window-loop MouseWheel arm above stays as it was;
-                    // the view consumes the wheel, so only one of the two
-                    // fires for an event. Until 2026-10-06 the wheel reached
-                    // neither in the built app (hand-test item H6).
-                    for scroll in rustkit_viewhost::drain_pending_scrolls() {
+                        }
+                        // The wheel, from the content view's own `scrollWheel:`.
+                        // The window-loop MouseWheel arm above stays as it was;
+                        // the view consumes the wheel, so only one of the two
+                        // fires for an event. Until 2026-10-06 the wheel reached
+                        // neither in the built app (hand-test item H6). A burst
+                        // arrives summed by the queue, pointer drift between
+                        // its steps included, so a drain costs one scroll per
+                        // burst and one present (#692), not one per step.
+                        rustkit_viewhost::InputKind::Wheel(scroll) => {
                         if wheel_burst_started() {
                             info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
                         }
                         if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
                             trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
                         }
-                    }
-                    for key in rustkit_viewhost::drain_pending_keys() {
+                        }
+                        rustkit_viewhost::InputKind::Key(key) => {
                         if key.cmd {
                             continue; // menu shortcuts are not text
                         }
@@ -2443,6 +2465,8 @@ fn main() {
                             if let Some(dy) = dy {
                                 view.scroll_by(0.0, dy);
                             }
+                        }
+                        }
                         }
                     }
                     // Timers that came due, late fetches, and what the
@@ -4148,6 +4172,11 @@ fn main() {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
                             let _ = settings_wv.evaluate_script(&script);
+                        }
+                    }
+                    UserEvent::WindowThreadPing => {
+                        if let Some((answered, clock)) = stall_log.as_ref() {
+                            answered.now(clock);
                         }
                     }
                     UserEvent::DecayTick => {

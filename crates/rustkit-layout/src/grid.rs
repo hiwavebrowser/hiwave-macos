@@ -57,6 +57,11 @@ pub struct GridTrack {
     /// wide for any other reason (`0px`, an empty `auto` track) keeps both
     /// of its gutters; the size alone does not say which this is.
     pub collapsed: bool,
+    /// A flexible track whose minimum is a length or a percentage
+    /// (`minmax(0, 1fr)`), not the `auto` minimum of a plain `1fr`. Items
+    /// do not size it (css-grid-1 §12.5 sizes only tracks with an intrinsic
+    /// min sizing function): its base size is that minimum and no more.
+    pub flexible_with_fixed_min: bool,
     /// Final computed size.
     pub size: f32,
     /// Position (offset from container start).
@@ -159,6 +164,9 @@ impl GridTrack {
             fit_content_limit,
             is_auto_fit: false,
             collapsed: false,
+            flexible_with_fixed_min: flex_factor > 0.0
+                && matches!(size, TrackSize::MinMax(min, _)
+                    if matches!(min.as_ref(), TrackSize::Px(_) | TrackSize::Percent(_))),
             size: base_size,
             position: 0.0,
             line_names: Vec::new(),
@@ -446,6 +454,27 @@ impl<'a> GridItem<'a> {
         min_width.max(auto_min) + margins
     }
 
+    /// The item's contribution to columns that are all flexible.
+    ///
+    /// A flexible column takes its base size from the item and its final
+    /// size from the `fr` share, so the contribution is the minimum one
+    /// alone: for an auto-width item with a `min-width` that is a length,
+    /// that length and not the content (css-grid-1 §6.6: the automatic
+    /// minimum is for `min-width: auto`). Two `1fr` columns of 150px words
+    /// in `min-width: 0` items are 50 each in a 100px grid in Chromium 143;
+    /// here each was 150. A column sized from content keeps
+    /// `get_width_contribution`: it has one number for its minimum and its
+    /// content, and the length alone would empty it.
+    pub fn get_flexible_width_contribution(&self, container_width: f32) -> f32 {
+        let style = &self.layout_box.style;
+        if matches!(style.width, Length::Auto) && style.overflow_x == Overflow::Visible {
+            if let Some(min_width) = length_min_width_border_box(self.layout_box) {
+                return min_width + horizontal_margins(style);
+            }
+        }
+        self.get_width_contribution(container_width)
+    }
+
     /// Set explicit placement from style.
     pub fn set_placement(&mut self, placement: &GridPlacement) {
         // Start with both dimensions needing auto-placement
@@ -478,6 +507,11 @@ impl<'a> GridItem<'a> {
                 self.column_span = *span;
                 // Still needs auto-placement, but with specified span
             }
+            // `auto / span N`: auto-placed, N tracks long (css-grid-1
+            // section 8.3; `grid-column-end: span N` alone is this).
+            (GridLine::Auto, GridLine::Span(span)) => {
+                self.column_span = *span;
+            }
             _ => {
                 // Auto placement for columns
             }
@@ -508,6 +542,11 @@ impl<'a> GridItem<'a> {
             (GridLine::Span(span), _) => {
                 self.row_span = *span;
                 // Still needs auto-placement, but with specified span
+            }
+            // `auto / span N`: auto-placed, N tracks long (css-grid-1
+            // section 8.3; `grid-row-end: span N` alone is this).
+            (GridLine::Auto, GridLine::Span(span)) => {
+                self.row_span = *span;
             }
             _ => {
                 // Auto placement
@@ -543,7 +582,8 @@ impl<'a> GridItem<'a> {
             // Both start and end are explicit (number or resolved name)
             ((start, false, None), (end, false, None)) if start != 0 && end != 0 => {
                 self.column_start = start;
-                self.column_end = end;
+                // The same line twice is a span of one (css-grid-1 8.3.1).
+                self.column_end = if end == start { start + 1 } else { end };
                 self.auto_column = false;
             }
             // Start is explicit, end is auto
@@ -568,6 +608,10 @@ impl<'a> GridItem<'a> {
             ((_, _, Some(span)), _) => {
                 self.column_span = span;
             }
+            // Start is auto, end is a span: auto-placed, that many tracks.
+            ((_, true, None), (_, _, Some(span))) => {
+                self.column_span = span;
+            }
             _ => {
                 // Auto placement for columns
             }
@@ -581,7 +625,7 @@ impl<'a> GridItem<'a> {
             // Both start and end are explicit
             ((start, false, None), (end, false, None)) if start != 0 && end != 0 => {
                 self.row_start = start;
-                self.row_end = end;
+                self.row_end = if end == start { start + 1 } else { end };
                 self.auto_row = false;
             }
             // Start is explicit, end is auto
@@ -604,6 +648,10 @@ impl<'a> GridItem<'a> {
             }
             // Start is a span
             ((_, _, Some(span)), _) => {
+                self.row_span = span;
+            }
+            // Start is auto, end is a span: auto-placed, that many tracks.
+            ((_, true, None), (_, _, Some(span))) => {
                 self.row_span = span;
             }
             _ => {
@@ -1147,8 +1195,15 @@ impl GridLayout {
                 if let Some(n) = self.find_column_line_by_name(name) {
                     (n, false, None)
                 } else {
-                    trace!("Column line name '{}' not found, using auto", name);
-                    (0, true, None)
+                    // No line has this name. css-grid-1 8.3: every implicit
+                    // line is then taken to have it, so this is the first
+                    // line after the explicit grid. Until 2026-10-12 the
+                    // item was auto-placed instead, and two items that named
+                    // the same missing area (bing's search box: a textarea
+                    // and the `::after` that sizes it, both `grid-area:
+                    // content`) landed in two rows where they share a cell.
+                    trace!("Column line name '{}' not found, using the first implicit line", name);
+                    (self.explicit_columns as i32 + 2, false, None)
                 }
             }
             GridLine::Span(count) => (0, true, Some(*count)),
@@ -1243,8 +1298,9 @@ impl GridLayout {
                 if let Some(n) = self.find_row_line_by_name(name) {
                     (n, false, None)
                 } else {
-                    trace!("Row line name '{}' not found, using auto", name);
-                    (0, true, None)
+                    // As for columns: the first line after the explicit grid.
+                    trace!("Row line name '{}' not found, using the first implicit line", name);
+                    (self.explicit_rows as i32 + 2, false, None)
                 }
             }
             GridLine::Span(count) => (0, true, Some(*count)),
@@ -1487,12 +1543,14 @@ pub fn layout_grid_container(
         }
     };
 
-    // Ensure at least one column and row
+    // Ensure at least one column and row. With no template they are
+    // implicit tracks like any later one, so `grid-auto-rows: 40px` sizes
+    // the first row too (it used to be `auto`: its content).
     if grid.columns.is_empty() {
-        grid.columns.push(GridTrack::implicit(&TrackSize::Auto));
+        grid.columns.push(GridTrack::implicit(&style.grid_auto_columns));
     }
     if grid.rows.is_empty() {
-        grid.rows.push(GridTrack::implicit(&TrackSize::Auto));
+        grid.rows.push(GridTrack::implicit(&style.grid_auto_rows));
     }
 
     // Collect items with placement info
@@ -1720,14 +1778,26 @@ pub fn layout_grid_container(
     // and columns do not read each other in this phase, and a row
     // contribution that is a real layout (the L0 fragments below) needs
     // the item's inline size.
+    let span_over_flexible = a_span_covers_a_flexible_track(
+        &grid.columns,
+        items.iter().map(|item| ((item.column_start - 1).max(0) as usize, item.column_span.max(1) as usize)),
+    );
     let column_contributions: Vec<(usize, usize, f32)> = items
         .iter()
         .map(|item| {
-            (
-                (item.column_start - 1).max(0) as usize,
-                item.column_span.max(1) as usize,
-                item.get_width_contribution(container_width),
-            )
+            let start = (item.column_start - 1).max(0) as usize;
+            let span = item.column_span.max(1) as usize;
+            // With a spanning item over a flexible column, every column keeps
+            // the content floor of its own items
+            // (see `a_span_covers_a_flexible_track`).
+            let flexible = !span_over_flexible
+                && (start..start + span).all(|i| grid.columns.get(i).is_some_and(|t| t.is_flexible));
+            let contribution = if flexible {
+                item.get_flexible_width_contribution(container_width)
+            } else {
+                item.get_width_contribution(container_width)
+            };
+            (start, span, contribution)
         })
         .collect();
     let max_col_span = column_contributions.iter().map(|c| c.1).max().unwrap_or(1);
@@ -2993,7 +3063,18 @@ pub fn layout_grid_container(
                 AlignSelf::Baseline => AlignSelf::FlexStart,
                 other => other,
             };
-            if !matches!(align, AlignSelf::FlexStart | AlignSelf::Center | AlignSelf::FlexEnd) {
+            // An `auto` margin on the block axis takes the free space and
+            // `align-self` then has nothing to act on, `stretch` included
+            // (css-grid-1 6.4): `margin-top: auto` puts the item at the end
+            // of its area, both centre it. google's logo block is `height:
+            // 100%; max-height: 92px; margin-top: auto` in a grid that
+            // centres its items and sat in the middle of its row.
+            let top_auto = matches!(child.style.margin_top, Length::Auto);
+            let bottom_auto = matches!(child.style.margin_bottom, Length::Auto);
+            let auto_margin = top_auto || bottom_auto;
+            if !auto_margin
+                && !matches!(align, AlignSelf::FlexStart | AlignSelf::Center | AlignSelf::FlexEnd)
+            {
                 continue;
             }
             let Some(&(r0, r1)) = row_spans.get(item_idx) else {
@@ -3051,9 +3132,16 @@ pub fn layout_grid_container(
                 - margin_top
                 - child.dimensions.margin.bottom
                 - (child.dimensions.content.height + pb);
-            let offset = match align {
-                AlignSelf::Center => free / 2.0,
-                AlignSelf::FlexEnd => free,
+            let offset = match (auto_margin, align) {
+                // An item taller than its area has no free space to give
+                // its margins and stays at the start.
+                (true, _) => match (top_auto, bottom_auto) {
+                    (true, true) => free.max(0.0) / 2.0,
+                    (true, false) => free.max(0.0),
+                    _ => 0.0,
+                },
+                (false, AlignSelf::Center) => free / 2.0,
+                (false, AlignSelf::FlexEnd) => free,
                 _ => 0.0,
             };
             let border_top = child.dimensions.content.y
@@ -3136,6 +3224,188 @@ pub fn layout_grid_container(
     );
 }
 
+/// The min- or max-content width (content box) of a grid container whose
+/// columns are an explicit list of tracks, or `None` for a grid this does
+/// not cover (no column template, a `repeat()`, an item placed by line or
+/// spanning), which keeps the generic walk's answer.
+///
+/// css-grid-1 section 12.1: the tracks are sized under a min-content or a
+/// max-content constraint and the container's width is their sum plus the
+/// gaps. A length track is itself; `minmax(a, b)` is its minimum under
+/// min-content and its maximum under max-content; a content-sized track is
+/// the largest contribution of the items in its column; a flexible track is
+/// its base size under min-content, and under max-content the tracks share
+/// one `fr` size, the largest any of them needs.
+///
+/// The generic walk took the widest child, as if the items were stacked: an
+/// auto-width grid that is a flex item was as wide as its longest word
+/// (reddit's feed, 46px for two columns of up to 756 and 316).
+fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> {
+    let style = &layout_box.style;
+    let template = &style.grid_template_columns;
+    if !style.display.is_grid() || template.tracks.is_empty() || !template.repeats.is_empty() {
+        return None;
+    }
+    let items: Vec<&LayoutBox> = layout_box
+        .children
+        .iter()
+        .filter(|c| {
+            c.style.display != Display::None
+                && !matches!(c.position, crate::Position::Absolute | crate::Position::Fixed)
+                && !is_collapsible_whitespace_only(c)
+        })
+        .collect();
+    let auto_placed = |c: &&LayoutBox| {
+        matches!(c.style.grid_column_start, GridLine::Auto) && matches!(c.style.grid_column_end, GridLine::Auto)
+    };
+    if !items.iter().all(auto_placed) || style.grid_auto_flow != GridAutoFlow::Row {
+        return None;
+    }
+
+    // Two track shapes keep the generic walk's answer for now: a
+    // `fit-content()` track (its minimum is its items' minimum contribution,
+    // not their min-content) and a flexible track with a factor below 1
+    // (the items of a track the section 12.7.1 restart makes inflexible ask
+    // for nothing). On both the estimate below was further from Chromium
+    // than the walk: two `fit-content(80px)` columns of 150px words in
+    // `overflow: hidden` items were 300 in a 100px float (Chromium 100, the
+    // walk 150), and `0fr 2fr` around a 60px word with `min-width: 20px`
+    // was 100 (Chromium and the walk 60).
+    let outside_the_estimate = |size: &TrackSize| match size {
+        TrackSize::FitContent(_) => true,
+        TrackSize::Fr(fr) => *fr < 1.0,
+        TrackSize::MinMax(_, high) => matches!(high.as_ref(), TrackSize::Fr(fr) if *fr < 1.0),
+        _ => false,
+    };
+    if template.tracks.iter().any(|t| outside_the_estimate(&t.size)) {
+        return None;
+    }
+
+    let columns = template.tracks.len();
+    // The largest contribution of the items that auto-placement puts in a
+    // column: item i goes to column i mod n.
+    // Walked once per column and constraint: a track below asks up to three
+    // times. The third value is the largest minimum contribution, what an
+    // `auto` minimum is sized from; it is above the content only for a
+    // `min-width` longer than the content, which floors the other two.
+    let mut contributions = vec![(0.0f32, 0.0f32, 0.0f32); columns];
+    for (i, c) in items.iter().enumerate() {
+        let (low, high, floor) = &mut contributions[i % columns];
+        let min_content = estimate_min_content_width(c);
+        let minimum = minimum_contribution_width(c, min_content);
+        *low = low.max(min_content).max(minimum);
+        *high = high.max(estimate_max_content_width(c)).max(minimum);
+        *floor = floor.max(minimum);
+    }
+    let content = |column: usize, min: bool| -> f32 {
+        let (low, high, _) = contributions[column];
+        if min { low } else { high }
+    };
+    let floor = |column: usize| contributions[column].2;
+    let mut total = 0.0f32;
+    // The flexible tracks, as (base size, factor), and the one `fr` size
+    // they share under a max-content constraint.
+    //
+    // css-grid-1 section 12.7: under a min-content constraint the flex
+    // fraction is zero, so a flexible track is its base size: its minimum
+    // (`minmax(0, 1fr)` is 0), or the minimum contribution of its items
+    // for a plain `<n>fr`, whose minimum is `auto`. Under a max-content
+    // constraint the fraction is the largest any track needs (section
+    // 12.7.1): its base size over its factor, and its items' max-content
+    // over the factor, neither factor counted below 1; where that item
+    // fraction times the factor is less than the base size the track is
+    // inflexible for the item, which then asks only for its max-content
+    // less the base. A track is the fraction times its factor, never less
+    // than its base size. Chromium 143: `0.5fr` around a 100px word is 100
+    // wide, two `minmax(100px, 1fr)` around 50 and 150 are 300, two
+    // `minmax(0, 1fr)` shrink to their container, and `0.25fr 1fr` around
+    // two 60px words and a 10px one is 60 and 60.
+    //
+    // An `auto` minimum (`auto`, `minmax(auto, ..)`, `<n>fr`) under a
+    // min-content constraint is the minimum contribution too, not the
+    // min-content: two `1fr` columns of 150px words in `overflow: hidden`
+    // or `min-width: 0` items have a min-content of 0, so the grid shrinks
+    // to a narrow float or row instead of overflowing it at 300.
+    let mut flexible: Vec<(f32, f32)> = Vec::new();
+    let mut fr_size = 0.0f32;
+    for (column, track) in template.tracks.iter().enumerate() {
+        let sized = |size: &TrackSize, min: bool| -> Option<f32> {
+            match size {
+                TrackSize::Px(v) => Some(*v),
+                TrackSize::MinContent => Some(content(column, true)),
+                TrackSize::MaxContent => Some(content(column, false)),
+                TrackSize::Auto | TrackSize::Percent(_) => {
+                    Some(if min { floor(column) } else { content(column, false) })
+                }
+                TrackSize::FitContent(limit) => Some(content(column, min).min(limit.max(content(column, true)))),
+                _ => None,
+            }
+        };
+        let mut flex = |base: f32, fr: f32| {
+            let fr = fr.max(0.0);
+            let item = content(column, false) / fr.max(1.0);
+            let item = if item * fr < base { content(column, false) - base } else { item };
+            fr_size = fr_size.max(base / fr.max(1.0)).max(item);
+            flexible.push((base, fr));
+        };
+        match &track.size {
+            TrackSize::Fr(fr) => flex(floor(column), *fr),
+            TrackSize::MinMax(low, high) => match high.as_ref() {
+                TrackSize::Fr(fr) => flex(sized(low, true).unwrap_or(0.0), *fr),
+                high => {
+                    let low = sized(low, true).unwrap_or(0.0);
+                    total += if min { low } else { sized(high, false).unwrap_or(low).max(low) };
+                }
+            },
+            size => total += sized(size, min)?,
+        }
+    }
+    let gap = layout_box.length_to_px(&style.column_gap, 0.0);
+    for (base, fr) in flexible {
+        total += if min { base } else { base.max(fr_size * fr) };
+    }
+    Some(total + gap * (columns as f32 - 1.0))
+}
+
+/// A grid item's minimum contribution to a column with an `auto` minimum
+/// (border box), given its min-content width.
+///
+/// css-grid-1 section 12.5 with the automatic minimum size of section 6.6:
+/// an item with a `width` contributes that (the min-content estimate reads
+/// it already); otherwise a `min-width` that is a length is the contribution
+/// whatever the content, a scroll container contributes nothing but its
+/// padding and border, and any other item its min-content.
+fn minimum_contribution_width(item: &LayoutBox, min_content: f32) -> f32 {
+    let style = &item.style;
+    if matches!(style.width, Length::Px(_)) {
+        return min_content;
+    }
+    if let Some(min_width) = length_min_width_border_box(item) {
+        return min_width;
+    }
+    if style.overflow_x != Overflow::Visible {
+        return horizontal_padding_border(style);
+    }
+    min_content
+}
+
+/// The border-box width a `min-width` that is a length gives a box, or
+/// `None` for `auto`, a percentage or a keyword.
+fn length_min_width_border_box(item: &LayoutBox) -> Option<f32> {
+    let style = &item.style;
+    let min_width = match &style.min_width {
+        Length::Auto | Length::FitContent | Length::Percent(_) => return None,
+        Length::Calc(sum) if sum.percent != 0.0 => return None,
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => return None,
+        length => item.length_to_px(length, 0.0),
+    };
+    let padding_border = horizontal_padding_border(style);
+    Some(match style.box_sizing {
+        BoxSizing::BorderBox => min_width.max(padding_border),
+        BoxSizing::ContentBox => min_width + padding_border,
+    })
+}
+
 /// Size grid tracks using the track sizing algorithm.
 /// Estimate of a box's min-content (border-box) width.
 ///
@@ -3216,6 +3486,11 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     // specified width still wins.
     if let BoxType::FormControl(control) = &layout_box.box_type {
         return form_control_min_content_width(style, control);
+    }
+
+    // A grid container's width comes from its column tracks.
+    if let Some(w) = grid_columns_content_width(layout_box, true) {
+        return w + padding_border;
     }
 
     // A single-line ROW flex container's min-content main size SUMS its items'
@@ -3548,6 +3823,11 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
         return crate::form_control_intrinsic_size(style, control).0;
     }
 
+    // A grid container's width comes from its column tracks.
+    if let Some(w) = grid_columns_content_width(layout_box, false) {
+        return w + padding_border;
+    }
+
     // A flex container's max-content main size sums its ITEMS plus
     // main-axis gaps (row), or takes the widest item (column). Whitespace-
     // only text never becomes a flex item (css-flexbox-1 §4), so it
@@ -3786,6 +4066,25 @@ pub(crate) fn horizontal_padding_border(style: &ComputedStyle) -> f32 {
         + intrinsic_len_px(&style.border_right_width, fs)
 }
 
+/// Does an item spanning more than one track cover a flexible track?
+///
+/// Then every flexible track keeps the floor its own items put under it
+/// (their content, and for `minmax(0, 1fr)` too), as before the two span-1
+/// rules above existed. The spanning item's contribution is shared among
+/// every growable track it covers, the content-sized ones included; with
+/// the flexible track left at 0, a full-width header over
+/// `minmax(0, 1fr) auto` gave the empty `auto` column half the header's
+/// width (main 525 in 600; Chromium 143 600). css-grid-1 §12.5 step 4 would
+/// have the header grow only the flexible track; until spans do that, the
+/// floor keeps the content track at its own size. The rule is for the whole
+/// grid and not per track: flexible tracks share one `fr` size, and a
+/// floored track beside an unfloored one squeezed the second
+/// (`minmax(auto, 1fr) 2fr 2fr` in 100 with a header over the first two:
+/// the third column 10; 60 before, Chromium 32).
+fn a_span_covers_a_flexible_track(tracks: &[GridTrack], mut placements: impl Iterator<Item = (usize, usize)>) -> bool {
+    placements.any(|(start, span)| span > 1 && tracks.iter().skip(start).take(span).any(|t| t.is_flexible))
+}
+
 /// css-grid-1 §12.5 (intrinsic track sizes), items processed by span count:
 /// each `(start, span, contribution)` grows the base sizes of the tracks it
 /// spans until they (plus the spanned gutters, which the item already owns)
@@ -3806,6 +4105,7 @@ fn distribute_span_contributions(
     max_span: usize,
 ) {
     const EPS: f32 = 0.01;
+    let span_over_flexible = a_span_covers_a_flexible_track(tracks, contributions.iter().map(|c| (c.0, c.1)));
     // Per track: has an item of a smaller span already sized it?
     let mut sized = vec![false; tracks.len()];
     for span in 1..=max_span {
@@ -3829,8 +4129,19 @@ fn distribute_span_contributions(
             let growable: Vec<usize> = (start..end)
                 .filter(|&i| {
                     let t = &tracks[i];
-                    t.is_min_content || t.is_max_content || t.is_flexible
-                        || t.growth_limit > t.base_size
+                    // `minmax(0, 1fr)`: a fixed minimum, which no item
+                    // of its own grows. Chromium 143 gives two such columns
+                    // 50 each in a 100px grid around 150px words; here each
+                    // was 150. A spanning item still counts the track: left
+                    // out, the whole contribution went to the content track
+                    // beside it, and a header across `auto minmax(0, 1fr)`
+                    // made the sidebar as wide as the header's text (150
+                    // and 450 in 600; Chromium 40 and 560). And with a
+                    // spanning item over a flexible track, every track keeps
+                    // its own items' floor (`a_span_covers_a_flexible_track`).
+                    (span > 1 || !t.flexible_with_fixed_min || span_over_flexible)
+                        && (t.is_min_content || t.is_max_content || t.is_flexible
+                            || t.growth_limit > t.base_size)
                 })
                 .collect();
             if growable.is_empty() {
@@ -4055,10 +4366,13 @@ fn size_grid_tracks_filling(
             break;
         }
 
-        // Distribute proportionally, but don't exceed room_to_grow
-        let to_distribute = remaining.min(total_room);
+        // Equal shares, each track stopping at its growth limit; what a
+        // stopped track leaves goes round again (css-grid-1 section 12.6).
+        // Shares in proportion to the room gave `minmax(0, 756px)
+        // minmax(0, 316px)` in a 700px grid with a 24px gap 462 and 214, where Chromium
+        // has 360 and 316 (reddit's feed and sidebar, H26d).
+        let share = remaining.min(total_room) / growable.len() as f32;
         for (i, room) in &growable {
-            let share = (room / total_room) * to_distribute;
             tracks[*i].size += share.min(*room);
         }
 
@@ -4596,6 +4910,45 @@ fn apply_align_self(
         Length::Calc(_) => child.length_to_px(&child.style.height, cell_height),
         _ => cell_height,
     };
+    // A definite `max-height` and `min-height` bound an explicit height (max
+    // first, then min, CSS 2.1 10.7), as the inline axis does above. google's
+    // logo is `height: 100%; max-height: 92px` in a 150px row and was 150
+    // tall. Both are the SPECIFIED sizes, so `box-sizing` covers them alike.
+    // An `auto` height is left to the stretch and min/max passes that follow.
+    let definite = |l: &Length| match l {
+        Length::Auto | Length::FitContent | Length::Percent(_) => None,
+        Length::Calc(sum) if sum.percent != 0.0 => None,
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => None,
+        l => Some(child.length_to_px(l, 0.0)),
+    };
+    let mut child_height = child_height;
+    if has_explicit_height {
+        if let Some(max_h) = definite(&child.style.max_height) {
+            child_height = child_height.min(max_h);
+        }
+        if let Some(min_h) = definite(&child.style.min_height) {
+            child_height = child_height.max(min_h);
+        }
+    }
+
+    // An `auto` margin on the block axis takes the free space before
+    // `align-self` is looked at (css-grid-1 6.4): `margin-top: auto` puts
+    // the item at the bottom of its area, both margins centre it. google's
+    // logo is `height: 100%; max-height: 92px; margin-top: auto` in a
+    // taller row and sat at the top. Only an item with an explicit height
+    // is handled: the height of an `auto` one is not known until Phase 9
+    // has flowed it.
+    let top_auto = matches!(child.style.margin_top, Length::Auto);
+    let bottom_auto = matches!(child.style.margin_bottom, Length::Auto);
+    if has_explicit_height && (top_auto || bottom_auto) {
+        let free = (cell_height - child_height).max(0.0);
+        let before = match (top_auto, bottom_auto) {
+            (true, true) => free / 2.0,
+            (true, false) => free,
+            _ => 0.0,
+        };
+        return (cell_y + before, child_height);
+    }
 
     match align {
         AlignSelf::FlexStart | AlignSelf::Auto => (cell_y, child_height),
@@ -6137,10 +6490,11 @@ mod tests {
         assert_eq!(line2, 2);
         assert!(!is_auto2);
 
-        // Unknown name falls back to auto
+        // An unknown name is the first implicit line after the explicit
+        // grid (two columns, three lines: line 4), not auto-placement.
         let (line3, is_auto3, _) = grid.resolve_column_line(&GridLine::Name("unknown".to_string()));
-        assert_eq!(line3, 0);
-        assert!(is_auto3);
+        assert_eq!(line3, 4);
+        assert!(!is_auto3);
     }
 
     #[test]

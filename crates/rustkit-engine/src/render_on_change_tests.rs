@@ -34,13 +34,17 @@ fn a_view_is_drawn_again_only_when_its_frame_would_differ() {
     assert_eq!(engine.render_changed_views(), 0, "nothing changed since the load");
     assert_eq!(engine.render_changed_views(), 0);
 
-    // A scroll moves the frame.
+    // A user scroll presents the moved frame itself (scroll_paints_first_tests),
+    // so there is nothing left to draw at the next wake.
     assert!(engine.scroll_view(view, 0.0, -50.0).unwrap());
-    assert_eq!(engine.render_changed_views(), 1, "after a scroll");
+    assert_eq!(engine.render_changed_views(), 0, "the scroll presented its own frame");
+    // An offset the frame on record does not show is drawn.
+    engine.views.get_mut(&view).unwrap().scroll_offset = (0.0, 20.0);
+    assert_eq!(engine.render_changed_views(), 1, "the offset moved without a draw");
     assert_eq!(engine.render_changed_views(), 0);
-    // A scroll that cannot move (already at the top after going back) does not.
+    // A scroll that cannot move (already at the top after going back) draws nothing.
     assert!(engine.scroll_view(view, 0.0, 50.0).unwrap());
-    assert_eq!(engine.render_changed_views(), 1);
+    assert_eq!(engine.render_changed_views(), 0);
     assert!(!engine.scroll_view(view, 0.0, 50.0).unwrap());
     assert_eq!(engine.render_changed_views(), 0, "a scroll against the edge");
 

@@ -7,6 +7,13 @@ on:
   schedule:
     - cron: "0 9 * * *"
 
+# A new push to a PR supersedes the run for its previous head, so cancel it
+# instead of finishing eight macos-14 jobs for a commit nobody will merge.
+# Non-PR events get a per-run group and are never cancelled.
+concurrency:
+  group: parity-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   RUST_BACKTRACE: 1
   # Lifted to workflow scope on purpose: the umbrella-dispatch steps below
@@ -26,7 +33,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.91.0
       - uses: Swatinem/rust-cache@v2
       - name: All test targets must COMPILE (F1)
         run: cargo test --workspace --no-run
@@ -52,33 +59,27 @@ jobs:
   # red on a Linux font stack (measured 2026-09-17), so a ubuntu lane would
   # red-lock on font substitution and teach everyone to ignore it.
   #
-  # ADVISORY for one cycle, same posture as Gates A and B under ratified
-  # decision 2: this lane has never run anywhere, so its colour on macos-14 is
-  # unknown and a blocking lane of unknown colour is a red lock, not a gate.
-  # Advisory means VISIBLE, not ignored — the receipt goes to the job summary,
-  # including did-not-run, so the first run establishes the colour and the
-  # flip to blocking deletes one `continue-on-error` line.
+  # BLOCKING. It entered advisory-first so its colour on macos-14 could be
+  # established; it has been green on every PR run since, so the flip deleted
+  # the one `continue-on-error` line. The receipt still goes to the job
+  # summary, including did-not-run.
   unit-suites:
     runs-on: macos-14
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.91.0
       - uses: Swatinem/rust-cache@v2
 
-      - name: Campaign unit suites must PASS (F2, advisory)
-        id: unit_suites
-        continue-on-error: true
+      - name: Campaign unit suites must PASS (F2, blocking)
         run: |
           set -uo pipefail
           summary="$RUNNER_TEMP/unit-suites.md"
           {
-            echo "## Rust unit suites — advisory cycle"
+            echo "## Rust unit suites (blocking)"
             echo
             echo "The suites this campaign requires green before every commit."
-            echo "Advisory for one cycle; the flip to blocking removes one line."
-            echo
-            echo "| suite | result line | verdict |"
+                        echo "| suite | result line | verdict |"
             echo "|---|---|---|"
           } > "$summary"
           status=0
@@ -111,7 +112,7 @@ jobs:
   # Closes the CI gap from Issue #574 (Item 5): rustkit-js and rustkit-bindings
   # integration tests (class fields TDZ, GC weak cycles, let/for-of, web API
   # census probe) along with the full unit test suites must execute on CI.
-  # Unlike F2 (layout/engine, which are advisory for one cycle), this lane is
+  # Like F2 (layout/engine), this lane is
   # BLOCKING: these crates are headless, fast, and verify the Boa 0.22 engine
   # and web bindings invariants.
   js-suites:
@@ -119,7 +120,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.91.0
       - uses: Swatinem/rust-cache@v2
 
       - name: JS engine and bindings test suites must PASS (F3, blocking)
