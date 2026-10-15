@@ -30,6 +30,11 @@ use std::time::{Duration, Instant};
 /// a new document clears it ([`ViewControl::clear_all`]).
 pub const ALL: u64 = u64::MAX;
 
+/// What is left of a turn after its script was stopped may run this long
+/// (`JsRuntime`'s grace turn): the promise jobs the turn's finished
+/// callbacks queued, and the embedder's own script.
+pub const STOP_GRACE: Duration = Duration::from_millis(50);
+
 /// The longest the watchdog sleeps while a turn is open. It wakes sooner
 /// when an open turn's budget ends first.
 const TICK: Duration = Duration::from_millis(250);

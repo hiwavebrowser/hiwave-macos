@@ -154,6 +154,13 @@ struct ExecutionDeadline {
     control: std::cell::RefCell<Option<Arc<control::ViewControl>>>,
     /// The turn running now ([`JsRuntime::begin_turn`]); 0 = none.
     turn: std::cell::Cell<u64>,
+    /// Whether Boa compares the word with `turn` now: not during
+    /// bookkeeping ([`JsRuntime::evaluate_bookkeeping`]).
+    armed: std::cell::Cell<bool>,
+    /// The stamp the open turn is on, for the grace turn after a stop.
+    stamp: std::cell::RefCell<Option<Arc<control::ThreadStamp>>>,
+    /// Whether this turn's grace turn has been opened.
+    graced: std::cell::Cell<bool>,
 }
 
 impl ExecutionDeadline {
@@ -312,6 +319,7 @@ impl JsRuntime {
             use boa_engine::Source;
 
             let result = self.context.eval(Source::from_bytes(source));
+            self.consume_interrupt();
             // Promise reactions (`.then`, `await`) are jobs Boa queues but
             // does not run on its own; a page's async code never resumes
             // without this.
@@ -395,11 +403,13 @@ impl JsRuntime {
     /// the watchdog stops it, and return its id. Without a view control
     /// nothing is published and the id is 0. Every `begin_turn` is paired
     /// with an [`JsRuntime::end_turn`] on the same stamp.
-    pub fn begin_turn(&mut self, stamp: &control::ThreadStamp, budget: Duration) -> u64 {
+    pub fn begin_turn(&mut self, stamp: &Arc<control::ThreadStamp>, budget: Duration) -> u64 {
         let Some(control) = self.deadline.control.borrow().clone() else {
             return 0;
         };
         let turn = stamp.begin_turn(&control, budget);
+        *self.deadline.stamp.borrow_mut() = Some(stamp.clone());
+        self.deadline.graced.set(false);
         self.set_turn(turn);
         turn
     }
@@ -410,29 +420,78 @@ impl JsRuntime {
             return;
         }
         stamp.end_turn();
-        self.set_turn(stamp.current_turn());
+        let open = stamp.current_turn();
+        if open == 0 {
+            *self.deadline.stamp.borrow_mut() = None;
+        }
+        self.set_turn(open);
     }
 
     /// The turn the interrupt word is compared with.
     fn set_turn(&mut self, turn: u64) {
         self.deadline.turn.set(turn);
-        #[cfg(feature = "boa")]
-        self.context.set_interrupt_turn(turn);
+        self.arm(turn != 0);
     }
 
-    /// Called when script has returned to Rust: if the interrupt word stopped
-    /// the turn, the stop has done its work, and the rest of the turn is the
-    /// embedder's own script (draining the console, the page's queued
-    /// requests, the timer table), which the word must not kill. So Boa
-    /// stops comparing it with this turn; `take_deadline_hit` still reports
-    /// the stop, and past its deadline the page's host calls are still
-    /// refused, as they were before the word existed. [`ALL`](control::ALL)
-    /// keeps stopping everything.
+    /// Whether Boa stops the running turn by the word (`ALL` it always does).
+    fn arm(&mut self, armed: bool) {
+        self.deadline.armed.set(armed);
+        #[cfg(feature = "boa")]
+        self.context
+            .set_interrupt_turn(if armed { self.deadline.turn.get() } else { 0 });
+    }
+
+    /// Called each time script returns to Rust. The first time a turn's
+    /// script has been stopped (by the word, or by the deadline's host-call
+    /// refusal, which the watchdog's word then follows by a moment), the
+    /// rest of the turn moves to a grace turn of
+    /// [`STOP_GRACE`](control::STOP_GRACE): the stop has ended the script
+    /// that ran too long, and what the turn's finished script queued (an
+    /// XHR's `send` registers its request in a promise reaction) still runs,
+    /// as it did before the word existed. The watchdog stops the grace turn
+    /// too, and that stop is final. `take_deadline_hit` reports the stop.
     #[cfg(feature = "boa")]
     pub(crate) fn consume_interrupt(&mut self) {
-        if self.deadline.turn.get() != 0 && self.deadline.interrupted() {
-            self.deadline.hit.set(true);
-            self.context.set_interrupt_turn(0);
+        if !self.deadline.armed.get() || self.deadline.graced.get() {
+            return;
+        }
+        if !(self.deadline.interrupted() || self.deadline.hit.get()) {
+            return;
+        }
+        self.deadline.hit.set(true);
+        self.deadline.graced.set(true);
+        let control = self.deadline.control.borrow().clone();
+        let stamp = self.deadline.stamp.borrow().clone();
+        if let (Some(control), Some(stamp)) = (control, stamp) {
+            stamp.end_turn();
+            let grace = stamp.begin_turn(&control, control::STOP_GRACE);
+            self.set_turn(grace);
+        }
+    }
+
+    /// Evaluate the embedder's own bookkeeping script (reading a queue or a
+    /// table the page's script filled), which the interrupt word never
+    /// stops: a stop landing in it would lose what it reads, such as the
+    /// requests a stopped turn's callbacks made. Only for short script that
+    /// calls none of the page's functions. Runs no promise jobs (they are
+    /// the page's, and run at the next evaluation); [`ALL`](control::ALL)
+    /// still stops it.
+    pub fn evaluate_bookkeeping(&mut self, source: &str) -> Result<JsValue, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let armed = self.deadline.armed.get();
+            self.arm(false);
+            let result = self.context.eval(boa_engine::Source::from_bytes(source));
+            self.arm(armed);
+            match result {
+                Ok(value) => Ok(self.convert_boa_value(&value)),
+                Err(err) => Err(JsError::ExecutionError(err.to_string())),
+            }
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = source;
+            Err(JsError::NotInitialized)
         }
     }
 
@@ -448,8 +507,13 @@ impl JsRuntime {
         use boa_engine::Source;
 
         // Evaluate console._flush() directly on the context without calling
-        // evaluate_script, preventing infinite recursion.
-        let Ok(logs_val) = self.context.eval(Source::from_bytes("console._flush()")) else {
+        // evaluate_script, preventing infinite recursion. Bookkeeping: the
+        // interrupt word does not stop it (see `evaluate_bookkeeping`).
+        let armed = self.deadline.armed.get();
+        self.arm(false);
+        let logs_val = self.context.eval(Source::from_bytes("console._flush()"));
+        self.arm(armed);
+        let Ok(logs_val) = logs_val else {
             return Vec::new();
         };
 

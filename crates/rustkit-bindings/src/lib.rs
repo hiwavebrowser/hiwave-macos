@@ -1419,7 +1419,7 @@ impl DomBindings {
 
     /// Open a turn of script on `stamp`, stopped by the watchdog past
     /// `budget` (see [`JsRuntime::begin_turn`]).
-    pub fn begin_turn(&self, stamp: &rustkit_js::ThreadStamp, budget: std::time::Duration) -> u64 {
+    pub fn begin_turn(&self, stamp: &std::sync::Arc<rustkit_js::ThreadStamp>, budget: std::time::Duration) -> u64 {
         self.runtime.borrow_mut().begin_turn(stamp, budget)
     }
 
@@ -1653,7 +1653,7 @@ impl DomBindings {
         match self
             .runtime
             .borrow_mut()
-            .evaluate_script("window.__rustkit_next_timer()")
+            .evaluate_bookkeeping("window.__rustkit_next_timer()")
         {
             Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
             _ => None,
@@ -1666,7 +1666,7 @@ impl DomBindings {
         let drained = self
             .runtime
             .borrow_mut()
-            .evaluate_script("JSON.stringify(window.__rustkit_errors.splice(0))");
+            .evaluate_bookkeeping("JSON.stringify(window.__rustkit_errors.splice(0))");
         match drained {
             Ok(JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
             _ => Vec::new(),

@@ -242,3 +242,72 @@ fn once_the_stopped_script_has_returned_the_rest_of_its_turn_runs() {
     assert!(page.runtime.evaluate_script("(function () {})()").is_err());
     page.runtime.end_turn(&page.stamp);
 }
+
+#[test]
+fn a_word_landing_after_a_host_call_refusal_does_not_stop_the_rest_of_the_turn() {
+    // T0's deadline and the watchdog keep the same budget: the deadline
+    // usually ends the script first and the word lands during what the
+    // engine runs next. That must still run (#666's lost-request case).
+    let mut page = page();
+    page.runtime
+        .register_host_function("probe", 0, Box::new(|_| rustkit_js::JsValue::Undefined))
+        .unwrap();
+    let turn = page
+        .runtime
+        .begin_turn(&page.stamp, Duration::from_secs(60));
+    page.runtime
+        .set_execution_deadline(Some(Instant::now() - Duration::from_millis(1)));
+    assert!(page.runtime.evaluate_script("probe()").is_err());
+    page.control.interrupt_turn(turn);
+    let value = page
+        .runtime
+        .evaluate_script("[1, 2].map(function (x) { return x; }).length")
+        .unwrap();
+    assert_eq!(format!("{value:?}"), "Number(2.0)");
+    assert!(page.runtime.take_deadline_hit());
+    page.runtime.end_turn(&page.stamp);
+}
+
+#[test]
+fn bookkeeping_is_not_stopped_by_the_word() {
+    let mut page = page();
+    page.runtime
+        .evaluate_script("var queue = [1, 2, 3];")
+        .unwrap();
+    page.runtime
+        .begin_turn(&page.stamp, Duration::from_secs(60));
+    page.control.interrupt_turn(page.stamp.current_turn());
+    let taken = page
+        .runtime
+        .evaluate_bookkeeping("JSON.stringify(queue.splice(0))")
+        .unwrap();
+    assert_eq!(format!("{taken:?}"), r#"String("[1,2,3]")"#);
+    // Page script in the same turn still is.
+    assert!(page.runtime.evaluate_script("(function () {})()").is_err());
+    page.runtime.end_turn(&page.stamp);
+}
+
+#[test]
+fn after_a_stop_the_turn_gets_a_short_grace_and_its_stop_is_final() {
+    // What the stopped turn's finished callbacks queued still runs (an
+    // XHR's send is a promise reaction); a new spin in the grace is
+    // stopped at its end, and nothing runs after that in this turn.
+    let mut page = page();
+    page.runtime.begin_turn(&page.stamp, BUDGET);
+    let queued =
+        "var sent = false; Promise.resolve().then(function () { sent = true; }); while (true) {}";
+    assert!(page.runtime.evaluate_script(queued).is_err());
+    let started = Instant::now();
+    assert!(page.runtime.evaluate_script("while (true) {}").is_err());
+    let took = started.elapsed();
+    assert!(
+        took < rustkit_js::control::STOP_GRACE + SLACK,
+        "the grace spin ran {took:?}"
+    );
+    assert!(page.runtime.evaluate_script("(function () {})()").is_err());
+    assert!(page.runtime.take_deadline_hit());
+    page.runtime.end_turn(&page.stamp);
+    let (sent, stopped, _) = page.turn("sent", BUDGET);
+    assert_eq!(sent.unwrap(), "Boolean(true)", "the queued reaction ran");
+    assert!(!stopped);
+}
