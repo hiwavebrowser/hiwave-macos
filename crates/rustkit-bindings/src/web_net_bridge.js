@@ -36,7 +36,7 @@
         try {
             done(result);
         } catch (e) {
-            window.__rustkit_errors.push(String(e));
+            try { __rk.reportError(e); } catch (_) {}
         }
         return true;
     }

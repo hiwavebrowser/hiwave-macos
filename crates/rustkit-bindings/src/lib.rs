@@ -364,22 +364,32 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 ///
 /// An exception thrown inside an event listener or a timer callback does
 /// not propagate to whoever fired it (in a browser it goes to
-/// `window.onerror`), so those are caught here and queued in
-/// `__rustkit_errors` for the engine to collect. The one thing that does
+/// `window.onerror`), so those are caught here and handed to the runtime's
+/// host natives (`__rk.reportError`, which page script cannot reach) for the
+/// engine to collect. The one thing that does
 /// propagate is Boa's loop-iteration limit, which a script cannot catch.
 ///
 /// Timers run on a virtual clock the engine advances (`__rustkit_run_timers`),
 /// so a page's `setTimeout(f, 2000)` runs without the load waiting 2s of wall
 /// time. Promise reactions run when the enclosing evaluation returns, not
 /// between two timer callbacks.
+/// The Web API members the bindings report as unimplemented when page
+/// script reaches them (`__rk.unsupported` in the bindings' scripts, a
+/// native page script cannot reach). Nothing else is ever reported.
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 5] = [
+    ("XMLHttpRequest", "open(async=false)"),
+    ("XMLHttpRequest", "responseXML"),
+    ("CustomElementRegistry", "define(extends)"),
+    ("ReadableStream", "getReader(byob)"),
+    ("DOMParser", "parseFromString(XML)"),
+];
+
 const PAGE_LIFECYCLE_JS: &str = r#"
 (function () {
-    var errors = [];
-    window.__rustkit_errors = errors;
+    // Described natively (no page code runs) and queued in the runtime.
+    var reportError = __rk.reportError;
     function report(e) {
-        var msg;
-        try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
-        errors.push(msg);
+        try { reportError(e); } catch (_) {}
     }
 
     function makeEventTarget(target) {
@@ -673,7 +683,7 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
-        runtime.evaluate_script(include_str!("web_components.js"))?;
+        runtime.evaluate_with_host(include_str!("web_components.js"))?;
         // attachShadow, ShadowRoot, slots, event retargeting (web_shadow.js).
         runtime.evaluate_script(include_str!("web_shadow.js"))?;
         // Reflected IDL attributes: link.href, script.type, img.alt, a.target, el.tabIndex, ... (web_reflect.js).
@@ -697,12 +707,12 @@ impl DomBindings {
         web_scroll::install(&mut runtime, &scroll)?;
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
-        runtime.evaluate_script(include_str!("web_observers_live.js"))?;
+        runtime.evaluate_with_host(include_str!("web_observers_live.js"))?;
         // MutationObserver that records every DOM write and delivers in a microtask; replaces
         // the inert stub through the dom.rs write hook (web_mutation_observer.js).
-        runtime.evaluate_script(include_str!("web_mutation_observer.js"))?;
+        runtime.evaluate_with_host(include_str!("web_mutation_observer.js"))?;
         // postMessage, MessageChannel/MessagePort, MessageEvent, requestIdleCallback (web_messaging.js).
-        runtime.evaluate_script(include_str!("web_messaging.js"))?;
+        runtime.evaluate_with_host(include_str!("web_messaging.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -878,7 +888,7 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_encoding.js"))?;
 
         // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
-        runtime.evaluate_script(include_str!("web_streams.js"))?;
+        runtime.evaluate_with_host(include_str!("web_streams.js"))?;
 
         // Intl (en-US only) and the toLocale*String methods over it (web_intl.js).
         runtime.evaluate_script(include_str!("web_intl.js"))?;
@@ -1235,7 +1245,7 @@ impl DomBindings {
         "#;
 
         runtime.evaluate_script(input_element_js)?;
-        runtime.evaluate_script(PAGE_LIFECYCLE_JS)?;
+        runtime.evaluate_with_host(PAGE_LIFECYCLE_JS)?;
 
         debug!("Global objects injected");
         Ok(())
@@ -1385,6 +1395,60 @@ impl DomBindings {
             .map_err(Into::into)
     }
 
+    /// Evaluate a page script as `path` (see
+    /// [`JsRuntime::evaluate_script_named`]).
+    pub fn evaluate_named(&self, script: &str, path: &str) -> Result<JsValue, BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_script_named(script, path)
+            .map_err(Into::into)
+    }
+
+    /// Hand the page's console calls to `handler`, with their positions
+    /// (see [`JsRuntime::set_console_handler`]).
+    pub fn set_console_handler(&self, handler: rustkit_js::ConsoleHandler) {
+        self.runtime.borrow_mut().set_console_handler(handler);
+    }
+
+    /// Console arguments reach the handler as type and length only (see
+    /// [`JsRuntime::set_console_redaction`]).
+    pub fn set_console_redaction(&self, on: bool) {
+        self.runtime.borrow_mut().set_console_redaction(on);
+    }
+
+    /// Hand pending console calls to the console handler now.
+    pub fn flush_console(&self) {
+        self.runtime.borrow_mut().flush_console();
+    }
+
+    /// Diagnostics for an embedder that records them: describe each page
+    /// error ([`take_error_reports`](Self::take_error_reports)), with its
+    /// message text only when `keep_text` (see
+    /// [`JsRuntime::set_error_reports`]).
+    pub fn set_error_details(&self, on: bool, keep_text: bool) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().set_error_reports(on, keep_text);
+        Ok(())
+    }
+
+    /// Page errors since the last call (with
+    /// [`set_error_details`](Self::set_error_details) on): exceptions,
+    /// modules that threw after a top-level `await`, unhandled rejections.
+    pub fn take_error_reports(&self) -> Vec<rustkit_js::ErrorReport> {
+        self.runtime.borrow_mut().take_error_reports()
+    }
+
+    /// Unimplemented Web API members page script reached since the last
+    /// call: `(interface, member, times, first caller's position)`. Only
+    /// [`UNSUPPORTED_MEMBERS`] are ever returned.
+    pub fn take_unsupported_apis(&self) -> Vec<(String, String, u64, Option<rustkit_js::ScriptPosition>)> {
+        self.runtime
+            .borrow_mut()
+            .take_unsupported()
+            .into_iter()
+            .filter(|(i, m, _, _)| UNSUPPORTED_MEMBERS.contains(&(i.as_str(), m.as_str())))
+            .collect()
+    }
+
     /// Bound every loop a page script runs (see
     /// [`JsRuntime::set_loop_iteration_limit`]).
     pub fn set_loop_iteration_limit(&self, max_iterations: u64) {
@@ -1409,6 +1473,23 @@ impl DomBindings {
     /// call that ended it (see [`JsRuntime::take_deadline_overrun`]).
     pub fn take_deadline_overrun(&self) -> Option<std::time::Duration> {
         self.runtime.borrow_mut().take_deadline_overrun()
+    }
+
+    /// Let another thread stop this document's script through its view's
+    /// interrupt word (see [`JsRuntime::set_view_control`]).
+    pub fn set_view_control(&self, control: Option<std::sync::Arc<rustkit_js::ViewControl>>) {
+        self.runtime.borrow_mut().set_view_control(control);
+    }
+
+    /// Open a turn of script on `stamp`, stopped by the watchdog past
+    /// `budget` (see [`JsRuntime::begin_turn`]).
+    pub fn begin_turn(&self, stamp: &std::sync::Arc<rustkit_js::ThreadStamp>, budget: std::time::Duration) -> u64 {
+        self.runtime.borrow_mut().begin_turn(stamp, budget)
+    }
+
+    /// Close the turn [`DomBindings::begin_turn`] opened.
+    pub fn end_turn(&self, stamp: &rustkit_js::ThreadStamp) {
+        self.runtime.borrow_mut().end_turn(stamp);
     }
 
     /// Bound the number of microtask job iterations allowed per turn (see
@@ -1636,7 +1717,7 @@ impl DomBindings {
         match self
             .runtime
             .borrow_mut()
-            .evaluate_script("window.__rustkit_next_timer()")
+            .evaluate_bookkeeping("window.__rustkit_next_timer()")
         {
             Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
             _ => None,
@@ -1644,16 +1725,9 @@ impl DomBindings {
     }
 
     /// Exceptions thrown in listeners and timer callbacks since the last
-    /// call, as `String(error)` (`TypeError: x is not a function`).
+    /// call, as text (`TypeError: x is not a function`, `[object Object]`).
     pub fn take_reported_errors(&self) -> Vec<String> {
-        let drained = self
-            .runtime
-            .borrow_mut()
-            .evaluate_script("JSON.stringify(window.__rustkit_errors.splice(0))");
-        match drained {
-            Ok(JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
-            _ => Vec::new(),
-        }
+        self.runtime.borrow_mut().take_reported_errors()
     }
 
     /// Drain the IPC message queue.
@@ -2384,6 +2458,88 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("undefinedFn"), "{errors:?}");
         assert!(bindings.take_reported_errors().is_empty(), "drained");
+    }
+
+    /// Every member the bindings' scripts report is in
+    /// `UNSUPPORTED_MEMBERS`, and every listed member is reported somewhere.
+    #[test]
+    fn the_unsupported_list_matches_the_reporting_scripts() {
+        let sources = [
+            include_str!("web_xhr.js"),
+            include_str!("web_components.js"),
+            include_str!("web_streams.js"),
+            dom::WRAPPERS_JS_FOR_TESTS,
+        ]
+        .concat();
+        let mut reported: Vec<(String, String)> = sources
+            .split("__rk.unsupported('")
+            .skip(1)
+            .map(|rest| {
+                let (interface, rest) = rest.split_once("', '").unwrap();
+                (interface.to_string(), rest.split_once("')").unwrap().0.to_string())
+            })
+            .collect();
+        reported.sort();
+        reported.dedup();
+        let mut listed: Vec<(String, String)> =
+            UNSUPPORTED_MEMBERS.iter().map(|(i, m)| (i.to_string(), m.to_string())).collect();
+        listed.sort();
+        assert_eq!(reported, listed);
+    }
+
+    /// Page script reaches neither the reporter nor the table.
+    #[test]
+    fn page_script_cannot_report_or_read_unsupported_members() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let seen = bindings
+            .evaluate("[typeof __rustkit_unsupported, typeof __rustkit_take_unsupported, typeof __rustkit_errors_with_stacks].join()")
+            .unwrap();
+        assert!(matches!(seen, JsValue::String(ref s) if s == "undefined,undefined,undefined"), "{seen:?}");
+        bindings
+            .evaluate("try { new DOMParser().parseFromString('<a/>', 'text/xml'); } catch (e) {}")
+            .unwrap();
+        let apis = bindings.take_unsupported_apis();
+        assert_eq!(apis.len(), 1);
+        assert_eq!((apis[0].0.as_str(), apis[0].1.as_str(), apis[0].2), ("DOMParser", "parseFromString(XML)", 1));
+    }
+
+    #[test]
+    fn a_listener_error_is_reported_as_text_and_as_a_report_without_page_text() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings.set_error_details(true, false).unwrap();
+        bindings
+            .evaluate_named(
+                "window.addEventListener('load', function () { throw new Error('a\\u0000b'); });",
+                "inline#1",
+            )
+            .unwrap();
+        bindings.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(bindings.take_reported_errors(), vec!["Error: a\u{0}b".to_string()]);
+        let reports = bindings.take_error_reports();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let report = &reports[0];
+        assert_eq!((report.value, report.name, report.message.as_deref(), report.message_len), ("error", Some("Error"), None, Some(3)));
+        assert!(report.located);
+
+        bindings.set_error_details(false, false).unwrap();
+        bindings.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(bindings.take_reported_errors().len(), 1, "the script log keeps its text");
+        assert!(bindings.take_error_reports().is_empty(), "no reports while off");
+        assert_eq!(
+            report.frames,
+            vec![rustkit_js::ScriptPosition { path: "inline#1".into(), line: 1, column: 53 }]
+        );
+    }
+
+    /// Page script reaches none of the queues errors are reported through.
+    #[test]
+    fn page_script_cannot_reach_the_error_reporter() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings.set_error_details(true, false).unwrap();
+        let seen = bindings
+            .evaluate("[typeof __rk, typeof window.__rustkit_errors, typeof window.__rustkit_error_text].join()")
+            .unwrap();
+        assert!(matches!(seen, JsValue::String(ref s) if s == "undefined,undefined,undefined"), "{seen:?}");
     }
 
     #[test]
@@ -3221,15 +3377,17 @@ mod tests {
                  i.addEventListener('click', { handleEvent: function (e) { log.push(e.type, e.bubbles); } }); \
                  document.body.addEventListener('click', function (e) { log.push(e.target === i); }); \
                  i.click(); \
-                 log.push(window.__rustkit_errors.length, /missingFunction/.test(window.__rustkit_errors[0])); \
                  try { i.dispatchEvent('click'); } catch (e) { log.push(e instanceof TypeError); } \
                  try { Event('x'); } catch (e) { log.push(e instanceof TypeError); } \
                  log.push(i instanceof EventTarget, document instanceof EventTarget, \
                           Object.prototype.toString.call(new Event('x'))); \
                  log.join(',')"
             ),
-            "click,true,true,1,true,true,true,true,true,[object Event]"
+            "click,true,true,true,true,true,true,[object Event]"
         );
+        let errors = b.take_reported_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("missingFunction"), "{errors:?}");
     }
 
     // An `on<type>` content attribute is an event handler (HTML §8.1.8.1):
@@ -3282,11 +3440,13 @@ mod tests {
                 "var bad = document.getElementById('bad'), log = []; \
                  document.body.addEventListener('click', function () { log.push('bubbled'); }); \
                  bad.click(); bad.click(); \
-                 log.push(window.__rustkit_errors.length, /SyntaxError/.test(window.__rustkit_errors[0])); \
                  log.join(',')"
             ),
-            "bubbled,bubbled,1,true"
+            "bubbled,bubbled"
         );
+        let errors = b.take_reported_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("SyntaxError"), "{errors:?}");
     }
 
     const ROW: &str =

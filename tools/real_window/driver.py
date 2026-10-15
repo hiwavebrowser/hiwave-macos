@@ -143,8 +143,9 @@ class Fixture:
 # ── the app ────────────────────────────────────────────────────────────────
 
 class App:
-    def __init__(self, binary, profile, log_path):
+    def __init__(self, binary, profile, log_path, env=None):
         self.binary, self.profile, self.log_path = binary, profile, log_path
+        self.env = env or {}
         self.proc = None
 
     @property
@@ -152,7 +153,7 @@ class App:
         return self.profile / "Library" / "Application Support" / "hiwave" / "workspace_state.json"
 
     def start(self):
-        env = dict(os.environ, HOME=str(self.profile))
+        env = dict(os.environ, HOME=str(self.profile), **self.env)
         self.log = open(self.log_path, "wb")
         self.proc = subprocess.Popen([str(self.binary)], env=env, stdout=self.log,
                                      stderr=subprocess.STDOUT, cwd=str(self.profile))
@@ -292,7 +293,7 @@ class Driver:
         if set_tab_urls(json.loads(self.template), "x") == 0:
             sys.exit("no tab url found in the app's workspace_state.json")
 
-    def open_page(self, check, page):
+    def open_page(self, check, page, env=None):
         """A fresh app on `page`. Returns once the engine has started the load
         (or failed to), with the outcome recorded."""
         profile = self.out / "profile"
@@ -302,11 +303,11 @@ class Driver:
         url = "%s/%s" % (self.fixture.base, page)
         state = json.loads(self.template)
         set_tab_urls(state, url)
-        app = App(self.binary, profile, self.out / (check + ".app.log"))
+        app = App(self.binary, profile, self.out / (check + ".app.log"), env)
         app.state_file.write_text(json.dumps(state))
         self.since = self.fixture.mark()
         self.app = app.start()
-        got = self.fixture.wait("/" + page, 30, self.since)
+        got = self.fixture.wait("/" + page.split("?")[0], 30, self.since)
         self.expect(check, "the app fetched the page it was restored on", got, url)
         if got:
             # The engine logs this line when a document's first layout is built.
@@ -717,7 +718,181 @@ class Driver:
             return self.not_run(c, "the window shows the page's green image", self.why_not("Screen Recording"))
         self.expect(c, "the window shows the page's green image", frame[GREEN] > 2000, str(frame))
 
-    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin"]
+    # ── I0(a): the user keeps control while a page misbehaves ───────────────
+    #
+    # Two measures. The app's own stall log (HIWAVE_STALL_LOG=1) says how long
+    # the window thread went without turning its event loop; it needs nothing
+    # from the seat. The controls themselves (a new tab, a resize, closing the
+    # tab) need input and an unlocked screen, and the stall log does not stand
+    # in for them: a loop that turns can still draw nothing.
+
+    LIMIT_MS = 200
+    STALL_ENV = {"HIWAVE_STALL_LOG": "1"}
+
+    def stall_log_on(self, c):
+        """The offset in the app log where the stall log starts, or None."""
+        m = self.app.wait_log(r"Window thread stall log on", 5)
+        if not m:
+            self.not_run(c, "the window thread's holds", "this build writes no stall log (HIWAVE_STALL_LOG)")
+            return None
+        return m.end()
+
+    def holds(self, log_from):
+        """Every hold the stall log reported after `log_from`, in ms. A hold
+        still going on is its latest 'holding' figure."""
+        text = self.app.log_text()[log_from:]
+        held = [int(ms) for ms in re.findall(r"Window thread held ms=(\d+)", text)]
+        tail = text[text.rfind("Window thread held ms="):] if held else text
+        going = [int(ms) for ms in re.findall(r"Window thread holding ms=(\d+)", tail)]
+        return held + going[-1:]
+
+    def expect_no_hold(self, c, during, log_from):
+        if log_from is None:
+            return
+        holds = self.holds(log_from)
+        self.expect(c, "%s: the window thread was never held %d ms or more" % (during, self.LIMIT_MS),
+                    not holds, "holds (ms): %s" % (holds or "none"))
+
+    def expect_controls(self, c, during, close=False):
+        """A new tab, a resize and (if asked) closing the tab, each answered
+        within LIMIT_MS. Written without a seat that can post input: expect to
+        fix these the first time they run."""
+        if not self.can_input:
+            for what in ["a new tab (Cmd+T)", "a resize"] + (["closing the tab (Cmd+W)"] if close else []):
+                self.not_run(c, "%s: %s is answered within %d ms" % (during, what, self.LIMIT_MS),
+                             self.why_not("Accessibility"))
+            return
+        pid, limit = self.app.proc.pid, self.LIMIT_MS / 1000
+
+        def key(code, pattern, what):
+            log_from, t0 = len(self.app.log_text()), time.time()
+            self.hw("key", pid, code, "cmd")
+            m = self.app.wait_log(pattern, 3, log_from)
+            took = time.time() - t0
+            self.expect(c, "%s: %s is answered within %d ms" % (during, what, self.LIMIT_MS),
+                        bool(m) and took < limit, "%.0f ms" % (took * 1000) if m else "no log line in 3 s")
+
+        key(17, r"New tab - navigating to start page", "a new tab (Cmd+T)")
+        if self.can_resize:
+            code, win = self.hw("window", pid)
+            w, h = int(win.get("w", 1200)) - 120, int(win.get("h", 800)) - 80
+            t0 = time.time()
+            code, out = self.hw("resize", pid, w, h)
+            took = time.time() - t0
+            code2, now = self.hw("window", pid)
+            self.expect(c, "%s: a resize is answered within %d ms" % (during, self.LIMIT_MS),
+                        code == 0 and took < limit and abs(now.get("w", 0) - w) < 4,
+                        "%.0f ms; asked %dx%d, window %s" % (took * 1000, w, h, json.dumps(now)))
+        else:
+            self.not_run(c, "%s: a resize is answered within %d ms" % (during, self.LIMIT_MS),
+                         self.why_not("Accessibility"))
+        if close:
+            key(13, r"Closed tab", "closing the tab (Cmd+W)")
+
+    def start_spin(self, c):
+        """Opens the page whose timer starts an endless script and returns the
+        stall-log offset once the script is running, or None."""
+        if not self.open_page(c, "i0a_spin.html", self.STALL_ENV):
+            return None
+        log_from = self.stall_log_on(c)
+        # Ticks after the load: the page is live and its timers run.
+        ticking = self.fixture.wait("beacon?i0a-spin-tick-", 15, self.since, count=5)
+        self.expect(c, "the loaded page ticks", ticking)
+        if not ticking:
+            return None
+        self.expect_no_hold(c, "before the script starts", log_from)
+        self.fixture.reply = b"spin"
+        armed = self.fixture.wait("beacon?i0a-spin-armed", 5, self.since)
+        self.fixture.reply = b"ok"
+        self.expect(c, "the page said its script is about to start", armed)
+        if not armed:
+            return None
+        time.sleep(1.5)  # the page starts it one second after saying so
+        return len(self.app.log_text()) if log_from is not None else None
+
+    def i0a_script(self):
+        """I0(a): a script that does not end leaves the window usable."""
+        c = "i0a_script"
+        log_from = self.start_spin(c)
+        if self.app is None or not self.app.alive():
+            return
+        self.expect_controls(c, "while the script runs")
+        time.sleep(5)
+        self.expect_no_hold(c, "5 s of the script running", log_from)
+        # The lesser claim, while script still runs on the window's thread:
+        # the hold ends. The app stops the script at its turn budget (5 s).
+        if log_from is not None:
+            ended = self.app.wait_log(r"Window thread held ms=(\d+)", 5, log_from)
+            self.expect(c, "the hold ended within 10 s of the script's start", bool(ended),
+                        ended.group(0) if ended else "still held: %s ms" % self.holds(log_from))
+            mark = self.fixture.mark()
+            self.expect(c, "the page ticks again afterwards",
+                        bool(ended) and self.fixture.wait("beacon?i0a-spin-tick-", 3, mark))
+            asked = self.fixture.seen("beacon?i0a-spin-asked", self.since)
+            self.expect(c, "a request made in the turn that was stopped is answered to the page",
+                        bool(asked) and self.fixture.wait("beacon?i0a-spin-answered", 3, self.since),
+                        "asked %d, onload %d" % (len(asked), len(self.fixture.seen("beacon?i0a-spin-answered", self.since))))
+        frame = self.frame(c, "during", [GREEN])
+        if frame is None:
+            return self.not_run(c, "the window still shows the page's green image", self.why_not("Screen Recording"))
+        self.expect(c, "the window still shows the page's green image", frame[GREEN] > 2000, str(frame))
+
+    def i0a_layout(self):
+        """I0(a): a page whose layout is very expensive leaves the window usable."""
+        c = "i0a_layout"
+        if not self.open_page(c, "i0a_layout.html?n=150", self.STALL_ENV):
+            return
+        log_from = self.stall_log_on(c)
+        built = self.fixture.wait("beacon?i0a-layout-built-", 30, self.since)
+        self.expect(c, "the page built its boxes", built)
+        turned = self.fixture.wait("beacon?i0a-layout-turn-", 60, self.since, count=6)
+        self.expect(c, "the page changed every box's width six times", turned,
+                    "%d turns" % len(self.fixture.seen("beacon?i0a-layout-turn-", self.since)))
+        self.expect_controls(c, "while the page lays out")
+        self.expect_no_hold(c, "the load and six layouts", log_from)
+
+    def i0a_nav(self):
+        """I0(a): pages left while they are still loading leave the window usable."""
+        c = "i0a_nav"
+        if not self.open_page(c, "i0a_nav.html?n=1", self.STALL_ENV):
+            return
+        log_from = self.stall_log_on(c)
+        self.expect_controls(c, "while the first page loads")
+        last = self.fixture.wait("beacon?i0a-nav-last", 40, self.since)
+        starts = [p.rsplit("-", 1)[1] for p in self.fixture.seen("beacon?i0a-nav-start-", self.since)]
+        self.expect(c, "the five visits happened in order and the last one finished", last and starts == list("12345"),
+                    "visits started: %s; request times (s): %s"
+                    % (starts, self.fixture.times("/i0a_nav.html", self.since)))
+        # Each page asks to leave in its first script. How long it stays is
+        # how long a person's own click on a link would wait, too.
+        asked = self.fixture.times("/i0a_nav.html", self.since)
+        stays = [round(b - a, 1) for (a, b) in zip(asked, asked[1:])]
+        self.expect(c, "each page was left within 1 s of being requested", len(stays) == 4 and max(stays) < 1.0,
+                    "seconds each page stayed: %s" % stays)
+        self.expect_no_hold(c, "five pages, four left while loading", log_from)
+        time.sleep(1.0)
+        frame = self.frame(c, "last", [RED, GREEN])
+        if frame is None:
+            return self.not_run(c, "the window shows the last page's green image", self.why_not("Screen Recording"))
+        self.expect(c, "the window shows the last page's green image", frame[GREEN] > 2000 and frame[RED] < 500, str(frame))
+
+    def i0a_close(self):
+        """I0(a): a tab whose script does not end can be closed at once."""
+        c = "i0a_close"
+        self.start_spin(c)
+        if self.app is None or not self.app.alive():
+            return
+        self.expect_controls(c, "while the script runs", close=True)
+        if not self.can_input:
+            return
+        # With the tab gone its script must stop: the stall log goes quiet.
+        time.sleep(2.0)
+        log_from = len(self.app.log_text())
+        time.sleep(2.0)
+        self.expect_no_hold(c, "2 s after the tab was closed", log_from)
+
+    CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

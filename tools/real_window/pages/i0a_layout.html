@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>I0a a page whose layout is very expensive</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  img { display: block; width: 400px; height: 200px; margin: 10px; }
+  .row { display: flex; flex-wrap: wrap; }
+  .cell { display: flex; flex-direction: column; width: 9%; padding: 2px; border: 1px solid #ccc; }
+  .cell span { display: inline-block; }
+  .wide .cell { width: 11%; }
+</style>
+<!-- Little script, a great many boxes: rows of wrapping flex items that each
+     hold a column of text. The page is laid out once for the load and again
+     every 700 ms, when a class on the body changes every cell's width. The
+     window must stay usable while each layout runs. ?n= sets the row count. -->
+<img src="/img/00ff00.png" alt="">
+<div id="grid"></div>
+<script>
+  var n = parseInt((location.search.match(/n=(\d+)/) || [0, '150'])[1], 10);
+  var cell = '<div class="cell"><span>alpha beta</span><span>gamma delta epsilon</span><span>zeta</span></div>';
+  var row = '<div class="row">' + new Array(21).join(cell) + '</div>';
+  document.getElementById('grid').innerHTML = new Array(n + 1).join(row);
+  fetch('/beacon?i0a-layout-built-' + n);
+  var turns = 0;
+  setInterval(function () {
+    turns++;
+    document.body.className = (turns % 2) ? 'wide' : '';
+    fetch('/beacon?i0a-layout-turn-' + turns);
+  }, 700);
+</script>

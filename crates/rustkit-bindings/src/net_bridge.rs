@@ -51,11 +51,11 @@ impl DomBindings {
     pub fn enable_net_bridge(&self) -> Result<(), BindingError> {
         self.runtime
             .borrow_mut()
-            .evaluate_script(include_str!("web_net_bridge.js"))?;
+            .evaluate_with_host(include_str!("web_net_bridge.js"))?;
         // The surfaces built on the bridge exist only where the bridge does.
         self.runtime
             .borrow_mut()
-            .evaluate_script(include_str!("web_xhr.js"))?;
+            .evaluate_with_host(include_str!("web_xhr.js"))?;
         self.runtime
             .borrow_mut()
             .evaluate_script(include_str!("web_fetch.js"))?;
@@ -75,7 +75,7 @@ impl DomBindings {
     /// Take every request queued since the last call, in the order the page
     /// made them. Empty when the bridge is not enabled.
     pub fn take_net_requests(&self) -> Vec<NetRequest> {
-        let taken = self.runtime.borrow_mut().evaluate_script(
+        let taken = self.runtime.borrow_mut().evaluate_bookkeeping(
             "window.__rustkit_net ? window.__rustkit_net.take() : '[]'",
         );
         match taken {
@@ -138,7 +138,7 @@ impl DomBindings {
         match self
             .runtime
             .borrow_mut()
-            .evaluate_script("window.__rustkit_net ? window.__rustkit_net.waiting() : 0")
+            .evaluate_bookkeeping("window.__rustkit_net ? window.__rustkit_net.waiting() : 0")
         {
             Ok(JsValue::Number(n)) => n as usize,
             _ => 0,

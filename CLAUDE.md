@@ -15,9 +15,6 @@ cargo run -p hiwave-app --features rustkit
 # Release build
 cargo run -p hiwave-app --features rustkit --release
 
-# WebKit fallback mode (uses system WebKit for all rendering)
-cargo run -p hiwave-app --no-default-features --features webview-fallback
-
 # Quick syntax check
 cargo check -p hiwave-app
 
@@ -100,8 +97,11 @@ The browser uses a multi-WebView architecture:
 
 The `hiwave-app` crate uses feature flags:
 - `rustkit` (default) - Use RustKit for content, WRY for chrome
-- `webview-fallback` - Use system WebKit for everything
-- `headless` (dev) - Offscreen rendering for tests
+- `headless` (dev) - Offscreen rendering for tests (enabled on `rustkit-engine` for hiwave-app's macOS dev-dependency)
+
+On macOS, page content is always drawn by RustKit; the `webview-fallback`
+feature (system WebKit for content) was removed in threads plan step T3.
+On Windows and Linux the content WebView is still WRY.
 
 ## Test Fixtures
 
