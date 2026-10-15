@@ -1,29 +1,25 @@
 //! Unified content webview enum for macOS
 
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
-use super::webview_rustkit::RustKitView;
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 use super::content_webview_trait::ContentWebViewOps;
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+use super::webview_rustkit::RustKitView;
 use std::sync::Arc;
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 use wry::Rect;
 
 /// Unified content webview type (RustKit + WRY support)
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 #[allow(dead_code)]
 pub enum ContentWebView {
     RustKit(Arc<RustKitView>),
     Wry(Arc<wry::WebView>),
 }
 
-/// WebKit fallback mode - just wrap WRY WebView
-#[cfg(all(target_os = "macos", feature = "webview-fallback"))]
-pub type ContentWebView = Arc<wry::WebView>;
-
 #[cfg(not(target_os = "macos"))]
 pub type ContentWebView = Arc<wry::WebView>;
 
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 impl ContentWebViewOps for ContentWebView {
     fn load_url(&self, url: &str) -> Result<(), String> {
         match self {
@@ -54,7 +50,7 @@ impl ContentWebViewOps for ContentWebView {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 impl ContentWebView {
     /// Process events (for RustKit)
     #[allow(dead_code)]
@@ -101,4 +97,3 @@ impl ContentWebViewOps for ContentWebView {
         self.set_bounds(rect).map_err(|e| format!("{}", e))
     }
 }
-

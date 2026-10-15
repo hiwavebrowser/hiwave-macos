@@ -305,7 +305,7 @@ fn a_broken_import_map_is_reported_and_the_page_carries_on() {
     assert!(
         records
             .iter()
-            .any(|(src, o)| src == "importmap" && matches!(o, ScriptOutcome::Threw(m) if m.starts_with("import map:"))),
+            .any(|(src, o)| src == "importmap" && matches!(o, ScriptOutcome::EngineFailed(EngineFailure::ImportMap(_)))),
         "{records:#?}"
     );
 }

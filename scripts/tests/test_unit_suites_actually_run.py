@@ -173,6 +173,17 @@ def test_the_receipt_reaches_the_job_summary():
     assert "$GITHUB_STEP_SUMMARY" in _lane_step()["run"]
 
 
+def test_the_lane_is_blocking():
+    """A red suite must fail the job. `continue-on-error` on the step or the
+    job turns a RED receipt into a green check."""
+    assert not _lane_step().get("continue-on-error"), (
+        "the unit-suites step has continue-on-error: true; it must be blocking"
+    )
+    assert not _lane().get("continue-on-error"), (
+        "the unit-suites job has continue-on-error: true; it must be blocking"
+    )
+
+
 def test_the_lane_runs_where_coretext_is():
     assert _lane()["runs-on"] == "macos-14", (
         "the unit suites must run on macos-14: two of #199's justify tests are "

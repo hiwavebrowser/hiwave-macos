@@ -145,6 +145,7 @@ impl Rig {
             tokio::time::Instant::now() + within,
             rounds,
             None,
+            &crate::inspector::Inspector::new(&Default::default()),
         ))
     }
 
@@ -310,6 +311,7 @@ fn a_page_without_the_bridge_has_no_requests() {
         tokio::time::Instant::now() + Duration::from_secs(1),
         8,
         None,
+        &crate::inspector::Inspector::new(&Default::default()),
     ));
     assert_eq!((found.requests, found.rounds, found.poisoned), (0, 0, false));
 }

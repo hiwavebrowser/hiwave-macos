@@ -24,8 +24,6 @@ rustkit = [
   "wgpu",
   "tokio",
 ]
-# WebView fallback: Uses system WebKit for everything (no RustKit)
-webview-fallback = []
 
 [dependencies]
 # WebView (for Chrome UI, Shelf, and secondary windows)

@@ -278,6 +278,8 @@ use rustkit_layout::{
 };
 use std::borrow::Cow;
 use std::cell::Cell;
+pub mod inspector;
+mod inspector_glue;
 mod relayout_cause;
 mod diagnostics;
 pub use diagnostics::{
@@ -289,10 +291,20 @@ mod diagnostics_tests;
 use relayout_cause::PendingCauses;
 mod shadow_tree;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
+pub use inspector::{
+    ConsoleLevel, EndReason, Inspector, InspectorConfig, InspectorEvent, InspectorRecord, InspectorSink,
+    InspectorSnapshot, InspectorSummary, SourceLocation, UnsupportedApiCount, FailureStage, ResourceType,
+};
 pub use rustkit_bindings::MutationKind;
 mod script_net;
 #[cfg(test)]
 mod script_net_tests;
+#[cfg(test)]
+mod inspector_tests;
+#[cfg(all(test, feature = "headless"))]
+mod inspector_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod inspector_network_tests;
 #[cfg(all(test, feature = "headless"))]
 mod relayout_cause_engine_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -353,6 +365,8 @@ mod grid_in_flex_tests;
 mod grid_auto_repeat_percent_tests;
 #[cfg(test)]
 mod nested_layout_matrix_tests;
+#[cfg(test)]
+mod zero_font_size_tests;
 #[cfg(test)]
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -583,33 +597,63 @@ fn image_svg(mut svg: rustkit_svg::SvgDocument) -> rustkit_svg::SvgDocument {
 /// Referer the document's policy allows, and the caller's deadline bounds
 /// it. The image manager only decodes and caches what arrives. A cached
 /// image or a `data:` URL needs no request.
+///
+/// `inspector` records the request, if one is made; a caller that bounds
+/// the future with a deadline gets an `over_budget` failure when it drops it.
 async fn fetch_raster_image(
     loader: &ResourceLoader,
     image_manager: &ImageManager,
     referrer: &SubresourceReferrer,
     url: Url,
+    inspector: Option<(&Arc<Inspector>, &'static str, tokio::time::Instant)>,
 ) -> Result<Arc<rustkit_image::LoadedImage>, rustkit_image::ImageError> {
     use rustkit_image::ImageError;
 
     if url.scheme() == "data" || image_manager.is_cached(&url) {
         return image_manager.load(url).await;
     }
-    let response = loader
-        .fetch(referrer.get_for(url.clone(), RequestDestination::Image))
-        .await
-        .map_err(|e| ImageError::FetchError(format!("{e} for {url}")))?;
+    let guard = inspector
+        .and_then(|(inspector, initiator, deadline)| {
+            inspector
+                .begin_request(&url, "GET", ResourceType::Image, Some(initiator))
+                .map(|g| g.over_budget_at(deadline, "subresource budget spent"))
+        });
+    let response = match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)).await {
+        Ok(response) => response,
+        Err(e) => {
+            inspector::fail_net(guard, &e);
+            return Err(ImageError::FetchError(format!("{e} for {url}")));
+        }
+    };
+    let received = guard.map(|g| g.received(&response));
     if !response.ok() {
+        if let Some(received) = received {
+            received.unread();
+        }
         return Err(ImageError::FetchError(format!(
             "HTTP {} for {}",
             response.status, url
         )));
     }
     let content_type = response.content_type.as_ref().map(|mime| mime.to_string());
-    let body = response
-        .bytes()
-        .await
-        .map_err(|e| ImageError::FetchError(format!("{e} for {url}")))?;
-    image_manager.insert_fetched(&url, content_type.as_deref(), &body)
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(e) => {
+            if let Some(received) = received {
+                received.fail(FailureStage::Connect, "body cut off");
+            }
+            return Err(ImageError::FetchError(format!("{e} for {url}")));
+        }
+    };
+    let decoded = image_manager.insert_fetched(&url, content_type.as_deref(), &body);
+    if let Some(received) = received {
+        match &decoded {
+            // An SVG served under an image URL goes on to the SVG lane.
+            Ok(_) | Err(ImageError::Svg(_)) => received.read(body.len()),
+            Err(_) => received.fail(FailureStage::Decode, "image did not decode"),
+        }
+    }
+    decoded
 }
 
 /// What one image pass is to fetch, and everything the fetch needs
@@ -621,11 +665,15 @@ struct ImagePlan {
     svg_urls: Vec<Url>,
     /// Images already in a cache that the pass counts as loaded.
     already_loaded: usize,
-    budget: std::time::Duration,
     deadline: tokio::time::Instant,
     referrer: SubresourceReferrer,
     loader: Arc<ResourceLoader>,
     image_manager: Arc<ImageManager>,
+    inspector: Arc<Inspector>,
+    /// What asked for the images: `parser`, or `script` for a pass over
+    /// what scripts added. A CSS background is always `css`.
+    initiator: &'static str,
+    css_urls: std::collections::HashSet<Url>,
 }
 
 impl ImagePlan {
@@ -818,6 +866,8 @@ struct ViewState {
     relayout_pending: PendingCauses,
     /// Relayouts since the current document was committed, by cause.
     relayout_stats: RelayoutStats,
+    /// The view's Inspector record (see `inspector`).
+    inspector: Arc<Inspector>,
 }
 
 impl ViewState {
@@ -955,6 +1005,10 @@ pub struct EngineConfig {
     /// those scripts added: nobody will see that page. Off by default: a
     /// capture never follows the page, and shows it as it was.
     pub follows_script_navigation: bool,
+    /// Whether views keep an Inspector buffer, and how URLs in its events
+    /// are shown (see `inspector`). Off by default; a sink attached with
+    /// [`Engine::add_inspector_sink`] turns recording on for its view.
+    pub inspector: InspectorConfig,
 }
 
 impl Default for EngineConfig {
@@ -975,6 +1029,7 @@ impl Default for EngineConfig {
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
             follows_script_navigation: false,
+            inspector: InspectorConfig::default(),
         }
     }
 }
@@ -1054,6 +1109,29 @@ pub enum ScriptOutcome {
     FetchFailed(FetchFailure),
     /// Not started: the page's script budget was spent.
     OverBudget,
+    /// The engine itself failed here, not the page's script. Set only where
+    /// the engine raises the failure: whatever page script throws is
+    /// [`Threw`](Self::Threw), whatever its text says.
+    EngineFailed(EngineFailure),
+}
+
+/// A failure of the engine's own (see [`ScriptOutcome::EngineFailed`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum EngineFailure {
+    /// The JS engine panicked: its state is unknowable, and nothing more
+    /// runs on the page.
+    Panic,
+    /// An import map the engine refused, and why.
+    ImportMap(String),
+}
+
+impl std::fmt::Display for EngineFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineFailure::Panic => f.write_str("JS engine panic"),
+            EngineFailure::ImportMap(why) => write!(f, "import map: {why}"),
+        }
+    }
 }
 
 /// Why an external script's fetch failed.
@@ -1942,6 +2020,7 @@ impl Engine {
             live_images: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
+            inspector: Inspector::new(&self.config.inspector),
         };
 
         self.views.insert(id, view_state);
@@ -2028,6 +2107,7 @@ impl Engine {
             live_images: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
+            inspector: Inspector::new(&self.config.inspector),
         };
 
         let id = view_state.id;
@@ -2123,6 +2203,7 @@ impl Engine {
             live_images: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
+            inspector: Inspector::new(&self.config.inspector),
         };
 
         self.views.insert(id, view_state);
@@ -2265,21 +2346,15 @@ impl Engine {
                 let fired = if stopped.is_some() { Ok(()) } else { fired };
                 view.script_log.extend(stopped);
                 if let Err(e) = fired {
-                    view.script_log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: "event:resize".into(),
                         bytes: 0,
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(e.to_string()),
-                    });
+                    };
+                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                 }
-                for message in bindings.take_reported_errors() {
-                    view.script_log.push(ScriptRecord {
-                        source: "event:resize".into(),
-                        bytes: 0,
-                        elapsed_ms: 0,
-                        outcome: ScriptOutcome::Threw(message),
-                    });
-                }
+                inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
             }
         }
 
@@ -3281,24 +3356,18 @@ impl Engine {
                 // A stopped listener's error is the stop itself, which has
                 // its own record.
                 if stopped.is_none() {
-                    view.script_log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: source.clone(),
                         bytes: 0,
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(e.to_string()),
-                    });
+                    };
+                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                 }
                 true
             }
         };
-        for message in bindings.take_reported_errors() {
-            view.script_log.push(ScriptRecord {
-                source: source.clone(),
-                bytes: 0,
-                elapsed_ms: 0,
-                outcome: ScriptOutcome::Threw(message),
-            });
-        }
+        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source);
         view.script_log.extend(stopped);
         debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
         not_cancelled
@@ -3331,8 +3400,9 @@ impl Engine {
         };
         let policy = view.script_policy.clone();
         let document = view.url.clone();
+        let inspector = view.inspector.clone();
         let live_requests = &mut view.live_requests;
-        let mut threw: Vec<(&str, String)> = Vec::new();
+        let mut threw: Vec<(&str, ScriptOutcome)> = Vec::new();
         // One budget for all the script this turn runs. This thread is the
         // window's: until 2026-10-12 a callback that did not end held it
         // for as long as it ran.
@@ -3353,10 +3423,12 @@ impl Engine {
             Ok(Ok(ran)) => out.timers_ran = ran,
             Ok(Err(e)) => {
                 unwound = spent().then_some(threw.len());
-                threw.push(("timers", e.to_string()));
+                threw.push(("timers", ScriptOutcome::Threw(e.to_string())));
             }
-            Err(_) => threw.push(("timers", "JS engine panic".into())),
+            Err(_) => threw.push(("timers", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
         }
+        // What the timers threw or left rejected is theirs in the Inspector.
+        inspector_glue::drain_errors(bindings, &view.inspector, "timers");
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = spent();
@@ -3369,10 +3441,12 @@ impl Engine {
                     live_requests.extend(
                         requests
                             .into_iter()
-                            .map(|request| script_net::start_live(policy.clone(), loader.clone(), request, deadline)),
+                            .map(|request| {
+                                script_net::start_live(policy.clone(), loader.clone(), request, deadline, inspector.clone())
+                            }),
                     );
                 }
-                Err(_) => threw.push(("network", "JS engine panic".into())),
+                Err(_) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
             }
             // Delivery only: a timer a response handler sets runs on a later
             // turn, when its time has passed, and a request it makes starts
@@ -3399,9 +3473,9 @@ impl Engine {
                         if spent() {
                             unwound = Some(threw.len());
                         }
-                        threw.push(("network", e.to_string()));
+                        threw.push(("network", ScriptOutcome::Threw(e.to_string())));
                     }
-                    Err(_) => threw.push(("network", "JS engine panic".into())),
+                    Err(_) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
                 }
             }
             for (at, answer) in answers.enumerate() {
@@ -3420,12 +3494,13 @@ impl Engine {
                     tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
                     document,
                     &mut modules_fetched,
+                    &inspector,
                 )
                 .await;
                 out.requests += found.requests;
-                threw.extend(found.threw.into_iter().map(|message| ("network", message)));
+                threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
                 if found.poisoned {
-                    threw.push(("network", "JS engine panic".into()));
+                    threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
                 }
             }
         }
@@ -3437,19 +3512,29 @@ impl Engine {
         if let Some(at) = unwound.filter(|_| stopped.is_some()) {
             threw.remove(at);
         }
-        threw.extend(bindings.take_reported_errors().into_iter().map(|message| ("timers", message)));
+        let reported = bindings.take_reported_errors();
+        inspector_glue::drain_quiet(bindings, &view.inspector, "network");
         out.next_timer_ms = if held_back { Some(0) } else { bindings.next_timer_delay() };
         view.script_log.extend(stopped);
-        for (source, message) in threw {
+        let threw = threw
+            .into_iter()
+            .chain(reported.into_iter().map(|message| ("timers", ScriptOutcome::Threw(message))));
+        for (source, outcome) in threw {
             if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
-                break;
+                // The log is full; the Inspector's buffer bounds itself (the
+                // page's errors reached it from their reports above).
+                if let ScriptOutcome::EngineFailed(failure) = &outcome {
+                    inspector_glue::engine_error(&view.inspector, failure, source);
+                }
+                continue;
             }
-            view.script_log.push(ScriptRecord {
+            let record = ScriptRecord {
                 source: source.to_string(),
                 bytes: 0,
                 elapsed_ms: 0,
-                outcome: ScriptOutcome::Threw(message),
-            });
+                outcome,
+            };
+            inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
         }
 
         match self.flush_script_dom_writes(id, Some(RelayoutCause::Timer)) {
@@ -4019,6 +4104,26 @@ impl Engine {
         self.views.get(&id).map(|v| v.script_log.as_slice())
     }
 
+    /// The view's Inspector: its event buffer and sinks. The handle can be
+    /// kept and read from any thread, including while the page's script is
+    /// running ([`Inspector::snapshot_since`]); reading runs no script.
+    pub fn inspector(&self, id: EngineViewId) -> Option<Arc<Inspector>> {
+        self.views.get(&id).map(|v| v.inspector.clone())
+    }
+
+    /// Send the view's Inspector events to `sink` from now on (this turns
+    /// recording on for the view). Console capture and rejection tracking
+    /// are set up when a document is committed, so attach before loading.
+    pub fn add_inspector_sink(
+        &mut self,
+        id: EngineViewId,
+        sink: Box<dyn InspectorSink>,
+    ) -> Result<(), EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        view.inspector.add_sink(sink);
+        Ok(())
+    }
+
     /// Collect the document's `<script>`s in document order and start
     /// fetching the external ones. The returned future borrows nothing from
     /// the engine, so `load_url` polls it alongside `load_subresources`:
@@ -4073,12 +4178,14 @@ impl Engine {
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let base = base.clone();
+        let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
         Some(
             futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module)| {
                 let loader = loader.clone();
                 let referrer = referrer.clone();
                 let policy = policy.clone();
                 let base = base.clone();
+                let inspector = inspector.clone();
                 async move {
                     let mut label = label;
                     let result = match entry {
@@ -4093,8 +4200,11 @@ impl Engine {
                                 "no network policy for this page".into(),
                             ))),
                             Some(policy) => {
+                                let guard = inspector.begin_request(&url, "GET", ResourceType::Module, Some("parser"));
                                 let fetch = policy.fetch_module(&loader, &url, &base);
-                                match tokio::time::timeout_at(deadline, fetch).await {
+                                let fetched = tokio::time::timeout_at(deadline, fetch).await;
+                                inspector::answer_module(guard, &fetched);
+                                match fetched {
                                     Ok(Ok(module)) => {
                                         label = module.final_url.to_string();
                                         Ok((timing, module.source))
@@ -4111,21 +4221,39 @@ impl Engine {
                         },
                         Ok((timing, Body::External(url))) => {
                             let fetch = async {
+                                let guard = inspector
+                                    .begin_request(&url, "GET", ResourceType::Script, Some("parser"))
+                                    .map(|g| g.over_budget_at(deadline, "script budget spent"));
                                 match loader.fetch(
                                     referrer.get_for(url, RequestDestination::Script),
                                 ).await {
-                                    Ok(response) if response.ok() => match response.text().await {
-                                        Ok(text) => Ok((timing, text)),
-                                        Err(e) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                            format!("{e}"),
-                                        ))),
-                                    },
-                                    Ok(response) => Err(ScriptOutcome::FetchFailed(FetchFailure::Status(
-                                        response.status.as_u16(),
-                                    ))),
-                                    Err(e) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                        format!("{e}"),
-                                    ))),
+                                    Ok(response) if response.ok() => {
+                                        let received = guard.map(|g| g.received(&response));
+                                        match response.text().await {
+                                            Ok(text) => {
+                                                if let Some(received) = received {
+                                                    received.read(text.len());
+                                                }
+                                                Ok((timing, text))
+                                            }
+                                            Err(e) => {
+                                                if let Some(received) = received {
+                                                    received.fail(FailureStage::Decode, "body is not UTF-8");
+                                                }
+                                                Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(format!("{e}"))))
+                                            }
+                                        }
+                                    }
+                                    Ok(response) => {
+                                        if let Some(guard) = guard {
+                                            guard.received(&response).unread();
+                                        }
+                                        Err(ScriptOutcome::FetchFailed(FetchFailure::Status(response.status.as_u16())))
+                                    }
+                                    Err(e) => {
+                                        inspector::fail_net(guard, &e);
+                                        Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(format!("{e}"))))
+                                    }
                                 }
                             };
                             tokio::time::timeout_at(deadline, fetch)
@@ -4205,6 +4333,7 @@ impl Engine {
         let loader = self.loader.clone();
         let Some(view) = self.views.get(&id) else { return };
         let document_url = view.url.clone();
+        let inspector = view.inspector.clone();
         let view_document = view.document.clone();
         bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         bindings.set_loop_iteration_limit(loop_limit);
@@ -4227,12 +4356,10 @@ impl Engine {
                     runnable.push((label, key, Ok(text), node_id, is_module));
                 }
                 Err(outcome) if is_module => runnable.push((label, 1, Err(outcome), node_id, true)),
-                Err(outcome) => log.push(ScriptRecord {
-                    source: label,
-                    bytes: 0,
-                    elapsed_ms: 0,
-                    outcome,
-                }),
+                Err(outcome) => {
+                    let record = ScriptRecord { source: label, bytes: 0, elapsed_ms: 0, outcome };
+                    inspector_glue::log_script(log, &inspector, record);
+                }
             }
         }
         runnable.sort_by_key(|(_, key, _, _, _)| *key);
@@ -4240,14 +4367,15 @@ impl Engine {
         // A panic inside the JS engine leaves its state unknowable: record
         // it and run nothing more on this page.
         let poisoned = Cell::new(false);
-        let run = |source: String, bytes: usize, f: &dyn Fn() -> Result<(), String>| {
+        // `f` is given the source's label.
+        let run = |source: String, bytes: usize, f: &dyn Fn(&str) -> Result<(), String>| {
             let started = std::time::Instant::now();
-            let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&source))) {
                 Ok(Ok(())) => ScriptOutcome::Ran,
                 Ok(Err(message)) => ScriptOutcome::Threw(message),
                 Err(_) => {
                     poisoned.set(true);
-                    ScriptOutcome::Threw("JS engine panic".into())
+                    ScriptOutcome::EngineFailed(EngineFailure::Panic)
                 }
             };
             // Stopped by the execution deadline, whatever it then reported.
@@ -4292,18 +4420,23 @@ impl Engine {
             });
             for text in maps {
                 if let Err(message) = bindings.add_import_map(&text) {
-                    log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: "importmap".into(),
                         bytes: text.len(),
                         elapsed_ms: 0,
-                        outcome: ScriptOutcome::Threw(format!("import map: {message}")),
-                    });
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::ImportMap(message)),
+                    };
+                    inspector_glue::log_script(log, &inspector, record);
                 }
             }
         }
         let _ = bindings.set_ready_state("loading");
         let scripts_started = std::time::Instant::now();
         let modules_fetched = Cell::new(0usize);
+        let mut external_scripts = 0usize;
+        // What listeners reported while a script ran, for the script log at
+        // the next lifecycle step.
+        let mut carried: Vec<String> = Vec::new();
         for (label, _, source, node_id, is_module) in runnable {
             let text = match source {
                 Ok(text) => text,
@@ -4353,6 +4486,11 @@ impl Engine {
                     (Some(position), Some(document)) => format!("{document}#inline-module-{position}"),
                     _ => label.clone(),
                 };
+                // Named by the engine, so its positions read `inline#n`; a
+                // page module whose URL merely ends the same way does not.
+                if module_url != label {
+                    inspector.alias_script(&module_url, &label);
+                }
                 info!(source = %label, bytes = text.len(), "Running module script");
                 let module_started = std::time::Instant::now();
                 let begun = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -4361,7 +4499,7 @@ impl Engine {
                 let (outcome, event) = match begun {
                     Err(_) => {
                         poisoned.set(true);
-                        (ScriptOutcome::Threw("JS engine panic".into()), None)
+                        (ScriptOutcome::EngineFailed(EngineFailure::Panic), None)
                     }
                     // A syntax error: the module graph was never built.
                     Ok(Err(message)) => (ScriptOutcome::Threw(message), Some("error")),
@@ -4376,6 +4514,7 @@ impl Engine {
                                 tokio::time::Instant::now() + remaining,
                                 document,
                                 &mut count,
+                                &inspector,
                             )
                             .await;
                             modules_fetched.set(count);
@@ -4388,7 +4527,7 @@ impl Engine {
                         })) {
                             Err(_) => {
                                 poisoned.set(true);
-                                (ScriptOutcome::Threw("JS engine panic".into()), None)
+                                (ScriptOutcome::EngineFailed(EngineFailure::Panic), None)
                             }
                             // Loaded and run (a pending top-level `await` is
                             // still running): the element hears `load`.
@@ -4423,26 +4562,52 @@ impl Engine {
                     }
                     false => (outcome, event),
                 };
-                log.push(ScriptRecord {
-                    source: label,
+                // What the module logged comes before what it threw: module
+                // evaluation ends in no `evaluate_script`, which would flush.
+                bindings.flush_console();
+                let record = ScriptRecord {
+                    source: label.clone(),
                     bytes: text.len(),
                     elapsed_ms,
                     outcome,
-                });
+                };
+                inspector_glue::log_script(log, &inspector, record);
+                inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &label);
                 if let Some(event) = event {
                     let _ = bindings.fire_script_event(node_id, event);
                 }
                 continue;
             }
             info!(source = %label, bytes = text.len(), "Running page script");
-            let record = run(label, text.len(), &|| {
+            // The script runs under a name its positions carry: its
+            // `inline#n` label, or for an external one `script#n`, which
+            // the Inspector shows as its URL. Not the URL itself: that would
+            // make it the base of the script's dynamic `import()`s.
+            // The same names with the Inspector on or off, so the script
+            // log reads the same either way; only a listening Inspector
+            // records which URL each stands for.
+            let external: Option<String> = if label.starts_with("inline#") {
+                None
+            } else {
+                external_scripts += 1;
+                let name = format!("script#{external_scripts}");
+                inspector.alias_script(&name, &label);
+                Some(name)
+            };
+            let record = run(label, text.len(), &|label| {
+                let name = external.as_deref().unwrap_or(label);
                 // `document.currentScript` is this element while it runs.
                 let _ = bindings.set_current_script(Some(node_id));
-                let result = bindings.evaluate(&text).map(|_| ()).map_err(strip);
+                let result = bindings.evaluate_named(&text, name).map(|_| ()).map_err(strip);
                 let _ = bindings.set_current_script(None);
                 result
             });
-            log.push(record);
+            let source = record.source.clone();
+            inspector_glue::log_script(log, &inspector, record);
+            // What its listeners threw (a synchronous `click()`, an `on*`
+            // attribute) is this script's in the Inspector; the script log
+            // keeps it for the next lifecycle step (`carried`).
+            inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &source);
         }
         if poisoned.get() {
             return;
@@ -4460,6 +4625,7 @@ impl Engine {
             let loader = loader.clone();
             let document = document_url.clone();
             let modules_fetched = &modules_fetched;
+            let inspector = &inspector;
             async move {
                 match policy {
                     Some(policy) => {
@@ -4476,6 +4642,7 @@ impl Engine {
                             timers,
                             document.as_ref(),
                             &mut count,
+                            inspector,
                         )
                         .await;
                         modules_fetched.set(count);
@@ -4488,21 +4655,23 @@ impl Engine {
         let after_scripts = pump(None).await;
         if let Some(found) = after_scripts {
             if found.poisoned {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: "network".into(),
                     bytes: 0,
                     elapsed_ms: 0,
-                    outcome: ScriptOutcome::Threw("JS engine panic".into()),
-                });
+                    outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                };
+                inspector_glue::log_script(log, &inspector, record);
                 return;
             }
             for message in found.threw {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: "network".into(),
                     bytes: 0,
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Threw(message),
-                });
+                };
+                inspector_glue::log_script(log, &inspector, record);
             }
         }
 
@@ -4538,7 +4707,7 @@ impl Engine {
             self.refresh_layout_for_script(id, bindings);
             info!(%source, "Running page lifecycle step");
             let step_started = std::time::Instant::now();
-            let record = run(source.to_string(), 0, step);
+            let record = run(source.to_string(), 0, &|_| step());
             info!(
                 %source,
                 elapsed_ms = step_started.elapsed().as_millis() as u64,
@@ -4548,7 +4717,7 @@ impl Engine {
             // Only an escaped error (the loop limit, a panic) is worth a
             // record of its own; a clean step is not a script.
             if record.outcome != ScriptOutcome::Ran {
-                log.push(record);
+                inspector_glue::log_script(log, &inspector, record);
             }
             if poisoned.get() {
                 return;
@@ -4558,24 +4727,26 @@ impl Engine {
             let timers = (source == "timers").then_some((horizon_ms, MAX_TIMER_CALLBACKS));
             if let Some(found) = pump(timers).await {
                 for message in found.threw {
-                    log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(message),
-                    });
+                    };
+                    inspector_glue::log_script(log, &inspector, record);
                 }
                 if found.poisoned {
-                    log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
                         elapsed_ms: 0,
-                        outcome: ScriptOutcome::Threw("JS engine panic".into()),
-                    });
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                    };
+                    inspector_glue::log_script(log, &inspector, record);
                     return;
                 }
             }
-            for message in bindings.take_reported_errors() {
+            for message in carried.drain(..) {
                 log.push(ScriptRecord {
                     source: source.to_string(),
                     bytes: 0,
@@ -4583,6 +4754,7 @@ impl Engine {
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
+            inspector_glue::drain_reports(bindings, &inspector, log, source);
         }
     }
 
@@ -4613,6 +4785,16 @@ impl Engine {
 
         info!(?id, %url, replace, "Loading URL");
 
+        // A load still in progress is left for this one.
+        if view.navigation.is_loading() {
+            view.inspector.emit_with(|inspector| InspectorEvent::LoadEndedEarly {
+                url: view.url.as_ref().map(|u| inspector.url(u)),
+                reason: EndReason::NavigatedAway,
+                detail: "another navigation started".into(),
+            });
+        }
+        view.inspector.navigation_started(Some(&url));
+
         // Start navigation
         let request = if replace {
             NavigationRequest::new(url.clone()).with_replace()
@@ -4640,7 +4822,34 @@ impl Engine {
 
         // Fetch the URL
         let request = Request::get(url.clone()).destination(RequestDestination::Document);
-        let response = self.loader.fetch(request).await?;
+        let guard = view
+            .inspector
+            .begin_request(&url, "GET", ResourceType::Document, Some("navigation"))
+            .map(|g| g.dropped_as(FailureStage::Cancelled, "navigation superseded"));
+        let response = match self.loader.fetch(request).await {
+            Ok(response) => response,
+            Err(e) => {
+                inspector::fail_net(guard, &e);
+                if let Some(view) = self.views.get(&id) {
+                    view.inspector.emit_with(|inspector| InspectorEvent::LoadEndedEarly {
+                        url: Some(inspector.url(&url)),
+                        reason: EndReason::Failed,
+                        detail: inspector::net_error_kind(&e).into(),
+                    });
+                }
+                return Err(e.into());
+            }
+        };
+
+        if let (Some(view), Some(_)) = (self.views.get(&id), &guard) {
+            let chain: Vec<(Url, u16)> = response
+                .redirect_chain
+                .iter()
+                .map(|(from, status)| (from.clone(), status.as_u16()))
+                .collect();
+            view.inspector.redirects(&chain, &response.url);
+        }
+        let received = guard.map(|g| g.received(&response));
 
         // First await boundary crossed — are we still the current navigation?
         if self.nav_superseded(id, generation) {
@@ -4659,12 +4868,16 @@ impl Engine {
         // shown like any other document. Only an error response with
         // nothing in it fails the navigation.
         let mut response = Some(response);
+        let mut received = received;
         let mut error_page = None;
         if !status.is_success() {
             let body = match response.take() {
                 Some(response) => response.text().await.unwrap_or_default(),
                 None => String::new(),
             };
+            if let Some(received) = received.take() {
+                received.read(body.len());
+            }
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after the body of an error response");
                 return Ok(());
@@ -4675,6 +4888,11 @@ impl Engine {
                     .views
                     .get_mut(&id)
                     .ok_or(EngineError::ViewNotFound(id))?;
+                view.inspector.emit_with(|inspector| InspectorEvent::LoadEndedEarly {
+                    url: Some(inspector.url(&url)),
+                    reason: EndReason::Failed,
+                    detail: error.clone(),
+                });
                 view.navigation
                     .fail_navigation(error.clone())
                     .map_err(|e| EngineError::NavigationError(e.to_string()))?;
@@ -4710,7 +4928,20 @@ impl Engine {
         // Parse HTML
         let html = match (error_page, response) {
             (Some(body), _) => body,
-            (None, Some(response)) => response.text().await?,
+            (None, Some(response)) => match response.text().await {
+                Ok(text) => {
+                    if let Some(received) = received.take() {
+                        received.read(text.len());
+                    }
+                    text
+                }
+                Err(e) => {
+                    if let Some(received) = received.take() {
+                        received.fail(FailureStage::Decode, "body is not UTF-8");
+                    }
+                    return Err(e.into());
+                }
+            },
             (None, None) => String::new(),
         };
 
@@ -4738,6 +4969,11 @@ impl Engine {
         view.header_referrer_policy = header_referrer_policy;
         view.http_status = Some(status.as_u16());
         view.reset_for_new_document();
+        view.inspector.emit_with(|inspector| InspectorEvent::NavigationCommit {
+            url: Some(inspector.url(&url)),
+            status: Some(status.as_u16()),
+        });
+        let inspector = view.inspector.clone();
 
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
@@ -4762,6 +4998,7 @@ impl Engine {
             bindings
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
+            inspector_glue::attach(&bindings, &inspector);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
             // bindings' 800x600 placeholder: pages pick layouts from them.
@@ -4979,6 +5216,15 @@ impl Engine {
             });
         }
 
+        view.inspector.emit_with(|inspector| InspectorEvent::LoadFinished {
+            url: Some(inspector.url(&url)),
+            scripts_over_budget: view
+                .script_log
+                .iter()
+                .filter(|r| r.outcome == ScriptOutcome::OverBudget)
+                .count() as u32,
+        });
+
         let _ = self.event_tx.send(EngineEvent::PageLoaded {
             view_id: id,
             url,
@@ -5003,6 +5249,7 @@ impl Engine {
         // Use a synthetic about:blank URL for inline content
         // SAFETY: "about:blank" is a constant URL that will always parse successfully
         let url = Url::parse("about:blank").unwrap();
+        view.inspector.navigation_started(None);
 
         // Start navigation
         let request = NavigationRequest::new(url.clone());
@@ -5048,6 +5295,8 @@ impl Engine {
         view.header_referrer_policy = None;
         view.http_status = None;
         view.reset_for_new_document();
+        view.inspector.emit(InspectorEvent::NavigationCommit { url: None, status: None });
+        let inspector = view.inspector.clone();
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -5071,6 +5320,7 @@ impl Engine {
             bindings
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
+            inspector_glue::attach(&bindings, &inspector);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
             // bindings' 800x600 placeholder: pages pick layouts from them.
@@ -5115,6 +5365,8 @@ impl Engine {
                 title: title.clone(),
             });
         }
+
+        view.inspector.emit(InspectorEvent::LoadFinished { url: None, scripts_over_budget: 0 });
 
         let _ = self.event_tx.send(EngineEvent::PageLoaded {
             view_id: id,
@@ -5204,6 +5456,7 @@ impl Engine {
         );
         if let Some(view) = self.views.get_mut(&id) {
             view.relayout_stats.record(&causes, tree_reused, took_ms);
+            view.inspector.relayout(causes.first.as_ref(), took_ms);
             if layout_skipped {
                 view.relayout_stats.layouts_skipped =
                     view.relayout_stats.layouts_skipped.saturating_add(1);
@@ -5422,6 +5675,7 @@ impl Engine {
         if let Some(bindings) = view.bindings.as_ref() {
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
+        view.inspector.laid_out();
 
         // Render
         self.render(id)?;
@@ -5891,6 +6145,23 @@ impl Engine {
                     return true;
                 }
                 BoxType::Inline | BoxType::Block | BoxType::AnonymousBlock => {
+                    // An inline-block (or inline-flex, inline-grid) that
+                    // was kept is content on the line whatever it holds: a
+                    // sized, empty one is an icon. Without this a `<span>`
+                    // or `<a>` around only such a box was dropped with it,
+                    // and a block holding nothing else went too. An
+                    // absolutely or fixed positioned one is out of the flow
+                    // and not on the line: the inline box around only that
+                    // is empty, and keeping it gave the line a strut (a
+                    // positioned badge in a link moved the next block down).
+                    if child.style.display.is_atomic_inline()
+                        && !matches!(
+                            child.position,
+                            rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+                        )
+                    {
+                        return true;
+                    }
                     // Recursively check children
                     if Self::has_content_children(child) {
                         return true;
@@ -6780,6 +7051,11 @@ impl Engine {
                         rustkit_css::Length::Px(pct / 100.0 * parent_font_px)
                     }
                     rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+                    // `font-size: 0` parses to `Zero`, which is not `Px`:
+                    // layout read it as 16px. A line holding only a 10px
+                    // inline-block was 18 tall (Chromium 143: 10) and text
+                    // meant to be hidden was laid out at full size.
+                    rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
                     // Viewport units and math functions (`4.1vw`,
                     // `calc(2vw + 4px)`, `clamp(2rem, 5vw, 4rem)`) absolutize
                     // here too, against this view's viewport: left alone they
@@ -7562,8 +7838,23 @@ impl Engine {
                         | BoxType::LineBreak => true,
                     };
 
-                    if should_include && (!closed_details || details_summary == Some(child_index)) {
+                    let shown = !closed_details || details_summary == Some(child_index);
+                    if should_include && shown {
                         Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
+                    } else if shown && matches!(child_box.box_type, BoxType::Inline) {
+                        // An inline box with nothing in the flow is dropped,
+                        // and so was everything in it. What it positions out
+                        // of the flow stays: a badge in an otherwise empty
+                        // link still paints, at the link's place, and the
+                        // line hears nothing of it (#689 review, round 3).
+                        for out_of_flow in child_box.children.into_iter().filter(|grandchild| {
+                            matches!(
+                                grandchild.position,
+                                rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+                            )
+                        }) {
+                            Self::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
+                        }
                     }
                 }
                 drop(table_hints);
@@ -8045,6 +8336,7 @@ impl Engine {
             rustkit_css::Length::Em(em) => rustkit_css::Length::Px(em * parent_font_px),
             rustkit_css::Length::Percent(pct) => rustkit_css::Length::Px(pct / 100.0 * parent_font_px),
             rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+            rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
             other => other,
         };
 
@@ -10692,6 +10984,11 @@ impl Engine {
                 // an idle view.
                 if view.navigation.is_loading() {
                     info!(?id, "Navigation stopped");
+                    view.inspector.emit_with(|inspector| InspectorEvent::LoadEndedEarly {
+                        url: view.url.as_ref().map(|u| inspector.url(u)),
+                        reason: EndReason::NavigatedAway,
+                        detail: "stopped".into(),
+                    });
                     let _ = view.navigation.fail_navigation("stopped".to_string());
                     let _ = self.event_tx.send(EngineEvent::NavigationFailed {
                         view_id: id,
@@ -11280,15 +11577,29 @@ impl Engine {
         let deadline = self.subresource_deadline();
         let referrer = self.subresource_referrer(id);
         let referrer = &referrer;
+        let inspector = &view.inspector;
         let fetched: Vec<Option<Stylesheet>> = futures::stream::iter(urls.into_iter().map(|url| {
             let loader = loader.clone();
             async move {
                 info!(%url, "Loading external stylesheet");
                 let load = async {
+                    // Made inside the future the budget drops: a sheet still
+                    // loading at the deadline is recorded over budget.
+                    let guard = inspector
+                        .begin_request(&url, "GET", ResourceType::Stylesheet, Some("parser"))
+                        .map(|g| g.over_budget_at(deadline, "subresource budget spent"));
                     match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Style)).await {
                         Ok(response) => {
+                            let received = guard.map(|g| g.received(&response));
                             if response.ok() {
-                                match response.text().await {
+                                let text = response.text().await;
+                                if let Some(received) = received {
+                                    match &text {
+                                        Ok(css_text) => received.read(css_text.len()),
+                                        Err(_) => received.fail(FailureStage::Decode, "body is not UTF-8"),
+                                    }
+                                }
+                                match text {
                                     Ok(css_text) => match Stylesheet::parse(&absolutize_css_urls(&css_text, &url)) {
                                         Ok(stylesheet) => {
                                             debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
@@ -11305,11 +11616,15 @@ impl Engine {
                                     }
                                 }
                             } else {
+                                if let Some(received) = received {
+                                    received.unread();
+                                }
                                 warn!(status = %response.status, %url, "Failed to fetch stylesheet");
                                 None
                             }
                         }
                         Err(e) => {
+                            inspector::fail_net(guard, &e);
                             warn!(?e, %url, "Failed to fetch stylesheet");
                             None
                         }
@@ -11397,7 +11712,13 @@ impl Engine {
 
         let base_url = view.url.as_ref();
         let mut images = self.discover_images(document.as_ref(), base_url);
-        images.extend(Self::discover_background_images(view.display_list.as_ref()));
+        let backgrounds = Self::discover_background_images(view.display_list.as_ref());
+        let css_urls = match view.inspector.is_active() {
+            true => backgrounds.iter().map(|(_, url)| url.clone()).collect(),
+            false => std::collections::HashSet::new(),
+        };
+        let inspector = view.inspector.clone();
+        images.extend(backgrounds);
         if only_new {
             images.retain(|(_, url)| !view.images_attempted.contains(url));
         }
@@ -11445,11 +11766,13 @@ impl Engine {
             pending,
             svg_urls,
             already_loaded: loaded,
-            budget: std::time::Duration::from_millis(self.config.subresource_budget_ms),
             deadline: self.subresource_deadline(),
             referrer: self.subresource_referrer(id),
             loader: self.loader.clone(),
             image_manager,
+            inspector,
+            initiator: if only_new { "script" } else { "parser" },
+            css_urls,
         }))
     }
 
@@ -11465,7 +11788,20 @@ impl Engine {
         use futures::stream::StreamExt;
         const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
 
-        let ImagePlan { pending, svg_urls, already_loaded, budget, deadline, referrer, loader, image_manager } = plan;
+        let ImagePlan {
+            pending,
+            svg_urls,
+            already_loaded,
+            deadline,
+            referrer,
+            loader,
+            image_manager,
+            inspector,
+            initiator,
+            css_urls,
+        } = plan;
+        let initiator_of = |url: &Url| if css_urls.contains(url) { "css" } else { initiator };
+        let inspector = &inspector;
         let mut loaded = already_loaded;
         let mut svgs = Vec::new();
 
@@ -11479,30 +11815,62 @@ impl Engine {
             let parsed: Vec<Option<(String, rustkit_svg::SvgDocument)>> =
                 futures::stream::iter(svg_urls.into_iter().map(|url| {
                     let loader = loader.clone();
+                    let initiator = initiator_of(&url);
                     async move {
                         info!(%url, "Loading SVG image");
-                        let fetched = tokio::time::timeout_at(deadline, loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)))
-                            .await
-                            .unwrap_or(Err(NetError::Timeout(budget)));
+                        let guard = inspector.begin_request(&url, "GET", ResourceType::Image, Some(initiator));
+                        let fetched = match tokio::time::timeout_at(
+                            deadline,
+                            loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)),
+                        )
+                        .await
+                        {
+                            Ok(fetched) => fetched,
+                            Err(_) => {
+                                if let Some(guard) = guard {
+                                    guard.fail(FailureStage::OverBudget, "subresource budget spent");
+                                }
+                                warn!(%url, "Failed to fetch SVG image: over the subresource budget");
+                                return None;
+                            }
+                        };
                         match fetched {
-                            Ok(response) if response.ok() => match response.text().await {
-                                Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
-                                    Ok(doc) => Some((url.to_string(), image_svg(doc))),
+                            Ok(response) if response.ok() => {
+                                let received = guard.map(|g| g.received(&response));
+                                match response.text().await {
+                                    Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
+                                        Ok(doc) => {
+                                            if let Some(received) = received {
+                                                received.read(xml.len());
+                                            }
+                                            Some((url.to_string(), image_svg(doc)))
+                                        }
+                                        Err(e) => {
+                                            if let Some(received) = received {
+                                                received.fail(FailureStage::Decode, "SVG did not parse");
+                                            }
+                                            warn!(?e, %url, "Failed to parse SVG image");
+                                            None
+                                        }
+                                    },
                                     Err(e) => {
-                                        warn!(?e, %url, "Failed to parse SVG image");
+                                        if let Some(received) = received {
+                                            received.fail(FailureStage::Decode, "body is not UTF-8");
+                                        }
+                                        warn!(?e, %url, "Failed to read SVG body");
                                         None
                                     }
-                                },
-                                Err(e) => {
-                                    warn!(?e, %url, "Failed to read SVG body");
-                                    None
                                 }
-                            },
+                            }
                             Ok(response) => {
+                                if let Some(guard) = guard {
+                                    guard.received(&response).unread();
+                                }
                                 warn!(status = %response.status, %url, "Failed to fetch SVG image");
                                 None
                             }
                             Err(e) => {
+                                inspector::fail_net(guard, &e);
                                 warn!(?e, %url, "Failed to fetch SVG image");
                                 None
                             }
@@ -11526,9 +11894,10 @@ impl Engine {
         let results: Vec<RasterOutcome> = futures::stream::iter(pending.into_iter().map(|url| {
             let image_manager = image_manager.clone();
             let loader = loader.clone();
+            let initiator = initiator_of(&url);
             async move {
                 info!(%url, "Loading image");
-                let load = fetch_raster_image(&loader, &image_manager, referrer, url.clone());
+                let load = fetch_raster_image(&loader, &image_manager, referrer, url.clone(), Some((inspector, initiator, deadline)));
                 let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
                     warn!(%url, "Image over the subresource budget; rendering without it");
                     return (false, None);
@@ -11839,16 +12208,43 @@ impl Engine {
         let deadline = self.subresource_deadline();
         let referrer = self.subresource_referrer(id);
         let referrer = &referrer;
+        let inspector = self.views.get(&id).map(|v| v.inspector.clone());
+        let inspector = &inspector;
         let fetched: Vec<_> = stream::iter(targets.into_iter().map(|(key, family, url)| async move {
             info!(%family, %url, "Loading web font");
             let load = async {
+                let guard = inspector
+                    .as_ref()
+                    .and_then(|i| i.begin_request(&url, "GET", ResourceType::Font, Some("css")))
+                    .map(|g| g.over_budget_at(deadline, "subresource budget spent"));
                 match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Font)).await {
-                    Ok(response) if response.ok() => match response.bytes().await {
-                        Ok(bytes) => Ok(bytes.to_vec()),
-                        Err(e) => Err(format!("Failed to read web font body: {e:?}")),
-                    },
-                    Ok(response) => Err(format!("Failed to fetch web font: status {}", response.status)),
-                    Err(e) => Err(format!("Failed to fetch web font: {e:?}")),
+                    Ok(response) if response.ok() => {
+                        let received = guard.map(|g| g.received(&response));
+                        match response.bytes().await {
+                            Ok(bytes) => {
+                                if let Some(received) = received {
+                                    received.read(bytes.len());
+                                }
+                                Ok(bytes.to_vec())
+                            }
+                            Err(e) => {
+                                if let Some(received) = received {
+                                    received.fail(FailureStage::Connect, "body cut off");
+                                }
+                                Err(format!("Failed to read web font body: {e:?}"))
+                            }
+                        }
+                    }
+                    Ok(response) => {
+                        if let Some(guard) = guard {
+                            guard.received(&response).unread();
+                        }
+                        Err(format!("Failed to fetch web font: status {}", response.status))
+                    }
+                    Err(e) => {
+                        inspector::fail_net(guard, &e);
+                        Err(format!("Failed to fetch web font: {e:?}"))
+                    }
                 }
             };
             let outcome = tokio::time::timeout_at(deadline, load)
@@ -14673,6 +15069,7 @@ impl Engine {
 
         if let Some(view) = self.views.get_mut(&id) {
             view.presented = Some(presented);
+            view.inspector.painted();
             view.frames_presented += 1;
         }
         Ok(())
@@ -15342,8 +15739,16 @@ impl Engine {
         let event_tx = self.event_tx.clone();
         let referrer = self.subresource_referrer(view_id);
 
-        let load = fetch_raster_image(&self.loader, &image_manager, &referrer, url.clone());
-        let loaded = tokio::time::timeout_at(self.subresource_deadline(), load)
+        let inspector = self.views.get(&view_id).map(|v| v.inspector.clone());
+        let deadline = self.subresource_deadline();
+        let load = fetch_raster_image(
+            &self.loader,
+            &image_manager,
+            &referrer,
+            url.clone(),
+            inspector.as_ref().map(|i| (i, "script", deadline)),
+        );
+        let loaded = tokio::time::timeout_at(deadline, load)
             .await
             .unwrap_or_else(|_| {
                 Err(rustkit_image::ImageError::FetchError(

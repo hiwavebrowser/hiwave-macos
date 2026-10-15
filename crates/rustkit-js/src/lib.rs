@@ -18,6 +18,14 @@ pub use module::{FetchedModule, ModuleHandle, ModuleState};
 pub use control::{ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
 mod executor;
+#[cfg(feature = "boa")]
+mod describe;
+#[cfg(feature = "boa")]
+mod rejections;
+#[cfg(feature = "boa")]
+mod diag;
+#[cfg(feature = "boa")]
+pub use diag::{standard_name, STANDARD_ERROR_NAMES};
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
 
@@ -94,8 +102,54 @@ pub enum LogLevel {
     Debug,
 }
 
-/// Console output handler.
-pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str) + Send + Sync>;
+/// Where in a script something happened: the path the script was evaluated
+/// under ([`JsRuntime::evaluate_script_named`], a module's URL) and a
+/// 1-based line and column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptPosition {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// Console output handler: the level, the arguments formatted and joined,
+/// and the calling script's position when the caller was in a named script.
+pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>) + Send + Sync>;
+
+/// A page error for diagnostics: an exception no script caught (in a
+/// script, a module, a listener or a timer) or a promise rejected with no
+/// handler. By default it holds no text the page chose (see `diag`): the
+/// thrown value's type, a standard error name, a message's length, and the
+/// positions of the page's frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorReport {
+    /// What was thrown: `error`, `string`, `number`, `bigint`, `boolean`,
+    /// `symbol`, `null`, `undefined`, `object`, `array` or `function`.
+    pub value: &'static str,
+    /// An error's `name` when it is a standard one, else `Error`; `None`
+    /// for a value that is not an error.
+    pub name: Option<&'static str>,
+    /// The message text: only with error text kept
+    /// ([`JsRuntime::set_error_reports`]). Never chosen by what the text
+    /// says: an error that reached page script is the page's.
+    pub message: Option<String>,
+    /// The message's length in characters (an error's `message`, a thrown
+    /// string).
+    pub message_len: Option<usize>,
+    /// The page's frames, innermost first: only positions in scripts the
+    /// engine evaluated, never a function name.
+    pub frames: Vec<ScriptPosition>,
+    /// The first of `frames` is where it was thrown. Not so when the
+    /// innermost page code is in no script of its own (`eval` code, an
+    /// `on*` attribute's handler): it then has no position, and is never
+    /// given its caller's.
+    pub located: bool,
+    /// A promise rejected with no handler.
+    pub rejection: bool,
+    /// A module that threw after a top-level `await` outlived the step that
+    /// ran it: its path.
+    pub module: Option<String>,
+}
 
 /// Timer callback.
 pub type TimerCallback = Box<dyn FnOnce() + Send + 'static>;
@@ -188,6 +242,15 @@ pub struct JsRuntime {
     timers: Arc<Mutex<HashMap<TimerId, PendingTimer>>>,
     globals: HashMap<String, JsValue>,
     deadline: std::rc::Rc<ExecutionDeadline>,
+    #[cfg(feature = "boa")]
+    rejections: std::rc::Rc<rejections::RejectionHooks>,
+    #[cfg(feature = "boa")]
+    diag: std::rc::Rc<diag::Diagnostics>,
+    /// The natives the embedder's own scripts are handed
+    /// ([`evaluate_with_host`](Self::evaluate_with_host)); page script
+    /// never sees this object.
+    #[cfg(feature = "boa")]
+    host: boa_engine::JsObject,
 }
 
 impl JsRuntime {
@@ -208,7 +271,10 @@ impl JsRuntime {
             config.timeout,
         ));
         #[cfg(feature = "boa")]
+        let rejections = std::rc::Rc::new(rejections::RejectionHooks::default());
+        #[cfg(feature = "boa")]
         let mut context = boa_engine::Context::builder()
+            .host_hooks(rejections.clone())
             .module_loader(modules.loader())
             .job_executor(executor.clone())
             .build()
@@ -216,6 +282,10 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         context.strict(config.strict_mode);
+        #[cfg(feature = "boa")]
+        let diag = std::rc::Rc::new(diag::Diagnostics::default());
+        #[cfg(feature = "boa")]
+        let host = host_object(&diag, &mut context);
 
         let mut runtime = Self {
             #[cfg(feature = "boa")]
@@ -229,10 +299,20 @@ impl JsRuntime {
             timers: Arc::new(Mutex::new(HashMap::new())),
             globals: HashMap::new(),
             deadline: std::rc::Rc::default(),
+            #[cfg(feature = "boa")]
+            rejections,
+            #[cfg(feature = "boa")]
+            diag,
+            #[cfg(feature = "boa")]
+            host,
         };
 
         // Set up built-in APIs
         runtime.setup_console()?;
+        #[cfg(feature = "boa")]
+        {
+            *runtime.diag.stack_getter.borrow_mut() = describe::stack_getter(&runtime.context);
+        }
 
         debug!("JavaScript runtime initialized");
         Ok(runtime)
@@ -271,54 +351,204 @@ impl JsRuntime {
         }
     }
 
-    /// Set the console output handler.
+    /// Set the console output handler. From now on each console call also
+    /// notes where it was called from (one walk of the call stack per call).
     pub fn set_console_handler(&mut self, handler: ConsoleHandler) {
         self.console_handler = Some(Arc::new(handler));
+        #[cfg(feature = "boa")]
+        self.diag.console_capturing.set(true);
     }
 
-    /// Set up console API.
-    fn setup_console(&mut self) -> Result<(), JsError> {
-        // Console is set up via evaluate_script with native function bindings
-        // For now, we'll inject a simple console object
-        let console_script = r#"
-            var console = {
-                _logs: [],
-                log: function() {
-                    this._logs.push({level: 'log', args: Array.from(arguments)});
-                },
-                info: function() {
-                    this._logs.push({level: 'info', args: Array.from(arguments)});
-                },
-                warn: function() {
-                    this._logs.push({level: 'warn', args: Array.from(arguments)});
-                },
-                error: function() {
-                    this._logs.push({level: 'error', args: Array.from(arguments)});
-                },
-                debug: function() {
-                    this._logs.push({level: 'debug', args: Array.from(arguments)});
-                },
-                _flush: function() {
-                    var logs = this._logs;
-                    this._logs = [];
-                    return logs;
-                }
-            };
-        "#;
+    /// Hand the handler each console argument's type, and a string's length,
+    /// instead of its text (see `describe::redacted_text`): for an embedder
+    /// that records console calls where page text must not go. Off by
+    /// default. The flag lives here, in Rust: no page script can change it.
+    pub fn set_console_redaction(&mut self, on: bool) {
+        #[cfg(feature = "boa")]
+        self.diag.console_redacted.set(on);
+        #[cfg(not(feature = "boa"))]
+        let _ = on;
+    }
 
-        self.evaluate_script(console_script)?;
+    /// Describe page errors for [`take_error_reports`](Self::take_error_reports):
+    /// uncaught exceptions, those the embedder's scripts report, and
+    /// promises rejected with no handler. Off by default. `keep_text` keeps
+    /// each message's text, which carries whatever the page put in it
+    /// (cookies, form values, tokens): never for a log that will be shared.
+    pub fn set_error_reports(&mut self, on: bool, keep_text: bool) {
+        #[cfg(feature = "boa")]
+        {
+            self.diag.on.set(on);
+            self.diag.keep_text.set(keep_text);
+            self.rejections.tracking.set(on);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = (on, keep_text);
+    }
+
+    /// The page errors since the last call (with reports on), oldest first:
+    /// exceptions, then modules that threw after a top-level `await`, then
+    /// promises still rejected with no handler. Runs none of the page's
+    /// code.
+    pub fn take_error_reports(&mut self) -> Vec<ErrorReport> {
+        #[cfg(feature = "boa")]
+        {
+            if !self.diag.on.get() {
+                return Vec::new();
+            }
+            let mut reports = self.diag.take();
+            for (module, reason) in self.take_late_module_rejections() {
+                let mut report = self.diag.describe(&reason, None, false, &mut self.context);
+                report.module = Some(module);
+                reports.push(report);
+            }
+            let reasons = self.rejections.take();
+            for reason in reasons {
+                let report = self.diag.describe(&reason, None, true, &mut self.context);
+                reports.push(report);
+            }
+            reports
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// What listeners and timers threw since the last call (reported by
+    /// the embedder's scripts through the host natives), as text:
+    /// `TypeError: x is not a function`, a thrown object as
+    /// `[object Object]` (see `describe::text`). Held for at most 1024.
+    pub fn take_reported_errors(&mut self) -> Vec<String> {
+        #[cfg(feature = "boa")]
+        {
+            self.diag.take_reported_texts()
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Unimplemented members the embedder's scripts reported page script
+    /// reaching (`__rk.unsupported(interface, member)`) since the last call:
+    /// `(interface, member, times, first caller's position)`. At most 64
+    /// members are held.
+    pub fn take_unsupported(&mut self) -> Vec<(String, String, u64, Option<ScriptPosition>)> {
+        #[cfg(feature = "boa")]
+        {
+            self.diag.take_unsupported()
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Evaluate one of the embedder's own scripts (never page script) as
+    /// the body of a function whose parameter `__rk` is the host object:
+    /// `__rk.reportError(e)` reports what a listener or timer threw,
+    /// `__rk.unsupported(interface, member)` an unimplemented member. The
+    /// object is reachable only from the closures such a script builds, so
+    /// page script cannot report, forge or read through it.
+    pub fn evaluate_with_host(&mut self, source: &str) -> Result<JsValue, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::Source;
+            let wrapped = format!("(function (__rk) {{\n{source}\n}})");
+            let function = self
+                .context
+                .eval(Source::from_bytes(wrapped.as_bytes()).with_path(std::path::Path::new(diag::EMBEDDER_PATH)))
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            let function = function
+                .as_object()
+                .filter(|f| f.is_callable())
+                .ok_or_else(|| JsError::ExecutionError("host script is not a function".into()))?;
+            let host = boa_engine::JsValue::from(self.host.clone());
+            let result = function.call(&boa_engine::JsValue::undefined(), &[host], &mut self.context);
+            let _ = self.context.run_jobs();
+            self.flush_console_logs();
+            match result {
+                Ok(value) => Ok(self.convert_boa_value(&value)),
+                Err(err) => Err(JsError::ExecutionError(describe::error_text(&err, &mut self.context))),
+            }
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = source;
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// Set up console API: `console.log`, `info`, `warn`, `error` and
+    /// `debug` are native functions. Without a handler a call does nothing;
+    /// with one its line is built at the call (no page code runs) and queued
+    /// in Rust with the caller's position. Nothing on `console` or anywhere
+    /// else page script can reach turns redaction off or adds to the queue.
+    fn setup_console(&mut self) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{js_string, object::ObjectInitializer, property::Attribute, NativeFunction};
+            let mut console = ObjectInitializer::new(&mut self.context);
+            for (name, level) in [
+                ("log", LogLevel::Log),
+                ("info", LogLevel::Info),
+                ("warn", LogLevel::Warn),
+                ("error", LogLevel::Error),
+                ("debug", LogLevel::Debug),
+            ] {
+                let diag = self.diag.clone();
+                // SAFETY: the closure holds an `Rc<Diagnostics>`, whose only
+                // GC handle (the stack getter) stays rooted while it lives.
+                let method = unsafe {
+                    NativeFunction::from_closure(move |_this, args, context| {
+                        diag.console_call(level, args, context);
+                        Ok(boa_engine::JsValue::undefined())
+                    })
+                };
+                console.function(method, js_string!(name), 0);
+            }
+            let console = console.build();
+            self.context
+                .register_global_property(js_string!("console"), console, Attribute::WRITABLE | Attribute::CONFIGURABLE)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+        }
         Ok(())
     }
 
-    /// Evaluate JavaScript code.
+    /// Evaluate JavaScript code as one of the embedder's own scripts: its
+    /// frames are passed over in error reports and console positions (the
+    /// page's own scripts go through
+    /// [`evaluate_script_named`](Self::evaluate_script_named)).
     pub fn evaluate_script(&mut self, source: &str) -> Result<JsValue, JsError> {
+        self.evaluate(source, None)
+    }
+
+    /// Evaluate JavaScript code as the script `path`: error positions,
+    /// stacks and console call sites name it. A `path` that does not parse
+    /// as a URL (`inline#3`) leaves dynamic `import()` resolving against the
+    /// document, as an unnamed script does.
+    pub fn evaluate_script_named(&mut self, source: &str, path: &str) -> Result<JsValue, JsError> {
+        self.evaluate(source, Some(path))
+    }
+
+    fn evaluate(&mut self, source: &str, path: Option<&str>) -> Result<JsValue, JsError> {
         trace!(len = source.len(), "Evaluating script");
 
         #[cfg(feature = "boa")]
         {
             use boa_engine::Source;
 
-            let result = self.context.eval(Source::from_bytes(source));
+            let result = match path {
+                Some(path) => {
+                    self.diag.know_path(path);
+                    self.context
+                        .eval(Source::from_bytes(source).with_path(std::path::Path::new(path)))
+                }
+                None => self
+                    .context
+                    .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH))),
+            };
             self.consume_interrupt();
             // Promise reactions (`.then`, `await`) are jobs Boa queues but
             // does not run on its own; a page's async code never resumes
@@ -335,6 +565,10 @@ impl JsRuntime {
                         // to script failure; ordinary microtask rejections are handled by Promise rejection events
                         // and do not fail the synchronous script value that already completed successfully.
                         if msg.contains("Job queue") || msg.contains("limit") || msg.contains("timeout") {
+                            if self.diag.on.get() {
+                                let report = self.diag.describe_error(&job_err, &mut self.context);
+                                self.diag.push(report);
+                            }
                             return Err(JsError::ExecutionError(msg));
                         }
                     }
@@ -343,7 +577,11 @@ impl JsRuntime {
                 }
                 Err(err) => {
                     self.flush_console_logs();
-                    let msg = err.to_string();
+                    if self.diag.on.get() {
+                        let report = self.diag.describe_error(&err, &mut self.context);
+                        self.diag.push(report);
+                    }
+                    let msg = describe::error_text(&err, &mut self.context);
                     Err(JsError::ExecutionError(msg))
                 }
             }
@@ -351,6 +589,7 @@ impl JsRuntime {
 
         #[cfg(not(feature = "boa"))]
         {
+            let _ = path;
             Err(JsError::NotInitialized)
         }
     }
@@ -502,87 +741,11 @@ impl JsRuntime {
         self.deadline.late.take()
     }
 
-    #[cfg(feature = "boa")]
-    fn drain_console(&mut self) -> Vec<(LogLevel, String)> {
-        use boa_engine::Source;
-
-        // Evaluate console._flush() directly on the context without calling
-        // evaluate_script, preventing infinite recursion. Bookkeeping: the
-        // interrupt word does not stop it (see `evaluate_bookkeeping`).
-        let armed = self.deadline.armed.get();
-        self.arm(false);
-        let logs_val = self.context.eval(Source::from_bytes("console._flush()"));
-        self.arm(armed);
-        let Ok(logs_val) = logs_val else {
-            return Vec::new();
-        };
-
-        let Some(logs_obj) = logs_val.as_object() else {
-            return Vec::new();
-        };
-
-        let Ok(len_val) = logs_obj.get(boa_engine::js_string!("length"), &mut self.context) else {
-            return Vec::new();
-        };
-
-        let Some(len) = len_val.as_number() else {
-            return Vec::new();
-        };
-
-        if len < 0.0 || !len.is_finite() {
-            return Vec::new();
-        }
-
-        const MAX_FLUSH_ENTRIES: u32 = 10_000;
-        const MAX_FLUSH_ARGS: u32 = 256;
-
-        let count = (len as u32).min(MAX_FLUSH_ENTRIES);
-        let mut entries = Vec::with_capacity(count as usize);
-
-        for i in 0..count {
-            let Ok(entry_val) = logs_obj.get(i, &mut self.context) else {
-                continue;
-            };
-            let Some(entry_obj) = entry_val.as_object() else {
-                continue;
-            };
-
-            let level_str = entry_obj
-                .get(boa_engine::js_string!("level"), &mut self.context)
-                .ok()
-                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
-                .unwrap_or_else(|| "log".to_string());
-
-            let level = match level_str.as_str() {
-                "info" => LogLevel::Info,
-                "warn" => LogLevel::Warn,
-                "error" => LogLevel::Error,
-                "debug" => LogLevel::Debug,
-                _ => LogLevel::Log,
-            };
-
-            let mut msg_parts = Vec::new();
-            if let Ok(args_val) = entry_obj.get(boa_engine::js_string!("args"), &mut self.context) {
-                if let Some(args_obj) = args_val.as_object() {
-                    if let Ok(args_len_val) = args_obj.get(boa_engine::js_string!("length"), &mut self.context) {
-                        let args_count = (args_len_val.as_number().unwrap_or(0.0).max(0.0) as u32).min(MAX_FLUSH_ARGS);
-                        for arg_idx in 0..args_count {
-                            if let Ok(arg) = args_obj.get(arg_idx, &mut self.context) {
-                                let s = arg
-                                    .to_string(&mut self.context)
-                                    .map(|js_s| js_s.to_std_string_escaped())
-                                    .unwrap_or_else(|_| "[object]".to_string());
-                                msg_parts.push(s);
-                            }
-                        }
-                    }
-                }
-            }
-
-            entries.push((level, msg_parts.join(" ")));
-        }
-
-        entries
+    /// Hand the console calls made since the last flush to the handler
+    /// now (module evaluation and job runs do not end in an
+    /// `evaluate_script`, which flushes).
+    pub fn flush_console(&mut self) {
+        self.flush_console_logs();
     }
 
     /// Flush console logs and call handler.
@@ -593,9 +756,9 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         {
-            let logs = self.drain_console();
-            for (level, msg) in logs {
-                handler(level, &msg);
+            let logs = self.diag.take_console();
+            for (level, msg, at) in logs {
+                handler(level, &msg, at.as_ref());
             }
         }
 
@@ -769,6 +932,40 @@ fn to_boa_value(value: JsValue) -> boa_engine::JsValue {
             BoaValue::undefined()
         }
     }
+}
+
+/// The host object [`JsRuntime::evaluate_with_host`] hands the embedder's
+/// scripts: natives that write into `diag`, built here, before any script.
+#[cfg(feature = "boa")]
+fn host_object(diag: &std::rc::Rc<diag::Diagnostics>, context: &mut boa_engine::Context) -> boa_engine::JsObject {
+    use boa_engine::{js_string, object::ObjectInitializer, NativeFunction};
+    let reporter = diag.clone();
+    // SAFETY: the closure holds an `Rc<Diagnostics>`, whose only GC handles
+    // (the stack getter, report values never) stay rooted while it lives.
+    let report_error = unsafe {
+        NativeFunction::from_closure(move |_this, args, context| {
+            let value = args.first().cloned().unwrap_or_default();
+            reporter.reported(&value, context);
+            Ok(boa_engine::JsValue::undefined())
+        })
+    };
+    let noter = diag.clone();
+    // SAFETY: as above.
+    let unsupported = unsafe {
+        NativeFunction::from_closure(move |_this, args, context| {
+            if let (Some(interface), Some(member)) = (
+                args.first().and_then(|a| a.as_string()),
+                args.get(1).and_then(|a| a.as_string()),
+            ) {
+                noter.unsupported(&interface.to_std_string_escaped(), &member.to_std_string_escaped(), context);
+            }
+            Ok(boa_engine::JsValue::undefined())
+        })
+    };
+    ObjectInitializer::new(context)
+        .function(report_error, js_string!("reportError"), 1)
+        .function(unsupported, js_string!("unsupported"), 2)
+        .build()
 }
 
 #[cfg(feature = "boa")]
@@ -1060,7 +1257,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |level, msg| {
+        runtime.set_console_handler(Box::new(move |level, msg, _at| {
             recv_clone.lock().unwrap().push((format!("{level:?}"), msg.to_string()));
         }));
 
@@ -1079,11 +1276,90 @@ mod tests {
     }
 
     #[test]
+    fn console_calls_carry_the_named_scripts_position() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, at| {
+            recv_clone.lock().unwrap().push((msg.to_string(), at.cloned()));
+        }));
+        runtime
+            .evaluate_script_named("var a = 1;\nfunction f() {\n  console.log('in f');\n}\nf();", "inline#4")
+            .unwrap();
+        // Unnamed: no position.
+        runtime.evaluate_script("console.log('anonymous')").unwrap();
+        let logs = received.lock().unwrap().clone();
+        assert_eq!(
+            logs,
+            vec![
+                (
+                    "in f".to_string(),
+                    Some(ScriptPosition { path: "inline#4".into(), line: 3, column: 14 })
+                ),
+                ("anonymous".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_named_script_names_itself_in_its_errors() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let err = runtime.evaluate_script_named("1;\n  null.x;", "inline#2").unwrap_err();
+        assert!(err.to_string().contains("(inline#2:2:"), "{err}");
+    }
+
+    /// A thrown value that is not an error is described (`[object Object]`,
+    /// the string itself), never pretty-printed with its properties, and
+    /// keeps its frames; an error-like object (a prototype of
+    /// `Error.prototype`) keeps its name and message.
+    #[test]
+    fn a_thrown_non_error_is_described_not_printed() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let err = runtime
+            .evaluate_script_named("1;\nthrow {user: 'a', token: 'SECRET'};", "inline#1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[object Object]\n    at <main> (inline#1:2:"), "{err}");
+        assert!(!err.contains("SECRET"), "{err}");
+        let err = runtime.evaluate_script_named("throw 'plain';", "inline#2").unwrap_err().to_string();
+        assert!(err.contains("plain\n    at <main> (inline#2:1:"), "{err}");
+        let err = runtime
+            .evaluate_script_named(
+                "function D(m, n) { this.message = m; this.name = n; }\nD.prototype = Object.create(Error.prototype);\nthrow new D('no', 'NotSupportedError');",
+                "inline#3",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NotSupportedError: no\n    at <main> (inline#3:3:"), "{err}");
+    }
+
+    #[test]
+    fn unhandled_rejections_are_reported_only_when_tracked_and_unhandled() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.evaluate_script("Promise.reject(new Error('untracked'));").unwrap();
+        assert!(runtime.take_error_reports().is_empty());
+
+        runtime.set_error_reports(true, false);
+        runtime
+            .evaluate_script_named(
+                "Promise.reject(new TypeError('lost'));\nPromise.reject(1).catch(function () {});\nvar late = Promise.reject('late'); late.then(null, function () {});",
+                "inline#1",
+            )
+            .unwrap();
+        let rejections = runtime.take_error_reports();
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        let r = &rejections[0];
+        assert_eq!((r.value, r.name, r.message.as_deref(), r.message_len, r.rejection), ("error", Some("TypeError"), None, Some(4), true));
+        assert_eq!(r.frames, vec![ScriptPosition { path: "inline#1".into(), line: 1, column: 16 }]);
+        assert!(runtime.take_error_reports().is_empty(), "taken once");
+    }
+
+    #[test]
     fn console_flush_handles_throwing_tostring_gracefully() {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
 
@@ -1091,27 +1367,253 @@ mod tests {
             .evaluate_script("console.log('val:', { toString() { throw new Error('boom'); } });")
             .unwrap();
 
+        // The page's `toString` is never called: an object is its tag.
         let logs = received.lock().unwrap().clone();
         assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0], "val: [object]");
+        assert_eq!(logs[0], "val: [object Object]");
     }
 
+    /// The line is built at the call, from the values as they are then, and
+    /// none of the page's code runs: not `toString`, not a getter, not a
+    /// Proxy trap, neither at the call nor when the engine drains the log.
     #[test]
-    fn console_flush_bounded_against_hostile_length() {
+    fn console_lines_run_no_page_code_and_are_built_at_the_call() {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
-
-        // Hostile script overwriting console._flush with huge length
         runtime
-            .evaluate_script("console._flush = () => ({ length: 4294967295 });")
+            .evaluate_script(
+                "var n = 0;
+                 var o = { toString() { n += 100; return 'side'; } };
+                 var p = new Proxy({}, { get() { n += 1; throw new Error('trap'); } });
+                 var e = new TypeError('bad thing');
+                 var arr = [1, 2];
+                 console.log(o, p, e, arr, Symbol('s'), 12, null, undefined, 'text', 10n);
+                 arr.push(3);",
+            )
             .unwrap();
+        assert_eq!(
+            received.lock().unwrap().clone(),
+            vec!["[object Object] [object Object] TypeError: bad thing [object Array] Symbol(s) 12 null undefined text 10"]
+        );
+        assert_eq!(runtime.evaluate_script("n").unwrap().is_truthy(), false, "page code ran");
+    }
 
-        // Evaluation completes without hanging or OOM
-        let result = runtime.evaluate_script("1 + 1");
-        assert!(result.is_ok());
+    /// Nothing page script can reach turns redaction off or writes a line
+    /// of its own: the console methods are natives, the flag and the queue
+    /// live in Rust, and no prototype the page can patch is used.
+    #[test]
+    fn page_script_cannot_switch_redaction_off_or_forge_console_lines() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+            recv_clone.lock().unwrap().push(msg.to_string());
+        }));
+        runtime.set_console_redaction(true);
+        runtime
+            .evaluate_script(
+                "var secret = 'SECRET';
+                 try { console.__rustkit_capture(false); } catch (e) {}
+                 try { console._logs.push({level: 'error', msg: 'FORGED'}); } catch (e) {}
+                 console._flush = function () { return [{level: 'error', msg: 'FORGED'}]; };
+                 __rustkit_console_format = function () { return 'FORGED'; };
+                 Function.prototype.apply = function () { return 'FORGED'; };
+                 Array.prototype.push = function () { return 0; };
+                 Array.from = function () { return ['FORGED']; };
+                 JSON.stringify = function () { return 'FORGED'; };
+                 String = function () { return 'FORGED'; };
+                 Object.prototype[Symbol.toPrimitive] = function () { return 'FORGED'; };
+                 Object.defineProperty(Object.prototype, 'msg', { get: function () { return 'FORGED'; } });
+                 console.log(secret, 1);",
+            )
+            .unwrap();
+        assert_eq!(received.lock().unwrap().clone(), vec!["<string len=6> <number>"]);
+    }
+
+    /// A page that logs without end holds at most 1024 lines between flushes.
+    #[test]
+    fn console_lines_waiting_for_a_flush_are_bounded() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+            recv_clone.lock().unwrap().push(msg.to_string());
+        }));
+        let module = runtime.begin_module("https://a.test/m.js", "for (let i = 0; i < 5000; i++) console.log(i);");
+        assert!(module.is_ok());
+        let _ = runtime.poll_module(&module.unwrap());
+        runtime.flush_console();
+        let lines = received.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1024);
+        assert_eq!(lines.last().map(String::as_str), Some("4999"));
+    }
+
+    /// Code with no named script of its own (`eval`) has no position; the
+    /// caller's position is not passed off as its.
+    #[test]
+    fn a_console_call_from_eval_code_has_no_position() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, at| {
+            recv_clone.lock().unwrap().push((msg.to_string(), at.cloned()));
+        }));
+        runtime.evaluate_script_named("1;\neval(\"console.log('in eval')\");", "inline#1").unwrap();
+        assert_eq!(received.lock().unwrap().clone(), vec![("in eval".to_string(), None)]);
+    }
+
+    /// A rejection's reason is described without its `toString` or a
+    /// `stack` getter of the page's.
+    #[test]
+    fn describing_a_rejection_runs_no_page_code() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_error_reports(true, true);
+        runtime
+            .evaluate_script_named(
+                "var n = 0;
+                 Promise.reject({ toString() { n += 1; return 'x'; } });
+                 var e = new Error('plain');
+                 Object.defineProperty(e, 'stack', { get() { n += 10; return 'fake'; } });
+                 Object.defineProperty(e, 'name', { get() { n += 100; return 'Fake'; } });
+                 Promise.reject(e);",
+                "inline#1",
+            )
+            .unwrap();
+        let rejections = runtime.take_error_reports();
+        assert_eq!(rejections.len(), 2);
+        assert_eq!((rejections[0].value, rejections[0].message.as_deref()), ("object", None));
+        assert_eq!((rejections[1].name, rejections[1].message.as_deref()), (Some("Error"), Some("plain")));
+        assert_eq!(rejections[1].frames.first().map(|f| f.line), Some(3), "the stack is where the error was made: {rejections:?}");
+        assert_eq!(runtime.evaluate_script("n").unwrap().is_truthy(), false, "page code ran");
+    }
+
+    /// One function declared in `eval` code, which throws after a console
+    /// call, called from the page's script `inline#1`: the error's frames
+    /// and whether it is located, and the console call's position.
+    fn eval_declared_throw(declare: &str, call: &str) -> (Vec<ScriptPosition>, bool, Option<ScriptPosition>) {
+        let mut runtime = JsRuntime::new().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+        runtime.set_error_reports(true, false);
+        let body = "{ console.log(\"c\"); throw new Error(\"x\"); }";
+        let script = format!("1;\neval('{}');\n{call};", declare.replace("BODY", body));
+        assert!(runtime.evaluate_script_named(&script, "inline#1").is_err());
+        let reports = runtime.take_error_reports();
+        assert_eq!(reports.len(), 1, "{script}: {reports:?}");
+        let console = seen.lock().unwrap().clone();
+        assert_eq!(console.len(), 1, "{script}");
+        (reports[0].frames.clone(), reports[0].located, console[0].clone())
+    }
+
+    /// A function's name is the page's (a declaration, a literal or
+    /// computed key, `Object.defineProperty(f, 'name')`): whether its error
+    /// and console call have a place, and which, never depends on it. A
+    /// function `eval` code declared has no script of its own whatever it
+    /// is called, so neither is given its caller's position.
+    #[test]
+    fn a_page_chosen_function_name_never_decides_a_place() {
+        let ordinary = eval_declared_throw("function gg() BODY", "gg()");
+        assert_eq!(ordinary, (vec![ScriptPosition { path: "inline#1".into(), line: 3, column: 3 }], false, None));
+        for (declare, call) in [
+            ("function anonymous() BODY", "anonymous()"),
+            ("var o = { \"f eval at g\": function () BODY }", "o[\"f eval at g\"]()"),
+            ("var o = { \"<eval>\": function () BODY }", "o[\"<eval>\"]()"),
+            ("var o = { [\"<e\" + \"val>\"]: function () BODY }", "o[\"<eval>\"]()"),
+            ("var o = { [\"anony\" + \"mous\"]: function () BODY }", "o.anonymous()"),
+            ("function h() BODY Object.defineProperty(h, \"name\", { value: \"<eval>\" })", "h()"),
+            ("function h() BODY Object.defineProperty(h, \"name\", { value: \"anonymous\" })", "h()"),
+        ] {
+            let (frames, located, console) = eval_declared_throw(declare, call);
+            assert_eq!((frames.len(), located, console), (1, false, None), "{declare}");
+            assert_eq!((frames[0].path.as_str(), frames[0].line), ("inline#1", 3), "{declare}");
+        }
+    }
+
+    /// The same names on functions a page script declared: located where
+    /// they throw, like any other.
+    #[test]
+    fn a_page_function_named_like_engine_code_is_located_where_it_throws() {
+        for (declare, call) in [
+            ("function gg() BODY", "gg()"),
+            ("function anonymous() BODY", "anonymous()"),
+            ("var o = { \"f eval at g\": function () BODY }", "o[\"f eval at g\"]()"),
+            ("var o = { \"<eval>\": function () BODY }", "o[\"<eval>\"]()"),
+            ("function h() BODY Object.defineProperty(h, \"name\", { value: \"<eval>\" })", "h()"),
+        ] {
+            let mut runtime = JsRuntime::new().unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let sink = seen.clone();
+            runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+            runtime.set_error_reports(true, false);
+            let body = "{\nconsole.log('c');\n  throw new Error('x'); }";
+            let script = format!("{};\n{call};", declare.replace("BODY", body));
+            assert!(runtime.evaluate_script_named(&script, "inline#1").is_err());
+            let reports = runtime.take_error_reports();
+            assert!(reports[0].located, "{declare}: {reports:?}");
+            assert_eq!(reports[0].frames[0], ScriptPosition { path: "inline#1".into(), line: 3, column: 9 }, "{declare}");
+            let console = seen.lock().unwrap().clone();
+            assert_eq!(console, vec![Some(ScriptPosition { path: "inline#1".into(), line: 2, column: 12 })], "{declare}");
+        }
+    }
+
+    /// `eval` code and a function built by `new Function` are in no script
+    /// of their own: no place, never their caller's.
+    #[test]
+    fn eval_and_new_function_code_have_no_place() {
+        for script in ["1;\neval('console.log(1); null.q');", "1;\nvar f = new Function('console.log(1); null.q');\nf();"] {
+            let mut runtime = JsRuntime::new().unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let sink = seen.clone();
+            runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+            runtime.set_error_reports(true, false);
+            assert!(runtime.evaluate_script_named(script, "inline#1").is_err());
+            let reports = runtime.take_error_reports();
+            assert_eq!(reports.len(), 1, "{script}");
+            assert!(!reports[0].located, "{script}: {reports:?}");
+            assert_eq!(reports[0].frames.first().map(|f| f.line), Some(2 + script.matches("new Function").count() as u32), "{script}");
+            assert_eq!(seen.lock().unwrap().clone(), vec![None], "{script}");
+        }
+    }
+
+    /// The embedder's own scripts are passed over by where they are, not
+    /// by what their functions are called: an error a function of theirs
+    /// throws is placed at the page's call, whatever the function's name.
+    #[test]
+    fn the_embedders_own_frames_are_passed_over_whatever_their_name() {
+        for name in ["glueThrow", "anonymous"] {
+            let mut runtime = JsRuntime::new().unwrap();
+            runtime
+                .evaluate_with_host(&format!("globalThis.{name}Fn = function {name}() {{ throw new TypeError('g'); }};"))
+                .unwrap();
+            runtime.evaluate_script("globalThis.pathlessFn = function anonymous() { null.q; };").unwrap();
+            runtime.set_error_reports(true, false);
+            for callee in [format!("{name}Fn"), "pathlessFn".to_string()] {
+                assert!(runtime.evaluate_script_named(&format!("1;\n  {callee}();"), "inline#1").is_err());
+                let reports = runtime.take_error_reports();
+                assert!(reports[0].located, "{name} {callee}: {reports:?}");
+                assert_eq!((reports[0].frames[0].line, reports[0].frames[0].column), (2, 3 + callee.len() as u32), "{callee}");
+            }
+        }
+    }
+
+    /// An error's message is text page script can choose (a property key in
+    /// a native error's message): a position or frame line in it is never
+    /// taken for the engine's.
+    #[test]
+    fn a_position_in_an_errors_message_is_never_its_place() {
+        use boa_engine::{JsError as BoaError, JsNativeError};
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_error_reports(true, false);
+        runtime.evaluate_script_named("1;", "inline#1").unwrap();
+        for message in ["cannot redefine property: k (inline#1:9:9)", "k\n    at q (inline#1:9:9)", "k\n    at q (inline#1:9:9)\nz"] {
+            let error = BoaError::from(JsNativeError::typ().with_message(message));
+            let report = runtime.diag.describe_error(&error, &mut runtime.context);
+            assert_eq!((report.frames, report.located), (Vec::new(), false), "{message}");
+        }
     }
 }

@@ -5512,6 +5512,7 @@ dependencies = [
  "rustkit-core",
  "rustkit-css",
  "rustkit-dom",
+ "rustkit-http",
  "rustkit-image",
  "rustkit-js",
  "rustkit-layout",

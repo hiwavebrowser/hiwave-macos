@@ -69,6 +69,51 @@ impl RelayoutCause {
     }
 }
 
+/// The HTML element names a `relayout` record may name (plus `svg` and
+/// `math`). A custom element's name, or any other tag, is page text and is
+/// recorded as `other`.
+const HTML_ELEMENTS: [&str; 115] = [
+    "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base", "bdi", "bdo",
+    "blockquote", "body", "br", "button", "canvas", "caption", "cite", "code", "col",
+    "colgroup", "data", "datalist", "dd", "del", "details", "dfn", "dialog", "div", "dl", "dt",
+    "em", "embed", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
+    "h5", "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe", "img", "input", "ins",
+    "kbd", "label", "legend", "li", "link", "main", "map", "mark", "menu", "meta", "meter",
+    "nav", "noscript", "object", "ol", "optgroup", "option", "output", "p", "picture", "pre",
+    "progress", "q", "rp", "rt", "ruby", "s", "samp", "script", "search", "section", "select",
+    "slot", "small", "source", "span", "strong", "style", "sub", "summary", "sup", "table",
+    "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "time", "title", "tr",
+    "track", "u", "ul", "var", "video", "wbr", "svg", "math", "center",
+];
+
+impl RelayoutCause {
+    /// The cause as an Inspector `relayout` record shows it: engine words
+    /// and numbers only. A script write is its kind and, when it was to an
+    /// element, the element's tag if it is one of [`HTML_ELEMENTS`] (else
+    /// `other`); never its `id`, class or attributes, which page script
+    /// chooses. (The `relayout cause=` log line keeps the `tag#id` label.)
+    pub fn record_label(&self) -> String {
+        match self {
+            RelayoutCause::ScriptMutation { kind, node } if node.is_empty() => {
+                format!("script_mutation({})", kind.as_str())
+            }
+            RelayoutCause::ScriptMutation { kind, node } => {
+                // `node` is `tag#id` or `tag`: the tag is what precedes the
+                // first `#`. A tag that itself holds a `#` reads as the name
+                // before it, which is still only ever a listed name.
+                let tag = node.split('#').next().unwrap_or("");
+                let tag = HTML_ELEMENTS
+                    .iter()
+                    .find(|known| known.eq_ignore_ascii_case(tag))
+                    .copied()
+                    .unwrap_or("other");
+                format!("script_mutation({}@{tag})", kind.as_str())
+            }
+            cause => cause.to_string(),
+        }
+    }
+}
+
 impl fmt::Display for RelayoutCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -336,6 +381,21 @@ mod tests {
                 "other(embedder)",
             ]
         );
+    }
+
+    /// Fourth R1 hold @ 47fc7abb: a record names no id, and a tag only
+    /// when it is a listed HTML element.
+    #[test]
+    fn the_record_label_holds_no_page_text() {
+        let write = |kind, node: &str| RelayoutCause::ScriptMutation { kind, node: node.into() }.record_label();
+        assert_eq!(write(MutationKind::Attribute, "div#sid=COOKIEVALUE"), "script_mutation(attribute@div)");
+        assert_eq!(write(MutationKind::Style, "P#x"), "script_mutation(style@p)");
+        assert_eq!(write(MutationKind::ChildList, "x-cookievalue#el"), "script_mutation(child_list@other)");
+        assert_eq!(write(MutationKind::FormValue, "my-widget"), "script_mutation(form_value@other)");
+        assert_eq!(write(MutationKind::Text, ""), "script_mutation(text)");
+        assert_eq!(RelayoutCause::ImageLoaded { count: 2 }.record_label(), "image_loaded(count=2)");
+        assert_eq!(RelayoutCause::Other("embedder").record_label(), "other(embedder)");
+        assert_eq!(RelayoutCause::Timer.record_label(), "timer");
     }
 
     #[test]
