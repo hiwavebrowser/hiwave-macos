@@ -5448,8 +5448,17 @@ impl Engine {
                     // was kept is content on the line whatever it holds: a
                     // sized, empty one is an icon. Without this a `<span>`
                     // or `<a>` around only such a box was dropped with it,
-                    // and a block holding nothing else went too.
-                    if child.style.display.is_atomic_inline() {
+                    // and a block holding nothing else went too. An
+                    // absolutely or fixed positioned one is out of the flow
+                    // and not on the line: the inline box around only that
+                    // is empty, and keeping it gave the line a strut (a
+                    // positioned badge in a link moved the next block down).
+                    if child.style.display.is_atomic_inline()
+                        && !matches!(
+                            child.position,
+                            rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+                        )
+                    {
                         return true;
                     }
                     // Recursively check children
@@ -7108,8 +7117,23 @@ impl Engine {
                         | BoxType::LineBreak => true,
                     };
 
-                    if should_include && (!closed_details || details_summary == Some(child_index)) {
+                    let shown = !closed_details || details_summary == Some(child_index);
+                    if should_include && shown {
                         Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
+                    } else if shown && matches!(child_box.box_type, BoxType::Inline) {
+                        // An inline box with nothing in the flow is dropped,
+                        // and so was everything in it. What it positions out
+                        // of the flow stays: a badge in an otherwise empty
+                        // link still paints, at the link's place, and the
+                        // line hears nothing of it (#689 review, round 3).
+                        for out_of_flow in child_box.children.into_iter().filter(|grandchild| {
+                            matches!(
+                                grandchild.position,
+                                rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+                            )
+                        }) {
+                            Self::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
+                        }
                     }
                 }
                 drop(table_hints);

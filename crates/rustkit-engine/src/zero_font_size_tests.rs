@@ -171,35 +171,41 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
     // An out-of-flow atomic inline inside an inline box is not content of
     // the line: the empty `<span>` or `<a>` around a positioned icon or
     // badge must not be kept, or it gives the line a strut and the next
-    // block moves down one line (round-3 hold; Chromium 0).
+    // block moves down one line (round-3 hold; Chromium 0), while the
+    // positioned box itself stays, at the line's place (Chromium 141 and
+    // the pinned 143 agree on every box here).
     (
         "an absolute inline-block in a span, then a block",
         "#x{font-size:16px;line-height:20px}",
-        r#"<div id=x><span><i style="position:absolute;display:inline-block;width:20px;height:20px"></i></span></div><div id=y style="height:5px"></div>"#,
-        "x:0:0:1280:0 y:0:0:1280:5",
+        r#"<div id=x><span><i id=i style="position:absolute;display:inline-block;width:20px;height:20px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:0 i:0:0:20:20 y:0:0:1280:5",
     ),
     (
         "an absolute inline-block in a link, then a block",
         "#x{font-size:16px;line-height:20px}",
-        r#"<div id=x><a href=#><i style="position:absolute;display:inline-block;width:20px;height:20px"></i></a></div><div id=y style="height:5px"></div>"#,
-        "x:0:0:1280:0 y:0:0:1280:5",
+        r#"<div id=x><a href=#><i id=i style="position:absolute;display:inline-block;width:20px;height:20px"></i></a></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:0 i:0:0:20:20 y:0:0:1280:5",
     ),
     (
         "a fixed inline-flex in a span, then a block",
         "#x{font-size:16px;line-height:20px}",
-        r#"<div id=x><span><i style="position:fixed;display:inline-flex;width:20px;height:20px"></i></span></div><div id=y style="height:5px"></div>"#,
-        "x:0:0:1280:0 y:0:0:1280:5",
+        r#"<div id=x><span><i id=i style="position:fixed;display:inline-flex;width:20px;height:20px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:0 i:0:0:20:20 y:0:0:1280:5",
     ),
     (
         "an absolute inline-block in a span at font-size 0",
         "",
-        r#"<div id=x><span><i style="position:absolute;display:inline-block;width:20px;height:20px"></i></span></div><div id=y style="height:5px"></div>"#,
-        "x:0:0:1280:0 y:0:0:1280:5",
+        r#"<div id=x><span><i id=i style="position:absolute;display:inline-block;width:20px;height:20px"></i></span></div><div id=y style="height:5px"></div>"#,
+        "x:0:0:1280:0 i:0:0:20:20 y:0:0:1280:5",
     ),
+    // The positioned box is not compared here: beside an in-flow sibling
+    // the span is kept, and the engine seats the box 1px low on that
+    // existing path (Chromium 0), which is the static position's, not this
+    // round's.
     (
         "an absolute inline-block in a span beside an in-flow one",
         "#x{font-size:16px;line-height:20px}",
-        r#"<div id=x><span><i style="position:absolute;display:inline-block;width:20px;height:20px"></i>{ib}</span></div><div id=y style="height:5px"></div>"#,
+        r#"<div id=x><span><i id=i style="position:absolute;display:inline-block;width:20px;height:20px"></i>{ib}</span></div><div id=y style="height:5px"></div>"#,
         "x:0:0:1280:20 y:0:20:1280:5",
     ),
 ];
