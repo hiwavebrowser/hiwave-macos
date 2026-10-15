@@ -83,6 +83,12 @@ pub struct Vm {
     pub(crate) pending_exception: Option<JsError>,
     pub(crate) runtime_limits: RuntimeLimits,
 
+    // HIWAVE PATCH (interrupt): a word another thread may set to stop the
+    // running script, and the turn it is compared with. See PATCHES.md.
+    pub(crate) interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    pub(crate) interrupt_turn: u64,
+    // END HIWAVE PATCH
+
     /// This is used to assign a native (rust) function as the active function,
     /// because we don't push a frame for them.
     pub(crate) native_active_function: Option<JsObject>,
@@ -418,6 +424,8 @@ impl Vm {
             return_value: JsValue::undefined(),
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
+            interrupt: None,   // HIWAVE PATCH (interrupt)
+            interrupt_turn: 0, // HIWAVE PATCH (interrupt)
             native_active_function: None,
             host_call_depth: 0,
             shadow_stack: ShadowStack::default(),
@@ -1015,6 +1023,8 @@ impl Context {
 
     /// Checks if we haven't exceeded the defined runtime limits.
     pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
+        self.check_interrupt()?; // HIWAVE PATCH (interrupt)
+
         // Must throw if the number of recursive calls exceeds the defined limit.
         //
         // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking
@@ -1031,6 +1041,20 @@ impl Context {
 
         Ok(())
     }
+
+    // HIWAVE PATCH (interrupt): stop when the word names the running turn,
+    // or is `u64::MAX` (every turn). 0 never stops anything.
+    #[inline]
+    pub(crate) fn check_interrupt(&self) -> JsResult<()> {
+        if let Some(word) = &self.vm.interrupt {
+            let value = word.load(std::sync::atomic::Ordering::Relaxed);
+            if value != 0 && (value == u64::MAX || value == self.vm.interrupt_turn) {
+                return Err(RuntimeLimitError::Interrupted.into());
+            }
+        }
+        Ok(())
+    }
+    // END HIWAVE PATCH
 }
 
 /// Yields once to the executor.

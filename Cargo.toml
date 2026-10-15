@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-# Vendored with a patch, not a workspace member (see third_party/boa_gc/HIWAVE_PATCH.md and
-# third_party/boa_parser/HIWAVE_PATCH.md).
-exclude = ["third_party/boa_gc", "third_party/boa_parser"]
+# Vendored with a patch, not a workspace member (see third_party/boa_gc/HIWAVE_PATCH.md,
+# third_party/boa_parser/HIWAVE_PATCH.md and third_party/boa_engine/PATCHES.md).
+exclude = ["third_party/boa_gc", "third_party/boa_parser", "third_party/boa_engine"]
 members = [
     "crates/hiwave-core",
     "crates/hiwave-shield",
@@ -140,3 +140,5 @@ strip = false
 [patch.crates-io]
 boa_gc = { path = "third_party/boa_gc" }
 boa_parser = { path = "third_party/boa_parser" }
+# boa_engine 0.22.0 with a cross-thread interrupt word. See third_party/boa_engine/PATCHES.md.
+boa_engine = { path = "third_party/boa_engine" }

@@ -595,6 +595,29 @@ impl Context {
         &mut self.vm.runtime_limits
     }
 
+    // HIWAVE PATCH (interrupt)
+    /// Set the interrupt word: a value any thread may store to stop the
+    /// script running on this context. It is read at every call and every
+    /// loop back-edge; when it equals the turn set with
+    /// [`Context::set_interrupt_turn`], or is `u64::MAX`, the script ends with
+    /// [`RuntimeLimitError::Interrupted`](crate::error::RuntimeLimitError),
+    /// which script cannot catch. 0 stops nothing. `None` removes it.
+    #[inline]
+    pub fn set_interrupt_word(
+        &mut self,
+        word: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    ) {
+        self.vm.interrupt = word;
+    }
+
+    /// Set the turn the interrupt word is compared with (see
+    /// [`Context::set_interrupt_word`]).
+    #[inline]
+    pub fn set_interrupt_turn(&mut self, turn: u64) {
+        self.vm.interrupt_turn = turn;
+    }
+    // END HIWAVE PATCH
+
     /// Returns `true` if this context can be suspended by an `Atomics.wait` call.
     #[inline]
     #[must_use]

@@ -314,6 +314,12 @@ pub enum RuntimeLimitError {
     /// Error for reaching the maximum stack size
     #[error("reached the maximum stack size on this execution")]
     StackSize,
+    // HIWAVE PATCH (interrupt)
+    /// Error for the interrupt word naming the running turn
+    /// ([`Context::set_interrupt_word`](crate::Context::set_interrupt_word)).
+    #[error("the script was interrupted")]
+    Interrupted,
+    // END HIWAVE PATCH
 }
 
 /// Internal panic error.
