@@ -286,9 +286,9 @@ pub use diagnostics::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod diagnostics_tests;
-use relayout_cause::PendingCauses;
+use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
-pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats};
+pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats, StageMs};
 pub use rustkit_bindings::MutationKind;
 mod script_net;
 #[cfg(test)]
@@ -5131,10 +5131,12 @@ impl Engine {
             causes.note(RelayoutCause::Other("unattributed"));
         }
         relayout_cause::set_last_build_reused_tree(false);
+        relayout_cause::take_stage_ms();
 
         let layout_skipped = self.relayout_uncounted(id)?;
 
         let took_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let stages = relayout_cause::take_stage_ms();
         let tree_reused = relayout_cause::last_build_reused_tree();
         let cause = causes
             .first
@@ -5143,12 +5145,13 @@ impl Engine {
             .unwrap_or_default();
         info!(
             ?id,
-            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} layout_skipped={}",
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} layout_skipped={}",
             cause,
             causes.counts,
             causes.mutations,
             tree_reused,
             took_ms,
+            stages,
             layout_skipped
         );
         if let Some(view) = self.views.get_mut(&id) {
@@ -5235,6 +5238,7 @@ impl Engine {
         // Build layout tree from DOM with tracing
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
+            let _build_time = time_stage(Stage::Build);
             // Scope the focused node to THIS view for the duration of the
             // build; cleared immediately after so no later build inherits it.
             self.build_layout_for_view(id, &document, &external_stylesheets)
@@ -5244,6 +5248,7 @@ impl Engine {
         let mut root_box = root_box;
         {
             let _layout_span = tracing::info_span!("layout_compute").entered();
+            let _layout_time = time_stage(Stage::Layout);
             // Set viewport dimensions for vh/vw unit resolution
             root_box.set_viewport(bounds.width as f32, bounds.height as f32);
             // Root establishes the initial BFC: lay out through the margin-collapse
@@ -5353,6 +5358,7 @@ impl Engine {
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
         // answer from this layout.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
+            let _snapshot_time = time_stage(Stage::Snapshot);
             let (geometry, computed) = geometry_snapshot(layout);
             bindings.set_geometry(geometry);
             bindings.set_computed_styles(computed);
@@ -5381,6 +5387,7 @@ impl Engine {
     /// The display list of a laid-out tree, as the renderer takes it.
     fn display_list_for(&mut self, id: EngineViewId, root_box: &LayoutBox) -> DisplayList {
         let _display_list_span = tracing::info_span!("build_display_list").entered();
+        let _display_list_time = time_stage(Stage::DisplayList);
         let mut dl = DisplayList::build(root_box);
         // Splice cached SVG documents in place of their Image commands.
         // Done once per layout (not per frame): the renderer only speaks
@@ -5577,6 +5584,7 @@ impl Engine {
         let mut built = Vec::with_capacity(2);
         let mut walked = 0;
         for chains in [before, now.clone()] {
+            let _build_time = time_stage(Stage::Build);
             if let Some(view) = self.views.get_mut(&id) {
                 (view.hover_chain, view.active_chain) = chains;
             }
@@ -5633,6 +5641,7 @@ impl Engine {
         }
         // Script reads of computed style answer from the restyled boxes.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
+            let _snapshot_time = time_stage(Stage::Snapshot);
             let (geometry, computed) = geometry_snapshot(layout);
             bindings.set_geometry(geometry);
             bindings.set_computed_styles(computed);
@@ -14473,6 +14482,7 @@ impl Engine {
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("render", ?id).entered();
+        let _render_time = time_stage(Stage::Render);
 
         // Glyph rasterization resolves family names too; another view may
         // have laid out since this one did.

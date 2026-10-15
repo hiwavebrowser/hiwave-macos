@@ -247,9 +247,133 @@ pub(crate) fn last_build_reused_tree() -> bool {
     LAST_BUILD_REUSED_TREE.with(|c| c.get())
 }
 
+/// The stages a relayout is timed by, in the order they run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stage {
+    /// The box tree from the DOM (`build_layout_tree`), or a pointer
+    /// restyle's subtree builds.
+    Build,
+    /// Laying the tree out (`layout_compute`).
+    Layout,
+    /// The display list from the laid-out tree (`build_display_list`).
+    DisplayList,
+    /// The geometry and computed-style maps script reads.
+    Snapshot,
+    /// Drawing the display list (`render`).
+    Render,
+}
+
+/// Milliseconds one relayout spent in each stage. A stage that ran more
+/// than once (a pointer restyle that fell back to a full build) is summed;
+/// one that did not run is 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StageMs {
+    pub build: f64,
+    pub layout: f64,
+    pub display_list: f64,
+    pub snapshot: f64,
+    pub render: f64,
+}
+
+impl StageMs {
+    fn add(&mut self, stage: Stage, ms: f64) {
+        let slot = match stage {
+            Stage::Build => &mut self.build,
+            Stage::Layout => &mut self.layout,
+            Stage::DisplayList => &mut self.display_list,
+            Stage::Snapshot => &mut self.snapshot,
+            Stage::Render => &mut self.render,
+        };
+        *slot += ms;
+    }
+}
+
+impl fmt::Display for StageMs {
+    /// `build_ms=1.0 layout_ms=2.0 display_list_ms=0.5 snapshot_ms=0.1 render_ms=3.0`
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "build_ms={:.1} layout_ms={:.1} display_list_ms={:.1} snapshot_ms={:.1} render_ms={:.1}",
+            self.build, self.layout, self.display_list, self.snapshot, self.render
+        )
+    }
+}
+
+thread_local! {
+    /// The stage times of the relayout running on this thread.
+    /// `Engine::relayout` clears it before its build and takes it after
+    /// its paint; a render outside a relayout adds to it and is cleared
+    /// unread.
+    static STAGE_MS: std::cell::Cell<StageMs> = const {
+        std::cell::Cell::new(StageMs {
+            build: 0.0,
+            layout: 0.0,
+            display_list: 0.0,
+            snapshot: 0.0,
+            render: 0.0,
+        })
+    };
+}
+
+/// Times one stage until it is dropped: two `Instant` reads and a
+/// thread-local add, nothing else.
+pub(crate) struct StageTimer {
+    stage: Stage,
+    started: std::time::Instant,
+}
+
+pub(crate) fn time_stage(stage: Stage) -> StageTimer {
+    StageTimer {
+        stage,
+        started: std::time::Instant::now(),
+    }
+}
+
+impl Drop for StageTimer {
+    fn drop(&mut self) {
+        let ms = self.started.elapsed().as_secs_f64() * 1000.0;
+        STAGE_MS.with(|c| {
+            let mut stages = c.get();
+            stages.add(self.stage, ms);
+            c.set(stages);
+        });
+    }
+}
+
+/// The stage times since the last take, and a fresh start.
+pub(crate) fn take_stage_ms() -> StageMs {
+    STAGE_MS.with(|c| c.replace(StageMs::default()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_timers_add_up_per_stage_until_taken() {
+        take_stage_ms();
+        drop(time_stage(Stage::Build));
+        {
+            let _t = time_stage(Stage::Render);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let taken = take_stage_ms();
+        assert!(taken.render >= 2.0, "{taken}");
+        assert_eq!(taken.layout, 0.0);
+        assert_eq!(take_stage_ms(), StageMs::default(), "a take clears them");
+        let shown = StageMs {
+            build: 1.0,
+            layout: 2.04,
+            display_list: 0.5,
+            snapshot: 0.0,
+            render: 3.0,
+        }
+        .to_string();
+        assert_eq!(
+            shown,
+            "build_ms=1.0 layout_ms=2.0 display_list_ms=0.5 snapshot_ms=0.0 render_ms=3.0"
+        );
+    }
 
     #[test]
     fn the_summary_url_drops_the_query_and_fragment() {
