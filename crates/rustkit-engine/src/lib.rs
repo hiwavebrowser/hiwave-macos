@@ -308,6 +308,8 @@ mod inspector_network_tests;
 #[cfg(all(test, feature = "headless"))]
 mod relayout_cause_engine_tests;
 #[cfg(all(test, feature = "headless"))]
+mod decode_pool_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_module_tests;
@@ -593,7 +595,8 @@ fn image_svg(mut svg: rustkit_svg::SvgDocument) -> rustkit_svg::SvgDocument {
 /// A raster image for `url`, fetched like every other subresource: through
 /// the resource loader, so the shield sees the request, it carries the
 /// Referer the document's policy allows, and the caller's deadline bounds
-/// it. The image manager only decodes and caches what arrives. A cached
+/// it. The image manager decodes what arrives on its decode pool and caches
+/// it, unless `nav` was superseded by then (threads plan D1). A cached
 /// image or a `data:` URL needs no request.
 ///
 /// `inspector` records the request, if one is made; a caller that bounds
@@ -603,6 +606,7 @@ async fn fetch_raster_image(
     image_manager: &ImageManager,
     referrer: &SubresourceReferrer,
     url: Url,
+    nav: rustkit_image::DecodeNav,
     inspector: Option<(&Arc<Inspector>, &'static str, tokio::time::Instant)>,
 ) -> Result<Arc<rustkit_image::LoadedImage>, rustkit_image::ImageError> {
     use rustkit_image::ImageError;
@@ -643,11 +647,16 @@ async fn fetch_raster_image(
             return Err(ImageError::FetchError(format!("{e} for {url}")));
         }
     };
-    let decoded = image_manager.insert_fetched(&url, content_type.as_deref(), &body);
+    // Read before the body moves to the decode pool.
+    let body_len = body.len();
+    let decoded = image_manager
+        .decode_fetched(&url, content_type.as_deref(), body.to_vec(), nav)
+        .await;
     if let Some(received) = received {
         match &decoded {
-            // An SVG served under an image URL goes on to the SVG lane.
-            Ok(_) | Err(ImageError::Svg(_)) => received.read(body.len()),
+            // An SVG served under an image URL goes on to the SVG lane; a
+            // superseded decode still had its response arrive whole.
+            Ok(_) | Err(ImageError::Svg(_)) | Err(ImageError::Superseded) => received.read(body_len),
             Err(_) => received.fail(FailureStage::Decode, "image did not decode"),
         }
     }
@@ -667,6 +676,8 @@ struct ImagePlan {
     referrer: SubresourceReferrer,
     loader: Arc<ResourceLoader>,
     image_manager: Arc<ImageManager>,
+    /// The navigation the decodes belong to.
+    nav: rustkit_image::DecodeNav,
     inspector: Arc<Inspector>,
     /// What asked for the images: `parser`, or `script` for a pass over
     /// what scripts added. A CSS background is always `css`.
@@ -2187,6 +2198,7 @@ impl Engine {
             .remove(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
         self.render_failing.remove(&id);
+        self.image_manager.forget_view(id.0);
 
         // Destroy compositor surface
         let _ = self.compositor.destroy_surface(view.viewhost_id);
@@ -4770,6 +4782,7 @@ impl Engine {
             view.nav_generation = view.nav_generation.wrapping_add(1);
             view.nav_generation
         };
+        self.image_manager.begin_navigation(id.0, generation);
 
         // Emit event
         let _ = self.event_tx.send(EngineEvent::NavigationStarted {
@@ -10935,6 +10948,7 @@ impl Engine {
         match self.views.get_mut(&id) {
             Some(view) => {
                 view.nav_generation = view.nav_generation.wrapping_add(1);
+                self.image_manager.begin_navigation(id.0, view.nav_generation);
                 // Only a load that was actually in flight has anything to
                 // report: the state machine must leave Provisional/Committed
                 // (or `is_loading` stays true until the next start), and UI
@@ -10972,6 +10986,16 @@ impl Engine {
         match self.views.get(&id) {
             Some(view) => view.nav_generation != generation,
             None => true,
+        }
+    }
+
+    /// The navigation an image decode started now belongs to. A decode that
+    /// comes back after the view's generation moved on (a newer load, Stop)
+    /// is dropped by the image manager.
+    fn decode_nav(&self, id: EngineViewId) -> rustkit_image::DecodeNav {
+        rustkit_image::DecodeNav {
+            view: id.0,
+            nav_id: self.views.get(&id).map_or(0, |view| view.nav_generation),
         }
     }
 
@@ -11041,6 +11065,7 @@ impl Engine {
     fn bump_nav_generation_for_test(&mut self, id: EngineViewId) -> u64 {
         let view = self.views.get_mut(&id).expect("view exists");
         view.nav_generation = view.nav_generation.wrapping_add(1);
+        self.image_manager.begin_navigation(id.0, view.nav_generation);
         view.nav_generation
     }
 
@@ -11728,6 +11753,7 @@ impl Engine {
             referrer: self.subresource_referrer(id),
             loader: self.loader.clone(),
             image_manager,
+            nav: self.decode_nav(id),
             inspector,
             initiator: if only_new { "script" } else { "parser" },
             css_urls,
@@ -11754,6 +11780,7 @@ impl Engine {
             referrer,
             loader,
             image_manager,
+            nav,
             inspector,
             initiator,
             css_urls,
@@ -11855,7 +11882,14 @@ impl Engine {
             let initiator = initiator_of(&url);
             async move {
                 info!(%url, "Loading image");
-                let load = fetch_raster_image(&loader, &image_manager, referrer, url.clone(), Some((inspector, initiator, deadline)));
+                let load = fetch_raster_image(
+                    &loader,
+                    &image_manager,
+                    referrer,
+                    url.clone(),
+                    nav,
+                    Some((inspector, initiator, deadline)),
+                );
                 let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
                     warn!(%url, "Image over the subresource budget; rendering without it");
                     return (false, None);
@@ -11881,6 +11915,10 @@ impl Engine {
                                 (false, None)
                             }
                         }
+                    }
+                    Err(rustkit_image::ImageError::Superseded) => {
+                        debug!(%url, "Image decoded for a superseded navigation; dropped");
+                        (false, None)
                     }
                     Err(e) => {
                         warn!(?e, %url, "Failed to load image");
@@ -15705,6 +15743,7 @@ impl Engine {
             &image_manager,
             &referrer,
             url.clone(),
+            self.decode_nav(view_id),
             inspector.as_ref().map(|i| (i, "script", deadline)),
         );
         let loaded = tokio::time::timeout_at(deadline, load)
