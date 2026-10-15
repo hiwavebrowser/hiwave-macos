@@ -2390,13 +2390,23 @@ fn main() {
                     // the view consumes the wheel, so only one of the two
                     // fires for an event. Until 2026-10-06 the wheel reached
                     // neither in the built app (hand-test item H6).
+                    // One scroll per drain: the engine presents the moved
+                    // frame inside `scroll_by` and the page hears one
+                    // scroll event for it, so the wheel deltas that arrived
+                    // since the last wake are summed first, as a browser's
+                    // per-frame scroll does; a burst costs one draw, not one
+                    // per event.
+                    let (mut dx, mut dy, mut events) = (0.0f32, 0.0f32, 0u32);
                     for scroll in rustkit_viewhost::drain_pending_scrolls() {
                         if wheel_burst_started() {
                             info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
                         }
-                        if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
-                            trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
-                        }
+                        dx += scroll.dx as f32;
+                        dy += scroll.dy as f32;
+                        events += 1;
+                    }
+                    if events > 0 && view.scroll_by(dx, dy) {
+                        trace!(dx, dy, events, "content scrolled");
                     }
                     for key in rustkit_viewhost::drain_pending_keys() {
                         if key.cmd {
