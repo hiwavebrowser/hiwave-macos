@@ -1411,6 +1411,23 @@ impl DomBindings {
         self.runtime.borrow_mut().take_deadline_overrun()
     }
 
+    /// Let another thread stop this document's script through its view's
+    /// interrupt word (see [`JsRuntime::set_view_control`]).
+    pub fn set_view_control(&self, control: Option<std::sync::Arc<rustkit_js::ViewControl>>) {
+        self.runtime.borrow_mut().set_view_control(control);
+    }
+
+    /// Open a turn of script on `stamp`, stopped by the watchdog past
+    /// `budget` (see [`JsRuntime::begin_turn`]).
+    pub fn begin_turn(&self, stamp: &rustkit_js::ThreadStamp, budget: std::time::Duration) -> u64 {
+        self.runtime.borrow_mut().begin_turn(stamp, budget)
+    }
+
+    /// Close the turn [`DomBindings::begin_turn`] opened.
+    pub fn end_turn(&self, stamp: &rustkit_js::ThreadStamp) {
+        self.runtime.borrow_mut().end_turn(stamp);
+    }
+
     /// Bound the number of microtask job iterations allowed per turn (see
     /// [`JsRuntime::set_max_job_iterations`]).
     pub fn set_max_job_iterations(&self, max_iterations: u64) {

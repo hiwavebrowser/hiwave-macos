@@ -9,11 +9,13 @@
 //! 3. **Safe interop**: Controlled boundary between Rust and JS
 //! 4. **Async support**: Event loop integration
 
+pub mod control;
 mod import_map;
 #[cfg(feature = "boa")]
 mod module;
 #[cfg(feature = "boa")]
 pub use module::{FetchedModule, ModuleHandle, ModuleState};
+pub use control::{ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
 mod executor;
 #[cfg(all(test, feature = "boa"))]
@@ -145,6 +147,23 @@ struct ExecutionDeadline {
     hit: std::cell::Cell<bool>,
     /// How long after `at` the first refused host call came.
     late: std::cell::Cell<Option<std::time::Duration>>,
+    /// The view's interrupt word ([`JsRuntime::set_view_control`]), which
+    /// another thread may set. Boa reads it itself, at every call
+    /// (host calls included) and loop back-edge; this copy says whether it
+    /// was what stopped the script.
+    control: std::cell::RefCell<Option<Arc<control::ViewControl>>>,
+    /// The turn running now ([`JsRuntime::begin_turn`]); 0 = none.
+    turn: std::cell::Cell<u64>,
+}
+
+impl ExecutionDeadline {
+    /// Whether the view's interrupt word stops the running turn.
+    fn interrupted(&self) -> bool {
+        self.control
+            .borrow()
+            .as_ref()
+            .is_some_and(|control| control.stops(self.turn.get()))
+    }
 }
 
 /// JavaScript runtime that wraps the underlying engine.
@@ -235,9 +254,9 @@ impl JsRuntime {
     pub fn run_jobs(&mut self) -> Result<(), JsError> {
         #[cfg(feature = "boa")]
         {
-            self.context
-                .run_jobs()
-                .map_err(|e| JsError::ExecutionError(e.to_string()))
+            let result = self.context.run_jobs();
+            self.consume_interrupt();
+            result.map_err(|e| JsError::ExecutionError(e.to_string()))
         }
         #[cfg(not(feature = "boa"))]
         {
@@ -297,6 +316,7 @@ impl JsRuntime {
             // does not run on its own; a page's async code never resumes
             // without this.
             let job_result = self.context.run_jobs();
+            self.consume_interrupt();
 
             match result {
                 Ok(value) => {
@@ -354,9 +374,66 @@ impl JsRuntime {
     }
 
     /// Whether the deadline has stopped a host call since it was last set
-    /// or asked about.
+    /// or asked about, or the view's interrupt word stops the running turn
+    /// (which stays true until the turn ends).
     pub fn take_deadline_hit(&mut self) -> bool {
-        self.deadline.hit.replace(false)
+        self.deadline.hit.replace(false) | self.deadline.interrupted()
+    }
+
+    /// Give this runtime its view's control block: from now on another
+    /// thread can stop the running turn by its interrupt word, at the next
+    /// call (host calls included) or loop back-edge, the vendored Boa's
+    /// patch. `None` takes it away.
+    pub fn set_view_control(&mut self, control: Option<Arc<control::ViewControl>>) {
+        #[cfg(feature = "boa")]
+        self.context
+            .set_interrupt_word(control.as_ref().map(|c| c.word().clone()));
+        *self.deadline.control.borrow_mut() = control;
+    }
+
+    /// Open a turn on `stamp` for this runtime's view, with `budget` before
+    /// the watchdog stops it, and return its id. Without a view control
+    /// nothing is published and the id is 0. Every `begin_turn` is paired
+    /// with an [`JsRuntime::end_turn`] on the same stamp.
+    pub fn begin_turn(&mut self, stamp: &control::ThreadStamp, budget: Duration) -> u64 {
+        let Some(control) = self.deadline.control.borrow().clone() else {
+            return 0;
+        };
+        let turn = stamp.begin_turn(&control, budget);
+        self.set_turn(turn);
+        turn
+    }
+
+    /// Close what [`JsRuntime::begin_turn`] opened.
+    pub fn end_turn(&mut self, stamp: &control::ThreadStamp) {
+        if self.deadline.control.borrow().is_none() {
+            return;
+        }
+        stamp.end_turn();
+        self.set_turn(stamp.current_turn());
+    }
+
+    /// The turn the interrupt word is compared with.
+    fn set_turn(&mut self, turn: u64) {
+        self.deadline.turn.set(turn);
+        #[cfg(feature = "boa")]
+        self.context.set_interrupt_turn(turn);
+    }
+
+    /// Called when script has returned to Rust: if the interrupt word stopped
+    /// the turn, the stop has done its work, and the rest of the turn is the
+    /// embedder's own script (draining the console, the page's queued
+    /// requests, the timer table), which the word must not kill. So Boa
+    /// stops comparing it with this turn; `take_deadline_hit` still reports
+    /// the stop, and past its deadline the page's host calls are still
+    /// refused, as they were before the word existed. [`ALL`](control::ALL)
+    /// keeps stopping everything.
+    #[cfg(feature = "boa")]
+    pub(crate) fn consume_interrupt(&mut self) {
+        if self.deadline.turn.get() != 0 && self.deadline.interrupted() {
+            self.deadline.hit.set(true);
+            self.context.set_interrupt_turn(0);
+        }
     }
 
     /// How long after the deadline the host call that stopped script came,

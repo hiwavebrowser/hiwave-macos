@@ -230,6 +230,7 @@ impl JsRuntime {
             .insert(url.to_string(), module.clone());
         let load = module.load(&mut self.context);
         let _ = self.context.run_jobs();
+        self.consume_interrupt();
         self.modules.entries.insert(
             url.to_string(),
             ModuleEntry {
@@ -311,6 +312,7 @@ impl JsRuntime {
     /// once its graph is loaded it is linked and evaluated.
     pub fn poll_module(&mut self, handle: &ModuleHandle) -> ModuleState {
         let _ = self.context.run_jobs();
+        self.consume_interrupt();
         let Some(entry) = self.modules.entries.get_mut(&handle.0) else {
             return ModuleState::Failed("unknown module".into());
         };
@@ -348,6 +350,7 @@ impl JsRuntime {
                 }
             };
             let _ = self.context.run_jobs();
+            self.consume_interrupt();
             if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                 entry.evaluation = Some(evaluation);
             }
