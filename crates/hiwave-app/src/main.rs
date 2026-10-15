@@ -2342,7 +2342,16 @@ fn main() {
                     // events delivered to a child NSView do not surface as
                     // tao window events (measured with a synthetic
                     // sendEvent:, 2026-08-07).
-                    for click in rustkit_viewhost::drain_pending_clicks() {
+                    // One queue, drained in arrival order across clicks,
+                    // the wheel and keys (threads plan M2, #575): until
+                    // 2026-10-14 three queues were drained one after another,
+                    // so a click made after a wheel burst reached the page
+                    // before the burst, and a key typed before a click after
+                    // it. An event for a view that is gone was dropped by the
+                    // viewhost when the view was destroyed.
+                    for event in rustkit_viewhost::drain_input() {
+                        match event.kind {
+                        rustkit_viewhost::InputKind::Pointer(click) => {
                         // The page hears the click before the browser
                         // acts on it: mousedown on press; mouseup and click
                         // on release, and only then focus and the link,
@@ -2384,31 +2393,24 @@ fn main() {
                             info!(%url, "Link clicked");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
-                    }
-                    // The wheel, from the content view's own `scrollWheel:`.
-                    // The window-loop MouseWheel arm above stays as it was;
-                    // the view consumes the wheel, so only one of the two
-                    // fires for an event. Until 2026-10-06 the wheel reached
-                    // neither in the built app (hand-test item H6).
-                    // One scroll per drain: the engine presents the moved
-                    // frame inside `scroll_by` and the page hears one
-                    // scroll event for it, so the wheel deltas that arrived
-                    // since the last wake are summed first, as a browser's
-                    // per-frame scroll does; a burst costs one draw, not one
-                    // per event.
-                    let (mut dx, mut dy, mut events) = (0.0f32, 0.0f32, 0u32);
-                    for scroll in rustkit_viewhost::drain_pending_scrolls() {
+                        }
+                        // The wheel, from the content view's own `scrollWheel:`.
+                        // The window-loop MouseWheel arm above stays as it was;
+                        // the view consumes the wheel, so only one of the two
+                        // fires for an event. Until 2026-10-06 the wheel reached
+                        // neither in the built app (hand-test item H6). A burst
+                        // arrives summed by the queue, pointer drift between
+                        // its steps included, so a drain costs one scroll per
+                        // burst and one present (#692), not one per step.
+                        rustkit_viewhost::InputKind::Wheel(scroll) => {
                         if wheel_burst_started() {
                             info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
                         }
-                        dx += scroll.dx as f32;
-                        dy += scroll.dy as f32;
-                        events += 1;
-                    }
-                    if events > 0 && view.scroll_by(dx, dy) {
-                        trace!(dx, dy, events, "content scrolled");
-                    }
-                    for key in rustkit_viewhost::drain_pending_keys() {
+                        if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
+                            trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
+                        }
+                        }
+                        rustkit_viewhost::InputKind::Key(key) => {
                         if key.cmd {
                             continue; // menu shortcuts are not text
                         }
@@ -2463,6 +2465,8 @@ fn main() {
                             if let Some(dy) = dy {
                                 view.scroll_by(0.0, dy);
                             }
+                        }
+                        }
                         }
                     }
                     // Timers that came due, late fetches, and what the
