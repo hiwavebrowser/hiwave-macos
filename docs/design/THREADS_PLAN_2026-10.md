@@ -50,7 +50,7 @@ three threads carry semantics; the rest are pool workers and telemetry.
 | process isolation, GPU process, utility processes, Mojo | yes | no | not in scope (owner question 4) |
 
 End state: window + 1 to 8 page threads + chrome page thread + watchdog + decode pool (2)
-+ shield + three tickers, about 13 to 20 threads. That is one Chrome renderer's worth,
++ shield + three tickers, about 10 to 18 threads. That is one Chrome renderer's worth,
 for the whole browser.
 
 ## 3. Two things that stay true
@@ -91,7 +91,7 @@ Invariants, each checked against the pinned sources (`Cargo.lock` at develop):
    later; off-main, `current_extent` is `None`, so extents must be passed explicitly.
    Apple-side behaviour of off-main present is unexercised in this repo: M9 proves it.
 4. A frame reaches the screen only as an immutable commit: `FrameCommit { generation,
-   nav_id, Arc<DisplayList>, content size, max scroll, ... }`. `DisplayList` is
+   nav_id (from M3b; `nav_generation` until then), Arc<DisplayList>, content size, max scroll, ... }`. `DisplayList` is
    `Send + Sync`. The Presenter draws the newest commit per view and nothing else.
 5. Input reaches a page in arrival order, tagged by view, with a sequence number (M2).
    Wheel events are also applied by the Presenter (M4b) so scrolling never waits.
@@ -132,18 +132,19 @@ Invariants, each checked against the pinned sources (`Cargo.lock` at develop):
 Sizes: S under 300 lines, M about a lane-week, L two. "Where": **lane** = the headless Z
 lane on the Mac; **cloud** = a Linux cloud session (no screen); **Atlas-Mac** = the real
 window, run by Atlas when Pete says the Mac is free. Ids in parentheses are the design
-doc's.
+doc's; "(new)" marks a step the design doc does not have. The plan's T-ids are its own: the
+design doc's T1/T2 (host-call refusal, VM interrupt) are this plan's T0 and M1.
 
 | # | scope | user task it makes pass | size | where | after |
 |---|---|---|---|---|---|
-| T0 (M0) | **Land PR #666**: a 5 s budget per live turn and per input event, on script that makes host calls. A temporary mitigation with stated limits (below), not a responsiveness guarantee. Adds two tests first: one click whose three handlers each spin, and an interval that overruns every time | a post-load runaway that calls the host (h20, the eBay `forEach` spin) is cut off after 5 s per turn instead of never | S, written | Atlas-Mac rerun of the corrected `i0a` checks, then merge | Pete's decision 1 |
+| T0 (M0) | **PR #666 (landed 2026-10-14)**: a 5 s budget per live turn and per input event, on script that makes host calls. A temporary mitigation with stated limits (below), not a responsiveness guarantee. Adds two tests first: one click whose three handlers each spin, and an interval that overruns every time | a post-load runaway that calls the host (h20, the eBay `forEach` spin) is cut off after 5 s per turn instead of never | S, written | Atlas-Mac rerun of the corrected `i0a` checks, then merge | Pete's decision 1 |
 | T1 | **Relayout stage timer**: `build / layout / display_list / snapshot / render` ms on every `relayout cause=` line, from the spans that already exist (`lib.rs:5036, 5045, 5121, 5240, 5260`); coalesce pointer moves per drain | we learn which stage owns eBay's 509 ms; a fast sweep across listings costs one relayout per drain, not one per move | S | cloud | none |
-| T2 (M0b) | **Scroll paints before the page hears it**: `scroll_view` updates the offset and re-presents the last display list; the relayout follows | once the window thread processes a wheel event, the page moves on that frame instead of after the relayout it triggers. It cannot help a wheel event that arrives while the thread is already blocked; M4b fixes that | S | lane; Atlas-Mac check | none |
+| T2 (new) | **Scroll paints before the page hears it**: `scroll_view` updates the offset and re-presents the last display list; the relayout follows | once the window thread processes a wheel event, the page moves on that frame instead of after the relayout it triggers. It cannot help a wheel event that arrives while the thread is already blocked; M4b fixes that | S | lane; Atlas-Mac check | none |
 | T3 | **Phase X step 1, narrowed**: delete only the `webview-fallback` feature (system WebKit drawing *content* on macOS; `hiwave-app/Cargo.toml:28`, 23 cfg branches). The non-macOS wry content path (`main.rs:1220`) is **not** touched: Windows and Linux keep it | nothing felt; M4 then has one macOS content path to convert | S | cloud | none |
 | P1 | **#687**: paint-only hover takes the short path (held on the unpainted focus change) | hovering a cnn or eBay listing no longer rebuilds the page | M, in review | lane | none |
 | P2 | **Lazy geometry snapshot**: build the JS-visible box map on first read, not on every relayout (35 ms of every relayout on the author's Mac) | every relayout on every site drops ~35 ms | M | cloud | T1 |
 | P3 | **Render without clones**: no `commands.clone()` for image upload (`lib.rs:14110`) or scroll (`:14177`); scroll as a renderer offset | wheel on the Wikipedia portal re-presents without copying 2.2M commands | M | cloud, Atlas-Mac check | T1 |
-| D1 | **Decode pool**: two `rustkit-decode` threads behind a bounded queue (64 jobs; when full the page thread decodes inline). A job carries its `nav_id`; a result for a superseded navigation is dropped. The page thread never waits on a result: layout uses the placeholder size and relays out on arrival, as `image_loaded` does today | image decode never stalls script or layout; eBay's 84 and cnn's 41 images decode in parallel | S | cloud | none |
+| D1 | **Decode pool**: two `rustkit-decode` threads behind a bounded queue (64 jobs; when full the page thread decodes inline). A job carries the document's `nav_generation` (today's counter; `nav_id` replaces it at M3b); a result for a superseded navigation is dropped. The page thread never waits on a result: layout uses the placeholder size and relays out on arrival, as `image_loaded` does today | image decode never stalls script or layout; eBay's 84 and cnn's 41 images decode in parallel | S | cloud | none |
 | M1 | **Boa VM interrupt + `ThreadStamp` / `ViewControl` + watchdog thread**: vendor `boa_engine` 0.22.0 with the ~30-line patch; delete the stale, unused `boa_gc` / `boa_parser` patches (`Cargo.lock` lists them `[[patch.unused]]`) | a pure spin with no host calls (h20b, `while(true){}`) stops within budget + 250 ms | S-M | cloud | T0 |
 | M2 | **Ordered, view-tagged input queue** replacing the three statics in `rustkit-viewhost/src/macos.rs` | scroll-then-click and type-then-click arrive in order; input is tagged with the view it was delivered to | M | lane | none |
 | M3 | **Engine split**: `PageEngine` + `Presenter` on one thread, in two PRs (pure move, then `FrameCommit`). Includes the **W-gate log**: every window-thread hold of 50 ms or more, by stage, and input-to-present latency | nothing felt: h1-h16 and the 26-case campaign identical; it is the price of M4 | L | lane | P3 |
@@ -210,7 +211,8 @@ writing alone, before M2, review, integration and Mac time.
 | M2 input queue | 1 week, lane | 3 to 5 days | half a day | week 2 |
 | M3 PR1: pure move | 1 week, lane (after M2) | 3 to 5 days | campaign A/B | week 3-4 |
 | M3 PR2: FrameCommit + W-gate log | 1 week | 3 to 5 days | half a day | week 5 |
-| M1, M3b cancel, R1, D1, P2, P3, T1, T3 | cloud, in parallel | their own rounds | none | not on the path if started now |
+| M1, M3b cancel, D1, P2, P3, T1, T3 | cloud, in parallel | their own rounds | none | not on the path if started now |
+| R1 resource audit | cloud, after M3 PR2 | 3 to 5 days | none | before M5; off the path if started at week 5 |
 | M4 PR1: protocol | 1 week | 3 to 5 days | h1-h16 | week 6-7 |
 | M4 PR2: thread, flag on | 1 week | 3 to 5 days | a hand-test day, W-gate read | week 8 |
 
