@@ -352,6 +352,8 @@ mod grid_auto_repeat_percent_tests;
 #[cfg(test)]
 mod nested_layout_matrix_tests;
 #[cfg(test)]
+mod zero_font_size_tests;
+#[cfg(test)]
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod ws_beside_block_replaced_tests;
@@ -5840,6 +5842,23 @@ impl Engine {
                     return true;
                 }
                 BoxType::Inline | BoxType::Block | BoxType::AnonymousBlock => {
+                    // An inline-block (or inline-flex, inline-grid) that
+                    // was kept is content on the line whatever it holds: a
+                    // sized, empty one is an icon. Without this a `<span>`
+                    // or `<a>` around only such a box was dropped with it,
+                    // and a block holding nothing else went too. An
+                    // absolutely or fixed positioned one is out of the flow
+                    // and not on the line: the inline box around only that
+                    // is empty, and keeping it gave the line a strut (a
+                    // positioned badge in a link moved the next block down).
+                    if child.style.display.is_atomic_inline()
+                        && !matches!(
+                            child.position,
+                            rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+                        )
+                    {
+                        return true;
+                    }
                     // Recursively check children
                     if Self::has_content_children(child) {
                         return true;
@@ -6729,6 +6748,11 @@ impl Engine {
                         rustkit_css::Length::Px(pct / 100.0 * parent_font_px)
                     }
                     rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+                    // `font-size: 0` parses to `Zero`, which is not `Px`:
+                    // layout read it as 16px. A line holding only a 10px
+                    // inline-block was 18 tall (Chromium 143: 10) and text
+                    // meant to be hidden was laid out at full size.
+                    rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
                     // Viewport units and math functions (`4.1vw`,
                     // `calc(2vw + 4px)`, `clamp(2rem, 5vw, 4rem)`) absolutize
                     // here too, against this view's viewport: left alone they
@@ -7511,8 +7535,23 @@ impl Engine {
                         | BoxType::LineBreak => true,
                     };
 
-                    if should_include && (!closed_details || details_summary == Some(child_index)) {
+                    let shown = !closed_details || details_summary == Some(child_index);
+                    if should_include && shown {
                         Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
+                    } else if shown && matches!(child_box.box_type, BoxType::Inline) {
+                        // An inline box with nothing in the flow is dropped,
+                        // and so was everything in it. What it positions out
+                        // of the flow stays: a badge in an otherwise empty
+                        // link still paints, at the link's place, and the
+                        // line hears nothing of it (#689 review, round 3).
+                        for out_of_flow in child_box.children.into_iter().filter(|grandchild| {
+                            matches!(
+                                grandchild.position,
+                                rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+                            )
+                        }) {
+                            Self::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
+                        }
                     }
                 }
                 drop(table_hints);
@@ -7994,6 +8033,7 @@ impl Engine {
             rustkit_css::Length::Em(em) => rustkit_css::Length::Px(em * parent_font_px),
             rustkit_css::Length::Percent(pct) => rustkit_css::Length::Px(pct / 100.0 * parent_font_px),
             rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+            rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
             other => other,
         };
 
