@@ -151,6 +151,12 @@ impl AdBlocker {
         if !self.enabled {
             return false;
         }
+        // Only network requests are filtered. A `data:` (or `blob:`) URL
+        // carries its own content: nothing is requested, and adblock cannot
+        // build a request from it.
+        if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
+            return false;
+        }
 
         let request = adblock::request::Request::new(
             url.as_str(),
@@ -296,6 +302,16 @@ mod tests {
 
         let blocked = blocker.should_block(&url, &source, ResourceType::Script);
         assert!(blocked);
+    }
+
+    #[test]
+    fn a_data_url_is_never_blocked() {
+        // Even a rule that names it: a `data:` URL is not a request.
+        let blocker = AdBlocker::with_rules(&["STICKY_CANARY", "*$script"]);
+        let url = Url::parse("data:text/javascript,window.STICKY_CANARY=1").unwrap();
+        let source = Url::parse("https://www.reddit.com/").unwrap();
+        assert!(!blocker.should_block(&url, &source, ResourceType::Script));
+        assert_eq!(blocker.requests_blocked.load(Ordering::Relaxed), 0);
     }
 
     #[test]

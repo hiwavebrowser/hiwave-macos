@@ -651,6 +651,33 @@ impl ResourceLoader {
     ) -> Result<Response, NetError> {
         debug!(url = %request.url, method = %request.method, "Fetching resource");
 
+        // data: URLs (RFC 2397) carry their own body — answer them here instead
+        // of sending them to the HTTP client, which rejects them for having no
+        // host. Sites inline small stylesheets, fonts, images and scripts this
+        // way (facebook ships a base64 `data:text/css` sheet). First, before
+        // the replay proxy and the interceptor: a `data:` URL is not a
+        // request, so the shield never sees one (it logged "Failed to create
+        // request" for each of reddit's `data:` scripts) and cannot block it.
+        if request.url.scheme() == "data" {
+            let (content_type, body) = decode_data_url(request.url.as_str())?;
+            let mut headers = HeaderMap::new();
+            if let Ok(v) = HeaderValue::try_from(content_type.as_str()) {
+                headers.insert(HeaderName::from_static("content-type"), v);
+            }
+            return Ok(Response {
+                request_id: request.id,
+                url: request.url.clone(),
+                status: StatusCode::OK,
+                headers,
+                content_type: content_type.parse::<Mime>().ok(),
+                content_length: Some(body.len() as u64),
+                from_cache: false,
+                encoded_body_size: None,
+                redirect_chain: Vec::new(),
+                body: ResponseBody::Full(Bytes::from(body)),
+            });
+        }
+
         // If replay_proxy is configured, rewrite outbound socket request to proxy on first entry
         if let Some(ref proxy) = self.config.replay_proxy {
             if !request.is_replay_proxied {
@@ -694,30 +721,6 @@ impl ResourceLoader {
             }
         }
         
-        // data: URLs (RFC 2397) carry their own body — answer them here instead
-        // of sending them to the HTTP client, which rejects them for having no
-        // host. Sites inline small stylesheets, fonts, images and scripts this
-        // way (facebook ships a base64 `data:text/css` sheet).
-        if request.url.scheme() == "data" {
-            let (content_type, body) = decode_data_url(request.url.as_str())?;
-            let mut headers = HeaderMap::new();
-            if let Ok(v) = HeaderValue::try_from(content_type.as_str()) {
-                headers.insert(HeaderName::from_static("content-type"), v);
-            }
-            return Ok(Response {
-                request_id: request.id,
-                url: request.url.clone(),
-                status: StatusCode::OK,
-                headers,
-                content_type: content_type.parse::<Mime>().ok(),
-                content_length: Some(body.len() as u64),
-                from_cache: false,
-                encoded_body_size: None,
-                redirect_chain: Vec::new(),
-                body: ResponseBody::Full(Bytes::from(body)),
-            });
-        }
-
         // Check cache for GET requests
         let cache_key = if use_cache && request.method == Method::GET && self.cache.enabled() {
             let key = CacheKey::new(&request.url);
@@ -1125,6 +1128,34 @@ mod data_url_tests {
         assert!(resp.ok());
         assert_eq!(resp.content_type.as_ref().map(|m| m.essence_str().to_string()), Some("text/css".into()));
         assert_eq!(rt.block_on(resp.text()).unwrap(), "body{color:red}");
+    }
+
+    /// A `data:` URL is not a request: it never reaches the interceptor (the
+    /// shield), so a rule cannot block it and the shield has nothing to log.
+    #[test]
+    fn a_data_url_never_reaches_the_interceptor() {
+        struct Refuse(Arc<std::sync::atomic::AtomicUsize>);
+        impl InterceptHandler for Refuse {
+            fn intercept(&self, _: &Request) -> InterceptAction {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                InterceptAction::Block
+            }
+        }
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut interceptor = RequestInterceptor::new();
+        interceptor.add_handler(Arc::new(Refuse(asked.clone())));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let loader = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(interceptor)).unwrap();
+        for (url, want) in [
+            ("data:text/javascript,window.STICKY_CANARY=%22on%22", "window.STICKY_CANARY=\"on\""),
+            ("data:text/javascript;base64,bGV0IGE9MTs=", "let a=1;"),
+        ] {
+            let mut request = Request::get(Url::parse(url).unwrap());
+            request.destination = RequestDestination::Script;
+            let resp = rt.block_on(loader.fetch(request)).expect("data: is answered, not blocked");
+            assert_eq!(rt.block_on(resp.text()).unwrap(), want);
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
 
