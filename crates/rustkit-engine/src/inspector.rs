@@ -1012,10 +1012,12 @@ pub fn answer(guard: Option<RequestGuard>, response: &rustkit_net::Response, dec
 }
 
 /// Record a module fetch through the page's policy: its source arrived,
-/// the policy refused it, or the script budget ran out (`Err(Elapsed)`).
+/// the policy refused it, or its deadline came first (`Err(Elapsed)`,
+/// recorded as `on_deadline`).
 pub fn answer_module(
     guard: Option<RequestGuard>,
     fetched: &Result<Result<rustkit_net::policy::ModuleSource, rustkit_net::policy::Denial>, tokio::time::error::Elapsed>,
+    on_deadline: FailureStage,
 ) {
     let Some(guard) = guard else { return };
     match fetched {
@@ -1032,7 +1034,13 @@ pub fn answer_module(
             let (stage, reason) = denial_stage(denial);
             guard.fail(stage, reason);
         }
-        Err(_) => guard.fail(FailureStage::OverBudget, "script budget spent"),
+        Err(_) => {
+            let reason = match on_deadline {
+                FailureStage::OverBudget => "script budget spent",
+                _ => "timed out",
+            };
+            guard.fail(on_deadline, reason)
+        }
     }
 }
 

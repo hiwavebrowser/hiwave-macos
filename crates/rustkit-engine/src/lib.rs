@@ -366,6 +366,8 @@ mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
 #[cfg(all(test, feature = "headless"))]
+mod dynamic_import_budget_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
@@ -1003,6 +1005,10 @@ pub struct EngineConfig {
     /// the loop-iteration limit, and by this only with
     /// `interrupt_scripts_at_budget`). Scripts run after every
     /// subresource today, so this comes out of the page's load time.
+    /// Module fetches once the scripts run (a module's imports, `import()`)
+    /// are not charged to it and not refused because script time ran out.
+    /// One load shares a single network window of `subresource_budget_ms`
+    /// for every such fetch.
     pub script_budget_ms: u64,
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
@@ -3484,11 +3490,15 @@ impl Engine {
             // for again on the next.
             if let Some(document) = document.as_ref().filter(|_| !spent()) {
                 let mut modules_fetched = 0;
+                // One turn, one window: the same 2s the live path had when
+                // the deadline was computed here. Not the load's window.
+                let module_fetches = script_net::ModuleFetchBudget::new(LIVE_NETWORK_BUDGET);
                 let found = script_net::pump_modules(
                     bindings,
                     &policy,
                     &loader,
-                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
+                    &module_fetches,
+                    None,
                     document,
                     &mut modules_fetched,
                     &inspector,
@@ -4220,7 +4230,7 @@ impl Engine {
                                 let guard = inspector.begin_request(&url, "GET", ResourceType::Module, Some("parser"));
                                 let fetch = policy.fetch_module(&loader, &url, &base);
                                 let fetched = tokio::time::timeout_at(deadline, fetch).await;
-                                inspector::answer_module(guard, &fetched);
+                                inspector::answer_module(guard, &fetched, FailureStage::OverBudget);
                                 match fetched {
                                     Ok(Ok(module)) => {
                                         label = module.final_url.to_string();
@@ -4346,7 +4356,23 @@ impl Engine {
         log: &mut Vec<ScriptRecord>,
         watch: Option<&NavWatch>,
     ) {
-        let started = std::time::Instant::now();
+        // The budget counts script time: module fetches give back what
+        // they waited (`ScriptClock`).
+        let started = Cell::new(std::time::Instant::now());
+        let clock = script_net::ScriptClock {
+            bindings,
+            started: &started,
+            budget,
+            interrupts: self.config.interrupt_scripts_at_budget,
+        };
+        let clock = &clock;
+        // One network window for every module fetch on this load. A fresh
+        // `subresource_budget_ms` per script let a chain of imports wait
+        // that long each time. Script time does not spend the window, and
+        // the window does not spend the script budget.
+        let module_fetches = script_net::ModuleFetchBudget::new(std::time::Duration::from_millis(
+            self.config.subresource_budget_ms,
+        ));
         let horizon_ms = self.config.timer_horizon_ms;
         let loop_limit = self.config.script_loop_iteration_limit;
         let net_rounds = self.config.script_network_rounds;
@@ -4483,7 +4509,7 @@ impl Engine {
                     continue;
                 }
             };
-            if poisoned.get() || started.elapsed() >= budget {
+            if poisoned.get() || clock.remaining().is_zero() {
                 log.push(ScriptRecord {
                     source: label,
                     bytes: text.len(),
@@ -4535,7 +4561,6 @@ impl Engine {
                     Ok(Err(message)) => (ScriptOutcome::Threw(message), Some("error")),
                     Ok(Ok(handle)) => {
                         if let (Some(policy), Some(document)) = (&policy, &document_url) {
-                            let remaining = budget.saturating_sub(started.elapsed());
                             let mut count = modules_fetched.get();
                             let found = nav_cancel::unless_cancelled(
                                 watch,
@@ -4543,7 +4568,8 @@ impl Engine {
                                     bindings,
                                     policy,
                                     &loader,
-                                    tokio::time::Instant::now() + remaining,
+                                    &module_fetches,
+                                    Some(clock),
                                     document,
                                     &mut count,
                                     &inspector,
@@ -4660,11 +4686,13 @@ impl Engine {
             let document = document_url.clone();
             let modules_fetched = &modules_fetched;
             let inspector = &inspector;
+            let module_fetches = &module_fetches;
             let referrer = &referrer;
             async move {
                 match policy {
                     Some(policy) => {
-                        let remaining = budget.saturating_sub(started.elapsed());
+                        let remaining = clock.remaining();
+                        let now = tokio::time::Instant::now();
                         let mut count = modules_fetched.get();
                         // Network requests and dynamic imports alternate:
                         // one can start the other.
@@ -4674,10 +4702,11 @@ impl Engine {
                                 bindings,
                                 &policy,
                                 &loader,
-                                tokio::time::Instant::now() + remaining,
+                                now + remaining,
                                 net_rounds,
                                 timers,
                                 document.as_ref(),
+                                (module_fetches, Some(clock)),
                                 &mut count,
                                 inspector,
                                 Some(referrer),

@@ -19,6 +19,8 @@ pub use control::{ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
 mod executor;
 #[cfg(feature = "boa")]
+pub mod stack;
+#[cfg(feature = "boa")]
 mod describe;
 #[cfg(feature = "boa")]
 mod rejections;
@@ -282,6 +284,15 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         context.strict(config.strict_mode);
+        #[cfg(feature = "boa")]
+        {
+            // Browser-like call depth, and a RangeError rather than a native
+            // stack overflow on this (the creating, and only) thread.
+            let limits = context.runtime_limits_mut();
+            limits.set_recursion_limit(stack::RECURSION_LIMIT);
+            limits.set_stack_size_limit(stack::VALUE_STACK_LIMIT);
+            context.set_native_stack_floor(stack::native_stack_floor());
+        }
         #[cfg(feature = "boa")]
         let diag = std::rc::Rc::new(diag::Diagnostics::default());
         #[cfg(feature = "boa")]

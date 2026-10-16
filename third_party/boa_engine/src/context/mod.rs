@@ -618,6 +618,20 @@ impl Context {
     }
     // END HIWAVE PATCH
 
+    // HIWAVE PATCH (stack)
+    /// Set the lowest native stack address at which a function call may
+    /// start; below it the call throws a `RangeError` instead of risking a
+    /// native stack overflow. `None` turns the check off (the default).
+    ///
+    /// The address belongs to the thread this context runs on: the embedder
+    /// computes it from that thread's stack bounds, leaving room below it
+    /// for the native work done between two calls.
+    #[inline]
+    pub fn set_native_stack_floor(&mut self, floor: Option<usize>) {
+        self.vm.native_stack_floor = floor.unwrap_or(0);
+    }
+    // END HIWAVE PATCH
+
     /// Returns `true` if this context can be suspended by an `Atomics.wait` call.
     #[inline]
     #[must_use]
