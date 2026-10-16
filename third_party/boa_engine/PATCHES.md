@@ -110,8 +110,13 @@ import), with the stopped turn's id still in the word. The cases: promise
 resolve, promise reject, a failed dynamic import (PR #706's report), a
 successful import's evaluation, an async function and async generator await, a
 microtask drain, `finally` and iterator cleanup, a module's top-level await, and
-3 × 2,500 stops plus 5,000 imports on one page (the leaks). Before the patch,
-six of them panic in Boa and the rest fail their assertions.
+3 × 2,500 stops plus 5,000 imports on one page (the leaks). On the unpatched
+code, three of the nine tests panic in Boa (`vm/opcode/call/mod.rs:370`,
+`module/mod.rs:413`, `module/source.rs:1521`), four fail their assertions
+(`EnginePanic` instead of `Interrupted`, an async stop that never reaches
+`run_jobs`, a `catch` that takes the stop, the stack limit after many stops),
+and two (reject, microtask drain) pass and stay as guards. Taken out one at a
+time, the async generator and `IteratorClose` hunks each fail their case too.
 
 **Upgrading Boa.** Re-apply the marked lines to the new version, or drop this
 directory once upstream has an equivalent hook (to be offered upstream).
