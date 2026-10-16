@@ -391,6 +391,7 @@ pub struct FunctionObjectBuilder<'realm> {
     constructor: Option<ConstructorKind>,
     name: JsString,
     length: usize,
+    settles_promises: bool, // HIWAVE PATCH (interrupt)
 }
 
 impl<'realm> FunctionObjectBuilder<'realm> {
@@ -404,8 +405,19 @@ impl<'realm> FunctionObjectBuilder<'realm> {
             constructor: None,
             name: js_string!(),
             length: 0,
+            settles_promises: false, // HIWAVE PATCH (interrupt)
         }
     }
+
+    // HIWAVE PATCH (interrupt)
+    /// Marks the function as the engine's own promise bookkeeping, which
+    /// runs no script (see `NativeFunctionObject::settles_promises`).
+    #[must_use]
+    pub(crate) const fn settles_promises(mut self) -> Self {
+        self.settles_promises = true;
+        self
+    }
+    // END HIWAVE PATCH
 
     /// Specify the name property of object function object.
     ///
@@ -449,6 +461,7 @@ impl<'realm> FunctionObjectBuilder<'realm> {
                 name: self.name.clone(),
                 constructor: self.constructor,
                 realm: Some(self.realm.clone()),
+                settles_promises: self.settles_promises, // HIWAVE PATCH (interrupt)
             },
             vec![self.length.into(), self.name.into()],
         );
@@ -899,6 +912,7 @@ impl<'ctx> ConstructorBuilder<'ctx> {
                 name: self.name.clone(),
                 constructor: self.kind,
                 realm: Some(self.context.realm().clone()),
+                settles_promises: false, // HIWAVE PATCH (interrupt)
             };
             let internal_methods = data.internal_methods();
             let mut constructor = Object {

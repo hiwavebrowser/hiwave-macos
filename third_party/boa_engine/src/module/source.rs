@@ -621,11 +621,11 @@ impl SourceTextModule {
                 }
                 // iii. If state.[[IsLoading]] is false, return unused.
                 if !state.loading.get() {
-                    return Ok(());
+                    return Ok(()); // HIWAVE PATCH (interrupt): returns `JsResult`
                 }
             }
         }
-        Ok(())
+        Ok(()) // HIWAVE PATCH (interrupt): returns `JsResult`
     }
 
     /// Concrete method [`GetExportedNames ( [ exportStarSet ] )`][spec].

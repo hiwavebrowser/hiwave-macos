@@ -34,11 +34,15 @@ thread_local! {
     static ARMED: RefCell<Option<(Arc<AtomicU64>, u64)>> = const { RefCell::new(None) };
 }
 
-/// `arm()`: stop the running turn at the engine's next call.
-fn arm(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+/// `arm()`: stop the running turn at the engine's next call. `arm(t)` does
+/// so only if the running turn is `t`.
+fn arm(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     ARMED.with(|armed| {
         if let Some((word, turn)) = &*armed.borrow() {
-            word.fetch_max(*turn, Ordering::Relaxed);
+            let named = args.first().and_then(JsValue::as_number);
+            if named.is_none_or(|t| t == *turn as f64) {
+                word.fetch_max(*turn, Ordering::Relaxed);
+            }
         }
     });
     Ok(JsValue::undefined())
@@ -276,10 +280,18 @@ fn race(
 #[test]
 fn interrupt_during_promise_resolve() {
     let mut page = Page::new();
-    // A reaction with no handler: the job's first call is `resolve`.
+    // A reaction with no handler: the job's first call is `resolve`. The
+    // engine's own resolve runs no script, so it is entered even in the
+    // stopped turn and the chain settles.
     let r = page.turn("var p = Promise.resolve(1).then(function () { arm(); }).then();");
-    assert_interrupted(r, "the reaction's resolve");
+    assert_interrupt_or_ok(r, "the reaction's resolve");
+    assert_eq!(page.settle("p"), "ok undefined");
     page.assert_recovers("resolve: reaction");
+
+    // Script's resolve, called while the turn is stopped, is still stopped.
+    let r = page.turn("var q = new Promise(function (resolve) { arm(); resolve(1); });");
+    assert_interrupted(r, "the executor's resolve");
+    page.assert_recovers("resolve: executor");
 
     // An import whose module is already known: the loader answers at once
     // and the load's own capability and `resolve` run in the stopped job.
@@ -974,4 +986,315 @@ fn jobs_refused_in_a_stopped_turn_leave_nothing_on_the_stack() {
         page.next_turn();
     }
     page.assert_recovers("refused jobs");
+}
+
+/// The ordinary errors a promise left behind by a stopped turn settles with.
+const INTERRUPTED_MESSAGES: &str = r#"["async generator was interrupted", "async function was interrupted", "promise job was interrupted", "module evaluation was interrupted"]"#;
+
+impl Page {
+    /// In a later turn, the result of `source` as JSON, once it settles
+    /// (`err <message>` if it rejects).
+    fn settle_json(&mut self, source: &str) -> String {
+        self.settle(&format!(
+            "Promise.resolve({source}).then(JSON.stringify, function (e) {{ throw e.message; }})"
+        ))
+    }
+
+    /// In a later turn, every promise in the global `ps` (made by a turn
+    /// that may have been stopped anywhere) settles: with a value, an error
+    /// the script threw, or one of the ordinary interrupted errors. Every
+    /// sync generator in `syncs` answers `next()` and `return()` without
+    /// throwing, and every async generator in `asyncs` settles both.
+    fn assert_left_nothing_pending(&mut self, tag: &str) {
+        let settled = self.settle(&format!(
+            r#"(function () {{
+                var interrupted = {INTERRUPTED_MESSAGES};
+                function settles(p) {{
+                    return Promise.resolve(p).then(function () {{ return 1; }}, function (e) {{
+                        if (e !== "thrown" && interrupted.indexOf(e && e.message) < 0) throw e;
+                        return 1;
+                    }});
+                }}
+                var made = typeof ps === "undefined" ? [] : ps;
+                var syncs_ = typeof syncs === "undefined" ? [] : syncs;
+                var asyncs_ = typeof asyncs === "undefined" ? [] : asyncs;
+                ps = []; syncs = []; asyncs = [];
+                syncs_.forEach(function (g) {{ g.next(); g.return(1); }});
+                var all = made.concat(asyncs_.map(function (g) {{ return g.next(); }}),
+                                      asyncs_.map(function (g) {{ return g.return(1); }}));
+                return Promise.all(all.map(settles)).then(function (r) {{ return r.length === all.length; }});
+            }})()"#
+        ));
+        assert_eq!(
+            settled, "ok true",
+            "{tag}: something the stopped turn left never settled"
+        );
+    }
+}
+
+#[test]
+fn the_holds_async_generator_stopped_mid_body_answers_later_calls() {
+    // R1 HOLD @ d627b635, its exact input: stopped after an `await`, and
+    // stopped before the first one.
+    for (tag, body) in [
+        ("after an await", "await null; arm();"),
+        ("before the first await", "arm();"),
+    ] {
+        let mut page = Page::new();
+        let r = page.turn(&format!(
+            "globalThis.ag = (async function* () {{ {body} [1].map(function (x) {{ return x; }}); yield 1; }})(); ag.next();"
+        ));
+        assert_interrupted(r, tag);
+        for _ in 0..2 {
+            assert_eq!(
+                page.settle_json("ag.next()"),
+                r#"ok {"done":true}"#,
+                "{tag}"
+            );
+            assert_eq!(
+                page.settle_json("ag.return(7)"),
+                r#"ok {"value":7,"done":true}"#,
+                "{tag}"
+            );
+        }
+        page.assert_recovers(tag);
+    }
+}
+
+#[test]
+fn an_async_generator_stopped_in_return_or_delegation_answers_later_calls() {
+    let cases = [
+        // `return(v)` awaits v; the reaction that would finish it is refused.
+        (
+            "await-return refused",
+            "var g = (async function* () {})(); g.next(); Promise.resolve().then(function () { arm(); }); var p = g.return(Promise.resolve(1));",
+        ),
+        // The thenable `return(v)` awaits is stopped in its `then`.
+        (
+            "await-return stopped in then",
+            "var g = (async function* () {})(); g.next(); var p = g.return({ then: function (r) { arm(); [1].map(function (x) { return x; }); r(1); } });",
+        ),
+        // A `constructor` getter on the value `return(v)` resolves. Stopped
+        // inside `return()` itself, the script never gets `p`.
+        (
+            "await-return stopped in PromiseResolve",
+            "var g = (async function* () {})(); g.next(); var v = Promise.resolve(1); Object.defineProperty(v, 'constructor', { get: function () { arm(); [1].map(function (x) { return x; }); return Promise; } }); var p = g.return(v);",
+        ),
+        // `return()` into a `finally` that awaits, stopped after the await.
+        (
+            "return into an awaiting finally",
+            "var g = (async function* () { try { yield 1; } finally { await null; arm(); [1].map(function (x) { return x; }); } })(); g.next(); var p = g.return(2);",
+        ),
+        // `yield*` to an async generator stopped after an await.
+        (
+            "yield* async",
+            "async function* inner() { yield 1; await null; arm(); [1].map(function (x) { return x; }); yield 2; } var g = (async function* () { yield* inner(); yield 3; })(); g.next(); var p = g.next();",
+        ),
+        // `yield*` to a sync generator stopped mid-body.
+        (
+            "yield* sync",
+            "function* inner() { yield 1; arm(); [1].map(function (x) { return x; }); yield 2; } var g = (async function* () { yield* inner(); yield 3; })(); g.next(); var p = g.next();",
+        ),
+    ];
+    for (tag, source) in cases {
+        let mut page = Page::new();
+        assert_interrupt_or_ok(page.turn(source), tag);
+        // The stopped request settles with the ordinary error.
+        page.next_turn();
+        if page.get("typeof p") != "undefined" {
+            assert_eq!(page.settle("p"), INTERRUPTED_GENERATOR, "{tag}");
+        } else {
+            assert_eq!(tag, "await-return stopped in PromiseResolve");
+        }
+        // Later calls settle as on a finished generator.
+        assert_eq!(page.settle_json("g.next()"), r#"ok {"done":true}"#, "{tag}");
+        assert_eq!(
+            page.settle_json("g.return(9)"),
+            r#"ok {"value":9,"done":true}"#,
+            "{tag}"
+        );
+        assert_eq!(page.settle("g.throw(4)"), "err 4", "{tag}");
+        page.assert_recovers(tag);
+    }
+}
+
+#[test]
+fn a_stopped_async_function_settles_its_promise() {
+    const FUNCTION: &str = "err Error: async function was interrupted";
+    let cases = [
+        // Stopped in a body resumed from an await.
+        (
+            "after an await",
+            "var p = (async function () { await null; arm(); [1].map(function (x) { return x; }); return 1; })();",
+        ),
+        ("a method", "var o = { async m() { await null; arm(); [1].map(function (x) { return x; }); } }; var p = o.m();"),
+        ("an arrow", "var p = (async () => { await null; arm(); [1].map(function (x) { return x; }); })();"),
+        // The outer function waits on the stopped inner one.
+        (
+            "nested",
+            "async function inner() { await null; arm(); [1].map(function (x) { return x; }); return 1; } var p = (async function () { return await inner(); })();",
+        ),
+        // It waits on a chain whose script handler the stopped turn refused.
+        (
+            "awaiting a refused job",
+            "var p = (async function () { Promise.resolve().then(function () { arm(); }); await Promise.resolve(1).then(function (v) { return v; }); return 2; })();",
+        ),
+        // It waits on `Promise.all` whose inputs settle in the stopped turn.
+        (
+            "awaiting Promise.all",
+            "var p = (async function () { Promise.resolve().then(function () { arm(); }); return await Promise.all([Promise.resolve(1), 2]); })();",
+        ),
+        // `for await` over a sync iterable, an async generator, and a sync
+        // generator (async-from-sync) stopped mid-loop.
+        (
+            "for await over an array",
+            "var p = (async function () { for await (var v of [1, 2, 3]) { if (v === 2) { arm(); [1].map(function (x) { return x; }); } } return 'done'; })();",
+        ),
+        (
+            "for await over an async generator",
+            "async function* src() { yield 1; yield 2; yield 3; } var p = (async function () { for await (var v of src()) { if (v === 2) { arm(); [1].map(function (x) { return x; }); } } return 'done'; })();",
+        ),
+        (
+            "for await over a sync generator stopped in it",
+            "function* src() { yield 1; arm(); [1].map(function (x) { return x; }); yield 2; } var p = (async function () { for await (var v of src()) {} return 'done'; })();",
+        ),
+        (
+            "for await, a refused async-from-sync job",
+            "function* src() { yield 1; yield 2; } var p = (async function () { Promise.resolve().then(function () { arm(); }); for await (var v of src()) {} return 'done'; })();",
+        ),
+        // Closing an async iterator (`break`) whose `finally` is stopped.
+        (
+            "async iterator close",
+            "async function* src() { try { yield 1; yield 2; } finally { arm(); [1].map(function (x) { return x; }); } } var p = (async function () { for await (var v of src()) { break; } return 'done'; })();",
+        ),
+    ];
+    for (tag, source) in cases {
+        let mut page = Page::new();
+        assert_interrupted(page.turn(source), tag);
+        assert_eq!(page.settle("p"), FUNCTION, "{tag}");
+        page.assert_recovers(tag);
+    }
+
+    // A script handler that is an async function: its `then` promise.
+    let mut page = Page::new();
+    assert_interrupted(
+        page.turn("var p = Promise.resolve().then(async function () { await null; arm(); [1].map(function (x) { return x; }); });"),
+        "then(async)",
+    );
+    assert_eq!(page.settle("p"), "err Error: promise job was interrupted");
+    page.assert_recovers("then(async)");
+}
+
+#[test]
+fn a_sync_generator_or_iterator_stopped_mid_body_completes() {
+    let cases = [
+        (
+            "mid body",
+            "function* gen() { yield 1; arm(); [1].map(function (x) { return x; }); yield 2; } var g = gen(); g.next(); g.next();",
+        ),
+        (
+            "in finally through return()",
+            "function* gen() { try { yield 1; } finally { arm(); [1].map(function (x) { return x; }); } } var g = gen(); g.next(); g.return(5);",
+        ),
+        (
+            "in a yield* inner generator",
+            "function* inner() { yield 1; arm(); [1].map(function (x) { return x; }); yield 2; } function* gen() { yield* inner(); yield 3; } var g = gen(); g.next(); g.next();",
+        ),
+        (
+            "closing it from for-of",
+            "function* gen() { try { yield 1; yield 2; } finally { arm(); [1].map(function (x) { return x; }); } } var g = gen(); for (var v of g) { break; }",
+        ),
+    ];
+    for (tag, source) in cases {
+        let mut page = Page::new();
+        assert_interrupted(page.turn(source), tag);
+        page.next_turn();
+        assert_eq!(
+            page.get("JSON.stringify(g.next())"),
+            r#"{"done":true}"#,
+            "{tag}"
+        );
+        assert_eq!(
+            page.get("JSON.stringify(g.return(9))"),
+            r#"{"value":9,"done":true}"#,
+            "{tag}"
+        );
+        page.assert_recovers(tag);
+    }
+}
+
+#[test]
+fn promise_combinators_settle_in_a_stopped_turn() {
+    // Their element functions and a capability's resolve are the engine's
+    // own bookkeeping, so they still run after the stop; script does not.
+    for (source, later, expected) in [
+        ("Promise.all([Promise.resolve(1), 2])", "p", "ok 1,2"),
+        (
+            "Promise.allSettled([Promise.resolve(1)])",
+            "p.then(function (r) { return r[0].status; })",
+            "ok fulfilled",
+        ),
+        (
+            "Promise.any([Promise.reject(1)])",
+            "p",
+            "err AggregateError: no promise in Promise.any was fulfilled.",
+        ),
+        ("Promise.race([Promise.resolve(1)])", "p", "ok 1"),
+    ] {
+        let mut page = Page::new();
+        let r = page.turn(&format!(
+            "var ran = 0; Promise.resolve().then(function () {{ arm(); }}); var p = {source}; p.then(function () {{ ran++; }}, function () {{ ran++; }});"
+        ));
+        assert_interrupt_or_ok(r, source);
+        // No script handler ran after the stop.
+        page.next_turn();
+        assert_eq!(page.get("ran"), "0", "{source}");
+        assert_eq!(page.settle(later), expected, "{source}");
+        page.assert_recovers(source);
+    }
+}
+
+const SUSPENDED_STATES_TURN: &str = r#"
+            ps = []; syncs = []; asyncs = []; var n = 0;
+            function tick() { if (n++ === K) arm(T); }
+            async function leaf(v) { tick(); await null; tick(); return [v].map(function (x) { tick(); return x; })[0]; }
+            async function* ag() { try { for (var j = 0; j < 3; j++) { tick(); yield await leaf(j); } } finally { tick(); await null; tick(); } }
+            function* sg() { try { for (var j = 0; j < 3; j++) { tick(); yield j; } } finally { tick(); } }
+            for (var i = 0; i < 4; i++) {
+                ps.push(leaf(i));
+                ps.push((async function () { var s = 0; for await (var v of ag()) { tick(); s += v; } return s; })());
+                ps.push((async function () { for await (var v of sg()) { tick(); if (v === 1) break; } return 1; })());
+                ps.push((async function () { for await (var v of ag()) { tick(); break; } return 1; })());
+                ps.push(Promise.resolve(i).then(async function (v) { tick(); return await leaf(v); }));
+                ps.push(Promise.all([leaf(i), leaf(i + 1)]).then(function (r) { tick(); return r; }));
+                ps.push(Promise.race([leaf(i), new Promise(function (r) { tick(); r(0); })]));
+                var a = ag(); asyncs.push(a); ps.push(a.next()); ps.push(a.return(leaf(i)));
+                var s = sg(); syncs.push(s); s.next(); tick();
+                for (var v of sg()) { tick(); if (v === 1) break; }
+            }
+            "#;
+
+#[test]
+fn every_suspended_state_a_raced_stop_leaves_settles_later() {
+    // Each turn makes async functions, async and sync generators, `for
+    // await` loops, iterator closes and combinators. It is stopped by
+    // another thread after a varied delay, and also, deterministically,
+    // at the `tick()` numbered `K`, which moves with the iteration (in its
+    // own turn only: what a turn stopped in its script leaves queued runs in
+    // the next one). The next turn checks that all of it settles.
+    // The turn runs about 80 ticks in its script and 170 more in its jobs
+    // (some 17 ms and 15 ms in a debug build): both the delay and `K` span
+    // all of it.
+    race(
+        "suspended states",
+        40_000,
+        |page, i| {
+            page.assert_left_nothing_pending(&format!("suspended states #{i}"));
+            page.next_turn();
+            let turn = page.turn;
+            page.eval(&format!("var K = {}, T = {turn};", (i * 7) % 260))
+                .unwrap();
+        },
+        |_| SUSPENDED_STATES_TURN.into(),
+    );
 }

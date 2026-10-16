@@ -427,7 +427,7 @@ impl Module {
                         visited: RefCell::default(),
                     }),
                     context,
-                ));
+                )); // HIWAVE PATCH (interrupt): closes `drop(`
 
                 // 5. Return pc.[[Promise]].
                 JsPromise::from_object(pc.promise().clone())
@@ -472,10 +472,10 @@ impl Module {
             state
                 .capability
                 .resolve()
-                .call(&JsValue::undefined(), &[], context)?;
+                .call(&JsValue::undefined(), &[], context)?; // HIWAVE PATCH (interrupt): `?`
         }
         // 6. Return unused.
-        Ok(())
+        Ok(()) // HIWAVE PATCH (interrupt): returns `JsResult`
     }
 
     /// Abstract method [`GetExportedNames([exportStarSet])`][spec].

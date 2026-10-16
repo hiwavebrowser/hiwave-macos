@@ -90,6 +90,9 @@ pub struct Vm {
     // Set by `new_promise_reaction_job` for an engine-internal reaction:
     // the next native call skips the interrupt check once.
     pub(crate) interrupt_exempt_once: bool,
+    // Set while the engine settles promises (`Promise::settling`): its own
+    // promise bookkeeping is then entered even in a stopped turn.
+    pub(crate) settling_promises: bool,
     // END HIWAVE PATCH
 
     /// This is used to assign a native (rust) function as the active function,
@@ -441,6 +444,7 @@ impl Vm {
             interrupt: None,              // HIWAVE PATCH (interrupt)
             interrupt_turn: 0,            // HIWAVE PATCH (interrupt)
             interrupt_exempt_once: false, // HIWAVE PATCH (interrupt)
+            settling_promises: false,     // HIWAVE PATCH (interrupt)
             native_active_function: None,
             host_call_depth: 0,
             shadow_stack: ShadowStack::default(),

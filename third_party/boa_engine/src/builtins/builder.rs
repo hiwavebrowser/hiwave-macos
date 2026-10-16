@@ -520,6 +520,7 @@ impl BuiltInCallable<'_> {
                 name: self.name.clone(),
                 constructor: None,
                 realm: Some(self.realm.clone()),
+                settles_promises: false, // HIWAVE PATCH (interrupt)
             },
             vec![JsValue::new(self.length), JsValue::new(self.name)],
         );

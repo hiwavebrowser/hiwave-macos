@@ -150,7 +150,7 @@ ends with `Interrupted`, and its own import promise stays pending, as before.
 | `src/builtins/promise/mod.rs` | `NewPromiseReactionJob`: a reaction with no capability is the engine's own (script's `then` always has one); its handler is entered even in a stopped turn (`Vm::interrupt_exempt_once`), so the `Await` and `ExecuteAsyncModule` handlers can record the stop. Stopped at its entry instead, a module's body was never resumed and the module stayed `evaluating-async` |
 | `src/native_function/mod.rs` | a native call consumes `interrupt_exempt_once`: it then makes only the recursion and stack checks |
 | `src/vm/mod.rs` | `Vm::interrupt_exempt_once`; `check_runtime_limits` split into `check_interrupt` + `check_depth_limits` (unchanged checks); `Context::run` checks the interrupt on entry, so no bytecode runs in a stopped turn, even a body an engine reaction resumes: it fails as its first opcode would |
-| `src/vm/opcode/call/mod.rs`, `src/builtins/async_generator/mod.rs`, `src/object/builtins/jspromise.rs` | the other no-capability engine handlers (`import()`'s steps, the async generator's await-return, `JsPromise::await_native`) call `check_interrupt` first, so they behave as before: not entered in a stopped turn (a module whose `import()` was only queued stays linked and evaluates normally later) |
+| `src/vm/opcode/call/mod.rs`, `src/object/builtins/jspromise.rs` | the other no-capability engine handlers (`import()`'s steps, `JsPromise::await_native`) call `check_interrupt` first, so they behave as before: not entered in a stopped turn (a module whose `import()` was only queued stays linked and evaluates normally later). The async generator's await-return did too; it now abandons the generator instead (last section) |
 
 One more operand-stack leak, which the executor below exposed:
 
@@ -212,7 +212,7 @@ is `executing`).
 
 | file | change |
 |---|---|
-| `src/builtins/async_generator/mod.rs` | new `AsyncGenerator::abandon_interrupted`: the generator becomes `completed` (its context dropped), and every queued request, the stopped one included, is rejected with an ordinary, catchable `Error: async generator was interrupted`. The reject functions only enqueue jobs and run no script, so each is called with `interrupt_exempt_once`, which lets this run in the stopped turn; a depth limit there leaves that request pending, as the stopped turn's own work does. `resume` calls it on an uncatchable completion |
+| `src/builtins/async_generator/mod.rs` | new `AsyncGenerator::abandon_interrupted`: the generator becomes `completed` (its context dropped), and every queued request, the stopped one included, is rejected with an ordinary, catchable `Error: async generator was interrupted`. The reject functions only enqueue jobs and run no script, so each is called while settling (`Promise::reject_interrupted`, last section), which lets this run in the stopped turn; a depth limit there leaves that request pending, as the stopped turn's own work does. `resume` calls it on an uncatchable completion |
 | `src/vm/opcode/await/mod.rs` | both `Await` reactions call it on an uncatchable completion of an async generator's body (after restoring its context, as before) |
 
 Later calls then behave as on a finished generator: `next()` resolves
@@ -227,6 +227,102 @@ turns the stopped and queued requests reject with the error above and
 200 raced turns of ten generators with twelve requests each, every request
 of a turn settling in the next. Without this patch the test fails with
 "`stopped2` never settled".
+
+## Patch, continued: nothing a stopped turn suspended stays stuck
+
+**Why.** The same task as the hold above asked for every other state the
+interrupt can freeze to be checked: sync generators, async functions,
+async-from-sync iterators, iterator close and `for await`. Probes (now the
+tests below) found that sync generators, async-from-sync iterators and sync
+`IteratorClose` already end `completed` and answer later calls. Four things
+stayed pending for good:
+
+- an **async function** stopped in a body an `await` resumed: its promise
+  (so every `await` of it, every `for await` loop in it, and `then(async ...)`);
+- an **async generator in `return(v)`**: stopped while awaiting `v` (the
+  reaction refused, a thenable's `then` or a `constructor` getter stopped),
+  it stayed `draining-queue` and queued every later call forever;
+- a **promise whose job the stopped turn refused**: a reaction job's derived
+  promise when its script handler (or its own `resolve`) was refused, a
+  promise resolved with a thenable whose `then` job was refused, and a
+  promise whose `resolve` was stopped while getting `then`; so an async
+  function awaiting one of them never resumed;
+- **`Promise.all`/`allSettled`/`any`/`race`** over inputs that settle in the
+  stopped turn: their element functions (and `race`'s resolve) run as
+  reaction jobs, which were refused.
+
+**Rule.** The engine's own promise bookkeeping still runs in a stopped turn;
+script does not. A promise the stop kept from settling is rejected with an
+ordinary, catchable error (`async function was interrupted`, `async generator
+was interrupted` or `promise job was interrupted`), so later turns that wait
+on it go on. A generator the stop froze becomes `completed`.
+
+| file | change |
+|---|---|
+| `src/native_function/mod.rs`, `src/object/mod.rs` | `NativeFunctionObject::settles_promises`, set by `FunctionObjectBuilder::settles_promises`: the engine's promise bookkeeping, which runs no script. A native call to one while `Vm::settling_promises` is set makes only the depth checks. The other builders (`builtins/builder.rs`, `object/builtins/jsfunction.rs`, `ConstructorBuilder`) set it to `false` |
+| `src/vm/mod.rs` | `Vm::settling_promises` |
+| `src/builtins/promise/mod.rs` | marked `settles_promises`: a promise's resolving functions (`CreateResolvingFunctions`) and the element functions of `Promise.all`, `allSettled` (both) and `any`. Each only records a value and calls a capability's resolve or reject; a capability that is not the engine's (a subclass's) is script and is still stopped at its entry |
+| `src/builtins/promise/mod.rs` | new `Promise::settling` (runs a closure with `settling_promises` set) and `Promise::reject_interrupted` (calls a reject function while settling, with `Error: {message}`; the result is dropped: a subclass's reject or a depth limit leaves that promise pending) |
+| `src/builtins/promise/mod.rs` | `NewPromiseReactionJob`: a handler marked `settles_promises` is called while settling; the capability's resolve/reject is called while settling; a handler the interrupt refused or stopped, and a resolve/reject it refused, reject the capability with `promise job was interrupted`, then the stop ends the job |
+| `src/builtins/promise/mod.rs` | `NewPromiseResolveThenableJob`: a `then` refused or stopped rejects the promise the same way. Promise resolve function: stopped while getting `then` (the promise is already resolved, so no reject function can settle it any more), it rejects the promise directly with that error and returns the stop |
+| `src/vm/opcode/await/mod.rs` | new `async_function_reject` (the reject function in a suspended async function's capability registers; `None` for an async generator and for a module's top level, which has no function object); both `Await` reactions call `Promise::reject_interrupted` with it on an uncatchable completion |
+| `src/builtins/async_generator/mod.rs` | `abandon_interrupted` rejects through `Promise::reject_interrupted` (was `interrupt_exempt_once`); new `await_return_step` for both closures of `AsyncGeneratorAwaitReturn`: if the turn is stopped, or a step is, the generator is abandoned (was `check_interrupt()?`, which left it `draining-queue`); it does nothing on a generator already abandoned, instead of failing step a.'s `assert_eq!` |
+| `src/builtins/async_generator/mod.rs` | `await_return`: an uncatchable `PromiseResolve` error abandons the generator. `drain_queue` is a wrapper that abandons it when the drain (upstream's steps, now `drain_queue_steps`) is stopped. `complete_step`: an uncatchable completion rejects the request with the ordinary error before returning the stop, and a resolve/reject the interrupt refused rejects it the same way (`settle_refused`) |
+
+The stopped turn still ends with `Interrupted`. In it, no script runs: the
+exemption covers only marked natives, every script function is still checked
+at its entry, and `Context::run` checks on entry. A promise chain or combinator
+whose inputs settle in the stopped turn therefore settles there; a script
+handler in it is dropped, and the promise it would have settled is rejected.
+One visible change: a reaction job's own `resolve` (a `then()` with no
+handler, or after the handler returned) is no longer where a stop lands, so a
+turn whose only remaining work is that bookkeeping can end `Ok` with the word
+set; script's own calls to `resolve`/`reject` are still stopped.
+
+**Tests** (`crates/rustkit-js/tests/vm_interrupt_promises.rs`):
+- `the_holds_async_generator_stopped_mid_body_answers_later_calls`: the
+  hold's input, stopped after an `await` and before the first; in two later
+  turns `next()` is `{done:true}` and `return(7)` is `{value:7,done:true}`.
+- `an_async_generator_stopped_in_return_or_delegation_answers_later_calls`:
+  await-return refused, stopped in a thenable's `then`, stopped in a
+  `constructor` getter; `return()` into a `finally` that awaits; `yield*` to an
+  async and to a sync generator stopped mid-body.
+- `a_stopped_async_function_settles_its_promise`: after an `await`, a method,
+  an arrow, nested functions, awaiting a refused job, awaiting `Promise.all`,
+  `for await` over an array, an async generator and a sync generator
+  (stopped in it, and a refused async-from-sync job), closing an async
+  iterator by `break` with its `finally` stopped, and `then(async ...)`.
+- `a_sync_generator_or_iterator_stopped_mid_body_completes`: mid-body, in a
+  `finally` through `return()`, in a `yield*` inner generator, and closed by a
+  `for-of` `break`.
+- `promise_combinators_settle_in_a_stopped_turn`: all four, with no script
+  handler run after the stop.
+- `every_suspended_state_a_raced_stop_leaves_settles_later`: 200 turns that
+  each make async functions, async and sync generators, `for await` loops,
+  iterator closes and combinators, stopped by another thread after a delay of
+  up to 40 ms and, separately, at the `tick()` numbered `K`, which steps
+  through all 252 of them (80 in the script, the rest in its jobs). The next
+  turn checks that every promise settles and every generator answers `next()`
+  and `return()`.
+- `interrupt_during_promise_resolve`: its reaction case now asserts the chain
+  settles; a new executor case keeps script's own `resolve` stopped.
+
+On the code before this patch, the async function, return/delegation and
+combinator tests and the race fail ("`p` never settled"), and the resolve
+case fails its new assertion; the hold's test fails without the previous
+section.
+
+**Not covered.** A promise whose capability is not the engine's (a `Promise`
+subclass with its own resolve/reject) stays pending if the stop refused the
+job that settles it: its reject function is script. A promise an earlier,
+healthy turn holds stays pending if the work that settles it was a script
+handler or `import()` step the stopped turn dropped (R1 HOLD @ `d627b635`:
+`p1 = import('X')` from turn 1, X's body stopped in turn 2); later work on
+the same object (a re-import, a later `next()`) settles. Upstream, with no
+interrupt involved: `import('D')` while D is `evaluating-async` under another
+cycle root never settles, because `SourceTextModule::evaluate`
+(`source.rs`, around lines 1052-1101) does not store the new capability on D
+(spec step 7); left as upstream.
 
 **Upgrading Boa.** Re-apply the marked lines to the new version, or drop this
 directory once upstream has an equivalent hook (to be offered upstream).
