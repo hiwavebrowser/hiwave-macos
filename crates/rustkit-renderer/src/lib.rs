@@ -92,10 +92,14 @@ pub enum RendererError {
 
 // ==================== Constants ====================
 
-/// Maximum GPU buffer size (256 MB) - prevents OOM on pathological inputs
+/// Maximum GPU buffer size (256 MB) - prevents OOM on pathological inputs.
+/// A batch past it (or past the device's own limit) is drawn in pieces
+/// (`Renderer::draw_split`), so no page fails the frame.
 const MAX_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
-/// A batch is flushed once one of its buffers reaches this size, well
-/// inside `MAX_BUFFER_SIZE` (one command adds far less).
+/// A batch is flushed once one of its buffers reaches this size, which
+/// bounds the memory a frame holds. A single command can still go past it
+/// (2.3 M characters on one line is 294 MB of glyph quads); the draw splits
+/// that.
 const MAX_BATCH_BYTES: u64 = 64 * 1024 * 1024;
 
 fn is_decoration(cmd: &DisplayCommand) -> bool {
@@ -458,6 +462,10 @@ pub struct Renderer {
     measure: bool,
     /// The batched glyph quads, by screen cell, for the overlap check.
     glyph_grid: glyph_grid::GlyphGrid,
+    /// The largest vertex or index buffer a batch draw creates: the
+    /// device's `max_buffer_size`, at most `MAX_BUFFER_SIZE`. A larger
+    /// batch is drawn in pieces (`draw_split`).
+    max_buffer_bytes: u64,
     /// Tests: draw without culling and answer the order check by a linear
     /// scan, the reference the fast path is compared against.
     #[cfg(test)]
@@ -701,6 +709,7 @@ impl Renderer {
             );
         }
         let gpu_gradients_enabled = false;
+        let max_buffer_bytes = device.limits().max_buffer_size.min(MAX_BUFFER_SIZE);
 
         Ok(Self {
             device,
@@ -740,6 +749,7 @@ impl Renderer {
             submits: Default::default(),
             measure: false,
             glyph_grid: Default::default(),
+            max_buffer_bytes,
             #[cfg(test)]
             reference: false,
             opacity_scopes: OpacityScopes::default(),
@@ -754,21 +764,6 @@ impl Renderer {
             filter_sampler,
             surface_format,
         })
-    }
-
-    /// Validate buffer size to prevent GPU memory exhaustion.
-    /// Returns Ok(size) if size is within limits, Err otherwise.
-    fn validate_buffer_size(&self, size: u64, label: &str) -> Result<u64, RendererError> {
-        if size > MAX_BUFFER_SIZE {
-            tracing::error!(
-                "Buffer '{}' size {} bytes exceeds maximum {} bytes",
-                label,
-                size,
-                MAX_BUFFER_SIZE
-            );
-            return Err(RendererError::BufferTooLarge(size, MAX_BUFFER_SIZE));
-        }
-        Ok(size)
     }
 
     /// Set the viewport size.
@@ -920,7 +915,6 @@ impl Renderer {
     fn flush_batches_to(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
         self.settle_opacity();
         self.tally_flush();
-        self.validate_batches()?;
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
@@ -957,30 +951,15 @@ impl Renderer {
 
             // Draw solid colors
             if !self.color_vertices.is_empty() {
-                // Validate buffer sizes before allocation
-                let vertex_size = (self.color_vertices.len() * std::mem::size_of::<ColorVertex>()) as u64;
-                let index_size = (self.color_indices.len() * std::mem::size_of::<u32>()) as u64;
-
-                self.validate_buffer_size(vertex_size, "Color Vertex Buffer")?;
-                self.validate_buffer_size(index_size, "Color Index Buffer")?;
-
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.color_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Color",
+                    &self.color_vertices,
+                    &self.color_indices,
+                    0..self.color_indices.len(),
+                );
             }
 
             // Draw images (own textures) between backgrounds and text
@@ -988,31 +967,16 @@ impl Renderer {
 
             // Draw textured quads
             if !self.texture_vertices.is_empty() {
-                // Validate buffer sizes before allocation
-                let vertex_size = (self.texture_vertices.len() * std::mem::size_of::<TextureVertex>()) as u64;
-                let index_size = (self.texture_indices.len() * std::mem::size_of::<u32>()) as u64;
-
-                self.validate_buffer_size(vertex_size, "Texture Vertex Buffer")?;
-                self.validate_buffer_size(index_size, "Texture Index Buffer")?;
-
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.texture_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 render_pass.set_bind_group(1, self.glyph_cache.bind_group(), &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Texture",
+                    &self.texture_vertices,
+                    &self.texture_indices,
+                    0..self.texture_indices.len(),
+                );
             }
 
             // Color glyphs (emoji) drawn on top via the RGBA atlas + blit pipeline.
@@ -1041,7 +1005,6 @@ impl Renderer {
     fn flush_batches_for_gradient(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
         self.settle_opacity();
         self.tally_flush();
-        self.validate_batches()?;
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
@@ -1100,30 +1063,15 @@ impl Renderer {
 
             // Draw solid colors
             if !self.color_vertices.is_empty() {
-                // Validate buffer sizes before allocation
-                let vertex_size = (self.color_vertices.len() * std::mem::size_of::<ColorVertex>()) as u64;
-                let index_size = (self.color_indices.len() * std::mem::size_of::<u32>()) as u64;
-
-                self.validate_buffer_size(vertex_size, "Color Vertex Buffer")?;
-                self.validate_buffer_size(index_size, "Color Index Buffer")?;
-
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.color_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Color",
+                    &self.color_vertices,
+                    &self.color_indices,
+                    0..self.color_indices.len(),
+                );
             }
 
             // Draw images (own textures) between backgrounds and text
@@ -1131,31 +1079,16 @@ impl Renderer {
 
             // Draw textured quads
             if !self.texture_vertices.is_empty() {
-                // Validate buffer sizes before allocation
-                let vertex_size = (self.texture_vertices.len() * std::mem::size_of::<TextureVertex>()) as u64;
-                let index_size = (self.texture_indices.len() * std::mem::size_of::<u32>()) as u64;
-
-                self.validate_buffer_size(vertex_size, "Texture Vertex Buffer")?;
-                self.validate_buffer_size(index_size, "Texture Index Buffer")?;
-
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.texture_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 render_pass.set_bind_group(1, self.glyph_cache.bind_group(), &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Texture",
+                    &self.texture_vertices,
+                    &self.texture_indices,
+                    0..self.texture_indices.len(),
+                );
             }
 
             // Color glyphs (emoji) drawn on top via the RGBA atlas + blit pipeline.
@@ -1727,26 +1660,6 @@ impl Renderer {
             self.image_indices.len() * size_of::<u32>(),
         ];
         bytes.iter().any(|&b| b as u64 >= MAX_BATCH_BYTES)
-    }
-
-    /// Every batch's vertex and index buffer within `MAX_BUFFER_SIZE`, so a
-    /// flush fails with `BufferTooLarge` instead of wgpu panicking.
-    fn validate_batches(&self) -> Result<(), RendererError> {
-        use std::mem::size_of;
-        let sizes = [
-            (self.color_vertices.len() * size_of::<ColorVertex>(), "Color Vertex Buffer"),
-            (self.color_indices.len() * size_of::<u32>(), "Color Index Buffer"),
-            (self.texture_vertices.len() * size_of::<TextureVertex>(), "Texture Vertex Buffer"),
-            (self.texture_indices.len() * size_of::<u32>(), "Texture Index Buffer"),
-            (self.color_glyph_vertices.len() * size_of::<TextureVertex>(), "Color Glyph Vertex Buffer"),
-            (self.color_glyph_indices.len() * size_of::<u32>(), "Color Glyph Index Buffer"),
-            (self.image_vertices.len() * size_of::<TextureVertex>(), "Image Vertex Buffer"),
-            (self.image_indices.len() * size_of::<u32>(), "Image Index Buffer"),
-        ];
-        for (size, label) in sizes {
-            self.validate_buffer_size(size as u64, label)?;
-        }
-        Ok(())
     }
 
     /// Execute commands with GPU blur support for backdrop filters.
@@ -6532,6 +6445,33 @@ impl Renderer {
             return;
         }
 
+        // image_pipeline, not texture_pipeline: the texture shader treats the
+        // sampled R channel as glyph-atlas alpha; the blit shader samples real
+        // RGBA. Not blit_pipeline either: its blend is REPLACE, which paints an
+        // image's transparent texels as their own colour (black, for most PNGs).
+        render_pass.set_pipeline(&self.image_pipeline);
+        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+
+        if !self.fits_one_buffer(&self.image_vertices, &self.image_indices) {
+            // Past the buffer limit: each run in as many draws as it takes.
+            let mut start = 0usize;
+            for (url, count) in &self.image_runs {
+                let end = start + *count as usize;
+                if let Some(cached) = self.texture_cache.get(url) {
+                    render_pass.set_bind_group(1, &cached.bind_group, &[]);
+                    self.draw_split(
+                        render_pass,
+                        "Image",
+                        &self.image_vertices,
+                        &self.image_indices,
+                        start..end.min(self.image_indices.len()),
+                    );
+                }
+                start = end;
+            }
+            return;
+        }
+
         let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Image Vertex Buffer"),
             contents: bytemuck::cast_slice(&self.image_vertices),
@@ -6542,13 +6482,6 @@ impl Renderer {
             contents: bytemuck::cast_slice(&self.image_indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-
-        // image_pipeline, not texture_pipeline: the texture shader treats the
-        // sampled R channel as glyph-atlas alpha; the blit shader samples real
-        // RGBA. Not blit_pipeline either: its blend is REPLACE, which paints an
-        // image's transparent texels as their own colour (black, for most PNGs).
-        render_pass.set_pipeline(&self.image_pipeline);
-        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
@@ -6562,6 +6495,78 @@ impl Renderer {
         }
     }
 
+    /// True when `verts` and `indices` each fit in one buffer of
+    /// `max_buffer_bytes`.
+    fn fits_one_buffer<V>(&self, verts: &[V], indices: &[u32]) -> bool {
+        let bytes = |n: usize, size: usize| (n as u64).saturating_mul(size as u64);
+        bytes(verts.len(), std::mem::size_of::<V>()) <= self.max_buffer_bytes
+            && bytes(indices.len(), 4) <= self.max_buffer_bytes
+    }
+
+    /// Draw the triangles `indices[range]` of a batch into `pass`, whose
+    /// pipeline and bind groups are set.
+    ///
+    /// A batch that fits takes one vertex and one index buffer. A larger
+    /// one (a page's worth of glyphs can pass 256 MB: 2.3 M characters on
+    /// one line, or 80k lines on screen) is drawn in as many draws as it
+    /// takes, each with buffers of its own slice of the vertices, so no
+    /// buffer passes the device's limit; wgpu would fail the frame with a
+    /// validation error, which panics. The draws go in batch order in the
+    /// same pass, so the pixels are those of one draw.
+    fn draw_split<V: bytemuck::Pod>(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        label: &str,
+        verts: &[V],
+        indices: &[u32],
+        range: std::ops::Range<usize>,
+    ) {
+        let cap = self.max_buffer_bytes as usize;
+        let max_verts = (cap / std::mem::size_of::<V>().max(1)).max(3);
+        let max_indices = (cap / 4 / 3 * 3).max(3);
+        let mut start = range.start;
+        while start + 3 <= range.end {
+            // As many whole triangles as fit, with the vertices they use.
+            let (mut lo, mut hi) = (u32::MAX, 0u32);
+            let mut end = start;
+            while end + 3 <= range.end && end - start < max_indices {
+                let tri = &indices[end..end + 3];
+                let tlo = lo.min(tri[0]).min(tri[1]).min(tri[2]);
+                let thi = hi.max(tri[0]).max(tri[1]).max(tri[2]);
+                if end > start && (thi - tlo) as usize >= max_verts {
+                    break;
+                }
+                (lo, hi) = (tlo, thi);
+                end += 3;
+            }
+            let first = (lo as usize).min(verts.len());
+            let last = (hi as usize).saturating_add(1).min(verts.len());
+            if first < last {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("{label} Vertex Buffer")),
+                    contents: bytemuck::cast_slice(&verts[first..last]),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let rebased: Vec<u32>;
+                let chunk = if lo == 0 {
+                    &indices[start..end]
+                } else {
+                    rebased = indices[start..end].iter().map(|i| i - lo).collect();
+                    &rebased
+                };
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("{label} Index Buffer")),
+                    contents: bytemuck::cast_slice(chunk),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..chunk.len() as u32, 0, 0..1);
+            }
+            start = end;
+        }
+    }
+
     /// Draw the color-glyph (emoji) batch: RGBA quads sampling the color atlas
     /// via the passthrough blit pipeline (blit samples real RGBA; the grayscale
     /// texture pipeline would treat R as alpha and mangle the artwork). Empty on
@@ -6570,22 +6575,16 @@ impl Renderer {
         if self.color_glyph_vertices.is_empty() {
             return;
         }
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Color Glyph Vertex Buffer"),
-            contents: bytemuck::cast_slice(&self.color_glyph_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Color Glyph Index Buffer"),
-            contents: bytemuck::cast_slice(&self.color_glyph_indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
         render_pass.set_pipeline(&self.color_glyph_pipeline);
         render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         render_pass.set_bind_group(1, self.glyph_cache.color_bind_group(), &[]);
-        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.draw_indexed(0..self.color_glyph_indices.len() as u32, 0, 0..1);
+        self.draw_split(
+            render_pass,
+            "Color Glyph",
+            &self.color_glyph_vertices,
+            &self.color_glyph_indices,
+            0..self.color_glyph_indices.len(),
+        );
     }
 
     fn flush_to(&mut self, target: &wgpu::TextureView) -> Result<(), RendererError> {
@@ -6621,7 +6620,6 @@ impl Renderer {
 
         self.settle_opacity();
         self.tally_flush();
-        self.validate_batches()?;
 
         // Render batched content
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -6674,30 +6672,15 @@ impl Renderer {
 
             // Draw solid colors
             if !self.color_vertices.is_empty() {
-                // Validate buffer sizes before allocation
-                let vertex_size = (self.color_vertices.len() * std::mem::size_of::<ColorVertex>()) as u64;
-                let index_size = (self.color_indices.len() * std::mem::size_of::<u32>()) as u64;
-
-                self.validate_buffer_size(vertex_size, "Color Vertex Buffer")?;
-                self.validate_buffer_size(index_size, "Color Index Buffer")?;
-
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Color Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.color_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.color_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Color",
+                    &self.color_vertices,
+                    &self.color_indices,
+                    0..self.color_indices.len(),
+                );
             }
 
             // Draw images (own textures) between backgrounds and text
@@ -6705,24 +6688,16 @@ impl Renderer {
 
             // Draw textured quads (glyphs)
             if !self.texture_vertices.is_empty() {
-                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Texture Index Buffer"),
-                    contents: bytemuck::cast_slice(&self.texture_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
                 render_pass.set_pipeline(&self.texture_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 render_pass.set_bind_group(1, self.glyph_cache.bind_group(), &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
+                self.draw_split(
+                    &mut render_pass,
+                    "Texture",
+                    &self.texture_vertices,
+                    &self.texture_indices,
+                    0..self.texture_indices.len(),
+                );
             }
 
             // Color glyphs (emoji) drawn on top via the RGBA atlas + blit pipeline.

@@ -637,3 +637,114 @@ fn a_batch_past_the_buffer_limit_is_flushed_instead_of_panicking() {
     let s = r.last_frame_stats();
     assert!(s.batch_flushes >= 2, "{s:?}");
 }
+
+fn count_ink(px: &[u8]) -> usize {
+    px.chunks_exact(4)
+        .filter(|p| p[..3] != [255, 255, 255])
+        .count()
+}
+
+#[test]
+fn a_batch_past_the_buffer_limit_is_drawn_in_pieces() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    // Fills, then images (two textures, alternating, so the runs split
+    // too), then a screenful of text: no command lands under one batched
+    // before it, so the frame is one batch. With a 64 KiB buffer limit
+    // each part of it is many times over.
+    let mut list = vec![fill(
+        0.0,
+        0.0,
+        1024.0,
+        768.0,
+        Color::new(255, 255, 255, 1.0),
+    )];
+    for i in 0..36 {
+        let y = i as f32 * 21.0;
+        list.push(fill(0.0, y, 1024.0, 1.0, Color::new(200, 200, 200, 1.0)));
+        for j in 0..40 {
+            list.push(fill(
+                j as f32 * 25.0,
+                y + 1.0,
+                3.0,
+                3.0,
+                Color::new(0, 0, 255, 1.0),
+            ));
+        }
+    }
+    for i in 0..36 {
+        let y = i as f32 * 21.0 + 4.0;
+        list.push(image(["a.png", "b.png"][i % 2], 0.0, y, 16.0, 16.0));
+        list.push(image(["b.png", "a.png"][i % 2], 1000.0, y, 16.0, 16.0));
+    }
+    for i in 0..36 {
+        list.push(text(
+            &LINE.repeat(2),
+            20.0,
+            i as f32 * 21.0 + 4.0,
+            Color::new(0, 0, 0, 1.0),
+        ));
+    }
+    let (want, _) = fast_draw(&gpu, &list, (0.0, 0.0));
+    let mut r = renderer(&gpu);
+    upload_images(&mut r);
+    r.max_buffer_bytes = 64 * 1024;
+    let got = draw(&gpu, &mut r, &list, (0.0, 0.0));
+    let s = r.last_frame_stats();
+    assert_eq!(s.batch_flushes, 1, "one batch, split only at draw: {s:?}");
+    let tex = std::mem::size_of::<TextureVertex>();
+    assert!(
+        r.texture_vertices.len() * tex > 4 * 64 * 1024,
+        "glyph batch over the limit"
+    );
+    assert!(r.color_vertices.len() * std::mem::size_of::<ColorVertex>() > 2 * 64 * 1024);
+    assert!(count_ink(&want) > 10_000);
+    let differ = want
+        .chunks_exact(4)
+        .zip(got.chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(differ, 0, "{differ} pixels differ from the one-draw frame");
+
+    // Images alone, more quads than one piece holds, to split inside runs.
+    let mut r = renderer(&gpu);
+    upload_images(&mut r);
+    r.max_buffer_bytes = 4 * 1024;
+    let tiles: Vec<_> = (0..1200)
+        .map(|i| {
+            let (x, y) = ((i % 40) as f32 * 25.0, (i / 40) as f32 * 25.0);
+            image(["a.png", "b.png"][(i / 300) % 2], x, y, 20.0, 20.0)
+        })
+        .collect();
+    let got = draw(&gpu, &mut r, &tiles, (0.0, 0.0));
+    let (want, _) = fast_draw(&gpu, &tiles, (0.0, 0.0));
+    assert!(r.image_vertices.len() * tex > 8 * 4 * 1024);
+    assert_eq!(want, got);
+}
+
+#[test]
+fn a_line_of_millions_of_characters_is_drawn() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    // One on-screen `Text` of 2.3 M characters (a minified bundle shown as
+    // text/plain): one command, 2.3 M glyph quads, 294 MB of vertices,
+    // past the 256 MB limit before any flush between commands can help.
+    // It panicked in `flush_to`, then failed the frame with
+    // `BufferTooLarge`; the draw now splits it.
+    let line = "x".repeat(2_300_000);
+    let list = vec![
+        fill(0.0, 0.0, 1024.0, 768.0, Color::new(255, 255, 255, 1.0)),
+        text(&line, 16.0, 100.0, Color::new(0, 0, 0, 1.0)),
+    ];
+    let mut r = renderer(&gpu);
+    let px = draw(&gpu, &mut r, &list, (0.0, 0.0));
+    assert!(
+        (r.texture_vertices.len() * std::mem::size_of::<TextureVertex>()) as u64 > MAX_BUFFER_SIZE,
+        "the batch is over the limit"
+    );
+    assert!(count_ink(&px) > 1_000, "the start of the line is drawn");
+}
