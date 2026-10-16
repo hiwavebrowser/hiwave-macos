@@ -1033,6 +1033,9 @@ pub fn decode_data_url(url: &str) -> Result<(String, Vec<u8>), NetError> {
         .filter(|s| s.eq_ignore_ascii_case("data:"))
         .map(|_| &url[5..])
         .ok_or_else(|| NetError::InvalidUrl("not a data: URL".into()))?;
+    // Fetch's data: URL processor serializes the URL without its fragment:
+    // `data:text/javascript,f()#x` is the script `f()`.
+    let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
     let (meta, payload) = rest
         .split_once(',')
         .ok_or_else(|| NetError::InvalidUrl("data: URL has no ','".into()))?;
@@ -1109,6 +1112,11 @@ mod data_url_tests {
         // Unpadded base64 and whitespace inside the payload are accepted.
         assert_eq!(decode_data_url("data:;base64,aGk").unwrap().1, b"hi");
         assert_eq!(decode_data_url("data:;base64,aG k=").unwrap().1, b"hi");
+        // The fragment is not the payload (Fetch: serialize, exclude fragment).
+        let url = Url::parse("data:text/javascript,log.push('frag')#ignored").unwrap();
+        assert_eq!(decode_data_url(url.as_str()).unwrap().1, b"log.push('frag')");
+        assert_eq!(decode_data_url("data:;base64,aGk=#x").unwrap().1, b"hi");
+        assert_eq!(decode_data_url("data:text/plain,a%23b#c").unwrap().1, b"a#b");
     }
 
     #[test]

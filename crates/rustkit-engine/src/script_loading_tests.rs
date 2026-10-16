@@ -66,6 +66,7 @@ fn data_url_scripts_run_without_the_network_or_the_shield() {
 <script type="module" src="data:text/javascript,let navPromise=null;async function getNavigation(){return navPromise||(navPromise=Promise.resolve('nav'))}window.getNavigation=getNavigation;log.push('module '+(typeof window.getNavigation))"></script>
 <script type="module" src="data:text/javascript;base64,ZXhwb3J0IGNvbnN0IHg9MTsgbG9nLnB1c2goJ21vZHVsZTY0Jyk7"></script>
 <script src="data:text/plain,log.push('plain classic')"></script>
+<script src="data:text/javascript,log.push('frag')#ignored"></script>
 </head><body><script>
 var a = document.createElement('script');
 a.src = 'data:text/javascript,log.push(%22inserted%20classic%20%22%2B(document.currentScript%3D%3D%3Da))';
@@ -79,7 +80,7 @@ document.head.appendChild(m);
 var b = document.createElement('script');
 b.setAttribute('src', 'data:text/javascript;base64,' + btoa("log.push('inserted base64')"));
 document.body.appendChild(b);
-import('data:text/javascript,export default 42').then(function (ns) { log.push('import ' + ns.default); },
+import('data:text/javascript,export default 42#x').then(function (ns) { log.push('import ' + ns.default); },
   function (e) { log.push('import failed ' + e); });
 import('data:text/plain,export default 1').then(function () { log.push('plain module ran'); },
   function () { log.push('plain module refused'); });
@@ -98,6 +99,8 @@ import('data:text/plain,export default 1').then(function () { log.push('plain mo
         "base64",
         "classic",
         "plain classic",
+        // A fragment is not part of the script.
+        "frag",
         "module function",
         "module64",
         "inserted classic true",
