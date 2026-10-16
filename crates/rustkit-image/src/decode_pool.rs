@@ -22,7 +22,7 @@
 //!   second engine (the opt-in RustKit chrome) starts two more threads.
 
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{catch_unwind, AssertUnwindSafe, UnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -193,10 +193,18 @@ pub(crate) fn decode_pixels_caught(
     bytes: &[u8],
     max_dimensions: (u32, u32),
 ) -> ImageResult<DecodedPixels> {
-    catch_unwind(AssertUnwindSafe(|| {
-        crate::decode_pixels(bytes, max_dimensions)
-    }))
-    .unwrap_or_else(|_| Err(ImageError::DecodeError("decoder panicked".into())))
+    catch_decode_panic(|| crate::decode_pixels(bytes, max_dimensions))
+}
+
+/// Turn a panicking codec into [`ImageError::DecodeError`] so the pool
+/// thread and the page thread's inline path stay alive. Extracted so a unit
+/// test can inject a panic without depending on a specific hostile bitstream.
+fn catch_decode_panic<F>(decode: F) -> ImageResult<DecodedPixels>
+where
+    F: FnOnce() -> ImageResult<DecodedPixels> + UnwindSafe,
+{
+    catch_unwind(AssertUnwindSafe(decode))
+        .unwrap_or_else(|_| Err(ImageError::DecodeError("decoder panicked".into())))
 }
 
 fn decode_thread(receiver: &Mutex<Receiver<DecodeJob>>, navs: &NavTable, counters: &Counters) {
@@ -241,6 +249,28 @@ mod tests {
 
     fn url(i: usize) -> Url {
         Url::parse(&format!("http://example.test/{i}.jpg")).unwrap()
+    }
+
+    #[test]
+    fn a_codec_panic_is_a_decode_error_not_an_unwind() {
+        // Expected panic: mute the default hook so CI logs stay clean.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let err = match catch_decode_panic(|| panic!("hostile codec")) {
+            Ok(_) => {
+                std::panic::set_hook(prev);
+                panic!("panic must become Err, not Ok");
+            }
+            Err(e) => e,
+        };
+        std::panic::set_hook(prev);
+        assert!(
+            matches!(err, ImageError::DecodeError(ref m) if m == "decoder panicked"),
+            "{err}"
+        );
+        // A real decode still returns Ok through the same catch path.
+        let pixels = decode_pixels_caught(JPEG, (16384, 16384)).expect("JPEG");
+        assert_eq!((pixels.width, pixels.height), (640, 480));
     }
 
     #[test]
