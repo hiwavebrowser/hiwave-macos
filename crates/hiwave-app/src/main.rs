@@ -54,6 +54,10 @@ mod webview_rustkit;
 mod shield_adapter;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit_chrome;
+/// The page protocol (threads plan M4 PR1): what crosses between the
+/// window thread and a page thread. Not yet spoken by anything.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+mod page_protocol;
 
 mod content_webview_trait;
 #[cfg(target_os = "macos")]
