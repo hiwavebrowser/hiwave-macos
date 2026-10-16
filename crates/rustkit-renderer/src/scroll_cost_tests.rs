@@ -1416,9 +1416,15 @@ fn fuzz_draw(
         })
         .collect();
     r.upload_image("checker.png", 16, 16, &checker).unwrap();
-    r.reference = reference;
     r.max_batch_bytes = case.batch_bytes;
     r.gpu_gradients_enabled = case.gpu_gradients;
+    // Warm the glyph atlas the same way for both paths: draw the full list
+    // on the reference path first. Atlas packing then no longer depends on
+    // which glyphs culling skipped, so culled and unculled must match byte
+    // for byte (Atlas's amended ruling on #710, R1 HOLD @ 6a5c89eb).
+    r.reference = true;
+    let _ = draw(gpu, &mut r, list, scroll);
+    r.reference = reference;
     let frame = draw(gpu, &mut r, list, scroll);
     (frame, r.last_frame_stats())
 }
@@ -1458,20 +1464,23 @@ fn culling_matches_unculled_on_random_lists() {
                 exact += 1;
                 continue;
             }
+            // With both atlases warmed identically there is no tolerance:
+            // any difference is a culling bug. The glyph check only says
+            // where it is.
             let (no_text, _) = fuzz_draw(&gpu, &case, &no_text_list, scroll, true);
-            if let Err(e) = check_culled(&want, &got, &no_text) {
-                eprintln!(
-                    "seed {seed} at {scroll:?} ({} commands): {e}",
-                    case.list.len()
-                );
-                failures.push((seed, scroll));
-            }
+            let e = check_culled(&want, &got, &no_text)
+                .err()
+                .unwrap_or_else(|| "glyph pixels differ within 1 LSB".into());
+            eprintln!(
+                "seed {seed} at {scroll:?} ({} commands): {e}",
+                case.list.len()
+            );
+            failures.push((seed, scroll));
         }
     }
     eprintln!(
         "{frames} frames ({culled} commands culled): {exact} byte-identical, \
-         {} within the glyph tolerance, {} failing",
-        frames - exact - failures.len(),
+         {} failing",
         failures.len()
     );
     assert!(failures.is_empty(), "failing (seed, scroll): {failures:?}");
