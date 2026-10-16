@@ -334,7 +334,14 @@ pub(crate) fn native_function_call(
 
     // We technically don't need this since native functions don't push any new frames to the
     // vm, but we'll eventually have to combine the native stack with the vm stack.
-    context.check_runtime_limits()?;
+    // HIWAVE PATCH (interrupt): an engine-internal reaction's handler is
+    // entered even in a stopped turn, so it can record the stop (see
+    // `new_promise_reaction_job`); the stop lands at its next check.
+    if std::mem::take(&mut context.vm.interrupt_exempt_once) {
+        context.check_depth_limits()?;
+    } else {
+        context.check_runtime_limits()?;
+    }
     let this_function_object = obj.clone();
 
     let NativeFunctionObject {

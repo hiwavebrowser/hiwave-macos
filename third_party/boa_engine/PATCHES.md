@@ -118,5 +118,86 @@ code, three of the nine tests panic in Boa (`vm/opcode/call/mod.rs:370`,
 and two (reject, microtask drain) pass and stay as guards. Taken out one at a
 time, the async generator and `IteratorClose` hunks each fail their case too.
 
+## Patch, continued: a stop never poisons module state for later turns
+
+**Why.** An interrupt ends the turn; later turns must not see it. R1 HOLD on
+PR #709 (@ 4c92f5b6, present since M1, #699) found that a module whose
+evaluation was stopped kept `Interrupted` as its `[[EvaluationError]]` and the
+stopped turn's `[[TopLevelCapability]]`, whose reject the stop itself had
+prevented. Every later `import()` of it (or of a module under it) never
+settled, and the first one re-raised "the script was interrupted" in a later
+turn, so any page script importing it waited forever. The same happened
+around a top-level `await`: a module stopped in a resumed body, in its async
+bookkeeping (`AsyncModuleExecutionFulfilled` returned early), or at the
+reaction that resumes its body stayed `evaluating-async` for good.
+
+**Rule.** A module the stop interrupted while it evaluated becomes
+`evaluated` with an ordinary, catchable `Error: module evaluation was
+interrupted`, and a top-level capability the stop kept from settling is
+dropped. A later import rejects with that error (a `catch` takes it like any
+other) instead of hanging; a module that finished evaluating before the stop
+landed on its own `resolve` keeps its namespace. The stopped turn itself still
+ends with `Interrupted`, and its own import promise stays pending, as before.
+
+| file | change |
+|---|---|
+| `src/module/source.rs` | new `interrupted_module_error`, `drop_top_level_capability`, `abandon_interrupted` (an `evaluating-async` module, its cycle root and the modules waiting on it become evaluated with that error and no capability; nothing is called, so it works in the stopped turn) and `abandon_interrupted_module_body` |
+| `src/module/source.rs` | `SourceTextModule::evaluate`, abrupt completion: an uncatchable one caches `interrupted_module_error` on each stack module and drops the capability, then returns the stop; a stop of the `reject` call drops the capability. Normal completion: a stop of the `resolve` call drops the capability |
+| `src/module/source.rs` | `async_module_execution_fulfilled`: a stop of the module's `resolve` drops the capability and abandons the modules waiting on it; a stop in a waiting module's `execute`/`execute_async` (was an early return through `into_opaque`/`?`), or of its `resolve`, abandons it and every module not run yet |
+| `src/module/source.rs` | `async_module_execution_rejected`: a stop of the `reject` call drops the capability and still marks the waiting modules evaluated with the error; the first stop is returned |
+| `src/module/mod.rs` | re-exports `abandon_interrupted_module_body` to the VM |
+| `src/vm/opcode/await/mod.rs` | `Await` reactions: when the resumed body is a module's top level (its frame's code block is the module's) and the stop ends it, that module is abandoned |
+| `src/builtins/promise/mod.rs` | `NewPromiseReactionJob`: a reaction with no capability is the engine's own (script's `then` always has one); its handler is entered even in a stopped turn (`Vm::interrupt_exempt_once`), so the `Await` and `ExecuteAsyncModule` handlers can record the stop. Stopped at its entry instead, a module's body was never resumed and the module stayed `evaluating-async` |
+| `src/native_function/mod.rs` | a native call consumes `interrupt_exempt_once`: it then makes only the recursion and stack checks |
+| `src/vm/mod.rs` | `Vm::interrupt_exempt_once`; `check_runtime_limits` split into `check_interrupt` + `check_depth_limits` (unchanged checks); `Context::run` checks the interrupt on entry, so no bytecode runs in a stopped turn, even a body an engine reaction resumes: it fails as its first opcode would |
+| `src/vm/opcode/call/mod.rs`, `src/builtins/async_generator/mod.rs`, `src/object/builtins/jspromise.rs` | the other no-capability engine handlers (`import()`'s steps, the async generator's await-return, `JsPromise::await_native`) call `check_interrupt` first, so they behave as before: not entered in a stopped turn (a module whose `import()` was only queued stays linked and evaluates normally later) |
+
+One more operand-stack leak, which the executor below exposed:
+
+| file | change |
+|---|---|
+| `src/object/operations.rs`, `src/vm/mod.rs` | `JsObject::call`/`construct`: a call refused before its frame exists (the interrupt, or another runtime limit, at an ordinary function's entry) left `this`, the function and the arguments on the stack; they are now truncated away (`Stack::len`/`truncate`). A stopped turn refuses every job left in it this way, so a few hundred stopped turns filled the stack and every later script failed with "reached the maximum stack size" |
+
+The job executor matters: rustkit-js' `HostJobExecutor` runs every queued job
+of a stopped turn (each fails at its entry) and returns the first error, so
+the engine reactions above run and record the stop. Boa's default
+`SimpleJobExecutor` drops the whole queue at the first error; with it, a
+module suspended at a top-level `await` when the turn was stopped is never
+resumed. The tests use an executor with `HostJobExecutor`'s policy.
+
+**Tests** (`crates/rustkit-js/tests/vm_interrupt_promises.rs`): the hold's
+input (`leaf`/`mid`), with both modules imported in two later turns, their
+namespace awaited in an `async` function whose `catch` takes the error, and
+an unrelated turn after; a module stopped at its evaluation's `resolve`
+(namespace kept), through `import()` and `Module::evaluate`; top-level
+`await` stopped before the first `await`, in a resumed body (and the module
+over it), in `AsyncModuleExecutionFulfilled` for a plain and an async
+waiting module, and as the body settles; the stop moved across every job of a
+module's top-level `await` (16 positions, each imported twice later); that
+an engine reaction entered after the stop runs no script; and 1,000 stopped
+turns each refusing 40 queued jobs (fails at the 86th without the
+`JsObject::call` fix). The races now re-import every module of the previous
+iteration in a later turn (each settles) and require the leftover-job drain of a later turn to succeed (it
+accepted `Interrupted`, which was this defect). On the code before this patch
+the hold's test and the TLA tests fail (an import never settles); without the
+`interrupt_exempt_once` entry the job-position test and the TLA race fail the
+same way; without the `run` entry check the no-script test fails.
+
+**Not covered.** `Array.fromAsync` / `JsPromise::await_native`
+(`object/builtins/jspromise.rs`, around `JsPromise::resolve(value)?` and
+`Break(Err)`): an error there returns with the coroutine's frame still pushed
+and the stacks swapped. Only reachable with Boa's `experimental` feature,
+which HiWave does not enable (`Array.fromAsync` is undefined here); revisit
+before enabling it. Separately, upstream's `async_module_execution_fulfilled`
+passes `module`, not `m`, to `AsyncModuleExecutionRejected` when a waiting
+module throws (spec: `m`), leaving `m` `evaluating-async`; that is upstream
+behaviour for ordinary errors, not the interrupt's, and is left as is.
+
+**M1's guarantees still hold**, now with one more: once the stop has landed,
+no more bytecode runs in that turn (the `run` entry check; before, a later
+job's body without calls or loops could still run). The stop still never
+reaches a `catch` or `finally`, a pure spin still stops at its back-edges, and
+a word naming an ended turn still stops nothing.
+
 **Upgrading Boa.** Re-apply the marked lines to the new version, or drop this
 directory once upstream has an equivalent hook (to be offered upstream).

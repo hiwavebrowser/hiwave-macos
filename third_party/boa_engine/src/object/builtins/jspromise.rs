@@ -1242,6 +1242,9 @@ impl JsPromise {
             context.realm(),
             NativeFunction::from_copy_closure_with_captures(
                 |_this, args, captures, context| {
+                    // HIWAVE PATCH (interrupt): not entered in a stopped turn (see
+                    // `new_promise_reaction_job`, which lets engine reactions in).
+                    context.check_interrupt()?;
                     // a. Let prevContext be the running execution context.
                     // b. Suspend prevContext.
                     // c. Push asyncContext onto the execution context stack; asyncContext is now the running execution context.
@@ -1306,6 +1309,9 @@ impl JsPromise {
             context.realm(),
             NativeFunction::from_copy_closure_with_captures(
                 |_this, args, captures, context| {
+                    // HIWAVE PATCH (interrupt): not entered in a stopped turn (see
+                    // `new_promise_reaction_job`, which lets engine reactions in).
+                    context.check_interrupt()?;
                     // a. Let prevContext be the running execution context.
                     // b. Suspend prevContext.
                     // c. Push asyncContext onto the execution context stack; asyncContext is now the running execution context.

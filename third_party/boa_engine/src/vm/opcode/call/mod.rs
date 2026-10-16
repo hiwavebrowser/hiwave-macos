@@ -452,6 +452,9 @@ async fn load_dyn_import(
         context.borrow().realm(),
         NativeFunction::from_copy_closure_with_captures(
             |_, args, cap, context| {
+                // HIWAVE PATCH (interrupt): not entered in a stopped turn (see
+                // `new_promise_reaction_job`, which lets engine reactions in).
+                context.check_interrupt()?;
                 //     a. Perform ! Call(promiseCapability.[[Reject]], undefined, « reason »).
                 // HIWAVE PATCH (interrupt): `?`, not `.expect`: the interrupt can stop it.
                 cap.reject()
@@ -471,6 +474,9 @@ async fn load_dyn_import(
         context.borrow().realm(),
         NativeFunction::from_copy_closure_with_captures(
             |_, _, (module, cap, on_rejected), context| {
+                // HIWAVE PATCH (interrupt): not entered in a stopped turn (see
+                // `new_promise_reaction_job`, which lets engine reactions in).
+                context.check_interrupt()?;
                 // a. Let link be Completion(module.Link()).
                 // b. If link is an abrupt completion, then
                 if let Err(e) = module.link(context) {
@@ -492,6 +498,9 @@ async fn load_dyn_import(
                     context.realm(),
                     NativeFunction::from_copy_closure_with_captures(
                         |_, _, (module, cap), context| {
+                            // HIWAVE PATCH (interrupt): not entered in a stopped turn (see
+                            // `new_promise_reaction_job`, which lets engine reactions in).
+                            context.check_interrupt()?;
                             // i. Let namespace be GetModuleNamespace(module).
                             let namespace = module.namespace(context);
 

@@ -2655,15 +2655,28 @@ fn new_promise_reaction_job(
                 }
             },
             //   e. Else, let handlerResult be Completion(HostCallJobCallback(handler, undefined, « argument »)).
-            Some(handler) => match context.host_hooks().call_job_callback(
-                &handler,
-                &JsValue::undefined(),
-                std::slice::from_ref(&argument),
-                context,
-            ) {
-                Ok(v) => Ok(v),
-                Err(e) => Err(e.into_opaque(context)?),
-            },
+            Some(handler) => {
+                // HIWAVE PATCH (interrupt): a reaction with no capability is
+                // the engine's own (an `await` resuming its body, a module's
+                // async evaluation, `import()`'s steps; script's `then` always
+                // has one). Its handler is entered even in a stopped turn:
+                // stopped at its entry, it could not record the stop, and a
+                // module would stay evaluating for good, hanging every later
+                // import. The stop lands at the handler's next check instead.
+                context.vm.interrupt_exempt_once = promise_capability.is_none();
+                let result = context.host_hooks().call_job_callback(
+                    &handler,
+                    &JsValue::undefined(),
+                    std::slice::from_ref(&argument),
+                    context,
+                );
+                context.vm.interrupt_exempt_once = false;
+                // END HIWAVE PATCH
+                match result {
+                    Ok(v) => Ok(v),
+                    Err(e) => Err(e.into_opaque(context)?),
+                }
+            }
         };
 
         match promise_capability {

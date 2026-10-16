@@ -587,6 +587,9 @@ impl AsyncGenerator {
             context.realm(),
             NativeFunction::from_copy_closure_with_captures(
                 |_this, args, generator, context| {
+                    // HIWAVE PATCH (interrupt): not entered in a stopped turn (see
+                    // `new_promise_reaction_job`, which lets engine reactions in).
+                    context.check_interrupt()?;
                     // a. Assert: generator.[[AsyncGeneratorState]] is draining-queue.
                     assert_eq!(
                         generator.borrow().data().state,
@@ -618,6 +621,9 @@ impl AsyncGenerator {
             context.realm(),
             NativeFunction::from_copy_closure_with_captures(
                 |_this, args, generator, context| {
+                    // HIWAVE PATCH (interrupt): not entered in a stopped turn (see
+                    // `new_promise_reaction_job`, which lets engine reactions in).
+                    context.check_interrupt()?;
                     // a. Assert: generator.[[AsyncGeneratorState]] is draining-queue.
                     assert_eq!(
                         generator.borrow().data().state,

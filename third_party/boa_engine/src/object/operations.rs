@@ -437,6 +437,7 @@ impl JsObject {
         // NOTE(HalidOdat): For object's that are not callable we implement a special __call__ internal method
         //                  that throws on call.
 
+        let stack_len = context.vm.stack.len(); // HIWAVE PATCH (interrupt)
         context.vm.stack.push(this.clone()); // this
         context.vm.stack.push(self.clone()); // func
         let argument_count = args.len();
@@ -444,7 +445,22 @@ impl JsObject {
 
         // 3. Return ? F.[[Call]](V, argumentsList).
         let frame_index = context.vm.frames.len();
-        if self.__call__(argument_count).resolve(context)? {
+        // HIWAVE PATCH (interrupt): a call refused before its frame exists
+        // (the interrupt, or another runtime limit, at an ordinary
+        // function's entry) left `this`, the function and the arguments on
+        // the stack. A stopped turn refuses every job left in it, so they
+        // filled the stack until every later script failed.
+        let ready = match self.__call__(argument_count).resolve(context) {
+            Ok(ready) => ready,
+            Err(err) => {
+                if context.vm.frames.len() == frame_index {
+                    context.vm.stack.truncate(stack_len);
+                }
+                return Err(err);
+            }
+        };
+        // END HIWAVE PATCH
+        if ready {
             return Ok(context.vm.stack.pop());
         }
 
@@ -486,6 +502,7 @@ impl JsObject {
         // 1. If newTarget is not present, set newTarget to F.
         let new_target = new_target.unwrap_or(self);
 
+        let stack_len = context.vm.stack.len(); // HIWAVE PATCH (interrupt)
         context.vm.stack.push(JsValue::undefined());
         context.vm.stack.push(self.clone()); // func
         let argument_count = args.len();
@@ -496,7 +513,18 @@ impl JsObject {
         // 3. Return ? F.[[Construct]](argumentsList, newTarget).
         let frame_index = context.vm.frames.len();
 
-        if self.__construct__(argument_count).resolve(context)? {
+        // HIWAVE PATCH (interrupt): as in `call`.
+        let ready = match self.__construct__(argument_count).resolve(context) {
+            Ok(ready) => ready,
+            Err(err) => {
+                if context.vm.frames.len() == frame_index {
+                    context.vm.stack.truncate(stack_len);
+                }
+                return Err(err);
+            }
+        };
+        // END HIWAVE PATCH
+        if ready {
             let result = context.vm.stack.pop();
             return Ok(result
                 .as_object()

@@ -18,7 +18,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::collections::VecDeque;
+use std::future::Future;
+use std::task::{Poll, Waker};
+
 use boa_engine::error::{EngineError, RuntimeLimitError};
+use boa_engine::job::{GenericJob, Job, JobExecutor, NativeAsyncJob, PromiseJob};
 use boa_engine::module::MapModuleLoader;
 use boa_engine::{js_string, Context, JsError, JsResult, JsValue, Module, NativeFunction, Source};
 
@@ -39,6 +44,69 @@ fn arm(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::undefined())
 }
 
+/// The job policy of rustkit-js' `HostJobExecutor`: every queued job runs
+/// and the first error is returned. (Boa's default executor drops the whole
+/// queue at the first error, so in a stopped turn the engine's own reactions,
+/// such as the one resuming a module's top-level `await`, never ran and a
+/// later import of that module could wait for good.)
+#[derive(Default)]
+struct HostPolicyExecutor {
+    promise_jobs: RefCell<VecDeque<PromiseJob>>,
+    async_jobs: RefCell<VecDeque<NativeAsyncJob>>,
+    generic_jobs: RefCell<VecDeque<GenericJob>>,
+}
+
+impl JobExecutor for HostPolicyExecutor {
+    fn enqueue_job(self: Rc<Self>, job: Job, _: &mut Context) {
+        match job {
+            Job::PromiseJob(job) => self.promise_jobs.borrow_mut().push_back(job),
+            Job::AsyncJob(job) => self.async_jobs.borrow_mut().push_back(job),
+            Job::GenericJob(job) => self.generic_jobs.borrow_mut().push_back(job),
+            _ => {}
+        }
+    }
+
+    fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
+        let context = RefCell::new(context);
+        let mut first_error = None;
+        let mut note = |result: JsResult<JsValue>| {
+            if let Err(err) = result {
+                first_error.get_or_insert(err);
+            }
+        };
+        loop {
+            let mut progress = false;
+            let async_jobs = std::mem::take(&mut *self.async_jobs.borrow_mut());
+            for job in async_jobs {
+                progress = true;
+                // `MapModuleLoader` answers at once: one poll settles it.
+                let mut future = std::pin::pin!(job.call(&context));
+                match future
+                    .as_mut()
+                    .poll(&mut std::task::Context::from_waker(Waker::noop()))
+                {
+                    Poll::Ready(result) => note(result),
+                    Poll::Pending => panic!("an async job did not finish at once"),
+                }
+            }
+            let promise_jobs = std::mem::take(&mut *self.promise_jobs.borrow_mut());
+            for job in promise_jobs {
+                progress = true;
+                note(job.call(&mut context.borrow_mut()));
+            }
+            let generic_jobs = std::mem::take(&mut *self.generic_jobs.borrow_mut());
+            for job in generic_jobs {
+                progress = true;
+                note(job.call(&mut context.borrow_mut()));
+            }
+            if !progress {
+                break;
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
 struct Page {
     context: Context,
     word: Arc<AtomicU64>,
@@ -51,6 +119,7 @@ impl Page {
         let loader = Rc::new(MapModuleLoader::new());
         let mut context = Context::builder()
             .module_loader(loader.clone())
+            .job_executor(Rc::new(HostPolicyExecutor::default()))
             .build()
             .unwrap();
         let word = Arc::new(AtomicU64::new(0));
@@ -191,9 +260,11 @@ fn race(
         stopped += u64::from(result.is_err());
         assert_interrupt_or_ok(result, &format!("{name} #{i}"));
         // Whatever the stopped turn left queued may run now, in a turn the
-        // word does not name.
+        // word does not name: nothing in it may raise the old stop again.
         page.next_turn();
-        assert_interrupt_or_ok(page.context.run_jobs(), &format!("{name} #{i} drain"));
+        page.context
+            .run_jobs()
+            .unwrap_or_else(|e| panic!("{name} #{i} drain: a later turn failed: {e}"));
     }
     assert!(
         stopped > 0,
@@ -325,6 +396,9 @@ fn interrupt_during_a_successful_dynamic_imports_evaluation() {
         "successful import",
         800,
         |page, i| {
+            if i > 0 {
+                page.reimport_all(&format!("m-{}-", i - 1), 20);
+            }
             for k in 0..20 {
                 page.module(&format!("m-{i}-{k}"), "export let n = 0; for (let j = 0; j < 50; j++) { n += [j].map(function (v) { return v; })[0]; }");
             }
@@ -512,6 +586,9 @@ fn interrupt_during_a_modules_top_level_await() {
         "tla",
         800,
         |page, i| {
+            if i > 0 {
+                page.reimport_all(&format!("t-{}-", i - 1), 10);
+            }
             for k in 0..10 {
                 page.module(
                     &format!("t-{i}-{k}"),
@@ -567,4 +644,243 @@ fn a_page_stopped_thousands_of_times_keeps_working() {
         page.get("(function f(n) { return n === 0 ? 0 : 1 + f(n - 1); })(400)"),
         "400"
     );
+}
+
+impl Page {
+    /// In a new turn, `source` (an expression) as a promise, settled in that
+    /// same turn: "ok <value>" or "err <reason>". A promise still pending
+    /// once the turn's jobs ran fails the test: a later import must never
+    /// hang.
+    fn settle(&mut self, source: &str) -> String {
+        self.next_turn();
+        let script = format!(
+            r#"var settled = "pending";
+            Promise.resolve({source}).then(function (v) {{ settled = "ok " + v; }},
+                                           function (e) {{ settled = "err " + e; }});"#
+        );
+        self.turn(&script)
+            .unwrap_or_else(|e| panic!("`{source}` in a later turn failed: {e}"));
+        let settled = self.get("settled");
+        assert_ne!(settled, "pending", "`{source}` never settled");
+        settled
+    }
+}
+
+impl Page {
+    /// In a later turn, imports `{prefix}0` .. `{prefix}{count - 1}`, which
+    /// a raced turn may have stopped anywhere: each import settles, with the
+    /// namespace or the ordinary interrupted-module error.
+    fn reimport_all(&mut self, prefix: &str, count: u32) {
+        let settled = self.settle(&format!(
+            r#"Promise.all(Array.from({{ length: {count} }}, function (_, k) {{
+                return import('{prefix}' + k).then(function () {{ return 1; }}, function (e) {{
+                    if (e.message !== "module evaluation was interrupted") throw e;
+                    return 1;
+                }});
+            }})).then(function (r) {{ return r.length; }})"#
+        ));
+        assert_eq!(settled, format!("ok {count}"), "re-importing {prefix}*");
+    }
+}
+
+const INTERRUPTED_MODULE: &str = "err Error: module evaluation was interrupted";
+
+#[test]
+fn a_module_stopped_while_it_evaluates_does_not_poison_later_turns() {
+    // R1 HOLD @ 4c92f5b6: the stopped module kept `Interrupted` as its
+    // evaluation error and the stopped turn's capability, so every later
+    // import of it hung and one later turn failed with "the script was
+    // interrupted".
+    let mut page = Page::new();
+    page.module(
+        "leaf",
+        "export const v = 1; arm(); [1].map(function (x) { return x; });",
+    );
+    page.module("mid", "import { v } from 'leaf'; export const w = v + 1;");
+    assert_interrupted(page.turn("import('mid');"), "the stopped import");
+
+    // Two later turns import the stopped module (and the one under it):
+    // each settles with an ordinary, catchable error.
+    assert_eq!(page.settle("import('mid')"), INTERRUPTED_MODULE);
+    assert_eq!(page.settle("import('leaf')"), INTERRUPTED_MODULE);
+    assert_eq!(page.settle("import('mid')"), INTERRUPTED_MODULE);
+    // Awaiting its namespace: a `catch` takes it like any error.
+    assert_eq!(
+        page.settle(
+            "(async function () { try { var ns = await import('mid'); return ns.w; } catch (e) { return 'caught ' + e.message; } })()"
+        ),
+        "ok caught module evaluation was interrupted"
+    );
+    // The next unrelated turn runs normally.
+    page.assert_recovers("stopped module");
+
+    // Stopped after the body, at the evaluation's own `resolve`: the module
+    // evaluated, so later imports get its namespace.
+    page.module("tail-2", "export const y = 2; arm();");
+    assert_interrupt_or_ok(page.turn("import('tail-2');"), "after the body");
+    assert_eq!(
+        page.settle("import('tail-2').then(function (ns) { return ns.y; })"),
+        "ok 2"
+    );
+    assert_eq!(
+        page.settle("import('tail-2').then(function (ns) { return ns.y; })"),
+        "ok 2"
+    );
+    page.assert_recovers("stopped resolve");
+
+    // Through the embedder's API: the same module evaluated again later.
+    let module = Module::parse(
+        Source::from_bytes("export const e = 1; arm(); [1].map(function (x) { return x; });"),
+        None,
+        &mut page.context,
+    )
+    .unwrap();
+    let _ = module.load_link_evaluate(&mut page.context);
+    assert_interrupted(page.context.run_jobs(), "load_link_evaluate");
+    page.next_turn();
+    let promise = module
+        .evaluate(&mut page.context)
+        .expect("a later evaluate returns a promise");
+    page.context.run_jobs().expect("a later evaluate");
+    match promise.state() {
+        boa_engine::builtins::promise::PromiseState::Rejected(e) => assert_eq!(
+            e.to_string(&mut page.context)
+                .unwrap()
+                .to_std_string_escaped(),
+            "Error: module evaluation was interrupted"
+        ),
+        state => panic!("a later evaluate: {state:?}"),
+    }
+    page.assert_recovers("embedder evaluate");
+}
+
+#[test]
+fn a_module_stopped_around_top_level_await_does_not_poison_later_turns() {
+    let mut page = Page::new();
+    let import_twice = |page: &mut Page, name: &str, expect: &str| {
+        let ns = format!("import('{name}')");
+        assert_eq!(page.settle(&ns), expect, "{name}, first later import");
+        assert_eq!(page.settle(&ns), expect, "{name}, second later import");
+        page.assert_recovers(name);
+    };
+
+    // Before the first await.
+    page.module(
+        "tla-before-2",
+        "arm(); [1].map(function (v) { return v; }); await null; export const a = 1;",
+    );
+    assert_interrupt_or_ok(page.turn("import('tla-before-2');"), "before await");
+    import_twice(&mut page, "tla-before-2", INTERRUPTED_MODULE);
+
+    // Resumed from an await, then stopped.
+    page.module(
+        "tla-after-2",
+        "await null; arm(); for (;;) {} export const b = 1;",
+    );
+    page.module(
+        "over-tla-after",
+        "import { b } from 'tla-after-2'; export const c = b;",
+    );
+    assert_interrupted(page.turn("import('over-tla-after');"), "after await");
+    import_twice(&mut page, "tla-after-2", INTERRUPTED_MODULE);
+    import_twice(&mut page, "over-tla-after", INTERRUPTED_MODULE);
+
+    // A module run once its async dependency settled (AsyncModuleExecution
+    // Fulfilled), stopped in its body: plain, and with its own await.
+    page.module("dep", "await null; export const d = 1;");
+    page.module(
+        "after-dep",
+        "import { d } from 'dep'; arm(); [1].map(function (v) { return v; }); export const p = d;",
+    );
+    page.module(
+        "after-dep-tla",
+        "import { d } from 'dep'; arm(); [1].map(function (v) { return v; }); await null; export const q = d;",
+    );
+    page.module("top", "import { p } from 'after-dep'; export const t = p;");
+    assert_interrupted(page.turn("import('top');"), "after an async dependency");
+    import_twice(&mut page, "top", INTERRUPTED_MODULE);
+    import_twice(&mut page, "after-dep", INTERRUPTED_MODULE);
+    assert_interrupted(
+        page.turn("import('after-dep-tla');"),
+        "after an async dependency, with await",
+    );
+    import_twice(&mut page, "after-dep-tla", INTERRUPTED_MODULE);
+    // The dependency itself evaluated.
+    assert_eq!(
+        page.settle("import('dep').then(function (ns) { return ns.d; })"),
+        "ok 1"
+    );
+
+    // Resumed from an await, then stopped as its body settles its own
+    // promise: the async evaluation never completed, so it is an
+    // interrupted module too.
+    page.module("tla-tail", "await null; export const r = 3; arm();");
+    assert_interrupted(page.turn("import('tla-tail');"), "tla tail");
+    import_twice(&mut page, "tla-tail", INTERRUPTED_MODULE);
+}
+
+#[test]
+fn a_module_stopped_at_any_job_of_its_top_level_await_settles_later() {
+    // The stop lands on each job in turn: the module's own await reactions
+    // (an engine reaction, let in to record the stop), its evaluation's
+    // bookkeeping, or the page's job between them. Every later import
+    // settles, with the namespace or the interrupted-module error.
+    let mut page = Page::new();
+    for n in 0..16 {
+        page.next_turn();
+        let name = format!("tick-{n}");
+        page.module(
+            &name,
+            "let s = 0; for (let j = 0; j < 3; j++) { s += await j; } export { s };",
+        );
+        let chain = "p = p.then(function () {});".repeat(n);
+        let r = page.turn(&format!(
+            "import('{name}').catch(function () {{}}); var p = Promise.resolve(); {chain} p.then(function () {{ arm(); [1].map(function (x) {{ return x; }}); }});"
+        ));
+        assert_interrupt_or_ok(r, &name);
+        let import = format!("import('{name}').then(function (ns) {{ return ns.s; }})");
+        for _ in 0..2 {
+            let settled = page.settle(&import);
+            assert!(
+                settled == "ok 3" || settled == INTERRUPTED_MODULE,
+                "{name}: {settled}"
+            );
+        }
+    }
+    page.assert_recovers("tla ticks");
+}
+
+#[test]
+fn an_engine_reaction_let_in_after_the_stop_runs_no_script() {
+    // `new_promise_reaction_job` enters the engine's own reactions in a
+    // stopped turn so a module can record the stop; the body such a reaction
+    // resumes still runs nothing.
+    let mut page = Page::new();
+    let r = page.turn(
+        "var after = 0; Promise.resolve().then(function () { arm(); [0].map(function (v) { return v; }); }); (async function () { await null; after = 1; })(); (async function* () { await null; after = 2; })().next();",
+    );
+    assert_interrupted(r, "the stop");
+    page.next_turn();
+    assert_eq!(page.get("after"), "0", "a resumed body ran after the stop");
+    page.assert_recovers("engine reaction");
+}
+
+#[test]
+fn jobs_refused_in_a_stopped_turn_leave_nothing_on_the_stack() {
+    // The host runs every job left in a stopped turn, and each is refused at
+    // its handler's entry. `JsObject::call` used to leave `this`, the
+    // handler and its argument on the VM's stack each time; a few hundred
+    // stopped turns filled it and every later script failed with "reached
+    // the maximum stack size".
+    let mut page = Page::new();
+    for i in 0..1000 {
+        assert_interrupted(
+            page.turn(
+                "Promise.resolve().then(function () { arm(); [0].map(function (v) { return v; }); }); for (var k = 0; k < 20; k++) { Promise.resolve(k).then(function (v) { return v; }); new Promise(function (r) { r(); }).then(function () {}, function () {}); }",
+            ),
+            &format!("stop #{i}"),
+        );
+        page.next_turn();
+    }
+    page.assert_recovers("refused jobs");
 }

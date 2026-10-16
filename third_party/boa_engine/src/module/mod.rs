@@ -41,6 +41,7 @@ use boa_parser::{Parser, Source};
 pub use loader::*;
 pub use namespace::ModuleNamespace;
 use source::SourceTextModule;
+pub(crate) use source::abandon_interrupted_module_body; // HIWAVE PATCH (interrupt)
 pub use synthetic::{SyntheticModule, SyntheticModuleInitializer};
 
 use crate::bytecompiler::ToJsString;

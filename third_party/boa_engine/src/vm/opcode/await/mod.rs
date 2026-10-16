@@ -14,6 +14,23 @@ use crate::{
 use boa_gc::Gc;
 use std::{cell::Cell, ops::ControlFlow};
 
+// HIWAVE PATCH (interrupt)
+use crate::{
+    module::{Module, abandon_interrupted_module_body},
+    vm::{ActiveRunnable, CodeBlock},
+};
+
+/// HIWAVE PATCH (interrupt): the module and code block of a suspended async
+/// body run by a module, to abandon that module if the body is its top level
+/// and the interrupt stops it.
+fn module_body(r#gen: &GeneratorContext) -> Option<(Module, Gc<CodeBlock>)> {
+    let frame = r#gen.call_frame.as_ref()?;
+    match &frame.active_runnable {
+        Some(ActiveRunnable::Module(module)) => Some((module.clone(), frame.code_block.clone())),
+        _ => None,
+    }
+}
+
 /// `Await` implements the Opcode Operation for `Opcode::Await`
 ///
 /// Operation:
@@ -73,6 +90,10 @@ impl Await {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object()?;
 
+                    // HIWAVE PATCH (interrupt): the module whose top level this
+                    // is, if any (see below).
+                    let runnable = module_body(&r#gen);
+
                     // HIWAVE PATCH (interrupt): keep the completion (was dropped).
                     let completion = r#gen.resume(
                         Some(args.get_or_undefined(0).clone()),
@@ -90,9 +111,14 @@ impl Await {
                     // HIWAVE PATCH (interrupt): the body takes every catchable
                     // error itself; a runtime limit (the interrupt) unwinds
                     // past it and ends this job instead of being dropped.
+                    // A module's top level stopped this way is abandoned, so
+                    // later imports of it do not hang.
                     if let CompletionRecord::Throw(err) = completion
                         && !err.is_catchable()
                     {
+                        if let Some((module, code)) = runnable {
+                            abandon_interrupted_module_body(&module, &code);
+                        }
                         return Err(err);
                     }
                     // END HIWAVE PATCH
@@ -125,6 +151,10 @@ impl Await {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object()?;
 
+                    // HIWAVE PATCH (interrupt): the module whose top level this
+                    // is, if any (see below).
+                    let runnable = module_body(&r#gen);
+
                     // HIWAVE PATCH (interrupt): keep the completion (was dropped).
                     let completion = r#gen.resume(
                         Some(args.get_or_undefined(0).clone()),
@@ -142,9 +172,14 @@ impl Await {
                     // HIWAVE PATCH (interrupt): the body takes every catchable
                     // error itself; a runtime limit (the interrupt) unwinds
                     // past it and ends this job instead of being dropped.
+                    // A module's top level stopped this way is abandoned, so
+                    // later imports of it do not hang.
                     if let CompletionRecord::Throw(err) = completion
                         && !err.is_catchable()
                     {
+                        if let Some((module, code)) = runnable {
+                            abandon_interrupted_module_body(&module, &code);
+                        }
                         return Err(err);
                     }
                     // END HIWAVE PATCH
