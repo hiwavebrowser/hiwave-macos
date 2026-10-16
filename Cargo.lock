@@ -4269,6 +4269,7 @@ name = "parity-capture"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "png",
  "rustkit-engine",
  "rustkit-layout",
  "rustkit-viewhost",
@@ -5552,7 +5553,9 @@ dependencies = [
  "futures",
  "h2",
  "http",
+ "httpdate",
  "native-tls",
+ "psl",
  "rustls",
  "rustls-native-certs",
  "thiserror 1.0.69",

@@ -382,6 +382,17 @@ impl Drop for StageTimer {
             stages.add(self.stage, ms);
             c.set(stages);
         });
+        // The same figure goes to the window-hold breakdown (W-gate).
+        crate::wgate::add(
+            match self.stage {
+                Stage::Build => crate::wgate::HoldStage::Build,
+                Stage::Layout => crate::wgate::HoldStage::Layout,
+                Stage::DisplayList => crate::wgate::HoldStage::DisplayList,
+                Stage::Snapshot => crate::wgate::HoldStage::Snapshot,
+                Stage::Render => crate::wgate::HoldStage::Render,
+            },
+            ms,
+        );
     }
 }
 

@@ -57,6 +57,10 @@ pub struct RustKitView {
     history: RefCell<Vec<Url>>,
     /// Current position in navigation history.
     history_index: RefCell<usize>,
+    /// The next `wry_load_url` replaces the current history entry instead
+    /// of adding one: the page's script asked for a replace navigation
+    /// (`take_script_navigation`).
+    replace_next: Cell<bool>,
     /// The page clock: the instant the live loop has run the page's timers
     /// up to. Reset when a page finishes loading.
     live_clock: Cell<Instant>,
@@ -177,6 +181,7 @@ impl RustKitView {
             blocked_counter: counter_clone,
             history: RefCell::new(Vec::new()),
             history_index: RefCell::new(0),
+            replace_next: Cell::new(false),
             live_clock: Cell::new(Instant::now()),
             live_runtime: tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -296,6 +301,16 @@ impl RustKitView {
         }
     }
 
+    /// An input event for this view arrived at the queue at `at` with
+    /// sequence number `seq` (W-gate: input-to-present latency). Called
+    /// before the event is delivered.
+    pub fn note_input(&self, at: Instant, seq: u64) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            engine.note_input(view_id, rustkit_engine::InputMark { at, seq });
+        }
+    }
+
     /// Route OS keyboard delivery to the content view (first responder).
     pub fn grab_keyboard(&self) {
         let engine = self.engine.borrow();
@@ -343,10 +358,15 @@ impl RustKitView {
     /// Where the page's own script asked to go since the last call
     /// (`location.href = url`, `link.click()`, `form.submit()`, a submit
     /// from a timer). The caller navigates.
+    /// A reload, `location.replace()` or a meta refresh replaces the
+    /// current history entry when it is loaded, as in Chrome.
     pub fn take_script_navigation(&self) -> Option<String> {
         let mut engine = self.engine.borrow_mut();
-        self.view_id
-            .and_then(|view_id| engine.take_script_navigation(view_id))
+        let (url, replace) = self
+            .view_id
+            .and_then(|view_id| engine.take_script_navigation_with_replace(view_id))?;
+        self.replace_next.set(replace);
+        Some(url)
     }
 
     /// Whether a content element currently holds focus.
@@ -490,14 +510,19 @@ impl RustKitView {
         let mut history = self.history.borrow_mut();
         let mut index = self.history_index.borrow_mut();
 
-        // If we're in the middle of history (user went back), truncate forward history
-        if *index < history.len() {
-            history.truncate(*index + 1);
-        }
+        if self.replace_next.take() && *index < history.len() {
+            // A replace navigation from the page's script: same entry.
+            history[*index] = parsed;
+        } else {
+            // If we're in the middle of history (user went back), truncate forward history
+            if *index < history.len() {
+                history.truncate(*index + 1);
+            }
 
-        // Add new URL to history
-        history.push(parsed);
-        *index = history.len() - 1;
+            // Add new URL to history
+            history.push(parsed);
+            *index = history.len() - 1;
+        }
 
         drop(history);
         drop(index);

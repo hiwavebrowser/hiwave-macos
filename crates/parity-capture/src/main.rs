@@ -7,6 +7,8 @@
 //!
 //! Unlike hiwave-smoke, this does NOT require a display and can run in CI.
 
+mod inspector;
+
 use clap::Parser;
 use rustkit_engine::inspector::{CollectingSink, JsonLinesSink};
 use rustkit_engine::{EngineBuilder, EngineConfig, Inspector, InspectorSink, InspectorSummary, ScriptOutcome, ScriptRecord};
@@ -22,7 +24,7 @@ use url::Url;
 #[derive(Parser, Debug, Clone)]
 #[command(name = "parity-capture")]
 #[command(about = "Headless frame capture for parity testing")]
-#[command(group(clap::ArgGroup::new("source").required(true).args(["html_file", "url"])))]
+#[command(group(clap::ArgGroup::new("source").required(true).args(["html_file", "url", "inspector_dump"])))]
 struct Args {
     /// Path to HTML file to render
     #[arg(long)]
@@ -161,6 +163,37 @@ struct Args {
     #[arg(long)]
     diagnostics_keep_query: bool,
 
+    /// Run the page's inline classic scripts after loading an --html-file
+    /// (fixture mode otherwise runs none), as a host does for a built-in
+    /// page it loads directly.
+    #[arg(long)]
+    run_inline_scripts: bool,
+
+    /// Render the HiWave Inspector for this capture's diagnostics dump into
+    /// this directory: inspector.html (the page with its input),
+    /// inspector.png and inspector.display-list.json.
+    #[arg(long, value_name = "DIR")]
+    inspector_out: Option<String>,
+
+    /// Show this dump (as --dump-diagnostics writes it) in the Inspector
+    /// instead of capturing a page. Needs --inspector-out.
+    #[arg(long, value_name = "FILE", requires = "inspector_out", conflicts_with_all = ["html_file", "url"])]
+    inspector_dump: Option<String>,
+
+    /// An inspector_diff.py result (tools/inspector) for the Inspector to
+    /// mark and compare.
+    #[arg(long, value_name = "FILE", requires = "inspector_out")]
+    inspector_diff: Option<String>,
+
+    /// Select the captured page's element at viewport point `X,Y` (CSS px)
+    /// in the Inspector, as click-to-inspect will.
+    #[arg(long, value_name = "X,Y", value_parser = parse_point_arg, requires = "inspector_out", conflicts_with = "inspector_dump")]
+    inspector_select_at: Option<(f32, f32)>,
+
+    /// Inspector viewport, `WxH`.
+    #[arg(long, value_name = "WxH", value_parser = parse_size, default_value = "1280x800")]
+    inspector_size: (u32, u32),
+
     /// Enable verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -200,6 +233,9 @@ struct CaptureResult {
     diagnostics: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     diagnostics_path: Option<String>,
+    /// `--inspector-out`
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    inspector: Option<inspector::InspectorOutput>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -286,6 +322,7 @@ impl CaptureResult {
             event_summary: None,
             diagnostics: None,
             diagnostics_path: None,
+            inspector: None,
         }
     }
 
@@ -470,6 +507,17 @@ fn write_event_log(path: &str, records: &[rustkit_engine::InspectorRecord]) -> s
 fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Arc<Inspector>>) -> CaptureResult {
     let mut result = CaptureResult::new(args);
 
+    if let Some(ref dump_path) = args.inspector_dump {
+        let dump = match fs::read_to_string(dump_path) {
+            Ok(d) => d,
+            Err(e) => return result.failed("error", format!("Failed to read {dump_path}: {e}")),
+        };
+        if let Err(e) = write_inspector(args, &dump, None, &mut result) {
+            return result.failed("error", e);
+        }
+        return result;
+    }
+
     // Read HTML file (URL mode fetches inside the engine instead)
     let html_content = match &args.html_file {
         Some(html_file) => match fs::read_to_string(html_file) {
@@ -509,7 +557,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
     let engine_result = EngineBuilder::new()
         .with_config(capture_config(args, replay_proxy))
         .user_agent(user_agent)
-        .javascript_enabled(url.is_some() || args.actions.is_some())
+        .javascript_enabled(url.is_some() || args.actions.is_some() || args.run_inline_scripts)
         .build();
 
     let mut engine = match engine_result {
@@ -580,6 +628,11 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
     } else if let Some(html) = html_content {
         if let Err(e) = engine.load_html(view_id, &html) {
             return result.failed("error", format!("Failed to load HTML: {:?}", e));
+        }
+        if args.run_inline_scripts {
+            if let Err(e) = engine.run_inline_scripts(view_id) {
+                return result.failed("error", format!("Inline script failed: {:?}", e));
+            }
         }
     }
 
@@ -653,6 +706,27 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
 
     write_diagnostics(&engine, view_id, args, &mut result);
 
+    if args.inspector_out.is_some() {
+        let opts = rustkit_engine::DiagnosticsOptions {
+            include_url_query: args.diagnostics_keep_query,
+            max_elements: args.diagnostics_max_elements,
+        };
+        let dump = engine
+            .all_element_diagnostics(view_id, &opts)
+            .map_err(|e| format!("Failed to build diagnostics: {e:?}"))
+            .and_then(|d| serde_json::to_string(&d).map_err(|e| e.to_string()));
+        let select = match args.inspector_select_at {
+            Some((x, y)) => match engine.inspector_selection_at(view_id, x, y) {
+                Ok(sel) => sel.map(|s| s.node_id),
+                Err(e) => return result.failed("error", format!("Inspector selection failed: {e:?}")),
+            },
+            None => None,
+        };
+        if let Err(e) = dump.and_then(|d| write_inspector(args, &d, select, &mut result)) {
+            return result.failed("error", e);
+        }
+    }
+
     // Clean up
     let _ = engine.destroy_view(view_id);
 
@@ -707,6 +781,19 @@ fn write_diagnostics(
             Err(e) => error!("Failed to build diagnostics: {:?}", e),
         }
     }
+}
+
+/// `--inspector-out`: the Inspector for `dump`, with `--inspector-diff`.
+fn write_inspector(args: &Args, dump: &str, select: Option<usize>, result: &mut CaptureResult) -> Result<(), String> {
+    let Some(ref out) = args.inspector_out else { return Ok(()) };
+    let diff = match args.inspector_diff {
+        Some(ref p) => Some(fs::read_to_string(p).map_err(|e| format!("Failed to read {p}: {e}"))?),
+        None => None,
+    };
+    let written = inspector::render_inspector(dump, diff.as_deref(), select, args.inspector_size, Path::new(out))
+        .map_err(|e| format!("Inspector: {e}"))?;
+    result.inspector = Some(written);
+    Ok(())
 }
 
 /// `X,Y` in CSS px.
@@ -1487,6 +1574,56 @@ mod tests {
         assert!(!is_micro_suite_path(Path::new(
             "/repo/websuite/pages/blog/index.html"
         )));
+    }
+
+    #[test]
+    fn inspector_flags_parse() {
+        let argv = |extra: &[&str]| {
+            let mut v = vec!["parity-capture"];
+            v.extend_from_slice(extra);
+            Args::try_parse_from(v)
+        };
+        // A dump file is a source of its own; it needs an output directory
+        // and no page.
+        let a = argv(&["--inspector-dump", "d.json", "--inspector-out", "o"]).unwrap();
+        assert_eq!((a.inspector_dump.as_deref(), a.inspector_size), (Some("d.json"), (1280, 800)));
+        assert!(argv(&["--inspector-dump", "d.json"]).is_err());
+        assert!(argv(&["--inspector-dump", "d.json", "--inspector-out", "o", "--html-file", "x.html"]).is_err());
+        // A point selects in a captured page, not in a dump file.
+        assert!(argv(&["--inspector-dump", "d.json", "--inspector-out", "o", "--inspector-select-at", "1,2"]).is_err());
+        let b = parsed(&["--inspector-out", "o", "--inspector-select-at", "3,4.5", "--inspector-size", "800x600"]);
+        assert_eq!((b.inspector_select_at, b.inspector_size), (Some((3.0, 4.5)), (800, 600)));
+        assert!(Args::try_parse_from(["parity-capture", "--url", "https://e.test/", "--inspector-diff", "x"]).is_err());
+        assert!(!parsed(&[]).run_inline_scripts);
+        assert!(parsed(&["--run-inline-scripts"]).run_inline_scripts);
+    }
+
+    /// The fixture dump and diff (fixtures/inspector), rendered as the
+    /// parity case's page is.
+    #[test]
+    fn the_inspector_renders_a_dump_file_to_png_and_display_list() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/inspector");
+        let dump = fs::read_to_string(root.join("target.planted.dump.json")).unwrap();
+        let diff = fs::read_to_string(root.join("f2_planted.diff.json")).unwrap();
+        let out = std::env::temp_dir().join(format!("parity-capture-inspector-{}", std::process::id()));
+        let written = inspector::render_inspector(&dump, Some(&diff), None, (1280, 800), &out).unwrap();
+        assert_eq!((written.elements, written.truncated), (21, false));
+        assert_eq!(fs::read_to_string(&written.html_path).unwrap(), fs::read_to_string(root.join("inspector_page.html")).unwrap());
+        let png = fs::read(&written.png_path).unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!((u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap())), (1280, 800));
+        let list: serde_json::Value = serde_json::from_str(&fs::read_to_string(&written.display_list_path).unwrap()).unwrap();
+        let texts: Vec<&str> = list["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| (c["op"] == "text").then(|| c["text"].as_str().unwrap().trim()))
+            .collect();
+        for want in ["HiWave Inspector", "first difference", "Difference from Chromium (STYLE)", "flex-grow"] {
+            assert!(texts.contains(&want), "{want:?} not painted: {texts:?}");
+        }
+        assert!(!out.join("inspector.ppm").exists(), "the intermediate frame is removed");
+        let _ = fs::remove_dir_all(&out);
     }
 
     #[test]

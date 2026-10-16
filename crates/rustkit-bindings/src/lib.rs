@@ -713,6 +713,8 @@ impl DomBindings {
         runtime.evaluate_with_host(include_str!("web_mutation_observer.js"))?;
         // postMessage, MessageChannel/MessagePort, MessageEvent, requestIdleCallback (web_messaging.js).
         runtime.evaluate_with_host(include_str!("web_messaging.js"))?;
+        // Script elements script inserts are prepared and run (web_scripts.js).
+        runtime.evaluate_with_host(include_str!("web_scripts.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -778,7 +780,58 @@ impl DomBindings {
     /// (`location.href = url`, `location.assign/replace`, `link.click()`),
     /// oldest first. Nothing navigates until the embedder does.
     pub fn take_navigation_requests(&self) -> Vec<String> {
+        self.take_navigation_requests_with_replace().into_iter().map(|(url, _)| url).collect()
+    }
+
+    /// [`Self::take_navigation_requests`], each with whether it replaces the
+    /// current history entry (`location.replace`, a reload, the document's
+    /// own URL again, a meta refresh) instead of adding one.
+    pub fn take_navigation_requests_with_replace(&self) -> Vec<(String, bool)> {
         self.dom_host.borrow_mut().take_navigation_requests()
+    }
+
+    /// The external classic scripts script inserted since the last call, as
+    /// (the element's raw NodeId, absolute URL), oldest first. The engine
+    /// fetches each and runs it as that element's script
+    /// ([`Self::set_current_script`], then [`Self::fire_script_event`]).
+    pub fn take_inserted_scripts(&self) -> Vec<(usize, String)> {
+        self.dom_host.borrow_mut().take_inserted_scripts()
+    }
+
+    /// Back `document.cookie` with the browser's jar: `get` answers the
+    /// cookies script may read for this document, `set` stores one
+    /// assignment. Without this, `document.cookie` is a string that keeps
+    /// nothing (a document with no URL has no cookies).
+    pub fn set_cookie_access(
+        &self,
+        get: Box<dyn Fn() -> String>,
+        set: Box<dyn Fn(&str)>,
+    ) -> Result<(), BindingError> {
+        let mut runtime = self.runtime.borrow_mut();
+        runtime.register_host_function("__rustkit_cookie_get", 0, Box::new(move |_| JsValue::String(get())))?;
+        runtime.register_host_function(
+            "__rustkit_cookie_set",
+            1,
+            Box::new(move |args| {
+                if let Some(JsValue::String(value)) = args.first() {
+                    set(value);
+                }
+                JsValue::Null
+            }),
+        )?;
+        runtime.evaluate_script(
+            r#"(function (g) {
+                var get = g.__rustkit_cookie_get, set = g.__rustkit_cookie_set;
+                delete g.__rustkit_cookie_get;
+                delete g.__rustkit_cookie_set;
+                Object.defineProperty(g.document, 'cookie', {
+                    get: function () { return get(); },
+                    set: function (v) { set(String(v)); },
+                    configurable: true, enumerable: true
+                });
+            })(globalThis);"#,
+        )?;
+        Ok(())
     }
 
     /// Tell script what the user typed into a control, so its `value`

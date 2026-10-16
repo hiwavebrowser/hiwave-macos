@@ -49,6 +49,8 @@ pub(crate) struct Pump {
     pub requests: usize,
     /// Rounds that did work.
     pub rounds: u32,
+    /// What each inserted script did, for the script log.
+    pub records: Vec<crate::ScriptRecord>,
 }
 
 /// Run take / fetch / deliver rounds until the queue is empty or `rounds`
@@ -472,10 +474,11 @@ pub(crate) async fn pump_modules(
 }
 
 /// Take-fetch-deliver for everything a page can have waiting: script network
-/// requests (XHR, fetch) and the modules a dynamic `import()` asked for. One
-/// can start the other (a fetch callback calls `import()`, a module fetches),
-/// so the two alternate until neither found work, at most `ALTERNATIONS`
-/// times. Whatever is still waiting then is left for the next step's pump
+/// requests (XHR, fetch), the modules a dynamic `import()` asked for, and the
+/// scripts it inserted (with `scripts`, the referrer they are fetched with
+/// and the log their outcomes go to). One can start another (a fetch
+/// callback calls `import()`, an inserted script fetches), so they alternate
+/// until none found work, at most `ALTERNATIONS` times. Whatever is still waiting then is left for the next step's pump
 /// (the network side fails its stragglers itself).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump_all(
@@ -489,6 +492,7 @@ pub(crate) async fn pump_all(
     modules: (&ModuleFetchBudget, Option<&ScriptClock<'_>>),
     modules_fetched: &mut usize,
     inspector: &Arc<Inspector>,
+    scripts: Option<&crate::SubresourceReferrer>,
 ) -> Pump {
     const ALTERNATIONS: u32 = 4;
     let mut total = Pump::default();
@@ -501,15 +505,158 @@ pub(crate) async fn pump_all(
             }
             None => Pump::default(),
         };
-        let worked = net.requests + modules.requests;
-        total.poisoned |= net.poisoned || modules.poisoned;
+        let inserted = match scripts {
+            Some(referrer) => pump_inserted_scripts(bindings, loader, referrer, deadline, inspector).await,
+            None => Pump::default(),
+        };
+        let worked = net.requests + modules.requests + inserted.requests;
+        total.poisoned |= net.poisoned || modules.poisoned || inserted.poisoned;
         total.threw.extend(net.threw);
         total.threw.extend(modules.threw);
+        total.threw.extend(inserted.threw);
+        total.records.extend(inserted.records);
         total.requests += worked;
-        total.rounds += net.rounds + modules.rounds;
+        total.rounds += net.rounds + modules.rounds + inserted.rounds;
         if total.poisoned || worked == 0 {
             break;
         }
     }
     total
+}
+
+/// Deepest chain of inserted scripts followed in one pump (each round
+/// fetches what the previous round's scripts inserted).
+const MAX_INSERTED_SCRIPT_ROUNDS: u32 = 16;
+
+/// Fetch and run the external classic scripts the page inserted
+/// (`web_scripts.js`), round by round, until it inserts no more. Each is
+/// fetched as a parser-inserted script is (the page's referrer, the script
+/// destination the shield classifies by, the loader's cookies), never
+/// through page script, and run as its element's script: `currentScript`
+/// is the element, then the element hears `load`, or `error` when the fetch
+/// failed. A script not fetched by `deadline` is over budget and its
+/// element hears neither. What each did is in the pump's `records`.
+pub(crate) async fn pump_inserted_scripts(
+    bindings: &DomBindings,
+    loader: &ResourceLoader,
+    referrer: &crate::SubresourceReferrer,
+    deadline: tokio::time::Instant,
+    inspector: &Arc<Inspector>,
+) -> Pump {
+    use crate::{EngineFailure, FetchFailure, ScriptOutcome, ScriptRecord};
+    let mut out = Pump::default();
+    for _ in 0..MAX_INSERTED_SCRIPT_ROUNDS {
+        let Ok(scripts) = catch_unwind(AssertUnwindSafe(|| bindings.take_inserted_scripts())) else {
+            out.poisoned = true;
+            return out;
+        };
+        if scripts.is_empty() {
+            return out;
+        }
+        out.rounds += 1;
+        out.requests += scripts.len();
+        let fetched = futures::future::join_all(scripts.iter().map(|(_, url)| async move {
+            let url = Url::parse(url).map_err(|_| ScriptOutcome::Skipped("unparseable src"))?;
+            let guard = inspector.begin_request(&url, "GET", ResourceType::Script, Some("script"));
+            let fetch = async {
+                match loader.fetch(referrer.get_for(url, RequestDestination::Script)).await {
+                    Ok(response) if response.ok() => {
+                        let received = guard.map(|g| g.received(&response));
+                        match response.text().await {
+                            Ok(text) => {
+                                if let Some(received) = received {
+                                    received.read(text.len());
+                                }
+                                Ok(text)
+                            }
+                            Err(e) => {
+                                if let Some(received) = received {
+                                    received.fail(FailureStage::Decode, "body is not UTF-8");
+                                }
+                                Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(format!("{e}"))))
+                            }
+                        }
+                    }
+                    Ok(response) => {
+                        if let Some(guard) = guard {
+                            guard.received(&response).unread();
+                        }
+                        Err(ScriptOutcome::FetchFailed(FetchFailure::Status(response.status.as_u16())))
+                    }
+                    Err(e) => {
+                        inspector::fail_net(guard, &e);
+                        Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(format!("{e}"))))
+                    }
+                }
+            };
+            tokio::time::timeout_at(deadline, fetch).await.unwrap_or(Err(ScriptOutcome::OverBudget))
+        }))
+        .await;
+
+        // Run in the order the page inserted them.
+        for ((node, url), result) in scripts.into_iter().zip(fetched) {
+            let mut record = ScriptRecord { source: url, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
+            let text = match result {
+                Ok(text) if tokio::time::Instant::now() >= deadline => {
+                    record.bytes = text.len();
+                    Err(ScriptOutcome::OverBudget)
+                }
+                Ok(text) if text.len() > crate::MAX_PAGE_SCRIPT_BYTES => {
+                    record.bytes = text.len();
+                    Err(ScriptOutcome::Skipped("too large to run inside the script budget"))
+                }
+                other => other,
+            };
+            let event = match text {
+                Err(outcome) => {
+                    let event = matches!(outcome, ScriptOutcome::FetchFailed(_)).then_some("error");
+                    record.outcome = outcome;
+                    event
+                }
+                Ok(text) => {
+                    record.bytes = text.len();
+                    // Named like a parser-inserted external script, not by
+                    // its URL (which would become its imports' base).
+                    let name = format!("inserted#{node}");
+                    inspector.alias_script(&name, &record.source);
+                    let started = std::time::Instant::now();
+                    let _ = bindings.set_current_script(Some(node));
+                    let ran = catch_unwind(AssertUnwindSafe(|| bindings.evaluate_named(&text, &name)));
+                    let _ = bindings.set_current_script(None);
+                    record.elapsed_ms = started.elapsed().as_millis() as u64;
+                    record.outcome = match ran {
+                        Err(_) => ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                        Ok(Ok(_)) => ScriptOutcome::Ran,
+                        Ok(Err(e)) => {
+                            let message = e.to_string();
+                            ScriptOutcome::Threw(
+                                message
+                                    .strip_prefix("JS error: Execution error: ")
+                                    .map(str::to_string)
+                                    .unwrap_or(message),
+                            )
+                        }
+                    };
+                    if bindings.take_deadline_hit() {
+                        crate::log_script_stopped(&record.source, record.elapsed_ms, bindings.take_deadline_overrun());
+                        record.outcome = ScriptOutcome::OverBudget;
+                    }
+                    // Run, thrown or not, the element hears `load`.
+                    matches!(record.outcome, ScriptOutcome::Ran | ScriptOutcome::Threw(_)).then_some("load")
+                }
+            };
+            let poisoned = record.outcome == ScriptOutcome::EngineFailed(EngineFailure::Panic);
+            out.records.push(record);
+            if poisoned {
+                out.poisoned = true;
+                return out;
+            }
+            if let Some(event) = event {
+                if let Err(e) = bindings.fire_script_event(node, event) {
+                    out.threw.push(e.to_string());
+                }
+            }
+        }
+    }
+    out
 }

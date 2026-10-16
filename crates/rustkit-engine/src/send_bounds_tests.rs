@@ -36,3 +36,12 @@ fn the_shared_loaders_can_be_shared_across_threads() {
 fn a_presented_frame_record_carries_nothing_page_owned() {
     assert_send_sync::<super::PresentedFrame>();
 }
+
+/// The commit itself (second M3 PR): what a page thread will send to the
+/// window thread at M4. An `Rc`, a reference or a page-owned handle in
+/// it is a compile error here.
+#[test]
+fn a_frame_commit_can_be_sent_to_the_window_thread() {
+    assert_send_sync::<super::FrameCommit>();
+    assert_send_sync::<super::InputMark>();
+}

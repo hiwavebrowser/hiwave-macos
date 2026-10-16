@@ -44,7 +44,7 @@ must name that SHA. If HEAD moves while you wait on CI, re-record and re-check.
 
 Treat these pull_request checks as required (must be SUCCESS, not pending):
 
-- `audit`, `f1-test-compile`, `selector-key`, `script-guards`, `unit-suites`
+- `audit`, `f1-test-compile`, `selector-key`, `script-guards`, `unit-suites`, `render-suites`
 - `pr-swarm` (0–3), `pr-aggregate`
 
 Skipped on PRs and **not** failures: `nightly-swarm`, `nightly-aggregate`,
