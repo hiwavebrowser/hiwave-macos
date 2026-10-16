@@ -75,6 +75,10 @@
         for (var i = 0; i < metas.length; i++) {
             var equiv = metas[i].getAttribute('http-equiv');
             if (!equiv || equiv.trim().toLowerCase() !== 'refresh') continue;
+            // Scripting is on, so a `<noscript>`'s content is text in a
+            // browser, not a meta: its refresh (a challenge page's way to
+            // the no-JavaScript fallback) is not one.
+            if (metas[i].closest('noscript')) continue;
             var refresh = parseRefresh(metas[i].getAttribute('content') || '');
             if (!refresh) continue;
             var target;

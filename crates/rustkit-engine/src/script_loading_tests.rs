@@ -11,7 +11,7 @@
 //! fetched and run: whatever made the element, however its `src` was set,
 //! wherever and however it went into the document.
 
-use super::error_page_script_tests::{serve, text, Server};
+use super::error_page_script_tests::{engine, serve, text, Server};
 use super::*;
 use std::sync::Mutex;
 
@@ -115,5 +115,157 @@ import('data:text/plain,export default 1').then(function () { log.push('plain mo
     let data: Vec<String> = intercepted.lock().unwrap().iter().filter(|u| u.starts_with("data:")).cloned().collect();
     assert!(data.is_empty(), "data: scripts reached the interceptor: {data:?}");
     assert_eq!(paths(&server), vec!["/"], "no data: script is a request");
+}
+
+/// A Cloudflare-style managed challenge: a 403 (`cf-mitigated: challenge`)
+/// whose inline script sets `window._cf_chl_opt`, rewrites the URL with
+/// `history.replaceState`, then inserts the orchestrating script. Each case
+/// inserts it a different way; in a browser every one of them fetches it.
+/// `{ray}` is the case's number, so the request says which case asked.
+const INSERTIONS: &[(&str, &str)] = &[
+    (
+        "createElement, .src, onload, getElementsByTagName('head')[0].appendChild",
+        "var cpo = document.createElement('script');\
+         cpo.src = '/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1?ray={ray}';\
+         window._cf_chl_opt.cOgUHash = location.hash === '' && location.href.indexOf('#') !== -1 ? '#' : location.hash;\
+         window._cf_chl_opt.cOgUQuery = location.search === '' && location.href.slice(0, location.href.length - window._cf_chl_opt.cOgUHash.length).indexOf('?') !== -1 ? '?' : location.search;\
+         if (window.history && window.history.replaceState) {\
+           var ogU = location.pathname + window._cf_chl_opt.cOgUQuery + window._cf_chl_opt.cOgUHash;\
+           history.replaceState(null, null, \"\\/p\\/{ray}?__cf_chl_rt_tk=tok-1700000000-1.0.1.1-abc\" + window._cf_chl_opt.cOgUHash);\
+           cpo.onload = function () { history.replaceState(null, null, ogU); };\
+         }\
+         document.getElementsByTagName('head')[0].appendChild(cpo);",
+    ),
+    (
+        "setAttribute('src'), async, nonce, document.head.append",
+        "var s = document.createElement('script'); s.setAttribute('src', '/orchestrate?ray={ray}');\
+         s.async = true; s.setAttribute('nonce', 'abc123'); s.nonce = 'abc123'; document.head.append(s);",
+    ),
+    (
+        "currentScript.parentNode.insertBefore(s, currentScript)",
+        "var s = document.createElement('script'); s.src = '/orchestrate?ray={ray}';\
+         var me = document.currentScript; me.parentNode.insertBefore(s, me);",
+    ),
+    (
+        "currentScript.after(s)",
+        "var s = document.createElement('script'); s.src = '/orchestrate?ray={ray}'; document.currentScript.after(s);",
+    ),
+    (
+        "insertAdjacentElement('afterend') on a specific element",
+        "var s = document.createElement('script'); s.src = '/orchestrate?ray={ray}';\
+         document.getElementById('challenge-body-text').insertAdjacentElement('afterend', s);",
+    ),
+    (
+        "defer, document.body.prepend",
+        "var s = document.createElement('script'); s.defer = true; s.src = '/orchestrate?ray={ray}'; document.body.prepend(s);",
+    ),
+    (
+        "replaceChild for a placeholder element",
+        "var s = document.createElement('script'); s.src = '/orchestrate?ray={ray}';\
+         var p = document.getElementById('slot'); p.parentNode.replaceChild(s, p);",
+    ),
+    (
+        "inserted empty, src set once connected",
+        "var s = document.createElement('script'); document.head.appendChild(s); s.src = '/orchestrate?ray={ray}';",
+    ),
+    (
+        "in a DocumentFragment, fragment appended",
+        "var f = document.createDocumentFragment(); var s = document.createElement('script');\
+         s.src = '/orchestrate?ray={ray}'; f.appendChild(s); document.body.appendChild(f);",
+    ),
+    (
+        "createElementNS(XHTML, 'script')",
+        "var s = document.createElementNS('http://www.w3.org/1999/xhtml', 'script');\
+         s.src = '/orchestrate?ray={ray}'; document.head.appendChild(s);",
+    ),
+    (
+        "cloneNode of a script not yet inserted",
+        "var t = document.createElement('script'); t.src = '/orchestrate?ray={ray}';\
+         document.head.appendChild(t.cloneNode(true));",
+    ),
+];
+
+/// A `<noscript>` meta refresh to the no-JavaScript fallback: with
+/// scripting on it is text, not a refresh.
+const NOSCRIPT: usize = 1000;
+
+fn challenge(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+    if path.starts_with("/cdn-cgi/") || path == "/orchestrate" {
+        return (
+            200,
+            "text/javascript",
+            vec![],
+            "window.orchestrated = (window.orchestrated || 0) + 1; window.orchestratedBy = document.currentScript && document.currentScript.src;".into(),
+        );
+    }
+    if path == "/nojs" {
+        return (200, "text/html", vec![], "<title>no js</title>".into());
+    }
+    let Some(case) = path.strip_prefix("/p/").and_then(|n| n.parse::<usize>().ok()) else {
+        return (404, "text/plain", vec![], "".into());
+    };
+    let (script, noscript) = if case == NOSCRIPT {
+        (INSERTIONS[0].1, r#"<noscript><meta http-equiv="refresh" content="0; url=/nojs"></noscript>"#)
+    } else {
+        (INSERTIONS[case].1, "")
+    };
+    let body = format!(
+        r#"<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"><meta name="robots" content="noindex,nofollow">
+<meta name="viewport" content="width=device-width,initial-scale=1">{noscript}<meta http-equiv="refresh" content="360"></head>
+<body><div class="main-wrapper" role="main"><div class="main-content"><h1>example.test</h1>
+<p id="challenge-body-text">Verifying you are human.</p><span id="slot"></span>
+<noscript><div class="h2"><span id="challenge-error-text">Enable JavaScript and cookies to continue</span></div></noscript></div></div>
+<script nonce="abc123">(function(){{window._cf_chl_opt = {{cvId: '3', cZone: 'example.test', cType: 'managed', cRay: '{case}', cH: 'h', cFPWv: 'b'}};{script}}}());</script>
+</body></html>"#,
+        script = script.replace("{ray}", &case.to_string()),
+    );
+    // A &'static header list: the handler's signature.
+    (403, "text/html", vec![("cf-mitigated", "challenge")], body)
+}
+
+/// Every insertion above fetches the orchestrating script once and runs it
+/// as the element's script; a `<noscript>` refresh is not a navigation.
+#[test]
+fn a_challenge_page_fetches_the_script_it_inserts_however_it_inserts_it() {
+    let server = serve(challenge);
+    let mut failures = Vec::new();
+    let cases = (0..INSERTIONS.len()).chain([NOSCRIPT]);
+    for case in cases {
+        let name = INSERTIONS.get(case).map(|c| c.0).unwrap_or("<noscript><meta refresh> beside the real pattern");
+        let (mut engine, view, rt) = engine();
+        let before = server.requests().len();
+        rt.block_on(engine.load_url(view, server.url(&format!("/p/{case}")))).expect("load");
+        rt.block_on(engine.pump_live(view, 100));
+        let fetched: Vec<String> =
+            server.requests()[before..].iter().map(|(p, _)| p.clone()).filter(|p| !p.starts_with("/p/")).collect();
+        let ran = text(&mut engine, view, "String(window.orchestrated)");
+        let nav = engine.take_script_navigation(view);
+        let fetched_ok = fetched.len() == 1 && fetched[0].ends_with(&format!("ray={case}"));
+        let nav_ok = nav.is_none();
+        if !(fetched_ok && ran == r#"String("1")"# && nav_ok) {
+            failures.push(format!("{name}: fetched {fetched:?}, orchestrated {ran}, navigation {nav:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "insertions that did not load:\n{}", failures.join("\n"));
+}
+
+/// `innerHTML` never runs the scripts it parses, in a browser or here.
+#[test]
+fn a_script_set_through_inner_html_is_not_fetched() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/" => page(
+                r#"<div id="d"></div><script>document.getElementById('d').innerHTML = '<script src="/never.js"><\/script>';</script>"#,
+            ),
+            _ => (200, "text/javascript", vec![], "window.never = 1;".into()),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = engine();
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    rt.block_on(engine.pump_live(view, 100));
+    assert_eq!(paths(&server), vec!["/"]);
+    assert_eq!(text(&mut engine, view, "String(window.never)"), r#"String("undefined")"#);
 }
 
