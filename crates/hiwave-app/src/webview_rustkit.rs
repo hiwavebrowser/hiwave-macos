@@ -296,6 +296,16 @@ impl RustKitView {
         }
     }
 
+    /// An input event for this view arrived at the queue at `at` with
+    /// sequence number `seq` (W-gate: input-to-present latency). Called
+    /// before the event is delivered.
+    pub fn note_input(&self, at: Instant, seq: u64) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            engine.note_input(view_id, rustkit_engine::InputMark { at, seq });
+        }
+    }
+
     /// Route OS keyboard delivery to the content view (first responder).
     pub fn grab_keyboard(&self) {
         let engine = self.engine.borrow();

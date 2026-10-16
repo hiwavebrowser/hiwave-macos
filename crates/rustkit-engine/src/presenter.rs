@@ -12,11 +12,24 @@
 //! makes the hand-over a `FrameCommit` and gives the presenter its own
 //! latest-commit-per-view store, which is what a page thread (M4) needs.
 //!
-//! Bodies are moved from `lib.rs` as they were, so the diff of this PR is
-//! read as a move. Where a body read a `ViewState` field, the field is now
-//! an argument.
+//! Bodies are moved from `lib.rs` as they were, so the diff of the first
+//! PR is read as a move. Where a body read a `ViewState` field, the field
+//! is now an argument.
+//!
+//! Second PR: the hand-over is a [`FrameCommit`], an immutable record the
+//! page side builds when its frame changes (a new display list, a new
+//! scroll offset) and the presenter keeps as the newest commit per view
+//! (`THREAD_OWNERSHIP_2026-10.md` §3 option A, "How a frame gets to the
+//! screen"; threads plan invariant 4). `present` draws a view's latest
+//! commit and nothing else: it never reads the page's `ViewState`, so at
+//! M4 the commit can arrive over a channel from a page thread and the
+//! window thread keeps drawing the last frame it was given while the
+//! page is busy. Everything a commit holds is `Send + Sync`
+//! (`send_bounds_tests`). The W-gate log (`wgate.rs`) times the
+//! presenter's own stages and reports input-to-present latency here.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use rustkit_compositor::Compositor;
 use rustkit_image::ImageManager;
@@ -25,24 +38,44 @@ use rustkit_renderer::{RenderStats, Renderer};
 use rustkit_viewhost::{Bounds, ViewHost, ViewHostTrait, ViewId};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use rustkit_viewhost::WindowHandle;
-use tracing::{info, trace, warn};
+use tracing::{debug, info, trace, warn};
 use url::Url;
 
 #[cfg(windows)]
 use windows::Win32::Foundation::HWND;
 
+use super::wgate::{self, HoldStage, InputLatency, InputMark};
 use super::{EngineError, EngineViewId, PresentedFrame};
 
-/// What one frame is drawn from. The page side fills it from its
-/// `ViewState`; the presenter reads nothing else of the view.
-pub(crate) struct Frame<'a> {
-    pub viewhost_id: ViewId,
-    /// A headless view draws to its texture and presents nothing.
-    pub is_headless: bool,
-    pub display_list: Option<&'a DisplayList>,
-    /// `ViewState::frame_generation` of `display_list`.
+/// One frame, as the page side hands it over: everything the presenter
+/// needs to draw it, and nothing the page side can change afterwards.
+/// The display list is shared by `Arc` (the page keeps its own handle for
+/// exports and hit tests); a commit holds it alive after the page has
+/// moved on, so the window can keep drawing the last frame of a page
+/// that is mid-relayout or replaced (invariant 11 in part: images, glyph
+/// runs and SVGs are the R1 audit's).
+#[derive(Debug, Clone)]
+pub struct FrameCommit {
+    /// `ViewState::frame_generation` of `list`: counts the display lists
+    /// the view has been given.
     pub generation: u64,
+    /// `ViewState::nav_id` (M3b) of the document `list` was built from: a
+    /// commit from a navigation the page has since left is still drawable,
+    /// and still named.
+    pub nav_generation: u64,
+    /// `None` before the view's first layout: the background is drawn.
+    pub list: Option<Arc<DisplayList>>,
+    /// The scroll offset the frame is drawn at, in CSS pixels.
     pub scroll_offset: (f32, f32),
+    /// The largest offset the page allows (`ViewState::max_scroll_offset`),
+    /// so a presenter-side scroll (M4b) can clamp without asking the page.
+    pub max_scroll_offset: (f32, f32),
+    /// The viewport the list was laid out for, in CSS pixels (0 x 0 before
+    /// the first layout).
+    pub laid_out_for: (u32, u32),
+    /// The earliest input the page took since its last commit, for the
+    /// input-to-present log.
+    pub input: Option<InputMark>,
 }
 
 /// The window thread's half of the engine: every NSView/HWND, every GPU
@@ -51,6 +84,10 @@ pub(crate) struct Presenter {
     viewhost: ViewHost,
     compositor: Compositor,
     renderer: Option<Renderer>,
+    /// The newest commit of each view: what `present` draws.
+    commits: HashMap<EngineViewId, FrameCommit>,
+    /// Input-to-present samples (W-gate).
+    latency: InputLatency,
     /// Views whose most recent render attempt failed. A view entering this
     /// set logs one `warn!`; leaving it logs recovery. Without this, a
     /// persistently failing render (e.g. a wedged surface) freezes the
@@ -97,6 +134,8 @@ impl Presenter {
             viewhost,
             compositor,
             renderer: Some(renderer),
+            commits: HashMap::new(),
+            latency: InputLatency::default(),
             render_failing: HashSet::new(),
             background_color,
             #[cfg(test)]
@@ -112,10 +151,32 @@ impl Presenter {
             viewhost: ViewHost::new(),
             compositor,
             renderer: None,
+            commits: HashMap::new(),
+            latency: InputLatency::default(),
             render_failing: HashSet::new(),
             background_color: super::EngineConfig::default().background_color,
             images_uploaded: 0,
         }
+    }
+
+    // ----- commits -------------------------------------------------------
+
+    /// Take `commit` as the newest frame of view `id`; the one before it
+    /// is dropped (with the last `Arc` to its list, when the page side has
+    /// moved on too).
+    pub(crate) fn commit(&mut self, id: EngineViewId, commit: FrameCommit) {
+        self.commits.insert(id, commit);
+    }
+
+    /// The newest commit of view `id`, if it has had one.
+    pub(crate) fn latest(&self, id: EngineViewId) -> Option<&FrameCommit> {
+        self.commits.get(&id)
+    }
+
+    /// Input-to-present samples recorded so far (tests).
+    #[cfg(test)]
+    pub(crate) fn latency_samples(&self) -> u64 {
+        self.latency.samples
     }
 
     // ----- views and surfaces -------------------------------------------
@@ -181,6 +242,7 @@ impl Presenter {
     /// Drop a view's surface and host view, and forget its render state.
     pub(crate) fn destroy_view(&mut self, id: EngineViewId, viewhost_id: ViewId) {
         self.render_failing.remove(&id);
+        self.commits.remove(&id);
 
         // Destroy compositor surface
         let _ = self.compositor.destroy_surface(viewhost_id);
@@ -297,27 +359,39 @@ impl Presenter {
         }
     }
 
-    /// Draw one frame: upload the images its display list names, execute
-    /// the list (scrolled, for a window view) and present. Returns what
-    /// the frame was drawn from, for `Engine::frame_is_current`; `None`
-    /// only from the no-renderer fallback of a window view, which drew the
-    /// background and recorded nothing before this module existed (there is
-    /// always a renderer, so that arm is dead; kept as it was).
+    /// Draw view `id`'s newest commit: upload the images its display list
+    /// names, execute the list (scrolled, for a window view) and present.
+    /// Returns what the frame was drawn from, for `Engine::frame_is_current`;
+    /// `None` only from the no-renderer fallback of a window view, which
+    /// drew the background and recorded nothing before this module existed
+    /// (there is always a renderer, so that arm is dead; kept as it was).
+    /// A view with no commit yet draws its background.
+    ///
+    /// `viewhost_id` and `is_headless` are the view's surface, which the
+    /// presenter owns; nothing of the page's state is read here.
     ///
     /// Was the body of `Engine::render` after its view reads.
     pub(crate) fn present(
         &mut self,
         id: EngineViewId,
-        frame: Frame<'_>,
+        viewhost_id: ViewId,
+        is_headless: bool,
         images: &ImageManager,
     ) -> Result<Option<PresentedFrame>, EngineError> {
-        let Frame {
-            viewhost_id,
-            is_headless,
-            display_list,
-            generation,
-            scroll_offset,
-        } = frame;
+        // The commit is the presenter's own; it is cloned out (an `Arc`
+        // and a few words) so the draw can borrow the renderer mutably.
+        let commit = self.commits.get(&id).cloned().unwrap_or(FrameCommit {
+            generation: 0,
+            nav_generation: 0,
+            list: None,
+            scroll_offset: (0.0, 0.0),
+            max_scroll_offset: (0.0, 0.0),
+            laid_out_for: (0, 0),
+            input: None,
+        });
+        let display_list: Option<&DisplayList> = commit.list.as_deref();
+        let generation = commit.generation;
+        let scroll_offset = commit.scroll_offset;
         let cmd_count = display_list.map(|dl| dl.commands.len()).unwrap_or(0);
 
         trace!(
@@ -342,6 +416,7 @@ impl Presenter {
 
         // What this frame is drawn from, kept when it has been presented.
         let mut missing_images = Vec::new();
+        let upload_time = wgate::time_stage(HoldStage::Execute);
 
         // Upload images from cache to renderer before drawing
         if let Some(display_list) = display_list {
@@ -354,6 +429,7 @@ impl Presenter {
             missing_images,
             at: std::time::Instant::now(),
         };
+        drop(upload_time);
 
         // Render based on whether view is headless or not
         if is_headless {
@@ -364,6 +440,7 @@ impl Presenter {
                     .get_headless_texture_view(viewhost_id)
                     .map_err(|e| EngineError::RenderError(e.to_string()))?
             };
+            let _execute_time = wgate::time_stage(HoldStage::Execute);
 
             let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
             if let Some(renderer) = &mut self.renderer {
@@ -379,12 +456,14 @@ impl Presenter {
             // No present() needed for headless - texture is already updated
         } else {
             // Regular surface rendering path
+            let acquire_time = wgate::time_stage(HoldStage::Acquire);
             let (output, texture_view) = {
                 let _texture_span = tracing::debug_span!("get_surface_texture").entered();
                 self.compositor
                     .get_surface_texture(viewhost_id)
                     .map_err(|e| EngineError::RenderError(e.to_string()))?
             };
+            drop(acquire_time);
 
             // Scroll is applied at render time as a whole-page translate:
             // the display list stays in document coordinates and the
@@ -393,6 +472,7 @@ impl Presenter {
             // frame draws the page's own list, not a copy of it.
 
             // Render using display list if available, otherwise just clear to background
+            let execute_time = wgate::time_stage(HoldStage::Execute);
             {
                 let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
                 if let Some(renderer) = &mut self.renderer {
@@ -407,8 +487,27 @@ impl Presenter {
                 }
             }
 
+            drop(execute_time);
+
             // Present surface texture
+            let _present_time = wgate::time_stage(HoldStage::Present);
             self.compositor.present(output);
+        }
+
+        // The W-gate's second figure: from the input's arrival at the
+        // app's queue to this present. A headless view presents nothing,
+        // but its draw is the same work, so it is measured the same way.
+        if let Some(input) = commit.input {
+            let ms = input.at.elapsed().as_millis().min(u32::MAX as u128) as u32;
+            debug!(ms, seq = input.seq, "Input to present");
+            if let Some(summary) = self.latency.record(ms) {
+                info!("{summary}");
+            }
+            // Once: a commit drawn again (a new surface size, the one-second
+            // refresh) is not that input's frame a second time.
+            if let Some(stored) = self.commits.get_mut(&id) {
+                stored.input = None;
+            }
         }
 
         Ok(Some(presented))
