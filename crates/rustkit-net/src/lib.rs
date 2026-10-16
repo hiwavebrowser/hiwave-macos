@@ -199,6 +199,23 @@ impl Request {
     }
 }
 
+/// Whether `request` sends and keeps cookies: a navigation always; any
+/// other request as its credentials mode says, `SameOrigin` judged against
+/// the document that made it (one with no document is its own origin).
+fn sends_cookies(request: &Request) -> bool {
+    match request.credentials {
+        CredentialsMode::Omit => false,
+        CredentialsMode::Include => true,
+        CredentialsMode::SameOrigin => {
+            request.destination == RequestDestination::Document
+                || request
+                    .referrer
+                    .as_ref()
+                    .is_none_or(|page| page.origin() == request.url.origin())
+        }
+    }
+}
+
 /// Credentials mode for requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CredentialsMode {
@@ -578,14 +595,25 @@ impl ResourceLoader {
                 _ => rustkit_http::AddressPolicy::Any,
             },
         };
-        if matches!(policy, rustkit_http::AddressPolicy::Any) {
+        let cookies = sends_cookies(&request);
+        if matches!(policy, rustkit_http::AddressPolicy::Any) && cookies {
             return self.fetch_with(request, &self.client, true).await;
         }
         // The shared cache is keyed by URL alone and would answer a private
         // URL without connecting.
         let use_cache = !policy::url_host_is_private(&request.url);
-        let client = self.client.clone().with_address_policy(policy);
+        let mut client = self.client.clone().with_address_policy(policy);
+        if !cookies {
+            client = client.with_cookies(None);
+        }
         self.fetch_with(request, &client, use_cache).await
+    }
+
+    /// The jar every request with credentials sends and keeps cookies
+    /// with (`None` with cookies disabled). `document.cookie` reads and
+    /// writes it too.
+    pub fn cookie_jar(&self) -> Option<Arc<rustkit_http::CookieJar>> {
+        self.client.cookie_jar().cloned()
     }
 
     /// One hop of a governed (script-initiated) request: the same pipeline as
@@ -602,12 +630,16 @@ impl ResourceLoader {
         use_cache: bool,
     ) -> Result<Response, NetError> {
         let policy = self.replay_proxy_address_policy().unwrap_or(address_policy);
-        let client = self
+        let mut client = self
             .client
             .clone()
             .with_address_policy(policy)
             .with_follow_redirects(false)
             .with_max_body(max_body);
+        // The policy says which hops carry cookies (`credentials`).
+        if !sends_cookies(&request) {
+            client = client.with_cookies(None);
+        }
         self.fetch_with(request, &client, use_cache).await
     }
 
