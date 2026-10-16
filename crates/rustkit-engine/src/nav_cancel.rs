@@ -156,6 +156,11 @@ thread_local! {
     /// cancel exactly there.
     pub(crate) static LOAD_PHASE_HOOK: std::cell::RefCell<Option<PhaseHook>> =
         const { std::cell::RefCell::new(None) };
+    /// When set, the load calls [`Engine::stop`] at the next phase check
+    /// (same thread as the load). The Stop button is on the window thread;
+    /// tests cannot hold `&mut Engine` while `load_url` does, so this is
+    /// how a mid-load Stop is pinned.
+    static STOP_AT_PHASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A named point of a load, for [`LOAD_PHASE_HOOK`]; nothing outside tests.
@@ -167,4 +172,49 @@ pub(crate) fn load_phase(_name: &str) {
             hook(_name);
         }
     });
+}
+
+/// Ask the in-flight load to call [`Engine::stop`] after the current phase
+/// hook returns. Test-only; cleared when taken.
+#[cfg(test)]
+pub(crate) fn request_stop_at_phase() {
+    STOP_AT_PHASE.set(true);
+}
+
+/// Whether a test asked for [`Engine::stop`] at this phase; clears the flag.
+#[cfg(test)]
+pub(crate) fn take_stop_at_phase() -> bool {
+    STOP_AT_PHASE.replace(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::ready;
+
+    fn watch(nav_id: u64) -> NavWatch {
+        let control = rustkit_js::Watchdog::shared().view_control();
+        control.begin_nav(nav_id);
+        NavWatch {
+            canceller: NavCanceller::new(control, Arc::new(Notify::new())),
+            nav_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn unless_cancelled_prefers_a_ready_cancel_over_a_ready_response() {
+        let watch = watch(1);
+        assert!(watch.canceller.cancel_nav(1));
+        // Both arms are ready on the first poll; cancel is selected first so
+        // the response is dropped (see [`NavCanceller::unless_cancelled`]).
+        let got = watch.unless_cancelled(ready("payload")).await;
+        assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn unless_cancelled_returns_the_response_when_nothing_was_cancelled() {
+        let watch = watch(1);
+        let got = watch.unless_cancelled(ready("payload")).await;
+        assert_eq!(got, Some("payload"));
+    }
 }

@@ -5036,6 +5036,14 @@ impl Engine {
             Document::parse_html(&html).map_err(|e| EngineError::RenderError(e.to_string()))?;
         let document = Rc::new(document);
         load_phase("parse");
+        // Test-only: the Stop button calls `stop` on the window thread while
+        // the page thread is in the load; tests request the same path here
+        // because they cannot hold `&mut Engine` concurrently with `load_url`.
+        #[cfg(test)]
+        if nav_cancel::take_stop_at_phase() {
+            self.stop(id);
+            return Ok(());
+        }
         // A cancel that arrived during the parse: the parsed document never
         // replaces the one the view shows.
         if self.nav_superseded(id, generation) {
@@ -18095,6 +18103,65 @@ pub(crate) fn scrolled_commands(
     }));
     scrolled.push(DisplayCommand::PopTransform);
     scrolled
+}
+
+#[cfg(test)]
+mod scrolled_commands_tests {
+    use super::scrolled_commands;
+    use rustkit_css::Color;
+    use rustkit_layout::{DisplayCommand, Rect};
+
+    fn paint() -> DisplayCommand {
+        DisplayCommand::SolidColor(Color::BLACK, Rect::new(0.0, 0.0, 10.0, 10.0))
+    }
+
+    fn is_translate(command: &DisplayCommand, x: f32, y: f32) -> bool {
+        matches!(
+            command,
+            DisplayCommand::PushTransform {
+                matrix: [1.0, 0.0, 0.0, 1.0, mx, my],
+                origin: (0.0, 0.0),
+            } if *mx == x && *my == y
+        )
+    }
+
+    #[test]
+    fn a_zero_offset_still_wraps_the_list_and_rewrites_fixed_markers() {
+        let list = vec![
+            paint(),
+            DisplayCommand::PushViewportFixed,
+            paint(),
+            DisplayCommand::PopViewportFixed,
+        ];
+        let out = scrolled_commands(&list, (0.0, 0.0));
+        assert_eq!(out.len(), 6);
+        assert!(is_translate(&out[0], 0.0, 0.0));
+        assert!(matches!(&out[1], DisplayCommand::SolidColor(_, _)));
+        assert!(is_translate(&out[2], 0.0, 0.0), "fixed → +offset translate");
+        assert!(matches!(&out[3], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[4], DisplayCommand::PopTransform));
+        assert!(matches!(&out[5], DisplayCommand::PopTransform));
+    }
+
+    #[test]
+    fn a_scroll_offset_wraps_the_page_and_counters_fixed_runs() {
+        let list = vec![
+            paint(),
+            DisplayCommand::PushViewportFixed,
+            paint(),
+            DisplayCommand::PopViewportFixed,
+            paint(),
+        ];
+        let out = scrolled_commands(&list, (12.0, 34.0));
+        assert_eq!(out.len(), 7);
+        assert!(is_translate(&out[0], -12.0, -34.0), "outer −offset");
+        assert!(matches!(&out[1], DisplayCommand::SolidColor(_, _)));
+        assert!(is_translate(&out[2], 12.0, 34.0), "fixed → +offset");
+        assert!(matches!(&out[3], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[4], DisplayCommand::PopTransform));
+        assert!(matches!(&out[5], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[6], DisplayCommand::PopTransform));
+    }
 }
 
 /// The page-space affine this box's own `transform` contributes, or `None`
