@@ -1,0 +1,532 @@
+//! What a scrolled frame costs, on synthetic display lists (the threads-P3
+//! follow-up: a 20,000-command page took 426 ms per scrolled frame on the
+//! Mac), and proof that the fast path keeps paint order.
+//!
+//! The timing table is an ignored test:
+//! `cargo test --release -p rustkit-renderer --lib -- --ignored scroll_cost_table --nocapture`
+//! (`SCROLL_COST_SIZES=1000,5000` picks the sizes). The GPU tests skip,
+//! loudly, where no adapter exists.
+
+use super::*;
+use std::time::Instant;
+
+const VIEW_W: u32 = 1024;
+const VIEW_H: u32 = 768;
+const ROW_H: f32 = 20.0;
+
+struct Gpu {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    adapter: String,
+}
+
+/// One device per test (the renderer's tests share no GPU state).
+fn gpu() -> Option<Gpu> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..Default::default()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))?;
+    let name = adapter.get_info().name;
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("scroll cost test device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+        },
+        None,
+    ))
+    .ok()?;
+    Some(Gpu {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        adapter: name,
+    })
+}
+
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+
+fn renderer(gpu: &Gpu) -> Renderer {
+    let mut r = Renderer::new(gpu.device.clone(), gpu.queue.clone(), FORMAT).expect("renderer");
+    r.set_viewport_size(VIEW_W, VIEW_H);
+    r
+}
+
+fn text(s: &str, x: f32, y: f32, color: Color) -> DisplayCommand {
+    DisplayCommand::Text {
+        text: s.to_string(),
+        x,
+        y,
+        color,
+        font_size: 14.0,
+        font_family: "sans-serif".to_string(),
+        font_weight: 400,
+        font_style: 0,
+        advances: Some(vec![7.0; s.chars().count()]),
+        ascent: Some(13.0),
+        run: None,
+    }
+}
+
+fn fill(x: f32, y: f32, w: f32, h: f32, color: Color) -> DisplayCommand {
+    DisplayCommand::SolidColor(color, Rect::new(x, y, w, h))
+}
+
+fn image(url: &str, x: f32, y: f32, w: f32, h: f32) -> DisplayCommand {
+    let r = Rect::new(x, y, w, h);
+    DisplayCommand::Image {
+        url: url.to_string(),
+        src_rect: None,
+        dest_rect: r,
+        object_fit: ObjectFit::Fill,
+        content_box: r,
+        object_position: (0.5, 0.5),
+        object_position_offset: (0.0, 0.0),
+        opacity: 1.0,
+        current_color: Color::new(0, 0, 0, 1.0),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(usize)]
+enum Mix {
+    /// Paragraph rows of text, an underline now and then.
+    Text,
+    /// Every row a small background (badge, table cell) and its text; one
+    /// row in fifty has a box that lands on the row above's text.
+    Backgrounds,
+    /// `Backgrounds` with no box over earlier text: nothing ever flushes,
+    /// so every fill is checked against every glyph batched so far.
+    Table,
+    /// Thumbnail, caption and a separator line per row.
+    Images,
+}
+
+const LINE: &str = "The quick brown fox jumps over the lazy dog 0123";
+
+/// A page of about `n` commands, rows `ROW_H` apart, a page background first.
+fn page(mix: Mix, n: usize) -> Vec<DisplayCommand> {
+    let ink = Color::new(20, 20, 20, 1.0);
+    let mut list = vec![fill(
+        0.0,
+        0.0,
+        VIEW_W as f32,
+        0.0,
+        Color::new(255, 255, 255, 1.0),
+    )];
+    let mut row = 0usize;
+    while list.len() < n {
+        let y = row as f32 * ROW_H;
+        match mix {
+            Mix::Text => {
+                list.push(text(LINE, 16.0, y, ink));
+                if row % 7 == 3 {
+                    list.push(DisplayCommand::TextDecoration {
+                        x: 16.0,
+                        y: y + 16.0,
+                        width: 120.0,
+                        thickness: 1.0,
+                        color: ink,
+                        style: rustkit_layout::TextDecorationStyleValue::Solid,
+                    });
+                }
+            }
+            Mix::Backgrounds | Mix::Table => {
+                let tint = Color::new(200 + (row % 5) as u8 * 10, 230, 240, 1.0);
+                list.push(fill(10.0, y + 1.0, 80.0, ROW_H - 2.0, tint));
+                list.push(text("cell", 14.0, y, ink));
+                list.push(fill(
+                    100.0,
+                    y + 1.0,
+                    500.0,
+                    ROW_H - 2.0,
+                    Color::new(245, 245, 250, 1.0),
+                ));
+                list.push(text(LINE, 104.0, y, ink));
+                if matches!(mix, Mix::Backgrounds) && row % 50 == 49 {
+                    // A positioned box over the row above's text.
+                    list.push(fill(
+                        300.0,
+                        y - 12.0,
+                        60.0,
+                        16.0,
+                        Color::new(250, 80, 80, 1.0),
+                    ));
+                }
+            }
+            Mix::Images => {
+                list.push(image(
+                    if row.is_multiple_of(2) { "a.png" } else { "b.png" },
+                    10.0,
+                    y + 2.0,
+                    16.0,
+                    16.0,
+                ));
+                list.push(text(LINE, 32.0, y, ink));
+                list.push(fill(
+                    0.0,
+                    y + ROW_H - 1.0,
+                    VIEW_W as f32,
+                    1.0,
+                    Color::new(220, 220, 220, 1.0),
+                ));
+            }
+        }
+        row += 1;
+    }
+    let height = row as f32 * ROW_H;
+    list[0] = fill(
+        0.0,
+        0.0,
+        VIEW_W as f32,
+        height,
+        Color::new(255, 255, 255, 1.0),
+    );
+    list
+}
+
+fn page_height(list: &[DisplayCommand]) -> f32 {
+    match list[0] {
+        DisplayCommand::SolidColor(_, r) => r.height,
+        _ => unreachable!(),
+    }
+}
+
+fn upload_images(r: &mut Renderer) {
+    let px: Vec<u8> = [30u8, 120, 200, 255].repeat(16 * 16);
+    r.upload_image("a.png", 16, 16, &px).unwrap();
+    r.upload_image("b.png", 16, 16, &px).unwrap();
+}
+
+/// The frame's pixels (BGRA).
+fn draw(gpu: &Gpu, r: &mut Renderer, list: &[DisplayCommand], scroll: (f32, f32)) -> Vec<u8> {
+    let (texture, view) = screenshot::create_offscreen_target(&gpu.device, VIEW_W, VIEW_H, FORMAT);
+    r.set_scroll_offset(scroll);
+    r.execute(list, &view).expect("execute");
+    r.set_scroll_offset((0.0, 0.0));
+    let readback = screenshot::GpuReadbackBuffer::new(&gpu.device, VIEW_W, VIEW_H);
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    readback.copy_from_texture(&mut encoder, &texture);
+    gpu.queue.submit(std::iter::once(encoder.finish()));
+    readback.read_data_sync(&gpu.device).expect("readback")
+}
+
+/// Milliseconds for one frame, CPU work plus waiting for the GPU; `NaN`
+/// when the frame fails (a batch past wgpu's buffer limit).
+fn time_frame(
+    gpu: &Gpu,
+    r: &mut Renderer,
+    view: &wgpu::TextureView,
+    list: &[DisplayCommand],
+    scroll: (f32, f32),
+) -> f64 {
+    r.set_scroll_offset(scroll);
+    gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let t = Instant::now();
+    let drawn = r.execute(list, view);
+    gpu.device.poll(wgpu::Maintain::Wait);
+    let ms = t.elapsed().as_secs_f64() * 1e3;
+    let invalid = pollster::block_on(gpu.device.pop_error_scope());
+    r.set_scroll_offset((0.0, 0.0));
+    if drawn.is_err() || invalid.is_some() {
+        f64::NAN
+    } else {
+        ms
+    }
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    if v.iter().any(|ms| ms.is_nan()) {
+        return f64::NAN;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+/// The commands of `list` with a row inside the viewport at `scroll_y`:
+/// the work a frame cannot avoid.
+fn visible_only(list: &[DisplayCommand], scroll_y: f32) -> Vec<DisplayCommand> {
+    let top = |c: &DisplayCommand| match c {
+        DisplayCommand::SolidColor(_, r) => (r.y, r.y + r.height),
+        DisplayCommand::Text { y, .. } => (*y, *y + ROW_H),
+        DisplayCommand::TextDecoration { y, thickness, .. } => (*y, *y + thickness),
+        DisplayCommand::Image { dest_rect, .. } => (dest_rect.y, dest_rect.y + dest_rect.height),
+        _ => (f32::MIN, f32::MAX),
+    };
+    list.iter()
+        .filter(|c| {
+            let (y0, y1) = top(c);
+            y1 > scroll_y && y0 < scroll_y + VIEW_H as f32
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+#[ignore = "timing table; run with --release --ignored --nocapture"]
+fn scroll_cost_table() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP scroll_cost_table: no GPU adapter");
+        return;
+    };
+    let sizes: Vec<usize> = std::env::var("SCROLL_COST_SIZES")
+        .ok()
+        .map(|s| s.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![1_000, 5_000, 20_000, 80_000]);
+    let reps: usize = std::env::var("SCROLL_COST_REPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    println!("adapter: {}", gpu.adapter);
+    println!("| mix | path | commands | frame ms (scroll 0) | scrolled frame ms | visible-only ms | overlap checks | overlap comparisons | overlap ms | overlap flushes | batch flushes | submits | quads | quads off-screen | culled |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    let mixes = std::env::var("SCROLL_COST_MIXES").unwrap_or_default();
+    // `SCROLL_COST_PATHS=after` skips the slow reference path.
+    let paths = std::env::var("SCROLL_COST_PATHS").unwrap_or_else(|_| "before,after".into());
+    for mix in [Mix::Text, Mix::Backgrounds, Mix::Table, Mix::Images] {
+        if !mixes.is_empty() && !mixes.contains(&format!("{mix:?}")) {
+            continue;
+        }
+        for &n in &sizes {
+            let list = page(mix, n);
+            for (path, reference) in [("before", true), ("after", false)] {
+                if !paths.contains(path) {
+                    continue;
+                }
+                let mut r = renderer(&gpu);
+                r.reference = reference;
+                upload_images(&mut r);
+                let (_t, view) =
+                    screenshot::create_offscreen_target(&gpu.device, VIEW_W, VIEW_H, FORMAT);
+                let mid = ((page_height(&list) - VIEW_H as f32) / 2.0)
+                    .max(0.0)
+                    .round();
+                // Warm the glyph atlas.
+                time_frame(&gpu, &mut r, &view, &list, (0.0, 0.0));
+                let at0 = median(
+                    (0..reps)
+                        .map(|_| time_frame(&gpu, &mut r, &view, &list, (0.0, 0.0)))
+                        .collect(),
+                );
+                // A wheel scroll re-presents the same list at a new offset.
+                let scrolled = median(
+                    (0..reps)
+                        .map(|i| {
+                            time_frame(&gpu, &mut r, &view, &list, (0.0, mid + (i as f32) * 40.0))
+                        })
+                        .collect(),
+                );
+                let visible = visible_only(&list, mid);
+                time_frame(&gpu, &mut r, &view, &visible, (0.0, mid));
+                let vis = median(
+                    (0..reps)
+                        .map(|_| time_frame(&gpu, &mut r, &view, &visible, (0.0, mid)))
+                        .collect(),
+                );
+                r.set_measure(true);
+                time_frame(&gpu, &mut r, &view, &list, (0.0, mid));
+                let s = r.last_frame_stats();
+                println!(
+                    "| {mix:?} | {path} | {} | {at0:.1} | {scrolled:.1} | {vis:.1} | {} | {} | {:.1} | {} | {} | {} | {} | {} | {} |",
+                    list.len(),
+                    s.overlap_checks,
+                    s.overlap_comparisons,
+                    s.overlap_ns as f64 / 1e6,
+                    s.overlap_flushes,
+                    s.batch_flushes,
+                    s.submits,
+                    s.quads,
+                    s.quads_offscreen,
+                    s.culled,
+                );
+            }
+        }
+    }
+}
+
+/// A page that exercises what culling must get right: a fixed header, an
+/// `overflow: hidden` box whose content is mostly clipped, a transform that
+/// pulls far-down content into view, an opacity group, a rotated box, a
+/// positioned box over earlier text, and `n` rows of mixed content.
+fn kitchen_sink(n: usize) -> Vec<DisplayCommand> {
+    let ink = Color::new(20, 20, 20, 1.0);
+    let mut list = page(Mix::Backgrounds, n);
+    let height = page_height(&list);
+    list.extend([
+        // Content 3000px down, translated up into the first screen.
+        DisplayCommand::PushTransform {
+            matrix: [1.0, 0.0, 0.0, 1.0, 0.0, -3000.0],
+            origin: (0.0, 0.0),
+        },
+        fill(620.0, 3100.0, 200.0, 40.0, Color::new(40, 160, 90, 1.0)),
+        text(LINE, 624.0, 3110.0, Color::new(255, 255, 255, 1.0)),
+        DisplayCommand::PopTransform,
+        // A rotated card: its bounds are tested on the mapped corners.
+        DisplayCommand::PushTransform {
+            matrix: [0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
+            origin: (700.0, 400.0),
+        },
+        fill(650.0, 380.0, 120.0, 40.0, Color::new(90, 60, 200, 1.0)),
+        text("rotated", 660.0, 390.0, Color::new(255, 255, 255, 1.0)),
+        DisplayCommand::PopTransform,
+        // A clipped scroller: 200 rows inside a 300px box.
+        DisplayCommand::PushClip(Rect::new(650.0, 500.0, 300.0, 120.0)),
+    ]);
+    for i in 0..200 {
+        let y = 500.0 + i as f32 * ROW_H;
+        list.push(fill(
+            650.0,
+            y,
+            300.0,
+            ROW_H - 1.0,
+            Color::new(255, 240 - (i % 4) as u8 * 20, 200, 1.0),
+        ));
+        list.push(text(LINE, 654.0, y, ink));
+    }
+    list.push(DisplayCommand::PopClip);
+    // An opacity group across the page.
+    list.push(DisplayCommand::PushOpacity(0.5));
+    for i in 0..60 {
+        let y = i as f32 * (height / 60.0);
+        list.push(fill(800.0, y, 150.0, 30.0, Color::new(0, 120, 255, 1.0)));
+        list.push(text("faded", 804.0, y + 4.0, ink));
+    }
+    list.push(DisplayCommand::PopOpacity);
+    // A fixed header, drawn last so it is on top.
+    list.extend([
+        DisplayCommand::PushViewportFixed,
+        fill(0.0, 0.0, VIEW_W as f32, 40.0, Color::new(30, 30, 40, 1.0)),
+        text("Fixed header", 16.0, 12.0, Color::new(255, 255, 255, 1.0)),
+        fill(
+            0.0,
+            VIEW_H as f32 - 24.0,
+            VIEW_W as f32,
+            24.0,
+            Color::new(240, 200, 0, 1.0),
+        ),
+        DisplayCommand::PopViewportFixed,
+    ]);
+    list
+}
+
+fn reference_draw(gpu: &Gpu, list: &[DisplayCommand], scroll: (f32, f32)) -> (Vec<u8>, FrameStats) {
+    let mut r = renderer(gpu);
+    upload_images(&mut r);
+    r.reference = true;
+    let px = draw(gpu, &mut r, list, scroll);
+    (px, r.last_frame_stats())
+}
+
+fn fast_draw(gpu: &Gpu, list: &[DisplayCommand], scroll: (f32, f32)) -> (Vec<u8>, FrameStats) {
+    let mut r = renderer(gpu);
+    upload_images(&mut r);
+    let px = draw(gpu, &mut r, list, scroll);
+    (px, r.last_frame_stats())
+}
+
+#[test]
+fn culled_frames_are_byte_identical_to_unculled_ones_at_every_scroll() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    let mut lists: Vec<(&str, Vec<DisplayCommand>)> = vec![("kitchen sink", kitchen_sink(3_000))];
+    for mix in [Mix::Text, Mix::Backgrounds, Mix::Table, Mix::Images] {
+        lists.push((
+            ["text", "backgrounds", "table", "images"][mix as usize],
+            page(mix, 2_000),
+        ));
+    }
+    for (name, list) in &lists {
+        let end = page_height(list) - VIEW_H as f32;
+        for scroll in [
+            (0.0, 0.0),
+            (0.0, 777.0),
+            (0.0, (end / 2.0).round()),
+            (0.0, end),
+            (13.0, 500.5),
+            (0.0, -50.0),
+        ] {
+            let (want, want_stats) = reference_draw(&gpu, list, scroll);
+            let (got, got_stats) = fast_draw(&gpu, list, scroll);
+            let differ = want
+                .chunks_exact(4)
+                .zip(got.chunks_exact(4))
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(differ, 0, "{name} at {scroll:?}: {differ} pixels differ");
+            assert_eq!(want_stats.culled, 0);
+            assert!(
+                got_stats.culled > 0 || list.len() < 100,
+                "{name} at {scroll:?}: nothing culled"
+            );
+            // The grid finds the same overlaps the scan found wherever
+            // nothing was culled away; culling only drops flushes caused
+            // by off-screen geometry.
+            assert!(got_stats.overlap_flushes <= want_stats.overlap_flushes);
+        }
+    }
+}
+
+#[test]
+fn paint_order_is_kept_for_interleaved_fills_and_text() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    // Rows of: a background, text on it, then a box over that text (a
+    // positioned box painting later), then text on the box. Every box
+    // over text must flush, and the pixels must be the scan's.
+    let ink = Color::new(0, 0, 0, 1.0);
+    let red = Color::new(255, 0, 0, 1.0);
+    let mut list = vec![fill(
+        0.0,
+        0.0,
+        VIEW_W as f32,
+        VIEW_H as f32,
+        Color::new(255, 255, 255, 1.0),
+    )];
+    let rows = 30;
+    for i in 0..rows {
+        let y = 10.0 + i as f32 * 24.0;
+        list.push(fill(10.0, y, 600.0, 22.0, Color::new(230, 230, 255, 1.0)));
+        list.push(text(
+            "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM",
+            14.0,
+            y + 2.0,
+            ink,
+        ));
+        list.push(fill(100.0, y, 60.0, 22.0, red));
+        list.push(text("ok", 104.0, y + 2.0, Color::new(255, 255, 255, 1.0)));
+    }
+    let (want, want_stats) = reference_draw(&gpu, &list, (0.0, 0.0));
+    let (got, got_stats) = fast_draw(&gpu, &list, (0.0, 0.0));
+    assert_eq!(want, got, "the grid changed the pixels");
+    assert_eq!(got_stats.overlap_flushes, want_stats.overlap_flushes);
+    assert!(
+        got_stats.overlap_flushes >= rows as u64,
+        "every red box lands on text: {got_stats:?}"
+    );
+    assert!(
+        got_stats.overlap_comparisons < want_stats.overlap_comparisons
+            || want_stats.overlap_comparisons < 100
+    );
+    // The red box is on top of the black text under it: inside the box,
+    // away from its own white text, no pixel is black. BGRA.
+    for i in 0..rows {
+        let y = (10.0 + i as f32 * 24.0) as usize + 10;
+        for x in 140..158 {
+            let p = &got[(y * VIEW_W as usize + x) * 4..][..4];
+            assert_eq!(
+                p,
+                [0, 0, 255, 255],
+                "row {i} pixel ({x}, {y}) is {p:?}, not the red box"
+            );
+        }
+    }
+}
