@@ -17,19 +17,23 @@
 //! cull tests the command where the current transform puts it. A clip only
 //! ever removes pixels, so a command outside the viewport stays outside
 //! it whatever clip is open.
+//!
 //! Nothing samples the paint of a culled command either: the only filter
 //! command is `BackdropFilter`, which reads the target, and the target
 //! holds only the viewport. A group filter (`filter: blur()` or
 //! `drop-shadow()` over a subtree) would have to inflate the cull by its
 //! reach, or turn it off inside the group.
 //!
-//! The fast path's mid-list flushes (a fill over batched glyphs) are the
-//! one thing culling can change: a flush whose overlap was off-screen no
-//! longer happens. That flush ordered off-screen pixels only, so the frame
-//! is the same, with one exception the fast path already has: images are
-//! not part of the overlap check, so an on-screen fill drawn after an
-//! on-screen image it overlaps relied on such a flush to land on top.
+//! The fast path's mid-list flushes are the one thing culling changes: a
+//! flush whose overlap was off-screen no longer happens. That cannot change
+//! a pixel, because the fast path flushes whenever a command would be drawn
+//! under something batched before it that it overlaps (`order_probe`), in
+//! every batch: the frame is then the list painted in order, wherever the
+//! other flushes fall. Text decorations are the one exception, drawn under
+//! the text they follow, and no flush ever falls between the two. The GPU-gradient and blur paths flush only at their
+//! own gradient and blur commands, which are never culled.
 
+use crate::glyph_grid::Batch;
 use rustkit_layout::{DisplayCommand, Rect};
 
 /// Antialiasing fringe added to every bound, in CSS px.
@@ -50,15 +54,46 @@ pub(crate) fn paint_bounds(cmd: &DisplayCommand) -> Option<Rect> {
             font_size,
             advances: Some(advances),
             ascent,
+            run,
             ..
         } => {
             // A glyph's ink can start left of its pen position and reach
             // past its advance (italics, overhang) and below the
             // baseline: one font size of slack on every side covers it.
-            let width: f32 = advances.iter().map(|a| a.abs()).sum();
-            let size = font_size.abs().max(1.0);
-            let ascent = ascent.map_or(size, |a| a.abs().max(size));
-            Rect::new(x - size, y - size, width + 2.0 * size, ascent + 3.0 * size)
+            // The pen walks the advances from `x`, and a negative advance
+            // (letter- or word-spacing) walks it left. It never gets
+            // further left than all the negative advances together, nor
+            // further right than all the positive ones: a superset of the
+            // walk that sums without a branch. A shaped run's offsets add
+            // their extremes the same way.
+            let mut size = font_size.abs().max(1.0);
+            let mut top = ascent.map_or(0.0, f32::abs);
+            let mut lo: f32 = advances.iter().map(|a| a.min(0.0)).sum();
+            let mut hi: f32 = advances.iter().map(|a| a.max(0.0)).sum();
+            let (mut rise, mut drop) = (0.0f32, 0.0f32);
+            if let Some(run) = run {
+                size = size.max(run.font_size.abs());
+                top = top.max(run.ascent.abs());
+                let (mut run_lo, mut run_hi, mut off_lo, mut off_hi) =
+                    (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                for g in &run.glyphs {
+                    run_lo += g.advance.min(0.0);
+                    run_hi += g.advance.max(0.0);
+                    off_lo = off_lo.min(g.x_offset);
+                    off_hi = off_hi.max(g.x_offset);
+                    rise = rise.min(g.y_offset);
+                    drop = drop.max(g.y_offset);
+                }
+                lo = lo.min(run_lo + off_lo);
+                hi = hi.max(run_hi + off_hi);
+            }
+            let top = top.max(size);
+            Rect::new(
+                x + lo - size,
+                y + rise - size,
+                hi - lo + 2.0 * size,
+                top + 3.0 * size + drop - rise,
+            )
         }
         DisplayCommand::TextDecoration {
             x,
@@ -86,6 +121,89 @@ pub(crate) fn paint_bounds(cmd: &DisplayCommand) -> Option<Rect> {
             rect.width.max(0.0) + 2.0 * FRINGE,
             rect.height.max(0.0) + 2.0 * FRINGE,
         )
+    })
+}
+
+/// What the fast path's paint-order check needs to know about `cmd`
+/// (`Renderer::occludes_batched`). A flush draws the color batch, then
+/// images, then glyphs, then color glyphs, so a command is drawn under
+/// anything batched before it in a later batch than its own. The probe
+/// gives the first such batch and the rect, before the current transform,
+/// that holds the command's pixels; `None` for the rect means unbounded
+/// (whatever is batched there counts). `None` overall: the command draws
+/// nothing.
+///
+/// A command drawing into several batches (form controls: a box, then
+/// text) is probed at its lowest, which checks the most.
+pub(crate) fn order_probe(cmd: &DisplayCommand) -> Option<(Batch, Option<Rect>)> {
+    use DisplayCommand as C;
+    let grown =
+        |r: &Rect, d: f32| Rect::new(r.x - d, r.y - d, r.width + 2.0 * d, r.height + 2.0 * d);
+    Some(match cmd {
+        C::PushClip(_)
+        | C::PushClipRounded { .. }
+        | C::PopClip
+        | C::PushStackingContext { .. }
+        | C::PopStackingContext
+        | C::PushTransform { .. }
+        | C::PopTransform
+        | C::PushOpacity(_)
+        | C::PopOpacity
+        | C::PushViewportFixed
+        | C::PopViewportFixed => return None,
+        // Fills keep the exact rect the check has always used.
+        C::SolidColor(color, rect) | C::RoundedRect { color, rect, .. } => {
+            if color.a <= 0.0 {
+                return None;
+            }
+            (Batch::Image, Some(*rect))
+        }
+        // A decoration follows its own text and is drawn under it, with the
+        // batch it is in: layout relies on that (an underline below the
+        // descenders), so it is not ordered against the glyphs.
+        C::TextDecoration { .. } => return None,
+        C::Text { .. } => (Batch::ColorGlyph, paint_bounds(cmd)),
+        C::Image { content_box, .. } => (Batch::Glyph, Some(*content_box)),
+        C::BackgroundImage { rect, .. } => (Batch::Glyph, Some(grown(rect, FRINGE))),
+        C::BoxShadow {
+            rect,
+            offset_x,
+            offset_y,
+            blur_radius,
+            spread_radius,
+            ..
+        } => {
+            // Outer layers reach the spread and the blur past the moved box.
+            let reach = offset_x.abs().max(offset_y.abs())
+                + spread_radius.abs()
+                + 2.0 * blur_radius.abs()
+                + FRINGE;
+            (Batch::Image, Some(grown(rect, reach)))
+        }
+        C::FocusRing {
+            rect,
+            width,
+            offset,
+            ..
+        } => (
+            Batch::Image,
+            Some(grown(rect, width.abs() + offset.abs() + FRINGE)),
+        ),
+        C::Caret { x, y, height, .. } => (
+            Batch::Image,
+            Some(grown(
+                &Rect::new(*x, *y, 0.0, height.max(0.0)),
+                2.0 + FRINGE,
+            )),
+        ),
+        C::MaskedColor { rect, .. }
+        | C::BackdropFilter { rect, .. }
+        | C::LinearGradient { rect, .. }
+        | C::RadialGradient { rect, .. }
+        | C::ConicGradient { rect, .. } => (Batch::Image, Some(grown(rect, FRINGE))),
+        // Borders are bounded; form controls, canvas shapes and gradient
+        // text are not.
+        _ => (Batch::Image, paint_bounds(cmd)),
     })
 }
 
@@ -176,5 +294,59 @@ mod tests {
         let b = paint_bounds(&fill).unwrap();
         assert!(outside(ID, b, 800.0, 600.0));
         assert!(!outside([0.0, 1.0, -1.0, 0.0, 0.0, 0.0], b, 800.0, 600.0));
+    }
+
+    fn spaced_text(x: f32, advances: Vec<f32>) -> DisplayCommand {
+        DisplayCommand::Text {
+            text: "x".repeat(advances.len()),
+            x,
+            y: 100.0,
+            color: Color::new(0, 0, 0, 1.0),
+            font_size: 14.0,
+            font_family: String::new(),
+            font_weight: 400,
+            font_style: 0,
+            advances: Some(advances),
+            ascent: Some(13.0),
+            run: None,
+        }
+    }
+
+    #[test]
+    fn negative_letter_spacing_keeps_text_whose_pen_walks_back_on_screen() {
+        // Starts 300px right of an 800px viewport; letter-spacing of -40px
+        // walks the pen 600px left, so its last glyphs are on screen.
+        let b = paint_bounds(&spaced_text(1100.0, vec![-30.0; 20])).unwrap();
+        assert!(b.x <= 1100.0 - 600.0 - 14.0, "{b:?}");
+        assert!(!outside(ID, b, 800.0, 600.0));
+        // The same text walking right stays outside.
+        let b = paint_bounds(&spaced_text(1100.0, vec![30.0; 20])).unwrap();
+        assert!(outside(ID, b, 800.0, 600.0));
+    }
+
+    #[test]
+    fn the_order_probe_names_the_batches_drawn_above_each_command() {
+        let red = Color::new(255, 0, 0, 1.0);
+        let fill = DisplayCommand::SolidColor(red, Rect::new(0.0, 0.0, 10.0, 10.0));
+        let probe = order_probe(&fill).map(|(b, r)| (b, r.map(|r| (r.x, r.y, r.width, r.height))));
+        assert_eq!(probe, Some((Batch::Image, Some((0.0, 0.0, 10.0, 10.0)))));
+        let clear =
+            DisplayCommand::SolidColor(Color::new(0, 0, 0, 0.0), Rect::new(0.0, 0.0, 10.0, 10.0));
+        assert!(order_probe(&clear).is_none());
+        assert!(order_probe(&DisplayCommand::PopClip).is_none());
+        assert_eq!(
+            order_probe(&spaced_text(0.0, vec![7.0])).map(|p| p.0),
+            Some(Batch::ColorGlyph)
+        );
+        // Unbounded commands count everything batched above them.
+        let line = DisplayCommand::Line {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 10.0,
+            y2: 10.0,
+            color: red,
+            width: 1.0,
+        };
+        assert!(matches!(order_probe(&line), Some((Batch::Image, None))));
     }
 }

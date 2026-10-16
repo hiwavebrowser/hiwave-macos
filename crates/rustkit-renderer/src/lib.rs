@@ -94,6 +94,13 @@ pub enum RendererError {
 
 /// Maximum GPU buffer size (256 MB) - prevents OOM on pathological inputs
 const MAX_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
+/// A batch is flushed once one of its buffers reaches this size, well
+/// inside `MAX_BUFFER_SIZE` (one command adds far less).
+const MAX_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+
+fn is_decoration(cmd: &DisplayCommand) -> bool {
+    matches!(cmd, DisplayCommand::TextDecoration { .. })
+}
 
 // ==================== Vertex Types ====================
 
@@ -451,8 +458,8 @@ pub struct Renderer {
     measure: bool,
     /// The batched glyph quads, by screen cell, for the overlap check.
     glyph_grid: glyph_grid::GlyphGrid,
-    /// Tests: draw as before culling and the grid (no cull, linear
-    /// overlap scan), the reference the fast path is compared against.
+    /// Tests: draw without culling and answer the order check by a linear
+    /// scan, the reference the fast path is compared against.
     #[cfg(test)]
     reference: bool,
     /// Open `PushOpacity` scopes on the paths that fade per command.
@@ -913,6 +920,7 @@ impl Renderer {
     fn flush_batches_to(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
         self.settle_opacity();
         self.tally_flush();
+        self.validate_batches()?;
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
@@ -1033,6 +1041,7 @@ impl Renderer {
     fn flush_batches_for_gradient(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
         self.settle_opacity();
         self.tally_flush();
+        self.validate_batches()?;
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
@@ -1491,6 +1500,10 @@ impl Renderer {
         target: &wgpu::TextureView,
     ) -> Result<(), RendererError> {
         self.last_list = (commands.as_ptr() as usize, commands.len());
+        #[cfg(test)]
+        {
+            self.glyph_grid.scan_only = self.reference;
+        }
         self.stats = FrameStats {
             commands: commands.len() as u64,
             ..FrameStats::default()
@@ -1614,8 +1627,10 @@ impl Renderer {
                 if self.culled(cmd) {
                     continue;
                 }
-                if self.solid_fill_occludes_batched_glyphs(cmd) {
+                if self.occludes_batched(cmd) {
                     self.stats.overlap_flushes += 1;
+                    self.flush_mid_stream(target, &layers, &mut cleared)?;
+                } else if self.batches_full() && !is_decoration(cmd) {
                     self.flush_mid_stream(target, &layers, &mut cleared)?;
                 }
                 self.process_command(cmd);
@@ -1643,43 +1658,48 @@ impl Renderer {
         }
     }
 
-    /// True when `cmd` is a solid fill whose rect overlaps a glyph quad
-    /// already sitting in the batch — the case where flush order (colors
-    /// before glyphs) would contradict command order. Batched glyph
-    /// positions are already transformed, so the rect's corners get the
-    /// same transform before the overlap test.
+    /// True when `cmd` would be drawn under something batched before it
+    /// that it overlaps: a flush draws the color batch, then images, then
+    /// glyphs, then color glyphs, so a fill over batched text or an image,
+    /// or an image over batched text, has to wait for a flush to land on
+    /// top (CSS 2.1 Appendix E puts positioned boxes over in-flow text).
+    /// `cull::order_probe` says which batches count and where `cmd` paints.
+    /// Batched positions are already transformed, so the rect's corners get
+    /// the same transform before the overlap test.
     ///
-    /// The glyphs are looked up in `glyph_grid` rather than scanned: the
-    /// scan compared every fill with every glyph batched since the last
+    /// The batched quads are looked up in `glyph_grid` rather than scanned:
+    /// the scan compared every fill with every glyph batched since the last
     /// flush, 1.3 billion comparisons and 10 s for a 20,000-command table
     /// on lavapipe (`scroll_cost_tests`). The answer is the same.
-    fn solid_fill_occludes_batched_glyphs(&mut self, cmd: &DisplayCommand) -> bool {
-        if self.texture_vertices.is_empty() && self.color_glyph_vertices.is_empty() {
+    fn occludes_batched(&mut self, cmd: &DisplayCommand) -> bool {
+        if self.texture_vertices.is_empty()
+            && self.color_glyph_vertices.is_empty()
+            && self.image_vertices.is_empty()
+        {
             return false;
         }
-        let rect = match cmd {
-            DisplayCommand::SolidColor(color, rect) if color.a > 0.0 => rect,
-            DisplayCommand::RoundedRect { color, rect, .. } if color.a > 0.0 => rect,
-            _ => return false,
+        let Some((from, rect)) = cull::order_probe(cmd) else {
+            return false;
         };
         let started = self.measure.then(std::time::Instant::now);
-        let (ax, ay) = self.transform_point(rect.x, rect.y);
-        let (bx, by) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
-        let (rx0, rx1) = (ax.min(bx), ax.max(bx));
-        let (ry0, ry1) = (ay.min(by), ay.max(by));
-
+        use glyph_grid::Batch;
+        self.glyph_grid.extend(Batch::Image, &self.image_vertices, |v| v.position);
+        self.glyph_grid.extend(Batch::Glyph, &self.texture_vertices, |v| v.position);
+        self.glyph_grid.extend(Batch::ColorGlyph, &self.color_glyph_vertices, |v| v.position);
         let mut compared = 0u64;
-        #[cfg(test)]
-        let reference = self.reference;
-        #[cfg(not(test))]
-        let reference = false;
-        let hit = if reference {
-            Self::scan_glyphs(&self.texture_vertices, [rx0, ry0, rx1, ry1], &mut compared)
-                || Self::scan_glyphs(&self.color_glyph_vertices, [rx0, ry0, rx1, ry1], &mut compared)
-        } else {
-            self.glyph_grid.extend(0, &self.texture_vertices, |v| v.position);
-            self.glyph_grid.extend(1, &self.color_glyph_vertices, |v| v.position);
-            self.glyph_grid.overlaps([rx0, ry0, rx1, ry1], &mut compared)
+        let hit = match rect {
+            Some(rect) => {
+                let m = self.current_transform();
+                let map = |x: f32, y: f32| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+                let (x1, y1) = (rect.x + rect.width, rect.y + rect.height);
+                let corners = [map(rect.x, rect.y), map(x1, rect.y), map(rect.x, y1), map(x1, y1)];
+                let mut r = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                for (x, y) in corners {
+                    r = [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)];
+                }
+                self.glyph_grid.overlaps(r, from, &mut compared)
+            }
+            None => self.glyph_grid.any_from(from),
         };
         self.stats.overlap_checks += 1;
         self.stats.overlap_comparisons += compared;
@@ -1689,24 +1709,44 @@ impl Renderer {
         hit
     }
 
-    /// The overlap check before `glyph_grid`: every batched quad in order.
-    /// Kept as the tests' reference.
-    fn scan_glyphs(verts: &[TextureVertex], r: [f32; 4], compared: &mut u64) -> bool {
-        let [rx0, ry0, rx1, ry1] = r;
-        verts.chunks_exact(4).any(|quad| {
-            *compared += 1;
-            let mut qx0 = f32::MAX;
-            let mut qy0 = f32::MAX;
-            let mut qx1 = f32::MIN;
-            let mut qy1 = f32::MIN;
-            for v in quad {
-                qx0 = qx0.min(v.position[0]);
-                qy0 = qy0.min(v.position[1]);
-                qx1 = qx1.max(v.position[0]);
-                qy1 = qy1.max(v.position[1]);
-            }
-            rx0 < qx1 && rx1 > qx0 && ry0 < qy1 && ry1 > qy0
-        })
+    /// True when a batch has grown to `MAX_BATCH_BYTES`: the execute loops
+    /// flush it before the next command rather than build a buffer past
+    /// wgpu's limit (an 80,000-command text page used to panic in
+    /// `flush_to`). Never before a text decoration, which is drawn with
+    /// the batch of the text it follows (see `cull::order_probe`).
+    fn batches_full(&self) -> bool {
+        use std::mem::size_of;
+        let bytes = [
+            self.color_vertices.len() * size_of::<ColorVertex>(),
+            self.texture_vertices.len() * size_of::<TextureVertex>(),
+            self.color_glyph_vertices.len() * size_of::<TextureVertex>(),
+            self.image_vertices.len() * size_of::<TextureVertex>(),
+            self.color_indices.len() * size_of::<u32>(),
+            self.texture_indices.len() * size_of::<u32>(),
+            self.color_glyph_indices.len() * size_of::<u32>(),
+            self.image_indices.len() * size_of::<u32>(),
+        ];
+        bytes.iter().any(|&b| b as u64 >= MAX_BATCH_BYTES)
+    }
+
+    /// Every batch's vertex and index buffer within `MAX_BUFFER_SIZE`, so a
+    /// flush fails with `BufferTooLarge` instead of wgpu panicking.
+    fn validate_batches(&self) -> Result<(), RendererError> {
+        use std::mem::size_of;
+        let sizes = [
+            (self.color_vertices.len() * size_of::<ColorVertex>(), "Color Vertex Buffer"),
+            (self.color_indices.len() * size_of::<u32>(), "Color Index Buffer"),
+            (self.texture_vertices.len() * size_of::<TextureVertex>(), "Texture Vertex Buffer"),
+            (self.texture_indices.len() * size_of::<u32>(), "Texture Index Buffer"),
+            (self.color_glyph_vertices.len() * size_of::<TextureVertex>(), "Color Glyph Vertex Buffer"),
+            (self.color_glyph_indices.len() * size_of::<u32>(), "Color Glyph Index Buffer"),
+            (self.image_vertices.len() * size_of::<TextureVertex>(), "Image Vertex Buffer"),
+            (self.image_indices.len() * size_of::<u32>(), "Image Index Buffer"),
+        ];
+        for (size, label) in sizes {
+            self.validate_buffer_size(size as u64, label)?;
+        }
+        Ok(())
     }
 
     /// Execute commands with GPU blur support for backdrop filters.
@@ -1743,6 +1783,10 @@ impl Renderer {
 
             // Process command normally (including non-blur backdrop filters)
             if !self.culled(cmd) {
+                if self.batches_full() && !is_decoration(cmd) {
+                    self.flush_batches_to(&intermediate_view, is_first_flush)?;
+                    is_first_flush = false;
+                }
                 self.process_command(cmd);
             }
         }
@@ -1791,6 +1835,10 @@ impl Renderer {
                 self.render_gpu_gradient_inline(cmd, target);
             } else if !self.culled(cmd) {
                 // Process command normally (batched)
+                if self.batches_full() && !is_decoration(cmd) {
+                    self.flush_batches_for_gradient(target, is_first_flush)?;
+                    is_first_flush = false;
+                }
                 self.process_command(cmd);
             }
         }
@@ -6573,6 +6621,7 @@ impl Renderer {
 
         self.settle_opacity();
         self.tally_flush();
+        self.validate_batches()?;
 
         // Render batched content
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {

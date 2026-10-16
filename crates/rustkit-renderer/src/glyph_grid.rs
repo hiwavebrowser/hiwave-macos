@@ -1,15 +1,16 @@
-//! A uniform grid over the glyph quads batched since the last flush, so the
-//! fast path's "does this fill land on batched text?" check
-//! (`Renderer::solid_fill_occludes_batched_glyphs`) looks at the glyphs
-//! near the fill instead of every glyph batched so far.
+//! A uniform grid over the image, glyph and color-glyph quads batched since
+//! the last flush, so the fast path's "would this command be drawn under
+//! something batched before it?" check (`Renderer::occludes_batched`)
+//! looks at the quads near the command instead of every quad batched so
+//! far.
 //!
-//! The answer is the old linear scan's, exactly: each quad's bounding box
-//! is filed under every cell it touches, a query looks in every cell the
-//! fill touches, and the same strict overlap test decides. Two boxes that
+//! The answer is a linear scan's, exactly: each quad's bounding box is
+//! filed under every cell it touches, a query looks in every cell its rect
+//! touches, and the same strict overlap test decides. Two boxes that
 //! overlap share an interior point, and that point's cell is in both
-//! ranges, so no overlapping quad is missed. A fill too large for the
+//! ranges, so no overlapping quad is missed. A rect too large for the
 //! grid to help (the page background) is answered by scanning the boxes
-//! in order, as before.
+//! in order.
 
 use hashbrown::HashMap;
 
@@ -22,12 +23,25 @@ const MAX_KEPT_CELLS: usize = 4096;
 
 type Box2 = [f32; 4];
 
+/// The batches a flush draws after the color batch, in draw order:
+/// colors, then `Image`, then `Glyph`, then `ColorGlyph`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Batch {
+    Image = 0,
+    Glyph = 1,
+    ColorGlyph = 2,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct GlyphGrid {
-    /// Vertices of each glyph batch filed so far (grayscale, color).
-    filed: [usize; 2],
-    /// Every filed box, in batch order.
-    boxes: Vec<Box2>,
+    /// Vertices of each batch filed so far, by `Batch`.
+    filed: [usize; 3],
+    /// Boxes filed from each batch.
+    count: [usize; 3],
+    /// Every filed box and its batch, in filing order.
+    boxes: Vec<(Box2, Batch)>,
+    /// Tests: answer every query by scanning `boxes` in order.
+    pub(crate) scan_only: bool,
     /// Indices into `boxes`, by cell.
     cells: HashMap<(i32, i32), Vec<u32>>,
     /// Boxes too large or not finite enough to file in cells: always tested.
@@ -60,7 +74,8 @@ impl GlyphGrid {
     /// them, unless a transform has spread them over more cells than a
     /// screen holds.
     pub(crate) fn clear(&mut self) {
-        self.filed = [0, 0];
+        self.filed = [0, 0, 0];
+        self.count = [0, 0, 0];
         self.boxes.clear();
         if self.cells.len() > MAX_KEPT_CELLS {
             self.cells.clear();
@@ -70,10 +85,11 @@ impl GlyphGrid {
         self.wide.clear();
     }
 
-    /// File the quads of glyph batch `which` (0 grayscale, 1 color) added
-    /// since the last call; `verts` is the whole batch, four vertices per
-    /// quad, and `pos` reads a vertex's screen position.
-    pub(crate) fn extend<V>(&mut self, which: usize, verts: &[V], pos: impl Fn(&V) -> [f32; 2]) {
+    /// File the quads of `batch` added since the last call; `verts` is the
+    /// whole batch, four vertices per quad, and `pos` reads a vertex's
+    /// screen position.
+    pub(crate) fn extend<V>(&mut self, batch: Batch, verts: &[V], pos: impl Fn(&V) -> [f32; 2]) {
+        let which = batch as usize;
         if verts.len() < self.filed[which] {
             // The batch was cleared without `clear` (defensive): start over.
             self.clear();
@@ -89,7 +105,8 @@ impl GlyphGrid {
                 b[3] = b[3].max(y);
             }
             let id = self.boxes.len() as u32;
-            self.boxes.push(b);
+            self.boxes.push((b, batch));
+            self.count[which] += 1;
             match cell_range(b) {
                 Some((cx0, cy0, cx1, cy1)) => {
                     for cy in cy0..=cy1 {
@@ -104,18 +121,32 @@ impl GlyphGrid {
         self.filed[which] = from + (verts.len() - from) / 4 * 4;
     }
 
-    /// True when `r` strictly overlaps a filed box; `compared` counts the
-    /// boxes tested.
-    pub(crate) fn overlaps(&self, r: Box2, compared: &mut u64) -> bool {
+    /// True when a box from `from` or a later batch is filed.
+    pub(crate) fn any_from(&self, from: Batch) -> bool {
+        self.count[from as usize..].iter().any(|&n| n > 0)
+    }
+
+    /// True when `r` strictly overlaps a box filed from `from` or a later
+    /// batch; `compared` counts the boxes tested.
+    pub(crate) fn overlaps(&self, r: Box2, from: Batch, compared: &mut u64) -> bool {
+        if !self.any_from(from) {
+            return false;
+        }
+        if self.scan_only {
+            return self.scan(r, from, compared);
+        }
         let mut test = |id: &u32| {
-            *compared += 1;
-            strictly_overlap(r, self.boxes[*id as usize])
+            let (q, batch) = self.boxes[*id as usize];
+            batch >= from && {
+                *compared += 1;
+                strictly_overlap(r, q)
+            }
         };
         if self.wide.iter().any(&mut test) {
             return true;
         }
         let Some((cx0, cy0, cx1, cy1)) = cell_range(r) else {
-            return self.scan(r, compared);
+            return self.scan(r, from, compared);
         };
         let cells = (cx1 - cx0 + 1) as usize * (cy1 - cy0 + 1) as usize;
         if cells > self.cells.len() {
@@ -135,11 +166,13 @@ impl GlyphGrid {
         })
     }
 
-    /// Every box in order: the old linear scan.
-    fn scan(&self, r: Box2, compared: &mut u64) -> bool {
-        self.boxes.iter().any(|&q| {
-            *compared += 1;
-            strictly_overlap(r, q)
+    /// Every box in order: the linear scan.
+    fn scan(&self, r: Box2, from: Batch, compared: &mut u64) -> bool {
+        self.boxes.iter().any(|&(q, batch)| {
+            batch >= from && {
+                *compared += 1;
+                strictly_overlap(r, q)
+            }
         })
     }
 }
@@ -155,7 +188,7 @@ mod tests {
     fn grid(quads: &[[[f32; 2]; 4]]) -> GlyphGrid {
         let mut g = GlyphGrid::default();
         let pos: Vec<[f32; 2]> = quads.iter().flatten().copied().collect();
-        g.extend(0, &pos, |p| *p);
+        g.extend(Batch::Glyph, &pos, |p| *p);
         g
     }
 
@@ -203,7 +236,7 @@ mod tests {
                         y as f32 + 0.25 + h,
                     ];
                     assert_eq!(
-                        g.overlaps(r, &mut compared),
+                        g.overlaps(r, Batch::Image, &mut compared),
                         scan_answer(&quads, r),
                         "{r:?}"
                     );
@@ -221,9 +254,9 @@ mod tests {
     fn edges_that_only_touch_do_not_overlap() {
         let g = grid(&[quad(64.0, 64.0, 128.0, 80.0)]);
         let mut c = 0;
-        assert!(!g.overlaps([0.0, 0.0, 64.0, 64.0], &mut c));
-        assert!(!g.overlaps([128.0, 64.0, 200.0, 80.0], &mut c));
-        assert!(g.overlaps([127.9, 79.9, 200.0, 90.0], &mut c));
+        assert!(!g.overlaps([0.0, 0.0, 64.0, 64.0], Batch::Image, &mut c));
+        assert!(!g.overlaps([128.0, 64.0, 200.0, 80.0], Batch::Image, &mut c));
+        assert!(g.overlaps([127.9, 79.9, 200.0, 90.0], Batch::Image, &mut c));
     }
 
     #[test]
@@ -231,18 +264,18 @@ mod tests {
         let mut g = GlyphGrid::default();
         let q1 = quad(0.0, 0.0, 10.0, 10.0);
         let q2 = quad(100.0, 0.0, 110.0, 10.0);
-        g.extend(0, &q1, |p| *p);
+        g.extend(Batch::Glyph, &q1, |p| *p);
         let both: Vec<[f32; 2]> = q1.into_iter().chain(q2).collect();
-        g.extend(0, &both, |p| *p);
+        g.extend(Batch::Glyph, &both, |p| *p);
         assert_eq!(g.boxes.len(), 2);
         let mut c = 0;
-        assert!(g.overlaps([105.0, 5.0, 106.0, 6.0], &mut c));
+        assert!(g.overlaps([105.0, 5.0, 106.0, 6.0], Batch::Image, &mut c));
         g.clear();
-        assert!(!g.overlaps([105.0, 5.0, 106.0, 6.0], &mut c));
+        assert!(!g.overlaps([105.0, 5.0, 106.0, 6.0], Batch::Image, &mut c));
         // The emptied cells are reused, and hold only the new batch.
         assert!(!g.cells.is_empty());
-        g.extend(0, &q1, |p| *p);
-        assert!(g.overlaps([5.0, 5.0, 6.0, 6.0], &mut c));
-        assert!(!g.overlaps([105.0, 5.0, 106.0, 6.0], &mut c));
+        g.extend(Batch::Glyph, &q1, |p| *p);
+        assert!(g.overlaps([5.0, 5.0, 6.0, 6.0], Batch::Image, &mut c));
+        assert!(!g.overlaps([105.0, 5.0, 106.0, 6.0], Batch::Image, &mut c));
     }
 }

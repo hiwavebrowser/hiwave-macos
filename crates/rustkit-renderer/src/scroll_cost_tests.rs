@@ -161,7 +161,11 @@ fn page(mix: Mix, n: usize) -> Vec<DisplayCommand> {
             }
             Mix::Images => {
                 list.push(image(
-                    if row.is_multiple_of(2) { "a.png" } else { "b.png" },
+                    if row.is_multiple_of(2) {
+                        "a.png"
+                    } else {
+                        "b.png"
+                    },
                     10.0,
                     y + 2.0,
                     16.0,
@@ -188,6 +192,17 @@ fn page(mix: Mix, n: usize) -> Vec<DisplayCommand> {
         Color::new(255, 255, 255, 1.0),
     );
     list
+}
+
+trait PushGet<T> {
+    fn push_get(&mut self, item: T) -> &mut T;
+}
+
+impl<T> PushGet<T> for Vec<T> {
+    fn push_get(&mut self, item: T) -> &mut T {
+        self.push(item);
+        self.last_mut().unwrap()
+    }
 }
 
 fn page_height(list: &[DisplayCommand]) -> f32 {
@@ -397,6 +412,36 @@ fn kitchen_sink(n: usize) -> Vec<DisplayCommand> {
         list.push(text("faded", 804.0, y + 4.0, ink));
     }
     list.push(DisplayCommand::PopOpacity);
+    // Every 400px: an image, a caption on it, a badge over both, then an
+    // image over earlier text; and text right of the viewport whose
+    // negative letter-spacing walks it back on screen.
+    let mut y = 60.0;
+    while y < height {
+        list.push(image("a.png", 300.0, y, 120.0, 80.0));
+        list.push(text(
+            "caption",
+            304.0,
+            y + 50.0,
+            Color::new(255, 255, 255, 1.0),
+        ));
+        list.push(fill(
+            390.0,
+            y - 6.0,
+            40.0,
+            24.0,
+            Color::new(220, 0, 60, 1.0),
+        ));
+        list.push(text("seen through", 440.0, y + 20.0, ink));
+        list.push(image("b.png", 470.0, y + 18.0, 30.0, 30.0));
+        if let DisplayCommand::Text {
+            advances: Some(advances),
+            ..
+        } = list.push_get(text(LINE, 1400.0, y + 100.0, ink))
+        {
+            advances.iter_mut().for_each(|a| *a = -14.0);
+        }
+        y += 400.0;
+    }
     // A fixed header, drawn last so it is on top.
     list.extend([
         DisplayCommand::PushViewportFixed,
@@ -529,4 +574,66 @@ fn paint_order_is_kept_for_interleaved_fills_and_text() {
             );
         }
     }
+}
+
+#[test]
+fn a_badge_stays_over_its_image_and_an_image_over_its_text_whatever_is_off_screen() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    let ink = Color::new(0, 0, 0, 1.0);
+    let badge = Color::new(255, 0, 0, 1.0);
+    let list = vec![
+        fill(
+            0.0,
+            0.0,
+            VIEW_W as f32,
+            4000.0,
+            Color::new(255, 255, 255, 1.0),
+        ),
+        image("a.png", 100.0, 100.0, 200.0, 100.0),
+        // Off screen at scroll 0: a fill over text, which flushed the batch
+        // before, image and all, and so put the badge below on top.
+        text(LINE, 100.0, 3000.0, ink),
+        fill(100.0, 3000.0, 300.0, 20.0, Color::new(0, 200, 0, 1.0)),
+        fill(150.0, 120.0, 60.0, 40.0, badge),
+        // An image over earlier text.
+        text("MMMMMMMMMMMMMMMMMMMM", 100.0, 300.0, ink),
+        image("b.png", 120.0, 296.0, 60.0, 24.0),
+    ];
+    for scroll in [(0.0, 0.0), (0.0, 2600.0)] {
+        let (want, _) = reference_draw(&gpu, &list, scroll);
+        let (got, stats) = fast_draw(&gpu, &list, scroll);
+        assert_eq!(want, got, "at {scroll:?}");
+        if scroll.1 == 0.0 {
+            assert!(stats.culled >= 2, "{stats:?}");
+            let px = |x: usize, y: usize| got[(y * VIEW_W as usize + x) * 4..][..4].to_vec();
+            // BGRA: the badge over the image, the image over the text.
+            assert_eq!(px(180, 140), vec![0, 0, 255, 255], "badge under its image");
+            assert_eq!(
+                px(150, 308),
+                vec![200, 120, 30, 255],
+                "image under earlier text"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_batch_past_the_buffer_limit_is_flushed_instead_of_panicking() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    // 80,000 rows of text drawn without culling: about 3.4M glyph quads,
+    // past wgpu's 256 MB buffer limit in one batch. This panicked in
+    // `flush_to` (Texture Vertex Buffer).
+    let list = page(Mix::Text, 80_000);
+    let mut r = renderer(&gpu);
+    r.reference = true;
+    let (_t, view) = screenshot::create_offscreen_target(&gpu.device, VIEW_W, VIEW_H, FORMAT);
+    r.execute(&list, &view).expect("the frame draws");
+    let s = r.last_frame_stats();
+    assert!(s.batch_flushes >= 2, "{s:?}");
 }
