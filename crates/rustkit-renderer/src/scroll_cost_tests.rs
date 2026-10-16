@@ -499,6 +499,13 @@ fn without_text(list: &[DisplayCommand]) -> Vec<DisplayCommand> {
 /// paint shows as a difference outside those pixels, or as more than 1 LSB
 /// inside them, and fails.
 fn assert_culled_matches(want: &[u8], got: &[u8], no_text: &[u8], what: &str) {
+    if let Err(e) = check_culled(want, got, no_text) {
+        panic!("{what}: {e}");
+    }
+}
+
+/// `assert_culled_matches` without the panic: the reason a frame fails.
+fn check_culled(want: &[u8], got: &[u8], no_text: &[u8]) -> Result<(), String> {
     let mut wrong = 0usize;
     let mut first = None;
     let mut tolerated = 0usize;
@@ -526,11 +533,13 @@ fn assert_culled_matches(want: &[u8], got: &[u8], no_text: &[u8], what: &str) {
             ));
         }
     }
-    assert_eq!(
-        wrong, 0,
-        "{what}: {wrong} pixels differ beyond the glyph tolerance ({tolerated} glyph pixels within 1 LSB); \
+    if wrong == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "{wrong} pixels differ beyond the glyph tolerance ({tolerated} glyph pixels within 1 LSB); \
          first (x, y, reference, culled, glyph pixel): {first:?}"
-    );
+    ))
 }
 
 #[test]
@@ -1071,4 +1080,399 @@ fn the_culled_frame_check_allows_one_lsb_on_glyph_pixels_only() {
     let mut got = want.clone();
     got[40..44].copy_from_slice(&[255, 255, 255, 255]);
     assert!(!ok(&got), "a glyph pixel left uncovered is not");
+}
+
+/// Xorshift64: the randomized differential's lists are reproducible from
+/// their seed alone.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        // Spread small seeds so seed 1 and seed 2 start far apart.
+        Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+    }
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    /// A float in `lo..hi`.
+    fn f(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + (self.next() >> 40) as f32 / (1u64 << 24) as f32 * (hi - lo)
+    }
+    /// An integer in `0..n`.
+    fn u(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+    fn chance(&mut self, p: f32) -> bool {
+        self.f(0.0, 1.0) < p
+    }
+    /// Whole pixels three times in four, fractional ones otherwise.
+    fn pos(&mut self, lo: f32, hi: f32) -> f32 {
+        let v = self.f(lo, hi);
+        if self.chance(0.75) {
+            v.round()
+        } else {
+            v
+        }
+    }
+    fn color(&mut self, translucent: bool) -> Color {
+        let a = if translucent && self.chance(0.3) {
+            self.f(0.2, 0.9)
+        } else {
+            1.0
+        };
+        Color::new(self.u(256) as u8, self.u(256) as u8, self.u(256) as u8, a)
+    }
+}
+
+/// What a randomized seed draws: the list, its scroll offsets, and the
+/// renderer settings it needs.
+struct FuzzCase {
+    list: Vec<DisplayCommand>,
+    scrolls: Vec<(f32, f32)>,
+    batch_bytes: u64,
+    gpu_gradients: bool,
+}
+
+/// The randomized differential from R1 HOLD @ 5c529151: 20-240 commands
+/// mixing fills (translucent, negative-size), glyph runs (sizes 10-40, bold,
+/// italic, negative advances) with 0-3 decorations of every style after
+/// them, orphan decorations, three image textures (one a checkerboard),
+/// normal, wide and rounded borders, clips, translate / scale / rotate
+/// transforms, viewport-fixed groups, opacity groups, stacking contexts and
+/// box shadows. A quarter of the seeds add a blur backdrop filter, a
+/// quarter GPU linear gradients, and 30% a small batch cap. Each is drawn
+/// at scroll 0 and at 4 random offsets (some fractional, negative, or with
+/// x scroll).
+fn fuzz_case(seed: u64) -> FuzzCase {
+    let mut rng = Rng::new(seed);
+    let height = rng.f(1500.0, 8000.0).round();
+    let blur = rng.chance(0.25);
+    let gpu_gradients = rng.chance(0.25);
+    let batch_bytes = if rng.chance(0.3) {
+        [512, 2048, 16 * 1024][rng.u(3)]
+    } else {
+        MAX_BATCH_BYTES
+    };
+    let mut list = vec![fill(
+        0.0,
+        0.0,
+        VIEW_W as f32,
+        height,
+        Color::new(255, 255, 255, 1.0),
+    )];
+    // The pops owed for the groups open now, innermost last.
+    let mut open: Vec<DisplayCommand> = Vec::new();
+    let mut fixed = false;
+    let n = 20 + rng.u(221);
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,gjpqyW";
+    let styles = [
+        rustkit_layout::TextDecorationStyleValue::Solid,
+        rustkit_layout::TextDecorationStyleValue::Double,
+        rustkit_layout::TextDecorationStyleValue::Dotted,
+        rustkit_layout::TextDecorationStyleValue::Dashed,
+        rustkit_layout::TextDecorationStyleValue::Wavy,
+    ];
+    while list.len() < n {
+        let x = rng.pos(-200.0, VIEW_W as f32 + 200.0);
+        let y = rng.pos(-200.0, height);
+        match rng.u(20) {
+            0..=3 => {
+                let w = rng.pos(-300.0, 500.0);
+                let h = rng.pos(-100.0, 300.0);
+                list.push(fill(x, y, w, h, rng.color(true)));
+            }
+            4 => list.push(DisplayCommand::RoundedRect {
+                color: rng.color(true),
+                rect: Rect::new(x, y, rng.pos(1.0, 400.0), rng.pos(1.0, 200.0)),
+                radius: rustkit_layout::BorderRadius::uniform(rng.f(0.0, 40.0)),
+            }),
+            5..=8 => {
+                let len = 1 + rng.u(40);
+                let s: String = (0..len)
+                    .map(|_| CHARS[rng.u(CHARS.len())] as char)
+                    .collect();
+                let size = rng.f(10.0, 40.0).round();
+                let advance = if rng.chance(0.1) {
+                    -rng.f(1.0, 20.0)
+                } else {
+                    size * rng.f(0.4, 0.7)
+                };
+                list.push(DisplayCommand::Text {
+                    text: s,
+                    x,
+                    y,
+                    color: rng.color(true),
+                    font_size: size,
+                    font_family: "sans-serif".to_string(),
+                    font_weight: if rng.chance(0.3) { 700 } else { 400 },
+                    font_style: rng.chance(0.2) as u8,
+                    advances: Some(vec![advance; len]),
+                    ascent: Some(size * 0.9),
+                    run: None,
+                });
+                for _ in 0..rng.u(4) {
+                    let width = advance * len as f32 * if rng.chance(0.8) { 1.0 } else { -1.0 };
+                    list.push(DisplayCommand::TextDecoration {
+                        x,
+                        y: y + size * rng.f(0.0, 1.2),
+                        width,
+                        thickness: rng.f(1.0, 4.0),
+                        color: rng.color(true),
+                        style: styles[rng.u(styles.len())],
+                    });
+                }
+            }
+            9 => list.push(DisplayCommand::TextDecoration {
+                x,
+                y,
+                width: rng.pos(-300.0, 300.0),
+                thickness: rng.f(1.0, 6.0),
+                color: rng.color(true),
+                style: styles[rng.u(styles.len())],
+            }),
+            10..=11 => {
+                let url = ["a.png", "b.png", "checker.png"][rng.u(3)];
+                list.push(image(url, x, y, rng.pos(4.0, 400.0), rng.pos(4.0, 400.0)));
+            }
+            12 => {
+                let wide = rng.chance(0.3);
+                let mut side = || {
+                    if wide {
+                        rng.f(0.0, 400.0)
+                    } else {
+                        rng.f(0.0, 6.0)
+                    }
+                };
+                let (top, right, bottom, left) = (side(), side(), side(), side());
+                list.push(DisplayCommand::Border {
+                    color: rng.color(true),
+                    rect: Rect::new(x, y, rng.pos(1.0, 400.0), rng.pos(1.0, 200.0)),
+                    top,
+                    right,
+                    bottom,
+                    left,
+                });
+            }
+            13 => {
+                let wide = rng.chance(0.3);
+                let mut side = || {
+                    if wide {
+                        rng.f(0.0, 400.0)
+                    } else {
+                        rng.f(0.0, 6.0)
+                    }
+                };
+                let widths = [side(), side(), side(), side()];
+                list.push(DisplayCommand::RoundedBorder {
+                    rect: Rect::new(x, y, rng.pos(1.0, 400.0), rng.pos(1.0, 200.0)),
+                    widths,
+                    colors: [
+                        rng.color(false),
+                        rng.color(false),
+                        rng.color(false),
+                        rng.color(false),
+                    ],
+                    radius: rustkit_layout::BorderRadius::uniform(rng.f(0.0, 30.0)),
+                });
+            }
+            14 => list.push(DisplayCommand::BoxShadow {
+                offset_x: rng.f(-10.0, 10.0),
+                offset_y: rng.f(-10.0, 10.0),
+                blur_radius: rng.f(0.0, 20.0),
+                spread_radius: rng.f(-5.0, 10.0),
+                color: rng.color(true),
+                rect: Rect::new(x, y, rng.pos(10.0, 300.0), rng.pos(10.0, 200.0)),
+                border_radius: rustkit_layout::BorderRadius::uniform(rng.f(0.0, 20.0)),
+                inset: rng.chance(0.2),
+            }),
+            15 if blur => list.push(DisplayCommand::BackdropFilter {
+                rect: Rect::new(x, y, rng.pos(50.0, 500.0), rng.pos(50.0, 300.0)),
+                border_radius: rustkit_layout::BorderRadius::uniform(rng.f(0.0, 20.0)),
+                filter: rustkit_css::BackdropFilter::Blur(rng.f(1.0, 12.0)),
+            }),
+            15 if gpu_gradients => {
+                let stops = (0..2 + rng.u(3))
+                    .map(|_| rustkit_css::ColorStop::new(rng.color(true), None))
+                    .collect();
+                list.push(DisplayCommand::LinearGradient {
+                    rect: Rect::new(x, y, rng.pos(10.0, 500.0), rng.pos(10.0, 300.0)),
+                    direction: rustkit_css::GradientDirection::Angle(rng.f(0.0, 360.0)),
+                    stops,
+                    repeating: rng.chance(0.2),
+                    border_radius: rustkit_layout::BorderRadius::default(),
+                });
+            }
+            16 => {
+                let w = rng.pos(10.0, 600.0);
+                let h = rng.pos(10.0, 600.0);
+                if rng.chance(0.5) {
+                    list.push(DisplayCommand::PushClip(Rect::new(x, y, w, h)));
+                } else {
+                    list.push(DisplayCommand::PushClipRounded {
+                        rect: Rect::new(x, y, w, h),
+                        radius: rustkit_layout::BorderRadius::uniform(rng.f(0.0, 40.0)),
+                    });
+                }
+                open.push(DisplayCommand::PopClip);
+            }
+            17 => {
+                let matrix = match rng.u(3) {
+                    // Sticky-like: content pulled up or down a long way.
+                    0 => [
+                        1.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                        rng.f(-200.0, 200.0),
+                        rng.f(-3000.0, 3000.0),
+                    ],
+                    1 => {
+                        let s = rng.f(0.1, 2.0);
+                        [s, 0.0, 0.0, s, rng.f(-100.0, 100.0), rng.f(-100.0, 100.0)]
+                    }
+                    _ => {
+                        let (sin, cos) = rng.f(0.0, std::f32::consts::TAU).sin_cos();
+                        [cos, sin, -sin, cos, 0.0, 0.0]
+                    }
+                };
+                list.push(DisplayCommand::PushTransform {
+                    matrix,
+                    origin: (rng.pos(0.0, VIEW_W as f32), rng.pos(0.0, height)),
+                });
+                open.push(DisplayCommand::PopTransform);
+            }
+            18 => {
+                if rng.chance(0.5) {
+                    list.push(DisplayCommand::PushOpacity(rng.f(0.1, 0.95)));
+                    open.push(DisplayCommand::PopOpacity);
+                } else {
+                    list.push(DisplayCommand::PushStackingContext {
+                        z_index: rng.u(5) as i32 - 2,
+                        rect: Rect::new(x, y, rng.pos(10.0, 600.0), rng.pos(10.0, 600.0)),
+                    });
+                    open.push(DisplayCommand::PopStackingContext);
+                }
+            }
+            19 if !fixed && open.is_empty() => {
+                list.push(DisplayCommand::PushViewportFixed);
+                open.push(DisplayCommand::PopViewportFixed);
+                fixed = true;
+            }
+            _ => {
+                if let Some(pop) = open.pop() {
+                    fixed &= !matches!(pop, DisplayCommand::PopViewportFixed);
+                    list.push(pop);
+                }
+            }
+        }
+    }
+    list.extend(open.into_iter().rev());
+    let mut scrolls = vec![(0.0, 0.0)];
+    for _ in 0..4 {
+        let mut y = rng.f(-100.0, height);
+        if rng.chance(0.6) {
+            y = y.round();
+        }
+        let x = if rng.chance(0.2) {
+            rng.pos(-50.0, 300.0)
+        } else {
+            0.0
+        };
+        scrolls.push((x, y));
+    }
+    FuzzCase {
+        list,
+        scrolls,
+        batch_bytes,
+        gpu_gradients,
+    }
+}
+
+/// One frame of a randomized case, in a fresh renderer (so the glyph atlas
+/// starts empty, as on a page's first frame).
+fn fuzz_draw(
+    gpu: &Gpu,
+    case: &FuzzCase,
+    list: &[DisplayCommand],
+    scroll: (f32, f32),
+    reference: bool,
+) -> (Vec<u8>, FrameStats) {
+    let mut r = renderer(gpu);
+    let solid = |rgb: [u8; 3]| [rgb[2], rgb[1], rgb[0], 255].repeat(16 * 16);
+    r.upload_image("a.png", 16, 16, &solid([200, 120, 30]))
+        .unwrap();
+    r.upload_image("b.png", 16, 16, &solid([30, 160, 220]))
+        .unwrap();
+    let checker: Vec<u8> = (0..16 * 16)
+        .flat_map(|i| {
+            if (i % 16 / 2 + i / 16 / 2) % 2 == 0 {
+                [0, 0, 0, 255]
+            } else {
+                [255, 255, 255, 255]
+            }
+        })
+        .collect();
+    r.upload_image("checker.png", 16, 16, &checker).unwrap();
+    r.reference = reference;
+    r.max_batch_bytes = case.batch_bytes;
+    r.gpu_gradients_enabled = case.gpu_gradients;
+    let frame = draw(gpu, &mut r, list, scroll);
+    (frame, r.last_frame_stats())
+}
+
+/// The reviewer's randomized differential (R1 HOLD @ 5c529151), on demand:
+/// `cargo test --release -p rustkit-renderer --lib -- --ignored culling_matches_unculled_on_random_lists --nocapture`
+/// (`CULL_FUZZ_SEEDS=300` is the count, `CULL_FUZZ_FIRST=1` the first seed).
+/// Every frame is checked with `assert_culled_matches`: no coverage or
+/// order difference anywhere, 1 LSB at most on glyph pixels. It is ignored
+/// because a few hundred seeds take minutes on a software adapter.
+#[test]
+#[ignore = "randomized differential; run with --release --ignored --nocapture"]
+fn culling_matches_unculled_on_random_lists() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    let env = |k: &str, d: u64| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let first = env("CULL_FUZZ_FIRST", 1);
+    let seeds = env("CULL_FUZZ_SEEDS", 300);
+    eprintln!("adapter: {}; seeds {first}..{}", gpu.adapter, first + seeds);
+    let (mut frames, mut exact, mut culled, mut failures) = (0usize, 0usize, 0u64, Vec::new());
+    for seed in first..first + seeds {
+        let case = fuzz_case(seed);
+        let no_text_list = without_text(&case.list);
+        for &scroll in &case.scrolls {
+            let (want, _) = fuzz_draw(&gpu, &case, &case.list, scroll, true);
+            let (got, stats) = fuzz_draw(&gpu, &case, &case.list, scroll, false);
+            frames += 1;
+            culled += stats.culled;
+            if want == got {
+                exact += 1;
+                continue;
+            }
+            let (no_text, _) = fuzz_draw(&gpu, &case, &no_text_list, scroll, true);
+            if let Err(e) = check_culled(&want, &got, &no_text) {
+                eprintln!(
+                    "seed {seed} at {scroll:?} ({} commands): {e}",
+                    case.list.len()
+                );
+                failures.push((seed, scroll));
+            }
+        }
+    }
+    eprintln!(
+        "{frames} frames ({culled} commands culled): {exact} byte-identical, \
+         {} within the glyph tolerance, {} failing",
+        frames - exact - failures.len(),
+        failures.len()
+    );
+    assert!(failures.is_empty(), "failing (seed, scroll): {failures:?}");
 }
