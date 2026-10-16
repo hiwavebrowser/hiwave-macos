@@ -1,0 +1,104 @@
+// Script elements that script inserts (HTML §4.12.1.1 "prepare the script
+// element"): `document.createElement('script')`, a `src` or text, and an
+// insert into the document. Pages load whole bundles this way (loaders,
+// analytics, a challenge page's check script); until 2026-10-16 such an
+// element sat in the tree and nothing fetched or ran it.
+//
+// An external classic script is queued for the engine, which fetches it
+// like a parser-inserted one (its own request, never through page script)
+// and runs it as the element's script, then fires `load` or `error`. An
+// external module is `import()`ed. An inline classic script runs at once.
+//
+// Only elements script created are prepared: the parser's scripts ran (or
+// were skipped) with the load, and `innerHTML` never runs scripts. Each
+// element is prepared once. Not here (stated): inline module scripts and
+// `document.write`.
+(function (g) {
+    var internals = g.__rkScriptInternals;
+    delete g.__rkScriptInternals;
+    var HOOKS = g.__rkDomHooks;
+    if (!internals || !HOOKS) return;
+    // Captured before page script can replace them.
+    var indirectEval = g.eval, resolved = Promise.resolve(), URL_ = g.URL, Event_ = g.Event;
+    var STATE = Symbol('rustkit.script');
+    // Created and not yet started: inserts look for scripts only while
+    // there is one.
+    var fresh = 0;
+    var JS_TYPE = /^(?:(?:text|application)\/(?:x-)?(?:java|ecma)script|text\/javascript1\.[0-5]|text\/(?:jscript|livescript))$/;
+
+    function isScript(n) {
+        return n != null && n.nodeType === 1 && n.localName === 'script';
+    }
+    // The script's type (HTML §4.12.1.1 steps 8-10): 'classic', 'module',
+    // or null for a data block.
+    function kind(el) {
+        var type = el.getAttribute('type'), lang = el.getAttribute('language'), t;
+        if (type === null ? !lang : type === '') t = 'text/javascript';
+        else if (type === null) t = 'text/' + lang;
+        else t = type;
+        t = t.trim().toLowerCase();
+        if (JS_TYPE.test(t)) return 'classic';
+        return t === 'module' ? 'module' : null;
+    }
+    function fire(el, type) {
+        resolved.then(function () { el.dispatchEvent(new Event_(type)); });
+    }
+    function prepare(el) {
+        if (el[STATE] !== 'fresh' || !el.isConnected) return;
+        var src = el.getAttribute('src');
+        if (src === null && el.textContent === '') return;
+        var k = kind(el);
+        if (!k) return;
+        el[STATE] = 'started';
+        fresh--;
+        if (k === 'classic' && el.hasAttribute('nomodule')) return;
+        if (src !== null) {
+            var url;
+            try { url = new URL_(src, g.document.baseURI || g.location.href).href; } catch (e) { url = null; }
+            if (!url || src === '') return fire(el, 'error');
+            if (k === 'module') {
+                import(url).then(function () { fire(el, 'load'); }, function () { fire(el, 'error'); });
+                return;
+            }
+            internals.fetch(el, url);
+            return;
+        }
+        if (k === 'module') return;
+        var was = internals.current(el);
+        try {
+            indirectEval(el.textContent);
+        } catch (e) {
+            try { __rk.reportError(e); } catch (_) {}
+        } finally {
+            internals.current(was);
+        }
+    }
+
+    HOOKS.scripts = {
+        created: function (el) {
+            if (!isScript(el)) return;
+            Object.defineProperty(el, STATE, { value: 'fresh', writable: true, configurable: true });
+            fresh++;
+        },
+        // Before `node` goes into `parent`: the fresh scripts it carries (a
+        // fragment empties as it goes in), prepared in tree order after.
+        inserting: function (node, parent) {
+            if (fresh === 0) return null;
+            var found = [];
+            if (isScript(node)) found.push(node);
+            else if (node && typeof node.querySelectorAll === 'function') {
+                var all = node.querySelectorAll('script');
+                for (var i = 0; i < all.length; i++) found.push(all[i]);
+            }
+            // Text added to a script already in the document.
+            if (isScript(parent)) found.push(parent);
+            found = found.filter(function (s) { return s[STATE] === 'fresh'; });
+            return found.length ? function () { found.forEach(prepare); } : null;
+        },
+        // A `src` set, or text written, on a script already in the document.
+        changed: function (node, op, name) {
+            if (fresh === 0 || !isScript(node)) return;
+            if (op === 'setText' || (op === 'setAttr' && String(name).toLowerCase() === 'src')) prepare(node);
+        }
+    };
+})(globalThis);

@@ -25,6 +25,8 @@ use tracing::{debug, trace, warn};
 use url::Url;
 
 mod addr;
+pub mod cookies;
+pub use cookies::{CookieJar, CookieSource};
 pub use addr::{is_local_name, is_public_ip, AddressPolicy, Resolve, ResolveFuture, SystemResolver};
 
 /// HTTP client errors.
@@ -238,6 +240,9 @@ pub struct Client {
     address_policy: AddressPolicy,
     resolver: Arc<dyn Resolve>,
     max_body: Option<usize>,
+    /// Where `Set-Cookie` goes and `Cookie` comes from, at every hop; `None`
+    /// sends and keeps no cookies.
+    cookies: Option<Arc<CookieJar>>,
     #[cfg(not(feature = "native-tls"))]
     tls_connector: TlsConnector,
     #[cfg(feature = "native-tls")]
@@ -263,6 +268,7 @@ impl Client {
             address_policy: AddressPolicy::default(),
             resolver: Arc::new(SystemResolver),
             max_body: None,
+            cookies: None,
             tls_connector,
         })
     }
@@ -327,6 +333,7 @@ impl Client {
             address_policy: AddressPolicy::default(),
             resolver: Arc::new(SystemResolver),
             max_body: None,
+            cookies: None,
             tls_connector,
         })
     }
@@ -384,6 +391,17 @@ impl Client {
     pub fn with_follow_redirects(mut self, follow: bool) -> Self {
         self.config.follow_redirects = follow;
         self
+    }
+
+    /// The same client with this cookie jar, or with none.
+    pub fn with_cookies(mut self, jar: Option<Arc<CookieJar>>) -> Self {
+        self.cookies = jar;
+        self
+    }
+
+    /// The jar this client sends and keeps cookies with.
+    pub fn cookie_jar(&self) -> Option<&Arc<CookieJar>> {
+        self.cookies.as_ref()
     }
 
     /// The same client, refusing any response body (after decoding) larger
@@ -446,6 +464,16 @@ impl Client {
 
         debug!(method = %method, url = %url, "HTTP request");
 
+        // The jar's cookies for this hop; a caller's own Cookie header stands.
+        let mut headers = headers;
+        if let Some(jar) = &self.cookies {
+            if !headers.contains_key(http::header::COOKIE) {
+                if let Some(value) = jar.header_for(&url, false).and_then(|v| HeaderValue::from_str(&v).ok()) {
+                    headers.insert(http::header::COOKIE, value);
+                }
+            }
+        }
+
         // Connect with timeout
         let response = timeout(self.config.timeout, async {
             match scheme {
@@ -456,6 +484,15 @@ impl Client {
         })
         .await
         .map_err(|_| HttpError::Timeout)??;
+
+        // Every hop's Set-Cookie is kept, a redirect's included.
+        if let Some(jar) = &self.cookies {
+            for value in response.headers.get_all(http::header::SET_COOKIE) {
+                if let Ok(value) = value.to_str() {
+                    jar.set(&url, value, CookieSource::Http);
+                }
+            }
+        }
 
         // Handle redirects
         if self.config.follow_redirects && response.status.is_redirection() {
@@ -802,6 +839,7 @@ impl RawResponse {
 /// Client builder for configuring HTTP client.
 pub struct ClientBuilder {
     config: ClientConfig2,
+    cookies: bool,
 }
 
 impl ClientBuilder {
@@ -809,6 +847,7 @@ impl ClientBuilder {
     pub fn new() -> Self {
         Self {
             config: ClientConfig2::default(),
+            cookies: false,
         }
     }
 
@@ -831,15 +870,16 @@ impl ClientBuilder {
         self
     }
 
-    /// Placeholder for cookie_store (not implemented in minimal client).
-    pub fn cookie_store(self, _enabled: bool) -> Self {
-        // Cookie support would require additional implementation
+    /// Keep and send cookies, in a jar of the client's own.
+    pub fn cookie_store(mut self, enabled: bool) -> Self {
+        self.cookies = enabled;
         self
     }
 
     /// Build the client.
     pub fn build(self) -> Result<Client, HttpError> {
-        Client::with_config(self.config)
+        let jar = self.cookies.then(|| Arc::new(CookieJar::new()));
+        Ok(Client::with_config(self.config)?.with_cookies(jar))
     }
 }
 
