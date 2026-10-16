@@ -1080,6 +1080,17 @@ fn an_async_generator_stopped_in_return_or_delegation_answers_later_calls() {
             "await-return stopped in PromiseResolve",
             "var g = (async function* () {})(); g.next(); var v = Promise.resolve(1); Object.defineProperty(v, 'constructor', { get: function () { arm(); [1].map(function (x) { return x; }); return Promise; } }); var p = g.return(v);",
         ),
+        // R1 HOLD @ 2144eedf: `PromiseResolve` throws an ordinary error
+        // after the stop, so only its rejection is refused (`await_return`'s
+        // step 8). Suspended-start, then completed.
+        (
+            "await-return PromiseResolve throws (suspended start)",
+            "var g = (async function* () {})(); var v = Promise.resolve(1); Object.defineProperty(v, 'constructor', { get: function () { arm(); throw 1; } }); var p = g.return(v);",
+        ),
+        (
+            "await-return PromiseResolve throws (completed)",
+            "var g = (async function* () {})(); g.next(); var v = Promise.resolve(1); Object.defineProperty(v, 'constructor', { get: function () { arm(); throw 1; } }); var p = g.return(v);",
+        ),
         // `return()` into a `finally` that awaits, stopped after the await.
         (
             "return into an awaiting finally",
@@ -1104,7 +1115,10 @@ fn an_async_generator_stopped_in_return_or_delegation_answers_later_calls() {
         if page.get("typeof p") != "undefined" {
             assert_eq!(page.settle("p"), INTERRUPTED_GENERATOR, "{tag}");
         } else {
-            assert_eq!(tag, "await-return stopped in PromiseResolve");
+            assert!(
+                tag.contains("PromiseResolve"),
+                "{tag}: the script never got `p`"
+            );
         }
         // Later calls settle as on a finished generator.
         assert_eq!(page.settle_json("g.next()"), r#"ok {"done":true}"#, "{tag}");

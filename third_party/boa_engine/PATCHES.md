@@ -267,7 +267,7 @@ on it go on. A generator the stop froze becomes `completed`.
 | `src/builtins/promise/mod.rs` | `NewPromiseResolveThenableJob`: a `then` refused or stopped rejects the promise the same way. Promise resolve function: stopped while getting `then` (the promise is already resolved, so no reject function can settle it any more), it rejects the promise directly with that error and returns the stop |
 | `src/vm/opcode/await/mod.rs` | new `async_function_reject` (the reject function in a suspended async function's capability registers; `None` for an async generator and for a module's top level, which has no function object); both `Await` reactions call `Promise::reject_interrupted` with it on an uncatchable completion |
 | `src/builtins/async_generator/mod.rs` | `abandon_interrupted` rejects through `Promise::reject_interrupted` (was `interrupt_exempt_once`); new `await_return_step` for both closures of `AsyncGeneratorAwaitReturn`: if the turn is stopped, or a step is, the generator is abandoned (was `check_interrupt()?`, which left it `draining-queue`); it does nothing on a generator already abandoned, instead of failing step a.'s `assert_eq!` |
-| `src/builtins/async_generator/mod.rs` | `await_return`: an uncatchable `PromiseResolve` error abandons the generator. `drain_queue` is a wrapper that abandons it when the drain (upstream's steps, now `drain_queue_steps`) is stopped. `complete_step`: an uncatchable completion rejects the request with the ordinary error before returning the stop, and a resolve/reject the interrupt refused rejects it the same way (`settle_refused`) |
+| `src/builtins/async_generator/mod.rs` | `await_return`: an uncatchable `PromiseResolve` error abandons the generator, and so does a catchable one whose rejection the stop refused (step 8's `complete_step` returning the stop; R1 HOLD @ `2144eedf`: the direct `return()` path otherwise left it `draining-queue`). `drain_queue` is a wrapper that abandons it when the drain (upstream's steps, now `drain_queue_steps`) is stopped. `complete_step`: an uncatchable completion rejects the request with the ordinary error before returning the stop, and a resolve/reject the interrupt refused rejects it the same way (`settle_refused`) |
 
 The stopped turn still ends with `Interrupted`. In it, no script runs: the
 exemption covers only marked natives, every script function is still checked
@@ -285,7 +285,9 @@ set; script's own calls to `resolve`/`reject` are still stopped.
   turns `next()` is `{done:true}` and `return(7)` is `{value:7,done:true}`.
 - `an_async_generator_stopped_in_return_or_delegation_answers_later_calls`:
   await-return refused, stopped in a thenable's `then`, stopped in a
-  `constructor` getter; `return()` into a `finally` that awaits; `yield*` to an
+  `constructor` getter, a `constructor` getter throwing after the stop (on a
+  suspended-start and on a completed generator); `return()` into a `finally`
+  that awaits; `yield*` to an
   async and to a sync generator stopped mid-body.
 - `a_stopped_async_function_settles_its_promise`: after an `await`, a method,
   an arrow, nested functions, awaiting a refused job, awaiting `Promise.all`,

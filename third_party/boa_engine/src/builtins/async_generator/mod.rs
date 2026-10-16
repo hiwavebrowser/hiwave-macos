@@ -653,7 +653,17 @@ impl AsyncGenerator {
                 }
                 // END HIWAVE PATCH
                 // a. Perform AsyncGeneratorCompleteStep(generator, promiseCompletion, true).
-                Self::complete_step(generator, Err(e), true, None, context)?;
+                // HIWAVE PATCH (interrupt): a catchable `PromiseResolve` error
+                // whose rejection the stop refused abandons the generator
+                // too, as in `await_return_step`.
+                let step = Self::complete_step(generator, Err(e), true, None, context);
+                if let Err(err) = &step
+                    && !err.is_catchable()
+                {
+                    Self::abandon_interrupted(&generator.clone().upcast(), context);
+                }
+                step?;
+                // END HIWAVE PATCH
                 // b. Perform AsyncGeneratorDrainQueue(generator).
                 Self::drain_queue(generator, context)?;
                 // c. Return unused.
