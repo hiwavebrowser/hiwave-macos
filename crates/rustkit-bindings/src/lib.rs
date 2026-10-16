@@ -780,6 +780,14 @@ impl DomBindings {
     /// (`location.href = url`, `location.assign/replace`, `link.click()`),
     /// oldest first. Nothing navigates until the embedder does.
     pub fn take_navigation_requests(&self) -> Vec<String> {
+        self.take_history_navigations().into_iter().map(|(url, _)| url).collect()
+    }
+
+    /// The same requests, each with whether it replaces the current
+    /// session history entry instead of adding one: `location.replace()`,
+    /// `location.reload()`, a meta refresh, and a navigation to the
+    /// document's own URL (HTML "navigate", historyHandling "replace").
+    pub fn take_history_navigations(&self) -> Vec<(String, bool)> {
         self.dom_host.borrow_mut().take_navigation_requests()
     }
 

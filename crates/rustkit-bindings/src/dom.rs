@@ -101,8 +101,9 @@ pub(crate) struct DomHost {
     submit_requests: Vec<(usize, Option<usize>)>,
     /// URLs script asked this document to navigate to (`location.href =`,
     /// `link.click()`, `form.submit()`), oldest first
-    /// (`DomBindings::take_navigation_requests`).
-    navigation_requests: Vec<String>,
+    /// (`DomBindings::take_navigation_requests`), each with whether it
+    /// replaces the current session history entry.
+    navigation_requests: Vec<(String, bool)>,
     /// Script elements script inserted with a `src` (HTML §4.12.1.1
     /// "prepare the script element"), as (NodeId, absolute URL), oldest
     /// first: the engine fetches and runs them
@@ -163,7 +164,7 @@ impl DomHost {
         !self.navigation_requests.is_empty()
     }
 
-    pub(crate) fn take_navigation_requests(&mut self) -> Vec<String> {
+    pub(crate) fn take_navigation_requests(&mut self) -> Vec<(String, bool)> {
         std::mem::take(&mut self.navigation_requests)
     }
 
@@ -1205,15 +1206,17 @@ pub(crate) fn install(
         }),
     )?;
 
-    // `navigate(url)`: script asked for another document at this absolute
-    // URL. Nothing navigates here; the embedder takes the request.
+    // `navigate(url, replace)`: script asked for another document at this
+    // absolute URL, in the current history entry when `replace`. Nothing
+    // navigates here; the embedder takes the request.
     let h = host.clone();
     runtime.register_host_function(
         "__rustkit_dom_navigate",
-        1,
+        2,
         Box::new(move |args| {
             if let Some(JsValue::String(url)) = args.first() {
-                h.borrow_mut().navigation_requests.push(url.clone());
+                let replace = matches!(args.get(1), Some(JsValue::Boolean(true)));
+                h.borrow_mut().navigation_requests.push((url.clone(), replace));
             }
             JsValue::Null
         }),
@@ -2930,7 +2933,7 @@ const WRAPPERS_JS: &str = r#"
         setImplicitSubmit: function (f) { implicitSubmit = f; }
     };
     // For web_history.js, which deletes it: script asks for a navigation.
-    g.__rkNavInternals = { navigate: function (url) { N.navigate(String(url)); } };
+    g.__rkNavInternals = { navigate: function (url, replace) { N.navigate(String(url), !!replace); } };
     // For web_scripts.js, which deletes it: a script element to fetch and run.
     g.__rkScriptInternals = {
         fetch: function (el, url) {

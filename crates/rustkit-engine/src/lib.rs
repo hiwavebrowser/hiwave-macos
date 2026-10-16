@@ -983,6 +983,19 @@ impl ViewState {
     }
 }
 
+/// A navigation the page's own script asked for
+/// ([`Engine::take_script_history_navigation`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptNavigation {
+    /// The absolute URL to load.
+    pub url: String,
+    /// The new document takes the current session history entry instead of
+    /// adding one, as Chrome does (HTML "navigate", historyHandling
+    /// "replace"): `location.replace()`, `location.reload()`, a meta
+    /// refresh, and a navigation to the document's own URL.
+    pub replace: bool,
+}
+
 /// Engine configuration.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -3247,22 +3260,32 @@ impl Engine {
     /// When script asked more than once, the last request of each kind is
     /// kept, and a URL wins over a form.
     pub fn take_script_navigation(&mut self, id: EngineViewId) -> Option<String> {
+        self.take_script_history_navigation(id).map(|nav| nav.url)
+    }
+
+    /// [`Self::take_script_navigation`], with whether the new document
+    /// takes the current session history entry instead of adding one (see
+    /// [`ScriptNavigation::replace`]). The embedder that keeps the history
+    /// asks this one.
+    pub fn take_script_history_navigation(&mut self, id: EngineViewId) -> Option<ScriptNavigation> {
         let bindings = self.views.get(&id)?.bindings.as_ref()?;
-        let requested = bindings.take_navigation_requests().pop();
+        let requested = bindings.take_history_navigations().pop();
         let submit = bindings.take_submit_requests().pop();
-        if requested.is_some() {
-            return requested;
+        if let Some((url, replace)) = requested {
+            return Some(ScriptNavigation { url, replace });
         }
         let (form, submitter) = submit?;
-        let form = self
-            .views
-            .get(&id)?
-            .document
-            .as_ref()?
-            .get_node(rustkit_dom::NodeId::new(form))?;
+        let view = self.views.get(&id)?;
+        let form = view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(form))?;
+        let current = view.url.as_ref().map(Url::to_string);
         self.form_submission(id, &form, submitter)
             .filter(|sub| sub.is_self_target())
-            .map(|sub| sub.url)
+            .map(|sub| ScriptNavigation {
+                // A form that submits to the document's own URL replaces
+                // its entry, as any navigation to that URL does.
+                replace: current.as_deref() == Some(sub.url.as_str()),
+                url: sub.url,
+            })
     }
 
     /// The last form script asked to submit since the previous call, with

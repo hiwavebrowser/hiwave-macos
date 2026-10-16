@@ -57,6 +57,9 @@ pub struct RustKitView {
     history: RefCell<Vec<Url>>,
     /// Current position in navigation history.
     history_index: RefCell<usize>,
+    /// A script navigation that replaces the current history entry
+    /// (`take_script_navigation`), by URL: its load overwrites the entry.
+    replace_next_load: RefCell<Option<String>>,
     /// The page clock: the instant the live loop has run the page's timers
     /// up to. Reset when a page finishes loading.
     live_clock: Cell<Instant>,
@@ -177,6 +180,7 @@ impl RustKitView {
             blocked_counter: counter_clone,
             history: RefCell::new(Vec::new()),
             history_index: RefCell::new(0),
+            replace_next_load: RefCell::new(None),
             live_clock: Cell::new(Instant::now()),
             live_runtime: tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -352,11 +356,17 @@ impl RustKitView {
 
     /// Where the page's own script asked to go since the last call
     /// (`location.href = url`, `link.click()`, `form.submit()`, a submit
-    /// from a timer). The caller navigates.
+    /// from a timer). The caller navigates. When the navigation replaces
+    /// the current entry (`location.replace()`, `reload()`, a meta refresh,
+    /// the document's own URL), the load of that URL overwrites the entry
+    /// instead of adding one, as in Chrome.
     pub fn take_script_navigation(&self) -> Option<String> {
         let mut engine = self.engine.borrow_mut();
-        self.view_id
-            .and_then(|view_id| engine.take_script_navigation(view_id))
+        let nav = self
+            .view_id
+            .and_then(|view_id| engine.take_script_history_navigation(view_id))?;
+        *self.replace_next_load.borrow_mut() = nav.replace.then(|| nav.url.clone());
+        Some(nav.url)
     }
 
     /// Whether a content element currently holds focus.
@@ -496,21 +506,13 @@ impl RustKitView {
         // Update cached URL
         *self.current_url.borrow_mut() = Some(url.to_string());
 
-        // Update navigation history
-        let mut history = self.history.borrow_mut();
-        let mut index = self.history_index.borrow_mut();
-
-        // If we're in the middle of history (user went back), truncate forward history
-        if *index < history.len() {
-            history.truncate(*index + 1);
-        }
-
-        // Add new URL to history
-        history.push(parsed);
-        *index = history.len() - 1;
-
-        drop(history);
-        drop(index);
+        let replace = self.replace_next_load.borrow_mut().take().as_deref() == Some(url);
+        record_navigation(
+            &mut self.history.borrow_mut(),
+            &mut self.history_index.borrow_mut(),
+            parsed,
+            replace,
+        );
 
         self.load_url_blocking(url);
         Ok(())
@@ -603,6 +605,22 @@ impl Drop for RustKitView {
     }
 }
 
+/// Record a navigation to `url` in a view's history. A new entry drops the
+/// entries forward of the current one. With `replace`, or when `url` is
+/// the current entry's URL (HTML "navigate": a navigation to the active
+/// document's URL is a replace), the current entry takes it instead, so a
+/// reload or a page that keeps refreshing adds nothing to Back.
+fn record_navigation(history: &mut Vec<Url>, index: &mut usize, url: Url, replace: bool) {
+    match history.get_mut(*index) {
+        Some(current) if replace || *current == url => *current = url,
+        _ => {
+            history.truncate(*index + 1);
+            history.push(url);
+            *index = history.len() - 1;
+        }
+    }
+}
+
 // ============================================================================
 // IWebContent Implementation
 // ============================================================================
@@ -612,21 +630,12 @@ impl IWebContent for RustKitView {
         // Update cached URL
         *self.current_url.borrow_mut() = Some(url.to_string());
 
-        // Update navigation history
-        let mut history = self.history.borrow_mut();
-        let mut index = self.history_index.borrow_mut();
-
-        // If we're in the middle of history (user went back), truncate forward history
-        if *index < history.len() {
-            history.truncate(*index + 1);
-        }
-
-        // Add new URL to history
-        history.push(url.clone());
-        *index = history.len() - 1;
-
-        drop(history);
-        drop(index);
+        record_navigation(
+            &mut self.history.borrow_mut(),
+            &mut self.history_index.borrow_mut(),
+            url.clone(),
+            false,
+        );
 
         self.load_url_blocking(url.as_str());
         Ok(())
@@ -714,6 +723,26 @@ mod tests {
         let config = content_engine_builder().config().clone();
         assert!(config.interrupt_scripts_at_budget);
         assert_eq!(config.live_turn_budget_ms, 5_000);
+    }
+
+    #[test]
+    fn a_replacing_navigation_adds_no_history_entry() {
+        let u = |s: &str| Url::parse(s).unwrap();
+        let (mut history, mut index) = (Vec::new(), 0);
+        record_navigation(&mut history, &mut index, u("https://a.test/x"), false);
+        record_navigation(&mut history, &mut index, u("https://a.test/err"), false);
+        // Reload, `href = href`, a meta refresh to itself: the same URL.
+        record_navigation(&mut history, &mut index, u("https://a.test/err"), false);
+        record_navigation(&mut history, &mut index, u("https://a.test/err"), true);
+        assert_eq!(history, [u("https://a.test/x"), u("https://a.test/err")]);
+        assert_eq!(index, 1);
+        // `location.replace()` or a meta refresh elsewhere takes the entry.
+        record_navigation(&mut history, &mut index, u("https://a.test/next"), true);
+        assert_eq!(history, [u("https://a.test/x"), u("https://a.test/next")]);
+        // Back, then a new page: the forward entry goes.
+        index = 0;
+        record_navigation(&mut history, &mut index, u("https://a.test/y"), false);
+        assert_eq!((history, index), (vec![u("https://a.test/x"), u("https://a.test/y")], 1));
     }
 
     #[test]

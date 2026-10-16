@@ -21,33 +21,46 @@
     function sameDocument(a, b) {
         return a.href.split('#')[0] === b.href.split('#')[0];
     }
-    function requestNavigation(target) {
+    // `replace`: the new document takes the current session history entry
+    // instead of adding one (historyHandling "replace").
+    function requestNavigation(target, replace) {
         if (!nav.navigate || (target.protocol !== 'http:' && target.protocol !== 'https:')) return;
-        nav.navigate(target.href);
+        nav.navigate(target.href, !!replace);
     }
     // `location.href = url`, and through it assign(), replace() and
     // `document.location = url`. `location` keeps the document's URL until
     // a navigation replaces the document; it used to read back the string
     // script assigned, relative or not. Another fragment of this document
     // is the fragment navigation; anything else is a request.
-    function go(target) {
+    function go(target, replace) {
         var current;
         try { current = new URL(hrefValue); } catch (e) { return; }
         // Only a URL with a fragment is a fragment navigation; the
         // document's own URL without one loads it again (HTML §7.4.2.2
         // step 12), as `location.href = location.href` does in Chrome.
-        if (!sameDocument(current, target) || target.href.indexOf('#') < 0) return requestNavigation(target);
-        if (target.href !== current.href) g.__rustkit_fragment_navigation(target.href);
+        // A navigation to the document's own URL replaces its entry
+        // ("navigate": url equals the active document's URL).
+        if (!sameDocument(current, target) || target.href.indexOf('#') < 0) {
+            return requestNavigation(target, replace || target.href === current.href);
+        }
+        if (target.href !== current.href) g.__rustkit_fragment_navigation(target.href, replace);
     }
-    // `location.reload()`: the same URL again, as a request like the rest.
+    // `location.replace(url)`: as `href = url`, in the current entry.
+    loc.replace = function (url) {
+        var target;
+        try { target = new URL(String(url), hrefValue); } catch (e) { return; }
+        go(target, true);
+    };
+    // `location.reload()`: the same URL again, adding no entry.
     loc.reload = function () {
-        try { requestNavigation(new URL(hrefValue)); } catch (e) {}
+        try { requestNavigation(new URL(hrefValue), true); } catch (e) {}
     };
     // `<meta http-equiv=refresh>` (HTML §4.2.5.3, "shared declarative
     // refresh steps"): once the document has loaded, the first one that
     // parses asks for its URL (or this document again) after its seconds.
     // A page that waits and then retries or moves on (a 503's "try again
-    // shortly") did neither until 2026-10-16.
+    // shortly") did neither until 2026-10-16. The refresh replaces the
+    // current entry, so a page that keeps refreshing adds none.
     function parseRefresh(content) {
         var m = /^[\t\n\f\r ]*(\d*)(\.[\d.]*)?/.exec(content);
         if (m[1] === '' && !m[2]) return null;
@@ -70,7 +83,7 @@
             if (!refresh) continue;
             var target;
             try { target = new URL(refresh.url || hrefValue, g.document.baseURI || hrefValue); } catch (e) { return; }
-            setTimeout(function () { requestNavigation(target); }, Math.min(refresh.seconds, 2147483) * 1000);
+            setTimeout(function () { requestNavigation(target, true); }, Math.min(refresh.seconds, 2147483) * 1000);
             return;
         }
     }
@@ -172,13 +185,18 @@
     }
 
     // The engine followed a link to a fragment of this document (HTML
-    // §7.4.2.3.3): a new entry, the new URL, then `hashchange`.
-    g.__rustkit_fragment_navigation = function (href) {
+    // §7.4.2.3.3): a new entry (or, from `location.replace`, the current
+    // one), the new URL, then `hashchange`.
+    g.__rustkit_fragment_navigation = function (href, replace) {
         var oldURL = loc.href;
         if (oldURL === href) return;
-        entries.length = index + 1;
-        entries.push({ url: href, state: null });
-        index++;
+        if (replace) {
+            entries[index] = { url: href, state: null };
+        } else {
+            entries.length = index + 1;
+            entries.push({ url: href, state: null });
+            index++;
+        }
         setLocation(href);
         g.dispatchEvent(new HashChangeEvent('hashchange', { oldURL: oldURL, newURL: loc.href }));
     };

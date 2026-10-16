@@ -145,8 +145,10 @@ fn a_403_page_runs_the_script_it_inserts_and_its_reload_carries_the_cookies() {
         r#"String("passed=1")"#,
         "document.cookie reads the jar; the HttpOnly cookie stays out of script's reach"
     );
-    let reload = engine.take_script_navigation(view).expect("location.reload() asks to navigate");
-    assert_eq!(reload, server.url("/").to_string());
+    let reload = engine.take_script_history_navigation(view).expect("location.reload() asks to navigate");
+    assert_eq!(reload.url, server.url("/").to_string());
+    assert!(reload.replace, "a reload adds no history entry");
+    let reload = reload.url;
 
     rt.block_on(engine.load_url(view, Url::parse(&reload).unwrap())).expect("the reload");
     assert_eq!(engine.http_status(view), Some(200));
@@ -195,8 +197,10 @@ fn a_503_page_with_a_meta_refresh_navigates() {
     rt.block_on(engine.load_url(view, server.url("/"))).expect("a 503 with a page is a page");
     assert_eq!(engine.http_status(view), Some(503));
     assert_eq!(engine.views[&view].title.as_deref(), Some("Busy"));
-    let next = engine.take_script_navigation(view).expect("the refresh asks to navigate");
-    assert_eq!(next, server.url("/later").to_string());
+    let next = engine.take_script_history_navigation(view).expect("the refresh asks to navigate");
+    assert_eq!(next.url, server.url("/later").to_string());
+    assert!(next.replace, "a refresh replaces the current entry");
+    let next = next.url;
     rt.block_on(engine.load_url(view, Url::parse(&next).unwrap())).expect("follow the refresh");
     assert_eq!(engine.views[&view].title.as_deref(), Some("Later"));
 }
@@ -212,7 +216,11 @@ fn a_meta_refresh_without_a_url_reloads_after_its_delay() {
     rt.block_on(engine.load_url(view, server.url("/wait"))).expect("load");
     assert_eq!(engine.take_script_navigation(view), None, "not before its ten seconds");
     rt.block_on(engine.pump_live(view, 10_000));
-    assert_eq!(engine.take_script_navigation(view), Some(server.url("/wait").to_string()));
+    assert_eq!(
+        engine.take_script_history_navigation(view),
+        Some(ScriptNavigation { url: server.url("/wait").to_string(), replace: true }),
+        "a page that keeps refreshing adds no history entries"
+    );
 }
 
 /// A 404 page's script fetches JSON from its own origin like any page.
@@ -246,7 +254,9 @@ fetch('/data.json').then(function (r) { return r.json(); }).then(function (d) {
 
 /// What else script navigates with, on an error page: `location.replace`
 /// and `assign`, and assigning the document's own URL (a reload, not a
-/// fragment navigation).
+/// fragment navigation). As in Chrome, `replace()`, `reload()` and a
+/// navigation to the document's own URL take the current history entry;
+/// the rest add one.
 #[test]
 fn location_replace_assign_and_href_to_itself_navigate() {
     fn site(_: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
@@ -255,17 +265,41 @@ fn location_replace_assign_and_href_to_itself_navigate() {
     let server = serve(site);
     let (mut engine, view, rt) = engine();
     rt.block_on(engine.load_url(view, server.url("/page"))).expect("load");
-    for (js, want) in [
-        ("location.replace('/a')", "/a"),
-        ("location.assign('/b?x=1')", "/b?x=1"),
-        ("location.href = location.href", "/page"),
-        ("location.reload()", "/page"),
-        ("location.href = '#top'", ""),
+    for (js, want, replace) in [
+        ("location.replace('/a')", "/a", true),
+        ("location.assign('/b?x=1')", "/b?x=1", false),
+        ("location.href = location.href", "/page", true),
+        ("location.assign('/page')", "/page", true),
+        ("location.reload()", "/page", true),
+        ("location.href = '/other'", "/other", false),
+        ("location.href = '#top'", "", false),
     ] {
         text(&mut engine, view, js);
-        let want = (!want.is_empty()).then(|| server.url(want).to_string());
-        assert_eq!(engine.take_script_navigation(view), want, "{js}");
+        let want = (!want.is_empty()).then(|| ScriptNavigation { url: server.url(want).to_string(), replace });
+        assert_eq!(engine.take_script_history_navigation(view), want, "{js}");
     }
+}
+
+/// A form script submits to the document's own URL replaces its entry
+/// too; one that goes elsewhere adds one. Not about the status either.
+#[test]
+fn a_form_submitted_to_the_page_s_own_url_replaces_its_entry() {
+    fn site(_: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        (200, "text/html", vec![], r#"<form action="/find"><input name="q" value="rust"></form>"#.into())
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = engine();
+    rt.block_on(engine.load_url(view, server.url("/find?q=rust"))).expect("load");
+    text(&mut engine, view, "document.forms[0].submit()");
+    assert_eq!(
+        engine.take_script_history_navigation(view),
+        Some(ScriptNavigation { url: server.url("/find?q=rust").to_string(), replace: true })
+    );
+    text(&mut engine, view, "document.forms[0].elements.q.value = 'go'; document.forms[0].submit()");
+    assert_eq!(
+        engine.take_script_history_navigation(view),
+        Some(ScriptNavigation { url: server.url("/find?q=go").to_string(), replace: false })
+    );
 }
 
 /// A script element is run once: moving an inserted script, or inserting

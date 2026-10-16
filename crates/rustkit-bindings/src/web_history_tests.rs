@@ -319,3 +319,20 @@ fn a_script_click_on_a_fragment_link_stays_in_the_document() {
         "https://site.test/dir/index.html?a=1#sec #sec 2"
     );
 }
+
+#[test]
+fn replace_reload_and_the_document_s_own_url_take_the_current_entry() {
+    let b = bound();
+    for (script, want, replace) in [
+        ("location.replace('/r')", "https://site.test/r", true),
+        ("location.reload()", DOC, true),
+        ("history.replaceState(null, '', '/own'); location.href = '/own'", "https://site.test/own", true),
+        ("location.href = '/away'", "https://site.test/away", false),
+    ] {
+        ev(&b, &format!("{script}; 0"));
+        assert_eq!(b.take_history_navigations(), [(want.to_string(), replace)], "{script}");
+    }
+    // A fragment by `replace()` rewrites this document's entry.
+    assert_eq!(ev(&b, "location.replace('#r'); location.hash + ' ' + history.length"), "#r 1");
+    assert_eq!(b.take_history_navigations(), Vec::<(String, bool)>::new());
+}
