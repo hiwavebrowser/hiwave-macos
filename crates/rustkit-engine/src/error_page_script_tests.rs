@@ -205,13 +205,13 @@ fn a_503_page_with_a_meta_refresh_navigates() {
 #[test]
 fn a_meta_refresh_without_a_url_reloads_after_its_delay() {
     fn site(_: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
-        (503, "text/html", vec![], r#"<meta http-equiv="Refresh" content="5"><p>busy</p>"#.into())
+        (503, "text/html", vec![], r#"<meta http-equiv="Refresh" content="10"><p>busy</p>"#.into())
     }
     let server = serve(site);
     let (mut engine, view, rt) = engine();
     rt.block_on(engine.load_url(view, server.url("/wait"))).expect("load");
-    assert_eq!(engine.take_script_navigation(view), None, "not before its five seconds");
-    rt.block_on(engine.pump_live(view, 5_000));
+    assert_eq!(engine.take_script_navigation(view), None, "not before its ten seconds");
+    rt.block_on(engine.pump_live(view, 10_000));
     assert_eq!(engine.take_script_navigation(view), Some(server.url("/wait").to_string()));
 }
 
@@ -352,9 +352,11 @@ setTimeout(function () {
 /// it: the M3b cancel reaches the inserted-script fetch like every other.
 #[test]
 fn a_cancelled_load_does_not_run_the_script_it_inserted() {
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
         match path {
             "/slow.js" => {
+                ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
                 std::thread::sleep(std::time::Duration::from_millis(400));
                 (200, "text/javascript", vec![], "window.slowRan = true;".into())
             }
@@ -369,8 +371,12 @@ fn a_cancelled_load_does_not_run_the_script_it_inserted() {
     let server = serve(site);
     let (mut engine, view, rt) = engine();
     let canceller = engine.nav_canceller(view).expect("canceller");
+    // Cancelled once the inserted script's request is out.
     let cancel = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        let started = std::time::Instant::now();
+        while !ASKED.load(std::sync::atomic::Ordering::SeqCst) && started.elapsed().as_secs() < 30 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         canceller.cancel_current();
     });
     let _ = rt.block_on(engine.load_url(view, server.url("/")));
@@ -379,4 +385,48 @@ fn a_cancelled_load_does_not_run_the_script_it_inserted() {
     // run the inserted one.
     let ran = engine.execute_script(view, "String(window.slowRan)").unwrap_or_default();
     assert_ne!(ran, r#"String("true")"#);
+    assert!(
+        server.requests().iter().any(|(p, _)| p == "/slow.js"),
+        "the cancel came while the inserted script was being fetched"
+    );
 }
+
+/// An inserted script still arriving when the load's script budget is spent
+/// is over budget, as a parser-inserted one is: not run, and its element
+/// hears neither `load` nor `error`.
+#[test]
+fn an_inserted_script_past_the_script_budget_does_not_run() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/slow.js" => {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                (200, "text/javascript", vec![], "window.slowRan = true;".into())
+            }
+            _ => (
+                403,
+                "text/html",
+                vec![],
+                r#"<p>x</p><script>var heard = [];
+var s = document.createElement('script'); s.src = '/slow.js';
+s.onload = function () { heard.push('load'); }; s.onerror = function () { heard.push('error'); };
+document.head.appendChild(s);</script>"#
+                    .into(),
+            ),
+        }
+    }
+    let server = serve(site);
+    let mut engine = Engine::new(EngineConfig { script_budget_ms: 200, ..EngineConfig::default() }).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+        .expect("view");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    assert_eq!(text(&mut engine, view, "String(window.slowRan) + ' ' + heard.join()"), r#"String("undefined ")"#);
+    let record = engine.views[&view]
+        .script_log
+        .iter()
+        .find(|r| r.source.ends_with("/slow.js"))
+        .expect("the inserted script is in the script log");
+    assert_eq!(record.outcome, ScriptOutcome::OverBudget);
+}
+

@@ -33,8 +33,46 @@
     function go(target) {
         var current;
         try { current = new URL(hrefValue); } catch (e) { return; }
-        if (!sameDocument(current, target)) return requestNavigation(target);
-        if (target.href !== current.href && target.hash !== '') g.__rustkit_fragment_navigation(target.href);
+        // Only a URL with a fragment is a fragment navigation; the
+        // document's own URL without one loads it again (HTML §7.4.2.2
+        // step 12), as `location.href = location.href` does in Chrome.
+        if (!sameDocument(current, target) || target.href.indexOf('#') < 0) return requestNavigation(target);
+        if (target.href !== current.href) g.__rustkit_fragment_navigation(target.href);
+    }
+    // `location.reload()`: the same URL again, as a request like the rest.
+    loc.reload = function () {
+        try { requestNavigation(new URL(hrefValue)); } catch (e) {}
+    };
+    // `<meta http-equiv=refresh>` (HTML §4.2.5.3, "shared declarative
+    // refresh steps"): once the document has loaded, the first one that
+    // parses asks for its URL (or this document again) after its seconds.
+    // A page that waits and then retries or moves on (a 503's "try again
+    // shortly") did neither until 2026-10-16.
+    function parseRefresh(content) {
+        var m = /^[\t\n\f\r ]*(\d*)(\.[\d.]*)?/.exec(content);
+        if (m[1] === '' && !m[2]) return null;
+        var rest = content.slice(m[0].length);
+        if (rest !== '' && !/^[\t\n\f\r ;,]/.test(rest)) return null;
+        rest = rest.replace(/^[\t\n\f\r ]*[;,]?[\t\n\f\r ]*/, '').replace(/^url[\t\n\f\r ]*=[\t\n\f\r ]*/i, '');
+        var quote = rest.charAt(0);
+        if (quote === '"' || quote === "'") {
+            rest = rest.slice(1);
+            if (rest.indexOf(quote) >= 0) rest = rest.slice(0, rest.indexOf(quote));
+        }
+        return { seconds: m[1] === '' ? 0 : parseInt(m[1], 10), url: rest.replace(/[\t\n\f\r ]+$/, '') };
+    }
+    function refreshOnLoad() {
+        var metas = g.document && g.document.getElementsByTagName ? g.document.getElementsByTagName('meta') : [];
+        for (var i = 0; i < metas.length; i++) {
+            var equiv = metas[i].getAttribute('http-equiv');
+            if (!equiv || equiv.trim().toLowerCase() !== 'refresh') continue;
+            var refresh = parseRefresh(metas[i].getAttribute('content') || '');
+            if (!refresh) continue;
+            var target;
+            try { target = new URL(refresh.url || hrefValue, g.document.baseURI || hrefValue); } catch (e) { return; }
+            setTimeout(function () { requestNavigation(target); }, Math.min(refresh.seconds, 2147483) * 1000);
+            return;
+        }
     }
     Object.defineProperty(loc, 'href', {
         get: function () { return hrefValue; },
@@ -70,9 +108,16 @@
         try { loc.href = href; } finally { syncing = false; }
     };
     // A new document: one entry, the current URL, no state.
+    var listening = false;
     g.__rustkit_history_reset = function () {
         entries = [{ url: loc.href, state: null }];
         index = 0;
+        // Listened for once the document is bound: window's listeners
+        // are not all in place when this file runs.
+        if (!listening && g.document && g.addEventListener) {
+            listening = true;
+            g.addEventListener('load', refreshOnLoad);
+        }
     };
     g.__rustkit_history_reset();
 

@@ -103,6 +103,11 @@ pub(crate) struct DomHost {
     /// `link.click()`, `form.submit()`), oldest first
     /// (`DomBindings::take_navigation_requests`).
     navigation_requests: Vec<String>,
+    /// Script elements script inserted with a `src` (HTML §4.12.1.1
+    /// "prepare the script element"), as (NodeId, absolute URL), oldest
+    /// first: the engine fetches and runs them
+    /// (`DomBindings::take_inserted_scripts`).
+    inserted_scripts: Vec<(usize, String)>,
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
@@ -133,6 +138,7 @@ impl DomHost {
         self.checked.clear();
         self.submit_requests.clear();
         self.navigation_requests.clear();
+        self.inserted_scripts.clear();
         self.generation
     }
 
@@ -159,6 +165,10 @@ impl DomHost {
 
     pub(crate) fn take_navigation_requests(&mut self) -> Vec<String> {
         std::mem::take(&mut self.navigation_requests)
+    }
+
+    pub(crate) fn take_inserted_scripts(&mut self) -> Vec<(usize, String)> {
+        std::mem::take(&mut self.inserted_scripts)
     }
 
     fn document_for(&self, generation: &JsValue) -> Option<&Rc<Document>> {
@@ -1209,6 +1219,24 @@ pub(crate) fn install(
         }),
     )?;
 
+    // `inserted_script(id, url)`: script inserted this element with this
+    // absolute `src`. Nothing is fetched here; the engine takes the queue.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_inserted_script",
+        2,
+        Box::new(move |args| {
+            if let (Some(JsValue::Number(id)), Some(JsValue::String(url))) = (args.first(), args.get(1)) {
+                let mut host = h.borrow_mut();
+                // Bounds what a page can park between two engine drains.
+                if host.inserted_scripts.len() < 256 {
+                    host.inserted_scripts.push((*id as usize, url.clone()));
+                }
+            }
+            JsValue::Null
+        }),
+    )?;
+
     // Its listener and handler errors go to the host natives (`__rk`).
     runtime.evaluate_with_host(WRAPPERS_JS)?;
     shadow::install(runtime, host, dirty)?;
@@ -1229,9 +1257,10 @@ const WRAPPERS_JS: &str = r#"
         write: __rustkit_dom_write, matches: __rustkit_dom_matches,
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
-        navigate: __rustkit_dom_navigate
+        navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script
     };
-    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate'].forEach(function (n) {
+    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
+        'inserted_script'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -1255,7 +1284,9 @@ const WRAPPERS_JS: &str = r#"
     // root's host (or null for any other node). `mutation` is the
     // MutationObserver's (web_mutation_observer.js): set from the first
     // observe(), it sees every write below before it happens and gets back
-    // what to record once it has.
+    // what to record once it has. `scripts` is web_scripts.js's: it hears of
+    // each element script creates, each insert before it happens (and gets
+    // back what to run once it has), and each write to a node's own data.
     var HOOKS = {};
     Object.defineProperty(g, '__rkDomHooks', { value: HOOKS, configurable: true, enumerable: false });
     var gen = 0;
@@ -1437,6 +1468,7 @@ const WRAPPERS_JS: &str = r#"
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
         if (m) m();
+        if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
         return r;
     }
     function create(kind, data, method) {
@@ -1488,9 +1520,11 @@ const WRAPPERS_JS: &str = r#"
         var p = slotOf(parent), n = nodeArg(node, method);
         var c = child == null ? null : here(nodeArg(child, method));
         var m = HOOKS.mutation && HOOKS.mutation.tree(op, parent, node, child);
+        var inserted = op === 'insert' && HOOKS.scripts && HOOKS.scripts.inserting(node, parent);
         var err = N.mutate(gen, op, here(p), here(n), c);
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
+        if (inserted) inserted();
         return node;
     }
     Node.prototype.appendChild = function (node) {
@@ -2460,7 +2494,9 @@ const WRAPPERS_JS: &str = r#"
     };
     Document.prototype.createElement = function (tag) {
         tag = String(tag);
-        return create('element', tag, 'createElement');
+        var el = create('element', tag, 'createElement');
+        if (HOOKS.scripts) HOOKS.scripts.created(el);
+        return el;
     };
     Document.prototype.createTextNode = function (data) {
         return create('text', String(data), 'createTextNode');
@@ -2895,6 +2931,16 @@ const WRAPPERS_JS: &str = r#"
     };
     // For web_history.js, which deletes it: script asks for a navigation.
     g.__rkNavInternals = { navigate: function (url) { N.navigate(String(url)); } };
+    // For web_scripts.js, which deletes it: a script element to fetch and run.
+    g.__rkScriptInternals = {
+        fetch: function (el, url) {
+            var s = el[SLOT];
+            if (s && s.gen === gen) N.insertedScript(s.id, String(url));
+        },
+        // `document.currentScript` while an inserted inline script runs;
+        // answers what it was.
+        current: function (el) { var was = currentScript; currentScript = el; return was; }
+    };
 
     // For node_apis.js, which runs next and deletes it.
     g.__rkNodeInternals = {
