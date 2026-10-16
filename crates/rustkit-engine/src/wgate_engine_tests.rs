@@ -30,13 +30,18 @@ fn load() -> (Engine, EngineViewId, crate::script_net_tests::Server, tokio::runt
 /// A page listener that spins for 200 ms on `popstate` without writing
 /// to the DOM used to leave no hold line: only a relayout nested in the
 /// script was timed.
+///
+/// `spin` reads `Date.now()`, whole milliseconds rounded down, so a
+/// `spin(90)` can leave after 89.0 ms of real time while the hold is timed
+/// in fractions; the bound asked of the hold sits 10 ms inside the spin
+/// (`spin(80)` against 80.0 failed 9 of 21 runs at 79.52 to 79.95 ms).
 #[test]
 fn a_script_the_app_runs_on_the_page_is_a_hold() {
     let (mut engine, view, _server, _rt) = load();
     wgate::clear_last();
-    let result = engine.execute_script(view, &spin(80)).expect("script");
+    let result = engine.execute_script(view, &spin(90)).expect("script");
     assert!(result.contains("spun"), "{result}");
-    let (entry, ms) = wgate::last_hold().expect("an 80 ms script from the window thread is reported");
+    let (entry, ms) = wgate::last_hold().expect("a 90 ms script from the window thread is reported");
     assert_eq!(entry, "script");
     assert!(ms >= 80.0, "{ms}");
 }
