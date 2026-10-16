@@ -45,6 +45,12 @@ futures = "0.3"
 # Base64 for auth
 base64 = "0.22"
 
+# Cookie Expires dates
+httpdate = "1"
+
+# Public suffix list: no cookie Domain may be one
+psl = "2"
+
 # Content-Encoding: gzip / deflate
 flate2 = "1"
 # Content-Encoding: br, for servers that send it without being asked. Decode

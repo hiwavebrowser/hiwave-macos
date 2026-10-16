@@ -673,7 +673,7 @@ document.addEventListener('DOMContentLoaded', function () {
   var d = document.getElementById('t'); d.id = document.cookie; d.setAttribute('data-x', '1');
 });
 window.addEventListener('load', function () {
-  var c = document.createElement('x-' + document.cookie.split('=')[1].toLowerCase());
+  var c = document.createElement('x-' + document.cookie.split('sid=')[1].toLowerCase());
   c.id = 'el-' + document.cookie; c.setAttribute('class', 'cls-' + document.cookie);
   document.body.appendChild(c);
   setTimeout(function () { c.setAttribute('data-y', '1'); c.textContent = 'SECRET_TEXT'; }, 0);
