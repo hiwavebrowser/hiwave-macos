@@ -401,4 +401,15 @@ mod tests {
         };
         assert!(matches!(order_probe(&line), Some((Batch::Image, None))));
     }
+
+    #[test]
+    fn a_negative_width_or_height_spans_back_from_its_origin() {
+        let fill = DisplayCommand::SolidColor(
+            Color::new(0, 0, 0, 1.0),
+            Rect::new(1100.0, 400.0, -300.0, -20.0),
+        );
+        let b = paint_bounds(&fill).unwrap();
+        assert_eq!((b.x, b.y, b.width, b.height), (798.0, 378.0, 304.0, 24.0));
+        assert!(!outside(ID, b, 1024.0, 768.0));
+    }
 }

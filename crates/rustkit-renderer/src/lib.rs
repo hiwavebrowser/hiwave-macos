@@ -1653,15 +1653,19 @@ impl Renderer {
     /// flush, 1.3 billion comparisons and 10 s for a 20,000-command table
     /// on lavapipe (`scroll_cost_tests`). The answer is the same.
     fn occludes_batched(&mut self, cmd: &DisplayCommand) -> bool {
+        match cull::order_probe(cmd) {
+            Some((from, rect)) => self.probe_occludes_batched(from, rect),
+            None => false,
+        }
+    }
+
+    fn probe_occludes_batched(&mut self, from: glyph_grid::Batch, rect: Option<Rect>) -> bool {
         if self.texture_vertices.is_empty()
             && self.color_glyph_vertices.is_empty()
             && self.image_vertices.is_empty()
         {
             return false;
         }
-        let Some((from, rect)) = cull::order_probe(cmd) else {
-            return false;
-        };
         let started = self.measure.then(std::time::Instant::now);
         use glyph_grid::Batch;
         self.glyph_grid.extend(Batch::Image, &self.image_vertices, |v| v.position);
