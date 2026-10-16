@@ -3223,8 +3223,17 @@ impl Engine {
     /// When script asked more than once, the last request of each kind is
     /// kept, and a URL wins over a form.
     pub fn take_script_navigation(&mut self, id: EngineViewId) -> Option<String> {
+        self.take_script_navigation_with_replace(id).map(|(url, _)| url)
+    }
+
+    /// [`Self::take_script_navigation`], with whether the navigation
+    /// replaces the current history entry instead of adding one:
+    /// `location.replace()`, `location.reload()`, the document's own URL
+    /// again and `<meta http-equiv=refresh>` do, as in Chrome, so Back does
+    /// not return to the page that reloaded or refreshed itself.
+    pub fn take_script_navigation_with_replace(&mut self, id: EngineViewId) -> Option<(String, bool)> {
         let bindings = self.views.get(&id)?.bindings.as_ref()?;
-        let requested = bindings.take_navigation_requests().pop();
+        let requested = bindings.take_navigation_requests_with_replace().pop();
         let submit = bindings.take_submit_requests().pop();
         if requested.is_some() {
             return requested;
@@ -3238,7 +3247,7 @@ impl Engine {
             .get_node(rustkit_dom::NodeId::new(form))?;
         self.form_submission(id, &form, submitter)
             .filter(|sub| sub.is_self_target())
-            .map(|sub| sub.url)
+            .map(|sub| (sub.url, false))
     }
 
     /// The last form script asked to submit since the previous call, with

@@ -21,9 +21,14 @@
     function sameDocument(a, b) {
         return a.href.split('#')[0] === b.href.split('#')[0];
     }
-    function requestNavigation(target) {
+    // A navigation that replaces the session history entry instead of
+    // adding one (HTML §7.4.2.2 "navigate", historyHandling "replace"):
+    // `location.replace()`, a reload, the document's own URL again, and a
+    // declarative refresh. Chrome's Back does not return to them.
+    var replacing = false;
+    function requestNavigation(target, replace) {
         if (!nav.navigate || (target.protocol !== 'http:' && target.protocol !== 'https:')) return;
-        nav.navigate(target.href);
+        nav.navigate(target.href, !!(replace || replacing || target.href === hrefValue));
     }
     // `location.href = url`, and through it assign(), replace() and
     // `document.location = url`. `location` keeps the document's URL until
@@ -41,7 +46,11 @@
     }
     // `location.reload()`: the same URL again, as a request like the rest.
     loc.reload = function () {
-        try { requestNavigation(new URL(hrefValue)); } catch (e) {}
+        try { requestNavigation(new URL(hrefValue), true); } catch (e) {}
+    };
+    loc.replace = function (url) {
+        replacing = true;
+        try { loc.href = String(url); } finally { replacing = false; }
     };
     // `<meta http-equiv=refresh>` (HTML §4.2.5.3, "shared declarative
     // refresh steps"): once the document has loaded, the first one that
@@ -70,7 +79,7 @@
             if (!refresh) continue;
             var target;
             try { target = new URL(refresh.url || hrefValue, g.document.baseURI || hrefValue); } catch (e) { return; }
-            setTimeout(function () { requestNavigation(target); }, Math.min(refresh.seconds, 2147483) * 1000);
+            setTimeout(function () { requestNavigation(target, true); }, Math.min(refresh.seconds, 2147483) * 1000);
             return;
         }
     }

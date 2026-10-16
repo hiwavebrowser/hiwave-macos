@@ -145,7 +145,8 @@ fn a_403_page_runs_the_script_it_inserts_and_its_reload_carries_the_cookies() {
         r#"String("passed=1")"#,
         "document.cookie reads the jar; the HttpOnly cookie stays out of script's reach"
     );
-    let reload = engine.take_script_navigation(view).expect("location.reload() asks to navigate");
+    let (reload, replace) = engine.take_script_navigation_with_replace(view).expect("location.reload() asks to navigate");
+    assert!(replace, "a reload replaces the history entry: Back does not return to the 403");
     assert_eq!(reload, server.url("/").to_string());
 
     rt.block_on(engine.load_url(view, Url::parse(&reload).unwrap())).expect("the reload");
@@ -195,7 +196,8 @@ fn a_503_page_with_a_meta_refresh_navigates() {
     rt.block_on(engine.load_url(view, server.url("/"))).expect("a 503 with a page is a page");
     assert_eq!(engine.http_status(view), Some(503));
     assert_eq!(engine.views[&view].title.as_deref(), Some("Busy"));
-    let next = engine.take_script_navigation(view).expect("the refresh asks to navigate");
+    let (next, replace) = engine.take_script_navigation_with_replace(view).expect("the refresh asks to navigate");
+    assert!(replace, "a declarative refresh replaces the history entry");
     assert_eq!(next, server.url("/later").to_string());
     rt.block_on(engine.load_url(view, Url::parse(&next).unwrap())).expect("follow the refresh");
     assert_eq!(engine.views[&view].title.as_deref(), Some("Later"));
@@ -255,16 +257,20 @@ fn location_replace_assign_and_href_to_itself_navigate() {
     let server = serve(site);
     let (mut engine, view, rt) = engine();
     rt.block_on(engine.load_url(view, server.url("/page"))).expect("load");
-    for (js, want) in [
-        ("location.replace('/a')", "/a"),
-        ("location.assign('/b?x=1')", "/b?x=1"),
-        ("location.href = location.href", "/page"),
-        ("location.reload()", "/page"),
-        ("location.href = '#top'", ""),
+    // The URL, and whether it replaces the history entry (Chrome: replace,
+    // reload and the document's own URL do; an assign elsewhere adds one).
+    for (js, want, replace) in [
+        ("location.replace('/a')", "/a", true),
+        ("location.assign('/b?x=1')", "/b?x=1", false),
+        ("location.href = '/c'", "/c", false),
+        ("location.href = location.href", "/page", true),
+        ("location.assign(location.href)", "/page", true),
+        ("location.reload()", "/page", true),
+        ("location.href = '#top'", "", false),
     ] {
         text(&mut engine, view, js);
-        let want = (!want.is_empty()).then(|| server.url(want).to_string());
-        assert_eq!(engine.take_script_navigation(view), want, "{js}");
+        let want = (!want.is_empty()).then(|| (server.url(want).to_string(), replace));
+        assert_eq!(engine.take_script_navigation_with_replace(view), want, "{js}");
     }
 }
 
