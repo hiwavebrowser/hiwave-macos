@@ -4,8 +4,9 @@ use rustc_hash::FxHashSet;
 
 use super::{BindingName, ResolveExportError, ResolvedBinding};
 use crate::{
-    Context, JsExpect, JsNativeError, JsResult, JsString, JsValue, Module, SpannedSourceText,
-    builtins::promise::ResolvingFunctions,
+    Context, JsExpect, JsNativeError, JsObject, JsResult, JsString, JsValue, Module,
+    SpannedSourceText,
+    builtins::promise::{Promise, ResolvingFunctions}, // HIWAVE PATCH (interrupt): `Promise`
     bytecompiler::ByteCompiler,
     class::{Class, ClassBuilder},
     environments::{DeclarativeEnvironment, EnvironmentStack},
@@ -257,8 +258,14 @@ impl SyntheticModule {
     ///
     /// [spec]: https://tc39.es/proposal-json-modules/#sec-smr-LoadRequestedModules
     pub(super) fn load(context: &mut Context) -> JsPromise {
-        JsPromise::resolve(JsValue::undefined(), context)
-            .expect("default resolve functions cannot throw and must return a promise")
+        // HIWAVE PATCH (interrupt): built fulfilled; `JsPromise::resolve`
+        // (was `.expect`) makes calls the interrupt can stop.
+        JsObject::from_proto_and_data_with_shared_shape(
+            context.root_shape(),
+            context.intrinsics().constructors().promise().prototype(),
+            Promise::fulfilled(JsValue::undefined()),
+        )
+        .into()
     }
 
     /// Concrete method [`GetExportedNames ( [ exportStarSet ] )`][spec].

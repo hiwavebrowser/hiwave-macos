@@ -124,12 +124,10 @@ fn the_stop_unwinds_nested_calls_and_promise_jobs() {
     let result = context.run_jobs();
     let ended = Instant::now();
     let set_at = setter.join().unwrap();
-    // Boa drops the completion of an async body resumed from a job (the
-    // `Await` reactions in `vm/opcode/await`), so the stop ends that job
-    // without reaching `run_jobs`' caller. What matters is that it ends.
-    if let Err(err) = result {
-        assert!(is_interrupt(&err), "got {err}");
-    }
+    // The `Await` reactions return the stop of the body they resume
+    // (PATCHES.md), so it reaches `run_jobs`' caller.
+    let err = result.expect_err("the async spin is stopped");
+    assert!(is_interrupt(&err), "got {err}");
     let late = ended.saturating_duration_since(set_at);
     assert!(
         late < Duration::from_millis(50),

@@ -136,6 +136,7 @@ impl JsFunction {
                     name: js_string!(),
                     constructor: constructor.then_some(ConstructorKind::Base),
                     realm: None,
+                    settles_promises: false, // HIWAVE PATCH (interrupt)
                 },
             ),
         }

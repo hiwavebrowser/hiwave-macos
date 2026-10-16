@@ -427,12 +427,31 @@ impl AsyncGenerator {
         match completion {
             // 6. If completion is a throw completion, then
             Err(e) => {
+                // HIWAVE PATCH (interrupt): a runtime limit (the interrupt)
+                // cannot be handed to script; the request is rejected with
+                // an ordinary error instead and the stop goes on.
+                let reason = match e.into_opaque(context) {
+                    Ok(reason) => reason,
+                    Err(stop) => {
+                        Promise::reject_interrupted(
+                            promise_capability.reject(),
+                            INTERRUPTED,
+                            context,
+                        );
+                        return Err(stop);
+                    }
+                };
+                // END HIWAVE PATCH
                 // a. Perform ! Call(promiseCapability.[[Reject]], undefined, « value »).
-                promise_capability.reject().call(
-                    &JsValue::undefined(),
-                    &[e.into_opaque(context)?],
-                    context,
-                )?;
+                let result =
+                    promise_capability
+                        .reject()
+                        .call(&JsValue::undefined(), &[reason], context);
+                // HIWAVE PATCH (interrupt): refused at its entry, the request
+                // would stay pending; it is rejected exempt instead.
+                settle_refused(&result, promise_capability, context);
+                result?;
+                // END HIWAVE PATCH
             }
 
             // 7. Else,
@@ -458,11 +477,15 @@ impl AsyncGenerator {
                 };
 
                 // d. Perform ! Call(promiseCapability.[[Resolve]], undefined, « iteratorResult »).
-                promise_capability.resolve().call(
+                let result = promise_capability.resolve().call(
                     &JsValue::undefined(),
                     &[iterator_result],
                     context,
-                )?;
+                );
+                // HIWAVE PATCH (interrupt): as for the reject above.
+                settle_refused(&result, promise_capability, context);
+                result?;
+                // END HIWAVE PATCH
             }
         }
         // 8. Return unused.
@@ -516,13 +539,69 @@ impl AsyncGenerator {
         generator.borrow_mut().data_mut().context = Some(generator_context);
 
         // 8. Assert: result is never an abrupt completion.
-        assert!(!result.is_throw_completion());
+        // HIWAVE PATCH (interrupt): except a runtime limit (the interrupt),
+        // which no handler in the body takes; it ends the job, and the
+        // generator is abandoned so later calls settle.
+        if let CompletionRecord::Throw(err) = result {
+            Self::abandon_interrupted(&generator.clone().upcast(), context);
+            return Err(err);
+        }
+        // END HIWAVE PATCH
 
         // 9. Assert: When we return here, genContext has already been removed from the execution context stack and
         //    callerContext is the currently running execution context.
         // 10. Return unused.
         Ok(())
     }
+
+    // HIWAVE PATCH (interrupt)
+    /// The interrupt stopped this generator's body while it ran. Left
+    /// `executing`, it would queue every later `next`/`return`/`throw`
+    /// forever. It becomes `completed` (so later calls settle as on a
+    /// finished generator), and every request already queued, the stopped
+    /// one included, is rejected with an ordinary, catchable error. The
+    /// reject functions only enqueue jobs and run no script, so they are
+    /// called exempt from the interrupt check, which lets this run in the
+    /// stopped turn.
+    pub(crate) fn abandon_interrupted(generator: &JsObject, context: &mut Context) {
+        let queue = {
+            let Some(mut r#gen) = generator.downcast_mut::<Self>() else {
+                return;
+            };
+            r#gen.state = AsyncGeneratorState::Completed;
+            r#gen.context = None;
+            std::mem::take(&mut r#gen.queue)
+        };
+        for request in queue {
+            Promise::reject_interrupted(request.capability.reject(), INTERRUPTED, context);
+        }
+    }
+
+    /// One step of `AsyncGeneratorAwaitReturn`'s closures (c. and d.), run
+    /// only if the interrupt has not stopped the turn. If it has, or stops a
+    /// step, the generator is abandoned: left `draining-queue`, every later
+    /// call would queue forever.
+    fn await_return_step(
+        generator: &JsObject<AsyncGenerator>,
+        result: JsResult<JsValue>,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        // Abandoned while the returned value was awaited: nothing is left.
+        if generator.borrow().data().state == AsyncGeneratorState::Completed {
+            return Ok(JsValue::undefined());
+        }
+        let step = context
+            .check_interrupt()
+            .and_then(|()| Self::complete_step(generator, result, true, None, context))
+            .and_then(|()| Self::drain_queue(generator, context));
+        if let Err(err) = &step
+            && !err.is_catchable()
+        {
+            Self::abandon_interrupted(&generator.clone().upcast(), context);
+        }
+        step.map(|()| JsValue::undefined())
+    }
+    // END HIWAVE PATCH
 
     /// `AsyncGeneratorAwaitReturn ( generator )`
     ///
@@ -565,8 +644,26 @@ impl AsyncGenerator {
                 .js_expect("%Promise% constructor must always return a Promise object")?,
             // 8. If promiseCompletion is an abrupt completion, then
             Err(e) => {
+                // HIWAVE PATCH (interrupt): stopped in `PromiseResolve` (a
+                // `constructor` getter), the generator is abandoned rather
+                // than left `draining-queue`.
+                if !e.is_catchable() {
+                    Self::abandon_interrupted(&generator.clone().upcast(), context);
+                    return Err(e);
+                }
+                // END HIWAVE PATCH
                 // a. Perform AsyncGeneratorCompleteStep(generator, promiseCompletion, true).
-                Self::complete_step(generator, Err(e), true, None, context)?;
+                // HIWAVE PATCH (interrupt): a catchable `PromiseResolve` error
+                // whose rejection the stop refused abandons the generator
+                // too, as in `await_return_step`.
+                let step = Self::complete_step(generator, Err(e), true, None, context);
+                if let Err(err) = &step
+                    && !err.is_catchable()
+                {
+                    Self::abandon_interrupted(&generator.clone().upcast(), context);
+                }
+                step?;
+                // END HIWAVE PATCH
                 // b. Perform AsyncGeneratorDrainQueue(generator).
                 Self::drain_queue(generator, context)?;
                 // c. Return unused.
@@ -582,23 +679,20 @@ impl AsyncGenerator {
             context.realm(),
             NativeFunction::from_copy_closure_with_captures(
                 |_this, args, generator, context| {
+                    // HIWAVE PATCH (interrupt): not run in a stopped turn (see
+                    // `new_promise_reaction_job`, which lets engine reactions
+                    // in); the generator is abandoned instead. The assert of
+                    // step a. holds unless it was abandoned already.
                     // a. Assert: generator.[[AsyncGeneratorState]] is draining-queue.
-                    assert_eq!(
-                        generator.borrow().data().state,
-                        AsyncGeneratorState::DrainingQueue
-                    );
 
                     // b. Let result be NormalCompletion(value).
                     let result = Ok(args.get_or_undefined(0).clone());
 
                     // c. Perform AsyncGeneratorCompleteStep(generator, result, true).
-                    Self::complete_step(generator, result, true, None, context)?;
-
                     // d. Perform AsyncGeneratorDrainQueue(generator).
-                    Self::drain_queue(generator, context)?;
-
                     // e. Return undefined.
-                    Ok(JsValue::undefined())
+                    Self::await_return_step(generator, result, context)
+                    // END HIWAVE PATCH
                 },
                 generator.clone(),
             ),
@@ -613,23 +707,17 @@ impl AsyncGenerator {
             context.realm(),
             NativeFunction::from_copy_closure_with_captures(
                 |_this, args, generator, context| {
+                    // HIWAVE PATCH (interrupt): as in the fulfilled closure.
                     // a. Assert: generator.[[AsyncGeneratorState]] is draining-queue.
-                    assert_eq!(
-                        generator.borrow().data().state,
-                        AsyncGeneratorState::DrainingQueue
-                    );
 
                     // b. Let result be ThrowCompletion(reason).
                     let result = Err(JsError::from_opaque(args.get_or_undefined(0).clone()));
 
                     // c. Perform AsyncGeneratorCompleteStep(generator, result, true).
-                    Self::complete_step(generator, result, true, None, context)?;
-
                     // d. Perform AsyncGeneratorDrainQueue(generator).
-                    Self::drain_queue(generator, context)?;
-
                     // e. Return undefined.
-                    Ok(JsValue::undefined())
+                    Self::await_return_step(generator, result, context)
+                    // END HIWAVE PATCH
                 },
                 generator.clone(),
             ),
@@ -665,6 +753,24 @@ impl AsyncGenerator {
         generator: &JsObject<AsyncGenerator>,
         context: &mut Context,
     ) -> JsResult<()> {
+        // HIWAVE PATCH (interrupt): a drain the interrupt stops abandons the
+        // generator; left `draining-queue`, every later call would queue
+        // forever.
+        let result = Self::drain_queue_steps(generator, context);
+        if let Err(err) = &result
+            && !err.is_catchable()
+        {
+            Self::abandon_interrupted(&generator.clone().upcast(), context);
+        }
+        result
+    }
+
+    // HIWAVE PATCH (interrupt): upstream's `drain_queue`, renamed.
+    fn drain_queue_steps(
+        generator: &JsObject<AsyncGenerator>,
+        context: &mut Context,
+    ) -> JsResult<()> {
+        // END HIWAVE PATCH
         // 1. Assert: generator.[[AsyncGeneratorState]] is draining-queue.
         assert_eq!(
             generator.borrow().data().state,
@@ -729,3 +835,24 @@ impl AsyncGenerator {
         Ok(())
     }
 }
+
+// HIWAVE PATCH (interrupt)
+/// The error a request is rejected with when the interrupt stopped the
+/// generator before it could answer it.
+const INTERRUPTED: &str = "async generator was interrupted";
+
+/// A request's `resolve`/`reject` that the interrupt refused at its entry
+/// left it pending; it is rejected with an ordinary error instead (a no-op
+/// if the call got far enough to settle it).
+fn settle_refused(
+    result: &JsResult<JsValue>,
+    capability: &PromiseCapability,
+    context: &mut Context,
+) {
+    if let Err(err) = result
+        && !err.is_catchable()
+    {
+        Promise::reject_interrupted(capability.reject(), INTERRUPTED, context);
+    }
+}
+// END HIWAVE PATCH

@@ -14,6 +14,41 @@ use crate::{
 use boa_gc::Gc;
 use std::{cell::Cell, ops::ControlFlow};
 
+// HIWAVE PATCH (interrupt)
+use crate::{
+    JsObject,
+    module::{Module, abandon_interrupted_module_body},
+    vm::{ActiveRunnable, CallFrame, CodeBlock},
+};
+
+/// HIWAVE PATCH (interrupt): the module and code block of a suspended async
+/// body run by a module, to abandon that module if the body is its top level
+/// and the interrupt stops it.
+fn module_body(r#gen: &GeneratorContext) -> Option<(Module, Gc<CodeBlock>)> {
+    let frame = r#gen.call_frame.as_ref()?;
+    match &frame.active_runnable {
+        Some(ActiveRunnable::Module(module)) => Some((module.clone(), frame.code_block.clone())),
+        _ => None,
+    }
+}
+
+/// HIWAVE PATCH (interrupt): the reject function of a suspended async
+/// function's promise, to settle it if the interrupt stops the body. `None`
+/// for an async generator (abandoned on its own) and for a module's top
+/// level, which has no function object (abandoned with its module).
+fn async_function_reject(r#gen: &GeneratorContext) -> Option<JsObject> {
+    let frame = r#gen.call_frame.as_ref()?;
+    let code = frame.code_block();
+    if !code.is_async() || code.is_generator() {
+        return None;
+    }
+    r#gen.stack.stack.get(frame.function_index())?.as_object()?;
+    r#gen
+        .stack
+        .get_register(frame, CallFrame::PROMISE_CAPABILITY_REJECT_REGISTER_INDEX)?
+        .as_object()
+}
+
 /// `Await` implements the Opcode Operation for `Opcode::Await`
 ///
 /// Operation:
@@ -73,18 +108,51 @@ impl Await {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object()?;
 
-                    r#gen.resume(
+                    // HIWAVE PATCH (interrupt): the module whose top level this
+                    // is, if any (see below).
+                    let runnable = module_body(&r#gen);
+                    let async_function = async_function_reject(&r#gen);
+
+                    // HIWAVE PATCH (interrupt): keep the completion (was dropped).
+                    let completion = r#gen.resume(
                         Some(args.get_or_undefined(0).clone()),
                         GeneratorResumeKind::Normal,
                         context,
                     );
 
-                    if let Some(async_generator) = async_generator {
+                    if let Some(async_generator) = &async_generator {
                         async_generator
                             .downcast_mut::<AsyncGenerator>()
                             .js_expect("must be async generator")?
                             .context = Some(r#gen);
                     }
+
+                    // HIWAVE PATCH (interrupt): the body takes every catchable
+                    // error itself; a runtime limit (the interrupt) unwinds
+                    // past it and ends this job instead of being dropped.
+                    // A module's top level stopped this way is abandoned, so
+                    // later imports of it do not hang; so is an async
+                    // generator, so its later calls settle, and an async
+                    // function's promise is rejected with an ordinary error.
+                    if let CompletionRecord::Throw(err) = completion
+                        && !err.is_catchable()
+                    {
+                        if let Some((module, code)) = runnable {
+                            abandon_interrupted_module_body(&module, &code);
+                        }
+                        if let Some(async_generator) = &async_generator {
+                            AsyncGenerator::abandon_interrupted(async_generator, context);
+                        }
+                        if let Some(reject) = &async_function {
+                            Promise::reject_interrupted(
+                                reject,
+                                "async function was interrupted",
+                                context,
+                            );
+                        }
+                        return Err(err);
+                    }
+                    // END HIWAVE PATCH
 
                     // e. Assert: When we reach this step, asyncContext has already been removed from the execution context stack and prevContext is the currently running execution context.
                     // f. Return undefined.
@@ -114,18 +182,51 @@ impl Await {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object()?;
 
-                    r#gen.resume(
+                    // HIWAVE PATCH (interrupt): the module whose top level this
+                    // is, if any (see below).
+                    let runnable = module_body(&r#gen);
+                    let async_function = async_function_reject(&r#gen);
+
+                    // HIWAVE PATCH (interrupt): keep the completion (was dropped).
+                    let completion = r#gen.resume(
                         Some(args.get_or_undefined(0).clone()),
                         GeneratorResumeKind::Throw,
                         context,
                     );
 
-                    if let Some(async_generator) = async_generator {
+                    if let Some(async_generator) = &async_generator {
                         async_generator
                             .downcast_mut::<AsyncGenerator>()
                             .js_expect("must be async generator")?
                             .context = Some(r#gen);
                     }
+
+                    // HIWAVE PATCH (interrupt): the body takes every catchable
+                    // error itself; a runtime limit (the interrupt) unwinds
+                    // past it and ends this job instead of being dropped.
+                    // A module's top level stopped this way is abandoned, so
+                    // later imports of it do not hang; so is an async
+                    // generator, so its later calls settle, and an async
+                    // function's promise is rejected with an ordinary error.
+                    if let CompletionRecord::Throw(err) = completion
+                        && !err.is_catchable()
+                    {
+                        if let Some((module, code)) = runnable {
+                            abandon_interrupted_module_body(&module, &code);
+                        }
+                        if let Some(async_generator) = &async_generator {
+                            AsyncGenerator::abandon_interrupted(async_generator, context);
+                        }
+                        if let Some(reject) = &async_function {
+                            Promise::reject_interrupted(
+                                reject,
+                                "async function was interrupted",
+                                context,
+                            );
+                        }
+                        return Err(err);
+                    }
+                    // END HIWAVE PATCH
 
                     Ok(JsValue::undefined())
                 },

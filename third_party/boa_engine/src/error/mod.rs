@@ -358,7 +358,17 @@ impl PanicError {
 
 impl From<PanicError> for JsError {
     fn from(err: PanicError) -> Self {
-        EngineError::from(err).into()
+        // HIWAVE PATCH (interrupt): `js_expect` wraps the error of a call Boa
+        // assumed cannot fail. A runtime limit (the interrupt among them) is
+        // not a broken invariant, so it passes through as itself.
+        let PanicError { message, source } = err;
+        match source {
+            Some(source) if matches!(source.as_engine(), Some(EngineError::RuntimeLimit(_))) => {
+                *source
+            }
+            source => EngineError::from(PanicError { message, source }).into(),
+        }
+        // END HIWAVE PATCH
     }
 }
 

@@ -87,6 +87,12 @@ pub struct Vm {
     // running script, and the turn it is compared with. See PATCHES.md.
     pub(crate) interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     pub(crate) interrupt_turn: u64,
+    // Set by `new_promise_reaction_job` for an engine-internal reaction:
+    // the next native call skips the interrupt check once.
+    pub(crate) interrupt_exempt_once: bool,
+    // Set while the engine settles promises (`Promise::settling`): its own
+    // promise bookkeeping is then entered even in a stopped turn.
+    pub(crate) settling_promises: bool,
     // END HIWAVE PATCH
 
     /// This is used to assign a native (rust) function as the active function,
@@ -148,6 +154,17 @@ impl Stack {
     pub(crate) fn set_register(&mut self, frame: &CallFrame, index: usize, value: JsValue) {
         self.stack[frame.rp as usize + index] = value;
     }
+
+    // HIWAVE PATCH (interrupt): the stack's length, and truncation to it,
+    // for `JsObject::call`/`construct` (`object/operations.rs`).
+    pub(crate) fn len(&self) -> usize {
+        self.stack.len()
+    }
+
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.stack.truncate(len);
+    }
+    // END HIWAVE PATCH
 
     /// Truncate the stack to the given frame.
     pub(crate) fn truncate_to_frame(&mut self, frame: &CallFrame) {
@@ -424,8 +441,10 @@ impl Vm {
             return_value: JsValue::undefined(),
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
-            interrupt: None,   // HIWAVE PATCH (interrupt)
-            interrupt_turn: 0, // HIWAVE PATCH (interrupt)
+            interrupt: None,              // HIWAVE PATCH (interrupt)
+            interrupt_turn: 0,            // HIWAVE PATCH (interrupt)
+            interrupt_exempt_once: false, // HIWAVE PATCH (interrupt)
+            settling_promises: false,     // HIWAVE PATCH (interrupt)
             native_active_function: None,
             host_call_depth: 0,
             shadow_stack: ShadowStack::default(),
@@ -841,6 +860,15 @@ impl Context {
             if let Some(frame) = frame {
                 self.vm.stack.truncate_to_frame(&frame);
             }
+            // HIWAVE PATCH (interrupt): also drop the exit-early frame's own
+            // values, as `handle_throw` does. Its caller pops the frame
+            // without truncating, so every stopped turn left them behind
+            // until the stack limit failed every later script.
+            if self.vm.frame().exit_early() {
+                let fp = self.vm.frame().frame_pointer();
+                self.vm.stack.stack.truncate(fp);
+            }
+            // END HIWAVE PATCH
             return ControlFlow::Break(CompletionRecord::Throw(err));
         }
 
@@ -994,6 +1022,16 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
+        // HIWAVE PATCH (interrupt): no bytecode runs in a stopped turn, even
+        // when an engine reaction let in by `new_promise_reaction_job`
+        // resumes a body or runs a module: it fails as its first opcode
+        // would.
+        if let Err(err) = self.check_interrupt()
+            && let ControlFlow::Break(value) = self.handle_error(err)
+        {
+            return value;
+        }
+        // END HIWAVE PATCH
         while let Some(byte) = self
             .vm
             .frame()
@@ -1024,7 +1062,13 @@ impl Context {
     /// Checks if we haven't exceeded the defined runtime limits.
     pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
         self.check_interrupt()?; // HIWAVE PATCH (interrupt)
+        self.check_depth_limits() // HIWAVE PATCH (interrupt)
+    }
 
+    // HIWAVE PATCH (interrupt): the recursion and stack checks of
+    // `check_runtime_limits`, split out (unchanged) so a native call can make
+    // them without the interrupt check (`interrupt_exempt_once`).
+    pub(crate) fn check_depth_limits(&self) -> JsResult<()> {
         // Must throw if the number of recursive calls exceeds the defined limit.
         //
         // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking

@@ -82,6 +82,14 @@ pub struct NativeFunctionObject {
 
     /// The [`Realm`] in which the function is defined, or `None` if the realm is uninitialized.
     pub(crate) realm: Option<Realm>,
+
+    // HIWAVE PATCH (interrupt)
+    /// The engine's own promise bookkeeping (a promise's resolving
+    /// functions, `Promise.all`'s element functions, ...), which runs no
+    /// script. While the engine settles promises in a stopped turn
+    /// (`Vm::settling_promises`) it is not stopped at its entry.
+    pub(crate) settles_promises: bool,
+    // END HIWAVE PATCH
 }
 
 // SAFETY: this traces all fields that need to be traced by the GC.
@@ -334,7 +342,20 @@ pub(crate) fn native_function_call(
 
     // We technically don't need this since native functions don't push any new frames to the
     // vm, but we'll eventually have to combine the native stack with the vm stack.
-    context.check_runtime_limits()?;
+    // HIWAVE PATCH (interrupt): an engine-internal reaction's handler is
+    // entered even in a stopped turn, so it can record the stop (see
+    // `new_promise_reaction_job`); the stop lands at its next check.
+    // A promise's bookkeeping is entered too while the engine settles
+    // promises in a stopped turn (see `Vm::settling_promises`).
+    let settles_promises = context.vm.settling_promises
+        && obj
+            .downcast_ref::<NativeFunctionObject>()
+            .is_some_and(|f| f.settles_promises);
+    if std::mem::take(&mut context.vm.interrupt_exempt_once) || settles_promises {
+        context.check_depth_limits()?;
+    } else {
+        context.check_runtime_limits()?;
+    }
     let this_function_object = obj.clone();
 
     let NativeFunctionObject {
@@ -342,6 +363,7 @@ pub(crate) fn native_function_call(
         name,
         constructor,
         realm,
+        .. // HIWAVE PATCH (interrupt)
     } = obj
         .downcast_ref::<NativeFunctionObject>()
         .expect("the object should be a native function object")
@@ -397,6 +419,7 @@ fn native_function_construct(
         name,
         constructor,
         realm,
+        .. // HIWAVE PATCH (interrupt)
     } = obj
         .downcast_ref::<NativeFunctionObject>()
         .expect("the object should be a native function object")

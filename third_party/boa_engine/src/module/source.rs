@@ -490,12 +490,14 @@ impl SourceTextModule {
     /// Abstract operation [`InnerModuleLoading`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-InnerModuleLoading
+    // HIWAVE PATCH (interrupt): returns the error of loading an already
+    // loaded module (`Module::inner_load`), which the interrupt can stop.
     pub(super) fn inner_load(
         &self,
         module_self: &Module,
         state: &Rc<GraphLoadingState>,
         context: &mut Context,
-    ) {
+    ) -> JsResult<()> {
         /// Loads the module of an import.
         ///
         /// This combines the operations:
@@ -558,7 +560,7 @@ impl SourceTextModule {
             match completion {
                 Ok(m) => {
                     // a. Perform InnerModuleLoading(state, moduleCompletion.[[Value]]).
-                    m.inner_load(&state, &mut context.borrow_mut());
+                    m.inner_load(&state, &mut context.borrow_mut())?; // HIWAVE PATCH (interrupt)
                 }
                 // 3. Else,
                 Err(err) => {
@@ -599,7 +601,7 @@ impl SourceTextModule {
                 if let Some(loaded) = loaded {
                     // 1. Let record be that Record.
                     // 2. Perform InnerModuleLoading(state, record.[[Module]]).
-                    loaded.inner_load(state, context);
+                    loaded.inner_load(state, context)?; // HIWAVE PATCH (interrupt)
                 } else {
                     //    ii. Else,
                     //       1. Perform HostLoadImportedModule(module, required, state.[[HostDefined]], state).
@@ -619,10 +621,11 @@ impl SourceTextModule {
                 }
                 // iii. If state.[[IsLoading]] is false, return unused.
                 if !state.loading.get() {
-                    return;
+                    return Ok(()); // HIWAVE PATCH (interrupt): returns `JsResult`
                 }
             }
         }
+        Ok(()) // HIWAVE PATCH (interrupt): returns `JsResult`
     }
 
     /// Concrete method [`GetExportedNames ( [ exportStarSet ] )`][spec].
@@ -1112,10 +1115,16 @@ impl SourceTextModule {
                 if matches!(&*module_src.status.borrow(), ModuleStatus::Evaluated { .. }) {
                     //    i. Assert: module.[[Status]] is evaluated.
                     //    ii. Perform ! Call(capability.[[Resolve]], undefined, « undefined »).
-                    capability
+                    // HIWAVE PATCH (interrupt): the module evaluated; a stop
+                    // here only keeps this capability from settling, so drop it.
+                    if let Err(err) = capability
                         .resolve()
                         .call(&JsValue::undefined(), &[], context)
-                        .js_expect("cannot fail for the default resolve function")?;
+                        .js_expect("cannot fail for the default resolve function")
+                    {
+                        drop_top_level_capability(&module);
+                        return Err(err.into());
+                    }
                 }
 
                 //     d. Assert: stack is empty.
@@ -1123,6 +1132,15 @@ impl SourceTextModule {
             }
             // 9. If result is an abrupt completion, then
             Err(err) => {
+                // HIWAVE PATCH (interrupt): a stop caches an ordinary error and
+                // drops the stopped turn's capability (see
+                // `interrupted_module_error`); this turn still ends with `err`.
+                let interrupted = !err.is_catchable();
+                let cached = if interrupted {
+                    interrupted_module_error()
+                } else {
+                    err.clone()
+                };
                 // a. For each Cyclic Module Record m of stack, do
                 for m in stack.iter().filter_map(|cmr| cmr.kind().as_source_text()) {
                     m.status.borrow_mut().transition(|current| match current {
@@ -1142,9 +1160,11 @@ impl SourceTextModule {
                             // iii. Set m.[[EvaluationError]] to result.
                             ModuleStatus::Evaluated {
                                 environment,
-                                top_level_capability,
+                                // HIWAVE PATCH (interrupt)
+                                top_level_capability: top_level_capability
+                                    .filter(|_| !interrupted),
                                 cycle_root,
-                                error: Some(err.clone()),
+                                error: Some(cached.clone()), // HIWAVE PATCH (interrupt)
                             }
                         },
                         _ => panic!(
@@ -1159,10 +1179,20 @@ impl SourceTextModule {
                 );
 
                 // d. Perform ! Call(capability.[[Reject]], undefined, « result.[[Value]] »).
-                capability
+                // HIWAVE PATCH (interrupt): a stopped turn ends with the stop
+                // (its capability is already dropped); a stop of the reject
+                // itself drops the capability it kept from settling.
+                if interrupted {
+                    return Err(err);
+                }
+                if let Err(err) = capability
                     .reject()
                     .call(&JsValue::undefined(), &[err.into_opaque(context)?], context)
-                    .js_expect("cannot fail for the default reject function")?;
+                    .js_expect("cannot fail for the default reject function")
+                {
+                    drop_top_level_capability(&module);
+                    return Err(err.into());
+                }
             }
         }
 
@@ -1364,7 +1394,7 @@ impl SourceTextModule {
 
             //     d. If module.[[PendingAsyncDependencies]] = 0, perform ExecuteAsyncModule(module).
             if pending_async_dependencies == 0 {
-                self.execute_async(module_self, context);
+                self.execute_async(module_self, context)?; // HIWAVE PATCH (interrupt)
             }
         } else {
             // 13. Else,
@@ -1452,7 +1482,10 @@ impl SourceTextModule {
     /// Abstract operation [`ExecuteAsyncModule ( module )`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-execute-async-module
-    fn execute_async(&self, module_self: &Module, context: &mut Context) {
+    // HIWAVE PATCH (interrupt): returns the error of `execute` (was
+    // `.expect`): the interrupt stops an async module's body before its first
+    // `await` as an error no capability can take.
+    fn execute_async(&self, module_self: &Module, context: &mut Context) -> JsResult<()> {
         // 1. Assert: module.[[Status]] is either evaluating or evaluating-async.
         debug_assert!(matches!(
             &*self.status.borrow(),
@@ -1462,11 +1495,9 @@ impl SourceTextModule {
         debug_assert!(self.code.has_tla);
 
         // 3. Let capability be ! NewPromiseCapability(%Promise%).
-        let capability = PromiseCapability::new(
-            &context.intrinsics().constructors().promise().constructor(),
-            context,
-        )
-        .expect("cannot fail for the %Promise% intrinsic");
+        // HIWAVE PATCH (interrupt): built directly; constructing %Promise%
+        // can be interrupted.
+        let capability = PromiseCapability::new_intrinsic(context);
         let promise = capability
             .promise
             .clone()
@@ -1517,8 +1548,7 @@ impl SourceTextModule {
 
         // 9. Perform ! module.ExecuteModule(capability).
         // 10. Return unused.
-        self.execute(module_self, Some(capability), context)
-            .expect("async modules cannot directly throw");
+        self.execute(module_self, Some(capability), context) // HIWAVE PATCH (interrupt)
     }
 
     /// Abstract operation [`GatherAvailableAncestors ( module, execList )`][spec].
@@ -1924,6 +1954,11 @@ impl SourceTextModule {
             .vm
             .pop_frame()
             .js_expect("There should be a call frame")?;
+        // HIWAVE PATCH (interrupt): drop the frame's values too, as
+        // `SyntheticModule::evaluate` does. Every linked module left them on
+        // the VM stack, so a page that loads ~2,000 modules (or is stopped
+        // while loading them) failed every later script on the stack limit.
+        context.vm.stack.truncate_to_frame(&frame);
 
         let env = frame
             .environments
@@ -2077,14 +2112,26 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) -> J
         });
 
     // 7. If module.[[TopLevelCapability]] is not empty, then
-    if let Some(cap) = module_src.status.borrow().top_level_capability() {
+    // HIWAVE PATCH (interrupt): cloned, so the status is not borrowed below.
+    let top_level_capability = module_src.status.borrow().top_level_capability().cloned();
+    if let Some(cap) = top_level_capability {
         // a. Assert: module.[[CycleRoot]] and module are the same Module Record.
         debug_assert_eq!(module_src.status.borrow().cycle_root(), Some(module));
 
         // b. Perform ! Call(module.[[TopLevelCapability]].[[Resolve]], undefined, « undefined »).
-        cap.resolve()
+        // HIWAVE PATCH (interrupt): stopped here, the modules waiting on this
+        // one would never run: abandon them, and drop the capability.
+        let resolved = cap
+            .resolve()
             .call(&JsValue::undefined(), &[], context)
-            .js_expect("default `resolve` function cannot fail")?;
+            .js_expect("default `resolve` function cannot fail");
+        if let Err(err) = resolved {
+            drop_top_level_capability(module);
+            for m in std::mem::take(&mut *module_src.async_parent_modules.borrow_mut()) {
+                abandon_interrupted(&m);
+            }
+            return Err(err.into());
+        }
     }
 
     // 8. Let execList be a new empty List.
@@ -2119,7 +2166,9 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) -> J
     });
 
     // 12. For each Cyclic Module Record m of sortedExecList, do
-    for m in sorted_exec_list {
+    // HIWAVE PATCH (interrupt): an iterator, so a stop can abandon the rest.
+    let mut sorted_exec_list = sorted_exec_list.into_iter();
+    while let Some(m) = sorted_exec_list.next() {
         let ModuleKind::SourceText(m_src) = m.kind() else {
             continue;
         };
@@ -2135,7 +2184,13 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) -> J
         let has_tla = m_src.code.has_tla;
         if has_tla {
             // i. Perform ExecuteAsyncModule(m).
-            m_src.execute_async(&m, context);
+            // HIWAVE PATCH (interrupt): stopped before its first await, `m`
+            // and the modules not run yet would never settle: abandon them.
+            if let Err(err) = m_src.execute_async(&m, context) {
+                abandon_interrupted(&m);
+                sorted_exec_list.for_each(|m| abandon_interrupted(&m));
+                return Err(err);
+            }
             continue;
         }
         // c. Else,
@@ -2144,6 +2199,12 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) -> J
 
         // c.ii. If result is an abrupt completion, then
         if let Err(e) = result {
+            // HIWAVE PATCH (interrupt): stopped, as for `execute_async` above.
+            if !e.is_catchable() {
+                abandon_interrupted(&m);
+                sorted_exec_list.for_each(|m| abandon_interrupted(&m));
+                return Err(e);
+            }
             // eagerly convert to an opaque error so that we can exit immediately
             // if there was an EngineError.
             let e = &JsError::from_opaque(e.into_opaque(context)?);
@@ -2171,17 +2232,27 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) -> J
             _ => unreachable!(),
         });
 
-        let status = m_src.status.borrow();
+        // HIWAVE PATCH (interrupt): cloned, so the status is not borrowed below.
+        let top_level_capability = m_src.status.borrow().top_level_capability().cloned();
 
         // 3. If m.[[TopLevelCapability]] is not empty, then
-        if let Some(cap) = status.top_level_capability() {
+        if let Some(cap) = top_level_capability {
             // a. Assert: m.[[CycleRoot]] and m are the same Module Record..
-            debug_assert_eq!(status.cycle_root(), Some(&m));
+            debug_assert_eq!(m_src.status.borrow().cycle_root(), Some(&m));
 
             // b. Perform ! Call(m.[[TopLevelCapability]].[[Resolve]], undefined, « undefined »).
-            cap.resolve()
+            // HIWAVE PATCH (interrupt): `m` evaluated; a stop here drops the
+            // capability it kept from settling and abandons the modules not
+            // run yet.
+            if let Err(err) = cap
+                .resolve()
                 .call(&JsValue::undefined(), &[JsValue::undefined()], context)
-                .js_expect("default `resolve` function cannot fail")?;
+                .js_expect("default `resolve` function cannot fail")
+            {
+                drop_top_level_capability(&m);
+                sorted_exec_list.for_each(|m| abandon_interrupted(&m));
+                return Err(err.into());
+            }
         }
     }
     // 13. Return unused.
@@ -2236,30 +2307,123 @@ fn async_module_execution_rejected(
     //    module's [[AsyncEvaluationOrder]] internal slot is unused when its
     //    [[EvaluationError]] internal slot is not empty.
 
-    {
-        let status = module_src.status.borrow();
+    // HIWAVE PATCH (interrupt): a stop of a reject drops the capability it
+    // kept from settling, and the modules waiting on this one are still
+    // marked evaluated with the error; the first stop is returned at the end.
+    let mut result = Ok(());
+    let top_level_capability = module_src.status.borrow().top_level_capability().cloned();
 
-        // 9. If module.[[TopLevelCapability]] is not empty, then
-        if let Some(cap) = status.top_level_capability() {
-            // a. Assert: module.[[CycleRoot]] is module.
-            debug_assert_eq!(status.cycle_root(), Some(module));
+    // 9. If module.[[TopLevelCapability]] is not empty, then
+    if let Some(cap) = top_level_capability {
+        // a. Assert: module.[[CycleRoot]] is module.
+        debug_assert_eq!(module_src.status.borrow().cycle_root(), Some(module));
 
-            // b. Perform ! Call(module.[[TopLevelCapability]].[[Reject]], undefined, « error »).
-            cap.reject()
-                .call(
-                    &JsValue::undefined(),
-                    &[error.clone().into_opaque(context)?],
-                    context,
-                )
-                .js_expect("default `reject` function cannot fail")?;
+        // b. Perform ! Call(module.[[TopLevelCapability]].[[Reject]], undefined, « error »).
+        result = cap
+            .reject()
+            .call(
+                &JsValue::undefined(),
+                &[error.clone().into_opaque(context)?],
+                context,
+            )
+            .js_expect("default `reject` function cannot fail")
+            .map(|_| ())
+            .map_err(JsError::from);
+        if result.is_err() {
+            drop_top_level_capability(module);
         }
     }
 
     // 10. For each Cyclic Module Record m of module.[[AsyncParentModules]], do
     for m in std::mem::take(&mut *module_src.async_parent_modules.borrow_mut()) {
         // a. Perform AsyncModuleExecutionRejected(m, error).
-        async_module_execution_rejected(&m, error, context)?;
+        let rejected = async_module_execution_rejected(&m, error, context);
+        result = result.and(rejected);
     }
     // 11. Return unused.
-    Ok(())
+    result
+}
+
+// HIWAVE PATCH (interrupt): an interrupt ends the turn; it must not poison
+// module state for later turns. A module the interrupt stopped mid-evaluation
+// caches this ordinary, catchable error instead of the uncatchable one, so a
+// later import of it rejects with it (never hangs, never stops a later turn),
+// and a top-level capability the stop kept from settling is dropped, so a
+// later import makes a new one instead of returning a promise that never
+// settles.
+fn interrupted_module_error() -> JsError {
+    JsNativeError::error()
+        .with_message("module evaluation was interrupted")
+        .into()
+}
+
+/// HIWAVE PATCH (interrupt): forgets the top-level capability of a module the
+/// interrupt kept from settling it.
+fn drop_top_level_capability(module: &Module) {
+    let Some(src) = module.kind().as_source_text() else {
+        return;
+    };
+    if let ModuleStatus::Evaluated {
+        top_level_capability,
+        ..
+    }
+    | ModuleStatus::EvaluatingAsync {
+        top_level_capability,
+        ..
+    } = &mut *src.status.borrow_mut()
+    {
+        *top_level_capability = None;
+    }
+}
+
+/// HIWAVE PATCH (interrupt): a module still evaluating asynchronously that the
+/// interrupt stopped (or that waits on one it stopped) becomes evaluated with
+/// [`interrupted_module_error`] and no top-level capability, as do its cycle
+/// root and the modules waiting on it. Nothing is called, so this works in the
+/// stopped turn.
+fn abandon_interrupted(module: &Module) {
+    let Some(src) = module.kind().as_source_text() else {
+        return;
+    };
+    let cycle_root = {
+        let mut status = src.status.borrow_mut();
+        let ModuleStatus::EvaluatingAsync { cycle_root, .. } = &*status else {
+            return;
+        };
+        let cycle_root = cycle_root.clone();
+        status.transition(|status| match status {
+            ModuleStatus::EvaluatingAsync {
+                environment,
+                cycle_root,
+                ..
+            } => ModuleStatus::Evaluated {
+                environment,
+                top_level_capability: None,
+                cycle_root,
+                error: Some(interrupted_module_error()),
+            },
+            _ => unreachable!(),
+        });
+        cycle_root
+    };
+    abandon_interrupted(&cycle_root);
+    for m in std::mem::take(&mut *src.async_parent_modules.borrow_mut()) {
+        abandon_interrupted(&m);
+    }
+}
+
+/// HIWAVE PATCH (interrupt): the interrupt stopped a resumed async body
+/// (`Await` reactions). If that body is the top level of a module evaluating
+/// asynchronously, that module will never settle: abandon it.
+pub(crate) fn abandon_interrupted_module_body(module: &Module, code: &Gc<CodeBlock>) {
+    let Some(src) = module.kind().as_source_text() else {
+        return;
+    };
+    let is_body = matches!(
+        &*src.status.borrow(),
+        ModuleStatus::EvaluatingAsync { context, .. } if Gc::ptr_eq(&context.codeblock, code)
+    );
+    if is_body {
+        abandon_interrupted(module);
+    }
 }

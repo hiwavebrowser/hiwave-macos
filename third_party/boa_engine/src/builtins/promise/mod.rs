@@ -18,7 +18,7 @@ use crate::{
     error::JsNativeError,
     job::{JobCallback, PromiseJob},
     js_string,
-    native_function::NativeFunction,
+    native_function::{NativeFunction, NativeFunctionObject}, // HIWAVE PATCH (interrupt): NativeFunctionObject
     object::{
         CONSTRUCTOR, FunctionObjectBuilder, JsFunction, JsObject,
         internal_methods::get_prototype_from_constructor,
@@ -321,6 +321,20 @@ impl PromiseCapability {
         })
     }
 
+    // HIWAVE PATCH (interrupt)
+    /// `! NewPromiseCapability(%Promise%)`, built directly. Constructing the
+    /// intrinsic through [`PromiseCapability::new`] makes calls a runtime
+    /// limit (the interrupt) can fail; building it runs no code, so the
+    /// engine's own `!` uses of it cannot fail.
+    pub(crate) fn new_intrinsic(context: &mut Context) -> Self {
+        let (promise, functions) = crate::object::JsPromise::new_pending(context);
+        Self {
+            promise: promise.into(),
+            functions,
+        }
+    }
+    // END HIWAVE PATCH
+
     /// Returns the promise object.
     pub(crate) const fn promise(&self) -> &JsObject {
         &self.promise
@@ -459,6 +473,60 @@ impl BuiltInConstructor for Promise {
 }
 
 impl Promise {
+    // HIWAVE PATCH (interrupt)
+    /// Creates a `Promise` already fulfilled with `value`, without the calls
+    /// `Promise.resolve` makes (which the interrupt can stop).
+    pub(crate) fn fulfilled(value: JsValue) -> Self {
+        Self {
+            state: PromiseState::Fulfilled(value),
+            fulfill_reactions: Vec::default(),
+            reject_reactions: Vec::default(),
+            handled: false,
+        }
+    }
+
+    /// Runs `f` with the engine settling promises: its own promise
+    /// bookkeeping (functions built with `settles_promises`, such as a
+    /// promise's resolving functions) is entered even in a stopped turn,
+    /// so promises still settle there. That bookkeeping runs no script;
+    /// any script it would reach is still stopped at its entry.
+    pub(crate) fn settling<R>(context: &mut Context, f: impl FnOnce(&mut Context) -> R) -> R {
+        let outer = std::mem::replace(&mut context.vm.settling_promises, true);
+        let result = f(context);
+        context.vm.settling_promises = outer;
+        result
+    }
+
+    /// [`Promise::settling`] if `settle`, else just `f`.
+    fn settling_if<R>(settle: bool, context: &mut Context, f: impl FnOnce(&mut Context) -> R) -> R {
+        if settle {
+            Self::settling(context, f)
+        } else {
+            f(context)
+        }
+    }
+
+    /// The interrupt stopped the work that was to settle a promise. Rather
+    /// than leave it pending for good, `reject` (that promise's reject
+    /// function) is called, while settling, with an ordinary, catchable
+    /// `Error: {message}`, so later turns that wait on it go on. A reject
+    /// function that is not the engine's (a subclass capability's) is
+    /// refused at its entry and the promise stays pending, as does one a
+    /// depth limit stops.
+    pub(crate) fn reject_interrupted(
+        reject: &JsObject,
+        message: &'static str,
+        context: &mut Context,
+    ) {
+        let error = JsNativeError::error()
+            .with_message(message)
+            .into_opaque(context);
+        drop(Self::settling(context, |context| {
+            reject.call(&JsValue::undefined(), &[error.into()], context)
+        }));
+    }
+    // END HIWAVE PATCH
+
     /// Creates a new, pending `Promise`.
     pub(crate) fn new() -> Self {
         Self {
@@ -738,6 +806,8 @@ impl Promise {
             .name("")
             .length(1)
             .constructor(false)
+            // HIWAVE PATCH (interrupt): promise bookkeeping; runs no script.
+            .settles_promises()
             .build();
 
             // m. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] + 1.
@@ -976,6 +1046,8 @@ impl Promise {
             .name("")
             .length(1)
             .constructor(false)
+            // HIWAVE PATCH (interrupt): promise bookkeeping; runs no script.
+            .settles_promises()
             .build();
 
             // n. Let stepsRejected be the algorithm steps defined in Promise.allSettled Reject Element Functions.
@@ -1066,6 +1138,8 @@ impl Promise {
             .name("")
             .length(1)
             .constructor(false)
+            // HIWAVE PATCH (interrupt): promise bookkeeping; runs no script.
+            .settles_promises()
             .build();
 
             // v. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] + 1.
@@ -1639,6 +1713,8 @@ impl Promise {
             .name("")
             .length(1)
             .constructor(false)
+            // HIWAVE PATCH (interrupt): promise bookkeeping; runs no script.
+            .settles_promises()
             .build();
 
             // m. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] + 1.
@@ -2495,8 +2571,23 @@ impl Promise {
                     let then_action = match then.get(js_string!("then"), context) {
                         // 10. If then is an abrupt completion, then
                         Err(e) => {
+                            // HIWAVE PATCH (interrupt): stopped while getting
+                            // `then`, the promise is already resolved, so no
+                            // reject function can settle it any more: reject
+                            // it here with an ordinary error, then end the job.
+                            let reason = match e.into_opaque(context) {
+                                Ok(reason) => reason,
+                                Err(stop) => {
+                                    let error = JsNativeError::error()
+                                        .with_message(INTERRUPTED_JOB)
+                                        .into_opaque(context);
+                                    reject_promise(&promise, error.into(), context);
+                                    return Err(stop);
+                                }
+                            };
+                            // END HIWAVE PATCH
                             //   a. Perform RejectPromise(promise, then.[[Value]]).
-                            reject_promise(&promise, e.into_opaque(context)?, context);
+                            reject_promise(&promise, reason, context);
 
                             //   b. Return undefined.
                             return Ok(JsValue::undefined());
@@ -2540,6 +2631,8 @@ impl Promise {
         .name("")
         .length(1)
         .constructor(false)
+        // HIWAVE PATCH (interrupt): promise bookkeeping; runs no script.
+        .settles_promises()
         .build();
 
         // 10. Set reject.[[Promise]] to promise.
@@ -2575,6 +2668,8 @@ impl Promise {
         .name("")
         .length(1)
         .constructor(false)
+        // HIWAVE PATCH (interrupt): promise bookkeeping; runs no script.
+        .settles_promises()
         .build();
 
         // 12. Return the Record { [[Resolve]]: resolve, [[Reject]]: reject }.
@@ -2586,6 +2681,12 @@ impl Promise {
 ///  - [ECMAScript reference][spec]
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-newpromisereactionjob
+// HIWAVE PATCH (interrupt)
+/// The error a promise is rejected with when the interrupt stopped the job
+/// (or `resolve`) that was to settle it.
+const INTERRUPTED_JOB: &str = "promise job was interrupted";
+// END HIWAVE PATCH
+
 fn new_promise_reaction_job(
     mut reaction: ReactionRecord,
     argument: JsValue,
@@ -2628,25 +2729,67 @@ fn new_promise_reaction_job(
                 }
             },
             //   e. Else, let handlerResult be Completion(HostCallJobCallback(handler, undefined, « argument »)).
-            Some(handler) => match context.host_hooks().call_job_callback(
-                &handler,
-                &JsValue::undefined(),
-                std::slice::from_ref(&argument),
-                context,
-            ) {
-                Ok(v) => Ok(v),
-                Err(e) => Err(e.into_opaque(context)?),
-            },
+            Some(handler) => {
+                // HIWAVE PATCH (interrupt): a reaction with no capability is
+                // the engine's own (an `await` resuming its body, a module's
+                // async evaluation, `import()`'s steps; script's `then` always
+                // has one). Its handler is entered even in a stopped turn:
+                // stopped at its entry, it could not record the stop, and a
+                // module would stay evaluating for good, hanging every later
+                // import. The stop lands at the handler's next check instead.
+                // A handler that is the engine's own promise bookkeeping
+                // (`Promise.all`'s element functions, a capability's
+                // resolve as `Promise.race` passes it) runs no script and is
+                // run while settling, so the promise it settles does not
+                // stay pending.
+                context.vm.interrupt_exempt_once = promise_capability.is_none();
+                let bookkeeping = handler
+                    .callback()
+                    .downcast_ref::<NativeFunctionObject>()
+                    .is_some_and(|f| f.settles_promises);
+                let result = Promise::settling_if(bookkeeping, context, |context| {
+                    context.host_hooks().call_job_callback(
+                        &handler,
+                        &JsValue::undefined(),
+                        std::slice::from_ref(&argument),
+                        context,
+                    )
+                });
+                context.vm.interrupt_exempt_once = false;
+                // END HIWAVE PATCH
+                match result {
+                    Ok(v) => Ok(v),
+                    // HIWAVE PATCH (interrupt): a handler the interrupt
+                    // refused or stopped never settles the derived promise;
+                    // it is rejected with an ordinary error so later turns
+                    // waiting on it go on, and the stop ends the job.
+                    Err(e) => match e.into_opaque(context) {
+                        Ok(reason) => Err(reason),
+                        Err(stop) => {
+                            if let Some(capability) = &promise_capability {
+                                Promise::reject_interrupted(
+                                    capability.reject(),
+                                    INTERRUPTED_JOB,
+                                    context,
+                                );
+                            }
+                            return Err(stop);
+                        }
+                    },
+                    // END HIWAVE PATCH
+                }
+            }
         };
 
         match promise_capability {
             None => {
                 // f. If promiseCapability is undefined, then
                 //    i. Assert: handlerResult is not an abrupt completion.
-                assert!(
-                    handler_result.is_ok(),
-                    "Assertion: <handlerResult is not an abrupt completion> failed"
-                );
+                // HIWAVE PATCH (interrupt): the engine's own handlers can
+                // fail when a call they make hits a runtime limit; that
+                // error ends the job instead of failing the assertion.
+                handler_result.map_err(JsError::from_opaque)?;
+                // END HIWAVE PATCH
 
                 // ii. Return empty.
                 Ok(JsValue::undefined())
@@ -2658,7 +2801,10 @@ fn new_promise_reaction_job(
                     functions: ResolvingFunctions { resolve, reject },
                 } = &promise_capability_record;
 
-                match handler_result {
+                // HIWAVE PATCH (interrupt): the result is kept (see below),
+                // and the capability is settled while settling, so the
+                // engine's resolving functions are entered in a stopped turn.
+                let result = Promise::settling(context, |context| match handler_result {
                     // h. If handlerResult is an abrupt completion, then
                     Err(value) => {
                         // i. Return ? Call(promiseCapability.[[Reject]], undefined, « handlerResult.[[Value]] »).
@@ -2670,7 +2816,18 @@ fn new_promise_reaction_job(
                         // i. Return ? Call(promiseCapability.[[Resolve]], undefined, « handlerResult.[[Value]] »).
                         resolve.call(&JsValue::undefined(), &[value], context)
                     }
+                });
+                // HIWAVE PATCH (interrupt): a `resolve`/`reject` the
+                // interrupt refused at its entry left the promise pending;
+                // it is rejected with an ordinary error instead (a no-op if
+                // the call got far enough to settle it).
+                if let Err(err) = &result
+                    && !err.is_catchable()
+                {
+                    Promise::reject_interrupted(reject, INTERRUPTED_JOB, context);
                 }
+                result
+                // END HIWAVE PATCH
             }
         }
     };
@@ -2718,7 +2875,22 @@ fn new_promise_resolve_thenable_job(
 
         //    c. If thenCallResult is an abrupt completion, then
         if let Err(value) = then_call_result {
-            let value = value.into_opaque(context)?;
+            // HIWAVE PATCH (interrupt): a `then` the interrupt refused or
+            // stopped leaves the promise pending; it is rejected with an
+            // ordinary error (a no-op if `then` already settled it), and the
+            // stop ends the job.
+            let value = match value.into_opaque(context) {
+                Ok(value) => value,
+                Err(stop) => {
+                    Promise::reject_interrupted(
+                        &resolving_functions.reject,
+                        INTERRUPTED_JOB,
+                        context,
+                    );
+                    return Err(stop);
+                }
+            };
+            // END HIWAVE PATCH
             //    i. Return ? Call(resolvingFunctions.[[Reject]], undefined, « thenCallResult.[[Value]] »).
             return resolving_functions
                 .reject
