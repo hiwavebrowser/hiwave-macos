@@ -5672,6 +5672,7 @@ dependencies = [
  "bytemuck",
  "hashbrown 0.14.5",
  "png",
+ "pollster",
  "rustkit-common",
  "rustkit-css",
  "rustkit-layout",
