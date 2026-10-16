@@ -334,6 +334,8 @@ use nav_cancel::{load_phase, LoadInProgress, NavWatch};
 #[cfg(all(test, feature = "headless"))]
 mod load_cancel_tests;
 #[cfg(all(test, feature = "headless"))]
+mod error_page_script_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_module_tests;
@@ -3245,8 +3247,17 @@ impl Engine {
     /// When script asked more than once, the last request of each kind is
     /// kept, and a URL wins over a form.
     pub fn take_script_navigation(&mut self, id: EngineViewId) -> Option<String> {
+        self.take_script_navigation_with_replace(id).map(|(url, _)| url)
+    }
+
+    /// [`Self::take_script_navigation`], with whether the navigation
+    /// replaces the current history entry instead of adding one:
+    /// `location.replace()`, `location.reload()`, the document's own URL
+    /// again and `<meta http-equiv=refresh>` do, as in Chrome, so Back does
+    /// not return to the page that reloaded or refreshed itself.
+    pub fn take_script_navigation_with_replace(&mut self, id: EngineViewId) -> Option<(String, bool)> {
         let bindings = self.views.get(&id)?.bindings.as_ref()?;
-        let requested = bindings.take_navigation_requests().pop();
+        let requested = bindings.take_navigation_requests_with_replace().pop();
         let submit = bindings.take_submit_requests().pop();
         if requested.is_some() {
             return requested;
@@ -3260,7 +3271,7 @@ impl Engine {
             .get_node(rustkit_dom::NodeId::new(form))?;
         self.form_submission(id, &form, submitter)
             .filter(|sub| sub.is_self_target())
-            .map(|sub| sub.url)
+            .map(|sub| (sub.url, false))
     }
 
     /// The last form script asked to submit since the previous call, with
@@ -3377,6 +3388,7 @@ impl Engine {
             Err(e) => debug!(?id, error = %e, "layout after a resize failed"),
         }
         let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get_mut(&id) else {
             return out;
         };
@@ -3486,6 +3498,28 @@ impl Engine {
                 threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
                 if found.poisoned {
                     threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
+                }
+            }
+            // So are the scripts the turn's callbacks inserted, and they run
+            // inside it, under its budget.
+            if !spent() {
+                let found = script_net::pump_inserted_scripts(
+                    bindings,
+                    &loader,
+                    &referrer,
+                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
+                    &inspector,
+                )
+                .await;
+                out.requests += found.requests;
+                threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
+                if found.poisoned {
+                    threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
+                }
+                for record in found.records {
+                    if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
+                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    }
                 }
             }
         }
@@ -4149,9 +4183,8 @@ impl Engine {
             });
             entries.push((label, node.id.raw(), entry, is_module_script(node)));
         });
-        if entries.is_empty() {
-            return None;
-        }
+        // A document with no scripts still has a lifecycle: `load` fires and
+        // the timers run (a `<meta http-equiv=refresh>`'s among them).
 
         let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
         let deadline = tokio::time::Instant::now() + budget;
@@ -4318,6 +4351,7 @@ impl Engine {
         let loop_limit = self.config.script_loop_iteration_limit;
         let net_rounds = self.config.script_network_rounds;
         let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get(&id) else { return };
         let document_url = view.url.clone();
         let inspector = view.inspector.clone();
@@ -4626,6 +4660,7 @@ impl Engine {
             let document = document_url.clone();
             let modules_fetched = &modules_fetched;
             let inspector = &inspector;
+            let referrer = &referrer;
             async move {
                 match policy {
                     Some(policy) => {
@@ -4645,6 +4680,7 @@ impl Engine {
                                 document.as_ref(),
                                 &mut count,
                                 inspector,
+                                Some(referrer),
                             ),
                         )
                         .await;
@@ -4659,7 +4695,10 @@ impl Engine {
         if nav_cancel::cancelled(watch) {
             return;
         }
-        if let Some(found) = after_scripts {
+        if let Some(mut found) = after_scripts {
+            for record in found.records.drain(..) {
+                inspector_glue::log_script(log, &inspector, record);
+            }
             if found.poisoned {
                 let record = ScriptRecord {
                     source: "network".into(),
@@ -4735,6 +4774,9 @@ impl Engine {
             // each round also runs the timers the responses scheduled.
             let timers = (source == "timers").then_some((horizon_ms, MAX_TIMER_CALLBACKS));
             if let Some(found) = pump(timers).await {
+                for record in found.records {
+                    inspector_glue::log_script(log, &inspector, record);
+                }
                 for message in found.threw {
                     let record = ScriptRecord {
                         source: "network".into(),
@@ -5053,6 +5095,16 @@ impl Engine {
             bindings
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
+            // `document.cookie` is the jar the document's own requests use.
+            if let Some(jar) = self.loader.cookie_jar() {
+                let (read, read_url, write_url) = (jar.clone(), url.clone(), url.clone());
+                bindings
+                    .set_cookie_access(
+                        Box::new(move || read.header_for(&read_url, true).unwrap_or_default()),
+                        Box::new(move |value| jar.set(&write_url, value, rustkit_http::CookieSource::Script)),
+                    )
+                    .map_err(|e| EngineError::JsError(e.to_string()))?;
+            }
             inspector_glue::attach(&bindings, &inspector);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
