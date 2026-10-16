@@ -431,7 +431,8 @@ fn interrupt_during_an_async_function_await() {
         .unwrap();
     assert_interrupted(page.turn("it.next();"), "the async generator");
     page.assert_recovers("await: async generator");
-    // The stopped generator stays stuck, but using it again is harmless.
+    // Using the stopped generator again is harmless (and its calls settle:
+    // `an_async_generator_stopped_while_it_runs_settles_later_calls`).
     page.next_turn();
     page.turn("it.next(); it.return(1); it.throw(2).catch(function () {});")
         .expect("the stopped generator can be called again");
@@ -684,6 +685,96 @@ impl Page {
 }
 
 const INTERRUPTED_MODULE: &str = "err Error: module evaluation was interrupted";
+
+const INTERRUPTED_GENERATOR: &str = "err Error: async generator was interrupted";
+
+#[test]
+fn an_async_generator_stopped_while_it_runs_settles_later_calls() {
+    // R1 HOLD @ d627b635: a stopped async generator stayed `executing`, so
+    // its pending and later `next`/`return`/`throw` never settled.
+    let mut page = Page::new();
+    // Stopped in a body that `next()` resumes synchronously
+    // (`AsyncGenerator::resume`): later calls settle.
+    page.turn("async function* g1() { yield 1; arm(); for (;;) {} } var it1 = g1(); it1.next();")
+        .unwrap();
+    assert_interrupted(page.turn("it1.next();"), "stopped by next()");
+    page.next_turn();
+    // Requests queued while the body awaits: the first is answered by a
+    // `yield`, the body goes on for the second and is stopped, and a third
+    // is queued behind it.
+    assert_interrupted(
+        page.turn(
+            "async function* g3() { await null; yield 1; arm(); for (;;) {} } var it3 = g3(); var first3 = it3.next(), stopped3 = it3.next(), queued3 = it3.next();",
+        ),
+        "stopped for a queued request",
+    );
+    page.next_turn();
+    // Stopped in a body resumed from an await (the `Await` reactions).
+    assert_interrupted(
+        page.turn(
+            "async function* g2() { await null; arm(); for (;;) {} } var it2 = g2(); var stopped2 = it2.next(); var queued2 = it2.next();",
+        ),
+        "stopped after an await",
+    );
+    assert_eq!(
+        page.settle("first3.then(function (r) { return r.value; })"),
+        "ok 1"
+    );
+    for it in ["2", "3"] {
+        // The requests of the stopped turn reject with an ordinary error.
+        assert_eq!(page.settle(&format!("stopped{it}")), INTERRUPTED_GENERATOR);
+        assert_eq!(page.settle(&format!("queued{it}")), INTERRUPTED_GENERATOR);
+    }
+    for it in ["1", "2", "3"] {
+        // Later calls settle as on a finished generator.
+        assert_eq!(
+            page.settle(&format!(
+                "it{it}.next().then(function (r) {{ return r.done; }})"
+            )),
+            "ok true"
+        );
+        assert_eq!(
+            page.settle(&format!(
+                "it{it}.return(5).then(function (r) {{ return r.value; }})"
+            )),
+            "ok 5"
+        );
+        assert_eq!(page.settle(&format!("it{it}.throw(7)")), "err 7");
+        assert_eq!(
+            page.settle(&format!(
+                "(async function () {{ for await (var v of it{it}) {{}} return 'done'; }})()"
+            )),
+            "ok done"
+        );
+    }
+    page.assert_recovers("async generator");
+
+    // Every request made in a raced turn settles in the next one.
+    race(
+        "async generator",
+        600,
+        |page, i| {
+            // A raced turn can stop anywhere, even before its first
+            // statement, so count what it made; every one must settle.
+            let settled = page.settle(
+                r#"(function () {
+                    var made = typeof ps === "undefined" ? [] : ps;
+                    ps = [];
+                    return Promise.all(made.map(function (p) {
+                        return p.then(function () { return 1; }, function (e) {
+                            if (e.message !== "async generator was interrupted") throw e;
+                            return 1;
+                        });
+                    })).then(function (r) { return r.length === made.length; });
+                })()"#,
+            );
+            assert_eq!(settled, "ok true", "#{i}: the previous turn's requests");
+        },
+        |_| {
+            "ps = []; async function* g() { for (var j = 0; j < 10; j++) { yield await [j].map(function (v) { return v; })[0]; } } for (var i = 0; i < 10; i++) { var it = g(); for (var k = 0; k < 12; k++) { ps.push(it.next()); } }".into()
+        },
+    );
+}
 
 #[test]
 fn a_module_stopped_while_it_evaluates_does_not_poison_later_turns() {

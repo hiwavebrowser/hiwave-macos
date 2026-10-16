@@ -517,8 +517,10 @@ impl AsyncGenerator {
 
         // 8. Assert: result is never an abrupt completion.
         // HIWAVE PATCH (interrupt): except a runtime limit (the interrupt),
-        // which no handler in the body takes; it ends the job.
+        // which no handler in the body takes; it ends the job, and the
+        // generator is abandoned so later calls settle.
         if let CompletionRecord::Throw(err) = result {
+            Self::abandon_interrupted(&generator.clone().upcast(), context);
             return Err(err);
         }
         // END HIWAVE PATCH
@@ -528,6 +530,42 @@ impl AsyncGenerator {
         // 10. Return unused.
         Ok(())
     }
+
+    // HIWAVE PATCH (interrupt)
+    /// The interrupt stopped this generator's body while it ran. Left
+    /// `executing`, it would queue every later `next`/`return`/`throw`
+    /// forever. It becomes `completed` (so later calls settle as on a
+    /// finished generator), and every request already queued, the stopped
+    /// one included, is rejected with an ordinary, catchable error. The
+    /// reject functions only enqueue jobs and run no script, so they are
+    /// called exempt from the interrupt check, which lets this run in the
+    /// stopped turn.
+    pub(crate) fn abandon_interrupted(generator: &JsObject, context: &mut Context) {
+        let queue = {
+            let Some(mut r#gen) = generator.downcast_mut::<Self>() else {
+                return;
+            };
+            r#gen.state = AsyncGeneratorState::Completed;
+            r#gen.context = None;
+            std::mem::take(&mut r#gen.queue)
+        };
+        for request in queue {
+            let error = JsNativeError::error()
+                .with_message("async generator was interrupted")
+                .into_opaque(context);
+            context.vm.interrupt_exempt_once = true;
+            // Only a depth limit can fail it; the request then stays
+            // pending, as the stopped turn's own work does.
+            drop(
+                request
+                    .capability
+                    .reject()
+                    .call(&JsValue::undefined(), &[error.into()], context),
+            );
+            context.vm.interrupt_exempt_once = false;
+        }
+    }
+    // END HIWAVE PATCH
 
     /// `AsyncGeneratorAwaitReturn ( generator )`
     ///

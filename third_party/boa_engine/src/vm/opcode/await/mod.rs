@@ -101,7 +101,7 @@ impl Await {
                         context,
                     );
 
-                    if let Some(async_generator) = async_generator {
+                    if let Some(async_generator) = &async_generator {
                         async_generator
                             .downcast_mut::<AsyncGenerator>()
                             .js_expect("must be async generator")?
@@ -112,12 +112,16 @@ impl Await {
                     // error itself; a runtime limit (the interrupt) unwinds
                     // past it and ends this job instead of being dropped.
                     // A module's top level stopped this way is abandoned, so
-                    // later imports of it do not hang.
+                    // later imports of it do not hang; so is an async
+                    // generator, so its later calls settle.
                     if let CompletionRecord::Throw(err) = completion
                         && !err.is_catchable()
                     {
                         if let Some((module, code)) = runnable {
                             abandon_interrupted_module_body(&module, &code);
+                        }
+                        if let Some(async_generator) = &async_generator {
+                            AsyncGenerator::abandon_interrupted(async_generator, context);
                         }
                         return Err(err);
                     }
@@ -162,7 +166,7 @@ impl Await {
                         context,
                     );
 
-                    if let Some(async_generator) = async_generator {
+                    if let Some(async_generator) = &async_generator {
                         async_generator
                             .downcast_mut::<AsyncGenerator>()
                             .js_expect("must be async generator")?
@@ -173,12 +177,16 @@ impl Await {
                     // error itself; a runtime limit (the interrupt) unwinds
                     // past it and ends this job instead of being dropped.
                     // A module's top level stopped this way is abandoned, so
-                    // later imports of it do not hang.
+                    // later imports of it do not hang; so is an async
+                    // generator, so its later calls settle.
                     if let CompletionRecord::Throw(err) = completion
                         && !err.is_catchable()
                     {
                         if let Some((module, code)) = runnable {
                             abandon_interrupted_module_body(&module, &code);
+                        }
+                        if let Some(async_generator) = &async_generator {
+                            AsyncGenerator::abandon_interrupted(async_generator, context);
                         }
                         return Err(err);
                     }

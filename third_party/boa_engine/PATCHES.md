@@ -199,5 +199,34 @@ job's body without calls or loops could still run). The stop still never
 reaches a `catch` or `finally`, a pure spin still stops at its back-edges, and
 a word naming an ended turn still stops nothing.
 
+## Patch, continued: a stopped async generator settles its calls
+
+**Why.** R1 HOLD @ `d627b635` on #709: an async generator whose body the
+interrupt stopped stayed `executing`. `AsyncGenerator::resume` and both
+`Await` reactions returned the stop without changing its state, so the
+request being served, any queued behind it, and every later `next`,
+`return` or `throw` waited forever (`inner_next` only queues while the state
+is `executing`).
+
+**What.**
+
+| file | change |
+|---|---|
+| `src/builtins/async_generator/mod.rs` | new `AsyncGenerator::abandon_interrupted`: the generator becomes `completed` (its context dropped), and every queued request, the stopped one included, is rejected with an ordinary, catchable `Error: async generator was interrupted`. The reject functions only enqueue jobs and run no script, so each is called with `interrupt_exempt_once`, which lets this run in the stopped turn; a depth limit there leaves that request pending, as the stopped turn's own work does. `resume` calls it on an uncatchable completion |
+| `src/vm/opcode/await/mod.rs` | both `Await` reactions call it on an uncatchable completion of an async generator's body (after restoring its context, as before) |
+
+Later calls then behave as on a finished generator: `next()` resolves
+`{ done: true }`, `return(v)` resolves `{ value: v, done: true }`, `throw(e)`
+rejects with `e`, and `for await` ends.
+
+**Tests.** `an_async_generator_stopped_while_it_runs_settles_later_calls`:
+a body stopped when `next()` resumes it, one stopped after an `await`, and
+one stopped going on after a `yield` with requests queued behind it; in later
+turns the stopped and queued requests reject with the error above and
+`next`/`return`/`throw`/`for await` settle as on a finished generator. Then
+200 raced turns of ten generators with twelve requests each, every request
+of a turn settling in the next. Without this patch the test fails with
+"`stopped2` never settled".
+
 **Upgrading Boa.** Re-apply the marked lines to the new version, or drop this
 directory once upstream has an equivalent hook (to be offered upstream).
