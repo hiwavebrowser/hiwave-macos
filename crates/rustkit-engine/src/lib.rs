@@ -327,6 +327,8 @@ use nav_cancel::{load_phase, LoadInProgress, NavWatch};
 #[cfg(all(test, feature = "headless"))]
 mod load_cancel_tests;
 #[cfg(all(test, feature = "headless"))]
+mod error_page_script_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_module_tests;
