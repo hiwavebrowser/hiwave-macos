@@ -31,6 +31,7 @@ unsafe impl Trace for CompletionRecord {
 
 // ---- `CompletionRecord` methods ----
 impl CompletionRecord {
+    #[allow(dead_code)] // HIWAVE PATCH (interrupt): its one use was replaced
     pub(crate) const fn is_throw_completion(&self) -> bool {
         matches!(self, Self::Throw(_))
     }

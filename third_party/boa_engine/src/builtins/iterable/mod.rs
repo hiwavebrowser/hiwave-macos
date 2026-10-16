@@ -628,6 +628,13 @@ impl IteratorRecord {
                 }
             }
             Err(inner_result) => {
+                // HIWAVE PATCH (interrupt): a runtime limit (the interrupt)
+                // is not replaced by the completion being closed over.
+                if !inner_result.is_catchable() {
+                    return Err(inner_result);
+                }
+                // END HIWAVE PATCH
+
                 // 5. If completion.[[Type]] is throw, return ? completion.
                 completion?;
 
@@ -635,6 +642,14 @@ impl IteratorRecord {
                 return Err(inner_result);
             }
         };
+
+        // HIWAVE PATCH (interrupt): as above.
+        if let Err(err) = &inner_result
+            && !err.is_catchable()
+        {
+            return inner_result;
+        }
+        // END HIWAVE PATCH
 
         // 5. If completion.[[Type]] is throw, return ? completion.
         let completion = completion?;

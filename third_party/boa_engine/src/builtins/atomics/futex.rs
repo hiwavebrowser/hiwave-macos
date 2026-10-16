@@ -601,16 +601,16 @@ pub(super) unsafe fn wait_async<E: Element + PartialEq>(
 
     context.enqueue_job(
         NativeAsyncJob::new(async move |context| {
+            // HIWAVE PATCH (interrupt): the `resolve` call's error is
+            // returned (was `.expect`) after the timeout is cancelled.
+            let mut notified = Ok(JsValue::undefined());
             if let Ok(result) = receiver.await {
                 // v. Perform NotifyWaiter(WL, waiterRecord).
-                functions
-                    .resolve
-                    .call(
-                        &JsValue::undefined(),
-                        &[result.to_js_string().into()],
-                        &mut context.borrow_mut(),
-                    )
-                    .expect("default resolving functions cannot error");
+                notified = functions.resolve.call(
+                    &JsValue::undefined(),
+                    &[result.to_js_string().into()],
+                    &mut context.borrow_mut(),
+                );
             } else {
                 // The "else" branch can only happen if the channel was dropped in both
                 // the timeout job and the whole waiters map, which is only possible if
@@ -621,6 +621,8 @@ pub(super) unsafe fn wait_async<E: Element + PartialEq>(
             if let Some(token) = timeout_cancel {
                 token.cancel(&mut context.borrow_mut());
             }
+            notified?;
+            // END HIWAVE PATCH
 
             Ok(JsValue::undefined())
         })

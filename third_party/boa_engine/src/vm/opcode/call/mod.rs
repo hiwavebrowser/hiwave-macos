@@ -365,9 +365,9 @@ async fn load_dyn_import(
         Err(err) => {
             // a. Perform ! Call(promiseCapability.[[Reject]], undefined, « moduleCompletion.[[Value]] »).
             let err = err.into_opaque(&mut context.borrow_mut())?;
+            // HIWAVE PATCH (interrupt): `?`, not `.expect`: the interrupt can stop it.
             cap.reject()
-                .call(&JsValue::undefined(), &[err], &mut context.borrow_mut())
-                .expect("default `reject` function cannot throw");
+                .call(&JsValue::undefined(), &[err], &mut context.borrow_mut())?;
 
             // b. Return unused.
             return Ok(());
@@ -419,9 +419,9 @@ async fn load_dyn_import(
             .with_message("import.defer() and import.source() require the 'experimental' feature")
             .into();
         let err = JsError::into_opaque(err, &mut context.borrow_mut())?;
+        // HIWAVE PATCH (interrupt): `?`, not `.expect`: the interrupt can stop it.
         cap.reject()
-            .call(&JsValue::undefined(), &[err], &mut context.borrow_mut())
-            .expect("default `reject` function cannot throw");
+            .call(&JsValue::undefined(), &[err], &mut context.borrow_mut())?;
         return Ok(());
     }
 
@@ -436,9 +436,9 @@ async fn load_dyn_import(
             .with_message("source phase import is not available for this module")
             .into();
         let err = JsError::into_opaque(err, &mut context.borrow_mut())?;
+        // HIWAVE PATCH (interrupt): `?`, not `.expect`: the interrupt can stop it.
         cap.reject()
-            .call(&JsValue::undefined(), &[err], &mut context.borrow_mut())
-            .expect("default `reject` function cannot throw");
+            .call(&JsValue::undefined(), &[err], &mut context.borrow_mut())?;
         return Ok(());
     }
 
@@ -453,9 +453,9 @@ async fn load_dyn_import(
         NativeFunction::from_copy_closure_with_captures(
             |_, args, cap, context| {
                 //     a. Perform ! Call(promiseCapability.[[Reject]], undefined, « reason »).
+                // HIWAVE PATCH (interrupt): `?`, not `.expect`: the interrupt can stop it.
                 cap.reject()
-                    .call(&JsValue::undefined(), args, context)
-                    .expect("default `reject` function cannot throw");
+                    .call(&JsValue::undefined(), args, context)?;
 
                 //     b. Return unused.
                 Ok(JsValue::undefined())
@@ -476,9 +476,9 @@ async fn load_dyn_import(
                 if let Err(e) = module.link(context) {
                     // i. Perform ! Call(promiseCapability.[[Reject]], undefined, « link.[[Value]] »).
                     let e = e.into_opaque(context)?;
+                    // HIWAVE PATCH (interrupt): `?`, not `.expect`: the interrupt can stop it.
                     cap.reject()
-                        .call(&JsValue::undefined(), &[e], context)
-                        .expect("default `reject` function cannot throw");
+                        .call(&JsValue::undefined(), &[e], context)?;
                     // ii. Return unused.
                     return Ok(JsValue::undefined());
                 }
@@ -496,9 +496,9 @@ async fn load_dyn_import(
                             let namespace = module.namespace(context);
 
                             // ii. Perform ! Call(promiseCapability.[[Resolve]], undefined, « namespace »).
+                            // HIWAVE PATCH (interrupt): `?`, not `.expect`: the interrupt can stop it.
                             cap.resolve()
-                                .call(&JsValue::undefined(), &[namespace.into()], context)
-                                .expect("default `resolve` function cannot throw");
+                                .call(&JsValue::undefined(), &[namespace.into()], context)?;
 
                             // iii. Return unused.
                             Ok(JsValue::undefined())
@@ -571,11 +571,9 @@ impl ImportCall {
         let options = context.vm.get_register(options_op.into()).clone();
 
         // 5. Let promiseCapability be ! NewPromiseCapability(%Promise%).
-        let cap = PromiseCapability::new(
-            &context.intrinsics().constructors().promise().constructor(),
-            context,
-        )
-        .expect("operation cannot fail for the %Promise% intrinsic");
+        // HIWAVE PATCH (interrupt): built directly; constructing %Promise%
+        // can be interrupted.
+        let cap = PromiseCapability::new_intrinsic(context);
         let promise = cap.promise().clone();
 
         // 6. Let specifierString be Completion(ToString(specifier)).

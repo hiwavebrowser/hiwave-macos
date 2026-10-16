@@ -490,12 +490,14 @@ impl SourceTextModule {
     /// Abstract operation [`InnerModuleLoading`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-InnerModuleLoading
+    // HIWAVE PATCH (interrupt): returns the error of loading an already
+    // loaded module (`Module::inner_load`), which the interrupt can stop.
     pub(super) fn inner_load(
         &self,
         module_self: &Module,
         state: &Rc<GraphLoadingState>,
         context: &mut Context,
-    ) {
+    ) -> JsResult<()> {
         /// Loads the module of an import.
         ///
         /// This combines the operations:
@@ -558,7 +560,7 @@ impl SourceTextModule {
             match completion {
                 Ok(m) => {
                     // a. Perform InnerModuleLoading(state, moduleCompletion.[[Value]]).
-                    m.inner_load(&state, &mut context.borrow_mut());
+                    m.inner_load(&state, &mut context.borrow_mut())?; // HIWAVE PATCH (interrupt)
                 }
                 // 3. Else,
                 Err(err) => {
@@ -599,7 +601,7 @@ impl SourceTextModule {
                 if let Some(loaded) = loaded {
                     // 1. Let record be that Record.
                     // 2. Perform InnerModuleLoading(state, record.[[Module]]).
-                    loaded.inner_load(state, context);
+                    loaded.inner_load(state, context)?; // HIWAVE PATCH (interrupt)
                 } else {
                     //    ii. Else,
                     //       1. Perform HostLoadImportedModule(module, required, state.[[HostDefined]], state).
@@ -619,10 +621,11 @@ impl SourceTextModule {
                 }
                 // iii. If state.[[IsLoading]] is false, return unused.
                 if !state.loading.get() {
-                    return;
+                    return Ok(());
                 }
             }
         }
+        Ok(())
     }
 
     /// Concrete method [`GetExportedNames ( [ exportStarSet ] )`][spec].
@@ -1364,7 +1367,7 @@ impl SourceTextModule {
 
             //     d. If module.[[PendingAsyncDependencies]] = 0, perform ExecuteAsyncModule(module).
             if pending_async_dependencies == 0 {
-                self.execute_async(module_self, context);
+                self.execute_async(module_self, context)?; // HIWAVE PATCH (interrupt)
             }
         } else {
             // 13. Else,
@@ -1452,7 +1455,10 @@ impl SourceTextModule {
     /// Abstract operation [`ExecuteAsyncModule ( module )`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-execute-async-module
-    fn execute_async(&self, module_self: &Module, context: &mut Context) {
+    // HIWAVE PATCH (interrupt): returns the error of `execute` (was
+    // `.expect`): the interrupt stops an async module's body before its first
+    // `await` as an error no capability can take.
+    fn execute_async(&self, module_self: &Module, context: &mut Context) -> JsResult<()> {
         // 1. Assert: module.[[Status]] is either evaluating or evaluating-async.
         debug_assert!(matches!(
             &*self.status.borrow(),
@@ -1462,11 +1468,9 @@ impl SourceTextModule {
         debug_assert!(self.code.has_tla);
 
         // 3. Let capability be ! NewPromiseCapability(%Promise%).
-        let capability = PromiseCapability::new(
-            &context.intrinsics().constructors().promise().constructor(),
-            context,
-        )
-        .expect("cannot fail for the %Promise% intrinsic");
+        // HIWAVE PATCH (interrupt): built directly; constructing %Promise%
+        // can be interrupted.
+        let capability = PromiseCapability::new_intrinsic(context);
         let promise = capability
             .promise
             .clone()
@@ -1517,8 +1521,7 @@ impl SourceTextModule {
 
         // 9. Perform ! module.ExecuteModule(capability).
         // 10. Return unused.
-        self.execute(module_self, Some(capability), context)
-            .expect("async modules cannot directly throw");
+        self.execute(module_self, Some(capability), context) // HIWAVE PATCH (interrupt)
     }
 
     /// Abstract operation [`GatherAvailableAncestors ( module, execList )`][spec].
@@ -1924,6 +1927,11 @@ impl SourceTextModule {
             .vm
             .pop_frame()
             .js_expect("There should be a call frame")?;
+        // HIWAVE PATCH (interrupt): drop the frame's values too, as
+        // `SyntheticModule::evaluate` does. Every linked module left them on
+        // the VM stack, so a page that loads ~2,000 modules (or is stopped
+        // while loading them) failed every later script on the stack limit.
+        context.vm.stack.truncate_to_frame(&frame);
 
         let env = frame
             .environments
@@ -2135,7 +2143,7 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) -> J
         let has_tla = m_src.code.has_tla;
         if has_tla {
             // i. Perform ExecuteAsyncModule(m).
-            m_src.execute_async(&m, context);
+            m_src.execute_async(&m, context)?; // HIWAVE PATCH (interrupt)
             continue;
         }
         // c. Else,

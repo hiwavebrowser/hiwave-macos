@@ -841,6 +841,15 @@ impl Context {
             if let Some(frame) = frame {
                 self.vm.stack.truncate_to_frame(&frame);
             }
+            // HIWAVE PATCH (interrupt): also drop the exit-early frame's own
+            // values, as `handle_throw` does. Its caller pops the frame
+            // without truncating, so every stopped turn left them behind
+            // until the stack limit failed every later script.
+            if self.vm.frame().exit_early() {
+                let fp = self.vm.frame().frame_pointer();
+                self.vm.stack.stack.truncate(fp);
+            }
+            // END HIWAVE PATCH
             return ControlFlow::Break(CompletionRecord::Throw(err));
         }
 

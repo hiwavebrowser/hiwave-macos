@@ -73,7 +73,8 @@ impl Await {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object()?;
 
-                    r#gen.resume(
+                    // HIWAVE PATCH (interrupt): keep the completion (was dropped).
+                    let completion = r#gen.resume(
                         Some(args.get_or_undefined(0).clone()),
                         GeneratorResumeKind::Normal,
                         context,
@@ -85,6 +86,16 @@ impl Await {
                             .js_expect("must be async generator")?
                             .context = Some(r#gen);
                     }
+
+                    // HIWAVE PATCH (interrupt): the body takes every catchable
+                    // error itself; a runtime limit (the interrupt) unwinds
+                    // past it and ends this job instead of being dropped.
+                    if let CompletionRecord::Throw(err) = completion
+                        && !err.is_catchable()
+                    {
+                        return Err(err);
+                    }
+                    // END HIWAVE PATCH
 
                     // e. Assert: When we reach this step, asyncContext has already been removed from the execution context stack and prevContext is the currently running execution context.
                     // f. Return undefined.
@@ -114,7 +125,8 @@ impl Await {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object()?;
 
-                    r#gen.resume(
+                    // HIWAVE PATCH (interrupt): keep the completion (was dropped).
+                    let completion = r#gen.resume(
                         Some(args.get_or_undefined(0).clone()),
                         GeneratorResumeKind::Throw,
                         context,
@@ -126,6 +138,16 @@ impl Await {
                             .js_expect("must be async generator")?
                             .context = Some(r#gen);
                     }
+
+                    // HIWAVE PATCH (interrupt): the body takes every catchable
+                    // error itself; a runtime limit (the interrupt) unwinds
+                    // past it and ends this job instead of being dropped.
+                    if let CompletionRecord::Throw(err) = completion
+                        && !err.is_catchable()
+                    {
+                        return Err(err);
+                    }
+                    // END HIWAVE PATCH
 
                     Ok(JsValue::undefined())
                 },

@@ -321,6 +321,20 @@ impl PromiseCapability {
         })
     }
 
+    // HIWAVE PATCH (interrupt)
+    /// `! NewPromiseCapability(%Promise%)`, built directly. Constructing the
+    /// intrinsic through [`PromiseCapability::new`] makes calls a runtime
+    /// limit (the interrupt) can fail; building it runs no code, so the
+    /// engine's own `!` uses of it cannot fail.
+    pub(crate) fn new_intrinsic(context: &mut Context) -> Self {
+        let (promise, functions) = crate::object::JsPromise::new_pending(context);
+        Self {
+            promise: promise.into(),
+            functions,
+        }
+    }
+    // END HIWAVE PATCH
+
     /// Returns the promise object.
     pub(crate) const fn promise(&self) -> &JsObject {
         &self.promise
@@ -459,6 +473,19 @@ impl BuiltInConstructor for Promise {
 }
 
 impl Promise {
+    // HIWAVE PATCH (interrupt)
+    /// Creates a `Promise` already fulfilled with `value`, without the calls
+    /// `Promise.resolve` makes (which the interrupt can stop).
+    pub(crate) fn fulfilled(value: JsValue) -> Self {
+        Self {
+            state: PromiseState::Fulfilled(value),
+            fulfill_reactions: Vec::default(),
+            reject_reactions: Vec::default(),
+            handled: false,
+        }
+    }
+    // END HIWAVE PATCH
+
     /// Creates a new, pending `Promise`.
     pub(crate) fn new() -> Self {
         Self {
@@ -2643,10 +2670,11 @@ fn new_promise_reaction_job(
             None => {
                 // f. If promiseCapability is undefined, then
                 //    i. Assert: handlerResult is not an abrupt completion.
-                assert!(
-                    handler_result.is_ok(),
-                    "Assertion: <handlerResult is not an abrupt completion> failed"
-                );
+                // HIWAVE PATCH (interrupt): the engine's own handlers can
+                // fail when a call they make hits a runtime limit; that
+                // error ends the job instead of failing the assertion.
+                handler_result.map_err(JsError::from_opaque)?;
+                // END HIWAVE PATCH
 
                 // ii. Return empty.
                 Ok(JsValue::undefined())
