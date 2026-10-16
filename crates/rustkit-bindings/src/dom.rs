@@ -1665,7 +1665,9 @@ const WRAPPERS_JS: &str = r#"
         return n;
     };
     Node.prototype.cloneNode = function (deep) {
-        return wrap(setData(this, 'clone', !!deep, null, 'cloneNode'));
+        var copy = wrap(setData(this, 'clone', !!deep, null, 'cloneNode'));
+        if (HOOKS.scripts) HOOKS.scripts.cloned(this, copy);
+        return copy;
     };
     // DOM §4.4 "equals": same type, name, attributes (in any order) and
     // data, and equal children in order.

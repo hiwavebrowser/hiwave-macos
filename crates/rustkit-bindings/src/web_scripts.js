@@ -9,9 +9,10 @@
 // and runs it as the element's script, then fires `load` or `error`. An
 // external module is `import()`ed. An inline classic script runs at once.
 //
-// Only elements script created are prepared: the parser's scripts ran (or
-// were skipped) with the load, and `innerHTML` never runs scripts. Each
-// element is prepared once. Not here (stated): inline module scripts and
+// Only elements script created are prepared (`createElement`, an HTML
+// `createElementNS`, or a copy of one not yet started): the parser's scripts
+// ran (or were skipped) with the load, and `innerHTML` never runs scripts.
+// Each element is prepared once. Not here (stated): inline module scripts and
 // `document.write`.
 (function (g) {
     var internals = g.__rkScriptInternals;
@@ -21,6 +22,7 @@
     // Captured before page script can replace them.
     var indirectEval = g.eval, resolved = Promise.resolve(), URL_ = g.URL, Event_ = g.Event;
     var STATE = Symbol('rustkit.script');
+    var XHTML = 'http://www.w3.org/1999/xhtml';
     // Created and not yet started: inserts look for scripts only while
     // there is one.
     var fresh = 0;
@@ -76,9 +78,25 @@
 
     HOOKS.scripts = {
         created: function (el) {
-            if (!isScript(el)) return;
+            if (!isScript(el) || (el.namespaceURI != null && el.namespaceURI !== XHTML)) return;
             Object.defineProperty(el, STATE, { value: 'fresh', writable: true, configurable: true });
             fresh++;
+        },
+        // HTML §4.12.1 cloning steps: a copy is started when its original
+        // is, so a copy of a script not yet started (or of a subtree holding
+        // one) is prepared when it goes in. The parser's scripts, and those
+        // `innerHTML` made, are started: their copies never run.
+        cloned: function (from, copy) {
+            if (fresh === 0 || from == null || copy == null) return;
+            if (isScript(from)) {
+                if (from[STATE] === 'fresh') this.created(copy);
+                return;
+            }
+            if (typeof from.querySelectorAll !== 'function') return;
+            var a = from.querySelectorAll('script'), b = copy.querySelectorAll('script');
+            for (var i = 0; i < a.length && i < b.length; i++) {
+                if (a[i][STATE] === 'fresh') this.created(b[i]);
+            }
         },
         // Before `node` goes into `parent`: the fresh scripts it carries (a
         // fragment empties as it goes in), prepared in tree order after.

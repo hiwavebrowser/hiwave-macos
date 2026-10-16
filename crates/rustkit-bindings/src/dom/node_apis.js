@@ -42,10 +42,14 @@
         var p = base(id);
         return p === g.SVGSVGElement.prototype ? p : g.SVGElement.prototype;
     });
+    var HOOKS = g.__rkDomHooks;
     Document.prototype.createElementNS = function (ns, qualified) {
         var r = NS(I.gen(), 'create', ns == null ? '' : String(ns), String(qualified));
         if (typeof r === 'string') fail('createElementNS', 'Document', r);
-        return I.wrap(r);
+        var el = I.wrap(r);
+        // An HTML `script` made this way is a script like createElement's.
+        if (HOOKS && HOOKS.scripts) HOOKS.scripts.created(el);
+        return el;
     };
     function localOf(name) { var i = name.indexOf(':'); return i < 0 ? name : name.slice(i + 1); }
     function nsOf(name) { var i = name.indexOf(':'); return i < 0 ? null : PREFIX_NS[name.slice(0, i)] || null; }

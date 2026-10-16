@@ -15,24 +15,24 @@ use std::net::TcpListener;
 use std::sync::Mutex;
 
 /// What the server answers for a path, given the request's Cookie header.
-type Handler = fn(path: &str, cookie: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String);
+pub(crate) type Handler = fn(path: &str, cookie: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String);
 
-struct Server {
+pub(crate) struct Server {
     port: u16,
     /// (request target, Cookie header) in arrival order.
     seen: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl Server {
-    fn url(&self, path: &str) -> Url {
+    pub(crate) fn url(&self, path: &str) -> Url {
         Url::parse(&format!("http://127.0.0.1:{}{path}", self.port)).unwrap()
     }
-    fn requests(&self) -> Vec<(String, String)> {
+    pub(crate) fn requests(&self) -> Vec<(String, String)> {
         self.seen.lock().unwrap().clone()
     }
 }
 
-fn serve(handler: Handler) -> Server {
+pub(crate) fn serve(handler: Handler) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -76,7 +76,7 @@ fn serve(handler: Handler) -> Server {
     Server { port, seen }
 }
 
-fn engine() -> (Engine, EngineViewId, tokio::runtime::Runtime) {
+pub(crate) fn engine() -> (Engine, EngineViewId, tokio::runtime::Runtime) {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
@@ -85,7 +85,7 @@ fn engine() -> (Engine, EngineViewId, tokio::runtime::Runtime) {
     (engine, view, rt)
 }
 
-fn text(engine: &mut Engine, view: EngineViewId, js: &str) -> String {
+pub(crate) fn text(engine: &mut Engine, view: EngineViewId, js: &str) -> String {
     engine.execute_script(view, js).unwrap()
 }
 
