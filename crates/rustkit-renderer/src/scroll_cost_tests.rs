@@ -474,8 +474,67 @@ fn fast_draw(gpu: &Gpu, list: &[DisplayCommand], scroll: (f32, f32)) -> (Vec<u8>
     (px, r.last_frame_stats())
 }
 
+/// The list without its `Text` commands: drawn on the reference path, it
+/// tells which pixels of the reference frame are glyph pixels.
+fn without_text(list: &[DisplayCommand]) -> Vec<DisplayCommand> {
+    list.iter()
+        .filter(|c| !matches!(c, DisplayCommand::Text { .. }))
+        .cloned()
+        .collect()
+}
+
+/// Checks a culled frame against the unculled reference.
+///
+/// Culling must never change which pixels are covered or the order things
+/// are painted in: every pixel outside text must match byte for byte. Text
+/// may differ by at most 1 LSB per channel, on glyph pixels only. That is
+/// the lead's ruling on #710: culled text skips the glyph cache, so the
+/// visible glyphs are packed into different atlas slots, and linear sampling
+/// at fractional positions can round 1 LSB differently. Atlas packing
+/// already varies with page history on develop. (On lavapipe, clipped-away
+/// glyph quads sharing a draw can also move visible glyph pixels by 1 LSB.)
+///
+/// `no_text` is the reference frame drawn from `without_text`. A pixel where
+/// it differs from `want` is a glyph pixel. A missing, extra or misordered
+/// paint shows as a difference outside those pixels, or as more than 1 LSB
+/// inside them, and fails.
+fn assert_culled_matches(want: &[u8], got: &[u8], no_text: &[u8], what: &str) {
+    let mut wrong = 0usize;
+    let mut first = None;
+    let mut tolerated = 0usize;
+    for (i, ((w, g), n)) in want
+        .chunks_exact(4)
+        .zip(got.chunks_exact(4))
+        .zip(no_text.chunks_exact(4))
+        .enumerate()
+    {
+        if w == g {
+            continue;
+        }
+        let glyph = w != n;
+        let lsb = w.iter().zip(g).all(|(a, b)| a.abs_diff(*b) <= 1);
+        if glyph && lsb {
+            tolerated += 1;
+        } else {
+            wrong += 1;
+            first.get_or_insert((
+                i % VIEW_W as usize,
+                i / VIEW_W as usize,
+                w.to_vec(),
+                g.to_vec(),
+                glyph,
+            ));
+        }
+    }
+    assert_eq!(
+        wrong, 0,
+        "{what}: {wrong} pixels differ beyond the glyph tolerance ({tolerated} glyph pixels within 1 LSB); \
+         first (x, y, reference, culled, glyph pixel): {first:?}"
+    );
+}
+
 #[test]
-fn culled_frames_are_byte_identical_to_unculled_ones_at_every_scroll() {
+fn culled_frames_match_unculled_ones_at_every_scroll() {
     let Some(gpu) = gpu() else {
         eprintln!("SKIP: no GPU adapter");
         return;
@@ -499,12 +558,8 @@ fn culled_frames_are_byte_identical_to_unculled_ones_at_every_scroll() {
         ] {
             let (want, want_stats) = reference_draw(&gpu, list, scroll);
             let (got, got_stats) = fast_draw(&gpu, list, scroll);
-            let differ = want
-                .chunks_exact(4)
-                .zip(got.chunks_exact(4))
-                .filter(|(a, b)| a != b)
-                .count();
-            assert_eq!(differ, 0, "{name} at {scroll:?}: {differ} pixels differ");
+            let (no_text, _) = reference_draw(&gpu, &without_text(list), scroll);
+            assert_culled_matches(&want, &got, &no_text, &format!("{name} at {scroll:?}"));
             assert_eq!(want_stats.culled, 0);
             assert!(
                 got_stats.culled > 0 || list.len() < 100,
@@ -605,7 +660,8 @@ fn a_badge_stays_over_its_image_and_an_image_over_its_text_whatever_is_off_scree
     for scroll in [(0.0, 0.0), (0.0, 2600.0)] {
         let (want, _) = reference_draw(&gpu, &list, scroll);
         let (got, stats) = fast_draw(&gpu, &list, scroll);
-        assert_eq!(want, got, "at {scroll:?}");
+        let (no_text, _) = reference_draw(&gpu, &without_text(&list), scroll);
+        assert_culled_matches(&want, &got, &no_text, &format!("at {scroll:?}"));
         if scroll.1 == 0.0 {
             assert!(stats.culled >= 2, "{stats:?}");
             let px = |x: usize, y: usize| got[(y * VIEW_W as usize + x) * 4..][..4].to_vec();
@@ -846,9 +902,11 @@ fn draw_with(
     batch_bytes: u64,
 ) -> (Vec<u8>, FrameStats) {
     let mut r = renderer(gpu);
-    let mut px = |rgb: [u8; 3]| [rgb[2], rgb[1], rgb[0], 255].repeat(16 * 16);
-    r.upload_image("a.png", 16, 16, &px([200, 120, 30])).unwrap();
-    r.upload_image("b.png", 16, 16, &px([30, 160, 220])).unwrap();
+    let px = |rgb: [u8; 3]| [rgb[2], rgb[1], rgb[0], 255].repeat(16 * 16);
+    r.upload_image("a.png", 16, 16, &px([200, 120, 30]))
+        .unwrap();
+    r.upload_image("b.png", 16, 16, &px([30, 160, 220]))
+        .unwrap();
     r.reference = reference;
     r.max_batch_bytes = batch_bytes;
     let frame = draw(gpu, &mut r, list, scroll);
@@ -856,7 +914,7 @@ fn draw_with(
 }
 
 #[test]
-fn culling_never_changes_a_pixel_of_decorations_negative_sizes_or_wide_borders() {
+fn culling_never_changes_coverage_or_order_of_decorations_negative_sizes_or_wide_borders() {
     let Some(gpu) = gpu() else {
         eprintln!("SKIP: no GPU adapter");
         return;
@@ -890,12 +948,8 @@ fn culling_never_changes_a_pixel_of_decorations_negative_sizes_or_wide_borders()
         ] {
             let (want, _) = draw_with(&gpu, list, scroll, true, cap);
             let (got, stats) = draw_with(&gpu, list, scroll, false, cap);
-            let differ = want
-                .chunks_exact(4)
-                .zip(got.chunks_exact(4))
-                .filter(|(a, b)| a != b)
-                .count();
-            assert_eq!(differ, 0, "{name} at {scroll:?}: {differ} pixels differ");
+            let (no_text, _) = draw_with(&gpu, &without_text(list), scroll, true, cap);
+            assert_culled_matches(&want, &got, &no_text, &format!("{name} at {scroll:?}"));
             assert!(stats.culled > 0, "{name} at {scroll:?}: nothing culled");
         }
     }
@@ -917,7 +971,11 @@ fn culling_never_changes_a_pixel_of_decorations_negative_sizes_or_wide_borders()
         }
     }
     let (got, _) = draw_with(&gpu, &hazards, (0.0, 0.0), false, MAX_BATCH_BYTES);
-    assert_eq!(px(&got, 200, 150), vec![0, 100, 200, 255], "wide top border");
+    assert_eq!(
+        px(&got, 200, 150),
+        vec![0, 100, 200, 255],
+        "wide top border"
+    );
 }
 
 fn underline(x: f32, y: f32, width: f32, color: Color) -> DisplayCommand {
@@ -961,12 +1019,8 @@ fn an_underline_over_an_earlier_image_and_negative_widths_draw_the_same_at_any_s
     for scroll in [(0.0, 0.0), (0.0, 2600.0), (40.0, 0.0)] {
         let (want, _) = reference_draw(&gpu, &list, scroll);
         let (got, stats) = fast_draw(&gpu, &list, scroll);
-        let differ = want
-            .chunks_exact(4)
-            .zip(got.chunks_exact(4))
-            .filter(|(a, b)| a != b)
-            .count();
-        assert_eq!(differ, 0, "at {scroll:?}: {differ} pixels differ");
+        let (no_text, _) = reference_draw(&gpu, &without_text(&list), scroll);
+        assert_culled_matches(&want, &got, &no_text, &format!("at {scroll:?}"));
         let px = |x: usize, y: usize| got[(y * VIEW_W as usize + x) * 4..][..4].to_vec();
         if scroll == (0.0, 0.0) {
             assert!(stats.culled >= 2, "{stats:?}");
@@ -993,4 +1047,28 @@ fn an_underline_over_an_earlier_image_and_negative_widths_draw_the_same_at_any_s
             );
         }
     }
+}
+
+#[test]
+fn the_culled_frame_check_allows_one_lsb_on_glyph_pixels_only() {
+    let n = (VIEW_W * VIEW_H) as usize;
+    let white = [255u8, 255, 255, 255].repeat(n);
+    // Pixel 10 is a glyph pixel (text drew there); pixel 20 is not.
+    let mut want = white.clone();
+    want[40..44].copy_from_slice(&[20, 20, 20, 255]);
+    let no_text = white.clone();
+    let ok = |got: &[u8]| {
+        std::panic::catch_unwind(|| assert_culled_matches(&want, got, &no_text, "t")).is_ok()
+    };
+    let mut got = want.clone();
+    got[40..44].copy_from_slice(&[21, 19, 20, 255]);
+    assert!(ok(&got), "1 LSB on a glyph pixel is allowed");
+    got[40..44].copy_from_slice(&[22, 20, 20, 255]);
+    assert!(!ok(&got), "2 LSB on a glyph pixel is not");
+    let mut got = want.clone();
+    got[80..84].copy_from_slice(&[254, 255, 255, 255]);
+    assert!(!ok(&got), "any difference outside text is not");
+    let mut got = want.clone();
+    got[40..44].copy_from_slice(&[255, 255, 255, 255]);
+    assert!(!ok(&got), "a glyph pixel left uncovered is not");
 }
