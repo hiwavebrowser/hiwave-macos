@@ -283,8 +283,15 @@ pub mod inspector;
 mod inspector_glue;
 mod relayout_cause;
 mod presenter;
+pub use presenter::FrameCommit;
+mod wgate;
+pub use wgate::InputMark;
 #[cfg(test)]
 mod send_bounds_tests;
+#[cfg(all(test, feature = "headless"))]
+mod frame_commit_tests;
+#[cfg(all(test, feature = "headless"))]
+mod wgate_engine_tests;
 mod diagnostics;
 pub use diagnostics::{
     DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
@@ -299,7 +306,7 @@ pub use inspector_page::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod inspector_page_tests;
-use presenter::{Frame, Presenter};
+use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats, StageMs};
@@ -763,8 +770,15 @@ struct ViewState {
     /// page; with some, those boxes and that walk. `None` (not known) is
     /// always safe: the boxes are then looked for on every hit test.
     held_fixed: Option<Vec<Vec<usize>>>,
+    /// The view's display list, shared with the presenter's newest
+    /// `FrameCommit` for it (`Arc`: one allocation, two owners; a new
+    /// layout replaces it, nothing writes into it).
     #[allow(dead_code)]
-    display_list: Option<DisplayList>,
+    display_list: Option<Arc<DisplayList>>,
+    /// The earliest input the view took since its last commit
+    /// (`Engine::note_input`); rides the next commit for the W-gate's
+    /// input-to-present log, or is dropped when the input changed no frame.
+    input_pending: Option<InputMark>,
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
     /// The view's stop state: the interrupt word another thread (the
@@ -1973,6 +1987,7 @@ impl Engine {
             layout: None,
             held_fixed: None,
             display_list: None,
+            input_pending: None,
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
@@ -2059,6 +2074,7 @@ impl Engine {
             layout: None,
             held_fixed: None,
             display_list: None,
+            input_pending: None,
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
@@ -2144,6 +2160,7 @@ impl Engine {
             layout: None,
             held_fixed: None,
             display_list: None,
+            input_pending: None,
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
@@ -2244,6 +2261,7 @@ impl Engine {
     /// Lay out a view whose bounds changed since its last layout, and tell
     /// the page. Returns whether there was anything to do.
     pub fn flush_pending_resize(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let _hold = wgate::hold("resize");
         let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
         let Some(bounds) = view.pending_resize.take() else {
             return Ok(false);
@@ -2338,6 +2356,7 @@ impl Engine {
         delta_x: f32,
         delta_y: f32,
     ) -> Result<bool, EngineError> {
+        let _hold = wgate::hold("scroll");
         let view = self
             .views
             .get_mut(&id)
@@ -2424,6 +2443,7 @@ impl Engine {
         viewport_x: f32,
         viewport_y: f32,
     ) -> Option<String> {
+        let _hold = wgate::hold("focus");
         self.focus_point(id, viewport_x, viewport_y, PointFocus::Click)
     }
 
@@ -2623,6 +2643,7 @@ impl Engine {
     /// listener that cancels either event keeps the focus where it is.
     /// Returns false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        let _hold = wgate::hold("press");
         let target = self.element_at_point(id, viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = true;
@@ -2663,6 +2684,7 @@ impl Engine {
     /// `mousemove` at the element under the pointer. Whatever the
     /// listeners wrote to the DOM is laid out before this returns.
     pub fn mouse_move_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
+        let _hold = wgate::hold("move");
         self.pointer_moved(id, viewport_x, viewport_y, true);
     }
 
@@ -2670,6 +2692,7 @@ impl Engine {
     /// of everything it was over, with no `relatedTarget`, at the point it
     /// was last seen.
     pub fn mouse_leave(&mut self, id: EngineViewId) {
+        let _hold = wgate::hold("leave");
         let last = self.views.get(&id).and_then(|view| view.pointer_at);
         if let Some((x, y)) = last {
             self.pointer_moved(id, x, y, false);
@@ -2963,6 +2986,7 @@ impl Engine {
     /// Whatever the listeners wrote to the DOM is laid out before this
     /// returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
+        let _hold = wgate::hold("click");
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
             let changed = std::mem::take(&mut view.active_chain);
@@ -3344,6 +3368,7 @@ impl Engine {
     /// through the document's own `FetchPolicy`, as they did during the
     /// load; a page with none (`load_html`) has no network.
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
         // The window's size as of this turn, laid out once, before the
         // page's timers run and see it.
@@ -3561,6 +3586,7 @@ impl Engine {
         shift: bool,
         alt: bool,
     ) -> bool {
+        let _hold = wgate::hold("key");
         use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
         let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
@@ -3621,6 +3647,7 @@ impl Engine {
         shift: bool,
         alt: bool,
     ) {
+        let _hold = wgate::hold("key_up");
         let focused = self.views.get(&id).and_then(|v| v.focused_node).map(|n| n.raw());
         self.fire_key(id, focused, "keyup", key_code, key, ctrl, shift, alt);
     }
@@ -3670,6 +3697,7 @@ impl Engine {
     /// form, a listener cancelled, or the form is not a GET to this view.
     /// A page without script submits as before.
     pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
+        let _hold = wgate::hold("submit");
         let focused = self.views.get(&id)?.focused_node?.raw();
         if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
             return None;
@@ -4740,6 +4768,7 @@ impl Engine {
     }
 
     pub async fn load_url(&mut self, id: EngineViewId, url: Url) -> Result<(), EngineError> {
+        let _hold = wgate::hold("load");
         self.load_url_with_disposition(id, url, false).await
     }
 
@@ -5284,6 +5313,7 @@ impl Engine {
     /// This is used for loading inline HTML content like the Chrome UI,
     /// without making an HTTP request.
     pub fn load_html(&mut self, id: EngineViewId, html: &str) -> Result<(), EngineError> {
+        let _hold = wgate::hold("load_html");
         // A navigation of its own (M3b). Nothing in it awaits, so the only
         // cancel that can reach it is the interrupt word stopping a script.
         let watch = self.begin_nav(id)?;
@@ -5467,6 +5497,7 @@ impl Engine {
     /// is `other(unattributed)`.
     pub fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("relayout", ?id).entered();
+        let _hold = wgate::hold("relayout");
         let started = std::time::Instant::now();
 
         // A pending pointer restyle is covered by this build, whoever asked.
@@ -5715,7 +5746,7 @@ impl Engine {
             let _snapshot_time = time_stage(Stage::Snapshot);
             publish_geometry(bindings, layout);
         }
-        view.display_list = Some(display_list);
+        view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
         // Re-clamp: a relayout can shrink the document (or a navigation can
@@ -5997,7 +6028,7 @@ impl Engine {
             let _snapshot_time = time_stage(Stage::Snapshot);
             publish_geometry(bindings, layout);
         }
-        view.display_list = Some(display_list);
+        view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
         let snapshot = started.elapsed();
         self.render(id)?;
@@ -11883,7 +11914,7 @@ impl Engine {
 
         let base_url = view.url.as_ref();
         let mut images = self.discover_images(document.as_ref(), base_url);
-        let backgrounds = Self::discover_background_images(view.display_list.as_ref());
+        let backgrounds = Self::discover_background_images(view.display_list.as_deref());
         let css_urls = match view.inspector.is_active() {
             true => backgrounds.iter().map(|(_, url)| url.clone()).collect(),
             false => std::collections::HashSet::new(),
@@ -14362,8 +14393,11 @@ impl SelectorMatcher {
 }
 
 impl Engine {
-    /// Render a view (public API for continuous rendering).
+    /// Render a view (public API for continuous rendering: the chrome's
+    /// render path and the capture tool). A W-gate entry like the
+    /// app's other draws (`render_views`).
     pub fn render_view(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let _hold = wgate::hold("render_view");
         self.render(id)
     }
 
@@ -14382,6 +14416,24 @@ impl Engine {
         self.render_views(true)
     }
 
+    /// An input event for view `id` arrived at the app's queue at
+    /// `at` (W-gate: input-to-present). The earliest since the last commit
+    /// is kept; it rides the next commit the view makes, and is dropped at
+    /// the next `render_changed_views` if the frame did not move.
+    pub fn note_input(&mut self, id: EngineViewId, mark: InputMark) {
+        if let Some(view) = self.views.get_mut(&id) {
+            if view.input_pending.is_none() {
+                view.input_pending = Some(mark);
+            }
+        }
+    }
+
+    /// The presenter's newest commit for view `id` (tests and the shell's
+    /// diagnostics): its generation and the display list it holds alive.
+    pub fn latest_commit(&self, id: EngineViewId) -> Option<&FrameCommit> {
+        self.presenter.latest(id)
+    }
+
     /// Whether the frame `id` last presented is still the frame a render
     /// would draw: the same display list, scroll offset and surface size,
     /// no image arrived that it was drawn without, and not older than
@@ -14398,10 +14450,16 @@ impl Engine {
     }
 
     fn render_views(&mut self, only_changed: bool) -> usize {
+        let _hold = wgate::hold(if only_changed { "render_changed" } else { "render_all" });
         let view_ids: Vec<_> = self.views.keys().copied().collect();
         let mut drawn = 0;
         for id in view_ids {
             if only_changed && self.frame_is_current(id) {
+                // The drain that noted an input is over and the frame did
+                // not move: that input is not charged to a later frame.
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.input_pending = None;
+                }
                 continue;
             }
             drawn += 1;
@@ -14423,7 +14481,7 @@ impl Engine {
 
         info!(?id, path, "Capturing frame");
 
-        self.presenter.capture_frame(viewhost_id, display_list.as_ref(), path)
+        self.presenter.capture_frame(viewhost_id, display_list.as_deref(), path)
     }
 
     /// Export the layout tree for a view as JSON.
@@ -15047,7 +15105,7 @@ impl Engine {
         output_path: &std::path::Path,
     ) -> Result<ScreenshotMetadata, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let display_list = view.display_list.as_ref();
+        let display_list = view.display_list.as_deref();
         let viewhost_id = view.viewhost_id;
 
         let bounds = if let Some(headless_bounds) = view.headless_bounds {
@@ -15076,18 +15134,34 @@ impl Engine {
         // have laid out since this one did.
         self.install_web_fonts(id);
 
-        // The page side's part of a frame: what the presenter draws from.
-        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let frame = Frame {
-            viewhost_id: view.viewhost_id,
-            is_headless: view.headless_bounds.is_some(),
-            display_list: view.display_list.as_ref(),
-            generation: view.frame_generation,
-            scroll_offset: view.scroll_offset,
-        };
+        // The page side's part of a frame: a commit, when its frame moved
+        // since the presenter's newest one (a new display list or scroll
+        // offset). A draw for any other reason (a new surface size, an
+        // image that arrived, the one-second refresh) presents the commit
+        // the presenter already holds.
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let viewhost_id = view.viewhost_id;
+        let is_headless = view.headless_bounds.is_some();
+        let moved = self.presenter.latest(id).map_or(true, |c| {
+            c.generation != view.frame_generation || c.scroll_offset != view.scroll_offset
+        });
+        if moved {
+            let commit = FrameCommit {
+                generation: view.frame_generation,
+                nav_generation: view.nav_id,
+                list: view.display_list.clone(),
+                scroll_offset: view.scroll_offset,
+                max_scroll_offset: view.max_scroll_offset,
+                laid_out_for: view.laid_with.as_ref().map_or((0, 0), |w| w.size),
+                input: view.input_pending.take(),
+            };
+            self.presenter.commit(id, commit);
+        }
 
         // The presenter's: upload, execute, present.
-        let presented = self.presenter.present(id, frame, &self.image_manager)?;
+        let presented = self
+            .presenter
+            .present(id, viewhost_id, is_headless, &self.image_manager)?;
 
         if let (Some(presented), Some(view)) = (presented, self.views.get_mut(&id)) {
             view.presented = Some(presented);
@@ -15103,6 +15177,10 @@ impl Engine {
         id: EngineViewId,
         script: &str,
     ) -> Result<String, EngineError> {
+        // The app runs page code from the window thread here (the chrome's
+        // IPC path, a toolbar's `history.back()`): a W-gate entry, so a
+        // listener that spins without writing to the DOM is still seen.
+        let _hold = wgate::hold("script");
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         let bindings = view

@@ -2328,6 +2328,9 @@ fn main() {
                     // it. An event for a view that is gone was dropped by the
                     // viewhost when the view was destroyed.
                     for event in rustkit_viewhost::drain_input() {
+                        // When it arrived, for the W-gate's input-to-present
+                        // figure (logged by the presenter with the frame).
+                        view.note_input(event.at, event.seq);
                         match event.kind {
                         rustkit_viewhost::InputKind::Pointer(click) => {
                         // The page hears the click before the browser

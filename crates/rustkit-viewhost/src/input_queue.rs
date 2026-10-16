@@ -73,8 +73,9 @@ pub enum InputKind {
 }
 
 /// An input as the app drains it: `seq` is its place in arrival order
-/// across every kind and every view, `at` when the view recorded it, and
-/// `view` the content view it was delivered to.
+/// across every kind and every view, `at` when the view recorded it (for
+/// a coalesced burst, its first event), and `view` the content view it
+/// was delivered to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputEvent {
     pub seq: u64,
@@ -117,7 +118,9 @@ impl InputQueue {
                 }
                 _ => unreachable!("coalesces_into pairs like with like"),
             }
-            queued.at = Instant::now();
+            // `at` stays the first event's: input-to-present is measured
+            // from when the user acted, not from the last tick of a burst
+            // queued while the window was held.
             return queued.seq;
         }
         let seq = self.next_seq;
@@ -333,6 +336,26 @@ mod tests {
             _ => unreachable!(),
         }
         assert!(out[0].seq < out[1].seq, "the wheel keeps its earlier place");
+    }
+
+    #[test]
+    fn a_coalesced_burst_keeps_the_arrival_time_of_its_first_event() {
+        // The W-gate's input-to-present figure is measured from `at`. A
+        // trackpad flick queued while the window is held coalesces into one
+        // wheel; it must be timed from the first tick, not the last (#704
+        // review), or a 600 ms hold reads as a few ms.
+        let view = ViewId::new();
+        let mut q = InputQueue::default();
+        q.push(view, wheel(-10.0));
+        q.push(view, mv(1.0));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let later = Instant::now();
+        q.push(view, wheel(-10.0));
+        q.push(view, mv(2.0));
+        let out = q.drain();
+        assert_eq!(kinds(&out), ["wheel", "pointer"]);
+        assert!(out[0].at < later, "the wheel burst is timed from its first tick");
+        assert!(out[1].at < later, "the move burst is timed from its first move");
     }
 
     #[test]
