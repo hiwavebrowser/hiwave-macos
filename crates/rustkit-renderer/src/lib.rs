@@ -1543,7 +1543,10 @@ impl Renderer {
                 <= MAX_OPACITY_LAYERS;
             let mut cleared = false;
             let mut layers: Vec<(wgpu::TextureView, f32)> = Vec::new();
-            for cmd in commands {
+            // True while the decorations after a batched `Text` run: they
+            // were ordered with it (see `cull::order_probe`).
+            let mut decorations_probed = false;
+            for (i, cmd) in commands.iter().enumerate() {
                 if layered {
                     match cmd {
                         DisplayCommand::PushOpacity(alpha) => {
@@ -1557,10 +1560,32 @@ impl Renderer {
                         _ => {}
                     }
                 }
+                let decoration = is_decoration(cmd);
+                if !decoration {
+                    decorations_probed = false;
+                }
                 if self.culled(cmd) {
                     continue;
                 }
-                if self.occludes_batched(cmd) {
+                let occludes = if decoration {
+                    // A decoration whose text was culled (or that has none)
+                    // is ordered on its own.
+                    !decorations_probed && self.decoration_occludes_batched(cmd)
+                } else if matches!(cmd, DisplayCommand::Text { .. }) {
+                    // The text and the decorations that follow it are ordered
+                    // together, before the text is batched, so no flush can
+                    // fall between them and each decoration still lands over
+                    // whatever earlier image or text it covers.
+                    decorations_probed = true;
+                    let mut hit = self.occludes_batched(cmd);
+                    for d in commands[i + 1..].iter().take_while(|d| is_decoration(d)) {
+                        hit = hit || self.decoration_occludes_batched(d);
+                    }
+                    hit
+                } else {
+                    self.occludes_batched(cmd)
+                };
+                if occludes {
                     self.stats.overlap_flushes += 1;
                     self.flush_mid_stream(target, &layers, &mut cleared)?;
                 } else if self.batches_full() && !is_decoration(cmd) {
@@ -1605,15 +1630,41 @@ impl Renderer {
     /// flush, 1.3 billion comparisons and 10 s for a 20,000-command table
     /// on lavapipe (`scroll_cost_tests`). The answer is the same.
     fn occludes_batched(&mut self, cmd: &DisplayCommand) -> bool {
+        match cull::order_probe(cmd) {
+            Some((from, rect)) => self.probe_occludes_batched(from, rect),
+            None => false,
+        }
+    }
+
+    /// `occludes_batched` for a text decoration, which `order_probe` leaves
+    /// out: it is drawn in the color batch, under images and glyphs, as the
+    /// rect `process_command` draws for it.
+    fn decoration_occludes_batched(&mut self, d: &DisplayCommand) -> bool {
+        let DisplayCommand::TextDecoration {
+            x,
+            y,
+            width,
+            thickness,
+            color,
+            ..
+        } = d
+        else {
+            return false;
+        };
+        if color.a <= 0.0 {
+            return false;
+        }
+        let rect = Rect::new(x.min(x + width), y.min(y + thickness), width.abs(), thickness.abs());
+        self.probe_occludes_batched(glyph_grid::Batch::Image, Some(rect))
+    }
+
+    fn probe_occludes_batched(&mut self, from: glyph_grid::Batch, rect: Option<Rect>) -> bool {
         if self.texture_vertices.is_empty()
             && self.color_glyph_vertices.is_empty()
             && self.image_vertices.is_empty()
         {
             return false;
         }
-        let Some((from, rect)) = cull::order_probe(cmd) else {
-            return false;
-        };
         let started = self.measure.then(std::time::Instant::now);
         use glyph_grid::Batch;
         self.glyph_grid.extend(Batch::Image, &self.image_vertices, |v| v.position);

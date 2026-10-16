@@ -748,3 +748,78 @@ fn a_line_of_millions_of_characters_is_drawn() {
     );
     assert!(count_ink(&px) > 1_000, "the start of the line is drawn");
 }
+
+fn underline(x: f32, y: f32, width: f32, color: Color) -> DisplayCommand {
+    DisplayCommand::TextDecoration {
+        x,
+        y,
+        width,
+        thickness: 3.0,
+        color,
+        style: rustkit_layout::TextDecorationStyleValue::Solid,
+    }
+}
+
+#[test]
+fn an_underline_over_an_earlier_image_and_negative_widths_draw_the_same_at_any_scroll() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    let ink = Color::new(0, 0, 0, 1.0);
+    let list = vec![
+        fill(
+            0.0,
+            0.0,
+            VIEW_W as f32,
+            4000.0,
+            Color::new(255, 255, 255, 1.0),
+        ),
+        image("a.png", 100.0, 100.0, 200.0, 100.0),
+        // Off screen at scroll 0: a fill over text, which flushed the batch
+        // (image included) before the underlined text below.
+        text(LINE, 100.0, 3000.0, ink),
+        fill(100.0, 3000.0, 300.0, 20.0, Color::new(0, 200, 0, 1.0)),
+        // Underlined text over the image: the underline lands on the image.
+        text("underlined", 110.0, 150.0, ink),
+        underline(110.0, 170.0, 150.0, Color::new(255, 0, 255, 1.0)),
+        // Negative widths reach back left of `x` and up from `y`.
+        fill(1100.0, 400.0, -300.0, 20.0, Color::new(0, 160, 0, 1.0)),
+        underline(1100.0, 440.0, -300.0, Color::new(0, 0, 200, 1.0)),
+    ];
+    for scroll in [(0.0, 0.0), (0.0, 2600.0), (40.0, 0.0)] {
+        let (want, _) = reference_draw(&gpu, &list, scroll);
+        let (got, stats) = fast_draw(&gpu, &list, scroll);
+        let differ = want
+            .chunks_exact(4)
+            .zip(got.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differ, 0, "at {scroll:?}: {differ} pixels differ");
+        let px = |x: usize, y: usize| got[(y * VIEW_W as usize + x) * 4..][..4].to_vec();
+        if scroll == (0.0, 0.0) {
+            assert!(stats.culled >= 2, "{stats:?}");
+            // BGRA: the underline over the image.
+            assert_eq!(
+                px(250, 171),
+                vec![255, 0, 255, 255],
+                "underline under the image"
+            );
+        }
+        if scroll == (40.0, 0.0) {
+            // Under the scroll translate the negative-width bars are drawn
+            // (unscrolled, the renderer drops a negative-size quad), 40px
+            // left of where they are laid out.
+            assert_eq!(
+                px(860, 410),
+                vec![0, 160, 0, 255],
+                "negative-width fill missing"
+            );
+            assert_eq!(
+                px(860, 441),
+                vec![200, 0, 0, 255],
+                "negative-width underline missing"
+            );
+        }
+    }
+}

@@ -30,8 +30,10 @@
 //! under something batched before it that it overlaps (`order_probe`), in
 //! every batch: the frame is then the list painted in order, wherever the
 //! other flushes fall. Text decorations are the one exception, drawn under
-//! the text they follow, and no flush ever falls between the two. The GPU-gradient and blur paths flush only at their
-//! own gradient and blur commands, which are never culled.
+//! the text they follow: they are ordered against what was batched before
+//! that text, together with it, and no flush ever falls between the two.
+//! The GPU-gradient and blur paths flush only at their own gradient and
+//! blur commands, which are never culled.
 
 use crate::glyph_grid::Batch;
 use rustkit_layout::{DisplayCommand, Rect};
@@ -114,12 +116,15 @@ pub(crate) fn paint_bounds(cmd: &DisplayCommand) -> Option<Rect> {
         && rect.y.is_finite()
         && rect.width.is_finite()
         && rect.height.is_finite();
+    // A negative width or height spans the other way from `x` or `y`.
+    let x = rect.x.min(rect.x + rect.width);
+    let y = rect.y.min(rect.y + rect.height);
     finite.then(|| {
         Rect::new(
-            rect.x - FRINGE,
-            rect.y - FRINGE,
-            rect.width.max(0.0) + 2.0 * FRINGE,
-            rect.height.max(0.0) + 2.0 * FRINGE,
+            x - FRINGE,
+            y - FRINGE,
+            rect.width.abs() + 2.0 * FRINGE,
+            rect.height.abs() + 2.0 * FRINGE,
         )
     })
 }
@@ -160,7 +165,8 @@ pub(crate) fn order_probe(cmd: &DisplayCommand) -> Option<(Batch, Option<Rect>)>
         }
         // A decoration follows its own text and is drawn under it, with the
         // batch it is in: layout relies on that (an underline below the
-        // descenders), so it is not ordered against the glyphs.
+        // descenders). The fast path orders it against everything batched
+        // before that text, together with the text (`execute_once`).
         C::TextDecoration { .. } => return None,
         C::Text { .. } => (Batch::ColorGlyph, paint_bounds(cmd)),
         C::Image { content_box, .. } => (Batch::Glyph, Some(*content_box)),
@@ -348,5 +354,16 @@ mod tests {
             width: 1.0,
         };
         assert!(matches!(order_probe(&line), Some((Batch::Image, None))));
+    }
+
+    #[test]
+    fn a_negative_width_or_height_spans_back_from_its_origin() {
+        let fill = DisplayCommand::SolidColor(
+            Color::new(0, 0, 0, 1.0),
+            Rect::new(1100.0, 400.0, -300.0, -20.0),
+        );
+        let b = paint_bounds(&fill).unwrap();
+        assert_eq!((b.x, b.y, b.width, b.height), (798.0, 378.0, 304.0, 24.0));
+        assert!(!outside(ID, b, 1024.0, 768.0));
     }
 }
