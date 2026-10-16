@@ -2,9 +2,10 @@
 //! store, and the `Cookie` header each request carries.
 //!
 //! In memory, shared by every client cloned from the one that made it, and
-//! gone with the process. Not here (stated, not half-built): the public
-//! suffix list (a `Domain` attribute without a dot other than the host's own
-//! name is refused instead), `SameSite` enforcement, and cookie prefixes.
+//! gone with the process. A `Domain` attribute naming a public suffix
+//! (`co.uk`, `github.io`) is refused, so one site cannot set cookies for its
+//! siblings. Not here (stated, not half-built): `SameSite` enforcement and
+//! cookie prefixes.
 
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -123,6 +124,11 @@ fn is_secure(url: &Url) -> bool {
         || matches!(url.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback())
 }
 
+/// On the public suffix list (or an unlisted top-level name, by its `*` rule).
+fn is_public_suffix(domain: &str) -> bool {
+    psl::suffix_str(domain) == Some(domain)
+}
+
 fn domain_matches(host: &str, domain: &str) -> bool {
     host == domain
         || (host.ends_with(domain)
@@ -191,8 +197,16 @@ fn parse(url: &Url, header: &str, source: CookieSource) -> Option<Cookie> {
             }
             "domain" if !val.is_empty() => {
                 let domain = val.trim_start_matches('.').to_ascii_lowercase();
-                if !domain_matches(&host, &domain) || (!domain.contains('.') && domain != host) {
+                if !domain_matches(&host, &domain) {
                     return None;
+                }
+                // A public suffix is no cookie's domain: refused, unless it
+                // is the host itself, which keeps it host-only (§5.3 step 5).
+                if is_public_suffix(&domain) {
+                    if domain != host {
+                        return None;
+                    }
+                    continue;
                 }
                 cookie.domain = domain;
                 cookie.host_only = false;
@@ -246,6 +260,23 @@ mod tests {
         jar.set(&url("https://www.example.com/"), "c=3; Domain=com", CookieSource::Http);
         assert_eq!(jar.header_for(&url("https://api.example.com/"), false).as_deref(), Some("a=1"));
         assert_eq!(jar.header_for(&url("https://other.com/"), false), None);
+    }
+
+    #[test]
+    fn a_public_suffix_is_no_cookies_domain() {
+        let jar = CookieJar::new();
+        jar.set(&url("https://a.co.uk/"), "sid=x; Domain=co.uk", CookieSource::Http);
+        jar.set(&url("https://x.github.io/"), "sid=y; Domain=.github.io", CookieSource::Script);
+        for site in ["https://bank.co.uk/", "https://a.co.uk/", "https://y.github.io/", "https://x.github.io/"] {
+            assert_eq!(jar.header_for(&url(site), false), None, "{site}");
+        }
+        // The suffix's own host keeps it, host-only.
+        jar.set(&url("https://github.io/"), "own=1; Domain=github.io", CookieSource::Http);
+        assert_eq!(jar.header_for(&url("https://github.io/"), false).as_deref(), Some("own=1"));
+        assert_eq!(jar.header_for(&url("https://x.github.io/"), false), None);
+        // A registrable domain under a suffix still works.
+        jar.set(&url("https://www.shop.co.uk/"), "ok=1; Domain=shop.co.uk", CookieSource::Http);
+        assert_eq!(jar.header_for(&url("https://api.shop.co.uk/"), false).as_deref(), Some("ok=1"));
     }
 
     #[test]
