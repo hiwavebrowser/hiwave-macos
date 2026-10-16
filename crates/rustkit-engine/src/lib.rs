@@ -908,6 +908,11 @@ struct ViewState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
+    /// External classic scripts the page inserted whose fetches are still
+    /// out, or finished and not yet run, in insertion order. The load parks
+    /// them when its script budget ends; the live loop runs them and fires
+    /// `load` or `error`. Dropping the vec drops the fetches.
+    live_inserted: Vec<script_net::PendingInserted>,
     /// Causes noted since the last relayout (see `relayout_cause`).
     relayout_pending: PendingCauses,
     /// Relayouts since the current document was committed, by cause.
@@ -975,6 +980,7 @@ impl ViewState {
         // The last document's requests are nobody's now.
         self.live_requests.clear();
         self.live_images.clear();
+        self.live_inserted.clear();
         // The last document's sheets, before the first layout of this one.
         // `load_subresources` assigns the new document's when they have
         // been fetched, which is after a document that links none has been
@@ -1000,11 +1006,14 @@ pub struct EngineConfig {
     /// When true, all CSS animations and transitions are ignored during rendering.
     pub disable_animations: bool,
     /// Wall-clock budget for a page's scripts on the load path, fetching
-    /// and running together. Once spent, unfetched and unstarted scripts
-    /// are recorded as over budget (a script already running is bounded by
+    /// and running together. Once spent, a parser script not yet started is
+    /// recorded as over budget (a script already running is bounded by
     /// the loop-iteration limit, and by this only with
-    /// `interrupt_scripts_at_budget`). Scripts run after every
-    /// subresource today, so this comes out of the page's load time.
+    /// `interrupt_scripts_at_budget`). A dynamically inserted script that
+    /// is still fetching keeps going and runs on a later live turn; it is
+    /// not dropped and it does not delay `DOMContentLoaded` or `load`.
+    /// Scripts run after every subresource today, so this comes out of the
+    /// page's load time.
     pub script_budget_ms: u64,
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
@@ -1270,9 +1279,10 @@ pub struct LivePump {
     pub timers_ran: u32,
     /// Script network requests and module fetches that were answered.
     pub requests: usize,
-    /// Script network requests and script-added images that are out and
-    /// have not arrived yet. While there are any, the loop has to keep
-    /// turning: nothing else wakes it when one comes.
+    /// Script network requests, script-added images, and inserted-script
+    /// fetches that are out (or finished and not yet run). While there are
+    /// any, the loop has to keep turning: nothing else wakes it when one
+    /// comes.
     pub in_flight: usize,
     /// The page was laid out again: a callback wrote to the DOM, or an image
     /// it added arrived.
@@ -2030,6 +2040,7 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            live_inserted: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -2117,6 +2128,7 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            live_inserted: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -2203,6 +2215,7 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            live_inserted: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -3502,26 +3515,30 @@ impl Engine {
                     threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
                 }
             }
-            // So are the scripts the turn's callbacks inserted, and they run
-            // inside it, under its budget.
-            if !spent() {
-                let found = script_net::pump_inserted_scripts(
-                    bindings,
-                    &loader,
-                    &referrer,
-                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
-                    &inspector,
-                )
-                .await;
-                out.requests += found.requests;
-                threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
-                if found.poisoned {
-                    threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
-                }
-                for record in found.records {
-                    if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
-                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
-                    }
+            // Scripts the page inserted, including one whose fetch the load
+            // parked when its script budget ended. A turn does not wait a
+            // fetch out and does not drop it: the body is run when it is
+            // ready, and `load` or `error` fires then. While one is out,
+            // `in_flight` keeps the caller's loop turning.
+            let execute = !spent();
+            let found = script_net::drive_inserted_scripts(
+                bindings,
+                loader.clone(),
+                &referrer,
+                &inspector,
+                &mut view.live_inserted,
+                tokio::time::Instant::now() + LIVE_NETWORK_SLICE,
+                execute,
+            )
+            .await;
+            out.requests += found.requests;
+            threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
+            if found.poisoned {
+                threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
+            }
+            for record in found.records {
+                if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
+                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                 }
             }
         }
@@ -3594,6 +3611,7 @@ impl Engine {
         }
         if let Some(view) = self.views.get(&id) {
             out.in_flight += view.live_images.len();
+            out.in_flight += view.live_inserted.len();
         }
         if out.timers_ran > 0 || out.requests > 0 {
             debug!(?id, ?out, "Live turn");
@@ -4291,9 +4309,12 @@ impl Engine {
 
     /// Run the fetched `<script>`s: classic scripts in document order,
     /// then `defer`, then `async`; then `DOMContentLoaded`, `load`, and the
-    /// page's timers up to `timer_horizon_ms` of virtual time. Every
-    /// outcome lands in the view's script log. A script not started within
-    /// `budget` is over budget.
+    /// page's timers up to `timer_horizon_ms` of virtual time. External
+    /// scripts the page inserted are fetched after those events, so they
+    /// do not delay them; one still in flight when `budget` ends stays on
+    /// the view and runs on the live loop, firing `load` or `error`. Every
+    /// outcome lands in the view's script log. A parser script not started
+    /// within `budget` is over budget.
     ///
     /// The document is fully parsed before any script runs, so a script
     /// sees the whole tree rather than the part above it.
@@ -4662,14 +4683,14 @@ impl Engine {
             let document = document_url.clone();
             let modules_fetched = &modules_fetched;
             let inspector = &inspector;
-            let referrer = &referrer;
             async move {
                 match policy {
                     Some(policy) => {
                         let remaining = budget.saturating_sub(started.elapsed());
                         let mut count = modules_fetched.get();
                         // Network requests and dynamic imports alternate:
-                        // one can start the other.
+                        // one can start the other. Inserted scripts are
+                        // fetched after the lifecycle events, not here.
                         let found = nav_cancel::unless_cancelled(
                             watch,
                             script_net::pump_all(
@@ -4682,7 +4703,6 @@ impl Engine {
                                 document.as_ref(),
                                 &mut count,
                                 inspector,
-                                Some(referrer),
                             ),
                         )
                         .await;
@@ -4808,6 +4828,105 @@ impl Engine {
                 });
             }
             inspector_glue::drain_reports(bindings, &inspector, log, source);
+        }
+
+        // Dynamically inserted external scripts. They did not delay the
+        // events above. Fetch them in insertion order until the load's
+        // script budget ends; a fetch still out then stays on the view and
+        // the live loop runs it, firing `load` or `error`. It is not
+        // recorded over budget and it is not dropped. One that finishes
+        // inside the budget runs before this load returns. The network it
+        // asked for is answered next, and a script inserted from that
+        // answer is fetched the same way.
+        if poisoned.get() || nav_cancel::cancelled(watch) {
+            return;
+        }
+        let mut pending = Vec::new();
+        for _ in 0..4 {
+            if nav_cancel::cancelled(watch) {
+                pending.clear();
+                return;
+            }
+            let remaining = budget.saturating_sub(started.elapsed());
+            let driven = nav_cancel::unless_cancelled(
+                watch,
+                script_net::drive_inserted_scripts(
+                    bindings,
+                    loader.clone(),
+                    &referrer,
+                    &inspector,
+                    &mut pending,
+                    tokio::time::Instant::now() + remaining,
+                    true,
+                ),
+            )
+            .await;
+            let Some(found) = driven else {
+                pending.clear();
+                return;
+            };
+            for record in found.records {
+                inspector_glue::log_script(log, &inspector, record);
+            }
+            for message in found.threw {
+                log.push(ScriptRecord {
+                    source: "network".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                });
+            }
+            if found.poisoned {
+                pending.clear();
+                log.push(ScriptRecord {
+                    source: "network".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                });
+                return;
+            }
+            // The budget is spent: the fetches still out are parked, not
+            // failed. Their own network requests wait for the live loop.
+            if budget.saturating_sub(started.elapsed()).is_zero() {
+                break;
+            }
+            let answered = pump(None).await;
+            if nav_cancel::cancelled(watch) {
+                pending.clear();
+                return;
+            }
+            if let Some(found) = answered {
+                for record in found.records {
+                    inspector_glue::log_script(log, &inspector, record);
+                }
+                for message in found.threw {
+                    log.push(ScriptRecord {
+                        source: "network".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(message),
+                    });
+                }
+                if found.poisoned {
+                    pending.clear();
+                    log.push(ScriptRecord {
+                        source: "network".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                    });
+                    return;
+                }
+                if found.requests == 0 {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.live_inserted.append(&mut pending);
         }
     }
 
