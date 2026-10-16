@@ -106,6 +106,15 @@ fn is_decoration(cmd: &DisplayCommand) -> bool {
     matches!(cmd, DisplayCommand::TextDecoration { .. })
 }
 
+/// True when the decoration at `commands[i]` belongs to a `Text`: the
+/// first command before it that is not a decoration is text.
+fn follows_text(commands: &[DisplayCommand], i: usize) -> bool {
+    matches!(
+        commands[..i].iter().rev().find(|c| !is_decoration(c)),
+        Some(DisplayCommand::Text { .. })
+    )
+}
+
 // ==================== Vertex Types ====================
 
 /// Vertex for solid color rendering.
@@ -466,6 +475,9 @@ pub struct Renderer {
     /// device's `max_buffer_size`, at most `MAX_BUFFER_SIZE`. A larger
     /// batch is drawn in pieces (`draw_split`).
     max_buffer_bytes: u64,
+    /// A batch is flushed between commands once one of its buffers reaches
+    /// this (`MAX_BATCH_BYTES`; tests lower it).
+    max_batch_bytes: u64,
     /// Tests: draw without culling and answer the order check by a linear
     /// scan, the reference the fast path is compared against.
     #[cfg(test)]
@@ -750,6 +762,7 @@ impl Renderer {
             measure: false,
             glyph_grid: Default::default(),
             max_buffer_bytes,
+            max_batch_bytes: MAX_BATCH_BYTES,
             #[cfg(test)]
             reference: false,
             opacity_scopes: OpacityScopes::default(),
@@ -1375,6 +1388,13 @@ impl Renderer {
     /// True when `cmd` paints nothing inside the viewport where the current
     /// transform puts it, so it can be skipped (see `cull`).
     fn culled(&mut self, cmd: &DisplayCommand) -> bool {
+        let out = self.off_screen(cmd);
+        self.stats.culled += out as u64;
+        out
+    }
+
+    /// `culled` without the count.
+    fn off_screen(&self, cmd: &DisplayCommand) -> bool {
         #[cfg(test)]
         if self.reference {
             return false;
@@ -1383,9 +1403,37 @@ impl Renderer {
             return false;
         };
         let (w, h) = (self.viewport_size.0 as f32, self.viewport_size.1 as f32);
-        let out = cull::outside(self.current_transform(), bounds, w, h);
-        self.stats.culled += out as u64;
-        out
+        cull::outside(self.current_transform(), bounds, w, h)
+    }
+
+    /// Whether `commands[i]` must wait for a flush to keep paint order
+    /// (`occludes_batched`), given whether it is culled.
+    ///
+    /// A text decoration is drawn with the batch of the text it follows,
+    /// under that text's glyphs: layout relies on it (an underline below
+    /// the descenders), and no flush ever falls between the two. So the
+    /// decorations after a `Text` are ordered against what was batched
+    /// before it, when the text comes up and whether or not the text itself
+    /// is culled, and not again at the decoration. A decoration that does
+    /// not follow text is ordered like any fill. Either way the answer
+    /// depends only on the list and on what is batched, never on which
+    /// other commands culling dropped.
+    fn order_flush_needed(&mut self, commands: &[DisplayCommand], i: usize, culled: bool) -> bool {
+        let cmd = &commands[i];
+        if is_decoration(cmd) && follows_text(commands, i) {
+            return false;
+        }
+        if !culled && self.occludes_batched(cmd) {
+            return true;
+        }
+        if matches!(cmd, DisplayCommand::Text { .. }) {
+            for d in commands[i + 1..].iter().take_while(|c| is_decoration(c)) {
+                if !self.off_screen(d) && self.occludes_batched(d) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn submit(&self, encoder: wgpu::CommandEncoder) {
@@ -1543,7 +1591,7 @@ impl Renderer {
                 <= MAX_OPACITY_LAYERS;
             let mut cleared = false;
             let mut layers: Vec<(wgpu::TextureView, f32)> = Vec::new();
-            for cmd in commands {
+            for (i, cmd) in commands.iter().enumerate() {
                 if layered {
                     match cmd {
                         DisplayCommand::PushOpacity(alpha) => {
@@ -1557,16 +1605,16 @@ impl Renderer {
                         _ => {}
                     }
                 }
-                if self.culled(cmd) {
-                    continue;
-                }
-                if self.occludes_batched(cmd) {
+                let culled = self.culled(cmd);
+                if self.order_flush_needed(commands, i, culled) {
                     self.stats.overlap_flushes += 1;
                     self.flush_mid_stream(target, &layers, &mut cleared)?;
-                } else if self.batches_full() && !is_decoration(cmd) {
+                } else if !culled && self.batches_full() && !is_decoration(cmd) {
                     self.flush_mid_stream(target, &layers, &mut cleared)?;
                 }
-                self.process_command(cmd);
+                if !culled {
+                    self.process_command(cmd);
+                }
             }
             self.end_scroll_translate();
             // A list that ends inside a scope still shows what it drew.
@@ -1642,7 +1690,7 @@ impl Renderer {
         hit
     }
 
-    /// True when a batch has grown to `MAX_BATCH_BYTES`: the execute loops
+    /// True when a batch has grown to `max_batch_bytes`: the execute loops
     /// flush it before the next command rather than build a buffer past
     /// wgpu's limit (an 80,000-command text page used to panic in
     /// `flush_to`). Never before a text decoration, which is drawn with
@@ -1659,7 +1707,7 @@ impl Renderer {
             self.color_glyph_indices.len() * size_of::<u32>(),
             self.image_indices.len() * size_of::<u32>(),
         ];
-        bytes.iter().any(|&b| b as u64 >= MAX_BATCH_BYTES)
+        bytes.iter().any(|&b| b as u64 >= self.max_batch_bytes)
     }
 
     /// Execute commands with GPU blur support for backdrop filters.
@@ -1674,7 +1722,7 @@ impl Renderer {
 
         let mut is_first_flush = true;
 
-        for cmd in commands {
+        for (i, cmd) in commands.iter().enumerate() {
             // Check if this is a blur backdrop filter
             if let DisplayCommand::BackdropFilter {
                 rect,
@@ -1694,12 +1742,20 @@ impl Renderer {
                 }
             }
 
-            // Process command normally (including non-blur backdrop filters)
-            if !self.culled(cmd) {
-                if self.batches_full() && !is_decoration(cmd) {
-                    self.flush_batches_to(&intermediate_view, is_first_flush)?;
-                    is_first_flush = false;
-                }
+            // Process command normally (including non-blur backdrop filters).
+            // The order check as in the fast path: a flush for the size cap
+            // falls wherever culling leaves the batch full, so paint order
+            // must not depend on where flushes fall.
+            let culled = self.culled(cmd);
+            if self.order_flush_needed(commands, i, culled) {
+                self.stats.overlap_flushes += 1;
+                self.flush_batches_to(&intermediate_view, is_first_flush)?;
+                is_first_flush = false;
+            } else if !culled && self.batches_full() && !is_decoration(cmd) {
+                self.flush_batches_to(&intermediate_view, is_first_flush)?;
+                is_first_flush = false;
+            }
+            if !culled {
                 self.process_command(cmd);
             }
         }
@@ -1730,7 +1786,7 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         let mut is_first_flush = true;
 
-        for cmd in commands {
+        for (i, cmd) in commands.iter().enumerate() {
             // Check if this is a GPU gradient command
             let is_gpu_gradient = matches!(cmd,
                 DisplayCommand::LinearGradient { .. } |
@@ -1746,13 +1802,21 @@ impl Renderer {
 
                 // Render the gradient directly (inline, not queued)
                 self.render_gpu_gradient_inline(cmd, target);
-            } else if !self.culled(cmd) {
-                // Process command normally (batched)
-                if self.batches_full() && !is_decoration(cmd) {
+            } else {
+                // Process command normally (batched), ordered as in the
+                // blur path.
+                let culled = self.culled(cmd);
+                if self.order_flush_needed(commands, i, culled) {
+                    self.stats.overlap_flushes += 1;
+                    self.flush_batches_for_gradient(target, is_first_flush)?;
+                    is_first_flush = false;
+                } else if !culled && self.batches_full() && !is_decoration(cmd) {
                     self.flush_batches_for_gradient(target, is_first_flush)?;
                     is_first_flush = false;
                 }
-                self.process_command(cmd);
+                if !culled {
+                    self.process_command(cmd);
+                }
             }
         }
         self.end_scroll_translate();

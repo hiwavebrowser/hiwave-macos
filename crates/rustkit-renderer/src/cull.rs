@@ -30,8 +30,15 @@
 //! under something batched before it that it overlaps (`order_probe`), in
 //! every batch: the frame is then the list painted in order, wherever the
 //! other flushes fall. Text decorations are the one exception, drawn under
-//! the text they follow, and no flush ever falls between the two. The GPU-gradient and blur paths flush only at their
-//! own gradient and blur commands, which are never culled.
+//! the text they follow, and no flush ever falls between the two; they are
+//! ordered against everything batched before that text, at the text, so
+//! culling the text does not drop the check. The GPU-gradient and blur
+//! paths run the same check, since their size-cap flushes move with
+//! culling too.
+//!
+//! The rule both halves keep: a bound holds every pixel the drawing code
+//! can touch (a negative size is drawn normalised, a border side wider
+//! than its box reaches past it), and culling never changes paint order.
 
 use crate::glyph_grid::Batch;
 use rustkit_layout::{DisplayCommand, Rect};
@@ -43,11 +50,27 @@ const FRINGE: f32 = 2.0;
 /// paints; `None` for a command that is not bounded this way (it is
 /// never culled).
 pub(crate) fn paint_bounds(cmd: &DisplayCommand) -> Option<Rect> {
+    // How far past its rect a command paints, besides the fringe.
+    let mut reach = 0.0f32;
     let rect = match cmd {
-        DisplayCommand::SolidColor(_, rect)
-        | DisplayCommand::RoundedRect { rect, .. }
-        | DisplayCommand::Border { rect, .. }
-        | DisplayCommand::RoundedBorder { rect, .. } => *rect,
+        DisplayCommand::SolidColor(_, rect) | DisplayCommand::RoundedRect { rect, .. } => *rect,
+        // A side wider than the box is drawn past the box's opposite edge
+        // (`draw_border`, `draw_rounded_border`).
+        DisplayCommand::Border {
+            rect,
+            top,
+            right,
+            bottom,
+            left,
+            ..
+        } => {
+            reach = top.max(*right).max(*bottom).max(*left).max(0.0);
+            *rect
+        }
+        DisplayCommand::RoundedBorder { rect, widths, .. } => {
+            reach = widths.iter().fold(0.0f32, |m, w| m.max(*w));
+            *rect
+        }
         DisplayCommand::Text {
             x,
             y,
@@ -113,13 +136,18 @@ pub(crate) fn paint_bounds(cmd: &DisplayCommand) -> Option<Rect> {
     let finite = rect.x.is_finite()
         && rect.y.is_finite()
         && rect.width.is_finite()
-        && rect.height.is_finite();
+        && rect.height.is_finite()
+        && reach.is_finite();
+    // A negative size is drawn too: once a transform is set (any scroll),
+    // `clip_quad_under` maps the corners to screen space and the quad covers
+    // them whichever way round they are. So the bound is the normalised rect.
+    let pad = reach + FRINGE;
     finite.then(|| {
         Rect::new(
-            rect.x - FRINGE,
-            rect.y - FRINGE,
-            rect.width.max(0.0) + 2.0 * FRINGE,
-            rect.height.max(0.0) + 2.0 * FRINGE,
+            rect.x.min(rect.x + rect.width) - pad,
+            rect.y.min(rect.y + rect.height) - pad,
+            rect.width.abs() + 2.0 * pad,
+            rect.height.abs() + 2.0 * pad,
         )
     })
 }
@@ -158,10 +186,9 @@ pub(crate) fn order_probe(cmd: &DisplayCommand) -> Option<(Batch, Option<Rect>)>
             }
             (Batch::Image, Some(*rect))
         }
-        // A decoration follows its own text and is drawn under it, with the
-        // batch it is in: layout relies on that (an underline below the
-        // descenders), so it is not ordered against the glyphs.
-        C::TextDecoration { .. } => return None,
+        // A decoration that follows its text is probed when the text comes
+        // up, not here (`Renderer::order_flush_needed`).
+        C::TextDecoration { .. } => (Batch::Image, paint_bounds(cmd)),
         C::Text { .. } => (Batch::ColorGlyph, paint_bounds(cmd)),
         C::Image { content_box, .. } => (Batch::Glyph, Some(*content_box)),
         C::BackgroundImage { rect, .. } => (Batch::Glyph, Some(grown(rect, FRINGE))),
@@ -322,6 +349,31 @@ mod tests {
         // The same text walking right stays outside.
         let b = paint_bounds(&spaced_text(1100.0, vec![30.0; 20])).unwrap();
         assert!(outside(ID, b, 800.0, 600.0));
+    }
+
+    #[test]
+    fn a_negative_size_is_bounded_where_it_is_drawn_and_a_wide_border_past_its_box() {
+        let red = Color::new(255, 0, 0, 1.0);
+        // Drawn over x 800..1300 once a transform is set.
+        let b = paint_bounds(&DisplayCommand::SolidColor(
+            red,
+            Rect::new(1300.0, 500.0, -500.0, 40.0),
+        ))
+        .unwrap();
+        assert!(b.x <= 800.0 && b.x + b.width >= 1300.0, "{b:?}");
+        assert!(!outside(ID, b, 1024.0, 768.0));
+        // The top side reaches 380px below a 20px box above the viewport.
+        let border = DisplayCommand::Border {
+            color: red,
+            rect: Rect::new(100.0, -200.0, 300.0, 20.0),
+            top: 400.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        };
+        let b = paint_bounds(&border).unwrap();
+        assert!(b.y + b.height >= 200.0, "{b:?}");
+        assert!(!outside(ID, b, 1024.0, 768.0));
     }
 
     #[test]

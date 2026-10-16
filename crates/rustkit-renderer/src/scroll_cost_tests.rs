@@ -748,3 +748,174 @@ fn a_line_of_millions_of_characters_is_drawn() {
     );
     assert!(count_ink(&px) > 1_000, "the start of the line is drawn");
 }
+
+fn deco(x: f32, y: f32, width: f32, thickness: f32, color: Color) -> DisplayCommand {
+    DisplayCommand::TextDecoration {
+        x,
+        y,
+        width,
+        thickness,
+        color,
+        style: rustkit_layout::TextDecorationStyleValue::Solid,
+    }
+}
+
+fn spaced(s: &str, x: f32, y: f32, advance: f32, color: Color) -> DisplayCommand {
+    let mut t = text(s, x, y, color);
+    if let DisplayCommand::Text {
+        advances: Some(a), ..
+    } = &mut t
+    {
+        a.iter_mut().for_each(|a| *a = advance);
+    }
+    t
+}
+
+/// Lists whose culled frame used to differ from the unculled one: a
+/// decoration's order against an earlier image hung on an unrelated
+/// flush below the fold (R1 HOLD @ 9891715b, A); negative widths and a
+/// border side wider than its box were culled while drawn (B and the
+/// border note). Each is repeated down the page, so every scroll offset
+/// culls a different part of it.
+fn cull_hazards() -> Vec<DisplayCommand> {
+    let ink = Color::new(0, 0, 0, 1.0);
+    let red = Color::new(255, 0, 0, 1.0);
+    let blue = Color::new(0, 0, 255, 1.0);
+    let mut list = vec![fill(
+        0.0,
+        0.0,
+        VIEW_W as f32,
+        6000.0,
+        Color::new(255, 255, 255, 1.0),
+    )];
+    let mut y = 0.0;
+    while y < 5400.0 {
+        list.extend([
+            // A: an underlined link over an image, with a fill over text
+            // further down in between: that fill's flush used to be what
+            // put the underline over the image.
+            image("a.png", 100.0, y + 100.0, 300.0, 600.0),
+            text(LINE, 100.0, y + 900.0, ink),
+            fill(100.0, y + 900.0, 300.0, 20.0, Color::new(0, 200, 0, 1.0)),
+            text("Read more", 120.0, y + 420.0, ink),
+            deco(120.0, y + 436.0, 63.0, 3.0, red),
+            deco(120.0, y + 426.0, 63.0, 1.0, blue),
+            // A decoration over an earlier text run, not its own.
+            text("MMMMMMMMMMMMMMMMMMMMMMMM", 450.0, y + 200.0, ink),
+            text("x", 450.0, y + 230.0, ink),
+            deco(440.0, y + 205.0, 200.0, 4.0, red),
+            // An orphan decoration (no text before it) over an image.
+            image("b.png", 650.0, y + 300.0, 100.0, 100.0),
+            deco(640.0, y + 340.0, 140.0, 6.0, blue),
+            // B: text right of the viewport walking back on screen, its
+            // underline drawn leftwards; a fill with a negative width.
+            spaced("ABCDEFGHIJKLMNOPQRST", 1100.0, y + 160.0, -15.0, ink),
+            deco(1100.0, y + 174.0, -300.0, 2.0, red),
+            fill(1300.0, y + 500.0, -500.0, 40.0, Color::new(0, 120, 0, 1.0)),
+            fill(500.0, y + 640.0, 120.0, -60.0, Color::new(120, 0, 120, 1.0)),
+            // A border whose top side is wider than its box and reaches
+            // 380px below it; a rounded one the same.
+            DisplayCommand::Border {
+                color: Color::new(200, 100, 0, 1.0),
+                rect: Rect::new(100.0, y - 200.0, 300.0, 20.0),
+                top: 400.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+            },
+            DisplayCommand::RoundedBorder {
+                rect: Rect::new(700.0, y - 300.0, 200.0, 30.0),
+                widths: [420.0, 2.0, 2.0, 2.0],
+                colors: [Color::new(0, 150, 150, 1.0); 4],
+                radius: rustkit_layout::BorderRadius::default(),
+            },
+            // Glyphs and an image after all of it.
+            text("on top", 300.0, y + 430.0, Color::new(255, 255, 255, 1.0)),
+            image("b.png", 140.0, y + 560.0, 40.0, 40.0),
+        ]);
+        y += 1200.0;
+    }
+    list
+}
+
+fn draw_with(
+    gpu: &Gpu,
+    list: &[DisplayCommand],
+    scroll: (f32, f32),
+    reference: bool,
+    batch_bytes: u64,
+) -> (Vec<u8>, FrameStats) {
+    let mut r = renderer(gpu);
+    let mut px = |rgb: [u8; 3]| [rgb[2], rgb[1], rgb[0], 255].repeat(16 * 16);
+    r.upload_image("a.png", 16, 16, &px([200, 120, 30])).unwrap();
+    r.upload_image("b.png", 16, 16, &px([30, 160, 220])).unwrap();
+    r.reference = reference;
+    r.max_batch_bytes = batch_bytes;
+    let frame = draw(gpu, &mut r, list, scroll);
+    (frame, r.last_frame_stats())
+}
+
+#[test]
+fn culling_never_changes_a_pixel_of_decorations_negative_sizes_or_wide_borders() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    let hazards = cull_hazards();
+    // The same list through the blur path, whose only flushes besides the
+    // blur are the size cap's.
+    let mut blurred = hazards.clone();
+    blurred.push(DisplayCommand::BackdropFilter {
+        rect: Rect::new(900.0, 700.0, 100.0, 60.0),
+        border_radius: rustkit_layout::BorderRadius::default(),
+        filter: rustkit_css::BackdropFilter::Blur(4.0),
+    });
+    let cases: [(&str, &[DisplayCommand], u64); 4] = [
+        ("fast", &hazards, MAX_BATCH_BYTES),
+        // A cap of 2 KiB flushes every few commands, at places that move
+        // with culling.
+        ("fast, small cap", &hazards, 2 * 1024),
+        ("blur", &blurred, MAX_BATCH_BYTES),
+        ("blur, small cap", &blurred, 2 * 1024),
+    ];
+    for (name, list, cap) in cases {
+        for scroll in [
+            (0.0, 0.0),
+            (0.0, 150.0),
+            (0.0, 300.0),
+            (0.0, 1200.0),
+            (7.0, 2111.5),
+            (0.0, -40.0),
+            (0.0, 4500.0),
+        ] {
+            let (want, _) = draw_with(&gpu, list, scroll, true, cap);
+            let (got, stats) = draw_with(&gpu, list, scroll, false, cap);
+            let differ = want
+                .chunks_exact(4)
+                .zip(got.chunks_exact(4))
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(differ, 0, "{name} at {scroll:?}: {differ} pixels differ");
+            assert!(stats.culled > 0, "{name} at {scroll:?}: nothing culled");
+        }
+    }
+    // What the reference draws is what CSS order says, at every scroll: the
+    // underline over the image under it (BGRA red), the decoration over the
+    // earlier run, the leftward underline and fill, and the wide border.
+    let px = |f: &[u8], x: usize, y: usize| f[(y * VIEW_W as usize + x) * 4..][..4].to_vec();
+    let red = vec![0, 0, 255, 255];
+    for scroll_y in [0.0f32, 150.0] {
+        let (got, _) = draw_with(&gpu, &hazards, (0.0, scroll_y), false, MAX_BATCH_BYTES);
+        let at = |x: usize, y: f32| px(&got, x, (y - scroll_y) as usize);
+        assert_eq!(at(170, 437.0), red, "underline at scroll {scroll_y}");
+        assert_eq!(at(600, 206.0), red, "decoration over earlier text");
+        if scroll_y > 0.0 {
+            // At scroll 0 no transform is set and the negative sizes draw
+            // nothing (`push_color_quad`), on both paths.
+            assert_eq!(at(900, 175.0), red, "leftward underline");
+            assert_eq!(at(900, 520.0), vec![0, 120, 0, 255], "leftward fill");
+        }
+    }
+    let (got, _) = draw_with(&gpu, &hazards, (0.0, 0.0), false, MAX_BATCH_BYTES);
+    assert_eq!(px(&got, 200, 150), vec![0, 100, 200, 255], "wide top border");
+}
