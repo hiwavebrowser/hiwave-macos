@@ -17,6 +17,8 @@ use hashbrown::HashMap;
 const CELL: f32 = 64.0;
 /// A box spanning more cells than this on an axis is not filed in cells.
 const MAX_SPAN: i64 = 32;
+/// Cells kept, emptied, across a flush: a 4K screen is about 2,000.
+const MAX_KEPT_CELLS: usize = 4096;
 
 type Box2 = [f32; 4];
 
@@ -53,10 +55,18 @@ fn cell_range(b: Box2) -> Option<(i32, i32, i32, i32)> {
 
 impl GlyphGrid {
     /// Forget everything: the batches were flushed.
+    ///
+    /// The cells' vectors are emptied in place so the next batch reuses
+    /// them, unless a transform has spread them over more cells than a
+    /// screen holds.
     pub(crate) fn clear(&mut self) {
         self.filed = [0, 0];
         self.boxes.clear();
-        self.cells.clear();
+        if self.cells.len() > MAX_KEPT_CELLS {
+            self.cells.clear();
+        } else {
+            self.cells.values_mut().for_each(Vec::clear);
+        }
         self.wide.clear();
     }
 
@@ -228,6 +238,11 @@ mod tests {
         let mut c = 0;
         assert!(g.overlaps([105.0, 5.0, 106.0, 6.0], &mut c));
         g.clear();
+        assert!(!g.overlaps([105.0, 5.0, 106.0, 6.0], &mut c));
+        // The emptied cells are reused, and hold only the new batch.
+        assert!(!g.cells.is_empty());
+        g.extend(0, &q1, |p| *p);
+        assert!(g.overlaps([5.0, 5.0, 6.0, 6.0], &mut c));
         assert!(!g.overlaps([105.0, 5.0, 106.0, 6.0], &mut c));
     }
 }

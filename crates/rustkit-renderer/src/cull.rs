@@ -17,6 +17,11 @@
 //! cull tests the command where the current transform puts it. A clip only
 //! ever removes pixels, so a command outside the viewport stays outside
 //! it whatever clip is open.
+//! Nothing samples the paint of a culled command either: the only filter
+//! command is `BackdropFilter`, which reads the target, and the target
+//! holds only the viewport. A group filter (`filter: blur()` or
+//! `drop-shadow()` over a subtree) would have to inflate the cull by its
+//! reach, or turn it off inside the group.
 //!
 //! The fast path's mid-list flushes (a fill over batched glyphs) are the
 //! one thing culling can change: a flush whose overlap was off-screen no

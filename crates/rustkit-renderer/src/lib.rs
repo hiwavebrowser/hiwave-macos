@@ -1508,9 +1508,14 @@ impl Renderer {
         // over its own since: "static" over a page opened after others.
         // Build the frame again: every glyph it needs is now placed after
         // the reset, as long as one frame's glyphs fit in the atlas.
+        // The stats describe the frame that is shown: the second pass.
+        self.stats = FrameStats {
+            commands: commands.len() as u64,
+            ..FrameStats::default()
+        };
         let resets = self.glyph_cache.resets();
         let drawn = self.execute_once(commands, target);
-        self.stats.submits += self.submits.take();
+        self.stats.submits = self.submits.take();
         drawn?;
         if self.glyph_cache.resets() != resets {
             tracing::warn!(
