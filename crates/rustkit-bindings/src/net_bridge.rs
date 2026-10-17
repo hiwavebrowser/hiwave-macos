@@ -121,8 +121,33 @@ impl DomBindings {
         Ok(matches!(delivered, JsValue::Boolean(true)))
     }
 
+    /// Set `id`'s callback aside so a later [`Self::fail_pending_net_requests`]
+    /// does not settle it. The engine delivers the answer on a turn that
+    /// still has JavaScript budget. `false` when nothing is waiting for `id`.
+    pub fn shelve_net_request(&self, id: u64) -> bool {
+        match self.runtime.borrow_mut().evaluate_bookkeeping(&format!(
+            "window.__rustkit_net ? window.__rustkit_net.shelve({id}) : false"
+        )) {
+            Ok(JsValue::Boolean(kept)) => kept,
+            _ => false,
+        }
+    }
+
+    /// Put every shelved callback back. Returns how many.
+    pub fn unshelve_net_requests(&self) -> usize {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_bookkeeping("window.__rustkit_net ? window.__rustkit_net.unshelve() : 0")
+        {
+            Ok(JsValue::Number(n)) => n as usize,
+            _ => 0,
+        }
+    }
+
     /// Complete every request still waiting with an error (the engine ran out
-    /// of rounds or budget). Returns how many were waiting.
+    /// of rounds or of the network cap). Returns how many were waiting.
+    /// A request shelved with [`Self::shelve_net_request`] is not one of them.
     pub fn fail_pending_net_requests(&self, reason: &str) -> usize {
         let quoted = serde_json::to_string(reason).unwrap_or_default();
         match self.runtime.borrow_mut().evaluate_script(&format!(

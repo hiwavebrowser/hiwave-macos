@@ -699,6 +699,15 @@ impl JsRuntime {
         }
         self.deadline.hit.set(true);
         self.deadline.graced.set(true);
+        // The grace turn is a new id, so the interrupt word still names the
+        // stopped turn and the opcode check stays quiet. The host deadline
+        // is a separate clock and is already in the past: a reaction's first
+        // host call then throws uncatchable `LoopIteration`, which the await
+        // path reports as "async function was interrupted". Move the deadline
+        // with the grace turn.
+        self.deadline
+            .at
+            .set(Some(std::time::Instant::now() + control::STOP_GRACE));
         let control = self.deadline.control.borrow().clone();
         let stamp = self.deadline.stamp.borrow().clone();
         if let (Some(control), Some(stamp)) = (control, stamp) {
