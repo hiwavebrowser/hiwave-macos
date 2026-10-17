@@ -344,6 +344,26 @@ pub fn place_raw_view(view: isize, bounds: Bounds) {
     }
 }
 
+/// The host view's frame size in pixels, after [`place_raw_view`] or
+/// `set_bounds`. `None` when there is no view. This is the frame on screen,
+/// which can move while the engine's stored bounds have not.
+#[cfg(target_os = "macos")]
+pub fn raw_view_content_size(view: isize) -> Option<(u32, u32)> {
+    if view == 0 {
+        return None;
+    }
+    let view = view as id;
+    unsafe {
+        let frame: cocoa::foundation::NSRect = msg_send![view, frame];
+        let width = frame.size.width.round();
+        let height = frame.size.height.round();
+        if width < 1.0 || height < 1.0 {
+            return None;
+        }
+        Some((width as u32, height as u32))
+    }
+}
+
 /// Clip an existing `NSView`'s layer. No-op when the view has no layer yet.
 #[cfg(target_os = "macos")]
 pub fn clip_raw_view(view: isize) {

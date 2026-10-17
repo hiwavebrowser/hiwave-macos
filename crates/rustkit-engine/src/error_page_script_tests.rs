@@ -1650,3 +1650,124 @@ document.head.appendChild(s);
         r#"String("true")"#
     );
 }
+
+/// h2's page: an inline script and a `fetch`, no inserted script. The
+/// yielding load finishes inside the call. `window` `load` is not parked.
+#[test]
+fn a_fetch_without_an_inserted_script_does_not_yield() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/beacon" => (204, "text/plain", vec![], String::new()),
+            _ => (
+                200,
+                "text/html",
+                vec![],
+                r#"<pre id="log"></pre><script>
+function L(m) { document.getElementById('log').textContent += m + '\n'; }
+window.addEventListener('load', function () { L('window load'); });
+fetch('/beacon').catch(function () {});
+L('script');
+</script>"#
+                    .into(),
+            ),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = engine();
+    let yielded = rt
+        .block_on(engine.load_url_yielding(view, server.url("/")))
+        .expect("load");
+    assert_eq!(yielded, LoadYield::Complete);
+    assert!(engine.views[&view].load_tail.is_none());
+    assert!(!engine.views[&view].navigation.is_loading());
+    assert_eq!(
+        text(&mut engine, view, "document.readyState"),
+        r#"String("complete")"#
+    );
+    assert_eq!(event_trace(&page_log(&mut engine, view)), ["script", "window load"]);
+}
+
+/// On the yielded path, `window` `load` fires once, the lifecycle log shows
+/// that step and the timer horizon, and `readyState` is `complete`.
+#[test]
+fn a_yielding_load_logs_load_and_timers_once() {
+    let server = serve(chrome_order_site);
+    let (mut engine, view, rt) = engine();
+    let captured = LifecycleLog::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let yielded = rt
+            .block_on(engine.load_url_yielding(view, server.url("/")))
+            .expect("yield");
+        assert_eq!(yielded, LoadYield::Yielded);
+        assert_eq!(
+            text(&mut engine, view, "document.readyState"),
+            r#"String("interactive")"#
+        );
+        finish_yielded_load(&mut engine, view, &rt);
+    });
+    assert_eq!(
+        text(&mut engine, view, "document.readyState"),
+        r#"String("complete")"#
+    );
+    let log = page_log(&mut engine, view);
+    let loads = event_trace(&log)
+        .into_iter()
+        .filter(|line| *line == "window load readyState=complete")
+        .count();
+    assert_eq!(loads, 1, "window load fired once: {log}");
+    let lines = captured.lines();
+    let steps = lines
+        .iter()
+        .filter(|line| line.contains("Running page lifecycle step"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        steps.iter().filter(|line| line.contains("event:load")).count(),
+        1,
+        "lifecycle log: {steps:?}"
+    );
+    assert_eq!(
+        steps.iter().filter(|line| line.contains("timers")).count(),
+        1,
+        "lifecycle log: {steps:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Page lifecycle step done") && line.contains("event:load")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Page lifecycle step done") && line.contains("timers")),
+        "{lines:?}"
+    );
+}
+
+#[derive(Clone, Default)]
+struct LifecycleLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl LifecycleLog {
+    fn lines(&self) -> Vec<String> {
+        let bytes = self.0.lock().unwrap().clone();
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+impl std::io::Write for LifecycleLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

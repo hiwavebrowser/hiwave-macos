@@ -748,21 +748,14 @@ fn main() {
     let shelf_height = Arc::new(Mutex::new(SHELF_HEIGHT_DEFAULT as f64));
     let inspector_height = Arc::new(Mutex::new(INSPECTOR_HEIGHT_DEFAULT as f64));
     // Sidebar width: 0.0 = closed, >0 = open with that width.
-    // The content view is created before chrome JS runs, and a content load
-    // borrows the engine so a later sidebar event cannot resize it until the
-    // load returns. Start from the saved open state so the first frame is
-    // already inset.
-    let initial_sidebar = state
-        .lock()
-        .map(|app| {
-            if app.user_settings.sidebar_default_open {
-                (app.user_settings.sidebar_width as f64).clamp(48.0, 400.0)
-            } else {
-                0.0
-            }
-        })
-        .unwrap_or(0.0);
-    let sidebar_width_state = Arc::new(Mutex::new(initial_sidebar));
+    // The content view starts at the full window. A page with no inserted
+    // scripts reads that width, then hears one `resize` when chrome opens
+    // the sidebar. Creating it already inset made that first read the
+    // narrowed width, and chrome's initial width of 0 then dispatched a
+    // stale full-window resize. While a load has the engine borrowed, the
+    // NSView can still move (`place_host_frame`); the resize event follows
+    // the viewport the view has when the load returns.
+    let sidebar_width_state = Arc::new(Mutex::new(0.0_f64));
     let right_sidebar_open = Arc::new(Mutex::new(false));
 
     // Calculate initial bounds

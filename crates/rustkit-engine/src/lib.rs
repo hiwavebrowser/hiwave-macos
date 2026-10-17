@@ -893,6 +893,10 @@ struct ViewState {
     /// Bounds the view was given since its last layout (`set_view_bounds`):
     /// the next live turn lays out once, at these, and fires `resize`.
     pending_resize: Option<Bounds>,
+    /// The viewport last published to the page (`window.innerWidth` /
+    /// `innerHeight`). A later resize at this size is not an event, and a
+    /// queued size the view has already left is not dispatched.
+    announced_viewport: Option<(u32, u32)>,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
     script_log: Vec<ScriptRecord>,
     /// The document response's `Referrer-Policy` header, if it had a valid one.
@@ -2302,6 +2306,25 @@ pub struct StyleRecord {
     pub computed: Vec<(String, String)>,
 }
 
+/// The viewport a `resize` event is dispatched against.
+///
+/// `pending` is the size queued by [`Engine::set_view_bounds`]. `stored` is
+/// the viewport the engine last applied. `frame` is the host view's frame
+/// when that frame already moved (a sidebar inset while the engine was
+/// borrowed). The event follows the frame, otherwise the stored viewport.
+/// A queued size the view has left is not what the page hears.
+fn resize_dispatch_bounds(_pending: Bounds, stored: Bounds, frame: Option<(u32, u32)>) -> Bounds {
+    match frame {
+        Some((width, height)) if width > 0 && height > 0 => Bounds {
+            x: stored.x,
+            y: stored.y,
+            width,
+            height,
+        },
+        _ => stored,
+    }
+}
+
 impl Engine {
     /// Create a new browser engine.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
@@ -2444,6 +2467,7 @@ impl Engine {
             initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
+            announced_viewport: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
@@ -2533,6 +2557,7 @@ impl Engine {
             initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
+            announced_viewport: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
@@ -2621,6 +2646,7 @@ impl Engine {
             initial_layout_deferred: false,
             headless_bounds: Some(bounds),
             pending_resize: None,
+            announced_viewport: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
@@ -2666,7 +2692,7 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.pending_resize = None;
         }
-        self.layout_after_resize(id, bounds)
+        self.layout_after_resize(id, bounds).map(|_| ())
     }
 
     /// Give a view its new bounds now (the NSView frame and the GPU surface
@@ -2698,15 +2724,18 @@ impl Engine {
     }
 
     /// Lay out a view whose bounds changed since its last layout, and tell
-    /// the page. Returns whether there was anything to do.
+    /// the page. Returns whether the page was told.
+    ///
+    /// The event is the viewport the view has now, not a size queued earlier
+    /// and since left. A repeat of the size the page already reads is not
+    /// a `resize`.
     pub fn flush_pending_resize(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         let _hold = wgate::hold("resize");
         let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let Some(bounds) = view.pending_resize.take() else {
+        let Some(pending) = view.pending_resize.take() else {
             return Ok(false);
         };
-        self.layout_after_resize(id, bounds)?;
-        Ok(true)
+        self.layout_after_resize(id, pending)
     }
 
     /// The surface half of a resize: the viewhost's bounds and the GPU
@@ -2735,7 +2764,28 @@ impl Engine {
     /// let the page's scripts see it and hear `resize` at `window`, as a
     /// browser window resize does. Listener exceptions go to the script log
     /// like the lifecycle events' do.
-    fn layout_after_resize(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
+    ///
+    /// Returns whether the page heard `resize`. `false` when `requested`
+    /// is a size the view has already left, or the size the page already
+    /// reads: neither is dispatched.
+    fn layout_after_resize(
+        &mut self,
+        id: EngineViewId,
+        requested: Bounds,
+    ) -> Result<bool, EngineError> {
+        let stored = self.stored_viewport_bounds(id).unwrap_or(requested);
+        let bounds = resize_dispatch_bounds(requested, stored, self.live_frame_size(id));
+        if bounds.width != stored.width || bounds.height != stored.height {
+            // The host frame already moved (a sidebar inset while this
+            // engine was borrowed). The surface follows that frame; the
+            // queued size does not.
+            self.apply_view_bounds(id, bounds)?;
+        }
+        if self.views.get(&id).and_then(|view| view.announced_viewport)
+            == Some((bounds.width, bounds.height))
+        {
+            return Ok(false);
+        }
         // Re-layout if we have content
         if self
             .views
@@ -2782,8 +2832,36 @@ impl Engine {
             width: bounds.width,
             height: bounds.height,
         });
+        if let Some(view) = self.views.get_mut(&id) {
+            view.announced_viewport = Some((bounds.width, bounds.height));
+        }
 
-        Ok(())
+        Ok(true)
+    }
+
+    /// The viewport `set_view_bounds` last stored. A headless view keeps
+    /// its own; a windowed view reads the host.
+    fn stored_viewport_bounds(&self, id: EngineViewId) -> Option<Bounds> {
+        let view = self.views.get(&id)?;
+        if let Some(bounds) = view.headless_bounds {
+            return Some(bounds);
+        }
+        self.presenter.host_bounds(view.viewhost_id).ok()
+    }
+
+    /// The host view's frame, when a load moved it without borrowing the
+    /// engine (`place_host_frame`). `None` for a headless view and on
+    /// platforms without that frame.
+    fn live_frame_size(&self, id: EngineViewId) -> Option<(u32, u32)> {
+        #[cfg(target_os = "macos")]
+        {
+            return rustkit_viewhost::raw_view_content_size(self.host_view_raw(id));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = id;
+            None
+        }
     }
 
     /// Scroll a view by the given delta (the user's wheel, keys or scrollbar).
@@ -3990,6 +4068,11 @@ impl Engine {
         let mut stopped = nav_cancel::cancelled(watch.as_ref());
         if !stopped {
             self.refresh_layout_for_script(id, &bindings);
+            // The same lines the blocking load logs. A yielded tail used to
+            // fire `load` without them, so a live run never showed
+            // `source=event:load`.
+            info!(source = "event:load", "Running page lifecycle step");
+            let step_started = std::time::Instant::now();
             let (caught, load_stopped) = with_script_js(&bindings, || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     bindings
@@ -4021,6 +4104,12 @@ impl Engine {
                     stopped = true;
                 }
             }
+            info!(
+                source = "event:load",
+                elapsed_ms = step_started.elapsed().as_millis() as u64,
+                callbacks = 0u32,
+                "Page lifecycle step done"
+            );
             inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load");
         }
         if !stopped {
@@ -4034,12 +4123,14 @@ impl Engine {
         }
         if !stopped && !self.nav_superseded(id, nav_id) {
             self.refresh_layout_for_script(id, &bindings);
+            info!(source = "timers", "Running page lifecycle step");
+            let step_started = std::time::Instant::now();
+            let mut timer_callbacks = 0u32;
             let (caught, timer_stopped) = with_script_js(&bindings, || {
                 let _job = rustkit_js::DiagJob::enter("timer");
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     bindings
                         .run_timers(horizon, MAX_TIMER_CALLBACKS)
-                        .map(|_| ())
                         .map_err(Self::strip_binding)
                 }))
             });
@@ -4047,7 +4138,7 @@ impl Engine {
                 log_script_stopped("timers", 0, take_script_js_overrun());
             }
             match caught {
-                Ok(Ok(())) => {}
+                Ok(Ok(ran)) => timer_callbacks = ran,
                 Ok(Err(message)) => log.push(ScriptRecord {
                     source: "timers".into(),
                     bytes: 0,
@@ -4064,6 +4155,12 @@ impl Engine {
                     stopped = true;
                 }
             }
+            info!(
+                source = "timers",
+                elapsed_ms = step_started.elapsed().as_millis() as u64,
+                callbacks = timer_callbacks,
+                "Page lifecycle step done"
+            );
             inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers");
             if !stopped {
                 if let Some(found) = pump(Some((horizon, MAX_TIMER_CALLBACKS))).await {
@@ -6383,6 +6480,9 @@ impl Engine {
                 bindings
                     .set_dimensions(width as f64, height as f64)
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.announced_viewport = Some((width as u32, height as u32));
+                }
             }
 
             // One FetchPolicy per URL-loaded document, owning its request
@@ -6743,6 +6843,9 @@ impl Engine {
                 bindings
                     .set_dimensions(width as f64, height as f64)
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.announced_viewport = Some((width as u32, height as u32));
+                }
             }
 
             let view = self
