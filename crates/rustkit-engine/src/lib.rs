@@ -343,6 +343,8 @@ mod script_net_engine_tests;
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
+#[cfg(all(test, feature = "headless"))]
+mod range_hit_tests;
 #[cfg(test)]
 mod content_string_tests;
 #[cfg(test)]
@@ -18324,6 +18326,14 @@ fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
     bottom
 }
 
+/// The document element, the first box in the layout that names a node.
+fn root_element_id(layout: &LayoutBox) -> Option<usize> {
+    if layout.node_id.is_some() {
+        return layout.node_id;
+    }
+    layout.children.first().and_then(root_element_id)
+}
+
 /// Hand script the geometry of `layout` without measuring it: the snapshot
 /// is built on the first read (`DomBindings::set_geometry_source`). The
 /// source holds the layout weakly, so it never keeps an old tree alive or
@@ -18331,6 +18341,19 @@ fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
 /// is republished before script runs again.
 fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>) {
     let layout = Rc::downgrade(layout);
+    let hit_layout = layout.clone();
+    bindings.set_hit_tester(Some(std::rc::Rc::new(move |x, y, scroll| {
+        let layout = hit_layout.upgrade()?;
+        let hit = layout.hit_test_scrolled(x, y, scroll);
+        if let Some(id) = hit.as_ref().and_then(|hit| hit.node_id) {
+            return Some(id);
+        }
+        let bounds = layout.dimensions.border_box();
+        if x >= 0.0 && y >= 0.0 && x < bounds.width && y < bounds.height {
+            return root_element_id(&layout);
+        }
+        None
+    })));
     bindings.set_geometry_source(Box::new(move || {
         let Some(layout) = layout.upgrade() else {
             return Default::default();

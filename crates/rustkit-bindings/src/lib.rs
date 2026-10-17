@@ -43,6 +43,8 @@ mod web_history_tests;
 #[cfg(test)]
 mod geometry_tests;
 #[cfg(test)]
+mod range_tests;
+#[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]
 mod observers_tests;
@@ -70,7 +72,7 @@ mod web_crypto;
 mod web_scroll;
 mod web_url;
 
-pub use dom::{BoxGeometry, GeometrySource, SelectorMatchFn};
+pub use dom::{BoxGeometry, GeometrySource, HitTester, SelectorMatchFn};
 pub mod events;
 
 pub use events::{
@@ -1321,7 +1323,14 @@ impl DomBindings {
     pub fn set_geometry(&self, geometry: std::collections::HashMap<usize, BoxGeometry>) {
         let mut host = self.dom_host.borrow_mut();
         host.geometry_source = None;
+        host.set_hit_tester(None);
         host.geometry = geometry;
+    }
+
+    /// The layout hit test `elementFromPoint` uses. `None` falls back to
+    /// the published boxes. A point answers null until a layout exists.
+    pub fn set_hit_tester(&self, tester: Option<HitTester>) {
+        self.dom_host.borrow_mut().set_hit_tester(tester);
     }
 
     /// Publish a new layout without measuring it: `source` builds the maps
@@ -1349,6 +1358,8 @@ impl DomBindings {
         s.y = offset.1;
         s.max_x = max.0;
         s.max_y = max.1;
+        drop(s);
+        self.dom_host.borrow_mut().note_scroll(offset);
     }
 
     /// Where script last scrolled the window to since the last call, if it

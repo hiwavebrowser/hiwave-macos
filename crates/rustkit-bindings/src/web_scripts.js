@@ -129,14 +129,18 @@
         },
         // Before `node` goes into `parent`: the fresh scripts it carries (a
         // fragment empties as it goes in), prepared in tree order after.
+        // Walked, not queried: a fragment's scripts are not in the document
+        // the selector walks.
         inserting: function (node, parent) {
             if (fresh === 0) return null;
             var found = [];
-            if (isScript(node)) found.push(node);
-            else if (node && typeof node.querySelectorAll === 'function') {
-                var all = node.querySelectorAll('script');
-                for (var i = 0; i < all.length; i++) found.push(all[i]);
+            function walk(n) {
+                if (!n || n.localName === 'template') return;
+                if (isScript(n)) found.push(n);
+                for (var c = n.firstChild; c; c = c.nextSibling) walk(c);
             }
+            if (isScript(node)) found.push(node);
+            else walk(node);
             // Text added to a script already in the document.
             if (isScript(parent)) found.push(parent);
             found = found.filter(function (s) { return s[STATE] === 'fresh'; });
