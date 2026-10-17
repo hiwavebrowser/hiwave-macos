@@ -20,6 +20,15 @@ use crate::{EngineFailure, ScriptOutcome, ScriptRecord};
 /// Nothing is set up (and nothing costs anything) when nobody listens.
 pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
     if !inspector.is_active() {
+        // A page trace still wants console errors when nobody is inspecting.
+        if crate::page_trace::enabled() {
+            bindings.set_console_redaction(false);
+            bindings.set_console_handler(Box::new(|level, message, _| {
+                if matches!(level, rustkit_js::LogLevel::Error) {
+                    crate::page_trace::note_console(message);
+                }
+            }));
+        }
         return;
     }
     let sink = inspector.clone();
@@ -43,6 +52,9 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
             let column = if at.column > method_len { at.column - method_len } else { at.column };
             sink.frame_location(&at.path, at.line, column)
         });
+        if matches!(level, ConsoleLevel::Error) {
+            crate::page_trace::note_console(message);
+        }
         sink.console(level, message, location);
     }));
     let _ = bindings.set_error_details(true, inspector.keeps_error_text());
@@ -55,6 +67,7 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
 /// with a fixed message. What page script threw is never one of them,
 /// whatever its text.
 pub(crate) fn log_script(log: &mut Vec<ScriptRecord>, inspector: &Inspector, record: ScriptRecord) {
+    crate::page_trace::note_record(&record);
     if let ScriptOutcome::EngineFailed(failure) = &record.outcome {
         engine_error(inspector, failure, &record.source);
     }

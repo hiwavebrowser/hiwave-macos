@@ -328,3 +328,14 @@ cycle root never settles, because `SourceTextModule::evaluate`
 
 **Upgrading Boa.** Re-apply the marked lines to the new version, or drop this
 directory once upstream has an equivalent hook (to be offered upstream).
+
+## Patch: JS call-stack high-water for page traces
+
+**Why.** The replay comparison (`tools/replay/`) wants the deepest JS stack a
+load reached, the same field Chrome's profiler reports. Boa already walks
+`frames` for the recursion limit and does not keep a high-water mark.
+
+**What.** `src/vm/stack_sample.rs`, and one call at the end of `Vm::push_frame`
+(`HIWAVE PATCH (trace)`). Disarmed (the default) this is one relaxed atomic
+load per JS call. [`stack_sample::arm`]`(true)` zeroes the mark;
+[`stack_sample::max_depth`] reads it. Nothing else in the VM changes.

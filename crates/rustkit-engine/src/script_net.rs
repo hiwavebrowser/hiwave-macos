@@ -553,12 +553,14 @@ pub(crate) async fn pump_inserted_scripts(
                 }
             };
             let poisoned = record.outcome == ScriptOutcome::EngineFailed(EngineFailure::Panic);
+            let source = record.source.clone();
             out.records.push(record);
             if poisoned {
                 out.poisoned = true;
                 return out;
             }
             if let Some(event) = event {
+                crate::page_trace::note_element_event(&source, event);
                 if let Err(e) = bindings.fire_script_event(node, event) {
                     out.threw.push(e.to_string());
                 }

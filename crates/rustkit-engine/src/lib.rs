@@ -293,6 +293,7 @@ mod frame_commit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wgate_engine_tests;
 mod diagnostics;
+mod page_trace;
 pub use diagnostics::{
     DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
     DEFAULT_MAX_ELEMENTS, STYLE_PROPERTIES,
@@ -1895,6 +1896,7 @@ impl Engine {
         interceptor: Option<rustkit_net::RequestInterceptor>,
     ) -> Result<Self, EngineError> {
         info!("Initializing RustKit Engine");
+        page_trace::arm_from_env();
 
         // The view host, the compositor and the renderer.
         let presenter = Presenter::new(config.background_color)?;
@@ -4454,6 +4456,7 @@ impl Engine {
             }
         }
         let _ = bindings.set_ready_state("loading");
+        page_trace::note_ready("loading");
         let scripts_started = std::time::Instant::now();
         let modules_fetched = Cell::new(0usize);
         let mut external_scripts = 0usize;
@@ -4475,18 +4478,21 @@ impl Engine {
                 Err(outcome) => {
                     // A module script that could not be fetched: logged, and
                     // its element hears `error`.
-                    log.push(ScriptRecord {
-                        source: label,
-                        bytes: 0,
-                        elapsed_ms: 0,
-                        outcome,
-                    });
-                    let _ = bindings.fire_script_event(node_id, "error");
+                let record = ScriptRecord {
+                    source: label,
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome,
+                };
+                page_trace::note_record(&record);
+                page_trace::note_element_event(&record.source, "error");
+                log.push(record);
+                let _ = bindings.fire_script_event(node_id, "error");
                     continue;
                 }
             };
             if poisoned.get() || started.elapsed() >= budget {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: label,
                     bytes: text.len(),
                     elapsed_ms: 0,
@@ -4495,7 +4501,9 @@ impl Engine {
                     } else {
                         ScriptOutcome::OverBudget
                     },
-                });
+                };
+                page_trace::note_record(&record);
+                log.push(record);
                 continue;
             }
             // Boa cannot be interrupted mid-script, so the budget can only
@@ -4503,12 +4511,14 @@ impl Engine {
             // and more on app bundles: youtube's 10.8 MB bundle ran for 16s+
             // and hung the capture. A script that big is not started.
             if text.len() > MAX_PAGE_SCRIPT_BYTES {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: label,
                     bytes: text.len(),
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Skipped("too large to run inside the script budget"),
-                });
+                };
+                page_trace::note_record(&record);
+                log.push(record);
                 continue;
             }
             if is_module {
@@ -4610,6 +4620,7 @@ impl Engine {
                 inspector_glue::log_script(log, &inspector, record);
                 inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &label);
                 if let Some(event) = event {
+                    page_trace::note_element_event(&label, event);
                     let _ = bindings.fire_script_event(node_id, event);
                 }
                 continue;
@@ -4728,6 +4739,7 @@ impl Engine {
         let steps: [(&str, &dyn Fn() -> Result<(), String>); 3] = [
             ("event:DOMContentLoaded", &|| {
                 bindings.set_ready_state("interactive").map_err(strip)?;
+                page_trace::note_ready("interactive");
                 bindings
                     .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Document, "DOMContentLoaded")
                     .map_err(strip)?;
@@ -4737,6 +4749,7 @@ impl Engine {
             }),
             ("event:load", &|| {
                 bindings.set_ready_state("complete").map_err(strip)?;
+                page_trace::note_ready("complete");
                 bindings
                     .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load")
                     .map_err(strip)
@@ -4800,12 +4813,14 @@ impl Engine {
                 }
             }
             for message in carried.drain(..) {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: source.to_string(),
                     bytes: 0,
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Threw(message),
-                });
+                };
+                page_trace::note_record(&record);
+                log.push(record);
             }
             inspector_glue::drain_reports(bindings, &inspector, log, source);
         }
@@ -4838,6 +4853,7 @@ impl Engine {
             .ok_or(EngineError::ViewNotFound(id))?;
 
         info!(?id, %url, replace, "Loading URL");
+        let _page_trace = page_trace::begin(url.as_str());
 
         // A load still in progress is left for this one.
         if view.navigation.is_loading() {
@@ -15997,6 +16013,36 @@ impl EngineBuilder {
     /// Set an optional replay proxy URL for deterministic testing (test-only).
     pub fn replay_proxy(mut self, proxy: Option<Url>) -> Self {
         self.config.replay_proxy = proxy;
+        self
+    }
+
+    /// `HIWAVE_REPLAY=http://127.0.0.1:PORT`. Empty, unset, or not an http(s)
+    /// URL leaves the proxy off. An explicit [`replay_proxy`](Self::replay_proxy)
+    /// already set on the builder is kept.
+    pub fn replay_proxy_from_env(self) -> Self {
+        match std::env::var("HIWAVE_REPLAY") {
+            Ok(raw) => self.replay_proxy_from_str(&raw),
+            Err(_) => self,
+        }
+    }
+
+    /// Parse `raw` as the replay proxy. See [`replay_proxy_from_env`](Self::replay_proxy_from_env).
+    pub fn replay_proxy_from_str(mut self, raw: &str) -> Self {
+        if self.config.replay_proxy.is_some() {
+            return self;
+        }
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return self;
+        }
+        match Url::parse(raw) {
+            Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {
+                self.config.replay_proxy = Some(url);
+            }
+            _ => {
+                warn!(replay = %raw, "HIWAVE_REPLAY is not an http(s) URL; replay proxy left off");
+            }
+        }
         self
     }
 

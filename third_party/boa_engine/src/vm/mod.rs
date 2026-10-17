@@ -48,6 +48,7 @@ mod code_block;
 mod completion_record;
 mod inline_cache;
 mod runtime_limits;
+pub mod stack_sample;
 
 pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
@@ -643,6 +644,9 @@ impl Vm {
             .push_bytecode(current_pc, frame.code_block().source_info.clone());
 
         self.frames.push(frame);
+        // HIWAVE PATCH (trace): JS call-stack high-water, armed only while a
+        // page trace is being recorded. One relaxed load per call otherwise.
+        stack_sample::note(self.frames.len().saturating_sub(1));
     }
 
     pub(crate) fn push_frame_with_stack(
