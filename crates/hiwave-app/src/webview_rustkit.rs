@@ -24,8 +24,9 @@ use url::Url;
 /// asks for none).
 const MIN_LIVE_TURN: Duration = Duration::from_millis(4);
 
-/// How soon the loop turns again while a page's request is out. Nothing
-/// wakes the loop when the answer comes, so it looks.
+/// How soon the loop turns again while a page's XHR or `fetch` is out.
+/// Nothing wakes the loop when that answer comes, so it looks. An inserted
+/// script's fetch is not one of these: its completion posts `LiveTurn`.
 const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
 
 /// A RustKit-based WebView that implements IWebContent.
