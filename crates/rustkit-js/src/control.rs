@@ -608,8 +608,19 @@ mod tests {
         assert_eq!(stamp.read(), None);
     }
 
+    // The three tests that bound how soon the watchdog thread stops a turn.
+    // Cargo runs the suite in parallel. On a loaded macOS runner the short
+    // turn below was stopped at 275 ms, and once at 396 ms, against a 200 ms
+    // ceiling, while these tests spun beside it. They share one lock.
+    fn one_watchdog_timing_test() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        // A panicking test must not poison the other two.
+        LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
     #[test]
     fn the_watchdog_stops_a_turn_past_its_budget_and_not_the_next() {
+        let _timing = one_watchdog_timing_test();
         let watchdog = Watchdog::spawn();
         let stamp = watchdog.thread_stamp();
         let view = watchdog.view_control();
@@ -642,6 +653,10 @@ mod tests {
     fn a_short_turn_opened_while_the_watchdog_sleeps_a_tick_is_stopped_on_time() {
         // After stopping a turn the watchdog sleeps a whole tick; a turn
         // whose budget ends sooner (the grace turn after a stop) wakes it.
+        // A missed wake waits out that sleep, so the stop lands at about a
+        // tick. One tick still fails that, which a 200 ms ceiling did not
+        // leave room for on a loaded runner.
+        let _timing = one_watchdog_timing_test();
         let watchdog = Watchdog::spawn();
         let stamp = watchdog.thread_stamp();
         let view = watchdog.view_control();
@@ -666,14 +681,12 @@ mod tests {
         }
         let took = started.elapsed();
         stamp.end_turn();
-        assert!(
-            took < Duration::from_millis(200),
-            "stopped after {took:?}, a tick late"
-        );
+        assert!(took < TICK, "stopped after {took:?}, a tick late");
     }
 
     #[test]
     fn the_watchdog_ends_with_its_last_owner_and_its_stamps_still_work() {
+        let _timing = one_watchdog_timing_test();
         let watchdog = Watchdog::spawn();
         let weak = Arc::downgrade(&watchdog.shared);
         let stamp = watchdog.thread_stamp();
