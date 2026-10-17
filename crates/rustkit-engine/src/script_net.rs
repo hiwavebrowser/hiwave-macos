@@ -1280,6 +1280,9 @@ fn run_inserted(
         crate::console_log::inserted_script(&record.source, event);
     }
     let poisoned = record.outcome == ScriptOutcome::EngineFailed(EngineFailure::Panic);
+    // `note_element_event` queues until `note_record` logs execute, so the
+    // trace order stays execute then load. Clone before the push moves `record`.
+    let source = record.source.clone();
     out.records.push(record);
     out.requests += 1;
     if poisoned {
@@ -1288,6 +1291,7 @@ fn run_inserted(
     }
     if let Some(event) = event {
         if !super::script_js_exhausted() {
+            crate::page_trace::note_element_event(&source, event);
             let (fired, stopped) = super::with_script_js(bindings, || bindings.fire_script_event(job.node, event));
             if stopped {
                 crate::log_script_stopped(

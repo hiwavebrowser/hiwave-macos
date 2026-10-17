@@ -163,6 +163,9 @@ fn content_engine_builder() -> EngineBuilder {
         // (`take_script_navigation`), so a page that has asked to leave is
         // not kept waiting for images its scripts added.
         .follows_script_navigation(true)
+        // `HIWAVE_REPLAY=http://127.0.0.1:PORT` sends the page's requests at
+        // the replay server. Unset, the proxy stays off.
+        .replay_proxy_from_env()
 }
 
 /// `HIWAVE_RENDER_EVERY_WAKE=1`: draw at every wake of the event loop,

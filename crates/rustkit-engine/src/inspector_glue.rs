@@ -25,6 +25,16 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
     let mirror = crate::console_log::enabled();
     let listening = inspector.is_active();
     if !listening && !mirror {
+        // A page trace still wants console errors when nobody is inspecting
+        // and the console mirror is off.
+        if crate::page_trace::enabled() {
+            bindings.set_console_redaction(false);
+            bindings.set_console_handler(Box::new(|level, message, _| {
+                if matches!(level, rustkit_js::LogLevel::Error) {
+                    crate::page_trace::note_console(message);
+                }
+            }));
+        }
         return;
     }
     // Redaction is the Inspector's. The mirror logs the text the page wrote,
@@ -35,6 +45,9 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
     let sink = inspector.clone();
     bindings.set_console_handler(Box::new(move |level, message, at| {
         crate::console_log::console_message(level, message, at);
+        if matches!(level, rustkit_js::LogLevel::Error) {
+            crate::page_trace::note_console(message);
+        }
         if !sink.is_active() {
             return;
         }
@@ -72,6 +85,7 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
 /// with a fixed message. What page script threw is never one of them,
 /// whatever its text.
 pub(crate) fn log_script(log: &mut Vec<ScriptRecord>, inspector: &Inspector, record: ScriptRecord) {
+    crate::page_trace::note_record(&record);
     if let ScriptOutcome::EngineFailed(failure) = &record.outcome {
         engine_error(inspector, failure, &record.source);
     }

@@ -79,6 +79,68 @@ pub fn note_large_clear(tag: &str, id: &str, nodes: usize) {
     hook(tag, id, nodes);
 }
 
+/// A large-tree mutation: `kind` is `add` or `remove`, `nodes` is the subtree
+/// size (the node plus its descendants), `target` is the parent element's
+/// tag in ASCII uppercase (Chrome's `tagName` for an HTML element).
+pub type LargeMutationHook = fn(kind: &str, nodes: usize, target: &str);
+
+/// Subtrees larger than this are reported to [`set_large_mutation_hook`].
+const LARGE_MUTATION_NODES: usize = 50;
+
+static LARGE_MUTATION_HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+thread_local! {
+    static IN_LARGE_MUTATION_HOOK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Install `hook` for subtree adds and removes of more than
+/// [`LARGE_MUTATION_NODES`] nodes. `None` removes it. Off by default, so a
+/// page that is not being traced does not walk subtrees on every insert.
+pub fn set_large_mutation_hook(hook: Option<LargeMutationHook>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    LARGE_MUTATION_HOOK.store(ptr, Ordering::Release);
+}
+
+fn trace_subtree_len(node: &Node) -> usize {
+    let mut count = 1usize;
+    for child in node.children.borrow().iter() {
+        count = count.saturating_add(trace_subtree_len(child));
+    }
+    count
+}
+
+fn target_name(node: &Node) -> String {
+    match node.tag_name() {
+        Some(tag) => tag.to_ascii_uppercase(),
+        None => match &node.node_type {
+            NodeType::Document => "#document".to_string(),
+            NodeType::DocumentFragment => "#document-fragment".to_string(),
+            _ => String::new(),
+        },
+    }
+}
+
+fn note_large_mutation(kind: &str, node: &Node, target: &Node) {
+    let ptr = LARGE_MUTATION_HOOK.load(Ordering::Acquire);
+    if ptr.is_null() || IN_LARGE_MUTATION_HOOK.with(Cell::get) {
+        return;
+    }
+    let nodes = trace_subtree_len(node);
+    if nodes <= LARGE_MUTATION_NODES {
+        return;
+    }
+    // Safety: the pointer was stored from a `LargeMutationHook` in
+    // `set_large_mutation_hook` and is replaced only by another one or null.
+    let hook: LargeMutationHook = unsafe { std::mem::transmute(ptr) };
+    let target = target_name(target);
+    IN_LARGE_MUTATION_HOOK.with(|flag| flag.set(true));
+    hook(kind, nodes, &target);
+    IN_LARGE_MUTATION_HOOK.with(|flag| flag.set(false));
+}
+
 /// Errors that can occur in DOM operations.
 #[derive(Error, Debug)]
 pub enum DomError {
@@ -264,6 +326,13 @@ impl Node {
 
         // Add to children
         self.children.borrow_mut().push(child);
+        // The hook is null unless a page trace is recording, and it returns
+        // before walking the subtree in that case.
+        if !LARGE_MUTATION_HOOK.load(Ordering::Acquire).is_null() {
+            if let Some(child) = self.last_child() {
+                note_large_mutation("add", &child, self);
+            }
+        }
     }
 
     /// This node plus every descendant.
@@ -289,6 +358,7 @@ impl Node {
             }
         }
         if let Some(parent) = self.parent() {
+            note_large_mutation("remove", self, &parent);
             // Update sibling links
             if let Some(prev) = self.previous_sibling() {
                 *prev.next_sibling.borrow_mut() = self.next_sibling.borrow().clone();
@@ -328,6 +398,10 @@ impl Node {
 
             // Insert into children
             children.insert(idx, new_child);
+            drop(children);
+            if !LARGE_MUTATION_HOOK.load(Ordering::Acquire).is_null() {
+                note_large_mutation("add", &self.children.borrow()[idx], self);
+            }
         } else {
             // Reference not found, append at end
             drop(children);
@@ -1345,5 +1419,64 @@ mod node_write_tests {
         let shapes: Vec<String> = nodes.iter().map(shape).collect();
         assert_eq!(shapes, ["li('1')", "li('2')"]);
         assert!(doc.parse_fragment("", "div").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod large_mutation_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<Vec<(String, usize, String)>> = Mutex::new(Vec::new());
+
+    fn record(kind: &str, nodes: usize, target: &str) {
+        SEEN.lock().unwrap().push((kind.to_string(), nodes, target.to_string()));
+    }
+
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            set_large_mutation_hook(None);
+            SEEN.lock().unwrap().clear();
+        }
+    }
+
+    fn div_with_spans(doc: &Document, spans: usize) -> Rc<Node> {
+        let div = doc.create_node(NodeType::Element {
+            tag_name: "div".into(),
+            namespace: "http://www.w3.org/1999/xhtml".into(),
+            attributes: HashMap::new(),
+        });
+        for _ in 0..spans {
+            div.append_child(doc.create_node(NodeType::Element {
+                tag_name: "span".into(),
+                namespace: "http://www.w3.org/1999/xhtml".into(),
+                attributes: HashMap::new(),
+            }));
+        }
+        div
+    }
+
+    #[test]
+    fn a_subtree_is_reported_only_past_fifty_nodes_and_only_while_hooked() {
+        let _clear = Clear;
+        let doc = Document::parse_html("<html><body></body></html>").unwrap();
+        let body = doc.body().unwrap();
+        // Disarmed: a large insert is silent.
+        body.append_child(div_with_spans(&doc, 60));
+        assert!(SEEN.lock().unwrap().is_empty());
+
+        set_large_mutation_hook(Some(record));
+        SEEN.lock().unwrap().clear();
+        body.append_child(div_with_spans(&doc, 49));
+        assert!(SEEN.lock().unwrap().is_empty(), "50 nodes is the threshold, not a hit");
+        let big = div_with_spans(&doc, 50);
+        body.append_child(Rc::clone(&big));
+        assert_eq!(SEEN.lock().unwrap().as_slice(), [("add".into(), 51, "BODY".into())]);
+        big.remove_from_parent();
+        assert_eq!(
+            SEEN.lock().unwrap().as_slice(),
+            [("add".into(), 51, "BODY".into()), ("remove".into(), 51, "BODY".into())]
+        );
     }
 }

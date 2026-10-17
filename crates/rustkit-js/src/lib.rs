@@ -16,6 +16,31 @@ mod module;
 #[cfg(feature = "boa")]
 pub use module::{DynamicImportFailure, FetchedModule, ModuleHandle, ModuleState};
 pub use control::{mono_us, ThreadStamp, ViewControl, Watchdog};
+
+/// Arm the JS call-stack high-water in the VM (see `boa_engine::vm::stack_sample`).
+/// Off by default: a page trace turns it on for one load.
+pub fn set_js_stack_sample(armed: bool) {
+    #[cfg(feature = "boa")]
+    {
+        boa_engine::vm::stack_sample::arm(armed);
+    }
+    #[cfg(not(feature = "boa"))]
+    {
+        let _ = armed;
+    }
+}
+
+/// Deepest JS stack since the last [`set_js_stack_sample`]`(true)`.
+pub fn js_stack_sample() -> usize {
+    #[cfg(feature = "boa")]
+    {
+        boa_engine::vm::stack_sample::max_depth()
+    }
+    #[cfg(not(feature = "boa"))]
+    {
+        0
+    }
+}
 #[cfg(feature = "boa")]
 mod executor;
 #[cfg(feature = "boa")]
@@ -2051,5 +2076,24 @@ mod tests {
         assert!(max >= 20, "{line}");
         let attribution = interrupt_attribution();
         assert!(attribution.contains(&line), "{attribution}");
+    }
+
+    /// A recursive call updates the JS stack high-water only while sampling is armed.
+    #[test]
+    fn js_stack_sample_tracks_a_call_chain_only_while_armed() {
+        let mut runtime = JsRuntime::new().unwrap();
+        set_js_stack_sample(false);
+        runtime
+            .evaluate_script("function f(n) { if (n > 0) f(n - 1); } f(8);")
+            .unwrap();
+        assert_eq!(js_stack_sample(), 0);
+        set_js_stack_sample(true);
+        runtime
+            .evaluate_script("function g(n) { if (n > 0) g(n - 1); } g(8);")
+            .unwrap();
+        let depth = js_stack_sample();
+        set_js_stack_sample(false);
+        assert!(depth >= 8, "depth {depth}");
+        assert_eq!(js_stack_sample(), 0);
     }
 }
