@@ -1156,11 +1156,17 @@ pub(crate) fn install(
                     host.computed.get(&node.id.raw()).cloned().unwrap_or_default(),
                 ),
                 (Some(node), Some("geom")) => match host.geometry.get(&node.id.raw()) {
-                    Some(g) => JsValue::String(format!(
-                        "{} {} {} {} {} {} {} {} {} {} {}",
-                        g.x, g.y, g.width, g.height, g.border_left, g.border_top,
-                        g.client_width, g.client_height, g.scroll_width, g.scroll_height, g.position
-                    )),
+                    Some(g) => {
+                        // A non-finite edge would make getBoundingClientRect
+                        // report NaN, and parseInt of that feeds elementFromPoint
+                        // a double WebIDL rejects.
+                        let n = |v: f32| if v.is_finite() { v } else { 0.0 };
+                        JsValue::String(format!(
+                            "{} {} {} {} {} {} {} {} {} {} {}",
+                            n(g.x), n(g.y), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
+                            n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position
+                        ))
+                    }
                     None => JsValue::String(String::new()),
                 },
                 (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
@@ -2280,21 +2286,25 @@ const WRAPPERS_JS: &str = r#"
     // layout, so it can be stale between a script's own DOM writes and the
     // next layout. An element with no box (display:none, not rendered, or
     // measured before any layout) reads as all zeros, and has no offsetParent.
+    function finite(v) { v = Number(v); return isFinite(v) ? v : 0; }
     function geom(el) {
         var raw = info(el, 'geom');
         if (!raw) return null;
         var p = raw.split(' ');
         var n = [];
-        for (var i = 0; i < p.length; i++) n.push(Number(p[i]));
+        for (var i = 0; i < p.length; i++) n.push(finite(p[i]));
         return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10] };
     }
     function scrollOffset(axis) {
         var v = axis === 'x' ? (g.scrollX || g.pageXOffset) : (g.scrollY || g.pageYOffset);
-        return typeof v === 'number' ? v : 0;
+        return finite(typeof v === 'number' ? v : 0);
     }
     // DOMRect is installed after this layer (web_interfaces.js), so it is
-    // looked up when a rect is made.
+    // looked up when a rect is made. Edges are finite: a NaN here is what
+    // `Number.parseInt(getComputedStyle(e).borderRadius) / 2` used to hand
+    // to elementFromPoint.
     function rect(x, y, w, h) {
+        x = finite(x); y = finite(y); w = finite(w); h = finite(h);
         return typeof g.DOMRect === 'function'
             ? new g.DOMRect(x, y, w, h)
             : { x: x, y: y, width: w, height: h, top: y, left: x, right: x + w, bottom: y + h };
@@ -2368,6 +2378,14 @@ const WRAPPERS_JS: &str = r#"
         } else if (info(el, 'laidout')) {
             m.display = 'none';
             m.visibility = 'visible';
+        }
+        // Unset radii are 0px, the way Chrome serialises the computed
+        // initial value. An empty string makes Number.parseInt return NaN.
+        if (raw || info(el, 'laidout')) {
+            ['border-radius', 'border-top-left-radius', 'border-top-right-radius',
+             'border-bottom-right-radius', 'border-bottom-left-radius'].forEach(function (n) {
+                if (!Object.prototype.hasOwnProperty.call(m, n)) m[n] = '0px';
+            });
         }
         var inline = el.style;
         if (inline) {
@@ -2828,6 +2846,8 @@ const WRAPPERS_JS: &str = r#"
     function pointHit(x, y, method) {
         x = Number(x);
         y = Number(y);
+        // WebIDL `double` throws on NaN and infinities. Chrome does the same
+        // for elementFromPoint; the coordinates have to be finite before the call.
         if (!isFinite(x) || !isFinite(y)) {
             throw new TypeError("Failed to execute '" + method + "' on 'Document': The provided double value is non-finite.");
         }

@@ -18386,7 +18386,13 @@ fn geometry_snapshot(
     ) -> Option<(f32, f32, f32, f32)> {
         // The bounding rect (left, top, right, bottom) of this box and everything under it.
         let bb = b.dimensions.border_box();
-        let mut extent = Some((bb.x, bb.y, bb.x + bb.width, bb.y + bb.height));
+        let (bx, by, bw, bh) = (
+            finite_f32(bb.x),
+            finite_f32(bb.y),
+            finite_f32(bb.width),
+            finite_f32(bb.height),
+        );
+        let mut extent = Some((bx, by, bx + bw, by + bh));
         for child in &b.children {
             if let Some(c) = walk(child, out, styles) {
                 extent = Some(match extent {
@@ -18397,7 +18403,13 @@ fn geometry_snapshot(
         }
         if let Some(node) = b.node_id {
             let pb = b.dimensions.padding_box();
-            let (right, bottom) = extent.map_or((pb.x + pb.width, pb.y + pb.height), |e| (e.2, e.3));
+            let (px, py, pw, ph) = (
+                finite_f32(pb.x),
+                finite_f32(pb.y),
+                finite_f32(pb.width),
+                finite_f32(pb.height),
+            );
+            let (right, bottom) = extent.map_or((px + pw, py + ph), |e| (e.2, e.3));
             // The computed value, not the layout box's: a relative or sticky
             // box is laid out as static, but it is still positioned (it is
             // an offsetParent).
@@ -18407,16 +18419,16 @@ fn geometry_snapshot(
                 _ => 1,
             };
             let geometry = rustkit_bindings::BoxGeometry {
-                x: bb.x,
-                y: bb.y,
-                width: bb.width,
-                height: bb.height,
-                border_left: b.dimensions.border.left,
-                border_top: b.dimensions.border.top,
-                client_width: pb.width,
-                client_height: pb.height,
-                scroll_width: (right - pb.x).max(pb.width),
-                scroll_height: (bottom - pb.y).max(pb.height),
+                x: finite_f32(bb.x),
+                y: finite_f32(bb.y),
+                width: finite_f32(bb.width),
+                height: finite_f32(bb.height),
+                border_left: finite_f32(b.dimensions.border.left),
+                border_top: finite_f32(b.dimensions.border.top),
+                client_width: pw,
+                client_height: ph,
+                scroll_width: finite_f32((right - px).max(pw)),
+                scroll_height: finite_f32((bottom - py).max(ph)),
                 position,
             };
             styles.entry(node).or_insert_with(|| computed_style_lines(b));
@@ -18470,9 +18482,68 @@ fn css_color(c: rustkit_css::Color) -> String {
     }
 }
 
+fn finite_f32(v: f32) -> f32 {
+    if v.is_finite() { v } else { 0.0 }
+}
+
 fn css_px(v: f32) -> String {
+    let v = finite_f32(v);
     let r = (v * 100.0).round() / 100.0;
     if r.fract() == 0.0 { format!("{}px", r as i64) } else { format!("{r}px") }
+}
+
+/// One corner's used radii as `<n>px` strings. A percentage resolves against
+/// the border box: width for the horizontal radius, height for the vertical.
+fn corner_radii_px(
+    c: &rustkit_css::CornerRadius,
+    font_px: f32,
+    width: f32,
+    height: f32,
+) -> (String, String) {
+    let axis = |length: &rustkit_css::Length, size: f32| {
+        css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0))
+    };
+    (axis(&c.horizontal, width), axis(&c.vertical, height))
+}
+
+fn corner_longhand(horizontal: &str, vertical: &str) -> String {
+    if horizontal == vertical {
+        horizontal.to_string()
+    } else {
+        format!("{horizontal} {vertical}")
+    }
+}
+
+/// The `border-radius` shorthand the way Chrome serialises a computed value:
+/// four horizontal radii, then ` / ` and the vertical radii when any corner
+/// is elliptical. Each side drops a value the 1–4 expansion would refill,
+/// so an unset radius is `0px` rather than four zeros.
+fn border_radius_shorthand(corners: &[(String, String); 4]) -> String {
+    fn minimize(v: [&str; 4]) -> String {
+        if v[0] == v[1] && v[1] == v[2] && v[2] == v[3] {
+            v[0].to_string()
+        } else if v[0] == v[2] && v[1] == v[3] {
+            format!("{} {}", v[0], v[1])
+        } else if v[1] == v[3] {
+            format!("{} {} {}", v[0], v[1], v[2])
+        } else {
+            format!("{} {} {} {}", v[0], v[1], v[2], v[3])
+        }
+    }
+    let horizontal = minimize([
+        &corners[0].0,
+        &corners[1].0,
+        &corners[2].0,
+        &corners[3].0,
+    ]);
+    if corners.iter().all(|(h, v)| h == v) {
+        horizontal
+    } else {
+        format!(
+            "{horizontal} / {}",
+            minimize([&corners[0].1, &corners[1].1, &corners[2].1, &corners[3].1])
+        )
+    }
 }
 
 /// The computed style of one box as `name\tvalue` lines, for the properties
@@ -18500,6 +18571,13 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         rustkit_css::Length::Px(p) if p != 0.0 => css_px(p),
         _ => "normal".to_string(),
     };
+    let box_edges = d.border_box();
+    let radii = [
+        corner_radii_px(&s.border_top_left_radius, font_px, box_edges.width, box_edges.height),
+        corner_radii_px(&s.border_top_right_radius, font_px, box_edges.width, box_edges.height),
+        corner_radii_px(&s.border_bottom_right_radius, font_px, box_edges.width, box_edges.height),
+        corner_radii_px(&s.border_bottom_left_radius, font_px, box_edges.width, box_edges.height),
+    ];
     let rows: Vec<(&str, String)> = vec![
         ("display", css_keyword(&format!("{:?}", s.display))),
         ("position", css_keyword(&format!("{:?}", s.position))),
@@ -18526,6 +18604,11 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("border-right-width", css_px(d.border.right)),
         ("border-bottom-width", css_px(d.border.bottom)),
         ("border-left-width", css_px(d.border.left)),
+        ("border-top-left-radius", corner_longhand(&radii[0].0, &radii[0].1)),
+        ("border-top-right-radius", corner_longhand(&radii[1].0, &radii[1].1)),
+        ("border-bottom-right-radius", corner_longhand(&radii[2].0, &radii[2].1)),
+        ("border-bottom-left-radius", corner_longhand(&radii[3].0, &radii[3].1)),
+        ("border-radius", border_radius_shorthand(&radii)),
         ("top", offset(&s.top, d.content.height)),
         ("right", offset(&s.right, d.content.width)),
         ("bottom", offset(&s.bottom, d.content.height)),
