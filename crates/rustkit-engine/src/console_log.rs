@@ -528,6 +528,9 @@ mod tests {
         assert!(line.contains("limit=LoopIteration"), "{line}");
         assert!(line.contains("word="), "{line}");
         assert!(line.contains("setter="), "{line}");
+        assert!(line.contains("depth="), "{line}");
+        assert!(line.contains("recursion_limit="), "{line}");
+        assert!(line.contains("host_limit="), "{line}");
         assert!(line.contains("exec_us="), "{line}");
         assert!(line.contains("wall_us="), "{line}");
         assert!(line.contains("turn=load"), "{line}");

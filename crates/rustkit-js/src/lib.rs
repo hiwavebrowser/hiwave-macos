@@ -88,8 +88,10 @@ fn clear_deadline_trip() {
     DEADLINE_TRIP_US.with(|at| at.set(0));
 }
 
-/// `word=… turn_id=… setter=… setter_target=… setter_age_us=… wall_us=… turn_budget_us=… deadline_age_us=…`
+/// `word=… turn_id=… setter=… setter_target=… setter_age_us=… wall_us=… turn_budget_us=… deadline_age_us=… depth=… host_depth=… recursion_limit=… host_limit=… max_depth=…`
 /// for an interrupt log. Empty clocks read as `-` or zero when nothing is armed.
+/// `depth` is the JavaScript frame count at the last recursion check, and
+/// `recursion_limit` is the frame cap that check used.
 pub fn interrupt_attribution() -> String {
     let (word, setter, setter_at, setter_target) = DIAG_CONTROL.with(|slot| {
         slot.borrow()
@@ -125,8 +127,12 @@ pub fn interrupt_attribution() -> String {
     let deadline = deadline_age
         .map(|age| age.to_string())
         .unwrap_or_else(|| "-".to_string());
+    #[cfg(feature = "boa")]
+    let depth = recursion_depth_log();
+    #[cfg(not(feature = "boa"))]
+    let depth = "depth=- host_depth=- recursion_limit=- host_limit=- max_depth=-".to_string();
     format!(
-        "word={word} turn_id={turn} setter={setter} setter_target={target} setter_age_us={setter_age} wall_us={wall} turn_budget_us={turn_budget} deadline_age_us={deadline}"
+        "word={word} turn_id={turn} setter={setter} setter_target={target} setter_age_us={setter_age} wall_us={wall} turn_budget_us={turn_budget} deadline_age_us={deadline} {depth}"
     )
 }
 
@@ -1969,5 +1975,7 @@ mod tests {
             .and_then(|n| n.parse::<usize>().ok())
             .unwrap_or(0);
         assert!(max >= 20, "{line}");
+        let attribution = interrupt_attribution();
+        assert!(attribution.contains(&line), "{attribution}");
     }
 }
