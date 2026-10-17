@@ -248,6 +248,19 @@ pub(crate) fn inserted_script(url: &str, event: &str) {
     emit(format!("inserted script {event} {url}"));
 }
 
+/// A dynamic `import()` whose promise rejected. `url` is empty when the
+/// specifier did not resolve. The reason is the fetch, parse, link, or
+/// evaluation failure, on one line.
+pub(crate) fn dynamic_import_failed(specifier: &str, url: &str, reason: &str) {
+    if !enabled() {
+        return;
+    }
+    let url = if url.is_empty() { "-" } else { url };
+    let (reason, _) = cap(reason, MAX_MESSAGE_CHARS);
+    let reason = reason.replace(['\n', '\r'], " ");
+    emit(format!("dynamic import {specifier} -> {url}: {reason}"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +344,8 @@ mod tests {
         );
         inserted_script("https://cdn.example/ok.js", "load");
         inserted_script("https://cdn.example/missing.js", "error");
+        dynamic_import_failed("./gone.js", "https://cdn.example/gone.js", "not found");
+        dynamic_import_failed("bare", "", "Failed to resolve module specifier 'bare'");
         let lines = sink.lock().unwrap().clone();
         let text = lines.join("\n");
         assert!(text.contains("console warn https://page.example/:2:5 hello-console"), "{text}");
@@ -346,6 +361,8 @@ mod tests {
         assert!(call.lines().nth(1).is_some_and(|line| line.contains("at https://page.example/:1:414")), "{call}");
         assert!(text.contains("inserted script load https://cdn.example/ok.js"), "{text}");
         assert!(text.contains("inserted script error https://cdn.example/missing.js"), "{text}");
+        assert!(text.contains("dynamic import ./gone.js -> https://cdn.example/gone.js: not found"), "{text}");
+        assert!(text.contains("dynamic import bare -> -: Failed to resolve module specifier 'bare'"), "{text}");
         assert!(!text.contains("chunk#console-log-unit"), "{text}");
 
         force_for_test(Some(false));
@@ -366,6 +383,7 @@ mod tests {
             None,
         );
         inserted_script("https://cdn.example/ok.js", "load");
+        dynamic_import_failed("./gone.js", "https://cdn.example/gone.js", "not found");
         alias("chunk#console-log-unit", "https://cdn.example/other.js");
         assert_eq!(sink.lock().unwrap().len(), before);
     }
@@ -481,5 +499,77 @@ throw new Error('boom-inline');
             .expect("load");
         let lines = sink.lock().unwrap().clone();
         assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    const IMPORTS: &str = r#"<!doctype html><html><body><script>
+import('/ok.js').then(function () {});
+import('/missing.js').catch(function () {});
+import('bare-specifier').catch(function () {});
+import('/throws.js').catch(function () {});
+import('/syntax.js').catch(function () {});
+</script></body></html>"#;
+
+    fn import_site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/ok.js" => (200, "text/javascript", vec![], "export const name = 'ok';".into()),
+            "/throws.js" => (200, "text/javascript", vec![], "throw new Error('eval-boom');".into()),
+            "/syntax.js" => (200, "text/javascript", vec![], "let = = 1;".into()),
+            "/missing.js" => (404, "text/plain", vec![], "missing".into()),
+            _ => (200, "text/html", vec![], IMPORTS.into()),
+        }
+    }
+
+    fn dynamic_lines(sink: &Mutex<Vec<String>>) -> Vec<String> {
+        sink.lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("dynamic import "))
+            .cloned()
+            .collect()
+    }
+
+    fn load_imports() -> Vec<String> {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        let server = serve(import_site);
+        let mut engine = Engine::new(EngineConfig { timer_horizon_ms: 0, ..EngineConfig::default() }).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+        dynamic_lines(&sink)
+    }
+
+    #[test]
+    fn logs_the_specifier_url_and_reason_of_a_failed_dynamic_import() {
+        let _reset = Reset;
+        force_for_test(Some(true));
+        let lines = load_imports();
+        let one = |specifier: &str| -> String {
+            let found: Vec<_> = lines.iter().filter(|line| line.starts_with(&format!("dynamic import {specifier} ->"))).cloned().collect();
+            assert_eq!(found.len(), 1, "{specifier} in {lines:#?}");
+            found[0].clone()
+        };
+        let missing = one("/missing.js");
+        assert!(missing.contains("-> http://") && missing.contains("/missing.js:"), "{missing}");
+        let bare = one("bare-specifier");
+        assert!(bare.starts_with("dynamic import bare-specifier -> -: "), "{bare}");
+        let thrown = one("/throws.js");
+        assert!(thrown.contains("/throws.js:") && thrown.contains("eval-boom"), "{thrown}");
+        let syntax = one("/syntax.js");
+        assert!(syntax.contains("/syntax.js: ") && syntax.split(": ").nth(1).is_some_and(|reason| !reason.is_empty()), "{syntax}");
+        assert!(lines.iter().all(|line| !line.contains("/ok.js")), "{lines:#?}");
+    }
+
+    #[test]
+    fn failed_dynamic_imports_stay_quiet_when_the_switch_is_unset() {
+        if std::env::var("HIWAVE_CONSOLE_LOG").ok().as_deref() == Some("1") {
+            return;
+        }
+        let _reset = Reset;
+        force_for_test(None);
+        let lines = load_imports();
+        assert!(lines.is_empty(), "{lines:#?}");
     }
 }

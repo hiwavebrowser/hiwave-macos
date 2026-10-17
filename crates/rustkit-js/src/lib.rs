@@ -14,7 +14,7 @@ mod import_map;
 #[cfg(feature = "boa")]
 mod module;
 #[cfg(feature = "boa")]
-pub use module::{FetchedModule, ModuleHandle, ModuleState};
+pub use module::{DynamicImportFailure, FetchedModule, ModuleHandle, ModuleState};
 pub use control::{ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
 mod executor;

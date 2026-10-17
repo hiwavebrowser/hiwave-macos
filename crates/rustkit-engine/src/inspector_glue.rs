@@ -154,9 +154,20 @@ pub(crate) fn drain_script_reports(bindings: &DomBindings, inspector: &Inspector
 /// The page's error reports and unimplemented members since the last
 /// drain: Inspector events only, never script log records (the board's
 /// counts stay what they were).
+fn drain_dynamic_imports(bindings: &DomBindings, mirror: bool) {
+    let failures = bindings.take_dynamic_import_failures();
+    if !mirror {
+        return;
+    }
+    for failure in failures {
+        crate::console_log::dynamic_import_failed(&failure.specifier, &failure.url, &failure.reason);
+    }
+}
+
 pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source: &str) {
     let mirror = crate::console_log::enabled();
     if !inspector.is_active() && !mirror {
+        drain_dynamic_imports(bindings, false);
         return;
     }
     drain_errors(bindings, inspector, source);
@@ -173,6 +184,7 @@ pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source:
 pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source: &str) {
     let mirror = crate::console_log::enabled();
     let listening = inspector.is_active();
+    drain_dynamic_imports(bindings, mirror);
     if !listening && !mirror {
         return;
     }
