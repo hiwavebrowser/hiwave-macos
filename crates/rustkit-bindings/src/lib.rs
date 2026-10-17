@@ -791,10 +791,12 @@ impl DomBindings {
     }
 
     /// The external classic scripts script inserted since the last call, as
-    /// (the element's raw NodeId, absolute URL), oldest first. The engine
-    /// fetches each and runs it as that element's script
+    /// (the element's raw NodeId, absolute URL, whether it is in the
+    /// in-order list), oldest first. In-order means `async` was set false.
+    /// Anything else runs when its fetch finishes. The engine fetches each
+    /// and runs it as that element's script
     /// ([`Self::set_current_script`], then [`Self::fire_script_event`]).
-    pub fn take_inserted_scripts(&self) -> Vec<(usize, String)> {
+    pub fn take_inserted_scripts(&self) -> Vec<(usize, String, bool)> {
         self.dom_host.borrow_mut().take_inserted_scripts()
     }
 
@@ -1730,11 +1732,15 @@ impl DomBindings {
         self.runtime.borrow_mut().poll_module(handle)
     }
 
-    /// Set `document.readyState` (`loading` / `interactive` / `complete`).
+    /// Set `document.readyState` (`loading` / `interactive` / `complete`)
+    /// and fire `readystatechange` on the document. That is the spec's
+    /// readiness update: the event comes before `DOMContentLoaded` and
+    /// before `window` `load`.
     pub fn set_ready_state(&self, state: &str) -> Result<(), BindingError> {
-        self.runtime
-            .borrow_mut()
-            .evaluate_script(&format!("document.readyState = {:?};", state))?;
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.readyState = {:?}; window.__rustkit_fire('document', 'readystatechange');",
+            state
+        ))?;
         Ok(())
     }
 

@@ -222,6 +222,9 @@ enum UserEvent {
     DecayTick,
     // The stall log's ping (window_stall.rs); only sent with HIWAVE_STALL_LOG=1
     WindowThreadPing,
+    // An inserted script's fetch finished. The event only wakes the loop;
+    // MainEventsCleared runs the script on the live turn.
+    LiveTurn,
     // Focus mode events
     EnterFocusMode,
     ExitFocusMode,
@@ -1209,6 +1212,15 @@ fn main() {
         
         let rustkit_view = RustKitView::with_shield_counter(&window, bounds, Some(blocked_counter))
             .expect("Failed to create RustKit view");
+        // An inserted script's fetch finishes off this thread. Posting
+        // here wakes `MainEventsCleared`, which runs the script. The loop
+        // does not poll for it.
+        let wake_proxy = Arc::new(Mutex::new(proxy.clone()));
+        rustkit_engine::set_live_wake(Arc::new(move || {
+            if let Ok(proxy) = wake_proxy.lock() {
+                let _ = proxy.send_event(UserEvent::LiveTurn);
+            }
+        }));
         rustkit_view.load_html_internal(ABOUT_HTML)
             .expect("Failed to load initial HTML");
         
@@ -4153,6 +4165,9 @@ fn main() {
                         if let Some((answered, clock)) = stall_log.as_ref() {
                             answered.now(clock);
                         }
+                    }
+                    UserEvent::LiveTurn => {
+                        // MainEventsCleared follows and runs the live turn.
                     }
                     UserEvent::DecayTick => {
                         // Get decay settings and calculate decay levels for all tabs
