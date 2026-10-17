@@ -400,6 +400,7 @@ impl JsRuntime {
                 }
                 return ModuleState::Failed(message);
             }
+            self.context.reset_recursion_max();
             let evaluation = match module.evaluate(&mut self.context) {
                 Ok(p) => {
                     self.rejections.forget(&JsObject::from(p.clone()));
