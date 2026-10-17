@@ -284,6 +284,10 @@ mod inspector_glue;
 mod relayout_cause;
 mod presenter;
 pub use presenter::FrameCommit;
+mod page_protocol;
+pub use page_protocol::{
+    connect, LoadState, PageCmd, PageEndpoint, PageEvent, PageHandle, PageInput,
+};
 mod wgate;
 pub use wgate::InputMark;
 #[cfg(test)]
@@ -11168,6 +11172,12 @@ impl Engine {
             view.control.clone(),
             view.nav_signal.clone(),
         ))
+    }
+
+    /// The view's control block. A [`PageHandle`] holds one so a later
+    /// content thread can cancel and interrupt without owning the engine.
+    pub fn view_control(&self, id: EngineViewId) -> Option<Arc<rustkit_js::ViewControl>> {
+        self.views.get(&id).map(|view| Arc::clone(&view.control))
     }
 
     /// The view's newest navigation id; 0 before its first navigation.

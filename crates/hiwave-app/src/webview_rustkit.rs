@@ -7,7 +7,9 @@
 use super::shield_adapter::create_shield_interceptor_with_counter;
 use super::webview::IWebContent;
 use hiwave_core::{HiWaveError, HiWaveResult};
-use rustkit_engine::{Engine, EngineBuilder, EngineEvent, EngineViewId};
+use rustkit_engine::{
+    connect, EngineBuilder, EngineViewId, PageCmd, PageEndpoint, PageHandle, PageInput,
+};
 use rustkit_viewhost::Bounds;
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::AtomicU64;
@@ -15,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tao::window::Window;
 use tao::rwh_06::HasWindowHandle;
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 use url::Url;
 
@@ -30,13 +32,20 @@ const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
 
 /// A RustKit-based WebView that implements IWebContent.
 ///
+/// The window talks to the page through a [`PageHandle`]: commands go in,
+/// events and frame commits come out. Both ends are drained on this thread,
+/// so a load, an input and a frame do what they did when the view held the
+/// engine directly.
+///
 /// # Thread Safety
 ///
 /// This type is NOT Send or Sync. All operations must be performed on the main thread.
 pub struct RustKitView {
-    /// The engine managing this view.
-    engine: RefCell<Engine>,
-    /// The view ID within the engine.
+    /// Commands in, events out. Applied by [`Self::submit`] on this thread.
+    handle: PageHandle,
+    /// Owns the engine and applies the handle's commands.
+    endpoint: RefCell<PageEndpoint>,
+    /// The view ID within the engine. `None` after [`PageCmd::Close`].
     view_id: Option<EngineViewId>,
     /// Current URL (cached).
     current_url: RefCell<Option<String>>,
@@ -48,8 +57,6 @@ pub struct RustKitView {
     visible: RefCell<bool>,
     /// Loading state.
     loading: RefCell<bool>,
-    /// Event receiver for engine events.
-    event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
     /// Counter for blocked requests (shared with shield).
     #[allow(dead_code)]
     blocked_counter: Option<Arc<AtomicU64>>,
@@ -159,25 +166,25 @@ impl RustKitView {
             .build()
             .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
 
-        // Take event receiver for processing events
-        let event_rx = engine.take_event_receiver();
-
-        // Create view
+        // Create view, then hand the engine to the page endpoint. The
+        // endpoint takes the event receiver; the handle is what this view
+        // keeps.
         let view_id = engine
             .create_view(raw_handle, bounds)
             .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
+        let (handle, endpoint) = connect(engine, view_id);
 
         info!(?view_id, "RustKit view created");
 
         Ok(Self {
-            engine: RefCell::new(engine),
+            handle,
+            endpoint: RefCell::new(endpoint),
             view_id: Some(view_id),
             current_url: RefCell::new(None),
             current_title: RefCell::new(None),
             zoom_level: RefCell::new(1.0),
             visible: RefCell::new(true),
             loading: RefCell::new(false),
-            event_rx,
             blocked_counter: counter_clone,
             history: RefCell::new(Vec::new()),
             history_index: RefCell::new(0),
@@ -191,6 +198,26 @@ impl RustKitView {
         })
     }
 
+    /// Queue `cmd` and apply it on this thread. Events are taken and
+    /// dropped: `current_title` and `loading` stay as they were when the
+    /// view held the engine and never read its events.
+    fn submit(&self, cmd: PageCmd) {
+        if self.view_id.is_none() {
+            return;
+        }
+        self.handle.send(cmd);
+        self.endpoint.borrow_mut().drain(self.live_runtime.as_ref());
+        let _ = self.handle.drain_events();
+    }
+
+    /// Send a command that answers on a oneshot. The answer is ready when
+    /// this returns, because [`Self::submit`] drains on this thread.
+    fn ask<T>(&self, make: impl FnOnce(oneshot::Sender<T>) -> PageCmd) -> Option<T> {
+        let (tx, mut rx) = oneshot::channel();
+        self.submit(make(tx));
+        rx.try_recv().ok()
+    }
+
     /// One turn of the live loop for the page (call this in the event
     /// loop): run the timers that came due since the last turn, answer the
     /// page's network requests, and lay out what they changed.
@@ -202,8 +229,8 @@ impl RustKitView {
     /// ran a page's timers or delivered a fetch, so late content never
     /// showed and a `setTimeout` set by a click never fired (Z lane I0).
     pub fn process_events(&self) -> Option<Duration> {
-        let view_id = self.view_id?;
-        let runtime = self.live_runtime.as_ref()?;
+        self.view_id?;
+        self.live_runtime.as_ref()?;
         let started = Instant::now();
         // Whole milliseconds only; the remainder stays on the clock for the
         // next turn, so frequent turns do not slow the page's time.
@@ -211,8 +238,9 @@ impl RustKitView {
         self.live_clock
             .set(self.live_clock.get() + Duration::from_millis(elapsed_ms));
 
-        let mut engine = self.engine.borrow_mut();
-        let turn = runtime.block_on(engine.pump_live(view_id, elapsed_ms));
+        let turn = self
+            .ask(|reply| PageCmd::PumpLive { elapsed_ms, reply })
+            .unwrap_or_default();
         if turn.timers_ran > 0 || turn.requests > 0 {
             debug!(?turn, "Live turn");
         }
@@ -237,19 +265,10 @@ impl RustKitView {
     /// drawn again once it is a second old. `HIWAVE_RENDER_EVERY_WAKE=1`
     /// is the old behaviour, for telling a stale frame from a wrong one.
     pub fn render(&self) {
-        let mut engine = self.engine.borrow_mut();
         // The live turn lays out a resized view; without a live runtime
-        // there is no turn, so the frame does it.
-        if let Some(view_id) = self.view_id {
-            if let Err(e) = engine.flush_pending_resize(view_id) {
-                debug!(error = %e, "layout after a resize failed");
-            }
-        }
-        if render_every_wake() {
-            engine.render_all_views();
-        } else {
-            engine.render_changed_views();
-        }
+        // there is no turn, so the frame does it (`flush_pending_resize`
+        // inside [`PageCmd::Render`]).
+        self.submit(PageCmd::Render { every: render_every_wake() });
     }
 
     /// Go back in this view's navigation history.
@@ -305,18 +324,12 @@ impl RustKitView {
     /// sequence number `seq` (W-gate: input-to-present latency). Called
     /// before the event is delivered.
     pub fn note_input(&self, at: Instant, seq: u64) {
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            engine.note_input(view_id, rustkit_engine::InputMark { at, seq });
-        }
+        self.submit(PageCmd::NoteInput { at, seq });
     }
 
     /// Route OS keyboard delivery to the content view (first responder).
     pub fn grab_keyboard(&self) {
-        let engine = self.engine.borrow();
-        if let Some(view_id) = self.view_id {
-            engine.grab_keyboard(view_id);
-        }
+        self.submit(PageCmd::GrabKeyboard);
     }
 
     /// Deliver a key to the focused form control, if any.
@@ -331,18 +344,28 @@ impl RustKitView {
         shift: bool,
         alt: bool,
     ) -> bool {
-        let mut engine = self.engine.borrow_mut();
-        self.view_id
-            .map(|view_id| engine.handle_text_key(view_id, key_code, key, ctrl, shift, alt))
-            .unwrap_or(false)
+        self.ask(|reply| {
+            PageCmd::Input(PageInput::TextKey {
+                key_code,
+                key: key.to_string(),
+                ctrl,
+                shift,
+                alt,
+                reply,
+            })
+        })
+        .unwrap_or(false)
     }
 
     /// A key was released: the page hears `keyup`.
     pub fn handle_key_up(&self, key_code: u32, key: &str, ctrl: bool, shift: bool, alt: bool) {
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            engine.handle_key_up(view_id, key_code, key, ctrl, shift, alt);
-        }
+        self.submit(PageCmd::Input(PageInput::KeyUp {
+            key_code,
+            key: key.to_string(),
+            ctrl,
+            shift,
+            alt,
+        }));
     }
 
     /// Enter in the focused field: the page hears `keydown` and `submit`,
@@ -350,9 +373,8 @@ impl RustKitView {
     /// when there is no form, a listener cancelled, or the form is not a
     /// GET.
     pub fn form_submit_url(&self) -> Option<String> {
-        let mut engine = self.engine.borrow_mut();
-        self.view_id
-            .and_then(|view_id| engine.submit_focused_form(view_id))
+        self.ask(|reply| PageCmd::Input(PageInput::FormSubmit { reply }))
+            .flatten()
     }
 
     /// Where the page's own script asked to go since the last call
@@ -361,83 +383,60 @@ impl RustKitView {
     /// A reload, `location.replace()` or a meta refresh replaces the
     /// current history entry when it is loaded, as in Chrome.
     pub fn take_script_navigation(&self) -> Option<String> {
-        let mut engine = self.engine.borrow_mut();
-        let (url, replace) = self
-            .view_id
-            .and_then(|view_id| engine.take_script_navigation_with_replace(view_id))?;
+        let (url, replace) = self.ask(|reply| PageCmd::Input(PageInput::TakeNavigation { reply }))??;
         self.replace_next.set(replace);
         Some(url)
     }
 
     /// Whether a content element currently holds focus.
     pub fn has_focused_element(&self) -> bool {
-        let engine = self.engine.borrow();
-        self.view_id
-            .and_then(|view_id| engine.focused_node(view_id))
-            .is_some()
+        self.ask(|reply| PageCmd::Input(PageInput::HasFocus { reply }))
+            .unwrap_or(false)
     }
 
     /// Rebuild layout and repaint after an edit changed a control's value.
     pub fn relayout(&self) {
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            if let Err(e) = engine.relayout_for(view_id, rustkit_engine::RelayoutCause::Input) {
-                debug!(error = %e, "relayout after edit failed");
-            }
-        }
+        self.submit(PageCmd::Relayout);
     }
 
     /// Focus whatever focusable element sits at these viewport coordinates,
     /// clearing focus when nothing focusable is there. Returns the focused
     /// element's tag name.
     pub fn focus_at_point(&self, x: f32, y: f32) -> Option<String> {
-        let mut engine = self.engine.borrow_mut();
-        self.view_id
-            .and_then(|view_id| engine.focus_at_point(view_id, x, y))
+        self.ask(|reply| PageCmd::Input(PageInput::FocusAt { x, y, reply }))
+            .flatten()
     }
 
     /// Deliver a mouse press at viewport coordinates to the page
     /// (`mousedown`).
     pub fn mouse_down_at_point(&self, x: f32, y: f32) {
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            engine.mouse_down_at_point(view_id, x, y);
-        }
+        self.submit(PageCmd::Input(PageInput::MouseDown { x, y }));
     }
 
     /// Deliver a pointer move to viewport coordinates to the page (the
     /// over/out/enter/leave events when the element under it changed, then
     /// `pointermove` and `mousemove`).
     pub fn mouse_move_at_point(&self, x: f32, y: f32) {
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            engine.mouse_move_at_point(view_id, x, y);
-        }
+        self.submit(PageCmd::Input(PageInput::MouseMove { x, y }));
     }
 
     /// Tell the page the pointer left the view.
     pub fn mouse_leave(&self) {
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            engine.mouse_leave(view_id);
-        }
+        self.submit(PageCmd::Input(PageInput::MouseLeave));
     }
 
     /// Deliver a mouse release at viewport coordinates to the page
     /// (`mouseup`, `click`), then report the click's default actions: what
     /// it focused and the link to follow unless a listener cancelled it.
     pub fn click_at_point(&self, x: f32, y: f32) -> rustkit_engine::ClickOutcome {
-        let mut engine = self.engine.borrow_mut();
-        self.view_id
-            .map(|view_id| engine.click_at_point(view_id, x, y))
+        self.ask(|reply| PageCmd::Input(PageInput::Click { x, y, reply }))
             .unwrap_or_default()
     }
 
     /// Resolve a click at viewport coordinates to a link URL, if any.
     pub fn link_at_point(&self, x: f32, y: f32) -> Option<String> {
-        let engine = self.engine.borrow();
-        self.view_id
-            .and_then(|view_id| engine.link_at_point(view_id, x, y))
+        self.ask(|reply| PageCmd::Input(PageInput::LinkAt { x, y, reply }))
+            .flatten()
     }
 
     /// Scroll the view by a wheel delta in physical pixels.
@@ -446,27 +445,31 @@ impl RustKitView {
     /// Wheel events that reach the tao window loop are exactly the ones the
     /// UI-frame WebView did not consume, i.e. the pointer was over content.
     pub fn scroll_by(&self, delta_x: f32, delta_y: f32) -> bool {
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            match engine.scroll_view(view_id, delta_x, delta_y) {
-                Ok(changed) => changed,
-                Err(e) => {
-                    debug!(error = %e, "scroll_by failed");
-                    false
-                }
-            }
-        } else {
-            false
-        }
+        self.ask(|reply| {
+            PageCmd::Input(PageInput::Scroll {
+                dx: delta_x,
+                dy: delta_y,
+                reply,
+            })
+        })
+        .unwrap_or(false)
     }
 
     /// Load HTML content directly.
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            engine
-                .load_html(view_id, html)
-                .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
+        if self.view_id.is_some() {
+            match self.ask(|reply| PageCmd::LoadHtml {
+                html: html.to_string(),
+                reply,
+            }) {
+                Some(Ok(())) => {}
+                Some(Err(e)) => return Err(hiwave_core::HiWaveError::WebView(e)),
+                None => {
+                    return Err(hiwave_core::HiWaveError::WebView(
+                        "page did not answer LoadHtml".to_string(),
+                    ))
+                }
+            }
         }
         self.live_clock.set(Instant::now());
         Ok(())
@@ -479,13 +482,21 @@ impl RustKitView {
     /// many sizes a drag delivered since the last one (H9: every size laid
     /// the page out in full before the next was read).
     pub fn set_bounds_internal(&self, bounds: Bounds) -> HiWaveResult<()> {
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            engine
-                .set_view_bounds(view_id, bounds)
-                .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
+        if self.view_id.is_none() {
+            return Ok(());
         }
-        Ok(())
+        let scale = *self.zoom_level.borrow();
+        match self.ask(|reply| PageCmd::Resize {
+            bounds,
+            scale,
+            reply,
+        }) {
+            Some(Ok(())) => Ok(()),
+            Some(Err(e)) => Err(hiwave_core::HiWaveError::WebView(e)),
+            None => Err(hiwave_core::HiWaveError::WebView(
+                "page did not answer Resize".to_string(),
+            )),
+        }
     }
 
     /// Get the current title.
@@ -565,26 +576,11 @@ impl RustKitView {
             }
         };
 
-        // Create a single-threaded tokio runtime for this operation
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                error!(error = %e, "Failed to create runtime");
-                return;
-            }
-        };
-
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            rt.block_on(async {
-                if let Err(e) = engine.load_url(view_id, parsed).await {
-                    error!(error = %e, "Failed to load URL");
-                }
-            });
-        }
+        // The endpoint builds the runtime and calls `load_url`, as this
+        // method did. `nav_id` is this handle's count; the engine still
+        // assigns the id its cancel path reads.
+        let nav_id = self.handle.last_sent_nav_id().saturating_add(1);
+        self.submit(PageCmd::Navigate { url: parsed, nav_id });
         // The new page's clock starts now: the time the load took is not
         // time its timers have waited.
         self.live_clock.set(Instant::now());
@@ -592,28 +588,25 @@ impl RustKitView {
 
     /// Execute JavaScript synchronously.
     pub fn execute_script_sync(&self, script: &str) -> Option<String> {
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            match engine.execute_script(view_id, script) {
-                Ok(result) => Some(result),
-                Err(e) => {
-                    debug!(error = %e, "Script execution failed");
-                    None
-                }
+        match self.ask(|reply| PageCmd::Eval {
+            script: script.to_string(),
+            reply,
+        }) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(e)) => {
+                debug!(error = %e, "Script execution failed");
+                None
             }
-        } else {
-            None
+            None => None,
         }
     }
 }
 
 impl Drop for RustKitView {
     fn drop(&mut self) {
-        if let Some(view_id) = self.view_id {
-            let mut engine = self.engine.borrow_mut();
-            if let Err(e) = engine.destroy_view(view_id) {
-                warn!(error = %e, "Failed to destroy RustKit view");
-            }
+        if self.view_id.is_some() {
+            self.submit(PageCmd::Close);
+            self.view_id = None;
         }
     }
 }
