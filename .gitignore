@@ -40,12 +40,13 @@ nul
 .ai/logs/
 .ai/*
 
-# Tools (ignore all except parity_oracle, real_window, element_diff and inspector)
+# Tools (ignore all except parity_oracle, real_window, element_diff, inspector and replay)
 tools/*
 !tools/parity_oracle/
 !tools/real_window/
 !tools/element_diff/
 !tools/inspector/
+!tools/replay/
 tools/element_diff/out/
 tools/inspector/out/
 tools/real_window/out/
