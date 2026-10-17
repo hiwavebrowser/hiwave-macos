@@ -866,8 +866,9 @@ pub struct RequestGuard {
     started: Instant,
     dropped_as: FailureStage,
     dropped_reason: &'static str,
-    /// Dropped at or past this deadline, it ran out of a budget.
-    budget: Option<(Instant, &'static str)>,
+    /// Dropped at or past this deadline, it ran out of a budget: the stage
+    /// and the reason to record.
+    budget: Option<(Instant, FailureStage, &'static str)>,
     done: bool,
 }
 
@@ -888,7 +889,15 @@ impl RequestGuard {
     /// fetch ran out), it is recorded `over_budget` with `reason`; dropped
     /// before it (a navigation, a closed view), at the drop stage.
     pub fn over_budget_at(mut self, deadline: tokio::time::Instant, reason: &'static str) -> Self {
-        self.budget = Some((deadline.into_std(), reason));
+        self.budget = Some((deadline.into_std(), FailureStage::OverBudget, reason));
+        self
+    }
+
+    /// Dropped unanswered at or after `deadline`, it is recorded `timeout`
+    /// with `reason`. A network cap, not the script budget: the script is
+    /// not interrupted. Dropped before it, at the drop stage.
+    pub fn timeout_at(mut self, deadline: tokio::time::Instant, reason: &'static str) -> Self {
+        self.budget = Some((deadline.into_std(), FailureStage::Timeout, reason));
         self
     }
 
@@ -937,8 +946,7 @@ impl Drop for RequestGuard {
             return;
         }
         let (stage, reason) = match self.budget {
-            Some((deadline, reason)) if Instant::now() >= deadline => (FailureStage::OverBudget, reason),
-            _ => (self.dropped_as, self.dropped_reason),
+            Some((deadline, stage, reason)) if Instant::now() >= deadline => (stage, reason),            _ => (self.dropped_as, self.dropped_reason),
         };
         let event = InspectorEvent::Failure {
             id: self.id,
@@ -1012,7 +1020,7 @@ pub fn answer(guard: Option<RequestGuard>, response: &rustkit_net::Response, dec
 }
 
 /// Record a module fetch through the page's policy: its source arrived,
-/// the policy refused it, or the script budget ran out (`Err(Elapsed)`).
+/// the policy refused it, or the network cap ran out (`Err(Elapsed)`).
 pub fn answer_module(
     guard: Option<RequestGuard>,
     fetched: &Result<Result<rustkit_net::policy::ModuleSource, rustkit_net::policy::Denial>, tokio::time::error::Elapsed>,
@@ -1032,7 +1040,7 @@ pub fn answer_module(
             let (stage, reason) = denial_stage(denial);
             guard.fail(stage, reason);
         }
-        Err(_) => guard.fail(FailureStage::OverBudget, "script budget spent"),
+        Err(_) => guard.fail(FailureStage::Timeout, "timed out"),
     }
 }
 
