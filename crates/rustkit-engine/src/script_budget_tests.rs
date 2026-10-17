@@ -323,6 +323,113 @@ STICKY_CANARY();
     );
 }
 
+/// Three external bundles arrive at staggered times. An earlier script's
+/// async function awaits a promise the last bundle resolves, and a
+/// reaction handler runs after that resume. The last bundle then burns
+/// what is left of the load budget. The drain that resumes the async
+/// function must not reject it: a grace turn whose host deadline was
+/// already past used to, and the page logged "async function was
+/// interrupted" with no `vm.check_interrupt` line.
+#[test]
+fn a_later_bundle_resolves_a_pending_async_without_an_interrupt() {
+    let server = serve(vec![
+        (
+            "/",
+            Duration::ZERO,
+            "text/html",
+            r#"<html><body><script>
+window.canary = 'pending';
+window.canaryMsg = '';
+window.reaction = 'none';
+window.reactionMsg = '';
+window.saw = '';
+window.gate = new Promise(function (resolve) { window.release = resolve; });
+async function STICKY_CANARY() {
+  try {
+    await window.gate;
+    document.createElement('span');
+    window.canary = 'ok';
+  } catch (e) {
+    window.canary = 'err';
+    window.canaryMsg = String(e);
+  }
+}
+STICKY_CANARY();
+window.gate.then(function () {
+  try {
+    document.createElement('div');
+    window.reaction = 'ran';
+  } catch (e) {
+    window.reaction = 'err';
+    window.reactionMsg = String(e);
+  }
+});
+</script>
+<script src="/a.js"></script>
+<script src="/b.js"></script>
+<script src="/c.js"></script>
+</body></html>"#
+                .into(),
+        ),
+        (
+            "/a.js",
+            Duration::from_millis(40),
+            "text/javascript",
+            "window.saw += 'a';".into(),
+        ),
+        (
+            "/b.js",
+            Duration::from_millis(90),
+            "text/javascript",
+            "window.saw += 'b';".into(),
+        ),
+        (
+            "/c.js",
+            Duration::from_millis(140),
+            "text/javascript",
+            r#"window.saw += 'c';
+window.release();
+var t = Date.now();
+while (Date.now() - t < 40) {}
+document.createElement('burn');"#
+                .into(),
+        ),
+    ]);
+    // The earlier scripts have the whole budget. The resolving bundle
+    // starts with a few milliseconds, then spins past them, so its
+    // microtask drain is the one that used to run under a spent deadline.
+    nav_cancel::LOAD_PHASE_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(|phase| {
+            if phase == "script:3" {
+                test_leave_script_budget(Duration::from_millis(5));
+            }
+        }));
+    });
+    struct ClearPhase;
+    impl Drop for ClearPhase {
+        fn drop(&mut self) {
+            nav_cancel::LOAD_PHASE_HOOK.with(|hook| *hook.borrow_mut() = None);
+        }
+    }
+    let _clear = ClearPhase;
+    let (mut engine, view) = load(config(2_000), &server);
+    let got = engine
+        .execute_script(
+            view,
+            "window.saw + '|' + window.canary + '|' + window.canaryMsg + '|' + window.reaction + '|' + window.reactionMsg",
+        )
+        .unwrap();
+    let log = format!("{:#?}", engine.script_log(view));
+    assert!(
+        !got.contains("interrupted") && !log.contains("interrupted"),
+        "got={got}\n{log}"
+    );
+    assert!(
+        got.starts_with("String(\"abc|ok||ran|"),
+        "the later bundle should resume the async function and its reaction\n{got}\n{log}"
+    );
+}
+
 /// The chrome UI is another turn on the thread that is loading the page.
 /// A slow content fetch must still run it, and must not charge it to the
 /// content script budget or leave the content watchdog armed.
