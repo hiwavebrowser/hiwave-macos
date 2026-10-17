@@ -238,3 +238,151 @@ STICKY_CANARY();
     let rendered = format!("{log:#?}");
     assert!(!rendered.contains("interrupted"), "{rendered}");
 }
+
+/// The passing test above delivers the fetch while the budget still has
+/// time. Live reddit spends that budget on other scripts, and the canary's
+/// fetch comes back as the page-script phase is ending: one microsecond
+/// left. Delivering into that turn either never resumes the async function
+/// (it stays `pending`, so the feed stays empty) or resumes it under a
+/// watchdog that stops it at once ("async function was interrupted").
+/// The answer has to wait for a later turn. A resize after that is the
+/// live-turn arm (`arm_live_turn`).
+#[test]
+fn a_fetch_delivered_as_the_budget_runs_out_is_not_interrupted() {
+    let server = serve(vec![
+        (
+            "/",
+            Duration::ZERO,
+            "text/html",
+            r#"<html><body><script>
+window.canary = 'pending';
+window.canaryMsg = '';
+async function STICKY_CANARY() {
+  try {
+    var response = await fetch('/slow');
+    window.canary = 'ok ' + response.status;
+  } catch (e) {
+    window.canary = 'err';
+    window.canaryMsg = String(e);
+  }
+}
+STICKY_CANARY();
+</script></body></html>"#
+                .into(),
+        ),
+        (
+            "/slow",
+            Duration::from_millis(40),
+            "text/plain",
+            "ok".into(),
+        ),
+    ]);
+    // At the network step the inline script has finished and the budget
+    // has one microsecond left: the live page, whose other scripts used
+    // the budget, not the test above.
+    nav_cancel::LOAD_PHASE_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(|phase| {
+            if phase == "network" {
+                test_leave_script_budget(Duration::from_micros(1));
+            }
+        }));
+    });
+    struct ClearPhase;
+    impl Drop for ClearPhase {
+        fn drop(&mut self) {
+            nav_cancel::LOAD_PHASE_HOOK.with(|hook| *hook.borrow_mut() = None);
+        }
+    }
+    let _clear = ClearPhase;
+    let (mut engine, view) = load(config(200), &server);
+    let after_load = engine
+        .execute_script(view, "window.canary + '|' + window.canaryMsg")
+        .unwrap();
+    runtime().block_on(engine.pump_live(view, 1_000));
+    let _ = engine.resize_view(
+        view,
+        Bounds {
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 240,
+        },
+    );
+    runtime().block_on(engine.pump_live(view, 0));
+    let after_turn = engine
+        .execute_script(view, "window.canary + '|' + window.canaryMsg")
+        .unwrap();
+    let log = format!("{:#?}", engine.script_log(view));
+    assert!(
+        !after_load.contains("interrupted") && !after_turn.contains("interrupted") && !log.contains("interrupted"),
+        "load={after_load}\nturn={after_turn}\n{log}"
+    );
+    assert!(
+        after_turn.contains("ok 200"),
+        "the fetch should arrive on a turn that still has time\nload={after_load}\nturn={after_turn}\n{log}"
+    );
+}
+
+/// The chrome UI is another turn on the thread that is loading the page.
+/// A slow content fetch must still run it, and must not charge it to the
+/// content script budget or leave the content watchdog armed.
+#[test]
+fn the_chrome_ui_turn_runs_during_a_slow_content_load() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let clear = Arc::new(AtomicUsize::new(0));
+    let suspended = Arc::new(AtomicUsize::new(0));
+    let (hits_h, clear_h, suspended_h) = (hits.clone(), clear.clone(), suspended.clone());
+    set_chrome_ui_turn(Some(Box::new(move || {
+        hits_h.fetch_add(1, Ordering::SeqCst);
+        if chrome_ui_turn_is_clear() {
+            clear_h.fetch_add(1, Ordering::SeqCst);
+        }
+        if chrome_ui_turn_suspended_content_budget() {
+            suspended_h.fetch_add(1, Ordering::SeqCst);
+        }
+    })));
+    struct ClearHook;
+    impl Drop for ClearHook {
+        fn drop(&mut self) {
+            set_chrome_ui_turn(None);
+        }
+    }
+    let _clear = ClearHook;
+    let server = serve(vec![
+        (
+            "/",
+            Duration::ZERO,
+            "text/html",
+            r#"<html><body><script>
+fetch('/slow').then(function () { window.fetched = true; });
+</script></body></html>"#
+                .into(),
+        ),
+        (
+            "/slow",
+            Duration::from_millis(180),
+            "text/plain",
+            "ok".into(),
+        ),
+    ]);
+    let (mut engine, view) = load(config(1_000), &server);
+    assert!(
+        hits.load(Ordering::SeqCst) > 0,
+        "the chrome turn never ran while the content fetch was in flight"
+    );
+    assert_eq!(
+        clear.load(Ordering::SeqCst),
+        hits.load(Ordering::SeqCst),
+        "a chrome turn ran inside the content budget or watchdog turn"
+    );
+    assert!(
+        suspended.load(Ordering::SeqCst) > 0,
+        "the content script budget was not installed during the wait, so the turn was not the one a loading page skips"
+    );
+    assert_eq!(
+        engine.execute_script(view, "String(window.fetched)").unwrap(),
+        r#"String("true")"#
+    );
+}
