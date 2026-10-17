@@ -595,6 +595,16 @@ impl Context {
         &mut self.vm.runtime_limits
     }
 
+    /// Start a new per-script recursion high-water mark.
+    ///
+    /// HIWAVE PATCH (recursion). The frame count itself is not reset: it
+    /// returns to the dummy frame when a script ends, including on an
+    /// uncatchable stop.
+    #[inline]
+    pub fn reset_recursion_max(&mut self) {
+        self.vm.max_frame_depth.set(0);
+    }
+
     // HIWAVE PATCH (interrupt)
     /// Set the interrupt word: a value any thread may store to stop the
     /// script running on this context. It is read at every call and every
