@@ -15,6 +15,12 @@ use rustkit_js::{ErrorReport, LogLevel, ScriptPosition};
 use crate::inspector::{cap, MAX_MESSAGE_CHARS, MAX_STACK_CHARS};
 
 const ALIAS_CAP: usize = 1024;
+/// Characters of script source kept on each side of a throw's column.
+const CONTEXT_CHARS: usize = 160;
+/// The quoted source, including the ellipsis, never longer than this.
+const SNIPPET_CAP: usize = 400;
+/// A callee expression longer than this keeps its tail (the property).
+const CALLEE_CAP: usize = 120;
 
 struct AliasMap {
     entries: VecDeque<(String, String)>,
@@ -109,7 +115,102 @@ pub(crate) fn console_message(level: LogLevel, message: &str, at: Option<&Script
     emit(format!("console {level} {where_at} {message}"));
 }
 
-pub(crate) fn page_error(report: &ErrorReport, script: &str) {
+/// Source around a throw, and the callee expression when the column sits
+/// on a call's `(`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceWindow {
+    pub snippet: String,
+    pub callee: Option<String>,
+}
+
+/// About [`CONTEXT_CHARS`] characters either side of `line`:`column` in
+/// `source`, flattened to one line and capped. `column` is 1-based. The
+/// callee is the expression immediately before a `(` at that column
+/// (`box.missing(`), which is the name Boa places a call on.
+pub(crate) fn excerpt(source: &str, line: u32, column: u32) -> Option<SourceWindow> {
+    if line == 0 || column == 0 {
+        return None;
+    }
+    let body = source.split_inclusive('\n').nth(line as usize - 1)?;
+    let body = body.trim_end_matches(['\n', '\r']);
+    let chars: Vec<char> = body.chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let col = (column as usize - 1).min(chars.len().saturating_sub(1));
+    let start = col.saturating_sub(CONTEXT_CHARS);
+    let end = (col + CONTEXT_CHARS).min(chars.len()).max(col + 1).min(chars.len());
+    let mut snippet: String = chars[start..end].iter().collect();
+    snippet = flatten(&snippet);
+    let mut shown = String::new();
+    if start > 0 {
+        shown.push('…');
+    }
+    shown.push_str(&snippet);
+    if end < chars.len() {
+        shown.push('…');
+    }
+    let snippet = cap_middle(&shown, SNIPPET_CAP);
+    let callee = callee_before(&chars, col);
+    Some(SourceWindow { snippet, callee })
+}
+
+fn flatten(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch == '\n' || ch == '\r' || ch == '\t' || ch.is_control() {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn cap_middle(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let skip = count.saturating_sub(keep) / 2;
+    let piece: String = text.chars().skip(skip).take(keep).collect();
+    format!("…{piece}")
+}
+
+fn callee_before(chars: &[char], col: usize) -> Option<String> {
+    if chars.get(col) != Some(&'(') {
+        return None;
+    }
+    let mut end = col;
+    while end > 0 && chars[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let mut start = end;
+    while start > 0 && is_callee_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let name: String = chars[start..end].iter().collect();
+    let name = name.trim_matches(|c| c == '.' || c == '?');
+    if name.is_empty() {
+        return None;
+    }
+    let count = name.chars().count();
+    if count <= CALLEE_CAP {
+        return Some(name.to_string());
+    }
+    let tail: String = name.chars().skip(count - CALLEE_CAP).collect();
+    Some(format!("…{tail}"))
+}
+
+fn is_callee_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '.' || ch == '?'
+}
+
+pub(crate) fn page_error(report: &ErrorReport, script: &str, window: Option<SourceWindow>) {
     if !enabled() {
         return;
     }
@@ -119,6 +220,13 @@ pub(crate) fn page_error(report: &ErrorReport, script: &str) {
     let (url, line, column) = report.frames.first().map(|frame| (resolve(&frame.path), frame.line, frame.column)).unwrap_or_else(
         || (resolve(report.module.as_deref().unwrap_or(script)), 0, 0),
     );
+    let around = match window {
+        Some(window) => {
+            let callee = window.callee.map(|name| format!(" callee {name}")).unwrap_or_default();
+            format!("{callee} source {}", window.snippet)
+        }
+        None => String::new(),
+    };
     let stack = if report.frames.is_empty() {
         String::new()
     } else {
@@ -130,7 +238,7 @@ pub(crate) fn page_error(report: &ErrorReport, script: &str) {
         let (stack, _) = cap(&lines.join("\n"), MAX_STACK_CHARS);
         format!("\n{stack}")
     };
-    emit(format!("{kind} {name}: {message} at {url}:{line}:{column}{stack}"));
+    emit(format!("{kind} {name}: {message} at {url}:{line}:{column}{around}{stack}"));
 }
 
 pub(crate) fn inserted_script(url: &str, event: &str) {
@@ -183,6 +291,7 @@ mod tests {
                 module: None,
             },
             "inline#console-log-unit",
+            None,
         );
         page_error(
             &ErrorReport {
@@ -196,6 +305,29 @@ mod tests {
                 module: None,
             },
             "inline#console-log-unit",
+            None,
+        );
+        let long = format!("{}; box.missing({});", "a".repeat(400), "b".repeat(400));
+        let open = long.find('(').unwrap() as u32 + 1;
+        let window = excerpt(&long, 1, open).expect("window");
+        assert_eq!(window.callee.as_deref(), Some("box.missing"));
+        assert!(window.snippet.contains("box.missing("), "{}", window.snippet);
+        assert!(window.snippet.starts_with('…') && window.snippet.ends_with('…'), "{}", window.snippet);
+        assert!(window.snippet.chars().count() <= 400, "{}", window.snippet.chars().count());
+        assert!(!window.snippet.contains('\n'), "{}", window.snippet);
+        page_error(
+            &ErrorReport {
+                value: "error",
+                name: Some("TypeError"),
+                message: Some("not a callable function".into()),
+                message_len: Some(22),
+                frames: vec![ScriptPosition { path: "inline#console-log-unit".into(), line: 1, column: open }],
+                located: true,
+                rejection: false,
+                module: None,
+            },
+            "inline#console-log-unit",
+            Some(window),
         );
         inserted_script("https://cdn.example/ok.js", "load");
         inserted_script("https://cdn.example/missing.js", "error");
@@ -206,6 +338,12 @@ mod tests {
         assert!(text.contains("uncaught Error: boom-inline at https://page.example/:4:1"), "{text}");
         assert!(text.contains("    at https://page.example/:4:1"), "{text}");
         assert!(text.contains("unhandled rejection Error: boom-reject at https://page.example/:3:1"), "{text}");
+        let call = lines.iter().find(|line| line.contains("not a callable")).expect("call");
+        let head = call.lines().next().expect("head");
+        assert!(head.contains("callee box.missing"), "{head}");
+        assert!(head.contains("source ") && head.contains("box.missing("), "{head}");
+        assert!(!head[head.find("source ").unwrap()..].contains('\n'));
+        assert!(call.lines().nth(1).is_some_and(|line| line.contains("at https://page.example/:1:414")), "{call}");
         assert!(text.contains("inserted script load https://cdn.example/ok.js"), "{text}");
         assert!(text.contains("inserted script error https://cdn.example/missing.js"), "{text}");
         assert!(!text.contains("chunk#console-log-unit"), "{text}");
@@ -225,6 +363,7 @@ mod tests {
                 module: None,
             },
             "inline#1",
+            None,
         );
         inserted_script("https://cdn.example/ok.js", "load");
         alias("chunk#console-log-unit", "https://cdn.example/other.js");
@@ -258,6 +397,8 @@ missing.src = '/missing.js';
 document.head.appendChild(missing);
 Promise.reject(new Error('boom-reject'));
 setTimeout(function () { throw new Error('boom-timer'); }, 10);
+var box = {};
+box.missing(1);
 </script>
 <script>
 throw new Error('boom-inline');
@@ -305,12 +446,18 @@ throw new Error('boom-inline');
         let inline = text.lines().find(|line| line.contains("boom-inline")).unwrap_or("");
         assert!(inline.contains(&page), "uncaught stack should name the page\n{inline}");
         assert!(inline.contains("at "), "{inline}");
+        assert!(inline.contains("source ") && inline.contains("throw new Error"), "{inline}");
+        assert!(!inline.contains('\n'), "{inline}");
         assert!(text.contains("inserted script load") && text.contains("/ok.js"), "{text}");
         assert!(text.contains("inserted script error") && text.contains("/missing.js"), "{text}");
         let chunk = text.lines().find(|line| line.contains("from-chunk")).unwrap_or("");
         assert!(chunk.contains("/ok.js"), "{chunk}");
         assert!(!chunk.contains("inserted#"), "{chunk}");
         assert!(text.contains("boom-timer"), "{text}");
+        let call = text.lines().find(|line| line.contains("not a callable")).unwrap_or("");
+        assert!(call.contains("callee box.missing"), "{call}\n{text}");
+        assert!(call.contains("source ") && call.contains("box.missing("), "{call}");
+        assert_eq!(call.lines().count(), 1, "{call}");
     }
 
     #[test]

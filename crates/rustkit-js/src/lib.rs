@@ -24,6 +24,7 @@ mod describe;
 mod rejections;
 #[cfg(feature = "boa")]
 mod diag;
+mod source_context;
 #[cfg(feature = "boa")]
 pub use diag::{standard_name, STANDARD_ERROR_NAMES};
 #[cfg(all(test, feature = "boa"))]
@@ -251,6 +252,9 @@ pub struct JsRuntime {
     /// never sees this object.
     #[cfg(feature = "boa")]
     host: boa_engine::JsObject,
+    /// Page script text, only while an embedder has asked to quote it in
+    /// an error log. See [`JsRuntime::set_capture_script_sources`].
+    sources: source_context::ScriptSources,
 }
 
 impl JsRuntime {
@@ -305,6 +309,7 @@ impl JsRuntime {
             diag,
             #[cfg(feature = "boa")]
             host,
+            sources: source_context::ScriptSources::default(),
         };
 
         // Set up built-in APIs
@@ -384,6 +389,18 @@ impl JsRuntime {
         }
         #[cfg(not(feature = "boa"))]
         let _ = (on, keep_text);
+    }
+
+    /// Keep the source of each named script and module so a later error can
+    /// quote the text around its position. Off by default, and turning it
+    /// off drops whatever was kept. The page cannot see this.
+    pub fn set_capture_script_sources(&mut self, on: bool) {
+        self.sources.set_enabled(on);
+    }
+
+    /// The source last evaluated as `path`, when capture is on.
+    pub fn script_source(&self, path: &str) -> Option<String> {
+        self.sources.get(path)
     }
 
     /// The page errors since the last call (with reports on), oldest first:
@@ -542,6 +559,7 @@ impl JsRuntime {
             let result = match path {
                 Some(path) => {
                     self.diag.know_path(path);
+                    self.sources.remember(path, source);
                     self.context
                         .eval(Source::from_bytes(source).with_path(std::path::Path::new(path)))
                 }
@@ -1306,6 +1324,20 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let err = runtime.evaluate_script_named("1;\n  null.x;", "inline#2").unwrap_err();
         assert!(err.to_string().contains("(inline#2:2:"), "{err}");
+    }
+
+    #[test]
+    fn script_source_is_kept_only_while_capture_is_on() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.evaluate_script_named("var box = {};\nbox.missing(1);\n", "inline#1").ok();
+        assert!(runtime.script_source("inline#1").is_none());
+        runtime.set_capture_script_sources(true);
+        runtime.evaluate_script_named("var box = {};\nbox.missing(1);\n", "inline#2").ok();
+        let kept = runtime.script_source("inline#2").expect("captured");
+        assert!(kept.contains("box.missing(1)"), "{kept}");
+        assert!(runtime.script_source("inline#1").is_none(), "scripts from before capture stay unstored");
+        runtime.set_capture_script_sources(false);
+        assert!(runtime.script_source("inline#2").is_none());
     }
 
     /// A thrown value that is not an error is described (`[object Object]`,

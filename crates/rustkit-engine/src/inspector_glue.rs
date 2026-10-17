@@ -60,6 +60,9 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
     }));
     let keep_text = if mirror { true } else { inspector.keeps_error_text() };
     let _ = bindings.set_error_details(true, keep_text);
+    // The mirror quotes the source around a throw. The Inspector does not,
+    // so the text is kept only while the mirror is on.
+    bindings.capture_script_sources(mirror);
 }
 
 /// Push `record` onto a script log. A page exception in it reaches the
@@ -175,7 +178,10 @@ pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source
     }
     for report in bindings.take_error_reports() {
         if mirror {
-            crate::console_log::page_error(&report, source);
+            let window = report.frames.first().and_then(|frame| {
+                bindings.script_source(&frame.path).and_then(|text| crate::console_log::excerpt(&text, frame.line, frame.column))
+            });
+            crate::console_log::page_error(&report, source, window);
         }
         if listening {
             script_error(inspector, &report, source);

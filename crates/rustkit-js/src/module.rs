@@ -221,6 +221,7 @@ impl JsRuntime {
             Some(module) => module,
             None => {
                 self.diag.know_path(url);
+                self.sources.remember(url, source);
                 let path = Path::new(url);
                 let parsed = Module::parse(Source::from_bytes(source).with_path(path), None, &mut self.context);
                 match parsed {
@@ -275,6 +276,10 @@ impl JsRuntime {
                     Some(module) => Ok(module),
                     None => {
                         self.diag.know_path(&fetched.final_url);
+                        self.sources.remember(&fetched.final_url, &fetched.source);
+                        if fetched.final_url != requested {
+                            self.sources.remember(requested, &fetched.source);
+                        }
                         let path = Path::new(fetched.final_url.as_str());
                         match Module::parse(
                             Source::from_bytes(fetched.source.as_str()).with_path(path),
