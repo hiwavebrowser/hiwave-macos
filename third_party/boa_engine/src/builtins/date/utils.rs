@@ -745,7 +745,10 @@ pub(super) fn pad_six(t: u32, output: &mut [u8; 6]) -> JsStr<'_> {
 /// Parse a date string according to the steps specified in [`Date.parse`][spec].
 ///
 /// We parse three different formats:
-/// - The [`Date Time String Format`][spec-format] specified in the spec: `YYYY-MM-DDTHH:mm:ss.sssZ`
+/// - The [`Date Time String Format`][spec-format] specified in the spec: `YYYY-MM-DDTHH:mm:ss.sssZ`.
+///   The fraction may be any number of digits (the first three are the
+///   milliseconds). The offset may be `Z`, `+HH:MM`, `+HHMM`, or `+HH`, and
+///   the date/time separator may be `T`, `t`, or a space.
 /// - The `toString` format: `Thu Jan 01 1970 00:00:00 GMT+0000`
 /// - The `toUTCString` format: `Thu, 01 Jan 1970 00:00:00 GMT`
 ///
@@ -958,30 +961,39 @@ impl<'a> DateParser<'a> {
     #[allow(clippy::as_conversions)]
     fn parse(&mut self) -> Option<i64> {
         self.parse_year()?;
-        match self.input.peek() {
-            Some(b'T') => return self.parse_time(),
-            None => return self.finish(),
-            _ => {}
+        if self.at_time_separator() {
+            return self.parse_time();
+        }
+        if self.input.peek().is_none() {
+            return self.finish();
         }
         self.next_expect(b'-')?;
         self.month = self.parse_n_ascii_digits::<2>()? as u32;
         if self.month < 1 || self.month > 12 {
             return None;
         }
-        match self.input.peek() {
-            Some(b'T') => return self.parse_time(),
-            None => return self.finish(),
-            _ => {}
+        if self.at_time_separator() {
+            return self.parse_time();
+        }
+        if self.input.peek().is_none() {
+            return self.finish();
         }
         self.next_expect(b'-')?;
         self.day = self.parse_n_ascii_digits::<2>()? as u32;
         if self.day < 1 || self.day > 31 {
             return None;
         }
-        match self.input.peek() {
-            Some(b'T') => self.parse_time(),
-            _ => self.finish(),
+        if self.at_time_separator() {
+            self.parse_time()
+        } else {
+            self.finish()
         }
+    }
+
+    /// `T`, `t`, or a space. The spec's separator is `T`; the other two are
+    /// the forms `Date.parse` accepts in browsers.
+    fn at_time_separator(&mut self) -> bool {
+        matches!(self.input.peek().copied(), Some(&b'T' | &b't' | &b' '))
     }
 
     #[allow(clippy::as_conversions)]
@@ -1003,7 +1015,10 @@ impl<'a> DateParser<'a> {
 
     #[allow(clippy::as_conversions)]
     fn parse_time(&mut self) -> Option<i64> {
-        self.next_expect(b'T')?;
+        match self.input.next().copied() {
+            Some(b'T' | b't' | b' ') => {}
+            _ => return None,
+        }
         self.hour = self.parse_n_ascii_digits::<2>()? as u32;
         if self.hour > 24 {
             return None;
@@ -1033,7 +1048,9 @@ impl<'a> DateParser<'a> {
                 return self.finish();
             }
         };
-        self.millisecond = self.parse_n_ascii_digits::<3>()? as u32;
+        // One or more fractional digits. The first three are the
+        // milliseconds; fewer are padded, the rest are truncated.
+        self.millisecond = self.parse_fractional_milliseconds()?;
         if self.input.peek().is_some() {
             self.parse_timezone()?;
             self.finish()
@@ -1042,21 +1059,47 @@ impl<'a> DateParser<'a> {
         }
     }
 
+    fn parse_fractional_milliseconds(&mut self) -> Option<u32> {
+        let mut digits = 0u32;
+        let mut ms = 0u32;
+        let mut scale = 100u32;
+        loop {
+            let Some(&c) = self.input.peek().copied() else {
+                break;
+            };
+            if !c.is_ascii_digit() {
+                break;
+            }
+            self.input.next();
+            digits += 1;
+            if digits <= 3 {
+                ms += u32::from(c - b'0') * scale;
+                scale /= 10;
+            }
+        }
+        if digits == 0 { None } else { Some(ms) }
+    }
+
     #[allow(clippy::as_conversions)]
     fn parse_timezone(&mut self) -> Option<()> {
-        match self.input.next() {
-            Some(b'Z') => return Some(()),
+        match self.input.next().copied() {
+            Some(b'Z' | b'z') => return Some(()),
             Some(sign @ (b'+' | b'-')) => {
-                let neg = *sign == b'-';
+                let neg = sign == b'-';
                 let offset_hour = self.parse_n_ascii_digits::<2>()? as i64;
                 if offset_hour > 23 {
                     return None;
                 }
                 self.offset = if neg { offset_hour } else { -offset_hour } * 60;
-                if self.input.peek().is_none() {
-                    return Some(());
+                // `+HH:MM`, `+HHMM`, or `+HH`.
+                match self.input.peek().copied() {
+                    None => return Some(()),
+                    Some(&b':') => {
+                        self.input.next();
+                    }
+                    Some(&c) if c.is_ascii_digit() => {}
+                    _ => return None,
                 }
-                self.next_expect(b':')?;
                 let offset_minute = self.parse_n_ascii_digits::<2>()? as i64;
                 if offset_minute > 59 {
                     return None;

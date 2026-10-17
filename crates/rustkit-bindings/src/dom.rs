@@ -1382,8 +1382,15 @@ const WRAPPERS_JS: &str = r#"
         media.play = function play() {
             return Promise.reject(new g.DOMException('The element has no supported sources.', 'NotSupportedError'));
         };
-        [['paused', true], ['ended', false], ['readyState', 0], ['currentTime', 0], ['duration', NaN]].forEach(function (p) {
+        [['paused', true], ['ended', false], ['readyState', 0], ['currentTime', 0], ['duration', NaN], ['error', null]].forEach(function (p) {
             Object.defineProperty(media, p[0], { value: p[1], writable: true, enumerable: true, configurable: true });
+        });
+        // HTML §4.8.11. `MediaError` is the interface `video.error` would be,
+        // and pages compare against the code constants. There is no playback
+        // here, so the constructor stays illegal and `error` stays null.
+        var MediaError = iface('MediaError');
+        [['MEDIA_ERR_ABORTED', 1], ['MEDIA_ERR_NETWORK', 2], ['MEDIA_ERR_DECODE', 3], ['MEDIA_ERR_SRC_NOT_SUPPORTED', 4]].forEach(function (pair) {
+            MediaError[pair[0]] = MediaError.prototype[pair[0]] = pair[1];
         });
         // Interface objects with no element of their own here: the checks
         // `x instanceof HTMLUnknownElement` / `SVGElement` still need a RHS.
