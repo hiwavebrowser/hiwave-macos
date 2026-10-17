@@ -1661,6 +1661,10 @@ fn absolutize_one(reference: &str, base: &Url) -> Option<String> {
 
 fn decode_data_url(src: &str) -> Option<Vec<u8>> {
     let rest = src.get(5..)?;
+    // Fetch serializes a data: URL without its fragment, so
+    // `data:font/ttf;base64,AAEC#x` is the three bytes `AAEC`, not a
+    // base64 error. Same rule as `rustkit_net::decode_data_url` (#712).
+    let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
     let (meta, payload) = rest.split_once(',')?;
     if meta.to_ascii_lowercase().contains(";base64") {
         use base64::Engine as _;
@@ -23660,9 +23664,26 @@ mod web_font_tests {
             Some(&[0u8, 1, b'x'][..])
         );
         assert!(decode_data_url("data:font/ttf;base64,!!!").is_none());
+        // Fragment is not the payload (Fetch serialize, exclude fragment).
+        assert_eq!(
+            decode_data_url("data:font/ttf;base64,AAEC#ignored").as_deref(),
+            Some(&[0u8, 1, 2][..])
+        );
+        assert_eq!(
+            decode_data_url("data:,%00%01x#tail").as_deref(),
+            Some(&[0u8, 1, b'x'][..])
+        );
+        assert_eq!(
+            decode_data_url("data:text/plain,a%23b#c").as_deref(),
+            Some(b"a#b".as_slice())
+        );
         assert!(matches!(
             resolve_font_source(None, &ahem_data_uri()),
             FontSource::Data(b) if b == AHEM
+        ));
+        assert!(matches!(
+            resolve_font_source(None, "data:font/ttf;base64,AAEC#frag"),
+            FontSource::Data(b) if b.as_ref() == [0u8, 1, 2]
         ));
     }
 
