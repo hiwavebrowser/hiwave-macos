@@ -90,6 +90,7 @@ pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
 pub(crate) mod source_info;
 pub mod interrupt_diag; // HIWAVE PATCH (interrupt diagnostics)
+pub mod host_stack; // HIWAVE PATCH (host stack)
 
 #[cfg(feature = "flowgraph")]
 pub mod flowgraph;
@@ -143,6 +144,13 @@ pub struct Vm {
     /// [`JsObject::call`](crate::object::JsObject::call) and
     /// [`JsObject::construct`](crate::object::JsObject::construct).
     pub(crate) host_call_depth: usize,
+
+    // HIWAVE PATCH (host stack): names of the functions `call`/`construct`
+    // re-entered, parallel to `host_call_depth` while the console log is on.
+    // `host_stack_logged` remembers which of 256/512/1000 this climb already
+    // reported. See `host_stack`.
+    pub(crate) host_frames: Vec<String>,
+    pub(crate) host_stack_logged: u8,
 
     /// Deepest JavaScript frame count (excluding the dummy frame) since
     /// [`Context::reset_recursion_max`](crate::Context::reset_recursion_max).
@@ -491,6 +499,8 @@ impl Vm {
             settling_promises: false,     // HIWAVE PATCH (interrupt)
             native_active_function: None,
             host_call_depth: 0,
+            host_frames: Vec::new(),      // HIWAVE PATCH (host stack)
+            host_stack_logged: 0,         // HIWAVE PATCH (host stack)
             max_frame_depth: Cell::new(0), // HIWAVE PATCH (recursion)
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]

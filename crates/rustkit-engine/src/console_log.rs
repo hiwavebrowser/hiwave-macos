@@ -257,6 +257,7 @@ pub(crate) fn inserted_script(url: &str, event: &str) {
 /// one static function, and a disarmed walk does not run.
 pub(crate) fn install_console_diag() {
     rustkit_js::set_interrupt_diag(Some(on_interrupt));
+    rustkit_js::set_host_stack_diag(Some(on_host_stack));
     rustkit_net::set_fetch_diag(Some(on_fetch));
     rustkit_dom::set_removal_hook(Some(on_removal));
     rustkit_bindings::set_location_hook(Some(on_location));
@@ -265,6 +266,7 @@ pub(crate) fn install_console_diag() {
 
 pub(crate) fn sync_diag_armed() {
     let on = enabled();
+    rustkit_js::set_host_stack_armed(on);
     rustkit_dom::set_removal_armed(on);
     rustkit_bindings::set_location_armed(on);
     if on {
@@ -321,6 +323,15 @@ pub(crate) fn doc(kind: &str, detail: &str) {
         dash(rustkit_js::diag_turn()),
         dash(rustkit_js::diag_job()),
         rustkit_js::diag_nav()
+    ));
+}
+
+fn on_host_stack(depth: usize, histogram: &str, frames: &str) {
+    if !enabled() {
+        return;
+    }
+    emit(format!(
+        "host stack depth={depth} histogram=\"{histogram}\" frames=\"{frames}\""
     ));
 }
 
@@ -540,6 +551,25 @@ mod tests {
         rustkit_js::set_diag_turn("");
         rustkit_js::set_diag_job("");
         rustkit_js::set_diag_nav(0);
+    }
+
+    #[test]
+    fn a_host_stack_line_names_the_depth_only_while_forced_on() {
+        let _reset = Reset;
+        force_for_test(None);
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        on_host_stack(256, "set x=256", "set x > set x");
+        assert!(sink.lock().unwrap().is_empty());
+        force_for_test(Some(true));
+        on_host_stack(512, "set x=512", "set x > set x");
+        let lines = sink.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = &lines[0];
+        assert!(line.contains("host stack depth=512"), "{line}");
+        assert!(line.contains("histogram=\"set x=512\""), "{line}");
+        assert!(line.contains("frames=\"set x > set x\""), "{line}");
+        assert!(!line.contains('\n'), "{line}");
     }
 }
 

@@ -184,6 +184,34 @@ pub fn set_interrupt_diag(hook: Option<boa_engine::interrupt_diag::InterruptDiag
 #[cfg(not(feature = "boa"))]
 pub fn set_interrupt_diag(_hook: Option<fn(&'static str, &'static str, &'static str)>) {}
 
+/// Install the function Boa calls the first time a host-reentry climb crosses
+/// 256, 512, or 1000. A null hook leaves the climb silent.
+#[cfg(feature = "boa")]
+pub fn set_host_stack_diag(hook: Option<boa_engine::host_stack::HostStackDiag>) {
+    boa_engine::host_stack::set_host_stack_diag(hook);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_host_stack_diag(_hook: Option<fn(usize, &str, &str)>) {}
+
+/// Record host-reentry names only while this is set.
+#[cfg(feature = "boa")]
+pub fn set_host_stack_armed(on: bool) {
+    boa_engine::host_stack::set_host_stack_armed(on);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_host_stack_armed(_on: bool) {}
+
+/// Move the first host-stack log mark. `None` restores 256.
+#[cfg(feature = "boa")]
+pub fn set_host_stack_first_mark(mark: Option<usize>) {
+    boa_engine::host_stack::set_host_stack_first_mark(mark);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_host_stack_first_mark(_mark: Option<usize>) {}
+
 /// Errors that can occur in JS operations.
 #[derive(Error, Debug)]
 pub enum JsError {
@@ -1866,6 +1894,52 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(setters, JsValue::Number(n) if n == 8.0));
+
+        // A climb through 256 records the setter once, with the name on the
+        // stack, and does not log that threshold again before it returns.
+        {
+            use std::sync::{Mutex, OnceLock};
+            fn lines() -> &'static Mutex<Vec<String>> {
+                static LINES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+                LINES.get_or_init(|| Mutex::new(Vec::new()))
+            }
+            fn hook(depth: usize, histogram: &str, frames: &str) {
+                lines()
+                    .lock()
+                    .unwrap()
+                    .push(format!("depth={depth} histogram={histogram} frames={frames}"));
+            }
+            struct Disarm;
+            impl Drop for Disarm {
+                fn drop(&mut self) {
+                    set_host_stack_armed(false);
+                    set_host_stack_diag(None);
+                    set_host_stack_first_mark(None);
+                }
+            }
+            let _disarm = Disarm;
+            lines().lock().unwrap().clear();
+            // A debug native stack overflows before a climb of 256. The
+            // marks in a live run stay 256/512/1000; this only moves the first.
+            set_host_stack_first_mark(Some(4));
+            runtime
+                .context
+                .runtime_limits_mut()
+                .set_host_recursion_limit(1024);
+            set_host_stack_diag(Some(hook));
+            set_host_stack_armed(true);
+            let climbed = runtime
+                .evaluate_script(
+                    "var n = 0; var obj = { set x(v) { n++; if (n < 6) this.x = v; } }; obj.x = 1; n",
+                )
+                .unwrap();
+            assert!(matches!(climbed, JsValue::Number(n) if n == 6.0));
+            let logged = lines().lock().unwrap().clone();
+            assert_eq!(logged.len(), 1, "{logged:?}");
+            assert!(logged[0].starts_with("depth=4 "), "{}", logged[0]);
+            assert!(logged[0].contains("histogram=set x=4"), "{}", logged[0]);
+            assert!(logged[0].contains("set x > set x"), "{}", logged[0]);
+        }
 
         let word = Arc::new(AtomicU64::new(0));
         runtime.context.set_interrupt_word(Some(word.clone()));
