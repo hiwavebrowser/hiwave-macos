@@ -30,12 +30,95 @@ pub use diag::{standard_name, STANDARD_ERROR_NAMES};
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, info, trace};
+
+thread_local! {
+    static DIAG_TURN: Cell<&'static str> = const { Cell::new("") };
+    static DIAG_JOB: Cell<&'static str> = const { Cell::new("") };
+    static DIAG_NAV: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The kind of turn whose script is running: `load`, `live`, `navigation-teardown`.
+/// Empty when no turn has been marked. Restored when the guard drops.
+pub fn set_diag_turn(turn: &'static str) {
+    DIAG_TURN.with(|cell| cell.set(turn));
+}
+
+pub fn diag_turn() -> &'static str {
+    DIAG_TURN.with(Cell::get)
+}
+
+/// The job inside the turn: `timer`, `microtask`, or empty.
+pub fn set_diag_job(job: &'static str) {
+    DIAG_JOB.with(|cell| cell.set(job));
+}
+
+pub fn diag_job() -> &'static str {
+    DIAG_JOB.with(Cell::get)
+}
+
+/// Navigation id of the document the window thread is loading or showing.
+pub fn set_diag_nav(nav: u64) {
+    DIAG_NAV.with(|cell| cell.set(nav));
+}
+
+pub fn diag_nav() -> u64 {
+    DIAG_NAV.with(Cell::get)
+}
+
+/// Sets [`diag_turn`] and puts the previous kind back on drop.
+pub struct DiagTurn {
+    prev: &'static str,
+}
+
+impl DiagTurn {
+    pub fn enter(turn: &'static str) -> Self {
+        let prev = diag_turn();
+        set_diag_turn(turn);
+        Self { prev }
+    }
+}
+
+impl Drop for DiagTurn {
+    fn drop(&mut self) {
+        set_diag_turn(self.prev);
+    }
+}
+
+/// Sets [`diag_job`] and puts the previous job back on drop.
+pub struct DiagJob {
+    prev: &'static str,
+}
+
+impl DiagJob {
+    pub fn enter(job: &'static str) -> Self {
+        let prev = diag_job();
+        set_diag_job(job);
+        Self { prev }
+    }
+}
+
+impl Drop for DiagJob {
+    fn drop(&mut self) {
+        set_diag_job(self.prev);
+    }
+}
+
+/// Install the function Boa calls when an interrupt path fires. A null hook
+/// leaves those paths silent. The hook itself decides whether to write.
+#[cfg(feature = "boa")]
+pub fn set_interrupt_diag(hook: Option<boa_engine::interrupt_diag::InterruptDiag>) {
+    boa_engine::interrupt_diag::set_interrupt_diag(hook);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_interrupt_diag(_hook: Option<fn(&'static str, &'static str)>) {}
 
 /// Errors that can occur in JS operations.
 #[derive(Error, Debug)]
@@ -346,6 +429,7 @@ impl JsRuntime {
     pub fn run_jobs(&mut self) -> Result<(), JsError> {
         #[cfg(feature = "boa")]
         {
+            let _job = DiagJob::enter("microtask");
             let result = self.context.run_jobs();
             self.consume_interrupt();
             result.map_err(|e| JsError::ExecutionError(e.to_string()))

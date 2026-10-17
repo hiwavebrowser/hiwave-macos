@@ -68,6 +68,9 @@ pub struct RustKitView {
     /// Runtime the live loop's network turns block on. `None` if it could
     /// not be built: the page then gets no timers or late fetches, as before.
     live_runtime: Option<tokio::runtime::Runtime>,
+    /// The content `NSView`. Kept outside the engine so a load can move the
+    /// frame while `engine` is borrowed.
+    host_view: isize,
 }
 
 /// Script budget for pages in the live app. The engine default (5 s) is
@@ -212,6 +215,8 @@ impl RustKitView {
             .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
 
         info!(?view_id, "RustKit view created");
+        let host_view = engine.host_view_raw(view_id);
+        rustkit_viewhost::clip_raw_view(host_view);
         // The chrome WebView is WebKit on this same thread. A content load
         // blocks the thread through its network waits (it already did,
         // before the script budget stopped counting those waits). The hook
@@ -237,7 +242,15 @@ impl RustKitView {
                 .build()
                 .map_err(|e| warn!(error = %e, "No runtime for the live loop; page timers will not run"))
                 .ok(),
+            host_view,
         })
+    }
+
+    /// Move the content view's frame without borrowing the engine. The GPU
+    /// surface and the page layout still follow `set_bounds_internal` once
+    /// the load has returned the engine.
+    pub fn place_host_frame(&self, bounds: Bounds) {
+        rustkit_viewhost::place_raw_view(self.host_view, bounds);
     }
 
     /// One turn of the live loop for the page (call this in the event
@@ -286,6 +299,7 @@ impl RustKitView {
     /// drawn again once it is a second old. `HIWAVE_RENDER_EVERY_WAKE=1`
     /// is the old behaviour, for telling a stale frame from a wrong one.
     pub fn render(&self) {
+        rustkit_viewhost::clip_raw_view(self.host_view);
         let mut engine = self.engine.borrow_mut();
         // The live turn lays out a resized view; without a live runtime
         // there is no turn, so the frame does it.

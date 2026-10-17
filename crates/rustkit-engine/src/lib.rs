@@ -2283,6 +2283,7 @@ impl Engine {
         // Event channel
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
+        console_log::install_console_diag();
         Ok(Self {
             config,
             presenter,
@@ -2623,6 +2624,15 @@ impl Engine {
     /// H9). The events of one loop turn now cost one layout, at the last
     /// size, and the page hears one `resize`, as in a browser (at most one
     /// per frame).
+    /// Platform view pointer for `id` (an `NSView` on macOS). 0 when the
+    /// view has none. Reading it does not borrow the page.
+    pub fn host_view_raw(&self, id: EngineViewId) -> isize {
+        self.views
+            .get(&id)
+            .map(|view| self.presenter.raw_view(view.viewhost_id))
+            .unwrap_or(0)
+    }
+
     pub fn set_view_bounds(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
         self.apply_view_bounds(id, bounds)?;
         if let Some(view) = self.views.get_mut(&id) {
@@ -2684,6 +2694,7 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             if let Some(bindings) = view.bindings.as_ref() {
                 let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
+                let _turn = rustkit_js::DiagTurn::enter("live");
                 let armed = arm_live_turn(&self.config, bindings);
                 let fired = sized.and_then(|()| {
                     bindings.fire_lifecycle_event(
@@ -3713,6 +3724,7 @@ impl Engine {
             return true;
         };
         let source = format!("event:{event_type}");
+        let _turn = rustkit_js::DiagTurn::enter("live");
         let armed = arm_live_turn(&self.config, bindings);
         let fired = bindings.fire_mouse_event(target, event_type, data);
         let stopped = end_live_turn(&self.config, armed, bindings, &source);
@@ -3763,6 +3775,8 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return out;
         };
+        let _turn = rustkit_js::DiagTurn::enter("live");
+        rustkit_js::set_diag_nav(view.nav_id);
         let Some(bindings) = view.bindings.as_ref() else {
             return out;
         };
@@ -3786,6 +3800,7 @@ impl Engine {
 
         // Timers first: what they ask of the network is answered this turn.
         let (timers, timer_stopped) = with_script_js(bindings, || {
+            let _job = rustkit_js::DiagJob::enter("timer");
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
             }))
@@ -3842,6 +3857,7 @@ impl Engine {
                     break;
                 };
                 out.requests += 1;
+                script_net::log_live_handoff(&outcome, "delivered");
                 let (delivered, stopped) = with_script_js(bindings, || {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         bindings.deliver_net_response(request_id, outcome)
@@ -3859,6 +3875,7 @@ impl Engine {
                 }
             }
             for (at, answer) in answers.enumerate() {
+                script_net::log_live_handoff(&answer.1, "parked");
                 live_requests.insert(at, Box::pin(std::future::ready(answer)));
             }
             out.in_flight = live_requests.len();
@@ -4052,6 +4069,7 @@ impl Engine {
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
                 bindings.sync_control_value(focused.raw(), state.value());
                 let typed = (!key.is_empty() && !ctrl).then_some(key);
+                let _turn = rustkit_js::DiagTurn::enter("live");
                 let armed = arm_live_turn(&self.config, bindings);
                 if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
                     debug!(?id, error = %e, "input listener threw");
@@ -4211,6 +4229,7 @@ impl Engine {
             shift_key: shift,
             ..Default::default()
         };
+        let _turn = rustkit_js::DiagTurn::enter("live");
         let armed = arm_live_turn(&self.config, bindings);
         let not_cancelled = bindings.fire_key_event(node, event_type, &data).unwrap_or_else(|e| {
             debug!(?id, event_type, error = %e, "key listener threw");
@@ -4845,6 +4864,10 @@ impl Engine {
             },
             None => return,
         };
+        let _turn = rustkit_js::DiagTurn::enter("load");
+        if let Some(watch) = watch {
+            rustkit_js::set_diag_nav(watch.nav_id);
+        }
         // One budget of JavaScript time for the phase. Each script,
         // callback and microtask drain arms the watchdog on its own; the
         // fetches between them do not.
@@ -5315,6 +5338,7 @@ impl Engine {
                     .map_err(strip)
             }),
             ("timers", &|| {
+                let _job = rustkit_js::DiagJob::enter("timer");
                 bindings
                     .run_timers(horizon_ms, MAX_TIMER_CALLBACKS)
                     .map(|n| timers_ran.set(n))
@@ -5451,6 +5475,7 @@ impl Engine {
         url: Url,
         replace: bool,
     ) -> Result<(), EngineError> {
+        let _turn = rustkit_js::DiagTurn::enter("load");
         let view = self
             .views
             .get_mut(&id)
@@ -5482,6 +5507,11 @@ impl Engine {
         // load, Stop, or a cancel from another thread makes it stale, and
         // a stale load must not touch view state (M3b).
         let watch = self.begin_nav(id)?;
+        rustkit_js::set_diag_nav(watch.nav_id);
+        console_log::doc(
+            "navigation-start",
+            &format!("url={}", console_log::brief_url(url.as_str())),
+        );
         let _in_progress = LoadInProgress {
             control: watch.canceller.control().clone(),
             nav_id: watch.nav_id,
@@ -5678,6 +5708,10 @@ impl Engine {
         view.summarize_relayouts_for_navigation();
         view.url = Some(url.clone());
         view.document = Some(document.clone());
+        console_log::doc(
+            "document-replace",
+            &format!("url={}", console_log::brief_url(url.as_str())),
+        );
         view.title = title.clone();
         view.header_referrer_policy = header_referrer_policy;
         view.http_status = Some(status.as_u16());
@@ -5686,6 +5720,14 @@ impl Engine {
         // a cancel now stops its script (M3b). Until this, a cancel ends
         // the load at its next await and leaves the shown page's script.
         view.control.commit_nav(generation);
+        console_log::doc(
+            "navigation-commit",
+            &format!(
+                "url={} status={}",
+                console_log::brief_url(url.as_str()),
+                status.as_u16()
+            ),
+        );
         // Not laid out yet. Set to whether the first layout waits for the
         // sheets below; a cancel that comes first lays it out
         // (`load_cancelled`), or the frame keeps the previous page's.
@@ -5983,7 +6025,10 @@ impl Engine {
         let _hold = wgate::hold("load_html");
         // A navigation of its own (M3b). Nothing in it awaits, so the only
         // cancel that can reach it is the interrupt word stopping a script.
+        let _turn = rustkit_js::DiagTurn::enter("load");
         let watch = self.begin_nav(id)?;
+        rustkit_js::set_diag_nav(watch.nav_id);
+        console_log::doc("navigation-start", "url=about:blank");
         let _in_progress = LoadInProgress {
             control: watch.canceller.control().clone(),
             nav_id: watch.nav_id,
@@ -6040,12 +6085,14 @@ impl Engine {
         view.summarize_relayouts_for_navigation();
         view.url = Some(url.clone());
         view.document = Some(document.clone());
+        console_log::doc("document-replace", "url=about:blank");
         view.title = title.clone();
         view.header_referrer_policy = None;
         view.http_status = None;
         view.reset_for_new_document();
         // The commit: the interrupt word is this document's from here (M3b).
         view.control.commit_nav(watch.nav_id);
+        console_log::doc("navigation-commit", "url=about:blank status=-");
         view.inspector.emit(InspectorEvent::NavigationCommit { url: None, status: None });
         let inspector = view.inspector.clone();
 
@@ -11822,6 +11869,8 @@ impl Engine {
     /// "cancelled" if Stop has not already failed it. Nothing for a load
     /// superseded by a newer navigation, which owns the view now.
     fn load_cancelled(&mut self, id: EngineViewId, nav_id: u64) {
+        let _turn = rustkit_js::DiagTurn::enter("navigation-teardown");
+        rustkit_js::set_diag_nav(nav_id);
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
@@ -11831,6 +11880,7 @@ impl Engine {
         // Before the commit the word is the shown page's, whose script
         // keeps running: the cancel is of the load, not of that page.
         let committed = view.control.nav_committed(nav_id);
+        console_log::doc("navigation-teardown", &format!("committed={committed}"));
         if committed {
             view.control.stop_all();
         }

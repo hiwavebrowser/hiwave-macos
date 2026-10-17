@@ -346,6 +346,37 @@ fn apply_layout(
     let _ = shelf.set_bounds(shelf_rect);
 }
 
+/// The content view's top-left frame, in the same coordinates as
+/// [`apply_layout`]. Used while a load has the engine borrowed.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn content_host_bounds(
+    window: &tao::window::Window,
+    chrome_height: f64,
+    shelf_height: f64,
+    inspector_height: f64,
+    sidebar_width: f64,
+    right_sidebar_open: bool,
+) -> rustkit_viewhost::Bounds {
+    let scale = window.scale_factor();
+    let window_size = window.inner_size();
+    let width = window_size.width as f64 / scale;
+    let height = window_size.height as f64 / scale;
+    let sidebar_width = sidebar_width.min(width).max(0.0);
+    let right_sidebar_width = if right_sidebar_open {
+        SIDEBAR_WIDTH.min(width - sidebar_width)
+    } else {
+        0.0
+    };
+    let content_width = (width - sidebar_width - right_sidebar_width).max(0.0);
+    let content_height = (height - chrome_height - shelf_height - inspector_height).max(0.0);
+    rustkit_viewhost::Bounds {
+        x: sidebar_width as i32,
+        y: chrome_height as i32,
+        width: content_width as u32,
+        height: content_height as u32,
+    }
+}
+
 fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
     if let Ok(s) = state.lock() {
         let active_tab_id = s.shell.get_active_tab().map(|t| t.id);
@@ -716,8 +747,22 @@ fn main() {
     let chrome_height = Arc::new(Mutex::new(CHROME_HEIGHT_DEFAULT as f64));
     let shelf_height = Arc::new(Mutex::new(SHELF_HEIGHT_DEFAULT as f64));
     let inspector_height = Arc::new(Mutex::new(INSPECTOR_HEIGHT_DEFAULT as f64));
-    // Sidebar width: 0.0 = closed, >0 = open with that width
-    let sidebar_width_state = Arc::new(Mutex::new(0.0_f64));
+    // Sidebar width: 0.0 = closed, >0 = open with that width.
+    // The content view is created before chrome JS runs, and a content load
+    // borrows the engine so a later sidebar event cannot resize it until the
+    // load returns. Start from the saved open state so the first frame is
+    // already inset.
+    let initial_sidebar = state
+        .lock()
+        .map(|app| {
+            if app.user_settings.sidebar_default_open {
+                (app.user_settings.sidebar_width as f64).clamp(48.0, 400.0)
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+    let sidebar_width_state = Arc::new(Mutex::new(initial_sidebar));
     let right_sidebar_open = Arc::new(Mutex::new(false));
 
     // Calculate initial bounds
@@ -2074,6 +2119,35 @@ fn main() {
         #[cfg(all(target_os = "macos", feature = "rustkit"))]
         if webview_rustkit::chrome_pump_active() {
             if let Event::UserEvent(user_event) = &event {
+                // The engine is borrowed for the load, so `apply_layout`
+                // cannot run. Move the NSView now; the requeued event
+                // resizes the surface and relayouts once the load returns.
+                let sidebar = match user_event {
+                    UserEvent::SetSidebarOpen(open) => {
+                        Some((if *open { SIDEBAR_WIDTH } else { 0.0 }, None))
+                    }
+                    UserEvent::SetSidebarWidth(width) => Some((*width, None)),
+                    UserEvent::SetRightPanelOpen(open) => Some((
+                        *sidebar_width_for_events.lock().unwrap(),
+                        Some(*open),
+                    )),
+                    _ => None,
+                };
+                if let Some((width, right)) = sidebar {
+                    *sidebar_width_for_events.lock().unwrap() = width;
+                    if let Some(open) = right {
+                        *right_sidebar_open_for_events.lock().unwrap() = open;
+                    }
+                    let bounds = content_host_bounds(
+                        &window,
+                        *chrome_height_for_events.lock().unwrap(),
+                        *shelf_height_for_events.lock().unwrap(),
+                        *inspector_height_for_events.lock().unwrap(),
+                        *sidebar_width_for_events.lock().unwrap(),
+                        *right_sidebar_open_for_events.lock().unwrap(),
+                    );
+                    content_for_events.place_host_frame(bounds);
+                }
                 let _ = click_proxy.send_event(user_event.clone());
             }
             return;

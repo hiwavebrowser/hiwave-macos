@@ -2406,6 +2406,10 @@ fn abandon_interrupted(module: &Module) {
         });
         cycle_root
     };
+    crate::vm::interrupt_diag::note_interrupt(
+        "module.abandon",
+        "module evaluation was interrupted",
+    );
     abandon_interrupted(&cycle_root);
     for m in std::mem::take(&mut *src.async_parent_modules.borrow_mut()) {
         abandon_interrupted(&m);

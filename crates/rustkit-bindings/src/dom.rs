@@ -515,6 +515,10 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         // DOM §4.4 textContent setter on an element or fragment: replace
         // all children with one Text node (none for the empty string).
         ("setText", NodeType::Element { .. } | NodeType::DocumentFragment) => {
+            let removed: usize = node.children().iter().map(|child| child.subtree_len()).sum();
+            let tag = node.tag_name().unwrap_or("-").to_string();
+            let id = node.get_attribute("id").unwrap_or("").to_string();
+            rustkit_dom::note_large_clear(&tag, &id, removed);
             for child in node.children() {
                 child.remove_from_parent();
             }
@@ -550,6 +554,10 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
                 .get(&node.id.raw())
                 .cloned()
                 .unwrap_or(node.clone());
+            let removed: usize = target.children().iter().map(|child| child.subtree_len()).sum();
+            let tag = target.tag_name().unwrap_or("-").to_string();
+            let id = target.get_attribute("id").unwrap_or("").to_string();
+            rustkit_dom::note_large_clear(&tag, &id, removed);
             for child in target.children() {
                 child.remove_from_parent();
             }
@@ -1322,6 +1330,7 @@ pub(crate) fn install(
             if let Some(JsValue::String(url)) = args.first() {
                 let replace = matches!(args.get(1), Some(JsValue::Boolean(true)));
                 h.borrow_mut().navigation_requests.push((url.clone(), replace));
+                crate::note_location(url, replace);
             }
             JsValue::Null
         }),

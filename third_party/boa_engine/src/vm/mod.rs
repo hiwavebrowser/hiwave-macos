@@ -52,6 +52,7 @@ mod runtime_limits;
 pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
 pub(crate) mod source_info;
+pub mod interrupt_diag; // HIWAVE PATCH (interrupt diagnostics)
 
 #[cfg(feature = "flowgraph")]
 pub mod flowgraph;
@@ -1093,6 +1094,9 @@ impl Context {
         if let Some(word) = &self.vm.interrupt {
             let value = word.load(std::sync::atomic::Ordering::Relaxed);
             if value != 0 && (value == u64::MAX || value == self.vm.interrupt_turn) {
+                // HIWAVE PATCH (interrupt diagnostics): one line per stopped
+                // turn, and only after the word has already tripped.
+                interrupt_diag::note_interrupt_stop(value, self.vm.interrupt_turn);
                 return Err(RuntimeLimitError::Interrupted.into());
             }
         }

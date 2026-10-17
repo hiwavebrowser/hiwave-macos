@@ -34,6 +34,57 @@ use crate::inspector::{self, FailureStage, Inspector, ResourceType};
 /// What the page sees for every refusal and every failure.
 const NETWORK_ERROR: &str = "network error";
 
+fn log_request(method: &str, url: &str, status: &str, disposition: &str) {
+    crate::console_log::net(
+        "end",
+        method,
+        url,
+        status,
+        disposition,
+        rustkit_js::diag_nav(),
+    );
+}
+
+fn log_handoff(request: &NetRequest, outcome: &NetDelivery, disposition: &str) {
+    if !crate::console_log::enabled() {
+        return;
+    }
+    let (status, url) = match outcome {
+        NetDelivery::Response { status, url, .. } => (status.to_string(), url.as_str()),
+        NetDelivery::Error(_) => ("-".to_string(), request.url.as_str()),
+    };
+    log_request(&request.method, url, &status, disposition);
+}
+
+/// A live-loop answer no longer has the request's method. The start line does.
+pub(crate) fn log_live_handoff(outcome: &NetDelivery, disposition: &str) {
+    if !crate::console_log::enabled() {
+        return;
+    }
+    match outcome {
+        NetDelivery::Response { url, status, .. } => {
+            log_request("-", url, &status.to_string(), disposition);
+        }
+        NetDelivery::Error(_) => log_request("-", "-", "-", disposition),
+    }
+}
+
+fn log_denial(method: &str, url: &str, denial: &rustkit_net::policy::Denial) {
+    if !crate::console_log::enabled() {
+        return;
+    }
+    use rustkit_net::policy::Denial;
+    let (disposition, status) = match denial {
+        Denial::Shield | Denial::Csp => ("blocked", "-".to_string()),
+        Denial::Timeout => ("timeout", "-".to_string()),
+        Denial::Cancelled => ("cancelled", "-".to_string()),
+        Denial::BadStatus(code) => ("response", code.to_string()),
+        Denial::Network(_) => return,
+        _ => ("error", "-".to_string()),
+    };
+    log_request(method, url, &status, disposition);
+}
+
 thread_local! {
     /// Answers fetched while the JavaScript budget was already spent. The
     /// load hands them to the next live turn; failing them here would reject
@@ -126,10 +177,12 @@ pub(crate) async fn pump(
             // function would land in a turn the watchdog stops at once.
             if super::script_js_exhausted() || super::script_js_resume_would_be_stopped() {
                 if bindings.shelve_net_request(request.id) {
+                    log_handoff(request, &outcome, "parked");
                     park_delivery((request.id, outcome));
                 }
                 continue;
             }
+            log_handoff(request, &outcome, "delivered");
             let (delivered, stopped) = super::with_script_js(bindings, || {
                 catch_unwind(AssertUnwindSafe(|| {
                     bindings.deliver_net_response(request.id, outcome)
@@ -247,9 +300,13 @@ async fn execute(
         Ok(r) => r,
         Err(reason) => {
             debug!(id = request.id, %reason, "Script request refused before the policy");
+            log_request(&request.method, &request.url, "-", "error");
             return NetDelivery::Error(NETWORK_ERROR.into());
         }
     };
+    let log_net = crate::console_log::enabled();
+    let method = if log_net { script_request.method.to_string() } else { String::new() };
+    let url = if log_net { script_request.url.to_string() } else { String::new() };
     let resource_type = match script_request.destination {
         RequestDestination::Xhr => ResourceType::Xhr,
         RequestDestination::Fetch => ResourceType::Fetch,
@@ -273,6 +330,7 @@ async fn execute(
         }
         Ok(Err(denial)) => {
             debug!(id = request.id, ?denial, "Script request denied");
+            log_denial(&method, &url, &denial);
             if let Some(guard) = guard {
                 let (stage, reason) = inspector::denial_stage(&denial);
                 guard.fail(stage, reason);
@@ -280,7 +338,9 @@ async fn execute(
             NetDelivery::Error(NETWORK_ERROR.into())
         }
         Err(_) => {
-            debug!(id = request.id, "Script request hit its network cap");            if let Some(guard) = guard {
+            debug!(id = request.id, "Script request hit its network cap");
+            log_request(&method, &url, "-", "timeout");
+            if let Some(guard) = guard {
                 let reason = match on_deadline {
                     FailureStage::OverBudget => "script budget spent",
                     _ => "timed out",
@@ -970,7 +1030,9 @@ fn fetch_sender() -> &'static tokio::sync::mpsc::Sender<FetchJob> {
 }
 
 async fn run_fetch_job(job: FetchJob) {
+    rustkit_js::set_diag_nav(job.nav_id);
     if job.cancel.is_cancelled() {
+        log_request(job.request.method.as_str(), job.request.url.as_str(), "-", "cancelled");
         return;
     }
     let fetched = fetch_inserted(&job.loader, job.request, &job.cancel).await;

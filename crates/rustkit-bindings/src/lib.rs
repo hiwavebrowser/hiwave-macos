@@ -11,6 +11,42 @@
 
 mod dom;
 mod inner_text;
+
+thread_local! {
+    static LOCATION_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+static LOCATION_HOOK: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// `url`, `replace` (`location.replace` / reload).
+pub type LocationDiag = fn(&str, bool);
+
+pub fn set_location_armed(on: bool) {
+    LOCATION_ARMED.with(|cell| cell.set(on));
+}
+
+pub fn set_location_hook(hook: Option<LocationDiag>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    LOCATION_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn note_location(url: &str, replace: bool) {
+    if !LOCATION_ARMED.with(std::cell::Cell::get) {
+        return;
+    }
+    let ptr = LOCATION_HOOK.load(std::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: stored from a `LocationDiag` function pointer. The engine
+    // installs one static function for the process.
+    let hook: LocationDiag = unsafe { std::mem::transmute(ptr) };
+    hook(url, replace);
+}
 mod net_bridge;
 pub use net_bridge::{NetDelivery, NetRequest};
 pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};

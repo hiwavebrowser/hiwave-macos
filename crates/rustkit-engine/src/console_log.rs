@@ -50,6 +50,7 @@ pub(crate) fn enabled() -> bool {
 #[cfg(test)]
 pub(crate) fn force_for_test(on: Option<bool>) {
     FORCE.with(|cell| cell.set(on));
+    sync_diag_armed();
 }
 
 #[cfg(test)]
@@ -251,6 +252,136 @@ pub(crate) fn inserted_script(url: &str, event: &str) {
 /// A dynamic `import()` whose promise rejected. `url` is empty when the
 /// specifier did not resolve. The reason is the fetch, parse, link, or
 /// evaluation failure, on one line.
+/// Install the process-wide hooks and arm the walks for this thread when
+/// the switch is on. Safe to call from every `Engine::new`: the hooks are
+/// one static function, and a disarmed walk does not run.
+pub(crate) fn install_console_diag() {
+    rustkit_js::set_interrupt_diag(Some(on_interrupt));
+    rustkit_net::set_fetch_diag(Some(on_fetch));
+    rustkit_dom::set_removal_hook(Some(on_removal));
+    rustkit_bindings::set_location_hook(Some(on_location));
+    sync_diag_armed();
+}
+
+pub(crate) fn sync_diag_armed() {
+    let on = enabled();
+    rustkit_dom::set_removal_armed(on);
+    rustkit_bindings::set_location_armed(on);
+    if on {
+        rustkit_net::set_fetch_diag_armed(true);
+    }
+}
+
+/// Path, query truncated to 48 characters, whole string capped at 180.
+pub(crate) fn brief_url(url: &str) -> String {
+    let (path, query) = match url.split_once('?') {
+        Some((path, query)) => {
+            let mut q: String = query.chars().take(48).collect();
+            if query.chars().count() > 48 {
+                q.push('…');
+            }
+            (path, Some(q))
+        }
+        None => (url, None),
+    };
+    let mut brief = match query {
+        Some(q) => format!("{path}?{q}"),
+        None => path.to_string(),
+    };
+    if brief.chars().count() > 180 {
+        brief = brief.chars().take(179).collect();
+        brief.push('…');
+    }
+    brief
+}
+
+fn dash(text: &str) -> &str {
+    if text.is_empty() { "-" } else { text }
+}
+
+/// `net {phase} {method} {url} status={status} {disposition} nav={nav}`.
+pub(crate) fn net(phase: &str, method: &str, url: &str, status: &str, disposition: &str, nav: u64) {
+    if !enabled() {
+        return;
+    }
+    let method = if method.is_empty() { "-" } else { method };
+    emit(format!(
+        "net {phase} {method} {} status={status} {disposition} nav={nav}",
+        brief_url(url)
+    ));
+}
+
+/// `doc {kind} turn=… job=… nav=… {detail}`.
+pub(crate) fn doc(kind: &str, detail: &str) {
+    if !enabled() {
+        return;
+    }
+    emit(format!(
+        "doc {kind} turn={} job={} nav={} {detail}",
+        dash(rustkit_js::diag_turn()),
+        dash(rustkit_js::diag_job()),
+        rustkit_js::diag_nav()
+    ));
+}
+
+fn on_interrupt(site: &'static str, message: &'static str) {
+    if !enabled() {
+        return;
+    }
+    emit(format!(
+        "interrupt site={site} message={message} turn={} job={} nav={} bt={}",
+        dash(rustkit_js::diag_turn()),
+        dash(rustkit_js::diag_job()),
+        rustkit_js::diag_nav(),
+        short_backtrace()
+    ));
+}
+
+fn short_backtrace() -> String {
+    let text = std::backtrace::Backtrace::force_capture().to_string();
+    let mut out = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line.contains("short_backtrace")
+            || line.contains("on_interrupt")
+            || line.contains("interrupt_diag")
+            || line.contains("Backtrace")
+        {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str(" | ");
+        }
+        if out.len() + line.len() > 400 {
+            break;
+        }
+        out.push_str(line);
+    }
+    if out.is_empty() { "-".to_string() } else { out }
+}
+
+fn on_fetch(method: &str, url: &str, status: &str, disposition: &str) {
+    let phase = if disposition == "issued" { "start" } else { "end" };
+    net(phase, method, url, status, disposition, rustkit_js::diag_nav());
+}
+
+fn on_removal(tag: &str, id: &str, nodes: usize) {
+    if !enabled() {
+        return;
+    }
+    let id = if id.is_empty() { "-" } else { id };
+    doc("dom-remove", &format!("parent={tag}#{id} nodes={nodes}"));
+}
+
+fn on_location(url: &str, replace: bool) {
+    if !enabled() {
+        return;
+    }
+    let how = if replace { "replace" } else { "assign" };
+    doc("location", &format!("{how} {}", brief_url(url)));
+}
+
 pub(crate) fn dynamic_import_failed(specifier: &str, url: &str, reason: &str) {
     if !enabled() {
         return;
@@ -386,6 +517,45 @@ mod tests {
         dynamic_import_failed("./gone.js", "https://cdn.example/gone.js", "not found");
         alias("chunk#console-log-unit", "https://cdn.example/other.js");
         assert_eq!(sink.lock().unwrap().len(), before);
+    }
+
+    #[test]
+    fn brief_url_keeps_a_short_query_and_cuts_a_long_one() {
+        assert_eq!(brief_url("https://www.reddit.com/svc/shreddit"), "https://www.reddit.com/svc/shreddit");
+        let long = format!("https://www.reddit.com/svc/shreddit/gql?{}", "q".repeat(80));
+        let brief = brief_url(&long);
+        assert!(brief.starts_with("https://www.reddit.com/svc/shreddit/gql?"), "{brief}");
+        assert!(brief.ends_with('…'), "{brief}");
+        assert!(brief.chars().count() < long.chars().count(), "{brief}");
+        assert!(brief_url(&format!("https://example.test/{}", "p".repeat(300))).chars().count() <= 180);
+    }
+
+    #[test]
+    fn an_interrupt_line_names_the_site_and_turn_only_while_forced_on() {
+        let _reset = Reset;
+        force_for_test(None);
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        rustkit_js::set_diag_turn("load");
+        rustkit_js::set_diag_job("microtask");
+        rustkit_js::set_diag_nav(7);
+        on_interrupt("await.resume.fulfill", "async function was interrupted");
+        assert!(sink.lock().unwrap().is_empty());
+        force_for_test(Some(true));
+        on_interrupt("await.resume.reject", "async function was interrupted");
+        let lines = sink.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = &lines[0];
+        assert!(line.contains("interrupt site=await.resume.reject"), "{line}");
+        assert!(line.contains("message=async function was interrupted"), "{line}");
+        assert!(line.contains("turn=load"), "{line}");
+        assert!(line.contains("job=microtask"), "{line}");
+        assert!(line.contains("nav=7"), "{line}");
+        assert!(line.contains("bt="), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+        rustkit_js::set_diag_turn("");
+        rustkit_js::set_diag_job("");
+        rustkit_js::set_diag_nav(0);
     }
 }
 
@@ -571,5 +741,55 @@ import('/syntax.js').catch(function () {});
         force_for_test(None);
         let lines = load_imports();
         assert!(lines.is_empty(), "{lines:#?}");
+    }
+
+    fn diag_page() -> String {
+        let mut spans = String::new();
+        for i in 0..60 {
+            spans.push_str(&format!("<span id=\"s{i}\"></span>"));
+        }
+        format!(
+            "<!doctype html><html><body><div id=\"feed\">{spans}</div><script>\
+fetch('/gql?' + '{}');\
+document.getElementById('feed').innerHTML = '';\
+location.assign('/next');\
+</script></body></html>",
+            "q".repeat(80)
+        )
+    }
+
+    fn diag_site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/gql" => (200, "application/json", vec![], "{\"ok\":true}".into()),
+            _ => (200, "text/html", vec![], diag_page()),
+        }
+    }
+
+    #[test]
+    fn logs_navigation_fetches_and_a_large_removal() {
+        let _reset = Reset;
+        force_for_test(Some(true));
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        let server = serve(diag_site);
+        let mut engine = Engine::new(EngineConfig { timer_horizon_ms: 0, ..EngineConfig::default() }).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+        let lines = sink.lock().unwrap().clone();
+        let text = lines.join("\n");
+        assert!(text.contains("doc navigation-start") && text.contains("turn=load"), "{text}");
+        assert!(text.contains("doc navigation-commit") && text.contains("status=200"), "{text}");
+        assert!(text.contains("doc document-replace"), "{text}");
+        assert!(text.contains("doc dom-remove") && text.contains("parent=div#feed") && text.contains("nodes="), "{text}");
+        assert!(text.contains("doc location") && text.contains("assign") && text.contains("/next"), "{text}");
+        let gql: Vec<_> = lines.iter().filter(|line| line.contains("/gql?")).cloned().collect();
+        assert!(gql.iter().any(|line| line.contains("net start") && line.contains("GET")), "{gql:#?}\n{text}");
+        assert!(gql.iter().any(|line| line.contains("status=200") && line.contains("response")), "{gql:#?}");
+        assert!(gql.iter().any(|line| line.contains("delivered") || line.contains("nav=")), "{gql:#?}");
+        assert!(gql.iter().all(|line| !line.contains(&"q".repeat(60))), "query was not truncated: {gql:#?}");
+        assert!(gql.iter().any(|line| line.contains('…')), "long query should be marked truncated: {gql:#?}");
     }
 }
