@@ -17,7 +17,7 @@ use crate::{
 };
 use boa_gc::{Finalize, Gc, Trace, custom_trace};
 use shadow_stack::ShadowStack;
-use std::{future::Future, ops::ControlFlow, path::Path, pin::Pin, task};
+use std::{cell::Cell, future::Future, ops::ControlFlow, path::Path, pin::Pin, task};
 
 #[cfg(feature = "trace")]
 use crate::sys::time::Instant;
@@ -35,6 +35,43 @@ pub(crate) use {
 };
 
 pub use runtime_limits::RuntimeLimits;
+
+/// Depth at the most recent recursion check on this thread.
+///
+/// HIWAVE PATCH (recursion). The interrupt hook has no `Context`, so the
+/// check records this where the hook can read it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RecursionSample {
+    /// JavaScript frames, excluding the dummy frame.
+    pub frames: usize,
+    /// Nested `JsObject::call` / `construct` re-entries.
+    pub host: usize,
+    /// Configured JavaScript frame limit.
+    pub recursion_limit: usize,
+    /// Configured host re-entry limit.
+    pub host_limit: usize,
+    /// Deepest `frames` since the last [`Context::reset_recursion_max`].
+    pub max_frames: usize,
+}
+
+thread_local! {
+    static RECURSION_SAMPLE: Cell<RecursionSample> = const { Cell::new(RecursionSample {
+        frames: 0,
+        host: 0,
+        recursion_limit: 0,
+        host_limit: 0,
+        max_frames: 0,
+    }) };
+}
+
+/// The last recursion check on this thread.
+///
+/// HIWAVE PATCH (recursion)
+#[must_use]
+pub fn recursion_sample() -> RecursionSample {
+    RECURSION_SAMPLE.with(|sample| sample.get())
+}
+
 pub use {
     call_frame::{CallFrame, GeneratorResumeKind},
     code_block::CodeBlock,
@@ -105,6 +142,12 @@ pub struct Vm {
     /// [`JsObject::call`](crate::object::JsObject::call) and
     /// [`JsObject::construct`](crate::object::JsObject::construct).
     pub(crate) host_call_depth: usize,
+
+    /// Deepest JavaScript frame count (excluding the dummy frame) since
+    /// [`Context::reset_recursion_max`](crate::Context::reset_recursion_max).
+    ///
+    /// HIWAVE PATCH (recursion)
+    pub(crate) max_frame_depth: Cell<usize>,
 
     pub(crate) shadow_stack: ShadowStack,
 
@@ -447,6 +490,7 @@ impl Vm {
             settling_promises: false,     // HIWAVE PATCH (interrupt)
             native_active_function: None,
             host_call_depth: 0,
+            max_frame_depth: Cell::new(0), // HIWAVE PATCH (recursion)
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
             trace: false,
@@ -1061,29 +1105,54 @@ impl Context {
 
     /// Checks if we haven't exceeded the defined runtime limits.
     pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
+        // Sample before the interrupt check: an `Interrupted` stop has no
+        // `Context` by the time it is logged, and the depth is already known.
+        self.observe_recursion(); // HIWAVE PATCH (recursion)
         self.check_interrupt()?; // HIWAVE PATCH (interrupt)
-        self.check_depth_limits() // HIWAVE PATCH (interrupt)
+        self.enforce_depth_limits() // HIWAVE PATCH (recursion)
     }
 
     // HIWAVE PATCH (interrupt): the recursion and stack checks of
-    // `check_runtime_limits`, split out (unchanged) so a native call can make
-    // them without the interrupt check (`interrupt_exempt_once`).
+    // `check_runtime_limits`, split out so a native call can make them
+    // without the interrupt check (`interrupt_exempt_once`).
     pub(crate) fn check_depth_limits(&self) -> JsResult<()> {
-        // Must throw if the number of recursive calls exceeds the defined limit.
-        //
-        // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking
-        // `Context::run()` recursively (for example, accessor calls).
-        // Subtract 1 to exclude the dummy frame at index 0.
-        let recursion_depth = (self.vm.frames.len() - 1).saturating_add(self.vm.host_call_depth);
-        if self.vm.runtime_limits.recursion_limit() <= recursion_depth {
+        self.observe_recursion(); // HIWAVE PATCH (recursion)
+        self.enforce_depth_limits()
+    }
+
+    // HIWAVE PATCH (recursion): frame count and host re-entry are separate
+    // limits. Summing them counted every setter, getter and host callback
+    // twice (the frame `function_call` is about to push, plus
+    // `host_call_depth`, which `JsObject::call` increments around
+    // `Context::run`). `<=` matches the historical check, so a limit of 10
+    // still rejects `factorial(11)` and accepts `factorial(8)`.
+    fn enforce_depth_limits(&self) -> JsResult<()> {
+        let frames = self.vm.frames.len().saturating_sub(1);
+        if self.vm.runtime_limits.recursion_limit() <= frames
+            || self.vm.runtime_limits.host_recursion_limit() <= self.vm.host_call_depth
+        {
             return Err(RuntimeLimitError::Recursion.into());
         }
-        // Must throw if the stack size exceeds the defined maximum length.
         if self.vm.runtime_limits.stack_size_limit() <= self.vm.stack.stack.len() {
             return Err(RuntimeLimitError::StackSize.into());
         }
-
         Ok(())
+    }
+
+    fn observe_recursion(&self) {
+        let frames = self.vm.frames.len().saturating_sub(1);
+        let host = self.vm.host_call_depth;
+        let max = self.vm.max_frame_depth.get().max(frames);
+        self.vm.max_frame_depth.set(max);
+        RECURSION_SAMPLE.with(|sample| {
+            sample.set(RecursionSample {
+                frames,
+                host,
+                recursion_limit: self.vm.runtime_limits.recursion_limit(),
+                host_limit: self.vm.runtime_limits.host_recursion_limit(),
+                max_frames: max,
+            });
+        });
     }
 
     // HIWAVE PATCH (interrupt): stop when the word names the running turn,

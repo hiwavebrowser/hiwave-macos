@@ -10,8 +10,20 @@ pub struct RuntimeLimits {
     /// Max backtrace count in exception.
     backtrace_limit: usize,
 
-    /// Max function recursion limit
+    /// Max JavaScript call-frame recursion.
     recursion: usize,
+
+    /// Max nested host re-entries (`JsObject::call` / `construct` around
+    /// `Context::run`). Separate from `recursion`: each re-entry also pushes
+    /// a frame, and summing the two made a setter chain die at half the
+    /// frame limit. The host cap is the lower one because every re-entry
+    /// nests a `Context::run` on the native stack. 1024 of those fit the
+    /// main thread (8MB) and the limit throws before that stack overflows.
+    /// A 2MB thread overflows near 270 in a debug build, short of this cap;
+    /// page script runs on the main thread.
+    ///
+    /// HIWAVE PATCH (recursion)
+    host_recursion: usize,
 }
 
 impl Default for RuntimeLimits {
@@ -19,9 +31,16 @@ impl Default for RuntimeLimits {
     fn default() -> Self {
         Self {
             loop_iteration: u64::MAX,
-            recursion: 512,
+            // Boa's 512 is below a real page: Lit and custom elements build
+            // deep, legitimate stacks, and the old check counted each host
+            // callback in both counters. 8192 frames covers that. The stack
+            // slot limit used to be 10240, which a few hundred frames never
+            // reached; it has to grow with the frame cap or a deep call
+            // dies as `StackSize` instead.
+            recursion: 8192,
+            host_recursion: 1024, // HIWAVE PATCH (recursion)
             backtrace_limit: 50,
-            stack_size: 1024 * 10,
+            stack_size: 64 * 1024,
         }
     }
 }
@@ -93,5 +112,22 @@ impl RuntimeLimits {
     #[inline]
     pub fn set_recursion_limit(&mut self, value: usize) {
         self.recursion = value;
+    }
+
+    /// Get the nested host-call limit.
+    ///
+    /// HIWAVE PATCH (recursion). Default is 1024.
+    #[inline]
+    #[must_use]
+    pub const fn host_recursion_limit(&self) -> usize {
+        self.host_recursion
+    }
+
+    /// Set the nested host-call limit before an error is thrown.
+    ///
+    /// HIWAVE PATCH (recursion)
+    #[inline]
+    pub fn set_host_recursion_limit(&mut self, value: usize) {
+        self.host_recursion = value;
     }
 }
