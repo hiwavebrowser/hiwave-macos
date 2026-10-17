@@ -122,7 +122,9 @@ pub(crate) async fn pump(
         // for a turn that still has some. Delivering now would resume the
         // page under a stop, and the bridge would forget the request.
         for (request, outcome) in requests.iter().zip(outcomes) {
-            if super::script_js_exhausted() {
+            // Exhausted, or so little left that resuming the page's async
+            // function would land in a turn the watchdog stops at once.
+            if super::script_js_exhausted() || super::script_js_resume_would_be_stopped() {
                 if bindings.shelve_net_request(request.id) {
                     park_delivery((request.id, outcome));
                 }
@@ -256,7 +258,12 @@ async fn execute(
     let guard = inspector
         .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some("script"))
         .map(|g| g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)"));
-    match tokio::time::timeout_at(deadline, policy.execute(loader, script_request)).await {
+    match tokio::time::timeout_at(
+        deadline,
+        super::await_with_chrome_ui(policy.execute(loader, script_request)),
+    )
+    .await
+    {
         Ok(Ok(response)) => {
             if let Some(guard) = guard {
                 let mime = response.headers.get("content-type").and_then(|v| v.to_str().ok());
@@ -408,7 +415,11 @@ pub(crate) async fn pump_modules(
             }
             let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
             let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
-            let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
+            let fetched = tokio::time::timeout_at(
+                deadline,
+                super::await_with_chrome_ui(policy.fetch_module(loader, &parsed, document)),
+            )
+            .await;
             inspector::answer_module(guard, &fetched);
             match fetched {
                 Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
@@ -806,12 +817,21 @@ pub(crate) async fn drive_inserted_scripts(
         if tokio::time::Instant::now() >= deadline {
             return out;
         }
+        // The fetch itself is on the script thread. This wait is on the
+        // window thread, inside the load, and it used to hold that thread
+        // until a body arrived. Slice it so the chrome UI can paint.
         let notify = scripts.notify();
-        let notified = notify.notified();
-        tokio::pin!(notified);
-        tokio::select! {
-            _ = notified => {}
-            _ = tokio::time::sleep_until(deadline) => return out,
+        let woke = super::await_with_chrome_ui(async move {
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            tokio::select! {
+                _ = notified => true,
+                _ = tokio::time::sleep_until(deadline) => false,
+            }
+        })
+        .await;
+        if !woke {
+            return out;
         }
     }
 }

@@ -2038,6 +2038,18 @@ fn main() {
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
+        // A content load is pumping the run loop so the chrome WebView can
+        // paint. The engine is borrowed for that load; handling the nested
+        // event here would borrow it again (a resize, a navigate, the live
+        // turn). Put user events back and let WebKit's own sources, which
+        // already ran, do the paint.
+        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+        if webview_rustkit::chrome_pump_active() {
+            if let Event::UserEvent(user_event) = &event {
+                let _ = click_proxy.send_event(user_event.clone());
+            }
+            return;
+        }
         *control_flow = match live_wake.get() {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
