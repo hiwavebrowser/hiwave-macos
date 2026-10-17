@@ -343,6 +343,8 @@ mod script_net_engine_tests;
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
+#[cfg(all(test, feature = "headless"))]
+mod range_hit_tests;
 #[cfg(test)]
 mod content_string_tests;
 #[cfg(test)]
@@ -908,6 +910,12 @@ struct ViewState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
+    /// External classic scripts the page inserted whose fetches are still
+    /// out, or finished and not yet run. The fetch is not tied to a turn
+    /// deadline. A live turn runs one whose fetch has finished (an
+    /// `async = false` script waits for the in-order scripts before it) and
+    /// fires `load` or `error`. A new document retires the queue.
+    live_inserted: script_net::InsertedScripts,
     /// Causes noted since the last relayout (see `relayout_cause`).
     relayout_pending: PendingCauses,
     /// Relayouts since the current document was committed, by cause.
@@ -975,6 +983,9 @@ impl ViewState {
         // The last document's requests are nobody's now.
         self.live_requests.clear();
         self.live_images.clear();
+        // The previous document's inserted scripts must not run here. A
+        // fetch still out is discarded when its result arrives.
+        self.live_inserted.retire(self.nav_id);
         // The last document's sheets, before the first layout of this one.
         // `load_subresources` assigns the new document's when they have
         // been fetched, which is after a document that links none has been
@@ -1000,11 +1011,14 @@ pub struct EngineConfig {
     /// When true, all CSS animations and transitions are ignored during rendering.
     pub disable_animations: bool,
     /// Wall-clock budget for a page's scripts on the load path, fetching
-    /// and running together. Once spent, unfetched and unstarted scripts
-    /// are recorded as over budget (a script already running is bounded by
+    /// and running together. Once spent, a parser script not yet started is
+    /// recorded as over budget (a script already running is bounded by
     /// the loop-iteration limit, and by this only with
-    /// `interrupt_scripts_at_budget`). Scripts run after every
-    /// subresource today, so this comes out of the page's load time.
+    /// `interrupt_scripts_at_budget`). A dynamically inserted script that
+    /// is still fetching keeps going and runs on a later live turn; it is
+    /// not dropped and it does not delay `DOMContentLoaded` or `load`.
+    /// Scripts run after every subresource today, so this comes out of the
+    /// page's load time.
     pub script_budget_ms: u64,
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
@@ -1263,6 +1277,16 @@ pub struct ClickOutcome {
     pub navigate: Option<String>,
 }
 
+/// Wake the window thread when an inserted script's fetch finishes.
+///
+/// `wake` only posts an event the loop already turns into a live pump. The
+/// script runs on that turn, never inside `wake`. One slot for the process:
+/// the app has one content loop. Tests leave it unset and call
+/// [`Engine::pump_live`](Engine::pump_live) themselves.
+pub fn set_live_wake(wake: Arc<dyn Fn() + Send + Sync>) {
+    script_net::set_live_wake(wake);
+}
+
 /// What one turn of the live loop did for a view (see [`Engine::pump_live`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LivePump {
@@ -1270,9 +1294,10 @@ pub struct LivePump {
     pub timers_ran: u32,
     /// Script network requests and module fetches that were answered.
     pub requests: usize,
-    /// Script network requests and script-added images that are out and
-    /// have not arrived yet. While there are any, the loop has to keep
-    /// turning: nothing else wakes it when one comes.
+    /// Script network requests and script-added images that are out. While
+    /// there are any, the loop has to keep turning: nothing else wakes it
+    /// when one comes. An inserted script's fetch is not counted here. Its
+    /// completion wakes the loop, and the next turn runs the script.
     pub in_flight: usize,
     /// The page was laid out again: a callback wrote to the DOM, or an image
     /// it added arrived.
@@ -2030,6 +2055,7 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            live_inserted: script_net::InsertedScripts::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -2117,6 +2143,7 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            live_inserted: script_net::InsertedScripts::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -2203,6 +2230,7 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            live_inserted: script_net::InsertedScripts::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -3502,26 +3530,33 @@ impl Engine {
                     threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
                 }
             }
-            // So are the scripts the turn's callbacks inserted, and they run
-            // inside it, under its budget.
-            if !spent() {
-                let found = script_net::pump_inserted_scripts(
-                    bindings,
-                    &loader,
-                    &referrer,
-                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
-                    &inspector,
-                )
-                .await;
-                out.requests += found.requests;
-                threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
-                if found.poisoned {
-                    threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
-                }
-                for record in found.records {
-                    if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
-                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
-                    }
+            // Scripts the page inserted, including one whose fetch outlived
+            // the load. A turn does not wait a fetch out and does not drop
+            // it. The fetch runs on its own thread; a finished body is
+            // queued, and this turn runs it when its fetch has finished
+            // (in insertion order only when `async` was set false), then
+            // fires `load` or `error`. The arrival woke the loop. Nothing here
+            // polls, and the fetch is not part of `in_flight`.
+            let inserted = view.live_inserted.clone();
+            let execute = !spent();
+            let found = script_net::drive_inserted_scripts(
+                bindings,
+                loader.clone(),
+                &referrer,
+                &inspector,
+                &inserted,
+                tokio::time::Instant::now(),
+                execute,
+            )
+            .await;
+            out.requests += found.requests;
+            threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
+            if found.poisoned {
+                threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
+            }
+            for record in found.records {
+                if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
+                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                 }
             }
         }
@@ -3599,6 +3634,13 @@ impl Engine {
             debug!(?id, ?out, "Live turn");
         }
         out
+    }
+
+    /// How many inserted-script fetches have stored a result on this view.
+    /// Each one also wakes the window loop.
+    #[cfg(test)]
+    pub(crate) fn inserted_wake_count(&self, id: EngineViewId) -> u64 {
+        self.views.get(&id).map(|view| view.live_inserted.wake_count()).unwrap_or(0)
     }
 
     /// Deliver a key to the focused form control.
@@ -4291,9 +4333,12 @@ impl Engine {
 
     /// Run the fetched `<script>`s: classic scripts in document order,
     /// then `defer`, then `async`; then `DOMContentLoaded`, `load`, and the
-    /// page's timers up to `timer_horizon_ms` of virtual time. Every
-    /// outcome lands in the view's script log. A script not started within
-    /// `budget` is over budget.
+    /// page's timers up to `timer_horizon_ms` of virtual time. External
+    /// scripts the page inserted are fetched after those events, so they
+    /// do not delay them; one still in flight when `budget` ends stays on
+    /// the view and runs on the live loop, firing `load` or `error`. Every
+    /// outcome lands in the view's script log. A parser script not started
+    /// within `budget` is over budget.
     ///
     /// The document is fully parsed before any script runs, so a script
     /// sees the whole tree rather than the part above it.
@@ -4662,14 +4707,14 @@ impl Engine {
             let document = document_url.clone();
             let modules_fetched = &modules_fetched;
             let inspector = &inspector;
-            let referrer = &referrer;
             async move {
                 match policy {
                     Some(policy) => {
                         let remaining = budget.saturating_sub(started.elapsed());
                         let mut count = modules_fetched.get();
                         // Network requests and dynamic imports alternate:
-                        // one can start the other.
+                        // one can start the other. Inserted scripts are
+                        // fetched after the lifecycle events, not here.
                         let found = nav_cancel::unless_cancelled(
                             watch,
                             script_net::pump_all(
@@ -4682,7 +4727,6 @@ impl Engine {
                                 document.as_ref(),
                                 &mut count,
                                 inspector,
-                                Some(referrer),
                             ),
                         )
                         .await;
@@ -4808,6 +4852,105 @@ impl Engine {
                 });
             }
             inspector_glue::drain_reports(bindings, &inspector, log, source);
+        }
+
+        // Dynamically inserted external scripts. They did not delay the
+        // events above. Their fetches are not tied to this budget: this
+        // waits only until the budget ends, and a fetch still out then
+        // stays on the view. The fetch thread keeps it going and wakes a
+        // live turn when the body arrives; that turn runs it and fires
+        // `load` or `error`. It is not recorded over budget and it is not
+        // dropped. One that finishes inside the budget runs before this
+        // load returns. The network it asked for is answered next, and a
+        // script inserted from that answer is fetched the same way.
+        if poisoned.get() || nav_cancel::cancelled(watch) {
+            return;
+        }
+        let Some(inserted) = self.views.get(&id).map(|view| view.live_inserted.clone()) else {
+            return;
+        };
+        for _ in 0..4 {
+            if nav_cancel::cancelled(watch) {
+                inserted.abandon();
+                return;
+            }
+            let remaining = budget.saturating_sub(started.elapsed());
+            let driven = nav_cancel::unless_cancelled(
+                watch,
+                script_net::drive_inserted_scripts(
+                    bindings,
+                    loader.clone(),
+                    &referrer,
+                    &inspector,
+                    &inserted,
+                    tokio::time::Instant::now() + remaining,
+                    true,
+                ),
+            )
+            .await;
+            let Some(found) = driven else {
+                inserted.abandon();
+                return;
+            };
+            for record in found.records {
+                inspector_glue::log_script(log, &inspector, record);
+            }
+            for message in found.threw {
+                log.push(ScriptRecord {
+                    source: "network".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                });
+            }
+            if found.poisoned {
+                inserted.abandon();
+                log.push(ScriptRecord {
+                    source: "network".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                });
+                return;
+            }
+            // The budget is spent: the fetches still out stay queued, not
+            // failed. A later live turn runs them.
+            if budget.saturating_sub(started.elapsed()).is_zero() {
+                break;
+            }
+            let answered = pump(None).await;
+            if nav_cancel::cancelled(watch) {
+                inserted.abandon();
+                return;
+            }
+            if let Some(found) = answered {
+                for record in found.records {
+                    inspector_glue::log_script(log, &inspector, record);
+                }
+                for message in found.threw {
+                    log.push(ScriptRecord {
+                        source: "network".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(message),
+                    });
+                }
+                if found.poisoned {
+                    inserted.abandon();
+                    log.push(ScriptRecord {
+                        source: "network".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                    });
+                    return;
+                }
+                if found.requests == 0 {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
     }
 
@@ -18183,6 +18326,14 @@ fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
     bottom
 }
 
+/// The document element, the first box in the layout that names a node.
+fn root_element_id(layout: &LayoutBox) -> Option<usize> {
+    if layout.node_id.is_some() {
+        return layout.node_id;
+    }
+    layout.children.first().and_then(root_element_id)
+}
+
 /// Hand script the geometry of `layout` without measuring it: the snapshot
 /// is built on the first read (`DomBindings::set_geometry_source`). The
 /// source holds the layout weakly, so it never keeps an old tree alive or
@@ -18190,6 +18341,19 @@ fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
 /// is republished before script runs again.
 fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>) {
     let layout = Rc::downgrade(layout);
+    let hit_layout = layout.clone();
+    bindings.set_hit_tester(Some(std::rc::Rc::new(move |x, y, scroll| {
+        let layout = hit_layout.upgrade()?;
+        let hit = layout.hit_test_scrolled(x, y, scroll);
+        if let Some(id) = hit.as_ref().and_then(|hit| hit.node_id) {
+            return Some(id);
+        }
+        let bounds = layout.dimensions.border_box();
+        if x >= 0.0 && y >= 0.0 && x < bounds.width && y < bounds.height {
+            return root_element_id(&layout);
+        }
+        None
+    })));
     bindings.set_geometry_source(Box::new(move || {
         let Some(layout) = layout.upgrade() else {
             return Default::default();
@@ -18222,7 +18386,13 @@ fn geometry_snapshot(
     ) -> Option<(f32, f32, f32, f32)> {
         // The bounding rect (left, top, right, bottom) of this box and everything under it.
         let bb = b.dimensions.border_box();
-        let mut extent = Some((bb.x, bb.y, bb.x + bb.width, bb.y + bb.height));
+        let (bx, by, bw, bh) = (
+            finite_f32(bb.x),
+            finite_f32(bb.y),
+            finite_f32(bb.width),
+            finite_f32(bb.height),
+        );
+        let mut extent = Some((bx, by, bx + bw, by + bh));
         for child in &b.children {
             if let Some(c) = walk(child, out, styles) {
                 extent = Some(match extent {
@@ -18233,7 +18403,13 @@ fn geometry_snapshot(
         }
         if let Some(node) = b.node_id {
             let pb = b.dimensions.padding_box();
-            let (right, bottom) = extent.map_or((pb.x + pb.width, pb.y + pb.height), |e| (e.2, e.3));
+            let (px, py, pw, ph) = (
+                finite_f32(pb.x),
+                finite_f32(pb.y),
+                finite_f32(pb.width),
+                finite_f32(pb.height),
+            );
+            let (right, bottom) = extent.map_or((px + pw, py + ph), |e| (e.2, e.3));
             // The computed value, not the layout box's: a relative or sticky
             // box is laid out as static, but it is still positioned (it is
             // an offsetParent).
@@ -18243,16 +18419,16 @@ fn geometry_snapshot(
                 _ => 1,
             };
             let geometry = rustkit_bindings::BoxGeometry {
-                x: bb.x,
-                y: bb.y,
-                width: bb.width,
-                height: bb.height,
-                border_left: b.dimensions.border.left,
-                border_top: b.dimensions.border.top,
-                client_width: pb.width,
-                client_height: pb.height,
-                scroll_width: (right - pb.x).max(pb.width),
-                scroll_height: (bottom - pb.y).max(pb.height),
+                x: finite_f32(bb.x),
+                y: finite_f32(bb.y),
+                width: finite_f32(bb.width),
+                height: finite_f32(bb.height),
+                border_left: finite_f32(b.dimensions.border.left),
+                border_top: finite_f32(b.dimensions.border.top),
+                client_width: pw,
+                client_height: ph,
+                scroll_width: finite_f32((right - px).max(pw)),
+                scroll_height: finite_f32((bottom - py).max(ph)),
                 position,
             };
             styles.entry(node).or_insert_with(|| computed_style_lines(b));
@@ -18306,9 +18482,68 @@ fn css_color(c: rustkit_css::Color) -> String {
     }
 }
 
+fn finite_f32(v: f32) -> f32 {
+    if v.is_finite() { v } else { 0.0 }
+}
+
 fn css_px(v: f32) -> String {
+    let v = finite_f32(v);
     let r = (v * 100.0).round() / 100.0;
     if r.fract() == 0.0 { format!("{}px", r as i64) } else { format!("{r}px") }
+}
+
+/// One corner's used radii as `<n>px` strings. A percentage resolves against
+/// the border box: width for the horizontal radius, height for the vertical.
+fn corner_radii_px(
+    c: &rustkit_css::CornerRadius,
+    font_px: f32,
+    width: f32,
+    height: f32,
+) -> (String, String) {
+    let axis = |length: &rustkit_css::Length, size: f32| {
+        css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0))
+    };
+    (axis(&c.horizontal, width), axis(&c.vertical, height))
+}
+
+fn corner_longhand(horizontal: &str, vertical: &str) -> String {
+    if horizontal == vertical {
+        horizontal.to_string()
+    } else {
+        format!("{horizontal} {vertical}")
+    }
+}
+
+/// The `border-radius` shorthand the way Chrome serialises a computed value:
+/// four horizontal radii, then ` / ` and the vertical radii when any corner
+/// is elliptical. Each side drops a value the 1–4 expansion would refill,
+/// so an unset radius is `0px` rather than four zeros.
+fn border_radius_shorthand(corners: &[(String, String); 4]) -> String {
+    fn minimize(v: [&str; 4]) -> String {
+        if v[0] == v[1] && v[1] == v[2] && v[2] == v[3] {
+            v[0].to_string()
+        } else if v[0] == v[2] && v[1] == v[3] {
+            format!("{} {}", v[0], v[1])
+        } else if v[1] == v[3] {
+            format!("{} {} {}", v[0], v[1], v[2])
+        } else {
+            format!("{} {} {} {}", v[0], v[1], v[2], v[3])
+        }
+    }
+    let horizontal = minimize([
+        &corners[0].0,
+        &corners[1].0,
+        &corners[2].0,
+        &corners[3].0,
+    ]);
+    if corners.iter().all(|(h, v)| h == v) {
+        horizontal
+    } else {
+        format!(
+            "{horizontal} / {}",
+            minimize([&corners[0].1, &corners[1].1, &corners[2].1, &corners[3].1])
+        )
+    }
 }
 
 /// The computed style of one box as `name\tvalue` lines, for the properties
@@ -18336,6 +18571,13 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         rustkit_css::Length::Px(p) if p != 0.0 => css_px(p),
         _ => "normal".to_string(),
     };
+    let box_edges = d.border_box();
+    let radii = [
+        corner_radii_px(&s.border_top_left_radius, font_px, box_edges.width, box_edges.height),
+        corner_radii_px(&s.border_top_right_radius, font_px, box_edges.width, box_edges.height),
+        corner_radii_px(&s.border_bottom_right_radius, font_px, box_edges.width, box_edges.height),
+        corner_radii_px(&s.border_bottom_left_radius, font_px, box_edges.width, box_edges.height),
+    ];
     let rows: Vec<(&str, String)> = vec![
         ("display", css_keyword(&format!("{:?}", s.display))),
         ("position", css_keyword(&format!("{:?}", s.position))),
@@ -18362,6 +18604,11 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("border-right-width", css_px(d.border.right)),
         ("border-bottom-width", css_px(d.border.bottom)),
         ("border-left-width", css_px(d.border.left)),
+        ("border-top-left-radius", corner_longhand(&radii[0].0, &radii[0].1)),
+        ("border-top-right-radius", corner_longhand(&radii[1].0, &radii[1].1)),
+        ("border-bottom-right-radius", corner_longhand(&radii[2].0, &radii[2].1)),
+        ("border-bottom-left-radius", corner_longhand(&radii[3].0, &radii[3].1)),
+        ("border-radius", border_radius_shorthand(&radii)),
         ("top", offset(&s.top, d.content.height)),
         ("right", offset(&s.right, d.content.width)),
         ("bottom", offset(&s.bottom, d.content.height)),
