@@ -883,6 +883,7 @@ fn run_inserted(
             // (which would become its imports' base).
             let name = format!("inserted#{}", job.node);
             inspector.alias_script(&name, &record.source);
+            crate::console_log::alias(&name, &record.source);
             let started = std::time::Instant::now();
             let _ = bindings.set_current_script(Some(job.node));
             let ran = catch_unwind(AssertUnwindSafe(|| bindings.evaluate_named(&text, &name)));
@@ -909,6 +910,9 @@ fn run_inserted(
             matches!(record.outcome, ScriptOutcome::Ran | ScriptOutcome::Threw(_)).then_some("load")
         }
     };
+    if let Some(event) = event {
+        crate::console_log::inserted_script(&record.source, event);
+    }
     let poisoned = record.outcome == ScriptOutcome::EngineFailed(EngineFailure::Panic);
     out.records.push(record);
     out.requests += 1;

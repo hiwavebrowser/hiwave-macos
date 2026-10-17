@@ -281,6 +281,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
+mod console_log;
 mod relayout_cause;
 mod presenter;
 pub use presenter::FrameCommit;
@@ -4662,13 +4663,18 @@ impl Engine {
             // make it the base of the script's dynamic `import()`s.
             // The same names with the Inspector on or off, so the script
             // log reads the same either way; only a listening Inspector
-            // records which URL each stands for.
+            // records which URL each stands for. The console-log switch, when
+            // set, records the same names so a log line can show the URL.
             let external: Option<String> = if label.starts_with("inline#") {
+                if let Some(url) = document_url.as_ref() {
+                    crate::console_log::alias(&label, url.as_str());
+                }
                 None
             } else {
                 external_scripts += 1;
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
+                crate::console_log::alias(&name, &label);
                 Some(name)
             };
             let record = run(label, text.len(), &|label| {

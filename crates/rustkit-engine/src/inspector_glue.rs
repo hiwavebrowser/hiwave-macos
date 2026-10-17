@@ -2,7 +2,9 @@
 //! page errors the JS runtime describes (exceptions, unhandled rejections,
 //! modules that threw after a top-level `await`) and the unimplemented
 //! members the bindings saw. Every function here returns at once when the
-//! view's Inspector has nobody listening.
+//! view's Inspector has nobody listening, unless `HIWAVE_CONSOLE_LOG=1`
+//! (see `console_log`), which mirrors console output and those page errors
+//! into the tracing log.
 //!
 //! An error record is built from the runtime's report only, never from the
 //! script log's text: the report holds no text the page chose unless error
@@ -17,14 +19,25 @@ use crate::{EngineFailure, ScriptOutcome, ScriptRecord};
 
 /// Set up a document's new bindings for a listening Inspector: console
 /// calls with their positions, error reports, unsupported members' callers.
-/// Nothing is set up (and nothing costs anything) when nobody listens.
+/// Nothing is set up (and nothing costs anything) when nobody listens and
+/// `HIWAVE_CONSOLE_LOG` is unset.
 pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
-    if !inspector.is_active() {
+    let mirror = crate::console_log::enabled();
+    let listening = inspector.is_active();
+    if !listening && !mirror {
         return;
     }
+    // Redaction is the Inspector's. The mirror logs the text the page wrote,
+    // so it is left off while the mirror is on.
+    if listening && !mirror {
+        bindings.set_console_redaction(!inspector.keeps_console_text());
+    }
     let sink = inspector.clone();
-    bindings.set_console_redaction(!inspector.keeps_console_text());
     bindings.set_console_handler(Box::new(move |level, message, at| {
+        crate::console_log::console_message(level, message, at);
+        if !sink.is_active() {
+            return;
+        }
         let level = match level {
             rustkit_js::LogLevel::Log => ConsoleLevel::Log,
             rustkit_js::LogLevel::Info => ConsoleLevel::Info,
@@ -45,7 +58,8 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
         });
         sink.console(level, message, location);
     }));
-    let _ = bindings.set_error_details(true, inspector.keeps_error_text());
+    let keep_text = if mirror { true } else { inspector.keeps_error_text() };
+    let _ = bindings.set_error_details(true, keep_text);
 }
 
 /// Push `record` onto a script log. A page exception in it reaches the
@@ -138,10 +152,14 @@ pub(crate) fn drain_script_reports(bindings: &DomBindings, inspector: &Inspector
 /// drain: Inspector events only, never script log records (the board's
 /// counts stay what they were).
 pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source: &str) {
-    if !inspector.is_active() {
+    let mirror = crate::console_log::enabled();
+    if !inspector.is_active() && !mirror {
         return;
     }
     drain_errors(bindings, inspector, source);
+    if !inspector.is_active() {
+        return;
+    }
     for (interface, member, count, at) in bindings.take_unsupported_apis() {
         let location = at.and_then(|at| inspector.frame_location(&at.path, at.line, at.column));
         inspector.unsupported_api(&interface, &member, count, location);
@@ -150,10 +168,17 @@ pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source:
 
 /// The page's error reports since the last drain, under `source`.
 pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source: &str) {
-    if !inspector.is_active() {
+    let mirror = crate::console_log::enabled();
+    let listening = inspector.is_active();
+    if !listening && !mirror {
         return;
     }
     for report in bindings.take_error_reports() {
-        script_error(inspector, &report, source);
+        if mirror {
+            crate::console_log::page_error(&report, source);
+        }
+        if listening {
+            script_error(inspector, &report, source);
+        }
     }
 }
