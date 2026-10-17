@@ -909,8 +909,9 @@ struct ViewState {
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
     /// External classic scripts the page inserted whose fetches are still
-    /// out, or finished and not yet run, in insertion order. The fetch is
-    /// not tied to a turn deadline. A live turn runs a finished one and
+    /// out, or finished and not yet run. The fetch is not tied to a turn
+    /// deadline. A live turn runs one whose fetch has finished (an
+    /// `async = false` script waits for the in-order scripts before it) and
     /// fires `load` or `error`. A new document retires the queue.
     live_inserted: script_net::InsertedScripts,
     /// Causes noted since the last relayout (see `relayout_cause`).
@@ -3530,8 +3531,9 @@ impl Engine {
             // Scripts the page inserted, including one whose fetch outlived
             // the load. A turn does not wait a fetch out and does not drop
             // it. The fetch runs on its own thread; a finished body is
-            // queued, and this turn runs it in insertion order, then fires
-            // `load` or `error`. The arrival woke the loop. Nothing here
+            // queued, and this turn runs it when its fetch has finished
+            // (in insertion order only when `async` was set false), then
+            // fires `load` or `error`. The arrival woke the loop. Nothing here
             // polls, and the fetch is not part of `in_flight`.
             let inserted = view.live_inserted.clone();
             let execute = !spent();

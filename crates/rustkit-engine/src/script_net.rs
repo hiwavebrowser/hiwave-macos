@@ -451,12 +451,15 @@ fn poke_live_turn() {
     }
 }
 
-/// External classic scripts one view has inserted and not yet run, in
-/// insertion order. The fetch runs on the engine's fetch thread, not on
-/// the turn that enqueued it. A result is stored here and a live turn runs
-/// it. `retire` (a new document) drops whatever is queued and rejects a
-/// result stamped with an earlier `nav_id`, so it cannot run on the next
-/// page.
+/// External classic scripts one view has inserted and not yet run. The
+/// fetch runs on the engine's fetch thread, not on the turn that enqueued
+/// it. A result is stored here and a live turn runs it. A script runs when
+/// its own fetch finishes, unless `async` was set false, in which case it
+/// waits for the in-order scripts inserted before it. A fetch that failed
+/// or was blocked fires `error` as soon as that result is in and does not
+/// hold later scripts. `retire` (a new document) drops whatever is queued
+/// and rejects a result stamped with an earlier `nav_id`, so it cannot run
+/// on the next page.
 pub(crate) struct InsertedScripts {
     board: Arc<Mutex<InsertedBoard>>,
 }
@@ -466,6 +469,10 @@ struct InsertedBoard {
     /// id is discarded.
     nav_id: u64,
     next_id: u64,
+    /// How many results have been stored. A ready script records the value
+    /// at the moment its body arrived, so two that are both waiting run in
+    /// the order they finished.
+    ready_seq: u64,
     jobs: Vec<InsertedJob>,
     notify: Arc<tokio::sync::Notify>,
     /// Results stored (and the loop woken) since this board was created.
@@ -477,6 +484,11 @@ struct InsertedJob {
     node: usize,
     url: String,
     nav_id: u64,
+    /// `async` was set false: this script waits for in-order scripts
+    /// inserted before it. Otherwise it runs when its fetch finishes.
+    in_order: bool,
+    /// Set when `body` is stored. Zero while the fetch is still out.
+    ready_seq: u64,
     body: Option<FetchedInserted>,
     guard: Option<crate::inspector::RequestGuard>,
 }
@@ -525,6 +537,7 @@ impl InsertedScripts {
             board: Arc::new(Mutex::new(InsertedBoard {
                 nav_id: 0,
                 next_id: 1,
+                ready_seq: 0,
                 jobs: Vec::new(),
                 notify: Arc::new(tokio::sync::Notify::new()),
                 wakes: 0,
@@ -556,17 +569,14 @@ impl InsertedScripts {
         !lock_board(&self.board).jobs.is_empty()
     }
 
-    fn head_ready(&self) -> bool {
-        lock_board(&self.board).jobs.first().is_some_and(|job| job.body.is_some())
+    fn has_ready(&self) -> bool {
+        next_ready_index(&lock_board(&self.board).jobs).is_some()
     }
 
-    fn take_ready_head(&self) -> Option<InsertedJob> {
+    fn take_ready(&self) -> Option<InsertedJob> {
         let mut board = lock_board(&self.board);
-        if board.jobs.first().is_some_and(|job| job.body.is_some()) {
-            Some(board.jobs.remove(0))
-        } else {
-            None
-        }
+        let index = next_ready_index(&board.jobs)?;
+        Some(board.jobs.remove(index))
     }
 
     fn notify(&self) -> Arc<tokio::sync::Notify> {
@@ -584,12 +594,53 @@ fn lock_board(board: &Mutex<InsertedBoard>) -> std::sync::MutexGuard<'_, Inserte
     board.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A finished fetch that must not hold the queue: the element hears `error`
+/// (or, for an unparseable URL, nothing) and later scripts do not wait for it.
+fn does_not_block(body: &FetchedInserted) -> bool {
+    match body {
+        FetchedInserted::Source(_) => false,
+        FetchedInserted::Http(_) | FetchedInserted::Transport { .. } | FetchedInserted::Skipped(_) => true,
+    }
+}
+
+/// The script to run next, if one is ready (HTML §4.12.1.1). An async script
+/// (the default for one the page inserted) is ready when its fetch has
+/// finished. An in-order script (`async` set false) is ready when its fetch
+/// has finished and every in-order script inserted before it has already
+/// run, except a failed or blocked fetch: that fires `error` immediately and
+/// does not hold the ones after it. Among the scripts that are ready, the
+/// one whose fetch finished first runs.
+fn next_ready_index(jobs: &[InsertedJob]) -> Option<usize> {
+    let mut in_order_blocked = false;
+    let mut best: Option<(usize, u64)> = None;
+    for (index, job) in jobs.iter().enumerate() {
+        let failure = job.body.as_ref().is_some_and(does_not_block);
+        if job.in_order && in_order_blocked && !failure {
+            continue;
+        }
+        if job.body.is_none() {
+            if job.in_order {
+                in_order_blocked = true;
+            }
+            continue;
+        }
+        if job.in_order && !failure {
+            in_order_blocked = true;
+        }
+        if best.map(|(_, seq)| job.ready_seq < seq).unwrap_or(true) {
+            best = Some((index, job.ready_seq));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
 /// Fetch and run the external classic scripts the page inserted
-/// (`web_scripts.js`), in insertion order. Each is fetched as a
-/// parser-inserted script is (the page's referrer, the script destination
-/// the shield classifies by, the loader's cookies), never through page
-/// script, and run as its element's script: `currentScript` is the element,
-/// then the element hears `load`, or `error` when the fetch failed.
+/// (`web_scripts.js`). Each is fetched as a parser-inserted script is (the
+/// page's referrer, the script destination the shield classifies by, the
+/// loader's cookies), never through page script, and run as its element's
+/// script: `currentScript` is the element, then the element hears `load`,
+/// or `error` when the fetch failed. One whose `async` was set false waits
+/// its turn; every other one runs when its own fetch finishes.
 ///
 /// `deadline` bounds how long this call waits. It does not bound the fetch.
 /// A fetch still pending when the deadline passes stays queued, hears
@@ -621,7 +672,7 @@ pub(crate) async fn drive_inserted_scripts(
         if !execute {
             return out;
         }
-        if scripts.head_ready() {
+        if scripts.has_ready() {
             ran += 1;
             out.rounds += 1;
             if run_inserted(bindings, inspector, scripts, &mut out) {
@@ -671,7 +722,7 @@ fn enqueue_inserted(
     let mut started = Vec::new();
     {
         let mut board = lock_board(&scripts.board);
-        for (node, url) in queued {
+        for (node, url, in_order) in queued {
             let id = board.next_id;
             board.next_id = board.next_id.wrapping_add(1);
             let nav_id = board.nav_id;
@@ -679,7 +730,16 @@ fn enqueue_inserted(
                 Ok(parsed) => {
                     let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
                     let guard = inspector.begin_request(&parsed, "GET", ResourceType::Script, Some("script"));
-                    board.jobs.push(InsertedJob { id, node, url, nav_id, body: None, guard });
+                    board.jobs.push(InsertedJob {
+                        id,
+                        node,
+                        url,
+                        nav_id,
+                        in_order,
+                        ready_seq: 0,
+                        body: None,
+                        guard,
+                    });
                     started.push(FetchJob {
                         loader: Arc::clone(loader),
                         request,
@@ -688,14 +748,20 @@ fn enqueue_inserted(
                         nav_id,
                     });
                 }
-                Err(_) => board.jobs.push(InsertedJob {
-                    id,
-                    node,
-                    url,
-                    nav_id,
-                    body: Some(FetchedInserted::Skipped("unparseable src")),
-                    guard: None,
-                }),
+                Err(_) => {
+                    board.ready_seq = board.ready_seq.wrapping_add(1);
+                    let ready_seq = board.ready_seq;
+                    board.jobs.push(InsertedJob {
+                        id,
+                        node,
+                        url,
+                        nav_id,
+                        in_order,
+                        ready_seq,
+                        body: Some(FetchedInserted::Skipped("unparseable src")),
+                        guard: None,
+                    });
+                }
             }
         }
     }
@@ -764,10 +830,16 @@ fn store_inserted_result(board: &Mutex<InsertedBoard>, job_id: u64, nav_id: u64,
     if board.nav_id != nav_id {
         return false;
     }
-    let Some(job) = board.jobs.iter_mut().find(|job| job.id == job_id && job.nav_id == nav_id && job.body.is_none()) else {
+    let Some(index) = board.jobs.iter().position(|job| job.id == job_id && job.nav_id == nav_id && job.body.is_none()) else {
         return false;
     };
-    job.body = Some(fetched);
+    board.ready_seq = board.ready_seq.wrapping_add(1);
+    let ready_seq = board.ready_seq;
+    {
+        let job = &mut board.jobs[index];
+        job.ready_seq = ready_seq;
+        job.body = Some(fetched);
+    }
     board.wakes += 1;
     let notify = Arc::clone(&board.notify);
     drop(board);
@@ -853,7 +925,7 @@ fn run_inserted(
     out: &mut Pump,
 ) -> bool {
     use crate::{EngineFailure, FetchFailure, ScriptOutcome, ScriptRecord};
-    let Some(mut job) = scripts.take_ready_head() else {
+    let Some(mut job) = scripts.take_ready() else {
         return false;
     };
     let Some(fetched) = job.body.take() else {

@@ -791,10 +791,12 @@ impl DomBindings {
     }
 
     /// The external classic scripts script inserted since the last call, as
-    /// (the element's raw NodeId, absolute URL), oldest first. The engine
-    /// fetches each and runs it as that element's script
+    /// (the element's raw NodeId, absolute URL, whether it is in the
+    /// in-order list), oldest first. In-order means `async` was set false.
+    /// Anything else runs when its fetch finishes. The engine fetches each
+    /// and runs it as that element's script
     /// ([`Self::set_current_script`], then [`Self::fire_script_event`]).
-    pub fn take_inserted_scripts(&self) -> Vec<(usize, String)> {
+    pub fn take_inserted_scripts(&self) -> Vec<(usize, String, bool)> {
         self.dom_host.borrow_mut().take_inserted_scripts()
     }
 

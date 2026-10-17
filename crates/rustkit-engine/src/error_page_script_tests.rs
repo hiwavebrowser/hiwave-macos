@@ -315,12 +315,16 @@ document.body.appendChild(inline);
     let server = serve(site);
     let (mut engine, view, rt) = engine();
     rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
-    assert_eq!(
-        text(&mut engine, view, "log.join(',') + ' runs=' + runs"),
-        r#"String("inline true,ran a,load /a.js,error /gone.js runs=1")"#
-    );
-    // The two external scripts are fetched together, so the server may see
-    // either first. Execution stays in insertion order (asserted above).
+    let got = text(&mut engine, view, "log.join(',') + ' runs=' + runs");
+    let body = got.trim_start_matches("String(\"").trim_end_matches("\")");
+    assert!(body.starts_with("inline true,"), "{got}");
+    assert!(body.contains("ran a") && body.contains("load /a.js") && body.contains("error /gone.js"), "{got}");
+    assert!(body.find("ran a").unwrap() < body.find("load /a.js").unwrap(), "{got}");
+    assert!(!body.contains("ran data"), "{got}");
+    assert!(body.ends_with("runs=1"), "{got}");
+    // The two external scripts are fetched together, so either may finish,
+    // and run, first: a script the page inserted is async unless `async`
+    // was set false. `/a.js` still runs before its own `load`.
     let mut paths: Vec<String> = server.requests().into_iter().map(|(p, _)| p).collect();
     paths.sort();
     assert_eq!(paths, vec!["/", "/a.js", "/gone.js"]);
@@ -834,5 +838,86 @@ document.head.appendChild(s);
         "the failure was not recorded: {:?}",
         engine.script_log(view).unwrap().iter().map(|r| (&r.source, &r.outcome)).collect::<Vec<_>>()
     );
+}
+
+/// Two external scripts the page inserted, the first held on the server.
+/// `ordered` sets `async = false` on both, which is the in-order list.
+fn race_page(ordered: bool) -> String {
+    let set = if ordered {
+        "s.async = false; log.push('set-async ' + s.async + ' ' + s.hasAttribute('async'));"
+    } else {
+        ""
+    };
+    format!(
+        r#"<!doctype html><head></head><body><script>
+var log = [];
+log.push('default-async ' + document.createElement('script').async);
+function add(src) {{
+  var s = document.createElement('script');
+  {set}
+  s.src = src;
+  s.onload = function () {{ log.push('load ' + src); }};
+  s.onerror = function () {{ log.push('error ' + src); }};
+  document.head.appendChild(s);
+}}
+add('/slow.js');
+add('/fast.js');
+</script></body></html>"#
+    )
+}
+
+fn race_handler(ordered: bool, path: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+    match path {
+        "/slow.js" => {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            (200, "text/javascript", vec![], "log.push('ran /slow.js');".into())
+        }
+        "/fast.js" => (200, "text/javascript", vec![], "log.push('ran /fast.js');".into()),
+        _ => (200, "text/html", vec![], race_page(ordered)),
+    }
+}
+
+fn async_race(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+    race_handler(false, path)
+}
+
+fn ordered_race(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+    race_handler(true, path)
+}
+
+fn script_log_text(engine: &mut Engine, view: EngineViewId) -> String {
+    let raw = text(engine, view, "log.join(',')");
+    raw.trim_start_matches("String(\"").trim_end_matches("\")").to_string()
+}
+
+/// A script the page inserted is async unless `async` was set false. The
+/// one whose fetch finishes first runs first, even if it was inserted second.
+#[test]
+fn a_fast_inserted_script_runs_before_a_slower_one_inserted_earlier() {
+    let server = serve(async_race);
+    let (mut engine, view, rt) = engine();
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    let log = script_log_text(&mut engine, view);
+    assert!(log.contains("default-async true"), "{log}");
+    let at = |needle: &str| log.find(needle).unwrap_or_else(|| panic!("{needle} missing from {log}"));
+    assert!(at("ran /fast.js") < at("load /fast.js"), "{log}");
+    assert!(at("load /fast.js") < at("ran /slow.js"), "{log}");
+    assert!(at("ran /slow.js") < at("load /slow.js"), "{log}");
+}
+
+/// `async = false` is the in-order list: the script inserted first runs
+/// first, even when its fetch is the one that finishes second.
+#[test]
+fn scripts_with_async_false_run_in_insertion_order() {
+    let server = serve(ordered_race);
+    let (mut engine, view, rt) = engine();
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    let log = script_log_text(&mut engine, view);
+    assert!(log.contains("default-async true"), "{log}");
+    assert!(log.contains("set-async false false"), "{log}");
+    let at = |needle: &str| log.find(needle).unwrap_or_else(|| panic!("{needle} missing from {log}"));
+    assert!(at("ran /slow.js") < at("load /slow.js"), "{log}");
+    assert!(at("load /slow.js") < at("ran /fast.js"), "{log}");
+    assert!(at("ran /fast.js") < at("load /fast.js"), "{log}");
 }
 
