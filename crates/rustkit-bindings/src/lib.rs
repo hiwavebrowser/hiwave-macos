@@ -11,6 +11,42 @@
 
 mod dom;
 mod inner_text;
+
+thread_local! {
+    static LOCATION_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+static LOCATION_HOOK: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// `url`, `replace` (`location.replace` / reload).
+pub type LocationDiag = fn(&str, bool);
+
+pub fn set_location_armed(on: bool) {
+    LOCATION_ARMED.with(|cell| cell.set(on));
+}
+
+pub fn set_location_hook(hook: Option<LocationDiag>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    LOCATION_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn note_location(url: &str, replace: bool) {
+    if !LOCATION_ARMED.with(std::cell::Cell::get) {
+        return;
+    }
+    let ptr = LOCATION_HOOK.load(std::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: stored from a `LocationDiag` function pointer. The engine
+    // installs one static function for the process.
+    let hook: LocationDiag = unsafe { std::mem::transmute(ptr) };
+    hook(url, replace);
+}
 mod net_bridge;
 pub use net_bridge::{NetDelivery, NetRequest};
 pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
@@ -43,6 +79,8 @@ mod web_history_tests;
 #[cfg(test)]
 mod geometry_tests;
 #[cfg(test)]
+mod range_tests;
+#[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]
 mod observers_tests;
@@ -70,7 +108,7 @@ mod web_crypto;
 mod web_scroll;
 mod web_url;
 
-pub use dom::{BoxGeometry, GeometrySource, SelectorMatchFn};
+pub use dom::{BoxGeometry, GeometrySource, HitTester, SelectorMatchFn};
 pub mod events;
 
 pub use events::{
@@ -791,10 +829,12 @@ impl DomBindings {
     }
 
     /// The external classic scripts script inserted since the last call, as
-    /// (the element's raw NodeId, absolute URL), oldest first. The engine
-    /// fetches each and runs it as that element's script
+    /// (the element's raw NodeId, absolute URL, whether it is in the
+    /// in-order list), oldest first. In-order means `async` was set false.
+    /// Anything else runs when its fetch finishes. The engine fetches each
+    /// and runs it as that element's script
     /// ([`Self::set_current_script`], then [`Self::fire_script_event`]).
-    pub fn take_inserted_scripts(&self) -> Vec<(usize, String)> {
+    pub fn take_inserted_scripts(&self) -> Vec<(usize, String, bool)> {
         self.dom_host.borrow_mut().take_inserted_scripts()
     }
 
@@ -1319,7 +1359,14 @@ impl DomBindings {
     pub fn set_geometry(&self, geometry: std::collections::HashMap<usize, BoxGeometry>) {
         let mut host = self.dom_host.borrow_mut();
         host.geometry_source = None;
+        host.set_hit_tester(None);
         host.geometry = geometry;
+    }
+
+    /// The layout hit test `elementFromPoint` uses. `None` falls back to
+    /// the published boxes. A point answers null until a layout exists.
+    pub fn set_hit_tester(&self, tester: Option<HitTester>) {
+        self.dom_host.borrow_mut().set_hit_tester(tester);
     }
 
     /// Publish a new layout without measuring it: `source` builds the maps
@@ -1347,6 +1394,8 @@ impl DomBindings {
         s.y = offset.1;
         s.max_x = max.0;
         s.max_y = max.1;
+        drop(s);
+        self.dom_host.borrow_mut().note_scroll(offset);
     }
 
     /// Where script last scrolled the window to since the last call, if it
@@ -1501,6 +1550,17 @@ impl DomBindings {
     pub fn set_error_details(&self, on: bool, keep_text: bool) -> Result<(), BindingError> {
         self.runtime.borrow_mut().set_error_reports(on, keep_text);
         Ok(())
+    }
+
+    /// Keep each named script's source so an error log can quote it. Off
+    /// drops what was kept. See [`JsRuntime::set_capture_script_sources`].
+    pub fn capture_script_sources(&self, on: bool) {
+        self.runtime.borrow_mut().set_capture_script_sources(on);
+    }
+
+    /// Source last evaluated as `path`, when capture is on.
+    pub fn script_source(&self, path: &str) -> Option<String> {
+        self.runtime.borrow().script_source(path)
     }
 
     /// Page errors since the last call (with
@@ -1720,6 +1780,11 @@ impl DomBindings {
         self.runtime.borrow_mut().take_module_requests()
     }
 
+    /// Dynamic `import()` calls that rejected since the last call.
+    pub fn take_dynamic_import_failures(&self) -> Vec<rustkit_js::DynamicImportFailure> {
+        self.runtime.borrow_mut().take_dynamic_import_failures()
+    }
+
     /// Supply one requested module's source, or why there is none.
     pub fn supply_module(&self, requested: &str, outcome: Result<rustkit_js::FetchedModule, String>) {
         self.runtime.borrow_mut().supply_module(requested, outcome);
@@ -1730,11 +1795,15 @@ impl DomBindings {
         self.runtime.borrow_mut().poll_module(handle)
     }
 
-    /// Set `document.readyState` (`loading` / `interactive` / `complete`).
+    /// Set `document.readyState` (`loading` / `interactive` / `complete`)
+    /// and fire `readystatechange` on the document. That is the spec's
+    /// readiness update: the event comes before `DOMContentLoaded` and
+    /// before `window` `load`.
     pub fn set_ready_state(&self, state: &str) -> Result<(), BindingError> {
-        self.runtime
-            .borrow_mut()
-            .evaluate_script(&format!("document.readyState = {:?};", state))?;
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.readyState = {:?}; window.__rustkit_fire('document', 'readystatechange');",
+            state
+        ))?;
         Ok(())
     }
 

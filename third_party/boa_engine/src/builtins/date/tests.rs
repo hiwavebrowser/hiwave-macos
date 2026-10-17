@@ -195,6 +195,29 @@ fn date_ctor_parse_call() {
 }
 
 #[test]
+fn date_ctor_parse_fraction_and_basic_offset() {
+    run_test_actions([
+        TestAction::assert_eq(
+            "new Date('2024-10-16T18:22:11.123000+0000').toISOString()",
+            js_str!("2024-10-16T18:22:11.123Z"),
+        ),
+        TestAction::assert_eq(
+            "new Date('2024-10-16T18:22:11.1Z').getUTCMilliseconds()",
+            100,
+        ),
+        TestAction::assert_eq(
+            "new Date('2024-10-16T18:22:11.1234Z').toISOString()",
+            js_str!("2024-10-16T18:22:11.123Z"),
+        ),
+        TestAction::assert_eq(
+            "new Date('2024-10-16 18:22:11Z').toISOString()",
+            js_str!("2024-10-16T18:22:11.000Z"),
+        ),
+        TestAction::assert("isNaN(Date.parse('not-a-date'))"),
+    ]);
+}
+
+#[test]
 fn date_ctor_utc_call() {
     run_test_actions([TestAction::assert_eq(
         "Date.UTC(2020, 6, 8, 9, 16, 15, 779)",

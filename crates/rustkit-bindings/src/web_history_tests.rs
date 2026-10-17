@@ -303,6 +303,19 @@ fn a_script_click_on_a_link_follows_it() {
 }
 
 #[test]
+fn location_stringifies_to_its_href_and_can_be_a_url_base() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "String(location) + '|' + location.toString() + '|' + (location == location.href)"),
+        "https://site.test/dir/index.html?a=1#top|https://site.test/dir/index.html?a=1#top|true"
+    );
+    assert_eq!(
+        ev(&b, "new URL('/abs', location).href + ' ' + new URL('rel.js', location).href + ' ' + new URL(location).href"),
+        "https://site.test/abs https://site.test/dir/rel.js https://site.test/dir/index.html?a=1#top"
+    );
+}
+
+#[test]
 fn a_script_click_on_a_fragment_link_stays_in_the_document() {
     let b = bound();
     ev(

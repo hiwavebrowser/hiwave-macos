@@ -283,6 +283,11 @@ impl Presenter {
 
     /// The host view's bounds (a headless view has none here; the page
     /// side keeps those).
+    /// The platform view pointer (`NSView` on macOS). 0 when the view is gone.
+    pub(crate) fn raw_view(&self, viewhost_id: ViewId) -> isize {
+        self.viewhost.raw_view(viewhost_id)
+    }
+
     pub(crate) fn host_bounds(&self, viewhost_id: ViewId) -> Result<Bounds, EngineError> {
         self.viewhost
             .get_bounds(viewhost_id)

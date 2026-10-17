@@ -538,6 +538,11 @@ impl MacOSViewHost {
             // Convert from top-left origin to Cocoa's bottom-left origin
             let frame = Self::convert_to_cocoa_frame(bounds, parent_height);
             let _: () = msg_send![view, setFrame: frame];
+            let layer: id = msg_send![view, layer];
+            if layer != nil {
+                let masks: bool = true;
+                let _: () = msg_send![layer, setMasksToBounds: masks];
+            }
         }
 
         debug!(?view_id, ?bounds, "View bounds updated");

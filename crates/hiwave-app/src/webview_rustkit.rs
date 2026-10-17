@@ -24,8 +24,9 @@ use url::Url;
 /// asks for none).
 const MIN_LIVE_TURN: Duration = Duration::from_millis(4);
 
-/// How soon the loop turns again while a page's request is out. Nothing
-/// wakes the loop when the answer comes, so it looks.
+/// How soon the loop turns again while a page's XHR or `fetch` is out.
+/// Nothing wakes the loop when that answer comes, so it looks. An inserted
+/// script's fetch is not one of these: its completion posts `LiveTurn`.
 const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
 
 /// A RustKit-based WebView that implements IWebContent.
@@ -67,6 +68,9 @@ pub struct RustKitView {
     /// Runtime the live loop's network turns block on. `None` if it could
     /// not be built: the page then gets no timers or late fetches, as before.
     live_runtime: Option<tokio::runtime::Runtime>,
+    /// The content `NSView`. Kept outside the engine so a load can move the
+    /// frame while `engine` is borrowed.
+    host_view: isize,
 }
 
 /// Script budget for pages in the live app. The engine default (5 s) is
@@ -80,6 +84,49 @@ pub struct RustKitView {
 /// new module graph held the window for the full minute. Nothing loaded in
 /// the hand tests of 2026-10-08 needed more than about 8 s.
 const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
+
+thread_local! {
+    /// Set while the content load is pumping the run loop so the chrome
+    /// WebView can paint. The event loop must not re-enter the load: the
+    /// engine is already borrowed on this thread.
+    static CHROME_PUMP: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the window thread is inside a chrome paint turned from a content
+/// load. Event-loop handlers use it to avoid borrowing the engine again.
+pub(crate) fn chrome_pump_active() -> bool {
+    CHROME_PUMP.with(|flag| flag.get())
+}
+
+/// Give WebKit one short turn of the main run loop so the toolbar and
+/// sidebar composite while a content load is waiting on the network.
+fn pump_chrome_run_loop() {
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFRunLoopDefaultMode: *const std::ffi::c_void;
+        fn CFRunLoopRunInMode(
+            mode: *const std::ffi::c_void,
+            seconds: f64,
+            return_after_source_handled: u8,
+        ) -> i32;
+    }
+    unsafe {
+        // A few milliseconds, and keep going through the sources already
+        // queued (WebKit's paint among them). `returnAfterSourceHandled`
+        // would stop at the first source, which can be this process's own.
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, 0);
+    }
+}
+
+fn install_chrome_ui_turn() {
+    rustkit_engine::set_chrome_ui_turn(Some(Box::new(|| {
+        if CHROME_PUMP.with(|flag| flag.replace(true)) {
+            return;
+        }
+        pump_chrome_run_loop();
+        CHROME_PUMP.with(|flag| flag.set(false));
+    })));
+}
 
 /// The longest the script of one turn after the load may run: the timer
 /// callbacks and response handlers of one pass of the live loop, or the
@@ -168,6 +215,13 @@ impl RustKitView {
             .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
 
         info!(?view_id, "RustKit view created");
+        let host_view = engine.host_view_raw(view_id);
+        rustkit_viewhost::clip_raw_view(host_view);
+        // The chrome WebView is WebKit on this same thread. A content load
+        // blocks the thread through its network waits (it already did,
+        // before the script budget stopped counting those waits). The hook
+        // gives that WebView a run-loop turn during each wait.
+        install_chrome_ui_turn();
 
         Ok(Self {
             engine: RefCell::new(engine),
@@ -188,7 +242,15 @@ impl RustKitView {
                 .build()
                 .map_err(|e| warn!(error = %e, "No runtime for the live loop; page timers will not run"))
                 .ok(),
+            host_view,
         })
+    }
+
+    /// Move the content view's frame without borrowing the engine. The GPU
+    /// surface and the page layout still follow `set_bounds_internal` once
+    /// the load has returned the engine.
+    pub fn place_host_frame(&self, bounds: Bounds) {
+        rustkit_viewhost::place_raw_view(self.host_view, bounds);
     }
 
     /// One turn of the live loop for the page (call this in the event
@@ -237,6 +299,7 @@ impl RustKitView {
     /// drawn again once it is a second old. `HIWAVE_RENDER_EVERY_WAKE=1`
     /// is the old behaviour, for telling a stale frame from a wrong one.
     pub fn render(&self) {
+        rustkit_viewhost::clip_raw_view(self.host_view);
         let mut engine = self.engine.borrow_mut();
         // The live turn lays out a resized view; without a live runtime
         // there is no turn, so the frame does it.
