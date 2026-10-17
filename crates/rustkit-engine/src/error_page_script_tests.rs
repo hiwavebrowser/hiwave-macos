@@ -319,7 +319,10 @@ document.body.appendChild(inline);
         text(&mut engine, view, "log.join(',') + ' runs=' + runs"),
         r#"String("inline true,ran a,load /a.js,error /gone.js runs=1")"#
     );
-    let paths: Vec<String> = server.requests().into_iter().map(|(p, _)| p).collect();
+    // The two external scripts are fetched together, so the server may see
+    // either first. Execution stays in insertion order (asserted above).
+    let mut paths: Vec<String> = server.requests().into_iter().map(|(p, _)| p).collect();
+    paths.sort();
     assert_eq!(paths, vec!["/", "/a.js", "/gone.js"]);
 }
 
@@ -350,8 +353,21 @@ setTimeout(function () {
     let (mut engine, view, rt) = engine();
     rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
     assert_eq!(text(&mut engine, view, "String(window.late)"), r#"String("undefined")"#);
-    rt.block_on(engine.pump_live(view, 60_000));
-    assert_eq!(text(&mut engine, view, "String(window.late)"), r#"String("ran")"#);
+    // The timer inserts the script on the first turn. A turn does not wait
+    // the fetch out, so a later turn may be the one that runs it.
+    let started = std::time::Instant::now();
+    let mut elapsed = 60_000;
+    loop {
+        rt.block_on(engine.pump_live(view, elapsed));
+        elapsed = 10;
+        if text(&mut engine, view, "String(window.late)") == r#"String("ran")"# {
+            break;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the live loop never ran the script inserted after the load"
+        );
+    }
 }
 
 /// A load cancelled while an inserted script is being fetched runs none of
@@ -398,10 +414,11 @@ fn a_cancelled_load_does_not_run_the_script_it_inserted() {
 }
 
 /// An inserted script still arriving when the load's script budget is spent
-/// is over budget, as a parser-inserted one is: not run, and its element
-/// hears neither `load` nor `error`.
+/// is not dropped. The load finishes without it (no `load`, no `error`,
+/// and it is not recorded over budget). A later live turn runs it and the
+/// element hears `load`.
 #[test]
-fn an_inserted_script_past_the_script_budget_does_not_run() {
+fn an_inserted_script_past_the_script_budget_runs_on_a_later_live_turn() {
     fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
         match path {
             "/slow.js" => {
@@ -427,12 +444,395 @@ document.head.appendChild(s);</script>"#
         .expect("view");
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    assert_eq!(text(&mut engine, view, "document.readyState"), r#"String("complete")"#);
     assert_eq!(text(&mut engine, view, "String(window.slowRan) + ' ' + heard.join()"), r#"String("undefined ")"#);
-    let record = engine.views[&view]
-        .script_log
-        .iter()
-        .find(|r| r.source.ends_with("/slow.js"))
-        .expect("the inserted script is in the script log");
-    assert_eq!(record.outcome, ScriptOutcome::OverBudget);
+    assert!(
+        engine.script_log(view).unwrap().iter().all(|record| record.outcome != ScriptOutcome::OverBudget),
+        "a fetch past the budget stays in flight: {:?}",
+        engine.script_log(view).unwrap().iter().map(|r| (&r.source, &r.outcome)).collect::<Vec<_>>()
+    );
+    // The fetch is not `in_flight`: that would make the window loop poll.
+    // Its arrival wakes a turn. The script stays unrun until a turn sees it.
+    let turn = rt.block_on(engine.pump_live(view, 0));
+    assert_eq!(turn.in_flight, 0, "an inserted fetch must not keep the loop polling: {turn:?}");
+    let mut got = text(&mut engine, view, "String(window.slowRan) + ' ' + heard.join()");
+    if got != r#"String("true load")"# {
+        let started = std::time::Instant::now();
+        while engine.inserted_wake_count(view) == 0 {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "the finished fetch never woke a turn"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        got = text(&mut engine, view, "String(window.slowRan) + ' ' + heard.join()");
+        assert_eq!(got, r#"String("undefined ")"#, "the script ran outside a turn");
+        let started = std::time::Instant::now();
+        loop {
+            rt.block_on(engine.pump_live(view, 20));
+            got = text(&mut engine, view, "String(window.slowRan) + ' ' + heard.join()");
+            if got == r#"String("true load")"# {
+                break;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(3), "the inserted script never ran: {got}");
+        }
+    }
+}
+
+/// The page is the reduced loader: an inline script inserts chunk A, whose
+/// `onload` inserts chunk B, whose `IntersectionObserver` replaces the feed.
+fn chunk_chain_page() -> String {
+    r#"<!doctype html><html><head>
+<script>
+function L(m) { var p = document.getElementById('log'); if (p) p.textContent += m + '\n'; }
+function insert(src, next) {
+  var s = document.createElement('script');
+  s.src = src;
+  s.async = true;
+  s.onload = function () { L(src + ' load'); if (next) next(); };
+  s.onerror = function () { L(src + ' error'); };
+  document.head.appendChild(s);
+  L(src + ' inserted');
+}
+document.addEventListener('DOMContentLoaded', function () { L('DOMContentLoaded readyState=' + document.readyState); });
+window.addEventListener('load', function () { L('window load readyState=' + document.readyState); });
+insert('/chunk-a.js', function () { insert('/chunk-b.js'); });
+</script></head><body>
+<div id="feed"><div class="post">Server-rendered post 1</div><div class="post">Server-rendered post 2</div></div>
+<div id="sentinel" style="height:1px"></div>
+<pre id="log"></pre>
+</body></html>"#
+        .into()
+}
+
+const CHUNK_A: &str = "\
+L('chunk a ran');\n\
+document.getElementById('feed').innerHTML = '<div class=\"skeleton\">loading</div>';\n";
+
+const CHUNK_B: &str = "\
+L('chunk b ran');\n\
+new IntersectionObserver(function (entries) {\n\
+  if (!entries[0].isIntersecting) return;\n\
+  var feed = document.getElementById('feed');\n\
+  feed.innerHTML = '';\n\
+  for (var i = 1; i <= 3; i++) {\n\
+    var d = document.createElement('div');\n\
+    d.className = 'post';\n\
+    d.textContent = 'Feed post ' + i;\n\
+    feed.appendChild(d);\n\
+  }\n\
+  L('IO rendered ' + feed.children.length);\n\
+}).observe(document.getElementById('sentinel'));\n";
+
+fn chain_engine(budget_ms: u64) -> (Engine, EngineViewId, tokio::runtime::Runtime) {
+    let mut engine = Engine::new(EngineConfig { script_budget_ms: budget_ms, ..EngineConfig::default() }).expect("engine");
+    // Tall enough that the sentinel is inside the viewport when the feed is short.
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 800 })
+        .expect("view");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    (engine, view, rt)
+}
+
+fn page_log(engine: &mut Engine, view: EngineViewId) -> String {
+    let raw = text(
+        engine,
+        view,
+        r"document.getElementById('log').textContent.replace(/\n/g, '|')",
+    );
+    raw.trim_start_matches("String(\"").trim_end_matches("\")").to_string()
+}
+
+/// A chunk chain that arrives inside the script budget runs after
+/// `DOMContentLoaded` and `load`, and the intersection observer renders
+/// the feed before the load returns.
+#[test]
+fn an_inserted_chunk_chain_runs_after_dom_content_loaded() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/chunk-a.js" => (200, "text/javascript", vec![], CHUNK_A.into()),
+            "/chunk-b.js" => (200, "text/javascript", vec![], CHUNK_B.into()),
+            _ => (200, "text/html", vec![], chunk_chain_page()),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = chain_engine(5_000);
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    let log = page_log(&mut engine, view);
+    let at = |needle: &str| log.find(needle).unwrap_or_else(|| panic!("{needle} missing from {log}"));
+    assert!(at("/chunk-a.js inserted") < at("DOMContentLoaded readyState=interactive"), "{log}");
+    assert!(at("DOMContentLoaded readyState=interactive") < at("chunk a ran"), "{log}");
+    assert!(at("window load readyState=complete") < at("chunk a ran"), "{log}");
+    assert!(at("chunk a ran") < at("/chunk-a.js load"), "{log}");
+    assert!(at("/chunk-a.js load") < at("/chunk-b.js inserted"), "{log}");
+    assert!(at("/chunk-b.js inserted") < at("chunk b ran"), "{log}");
+    assert!(at("chunk b ran") < at("/chunk-b.js load"), "{log}");
+    assert!(log.contains("IO rendered 3"), "{log}");
+    let feed = text(&mut engine, view, "document.getElementById('feed').textContent");
+    assert!(feed.contains("Feed post 1") && feed.contains("Feed post 2") && feed.contains("Feed post 3"), "{feed}");
+    assert_eq!(text(&mut engine, view, "document.readyState"), r#"String("complete")"#);
+}
+
+/// The same chain, each chunk held longer than the load's script budget.
+/// The load still reaches `complete` and does not drop the fetch. Later
+/// live turns run both chunks, fire `onload`, and the observer renders
+/// the feed. No resize is involved.
+#[test]
+fn an_inserted_chunk_chain_past_the_budget_renders_on_the_live_loop() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/chunk-a.js" | "/chunk-b.js" => {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let body = if path == "/chunk-a.js" { CHUNK_A } else { CHUNK_B };
+                (200, "text/javascript", vec![], body.into())
+            }
+            _ => (200, "text/html", vec![], chunk_chain_page()),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = chain_engine(200);
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    let log = page_log(&mut engine, view);
+    assert!(log.contains("/chunk-a.js inserted"), "{log}");
+    assert!(log.contains("DOMContentLoaded readyState=interactive"), "{log}");
+    assert!(log.contains("window load readyState=complete"), "{log}");
+    assert!(!log.contains("chunk a ran"), "the chunk must not block the load, log was {log}");
+    assert_eq!(text(&mut engine, view, "document.readyState"), r#"String("complete")"#);
+    let feed = text(&mut engine, view, "document.getElementById('feed').textContent");
+    assert!(feed.contains("Server-rendered post 1"), "{feed}");
+    assert!(!feed.contains("Feed post"), "{feed}");
+    assert!(
+        engine.script_log(view).unwrap().iter().all(|record| record.outcome != ScriptOutcome::OverBudget),
+        "the in-flight chunk was dropped: {:?}",
+        engine.script_log(view).unwrap().iter().map(|r| (&r.source, &r.outcome)).collect::<Vec<_>>()
+    );
+
+    let started = std::time::Instant::now();
+    let mut rendered = false;
+    while started.elapsed() < std::time::Duration::from_secs(5) {
+        rt.block_on(engine.pump_live(view, 20));
+        let log = page_log(&mut engine, view);
+        if log.contains("IO rendered 3") {
+            rendered = true;
+            break;
+        }
+    }
+    assert!(rendered, "the feed never rendered:\n{}", page_log(&mut engine, view));
+    let log = page_log(&mut engine, view);
+    assert!(log.contains("chunk a ran") && log.contains("/chunk-a.js load"), "{log}");
+    assert!(log.contains("chunk b ran") && log.contains("/chunk-b.js load"), "{log}");
+    assert!(!log.contains("error"), "{log}");
+    let feed = text(&mut engine, view, "document.getElementById('feed').textContent");
+    assert!(feed.contains("Feed post 1") && feed.contains("Feed post 2") && feed.contains("Feed post 3"), "{feed}");
+}
+
+/// Three delayed chunks, each inserted from the previous one's `onload`.
+/// Every chunk is held longer than the load's script budget. The load
+/// reaches `complete` with none of them run. Later live turns run them in
+/// insertion order and the last one's observer renders the feed.
+#[test]
+fn an_inserted_chain_of_three_delayed_chunks_runs_in_order() {
+    const A: &str = "L('chunk a ran');\n";
+    const B: &str = "L('chunk b ran');\n";
+    const C: &str = "\
+L('chunk c ran');\n\
+new IntersectionObserver(function (entries) {\n\
+  if (!entries[0].isIntersecting) return;\n\
+  var feed = document.getElementById('feed');\n\
+  feed.innerHTML = '';\n\
+  for (var i = 1; i <= 3; i++) {\n\
+    var d = document.createElement('div');\n\
+    d.className = 'post';\n\
+    d.textContent = 'Feed post ' + i;\n\
+    feed.appendChild(d);\n\
+  }\n\
+  L('IO rendered ' + feed.children.length);\n\
+}).observe(document.getElementById('sentinel'));\n";
+    fn page() -> String {
+        r#"<!doctype html><html><head>
+<script>
+function L(m) { var p = document.getElementById('log'); if (p) p.textContent += m + '\n'; }
+function insert(src, next) {
+  var s = document.createElement('script');
+  s.src = src;
+  s.async = true;
+  s.onload = function () { L(src + ' load'); if (next) next(); };
+  s.onerror = function () { L(src + ' error'); };
+  document.head.appendChild(s);
+  L(src + ' inserted');
+}
+document.addEventListener('DOMContentLoaded', function () { L('DOMContentLoaded readyState=' + document.readyState); });
+window.addEventListener('load', function () { L('window load readyState=' + document.readyState); });
+insert('/chunk-a.js', function () { insert('/chunk-b.js', function () { insert('/chunk-c.js'); }); });
+</script></head><body>
+<div id="feed"><div class="post">Server-rendered post 1</div></div>
+<div id="sentinel" style="height:1px"></div>
+<pre id="log"></pre>
+</body></html>"#
+            .into()
+    }
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/chunk-a.js" | "/chunk-b.js" | "/chunk-c.js" => {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let body = match path {
+                    "/chunk-a.js" => A,
+                    "/chunk-b.js" => B,
+                    _ => C,
+                };
+                (200, "text/javascript", vec![], body.into())
+            }
+            _ => (200, "text/html", vec![], page()),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = chain_engine(200);
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    let log = page_log(&mut engine, view);
+    assert!(log.contains("/chunk-a.js inserted"), "{log}");
+    assert!(log.contains("DOMContentLoaded readyState=interactive"), "{log}");
+    assert!(log.contains("window load readyState=complete"), "{log}");
+    assert!(!log.contains("chunk a ran"), "{log}");
+    assert_eq!(text(&mut engine, view, "document.readyState"), r#"String("complete")"#);
+    assert!(
+        engine.script_log(view).unwrap().iter().all(|record| record.outcome != ScriptOutcome::OverBudget),
+        "a delayed chunk was dropped: {:?}",
+        engine.script_log(view).unwrap().iter().map(|r| (&r.source, &r.outcome)).collect::<Vec<_>>()
+    );
+
+    let started = std::time::Instant::now();
+    let mut rendered = false;
+    while started.elapsed() < std::time::Duration::from_secs(6) {
+        rt.block_on(engine.pump_live(view, 20));
+        if page_log(&mut engine, view).contains("IO rendered 3") {
+            rendered = true;
+            break;
+        }
+    }
+    assert!(rendered, "the feed never rendered:\n{}", page_log(&mut engine, view));
+    let log = page_log(&mut engine, view);
+    let at = |needle: &str| log.find(needle).unwrap_or_else(|| panic!("{needle} missing from {log}"));
+    assert!(at("chunk a ran") < at("/chunk-a.js load"), "{log}");
+    assert!(at("/chunk-a.js load") < at("/chunk-b.js inserted"), "{log}");
+    assert!(at("/chunk-b.js inserted") < at("chunk b ran"), "{log}");
+    assert!(at("chunk b ran") < at("/chunk-b.js load"), "{log}");
+    assert!(at("/chunk-b.js load") < at("/chunk-c.js inserted"), "{log}");
+    assert!(at("/chunk-c.js inserted") < at("chunk c ran"), "{log}");
+    assert!(at("chunk c ran") < at("/chunk-c.js load"), "{log}");
+    assert!(at("/chunk-c.js load") < at("IO rendered 3"), "{log}");
+    assert!(!log.contains("error"), "{log}");
+    let feed = text(&mut engine, view, "document.getElementById('feed').textContent");
+    assert!(feed.contains("Feed post 1") && feed.contains("Feed post 2") && feed.contains("Feed post 3"), "{feed}");
+}
+
+/// Navigating away while an inserted script is still being fetched drops
+/// it. The late body does not run in the next page.
+#[test]
+fn navigating_away_drops_an_inserted_script_still_fetching() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/slow.js" => {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                (200, "text/javascript", vec![], "window.fromFirst = 'ran';".into())
+            }
+            "/next" => (
+                200,
+                "text/html",
+                vec![],
+                "<p id=\"p\">second</p><script>window.page = 'b';</script>".into(),
+            ),
+            _ => (
+                200,
+                "text/html",
+                vec![],
+                r#"<p>first</p><script>
+var s = document.createElement('script');
+s.src = '/slow.js';
+document.head.appendChild(s);
+</script>"#
+                    .into(),
+            ),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = chain_engine(200);
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("first load");
+    assert_eq!(text(&mut engine, view, "String(window.fromFirst)"), r#"String("undefined")"#);
+    assert!(
+        server.requests().iter().any(|(p, _)| p == "/slow.js"),
+        "the fetch should be in flight when the load returns"
+    );
+    rt.block_on(engine.load_url(view, server.url("/next"))).expect("second load");
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_millis(1500) {
+        rt.block_on(engine.pump_live(view, 50));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(text(&mut engine, view, "String(window.page)"), r#"String("b")"#);
+    assert_eq!(
+        text(&mut engine, view, "String(window.fromFirst)"),
+        r#"String("undefined")"#,
+        "the previous page's script ran after navigation"
+    );
+    assert!(
+        engine.script_log(view).unwrap().iter().all(|record| record.outcome != ScriptOutcome::Ran || !record.source.contains("slow.js")),
+        "the dropped script was recorded as run: {:?}",
+        engine.script_log(view).unwrap().iter().map(|r| (&r.source, &r.outcome)).collect::<Vec<_>>()
+    );
+}
+
+/// A fetch that fails after the load's script budget still fires `error`
+/// on a later live turn. It is not recorded over budget and it does not
+/// vanish.
+#[test]
+fn a_failed_inserted_fetch_past_the_budget_fires_error() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/missing.js" => {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                (404, "text/plain", vec![], String::new())
+            }
+            _ => (
+                200,
+                "text/html",
+                vec![],
+                r#"<p>x</p><script>
+var heard = [];
+var s = document.createElement('script');
+s.src = '/missing.js';
+s.onload = function () { heard.push('load'); };
+s.onerror = function () { heard.push('error'); };
+document.head.appendChild(s);
+</script>"#
+                    .into(),
+            ),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = chain_engine(200);
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    assert_eq!(text(&mut engine, view, "heard.join()"), r#"String("")"#);
+    assert_eq!(text(&mut engine, view, "document.readyState"), r#"String("complete")"#);
+    assert!(
+        engine.script_log(view).unwrap().iter().all(|record| record.outcome != ScriptOutcome::OverBudget),
+        "a failed fetch was dropped as over budget: {:?}",
+        engine.script_log(view).unwrap().iter().map(|r| (&r.source, &r.outcome)).collect::<Vec<_>>()
+    );
+    let started = std::time::Instant::now();
+    loop {
+        rt.block_on(engine.pump_live(view, 20));
+        let got = text(&mut engine, view, "heard.join()");
+        if got == r#"String("error")"# {
+            break;
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "the failed fetch never fired error: {got}");
+    }
+    assert!(
+        engine.script_log(view).unwrap().iter().any(|record| {
+            record.source.contains("missing.js") && matches!(record.outcome, ScriptOutcome::FetchFailed(_))
+        }),
+        "the failure was not recorded: {:?}",
+        engine.script_log(view).unwrap().iter().map(|r| (&r.source, &r.outcome)).collect::<Vec<_>>()
+    );
 }
 

@@ -27,8 +27,8 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Icon, WindowBuilder},
 };
-use tracing::{error, info, trace, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info, trace, warn};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use wry::{Rect, WebView, WebViewBuilder};
 
 /// Default height of the chrome top bar area (workspace + tabs + toolbar)
@@ -222,6 +222,9 @@ enum UserEvent {
     DecayTick,
     // The stall log's ping (window_stall.rs); only sent with HIWAVE_STALL_LOG=1
     WindowThreadPing,
+    // An inserted script's fetch finished. The event only wakes the loop;
+    // MainEventsCleared runs the script on the live turn.
+    LiveTurn,
     // Focus mode events
     EnterFocusMode,
     ExitFocusMode,
@@ -586,11 +589,39 @@ fn should_record_history_url(url: &str) -> bool {
 // Popup filtering is now handled by platform::is_definitely_popup()
 // which provides comprehensive cross-platform URL blocking
 
+#[cfg(test)]
+mod rust_log_tests {
+    use super::rust_log_filter;
+    use tracing_subscriber::filter::LevelFilter;
+
+    #[test]
+    fn defaults_to_info_and_honors_a_rust_log_directive() {
+        assert_eq!(rust_log_filter(None).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("   ")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("===bad===")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+        assert_eq!(rust_log_filter(Some("warn")).max_level_hint(), Some(LevelFilter::WARN));
+        assert_eq!(rust_log_filter(Some("info,rustkit_engine=debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+    }
+}
+
+/// `RUST_LOG` when it is set to a directive this process can parse.
+/// Unset, blank, and unparseable values stay at info, which is what the
+/// app logged before `RUST_LOG` was read.
+fn rust_log_filter(rust_log: Option<&str>) -> EnvFilter {
+    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new("info")),
+        None => EnvFilter::new("info"),
+    }
+}
+
 fn main() {
-    // Initialize logging with log compatibility
+    // Initialize logging with log compatibility. `RUST_LOG` selects the
+    // level when it is set; otherwise info, as before.
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(rust_log_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
@@ -1209,6 +1240,15 @@ fn main() {
         
         let rustkit_view = RustKitView::with_shield_counter(&window, bounds, Some(blocked_counter))
             .expect("Failed to create RustKit view");
+        // An inserted script's fetch finishes off this thread. Posting
+        // here wakes `MainEventsCleared`, which runs the script. The loop
+        // does not poll for it.
+        let wake_proxy = Arc::new(Mutex::new(proxy.clone()));
+        rustkit_engine::set_live_wake(Arc::new(move || {
+            if let Ok(proxy) = wake_proxy.lock() {
+                let _ = proxy.send_event(UserEvent::LiveTurn);
+            }
+        }));
         rustkit_view.load_html_internal(ABOUT_HTML)
             .expect("Failed to load initial HTML");
         
@@ -4153,6 +4193,9 @@ fn main() {
                         if let Some((answered, clock)) = stall_log.as_ref() {
                             answered.now(clock);
                         }
+                    }
+                    UserEvent::LiveTurn => {
+                        // MainEventsCleared follows and runs the live turn.
                     }
                     UserEvent::DecayTick => {
                         // Get decay settings and calculate decay levels for all tabs
