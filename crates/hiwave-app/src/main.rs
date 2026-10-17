@@ -27,8 +27,8 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Icon, WindowBuilder},
 };
-use tracing::{error, info, trace, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info, trace, warn};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use wry::{Rect, WebView, WebViewBuilder};
 
 /// Default height of the chrome top bar area (workspace + tabs + toolbar)
@@ -589,11 +589,39 @@ fn should_record_history_url(url: &str) -> bool {
 // Popup filtering is now handled by platform::is_definitely_popup()
 // which provides comprehensive cross-platform URL blocking
 
+#[cfg(test)]
+mod rust_log_tests {
+    use super::rust_log_filter;
+    use tracing_subscriber::filter::LevelFilter;
+
+    #[test]
+    fn defaults_to_info_and_honors_a_rust_log_directive() {
+        assert_eq!(rust_log_filter(None).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("   ")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("===bad===")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+        assert_eq!(rust_log_filter(Some("warn")).max_level_hint(), Some(LevelFilter::WARN));
+        assert_eq!(rust_log_filter(Some("info,rustkit_engine=debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+    }
+}
+
+/// `RUST_LOG` when it is set to a directive this process can parse.
+/// Unset, blank, and unparseable values stay at info, which is what the
+/// app logged before `RUST_LOG` was read.
+fn rust_log_filter(rust_log: Option<&str>) -> EnvFilter {
+    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new("info")),
+        None => EnvFilter::new("info"),
+    }
+}
+
 fn main() {
-    // Initialize logging with log compatibility
+    // Initialize logging with log compatibility. `RUST_LOG` selects the
+    // level when it is set; otherwise info, as before.
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(rust_log_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 

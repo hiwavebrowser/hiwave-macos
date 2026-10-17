@@ -1516,6 +1516,17 @@ impl DomBindings {
         Ok(())
     }
 
+    /// Keep each named script's source so an error log can quote it. Off
+    /// drops what was kept. See [`JsRuntime::set_capture_script_sources`].
+    pub fn capture_script_sources(&self, on: bool) {
+        self.runtime.borrow_mut().set_capture_script_sources(on);
+    }
+
+    /// Source last evaluated as `path`, when capture is on.
+    pub fn script_source(&self, path: &str) -> Option<String> {
+        self.runtime.borrow().script_source(path)
+    }
+
     /// Page errors since the last call (with
     /// [`set_error_details`](Self::set_error_details) on): exceptions,
     /// modules that threw after a top-level `await`, unhandled rejections.
@@ -1731,6 +1742,11 @@ impl DomBindings {
     /// The URLs a module graph has asked for since the last call.
     pub fn take_module_requests(&self) -> Vec<String> {
         self.runtime.borrow_mut().take_module_requests()
+    }
+
+    /// Dynamic `import()` calls that rejected since the last call.
+    pub fn take_dynamic_import_failures(&self) -> Vec<rustkit_js::DynamicImportFailure> {
+        self.runtime.borrow_mut().take_dynamic_import_failures()
     }
 
     /// Supply one requested module's source, or why there is none.
