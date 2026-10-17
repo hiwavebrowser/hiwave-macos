@@ -15,7 +15,7 @@ mod import_map;
 mod module;
 #[cfg(feature = "boa")]
 pub use module::{DynamicImportFailure, FetchedModule, ModuleHandle, ModuleState};
-pub use control::{ThreadStamp, ViewControl, Watchdog};
+pub use control::{mono_us, ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
 mod executor;
 #[cfg(feature = "boa")]
@@ -72,6 +72,64 @@ pub fn diag_nav() -> u64 {
     DIAG_NAV.with(Cell::get)
 }
 
+thread_local! {
+    static DIAG_CONTROL: std::cell::RefCell<Option<Arc<control::ViewControl>>> =
+        const { std::cell::RefCell::new(None) };
+    static DIAG_STAMP: std::cell::RefCell<Option<Arc<control::ThreadStamp>>> =
+        const { std::cell::RefCell::new(None) };
+    static DEADLINE_TRIP_US: Cell<u64> = const { Cell::new(0) };
+}
+
+fn note_deadline_trip() {
+    DEADLINE_TRIP_US.with(|at| at.set(control::mono_us()));
+}
+
+fn clear_deadline_trip() {
+    DEADLINE_TRIP_US.with(|at| at.set(0));
+}
+
+/// `word=… turn_id=… setter=… setter_target=… setter_age_us=… wall_us=… turn_budget_us=… deadline_age_us=…`
+/// for an interrupt log. Empty clocks read as `-` or zero when nothing is armed.
+pub fn interrupt_attribution() -> String {
+    let (word, setter, setter_at, setter_target) = DIAG_CONTROL.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|control| control.word_writer())
+            .unwrap_or((0, "-", 0, 0))
+    });
+    let (turn, wall, turn_budget) = DIAG_STAMP.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|stamp| stamp.timing())
+            .unwrap_or((0, 0, 0))
+    });
+    let now = control::mono_us();
+    let setter_age = if setter_at == 0 {
+        0
+    } else {
+        now.saturating_sub(setter_at)
+    };
+    let deadline_age = DEADLINE_TRIP_US.with(|at| {
+        let tripped = at.get();
+        if tripped == 0 {
+            None
+        } else {
+            Some(now.saturating_sub(tripped))
+        }
+    });
+    let target = if setter_target == control::ALL {
+        "all".to_string()
+    } else {
+        setter_target.to_string()
+    };
+    let deadline = deadline_age
+        .map(|age| age.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "word={word} turn_id={turn} setter={setter} setter_target={target} setter_age_us={setter_age} wall_us={wall} turn_budget_us={turn_budget} deadline_age_us={deadline}"
+    )
+}
+
 /// Sets [`diag_turn`] and puts the previous kind back on drop.
 pub struct DiagTurn {
     prev: &'static str,
@@ -118,7 +176,7 @@ pub fn set_interrupt_diag(hook: Option<boa_engine::interrupt_diag::InterruptDiag
 }
 
 #[cfg(not(feature = "boa"))]
-pub fn set_interrupt_diag(_hook: Option<fn(&'static str, &'static str)>) {}
+pub fn set_interrupt_diag(_hook: Option<fn(&'static str, &'static str, &'static str)>) {}
 
 /// Errors that can occur in JS operations.
 #[derive(Error, Debug)]
@@ -720,6 +778,7 @@ impl JsRuntime {
         self.deadline.at.set(at);
         self.deadline.hit.set(false);
         self.deadline.late.set(None);
+        clear_deadline_trip();
     }
 
     /// Whether the deadline has stopped a host call since it was last set
@@ -737,6 +796,7 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         self.context
             .set_interrupt_word(control.as_ref().map(|c| c.word().clone()));
+        DIAG_CONTROL.with(|slot| *slot.borrow_mut() = control.clone());
         *self.deadline.control.borrow_mut() = control;
     }
 
@@ -750,6 +810,7 @@ impl JsRuntime {
         };
         let turn = stamp.begin_turn(&control, budget);
         *self.deadline.stamp.borrow_mut() = Some(stamp.clone());
+        DIAG_STAMP.with(|slot| *slot.borrow_mut() = Some(stamp.clone()));
         self.deadline.graced.set(false);
         self.set_turn(turn);
         turn
@@ -764,6 +825,7 @@ impl JsRuntime {
         let open = stamp.current_turn();
         if open == 0 {
             *self.deadline.stamp.borrow_mut() = None;
+            DIAG_STAMP.with(|slot| *slot.borrow_mut() = None);
         }
         self.set_turn(open);
     }
@@ -907,6 +969,7 @@ impl JsRuntime {
                         // takes long to unwind, the log still says when.
                         if !deadline.hit.replace(true) {
                             deadline.late.set(Some(late));
+                            note_deadline_trip();
                             tracing::warn!(
                                 late_ms = late.as_millis() as u64,
                                 "Script budget spent: host calls are refused until the script has unwound"

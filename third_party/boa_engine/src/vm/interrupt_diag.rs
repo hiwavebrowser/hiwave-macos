@@ -7,7 +7,9 @@
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 /// `site` names the path. `message` is the error text that path formats.
-pub type InterruptDiag = fn(site: &'static str, message: &'static str);
+/// `limit` is the runtime-limit variant (`Interrupted`, `LoopIteration`, …)
+/// or `-` when the path has no error value.
+pub type InterruptDiag = fn(site: &'static str, message: &'static str, limit: &'static str);
 
 static HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static LAST_WORD: AtomicU64 = AtomicU64::new(0);
@@ -26,6 +28,30 @@ pub fn set_interrupt_diag(hook: Option<InterruptDiag>) {
 /// a module). A null hook returns before any other work.
 #[inline]
 pub fn note_interrupt(site: &'static str, message: &'static str) {
+    dispatch(site, message, "-");
+}
+
+/// [`note_interrupt`] plus the runtime-limit variant of `err`.
+#[inline]
+pub fn note_interrupt_err(site: &'static str, message: &'static str, err: &crate::JsError) {
+    dispatch(site, message, limit_kind(err));
+}
+
+/// Which runtime limit `err` is, for the interrupt log.
+pub fn limit_kind(err: &crate::JsError) -> &'static str {
+    use crate::error::{EngineError, RuntimeLimitError};
+    match err.as_engine() {
+        Some(EngineError::RuntimeLimit(RuntimeLimitError::LoopIteration)) => "LoopIteration",
+        Some(EngineError::RuntimeLimit(RuntimeLimitError::Interrupted)) => "Interrupted",
+        Some(EngineError::RuntimeLimit(RuntimeLimitError::Recursion)) => "Recursion",
+        Some(EngineError::RuntimeLimit(RuntimeLimitError::StackSize)) => "StackSize",
+        Some(_) => "engine",
+        None => "other",
+    }
+}
+
+#[inline]
+fn dispatch(site: &'static str, message: &'static str, limit: &'static str) {
     let ptr = HOOK.load(Ordering::Relaxed);
     if ptr.is_null() {
         return;
@@ -34,7 +60,7 @@ pub fn note_interrupt(site: &'static str, message: &'static str) {
     // it is null and we already returned. The pointer stays valid for the
     // process: the engine installs one static function.
     let hook: InterruptDiag = unsafe { std::mem::transmute(ptr) };
-    hook(site, message);
+    hook(site, message, limit);
 }
 
 /// The opcode check stopped this turn. At most one note per `(word, turn)`,
@@ -49,5 +75,5 @@ pub fn note_interrupt_stop(word: u64, turn: u64) {
     if prev_word == word && prev_turn == turn {
         return;
     }
-    note_interrupt("vm.check_interrupt", "the script was interrupted");
+    dispatch("vm.check_interrupt", "the script was interrupted", "Interrupted");
 }

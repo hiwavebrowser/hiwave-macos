@@ -139,13 +139,14 @@ impl Await {
                     {
                         // HIWAVE PATCH (interrupt diagnostics): resumed by the
                         // fulfilled reaction with an uncatchable throw.
-                        crate::vm::interrupt_diag::note_interrupt(
+                        crate::vm::interrupt_diag::note_interrupt_err(
                             "await.resume.fulfill",
                             resume_interrupt_message(
                                 async_function.is_some(),
                                 async_generator.is_some(),
                                 runnable.is_some(),
                             ),
+                            &err,
                         );
                         if let Some((module, code)) = runnable {
                             abandon_interrupted_module_body(&module, &code);
@@ -223,13 +224,14 @@ impl Await {
                     {
                         // HIWAVE PATCH (interrupt diagnostics): resumed by the
                         // rejected reaction with an uncatchable throw.
-                        crate::vm::interrupt_diag::note_interrupt(
+                        crate::vm::interrupt_diag::note_interrupt_err(
                             "await.resume.reject",
                             resume_interrupt_message(
                                 async_function.is_some(),
                                 async_generator.is_some(),
                                 runnable.is_some(),
                             ),
+                            &err,
                         );
                         if let Some((module, code)) = runnable {
                             abandon_interrupted_module_body(&module, &code);

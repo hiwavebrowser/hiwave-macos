@@ -1453,6 +1453,8 @@ struct ScriptJs {
     stopped_us: std::cell::Cell<u64>,
     /// How far that execution ran past its allowance.
     overrun: std::cell::RefCell<Option<std::time::Duration>>,
+    /// Monotonic start of the open execution; 0 when none is open.
+    exec_started_us: std::cell::Cell<u64>,
 }
 
 thread_local! {
@@ -1464,6 +1466,7 @@ thread_local! {
         stopped: std::cell::Cell::new(false),
         stopped_us: std::cell::Cell::new(0),
         overrun: std::cell::RefCell::new(None),
+        exec_started_us: std::cell::Cell::new(0),
     }};
 }
 
@@ -1527,7 +1530,10 @@ fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bo
     let allowance = SCRIPT_JS.with(|js| {
         std::time::Duration::from_micros(js.limit_us.get().saturating_sub(js.spent_us.get()))
     });
-    SCRIPT_JS.with(|js| js.depth.set(1));
+    SCRIPT_JS.with(|js| {
+        js.depth.set(1);
+        js.exec_started_us.set(rustkit_js::mono_us());
+    });
     let started = std::time::Instant::now();
     // A zero allowance used to arm a deadline of now and a watchdog turn of
     // no time. The next `evaluate` (a lifecycle step) then resumed a pending
@@ -1574,7 +1580,10 @@ impl ArmedExecution<'_> {
     fn finish(&mut self) -> bool {
         self.open = false;
         if !self.interrupt {
-            SCRIPT_JS.with(|js| js.depth.set(0));
+            SCRIPT_JS.with(|js| {
+                js.depth.set(0);
+                js.exec_started_us.set(0);
+            });
             return false;
         }
         let hit = self.bindings.take_deadline_hit();
@@ -1584,6 +1593,7 @@ impl ArmedExecution<'_> {
         end_script_turn(self.bindings);
         SCRIPT_JS.with(|js| {
             js.depth.set(0);
+            js.exec_started_us.set(0);
             if hit {
                 *js.overrun.borrow_mut() = late;
             }
@@ -1601,8 +1611,31 @@ impl Drop for ArmedExecution<'_> {
             self.bindings.set_execution_deadline(None);
             end_script_turn(self.bindings);
         }
-        SCRIPT_JS.with(|js| js.depth.set(0));
+        SCRIPT_JS.with(|js| {
+            js.depth.set(0);
+            js.exec_started_us.set(0);
+        });
     }
+}
+
+/// `exec_us` is JavaScript time charged to the open load, including the
+/// execution in progress. `budget_us` is that load's allowance. Both are
+/// zero when no budget is installed.
+pub(crate) fn script_budget_attribution() -> String {
+    SCRIPT_JS.with(|js| {
+        let spent = js.spent_us.get();
+        let started = js.exec_started_us.get();
+        let current = if started == 0 {
+            0
+        } else {
+            rustkit_js::mono_us().saturating_sub(started)
+        };
+        format!(
+            "exec_us={} budget_us={}",
+            spent.saturating_add(current),
+            js.limit_us.get()
+        )
+    })
 }
 
 /// The budget is installed and too little of it is left to resume an async
@@ -11882,7 +11915,7 @@ impl Engine {
         let committed = view.control.nav_committed(nav_id);
         console_log::doc("navigation-teardown", &format!("committed={committed}"));
         if committed {
-            view.control.stop_all();
+            view.control.stop_cancelled();
         }
         // A cancel during a render-blocking sheet (or before the first
         // layout) leaves the committed document never laid out: lay it out

@@ -324,41 +324,18 @@ pub(crate) fn doc(kind: &str, detail: &str) {
     ));
 }
 
-fn on_interrupt(site: &'static str, message: &'static str) {
+fn on_interrupt(site: &'static str, message: &'static str, limit: &'static str) {
     if !enabled() {
         return;
     }
     emit(format!(
-        "interrupt site={site} message={message} turn={} job={} nav={} bt={}",
+        "interrupt site={site} message={message} limit={limit} {} {} turn={} job={} nav={}",
+        rustkit_js::interrupt_attribution(),
+        super::script_budget_attribution(),
         dash(rustkit_js::diag_turn()),
         dash(rustkit_js::diag_job()),
         rustkit_js::diag_nav(),
-        short_backtrace()
     ));
-}
-
-fn short_backtrace() -> String {
-    let text = std::backtrace::Backtrace::force_capture().to_string();
-    let mut out = String::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty()
-            || line.contains("short_backtrace")
-            || line.contains("on_interrupt")
-            || line.contains("interrupt_diag")
-            || line.contains("Backtrace")
-        {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push_str(" | ");
-        }
-        if out.len() + line.len() > 400 {
-            break;
-        }
-        out.push_str(line);
-    }
-    if out.is_empty() { "-".to_string() } else { out }
 }
 
 fn on_fetch(method: &str, url: &str, status: &str, disposition: &str) {
@@ -539,19 +516,23 @@ mod tests {
         rustkit_js::set_diag_turn("load");
         rustkit_js::set_diag_job("microtask");
         rustkit_js::set_diag_nav(7);
-        on_interrupt("await.resume.fulfill", "async function was interrupted");
+        on_interrupt("await.resume.fulfill", "async function was interrupted", "LoopIteration");
         assert!(sink.lock().unwrap().is_empty());
         force_for_test(Some(true));
-        on_interrupt("await.resume.reject", "async function was interrupted");
+        on_interrupt("await.resume.reject", "async function was interrupted", "LoopIteration");
         let lines = sink.lock().unwrap().clone();
         assert_eq!(lines.len(), 1, "{lines:?}");
         let line = &lines[0];
         assert!(line.contains("interrupt site=await.resume.reject"), "{line}");
         assert!(line.contains("message=async function was interrupted"), "{line}");
+        assert!(line.contains("limit=LoopIteration"), "{line}");
+        assert!(line.contains("word="), "{line}");
+        assert!(line.contains("setter="), "{line}");
+        assert!(line.contains("exec_us="), "{line}");
+        assert!(line.contains("wall_us="), "{line}");
         assert!(line.contains("turn=load"), "{line}");
         assert!(line.contains("job=microtask"), "{line}");
         assert!(line.contains("nav=7"), "{line}");
-        assert!(line.contains("bt="), "{line}");
         assert!(!line.contains('\n'), "{line}");
         rustkit_js::set_diag_turn("");
         rustkit_js::set_diag_job("");
