@@ -918,6 +918,12 @@ struct ViewState {
     /// `async = false` script waits for the in-order scripts before it) and
     /// fires `load` or `error`. A new document retires the queue.
     live_inserted: script_net::InsertedScripts,
+    /// Navigation whose `window` `load` is waiting on [`Self::live_inserted`].
+    /// Set only by [`Engine::load_url_yielding`], after `DOMContentLoaded`,
+    /// when an inserted script is still queued. `None` for [`Engine::load_url`]
+    /// and for a page that inserted nothing: those fire `load` before they
+    /// return. A newer document clears it without firing `load`.
+    load_tail: Option<u64>,
     /// Causes noted since the last relayout (see `relayout_cause`).
     relayout_pending: PendingCauses,
     /// Relayouts since the current document was committed, by cause.
@@ -986,7 +992,11 @@ impl ViewState {
         self.live_requests.clear();
         self.live_images.clear();
         // The previous document's inserted scripts must not run here. A
-        // fetch still out is discarded when its result arrives.
+        // fetch still out is discarded when its result arrives. A load tail
+        // parked on that document must not fire `load` on this one.
+        if let Some(nav_id) = self.load_tail.take() {
+            self.control.end_load(nav_id);
+        }
         self.live_inserted.retire(self.nav_id);
         // The last document's sheets, before the first layout of this one.
         // `load_subresources` assigns the new document's when they have
@@ -1330,6 +1340,16 @@ pub struct LivePump {
     /// Milliseconds until the page's next timer is due. `None`: it has none,
     /// and the loop can sleep until the next input.
     pub next_timer_ms: Option<u64>,
+}
+
+/// How far [`Engine::load_url_yielding`] got before it returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadYield {
+    /// `window` `load` has fired and `PageLoaded` was sent.
+    Complete,
+    /// `DOMContentLoaded` has fired. `readyState` is `interactive`.
+    /// Inserted scripts are still arriving; live turns finish the load.
+    Yielded,
 }
 
 /// The one line that says a script was stopped by the execution deadline
@@ -2431,6 +2451,7 @@ impl Engine {
             live_requests: Vec::new(),
             live_images: Vec::new(),
             live_inserted: script_net::InsertedScripts::new(),
+            load_tail: None,
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -2519,6 +2540,7 @@ impl Engine {
             live_requests: Vec::new(),
             live_images: Vec::new(),
             live_inserted: script_net::InsertedScripts::new(),
+            load_tail: None,
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -2606,6 +2628,7 @@ impl Engine {
             live_requests: Vec::new(),
             live_images: Vec::new(),
             live_inserted: script_net::InsertedScripts::new(),
+            load_tail: None,
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -3794,6 +3817,452 @@ impl Engine {
     /// [`LivePump::next_timer_ms`] says the next timer is due. Requests go
     /// through the document's own `FetchPolicy`, as they did during the
     /// load; a page with none (`load_html`) has no network.
+    /// `true` when an inserted script is queued or its fetch is still out.
+    /// Enqueues anything the page prepared since the last take. Does not
+    /// run a script and does not wait.
+    fn inserted_chain_pending(
+        &self,
+        id: EngineViewId,
+        bindings: &DomBindings,
+        loader: &Arc<ResourceLoader>,
+        referrer: &SubresourceReferrer,
+        inspector: &Arc<Inspector>,
+    ) -> bool {
+        let Some(inserted) = self.views.get(&id).map(|view| view.live_inserted.clone()) else {
+            return false;
+        };
+        if !script_net::enqueue_inserted_scripts(bindings, loader, referrer, inspector, &inserted) {
+            return false;
+        }
+        inserted.pending()
+    }
+
+    fn abandon_load_tail(&mut self, id: EngineViewId, nav_id: u64) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if view.load_tail != Some(nav_id) {
+            return;
+        }
+        view.load_tail = None;
+        // A newer document owns the queue. Retire already dropped the old
+        // jobs; abandoning here would cancel the new document's.
+        if view.nav_id == nav_id {
+            view.live_inserted.abandon();
+        }
+        view.control.end_load(nav_id);
+    }
+
+    fn tail_watch(&self, id: EngineViewId, nav_id: u64) -> Option<NavWatch> {
+        let view = self.views.get(&id)?;
+        Some(NavWatch {
+            canceller: NavCanceller::new(view.control.clone(), view.nav_signal.clone()),
+            nav_id,
+        })
+    }
+
+    fn note_tail_pump(&mut self, id: EngineViewId, found: script_net::Pump) -> bool {
+        let Some(view) = self.views.get_mut(&id) else {
+            return found.poisoned;
+        };
+        let inspector = view.inspector.clone();
+        let inserted = view.live_inserted.clone();
+        Self::absorb_inserted_pump(&mut view.script_log, &inspector, found, &inserted)
+    }
+
+    /// One live turn of a parked load: at most one arrived inserted script.
+    /// When nothing is left queued, fire `load` and finish the document.
+    async fn advance_load_tail(&mut self, id: EngineViewId) {
+        let Some(nav_id) = self.views.get(&id).and_then(|view| view.load_tail) else {
+            return;
+        };
+        if self.nav_superseded(id, nav_id) {
+            self.abandon_load_tail(id, nav_id);
+            return;
+        }
+        let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
+        let ready = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.bindings.is_some());
+        if !ready {
+            self.abandon_load_tail(id, nav_id);
+            return;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return;
+        };
+        let inserted = view.live_inserted.clone();
+        let inspector = view.inspector.clone();
+        let found = script_net::drive_at_most_one(
+            bindings,
+            &loader,
+            &referrer,
+            &inspector,
+            &inserted,
+            !script_js_exhausted(),
+        );
+        let poisoned = self.note_tail_pump(id, found);
+        if poisoned || self.nav_superseded(id, nav_id) {
+            self.abandon_load_tail(id, nav_id);
+            return;
+        }
+        let idle = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.load_tail == Some(nav_id) && !view.live_inserted.pending());
+        if idle {
+            self.complete_load_tail(id, nav_id).await;
+        }
+    }
+
+    /// The chain is idle. `readyState` becomes `complete`, `window` `load`
+    /// fires, then the timer horizon and scripts the load handler inserted.
+    /// `PageLoaded` is sent after that, not before.
+    async fn complete_load_tail(&mut self, id: EngineViewId, nav_id: u64) {
+        if self.nav_superseded(id, nav_id) {
+            self.abandon_load_tail(id, nav_id);
+            return;
+        }
+        let horizon = self.config.timer_horizon_ms;
+        let net_rounds = self.config.script_network_rounds;
+        let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if view.load_tail != Some(nav_id) {
+            return;
+        }
+        view.load_tail = None;
+        let Some(bindings) = view.bindings.take() else {
+            view.control.end_load(nav_id);
+            return;
+        };
+        let mut log = std::mem::take(&mut view.script_log);
+        let inspector = view.inspector.clone();
+        let policy = view.script_policy.clone();
+        let document_url = view.url.clone();
+        let modules_fetched = Cell::new(0usize);
+        let watch = NavWatch {
+            canceller: NavCanceller::new(view.control.clone(), view.nav_signal.clone()),
+            nav_id,
+        };
+        let watch = Some(watch);
+
+        let mut pump = |timers: Option<(u64, u32)>| {
+            let policy = policy.clone();
+            let loader = loader.clone();
+            let document = document_url.clone();
+            let modules_fetched = &modules_fetched;
+            let inspector = &inspector;
+            let watch = watch.clone();
+            let bindings = &bindings;
+            async move {
+                let Some(policy) = policy else {
+                    return None;
+                };
+                let mut count = modules_fetched.get();
+                let found = nav_cancel::unless_cancelled(
+                    watch.as_ref(),
+                    script_net::pump_all(
+                        bindings,
+                        &policy,
+                        &loader,
+                        tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
+                        net_rounds,
+                        timers,
+                        document.as_ref(),
+                        &mut count,
+                        inspector,
+                    ),
+                )
+                .await;
+                modules_fetched.set(count);
+                found
+            }
+        };
+
+        let mut stopped = nav_cancel::cancelled(watch.as_ref());
+        if !stopped {
+            self.refresh_layout_for_script(id, &bindings);
+            let (caught, load_stopped) = with_script_js(&bindings, || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings
+                        .set_ready_state("complete")
+                        .map_err(Self::strip_binding)?;
+                    bindings
+                        .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load")
+                        .map_err(Self::strip_binding)
+                }))
+            });
+            if load_stopped {
+                log_script_stopped("event:load", 0, take_script_js_overrun());
+            }
+            match caught {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => log.push(ScriptRecord {
+                    source: "event:load".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                }),
+                Err(_) => {
+                    log.push(ScriptRecord {
+                        source: "event:load".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                    });
+                    stopped = true;
+                }
+            }
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load");
+        }
+        if !stopped {
+            if let Some(found) = pump(None).await {
+                if Self::absorb_network_pump(&mut log, &inspector, found) {
+                    stopped = true;
+                }
+            } else if nav_cancel::cancelled(watch.as_ref()) {
+                stopped = true;
+            }
+        }
+        if !stopped && !self.nav_superseded(id, nav_id) {
+            self.refresh_layout_for_script(id, &bindings);
+            let (caught, timer_stopped) = with_script_js(&bindings, || {
+                let _job = rustkit_js::DiagJob::enter("timer");
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings
+                        .run_timers(horizon, MAX_TIMER_CALLBACKS)
+                        .map(|_| ())
+                        .map_err(Self::strip_binding)
+                }))
+            });
+            if timer_stopped {
+                log_script_stopped("timers", 0, take_script_js_overrun());
+            }
+            match caught {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => log.push(ScriptRecord {
+                    source: "timers".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                }),
+                Err(_) => {
+                    log.push(ScriptRecord {
+                        source: "timers".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                    });
+                    stopped = true;
+                }
+            }
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers");
+            if !stopped {
+                if let Some(found) = pump(Some((horizon, MAX_TIMER_CALLBACKS))).await {
+                    if Self::absorb_network_pump(&mut log, &inspector, found) {
+                        stopped = true;
+                    }
+                }
+            }
+        }
+        if !stopped {
+            // A script the load handler inserted does not delay `load`,
+            // which has already fired. Run one whose body is already here.
+            stopped = self
+                .settle_inserted_scripts(
+                    id,
+                    &bindings,
+                    &mut log,
+                    &loader,
+                    &referrer,
+                    &inspector,
+                    watch.as_ref(),
+                    tokio::time::Instant::now(),
+                    !script_js_exhausted(),
+                    false,
+                    &mut pump,
+                )
+                .await;
+        }
+        // `pump` only holds references, so it is `Copy`. Using it here ends
+        // that borrow and `bindings` can move back onto the view.
+        #[allow(dropping_copy_types)]
+        drop(pump);
+        if let Some(view) = self.views.get_mut(&id) {
+            log.append(&mut view.script_log);
+            view.script_log = log;
+            view.bindings = Some(bindings);
+        }
+        if stopped || self.nav_superseded(id, nav_id) {
+            if let Some(view) = self.views.get(&id) {
+                if view.nav_id == nav_id {
+                    view.live_inserted.abandon();
+                }
+                if view.control.loading_nav() == nav_id {
+                    view.control.end_load(nav_id);
+                }
+            }
+            return;
+        }
+        if let Err(e) = self.publish_yielded_load(id, nav_id).await {
+            warn!(?id, error = %e, "Yielded load failed while it was finishing");
+        }
+        if let Some(view) = self.views.get(&id) {
+            if view.control.loading_nav() == nav_id {
+                view.control.end_load(nav_id);
+            }
+        }
+    }
+
+    fn strip_binding(error: rustkit_bindings::BindingError) -> String {
+        let message = error.to_string();
+        message
+            .strip_prefix("JS error: Execution error: ")
+            .map(str::to_string)
+            .unwrap_or(message)
+    }
+
+    /// Record a network pump the way the load's lifecycle steps do.
+    /// `true` when the JS engine panicked.
+    fn absorb_network_pump(
+        log: &mut Vec<ScriptRecord>,
+        inspector: &Arc<Inspector>,
+        mut found: script_net::Pump,
+    ) -> bool {
+        for record in found.records.drain(..) {
+            inspector_glue::log_script(log, inspector, record);
+        }
+        for message in found.threw {
+            log.push(ScriptRecord {
+                source: "network".into(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::Threw(message),
+            });
+        }
+        if found.poisoned {
+            log.push(ScriptRecord {
+                source: "network".into(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+            });
+        }
+        found.poisoned
+    }
+
+    /// Images the yielded load's scripts added, then `PageLoaded`.
+    ///
+    /// Same ending as [`Engine::load_url`]: a cancel or a newer navigation
+    /// sends nothing.
+    async fn publish_yielded_load(
+        &mut self,
+        id: EngineViewId,
+        nav_id: u64,
+    ) -> Result<(), EngineError> {
+        if self.nav_superseded(id, nav_id) {
+            return Ok(());
+        }
+        if let Some(view) = self.views.get(&id) {
+            let settled = load_lost_a_script(&view.script_log)
+                && view
+                    .document
+                    .as_ref()
+                    .is_some_and(|document| document.settle_custom_element_definitions());
+            if let (true, Some(bindings)) = (settled, view.bindings.as_ref()) {
+                bindings.mark_dirty(DomDirty::Style);
+            }
+        }
+        self.flush_script_dom_writes(id, None)?;
+        let Some(watch) = self.tail_watch(id, nav_id) else {
+            return Ok(());
+        };
+        let leaving = self.config.follows_script_navigation
+            && self
+                .views
+                .get(&id)
+                .and_then(|view| view.bindings.as_ref())
+                .is_some_and(|bindings| bindings.navigation_requested());
+        if leaving {
+            info!(
+                ?id,
+                "Page asked to navigate: not waiting for images its scripts added"
+            );
+        }
+        let added = match leaving {
+            true => Ok(0),
+            false => match watch
+                .unless_cancelled(self.load_images_added_by_scripts(id))
+                .await
+            {
+                Some(added) => added,
+                None => return Ok(()),
+            },
+        };
+        match added {
+            Ok(0) => {}
+            Ok(count) => {
+                info!(count, "Loaded images added by page scripts");
+                if !self.nav_superseded(id, nav_id) {
+                    self.relayout_for(id, RelayoutCause::ImageLoaded { count })?;
+                }
+            }
+            Err(e) => warn!(?e, "Failed to load images added by page scripts"),
+        }
+        if self.nav_superseded(id, nav_id) {
+            return Ok(());
+        }
+        let still_loading = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.control.end_load(nav_id));
+        if !still_loading {
+            debug!(?id, nav_id, "Yielded load was cancelled as it finished");
+            return Ok(());
+        }
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
+        view.navigation
+            .finish_navigation()
+            .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        let url = view
+            .url
+            .clone()
+            .unwrap_or_else(|| Url::parse("about:blank").expect("about:blank parses"));
+        let title = view.title.clone();
+        if let Some(ref title) = title {
+            let _ = self.event_tx.send(EngineEvent::TitleChanged {
+                view_id: id,
+                title: title.clone(),
+            });
+        }
+        view.inspector
+            .emit_with(|inspector| InspectorEvent::LoadFinished {
+                url: Some(inspector.url(&url)),
+                scripts_over_budget: view
+                    .script_log
+                    .iter()
+                    .filter(|record| record.outcome == ScriptOutcome::OverBudget)
+                    .count() as u32,
+            });
+        let _ = self.event_tx.send(EngineEvent::PageLoaded {
+            view_id: id,
+            url,
+            title: view.title.clone(),
+        });
+        Ok(())
+    }
+
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
@@ -3802,6 +4271,20 @@ impl Engine {
         match self.flush_pending_resize(id) {
             Ok(resized) => out.relaid_out = resized,
             Err(e) => debug!(?id, error = %e, "layout after a resize failed"),
+        }
+        // A yielding load parked `window` `load` on this view. One arrived
+        // inserted script, then return, so the event loop can present. The
+        // live timer clock does not run until that `load` has fired.
+        let defer_post_load_timers = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.load_tail.is_some());
+        if defer_post_load_timers {
+            let _tail_js = install_script_js(
+                std::time::Duration::from_millis(self.config.script_budget_ms),
+                self.config.interrupt_scripts_at_budget,
+            );
+            self.advance_load_tail(id).await;
         }
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
@@ -3832,24 +4315,32 @@ impl Engine {
         let mut unwound = None;
 
         // Timers first: what they ask of the network is answered this turn.
-        let (timers, timer_stopped) = with_script_js(bindings, || {
-            let _job = rustkit_js::DiagJob::enter("timer");
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
-            }))
-        });
-        match timers {
-            Ok(Ok(ran)) => out.timers_ran = ran,
-            Ok(Err(e)) => {
-                if timer_stopped {
-                    unwound = Some(threw.len());
+        // Not while a load tail is open, and not on the turn that just
+        // fired `load`: that turn already ran the load's timer horizon, and
+        // `elapsed_ms` includes time from before `load`.
+        let timer_stopped = if defer_post_load_timers {
+            false
+        } else {
+            let (timers, timer_stopped) = with_script_js(bindings, || {
+                let _job = rustkit_js::DiagJob::enter("timer");
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
+                }))
+            });
+            match timers {
+                Ok(Ok(ran)) => out.timers_ran = ran,
+                Ok(Err(e)) => {
+                    if timer_stopped {
+                        unwound = Some(threw.len());
+                    }
+                    threw.push(("timers", ScriptOutcome::Threw(e.to_string())));
                 }
-                threw.push(("timers", ScriptOutcome::Threw(e.to_string())));
+                Err(_) => threw.push(("timers", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
             }
-            Err(_) => threw.push(("timers", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
-        }
-        // What the timers threw or left rejected is theirs in the Inspector.
-        inspector_glue::drain_errors(bindings, &view.inspector, "timers");
+            // What the timers threw or left rejected is theirs in the Inspector.
+            inspector_glue::drain_errors(bindings, &view.inspector, "timers");
+            timer_stopped
+        };
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
@@ -3941,27 +4432,30 @@ impl Engine {
             // false), then fires `load` or `error`. The arrival woke the
             // loop. Nothing here polls, and the fetch is not part of
             // `in_flight`. A turn whose JavaScript budget is already spent
-            // only enqueues.
-            let inserted = view.live_inserted.clone();
-            let execute = !script_js_exhausted();
-            let found = script_net::drive_inserted_scripts(
-                bindings,
-                loader.clone(),
-                &referrer,
-                &inspector,
-                &inserted,
-                tokio::time::Instant::now(),
-                execute,
-            )
-            .await;
-            out.requests += found.requests;
-            threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
-            if found.poisoned {
-                threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
-            }
-            for record in found.records {
-                if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
-                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+            //             only enqueues.
+            // The open tail already ran its one script for this turn.
+            if view.load_tail.is_none() {
+                let inserted = view.live_inserted.clone();
+                let execute = !script_js_exhausted();
+                let found = script_net::drive_inserted_scripts(
+                    bindings,
+                    loader.clone(),
+                    &referrer,
+                    &inspector,
+                    &inserted,
+                    tokio::time::Instant::now(),
+                    execute,
+                )
+                .await;
+                out.requests += found.requests;
+                threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
+                if found.poisoned {
+                    threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
+                }
+                for record in found.records {
+                    if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
+                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    }
                 }
             }
         }
@@ -4884,6 +5378,7 @@ impl Engine {
         budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
         watch: Option<&NavWatch>,
+        yield_inserted: bool,
     ) {
         // The page's scripts run on the view's bindings and log, taken out of
         // the view for the run so that the engine can lay the page out again
@@ -4905,8 +5400,17 @@ impl Engine {
         // callback and microtask drain arms the watchdog on its own; the
         // fetches between them do not.
         let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
-        self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log, watch)
-            .await;
+        self.run_page_scripts_with(
+            id,
+            fetched,
+            budget,
+            policy,
+            &bindings,
+            &mut log,
+            watch,
+            yield_inserted,
+        )
+        .await;
         let parked = script_net::take_parked_deliveries();
         if let Some(view) = self.views.get_mut(&id) {
             for delivery in parked {
@@ -4930,6 +5434,7 @@ impl Engine {
         bindings: &DomBindings,
         log: &mut Vec<ScriptRecord>,
         watch: Option<&NavWatch>,
+        yield_inserted: bool,
     ) {
         let horizon_ms = self.config.timer_horizon_ms;
         let loop_limit = self.config.script_loop_iteration_limit;
@@ -5352,6 +5857,7 @@ impl Engine {
         }
 
         let timers_ran = Cell::new(0u32);
+        let mut yielded = false;
         // Lifecycle events and timers. Listener/callback exceptions are
         // caught in JS and drained after each step.
         let steps: [(&str, &dyn Fn() -> Result<(), String>); 3] = [
@@ -5444,6 +5950,26 @@ impl Engine {
             // `load` or `error`, before those fire. The wait is the network
             // cap. A script inserted by the load handler itself is after
             // the event, so it is settled below without waiting.
+            //
+            // A yielding load returns here instead of waiting out the
+            // chain. The document stays `interactive`. Live turns run the
+            // scripts, one arrived body each, and fire `load` when the
+            // chain is idle. A page with nothing queued does not yield:
+            // `load` still fires before this call returns.
+            if index == 0
+                && yield_inserted
+                && self.inserted_chain_pending(id, bindings, &loader, &referrer, &inspector)
+            {
+                if let Some(watch) = watch {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.load_tail = Some(watch.nav_id);
+                        yielded = true;
+                    }
+                }
+                if yielded {
+                    break;
+                }
+            }
             if index == 0
                 && self
                     .settle_inserted_scripts(
@@ -5463,6 +5989,9 @@ impl Engine {
             {
                 return;
             }
+        }
+        if yielded {
+            return;
         }
         // Scripts the load handler or a timer inserted. Enqueue them, and
         // run one whose body has already arrived. Do not wait: they must
@@ -5489,7 +6018,31 @@ impl Engine {
 
     pub async fn load_url(&mut self, id: EngineViewId, url: Url) -> Result<(), EngineError> {
         let _hold = wgate::hold("load");
-        self.load_url_with_disposition(id, url, false).await
+        self.load_url_with_disposition(id, url, false, false)
+            .await
+            .map(|_| ())
+    }
+
+    /// Load `url` through `DOMContentLoaded`, then return while an inserted
+    /// script is still arriving.
+    ///
+    /// [`LoadYield::Complete`] is [`Engine::load_url`]: `window` `load` has
+    /// fired and `PageLoaded` was sent. A page that inserted no external
+    /// script during the parse or `DOMContentLoaded` always completes here.
+    /// [`LoadYield::Yielded`] means `readyState` is `interactive` and the
+    /// chain is still queued. Each later [`Engine::pump_live`] runs at most
+    /// one arrived script. When the chain is idle that turn fires
+    /// `readystatechange` / `complete` and `window` `load`, runs the timer
+    /// horizon and any script the load handler inserted, then sends
+    /// `PageLoaded`. A newer navigation abandons the chain and does not
+    /// fire `load`.
+    pub async fn load_url_yielding(
+        &mut self,
+        id: EngineViewId,
+        url: Url,
+    ) -> Result<LoadYield, EngineError> {
+        let _hold = wgate::hold("load");
+        self.load_url_with_disposition(id, url, false, true).await
     }
 
     /// Load a URL, optionally REPLACING the current history entry instead of
@@ -5507,7 +6060,8 @@ impl Engine {
         id: EngineViewId,
         url: Url,
         replace: bool,
-    ) -> Result<(), EngineError> {
+        yield_inserted: bool,
+    ) -> Result<LoadYield, EngineError> {
         let _turn = rustkit_js::DiagTurn::enter("load");
         let view = self
             .views
@@ -5545,17 +6099,33 @@ impl Engine {
             "navigation-start",
             &format!("url={}", console_log::brief_url(url.as_str())),
         );
-        let _in_progress = LoadInProgress {
-            control: watch.canceller.control().clone(),
-            nav_id: watch.nav_id,
-        };
+        let mut in_progress =
+            LoadInProgress::begin(watch.canceller.control().clone(), watch.nav_id);
         // Boxed: the load's state is large, and the debug build's stack
         // is not.
-        let result = Box::pin(self.load_url_for_nav(id, url, &watch)).await;
+        let result = Box::pin(self.load_url_for_nav(id, url, &watch, yield_inserted)).await;
+        if !self.nav_superseded(id, watch.nav_id)
+            && self
+                .views
+                .get(&id)
+                .is_some_and(|view| view.load_tail == Some(watch.nav_id))
+        {
+            // The tail fires `load` and sends `PageLoaded` from a later live
+            // turn. Until then a Stop still sees this load in progress.
+            in_progress.handed_off = true;
+            return Ok(LoadYield::Yielded);
+        }
+        if self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.load_tail == Some(watch.nav_id))
+        {
+            self.abandon_load_tail(id, watch.nav_id);
+        }
         if self.nav_superseded(id, watch.nav_id) {
             self.load_cancelled(id, watch.nav_id);
         }
-        result
+        result.map(|_| LoadYield::Complete)
     }
 
     /// The rest of [`Engine::load_url_with_disposition`], for navigation
@@ -5565,6 +6135,7 @@ impl Engine {
         id: EngineViewId,
         url: Url,
         watch: &NavWatch,
+        yield_inserted: bool,
     ) -> Result<(), EngineError> {
         let generation = watch.nav_id;
 
@@ -5943,10 +6514,26 @@ impl Engine {
         // not spend it.
         if let Some((fetched, _fetch_done)) = scripts {
             let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
-            self.run_page_scripts(id, fetched, budget, script_policy, Some(watch))
-                .await;
+            self.run_page_scripts(
+                id,
+                fetched,
+                budget,
+                script_policy,
+                Some(watch),
+                yield_inserted,
+            )
+            .await;
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
+                return Ok(());
+            }
+            if self
+                .views
+                .get(&id)
+                .is_some_and(|view| view.load_tail.is_some())
+            {
+                // `DOMContentLoaded` has fired. `window` `load`, the timer
+                // horizon and `PageLoaded` wait for the inserted-script chain.
                 return Ok(());
             }
             // The load's scripts are over. If it lost one (a script skipped
@@ -6062,10 +6649,7 @@ impl Engine {
         let watch = self.begin_nav(id)?;
         rustkit_js::set_diag_nav(watch.nav_id);
         console_log::doc("navigation-start", "url=about:blank");
-        let _in_progress = LoadInProgress {
-            control: watch.canceller.control().clone(),
-            nav_id: watch.nav_id,
-        };
+        let _in_progress = LoadInProgress::begin(watch.canceller.control().clone(), watch.nav_id);
         let view = self
             .views
             .get_mut(&id)
@@ -11989,7 +12573,7 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true).await?;
+                self.load_url_with_disposition(id, url, true, false).await?;
                 Ok(true)
             }
             None => Ok(false),
@@ -12004,7 +12588,7 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true).await?;
+                self.load_url_with_disposition(id, url, true, false).await?;
                 Ok(true)
             }
             None => Ok(false),
@@ -12021,7 +12605,7 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true).await?;
+                self.load_url_with_disposition(id, url, true, false).await?;
                 Ok(true)
             }
             None => Ok(false),

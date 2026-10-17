@@ -642,8 +642,12 @@ impl RustKitView {
 
         let mut engine = self.engine.borrow_mut();
         if let Some(view_id) = self.view_id {
+            // Returns after DOMContentLoaded when an inserted script is
+            // still arriving. Live turns (`process_events`) run the chain
+            // one script at a time and send PageLoaded at the end. A page
+            // with no inserted script still finishes inside this call.
             rt.block_on(async {
-                if let Err(e) = engine.load_url(view_id, parsed).await {
+                if let Err(e) = engine.load_url_yielding(view_id, parsed).await {
                     error!(error = %e, "Failed to load URL");
                 }
             });

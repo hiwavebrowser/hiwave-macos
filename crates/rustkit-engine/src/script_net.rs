@@ -753,6 +753,11 @@ impl InsertedScripts {
         !lock_board(&self.board).jobs.is_empty()
     }
 
+    /// A script is queued or its fetch is still out.
+    pub(crate) fn pending(&self) -> bool {
+        self.has_jobs()
+    }
+
     fn has_ready(&self) -> bool {
         next_ready_index(&lock_board(&self.board).jobs).is_some()
     }
@@ -816,6 +821,55 @@ fn next_ready_index(jobs: &[InsertedJob]) -> Option<usize> {
         }
     }
     best.map(|(index, _)| index)
+}
+
+/// Queue fetches for the external classic scripts the page has inserted
+/// since the last take. `false`: the JS engine panicked taking the queue,
+/// and the queue has been dropped.
+pub(crate) fn enqueue_inserted_scripts(
+    bindings: &DomBindings,
+    loader: &Arc<ResourceLoader>,
+    referrer: &crate::SubresourceReferrer,
+    inspector: &Arc<Inspector>,
+    scripts: &InsertedScripts,
+) -> bool {
+    if enqueue_inserted(bindings, loader, referrer, inspector, scripts) {
+        return true;
+    }
+    scripts.abandon();
+    false
+}
+
+/// Run at most one inserted script whose body has already arrived. Does not
+/// wait for a fetch. A script this one inserts is queued before the call
+/// returns, so the caller can see that the chain is not idle yet.
+pub(crate) fn drive_at_most_one(
+    bindings: &DomBindings,
+    loader: &Arc<ResourceLoader>,
+    referrer: &crate::SubresourceReferrer,
+    inspector: &Arc<Inspector>,
+    scripts: &InsertedScripts,
+    execute: bool,
+) -> Pump {
+    let mut out = Pump::default();
+    if !enqueue_inserted(bindings, loader, referrer, inspector, scripts) {
+        out.poisoned = true;
+        scripts.abandon();
+        return out;
+    }
+    if !execute || !scripts.has_ready() {
+        return out;
+    }
+    out.rounds += 1;
+    if run_inserted(bindings, inspector, scripts, &mut out) {
+        scripts.abandon();
+        return out;
+    }
+    if !enqueue_inserted(bindings, loader, referrer, inspector, scripts) {
+        out.poisoned = true;
+        scripts.abandon();
+    }
+    out
 }
 
 /// Fetch and run the external classic scripts the page inserted

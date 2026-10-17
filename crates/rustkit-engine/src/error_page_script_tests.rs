@@ -1249,3 +1249,404 @@ document.head.appendChild(s);
     assert!(closed.load(Ordering::SeqCst), "the in-flight fetch was not cancelled");
 }
 
+
+/// Pump a yielded load until `window` `load` has fired and `PageLoaded`
+/// was sent. Each turn runs at most one arrived inserted script.
+fn finish_yielded_load(engine: &mut Engine, view: EngineViewId, rt: &tokio::runtime::Runtime) {
+    let started = std::time::Instant::now();
+    loop {
+        let done = engine
+            .views
+            .get(&view)
+            .is_some_and(|state| state.load_tail.is_none())
+            && !engine.views[&view].navigation.is_loading()
+            && text(engine, view, "document.readyState").contains("complete");
+        if done {
+            return;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(20) {
+            let ready = text(engine, view, "document.readyState");
+            let tail = engine.views[&view].load_tail;
+            let loading = engine.views[&view].navigation.is_loading();
+            let log = page_log(engine, view);
+            panic!("tailed load did not finish: readyState={ready} tail={tail:?} loading={loading} log={log}");
+        }
+        rt.block_on(engine.pump_live(view, 16));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+}
+
+fn chrome_order_page() -> String {
+    r#"<pre id="log"></pre><script>
+function L(m) { document.getElementById('log').textContent += m + '\n'; }
+document.addEventListener('readystatechange', function () { L('readystatechange readyState=' + document.readyState); });
+document.addEventListener('DOMContentLoaded', function () { L('DOMContentLoaded readyState=' + document.readyState); });
+window.addEventListener('load', function () { L('window load readyState=' + document.readyState); });
+L('readyState=' + document.readyState);
+var s = document.createElement('script');
+s.src = '/a.js';
+s.onload = function () { L('/a.js load'); };
+s.onerror = function () { L('/a.js error'); };
+document.head.appendChild(s);
+L('/a.js inserted');
+</script>"#
+        .into()
+}
+
+const CHROME_ORDER_TRACE: &[&str] = &[
+    "readyState=loading",
+    "/a.js inserted",
+    "readystatechange readyState=interactive",
+    "DOMContentLoaded readyState=interactive",
+    "/a.js ran",
+    "/a.js load",
+    "readystatechange readyState=complete",
+    "window load readyState=complete",
+];
+
+fn chrome_order_site(
+    path: &str,
+    _: &str,
+) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+    match path {
+        "/a.js" => {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            (200, "text/javascript", vec![], "L('/a.js ran');".into())
+        }
+        _ => (200, "text/html", vec![], chrome_order_page()),
+    }
+}
+
+/// The sliced load and `load_url` produce the same event trace.
+#[test]
+fn a_yielding_load_matches_the_chrome_order_trace() {
+    let server = serve(chrome_order_site);
+    let (mut whole, whole_view, whole_rt) = engine();
+    whole_rt
+        .block_on(whole.load_url(whole_view, server.url("/")))
+        .expect("whole load");
+    let whole_log = page_log(&mut whole, whole_view);
+    let whole_trace = event_trace(&whole_log);
+
+    let (mut sliced, sliced_view, sliced_rt) = engine();
+    let yielded = sliced_rt
+        .block_on(sliced.load_url_yielding(sliced_view, server.url("/")))
+        .expect("yielding load");
+    assert_eq!(yielded, LoadYield::Yielded);
+    assert!(
+        sliced.views[&sliced_view].navigation.is_loading(),
+        "PageLoaded waits for the chain"
+    );
+    finish_yielded_load(&mut sliced, sliced_view, &sliced_rt);
+    let sliced_log = page_log(&mut sliced, sliced_view);
+    let sliced_trace = event_trace(&sliced_log);
+    assert_eq!(whole_trace, CHROME_ORDER_TRACE, "whole-chain trace");
+    assert_eq!(sliced_trace, whole_trace, "sliced trace");
+    assert!(!sliced.views[&sliced_view].navigation.is_loading());
+}
+
+fn fixture_715_html() -> String {
+    let raw =
+        include_str!("../../../docs/diagnostics/2026-10-16/reddit_707_script_insert_feed.html");
+    let mark = "insert('reddit_707_chunk_a.js'";
+    let extra = "\
+L('readyState=' + document.readyState);\n\
+document.addEventListener('readystatechange', function () { L('readystatechange readyState=' + document.readyState); });\n\
+window.addEventListener('load', function () { L('window load readyState=' + document.readyState); });\n";
+    raw.replacen(mark, &format!("{extra}{mark}"), 1)
+}
+
+fn fixture_715_site(
+    path: &str,
+    _: &str,
+) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+    match path {
+        "/reddit_707_chunk_a.js" => {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            (
+                200,
+                "text/javascript",
+                vec![],
+                include_str!("../../../docs/diagnostics/2026-10-16/reddit_707_chunk_a.js").into(),
+            )
+        }
+        "/reddit_707_chunk_b.js" => {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            (
+                200,
+                "text/javascript",
+                vec![],
+                include_str!("../../../docs/diagnostics/2026-10-16/reddit_707_chunk_b.js").into(),
+            )
+        }
+        _ => (200, "text/html", vec![], fixture_715_html()),
+    }
+}
+
+const FIXTURE_715_TRACE: &[&str] = &[
+    "readyState=loading",
+    "reddit_707_chunk_a.js inserted",
+    "readystatechange readyState=interactive",
+    "DOMContentLoaded, readyState=interactive",
+    "chunk a ran",
+    "reddit_707_chunk_a.js load",
+    "reddit_707_chunk_b.js inserted",
+    "chunk b ran",
+    "reddit_707_chunk_b.js load",
+    "IO rendered 3 posts",
+    "readystatechange readyState=complete",
+    "window load readyState=complete",
+];
+
+/// The #715 fixture's sliced load matches the whole-chain trace.
+#[test]
+fn a_yielding_load_matches_the_715_fixture_trace() {
+    let server = serve(fixture_715_site);
+    let (mut whole, whole_view, whole_rt) = chain_engine(5_000);
+    whole_rt
+        .block_on(whole.load_url(whole_view, server.url("/")))
+        .expect("whole load");
+    let whole_log = page_log(&mut whole, whole_view);
+    let whole_trace = event_trace(&whole_log);
+
+    let (mut sliced, sliced_view, sliced_rt) = chain_engine(5_000);
+    let yielded = sliced_rt
+        .block_on(sliced.load_url_yielding(sliced_view, server.url("/")))
+        .expect("yielding load");
+    assert_eq!(yielded, LoadYield::Yielded);
+    assert_eq!(
+        text(&mut sliced, sliced_view, "document.readyState"),
+        r#"String("interactive")"#,
+    );
+    finish_yielded_load(&mut sliced, sliced_view, &sliced_rt);
+    let sliced_log = page_log(&mut sliced, sliced_view);
+    let sliced_trace = event_trace(&sliced_log);
+    assert_eq!(whole_trace, FIXTURE_715_TRACE, "whole-chain trace");
+    assert_eq!(sliced_trace, whole_trace, "sliced trace");
+    let feed = text(
+        &mut sliced,
+        sliced_view,
+        "document.getElementById('feed').textContent",
+    );
+    assert!(
+        feed.contains("Feed post 1") && feed.contains("Feed post 3"),
+        "{feed}"
+    );
+}
+
+/// A page that inserts nothing returns from the yielding load the same way
+/// `load_url` does: `load` has fired, and a later live turn is not required.
+#[test]
+fn a_page_with_no_inserted_script_does_not_yield() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/" => (
+                200,
+                "text/html",
+                vec![],
+                r#"<pre id="log"></pre><script>
+function L(m) { document.getElementById('log').textContent += m + '\n'; }
+document.addEventListener('readystatechange', function () { L('readystatechange readyState=' + document.readyState); });
+document.addEventListener('DOMContentLoaded', function () { L('DOMContentLoaded readyState=' + document.readyState); });
+window.addEventListener('load', function () { L('window load readyState=' + document.readyState); });
+setTimeout(function () { L('timer'); }, 0);
+L('readyState=' + document.readyState);
+</script>"#
+                    .into(),
+            ),
+            _ => (404, "text/plain", vec![], "no".into()),
+        }
+    }
+    let expected = [
+        "readyState=loading",
+        "readystatechange readyState=interactive",
+        "DOMContentLoaded readyState=interactive",
+        "readystatechange readyState=complete",
+        "window load readyState=complete",
+        "timer",
+    ];
+    let server = serve(site);
+    let (mut whole, whole_view, whole_rt) = engine();
+    whole_rt
+        .block_on(whole.load_url(whole_view, server.url("/")))
+        .expect("whole");
+    let (mut sliced, sliced_view, sliced_rt) = engine();
+    let yielded = sliced_rt
+        .block_on(sliced.load_url_yielding(sliced_view, server.url("/")))
+        .expect("yielding");
+    assert_eq!(yielded, LoadYield::Complete);
+    assert!(sliced.views[&sliced_view].load_tail.is_none());
+    assert!(!sliced.views[&sliced_view].navigation.is_loading());
+    assert_eq!(event_trace(&page_log(&mut whole, whole_view)), expected);
+    assert_eq!(event_trace(&page_log(&mut sliced, sliced_view)), expected);
+}
+
+/// The yielding load returns while an inserted script is still on the
+/// network. A live turn during that wait does not run post-load timers
+/// and does not fire `load`. The event loop has the engine back, and a
+/// frame was presented for the interactive document.
+#[test]
+fn a_yielding_load_returns_during_the_inserted_script_fetch() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/a.js" => {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                (200, "text/javascript", vec![], "L('/a.js ran');".into())
+            }
+            _ => (
+                200,
+                "text/html",
+                vec![],
+                r#"<pre id="log"></pre><script>
+function L(m) { document.getElementById('log').textContent += m + '\n'; }
+document.addEventListener('readystatechange', function () { L('readystatechange readyState=' + document.readyState); });
+document.addEventListener('DOMContentLoaded', function () { L('DOMContentLoaded readyState=' + document.readyState); });
+window.addEventListener('load', function () { L('window load readyState=' + document.readyState); });
+setTimeout(function () { L('timer'); }, 0);
+L('readyState=' + document.readyState);
+var s = document.createElement('script');
+s.src = '/a.js';
+s.onload = function () { L('/a.js load'); };
+document.head.appendChild(s);
+L('/a.js inserted');
+</script>"#
+                    .into(),
+            ),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = engine();
+    let frames_before = engine.views[&view].frames_presented;
+    let started = std::time::Instant::now();
+    let yielded = rt
+        .block_on(engine.load_url_yielding(view, server.url("/")))
+        .expect("yield");
+    let returned_in = started.elapsed();
+    assert_eq!(yielded, LoadYield::Yielded);
+    assert!(
+        returned_in < std::time::Duration::from_millis(1000),
+        "the load held the event loop for the fetch: {returned_in:?}"
+    );
+    assert!(
+        engine.views[&view].frames_presented > frames_before,
+        "no frame was presented for the interactive document"
+    );
+    assert_eq!(
+        text(&mut engine, view, "document.readyState"),
+        r#"String("interactive")"#
+    );
+    assert!(engine.views[&view].navigation.is_loading());
+    let during = page_log(&mut engine, view);
+    assert_eq!(
+        event_trace(&during),
+        [
+            "readyState=loading",
+            "/a.js inserted",
+            "readystatechange readyState=interactive",
+            "DOMContentLoaded readyState=interactive",
+        ],
+        "{during}"
+    );
+    let turn_started = std::time::Instant::now();
+    // Long enough that a post-load timer clock would run the 0ms timer.
+    rt.block_on(engine.pump_live(view, 5_000));
+    assert!(
+        turn_started.elapsed() < std::time::Duration::from_millis(500),
+        "the live turn waited for the fetch: {:?}",
+        turn_started.elapsed()
+    );
+    let mid = page_log(&mut engine, view);
+    assert_eq!(
+        event_trace(&mid),
+        event_trace(&during),
+        "timers or load ran before the script: {mid}"
+    );
+    assert_eq!(
+        text(&mut engine, view, "document.readyState"),
+        r#"String("interactive")"#
+    );
+    finish_yielded_load(&mut engine, view, &rt);
+    assert_eq!(
+        event_trace(&page_log(&mut engine, view)),
+        [
+            "readyState=loading",
+            "/a.js inserted",
+            "readystatechange readyState=interactive",
+            "DOMContentLoaded readyState=interactive",
+            "/a.js ran",
+            "/a.js load",
+            "readystatechange readyState=complete",
+            "window load readyState=complete",
+            "timer",
+        ],
+    );
+}
+
+/// Navigating away while the chain is still fetching drops it. `load` does
+/// not fire for the old document, and it does not fire an extra time on
+/// the next one. The late script does not run there.
+#[test]
+fn navigating_away_mid_tail_does_not_fire_load() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/slow.js" => {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                (
+                    200,
+                    "text/javascript",
+                    vec![],
+                    "window.slowRan = true; L('slow ran');".into(),
+                )
+            }
+            "/next" => (
+                200,
+                "text/html",
+                vec![],
+                r#"<pre id="log"></pre><script>
+function L(m) { document.getElementById('log').textContent += m + '\n'; }
+window.addEventListener('load', function () { L('window load'); });
+</script>"#
+                    .into(),
+            ),
+            _ => (
+                200,
+                "text/html",
+                vec![],
+                r#"<pre id="log"></pre><script>
+function L(m) { document.getElementById('log').textContent += m + '\n'; }
+window.addEventListener('load', function () { L('old load'); });
+var s = document.createElement('script');
+s.src = '/slow.js';
+document.head.appendChild(s);
+</script>"#
+                    .into(),
+            ),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = engine();
+    let yielded = rt
+        .block_on(engine.load_url_yielding(view, server.url("/")))
+        .expect("yield");
+    assert_eq!(yielded, LoadYield::Yielded);
+    assert_eq!(
+        text(&mut engine, view, "document.readyState"),
+        r#"String("interactive")"#
+    );
+    assert!(
+        !page_log(&mut engine, view).contains("old load"),
+        "load fired before the chain was idle"
+    );
+    rt.block_on(engine.load_url(view, server.url("/next")))
+        .expect("next page");
+    rt.block_on(engine.pump_live(view, 16));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    rt.block_on(engine.pump_live(view, 16));
+    assert!(engine.views[&view].load_tail.is_none());
+    let log = page_log(&mut engine, view);
+    assert_eq!(event_trace(&log), ["window load"], "{log}");
+    assert_ne!(
+        text(&mut engine, view, "String(window.slowRan)"),
+        r#"String("true")"#
+    );
+}
