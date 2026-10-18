@@ -3774,6 +3774,42 @@ impl LayoutBox {
         // margin included) into the parent's context: contribute nothing.
         let top_adjoined_by_parent =
             in_flow && std::mem::take(&mut margin_context.first_child_top_adjoined);
+        // An empty in-flow block's top and bottom margins adjoin each other
+        // (CSS 2.1 §8.3.1). Materializing the top above the border box and
+        // the bottom below it makes a grid item — a formatting root, so the
+        // pair cannot escape — 48px for `margin: 24px 0`. Chrome collapses
+        // them first, and Wikipedia's empty `#siteNotice` then occupies one
+        // 24px row under the 66px header. A formatting root of our own
+        // (empty flex/grid) does not collapse through.
+        if self.children.is_empty()
+            && in_flow
+            && !is_formatting_root
+            && is_margin_collapsible_through(
+                &self.style,
+                self.float,
+                false,
+                self.dimensions.border.top,
+                self.dimensions.border.bottom,
+                self.dimensions.padding.top,
+                self.dimensions.padding.bottom,
+                false,
+            )
+        {
+            if !top_adjoined_by_parent {
+                margin_context.add_margin(self.dimensions.margin.top);
+            }
+            margin_context.add_margin(self.dimensions.margin.bottom);
+            self.dimensions.content.x = containing_block.content.x
+                + self.dimensions.margin.left
+                + self.dimensions.border.left
+                + self.dimensions.padding.left;
+            self.dimensions.content.y = containing_block.content.y
+                + containing_block.content.height
+                + self.dimensions.border.top
+                + self.dimensions.padding.top;
+            self.dimensions.content.height = 0.0;
+            return;
+        }
         if !top_adjoined_by_parent {
             margin_context.add_margin(self.dimensions.margin.top);
             for m in &top_chain {
@@ -4203,7 +4239,14 @@ impl LayoutBox {
         // Only the lengths that actually depend on the base are recomputed:
         // a `Px` height is already right, and an `auto` one is its content.
         if matches!(self.style.height, Length::Percent(_) | Length::Calc(_)) {
+            // An out-of-flow box's percentage height is against this padding
+            // box even when the box's own height came from its content
+            // (CSS 2.1 §10.5). The flow pass may have marked the percentage
+            // `auto` because the stand-in's height was the cursor.
+            let saved = self.percent_height_is_auto;
+            self.percent_height_is_auto = false;
             self.calculate_block_height(Some(containing_block.content.height));
+            self.percent_height_is_auto = saved;
         }
         self.apply_position_offsets_absolute(containing_block);
         let (dx, dy) = (

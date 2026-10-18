@@ -2006,6 +2006,21 @@ const WRAPPERS_JS: &str = r#"
     });
     accessor(HTMLElement.prototype, 'hidden', function () { return this.hasAttribute('hidden'); },
         function (v) { this.toggleAttribute('hidden', !!v); });
+    // HTML popover, reflected and limited to the known keywords. Absent is
+    // null. The empty string and `auto` are the auto state; `manual` and
+    // `hint` return themselves; any other present value is the invalid-value
+    // default, `manual`. Setting null removes the attribute. A closed
+    // popover is not shown: the UA sheet still keys off the content attribute.
+    accessor(HTMLElement.prototype, 'popover', function () {
+        if (!this.hasAttribute('popover')) return null;
+        var v = String(this.getAttribute('popover') || '').toLowerCase();
+        if (v === '' || v === 'auto') return 'auto';
+        if (v === 'manual' || v === 'hint') return v;
+        return 'manual';
+    }, function (v) {
+        if (v === null) this.removeAttribute('popover');
+        else this.setAttribute('popover', String(v));
+    });
     var datasets = new WeakMap();
     function dataAttr(p) {
         if (typeof p !== 'string' || /-[a-z]/.test(p)) return null;

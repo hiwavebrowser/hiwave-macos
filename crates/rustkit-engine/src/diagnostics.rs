@@ -1040,6 +1040,15 @@ fn track(t: &TrackSize) -> String {
         TrackSize::Auto => "auto".into(),
         TrackSize::MinMax(a, b) => format!("minmax({}, {})", track(a), track(b)),
         TrackSize::FitContent(p) => format!("fit-content({})", css_px(*p)),
+        TrackSize::Calc { percent, px } => {
+            if *px == 0.0 {
+                format!("calc({}%)", num(*percent))
+            } else if *px < 0.0 {
+                format!("calc({}% - {})", num(*percent), css_px(-px))
+            } else {
+                format!("calc({}% + {})", num(*percent), css_px(*px))
+            }
+        }
     }
 }
 

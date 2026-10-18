@@ -42,8 +42,12 @@ pub struct GridTrack {
     /// Percentage value if this is a percentage track (0.0-100.0).
     /// For minmax(%, x), this stores the min percentage.
     pub percent: Option<f32>,
+    /// Fixed px added when `percent` resolves (`calc(100% - 340px)`).
+    pub percent_fixed: f32,
     /// Percentage value for the max bound in minmax(x, %).
     pub max_percent: Option<f32>,
+    /// Fixed px added when `max_percent` resolves.
+    pub max_percent_fixed: f32,
     /// Whether this track uses min-content sizing.
     pub is_min_content: bool,
     /// Whether this track uses max-content sizing.
@@ -73,23 +77,17 @@ pub struct GridTrack {
 impl GridTrack {
     /// Create a new track with default sizing.
     pub fn new(size: &TrackSize) -> Self {
-        // Extract percentage values if present (for min and max bounds)
-        let (percent, max_percent) = match size {
-            TrackSize::Percent(p) => (Some(*p), None),
+        // Extract percentage values if present (for min and max bounds).
+        // A calc track carries the same percentage plus a fixed term.
+        let (percent, percent_fixed, max_percent, max_percent_fixed) = match size {
+            TrackSize::Percent(p) => (Some(*p), 0.0, None, 0.0),
+            TrackSize::Calc { percent, px } => (Some(*percent), *px, None, 0.0),
             TrackSize::MinMax(min, max) => {
-                let min_pct = if let TrackSize::Percent(p) = min.as_ref() {
-                    Some(*p)
-                } else {
-                    None
-                };
-                let max_pct = if let TrackSize::Percent(p) = max.as_ref() {
-                    Some(*p)
-                } else {
-                    None
-                };
-                (min_pct, max_pct)
+                let (min_pct, min_fixed) = track_percent_terms(min);
+                let (max_pct, max_fixed) = track_percent_terms(max);
+                (min_pct, min_fixed, max_pct, max_fixed)
             }
-            _ => (None, None),
+            _ => (None, 0.0, None, 0.0),
         };
 
         // Determine if this track uses intrinsic sizing
@@ -108,7 +106,7 @@ impl GridTrack {
 
         let (base_size, growth_limit, flex_factor) = match size {
             TrackSize::Px(v) => (*v, *v, 0.0),
-            TrackSize::Percent(_) => (0.0, f32::INFINITY, 0.0), // Will be resolved later
+            TrackSize::Percent(_) | TrackSize::Calc { .. } => (0.0, f32::INFINITY, 0.0), // Will be resolved later
             TrackSize::Fr(fr) => (0.0, f32::INFINITY, *fr),
             TrackSize::MinContent => (0.0, 0.0, 0.0), // Will be computed from content
             TrackSize::MaxContent => (0.0, f32::INFINITY, 0.0), // Will be computed from content
@@ -116,12 +114,20 @@ impl GridTrack {
             TrackSize::MinMax(min, max) => {
                 // For min: use 0 if it's intrinsic or percentage (resolved later)
                 let min_size = match min.as_ref() {
-                    TrackSize::Percent(_) | TrackSize::MinContent | TrackSize::MaxContent | TrackSize::Auto => 0.0,
+                    TrackSize::Percent(_)
+                    | TrackSize::Calc { .. }
+                    | TrackSize::MinContent
+                    | TrackSize::MaxContent
+                    | TrackSize::Auto => 0.0,
                     _ => Self::new(min).base_size,
                 };
                 // For max: use INFINITY if it's intrinsic, percentage, or flexible
                 let max_size = match max.as_ref() {
-                    TrackSize::Percent(_) | TrackSize::MinContent | TrackSize::MaxContent | TrackSize::Auto => f32::INFINITY,
+                    TrackSize::Percent(_)
+                    | TrackSize::Calc { .. }
+                    | TrackSize::MinContent
+                    | TrackSize::MaxContent
+                    | TrackSize::Auto => f32::INFINITY,
                     _ => Self::new(max).growth_limit,
                 };
                 let flex = if max.is_flexible() {
@@ -158,7 +164,9 @@ impl GridTrack {
             is_flexible: flex_factor > 0.0,
             flex_factor,
             percent,
+            percent_fixed,
             max_percent,
+            max_percent_fixed,
             is_min_content,
             is_max_content,
             fit_content_limit,
@@ -166,7 +174,7 @@ impl GridTrack {
             collapsed: false,
             flexible_with_fixed_min: flex_factor > 0.0
                 && matches!(size, TrackSize::MinMax(min, _)
-                    if matches!(min.as_ref(), TrackSize::Px(_) | TrackSize::Percent(_))),
+                    if matches!(min.as_ref(), TrackSize::Px(_) | TrackSize::Percent(_) | TrackSize::Calc { .. })),
             size: base_size,
             position: 0.0,
             line_names: Vec::new(),
@@ -176,6 +184,16 @@ impl GridTrack {
     /// Create an implicit track.
     pub fn implicit(size: &TrackSize) -> Self {
         Self::new(size)
+    }
+}
+
+/// Percentage and fixed term of a track bound. `calc(100% - 340px)` is
+/// `(Some(100), -340)`. A plain percentage has a zero fixed term.
+fn track_percent_terms(size: &TrackSize) -> (Option<f32>, f32) {
+    match size {
+        TrackSize::Percent(p) => (Some(*p), 0.0),
+        TrackSize::Calc { percent, px } => (Some(*percent), *px),
+        _ => (None, 0.0),
     }
 }
 
@@ -997,6 +1015,7 @@ impl GridLayout {
             // Flexible and intrinsic sizes are not definite
             TrackSize::Fr(_)
             | TrackSize::Percent(_)
+            | TrackSize::Calc { .. }
             | TrackSize::MinContent
             | TrackSize::MaxContent
             | TrackSize::Auto => 0.0,
@@ -1475,6 +1494,18 @@ impl GridLayout {
 // ==================== Layout Algorithm ====================
 
 /// Lay out a grid container and its items.
+/// A child that generates a grid item. Absolutely and fixed positioned
+/// boxes are not grid items (css-grid-1 §6.1); `position:relative` is,
+/// and the layout position field keeps Relative as Static, so this reads
+/// the layout position the engine actually set.
+fn is_grid_item(child: &LayoutBox) -> bool {
+    child.style.display != Display::None
+        && !matches!(
+            child.position,
+            crate::Position::Absolute | crate::Position::Fixed
+        )
+}
+
 pub fn layout_grid_container(
     container: &mut LayoutBox,
     container_width: f32,
@@ -1558,7 +1589,7 @@ pub fn layout_grid_container(
     let mut items: Vec<GridItem> = container
         .children
         .iter()
-        .filter(|child| child.style.display != Display::None)
+        .filter(|child| is_grid_item(child))
         .map(|child| {
             let mut item = GridItem::new(child);
             // Set placement from style, resolving named lines via grid
@@ -2006,7 +2037,7 @@ pub fn layout_grid_container(
     // Phase 8: Apply positions to children
     let mut position_idx = 0;
     for child in container.children.iter_mut() {
-        if child.style.display == Display::None {
+        if !is_grid_item(child) {
             continue;
         }
 
@@ -2024,7 +2055,7 @@ pub fn layout_grid_container(
     let container_align_items = container.style.align_items;
     let mut phase9_idx: usize = 0;
     for child in container.children.iter_mut() {
-        if child.style.display == Display::None {
+        if !is_grid_item(child) {
             continue;
         }
         let item_idx = phase9_idx;
@@ -2312,9 +2343,36 @@ pub fn layout_grid_container(
                     let old_x = grandchild.dimensions.content.x;
                     let old_y = grandchild.dimensions.content.y;
                     grandchild.dimensions.content.x = grid_item_x + margin_left + border_left + padding_left;
-                    seam_margins.add_margin(margin_top);
-                    grandchild.dimensions.content.y =
-                        current_y + seam_margins.resolve() + border_top + padding_top;
+                    // An empty block's own top and bottom margins adjoin.
+                    // Separating them here made a grid item 48px tall for
+                    // `#siteNotice { margin: 24px 0 }` (Chrome: 24).
+                    let margins_adjoin = grandchild.children.is_empty()
+                        && grandchild.float == crate::Float::None
+                        && !matches!(
+                            grandchild.position,
+                            crate::Position::Absolute | crate::Position::Fixed
+                        )
+                        && crate::margin_collapse::is_margin_collapsible_through(
+                            &grandchild.style,
+                            grandchild.float,
+                            false,
+                            grandchild.dimensions.border.top,
+                            grandchild.dimensions.border.bottom,
+                            grandchild.dimensions.padding.top,
+                            grandchild.dimensions.padding.bottom,
+                            false,
+                        );
+                    if margins_adjoin {
+                        seam_margins.add_margin(margin_top);
+                        seam_margins.add_margin(grandchild.dimensions.margin.bottom);
+                    } else {
+                        seam_margins.add_margin(margin_top);
+                    }
+                    grandchild.dimensions.content.y = if margins_adjoin {
+                        current_y + border_top + padding_top
+                    } else {
+                        current_y + seam_margins.resolve() + border_top + padding_top
+                    };
                     let dx = grandchild.dimensions.content.x - old_x;
                     let dy = grandchild.dimensions.content.y - old_y;
                     if dx != 0.0 || dy != 0.0 {
@@ -2444,8 +2502,29 @@ pub fn layout_grid_container(
                     // instead of stacking on top of it.
                     current_y = grandchild.dimensions.content.y + grandchild.dimensions.content.height
                         + grandchild.dimensions.padding.bottom + grandchild.dimensions.border.bottom;
-                    seam_margins.reset();
-                    seam_margins.add_margin(grandchild.dimensions.margin.bottom);
+                    // Adjoining margins stay pending so the item's height
+                    // records them once. Resetting here would drop the top
+                    // margin that was just collapsed with the bottom.
+                    let margins_still_adjoined = grandchild.children.is_empty()
+                        && grandchild.float == crate::Float::None
+                        && !matches!(
+                            grandchild.position,
+                            crate::Position::Absolute | crate::Position::Fixed
+                        )
+                        && crate::margin_collapse::is_margin_collapsible_through(
+                            &grandchild.style,
+                            grandchild.float,
+                            false,
+                            grandchild.dimensions.border.top,
+                            grandchild.dimensions.border.bottom,
+                            grandchild.dimensions.padding.top,
+                            grandchild.dimensions.padding.bottom,
+                            false,
+                        );
+                    if !margins_still_adjoined {
+                        seam_margins.reset();
+                        seam_margins.add_margin(grandchild.dimensions.margin.bottom);
+                    }
                 }
 
                 // Record the item's real flowed content height for Phase 9.5.
@@ -2513,7 +2592,7 @@ pub fn layout_grid_container(
         {
             let mut idx = 0usize;
             for child in container.children.iter() {
-                if child.style.display == Display::None {
+                if !is_grid_item(child) {
                     continue;
                 }
                 if let Some(&(r0, r1)) = row_spans.get(idx) {
@@ -2787,7 +2866,7 @@ pub fn layout_grid_container(
 
             let mut idx = 0usize;
             for child in container.children.iter_mut() {
-                if child.style.display == Display::None {
+                if !is_grid_item(child) {
                     continue;
                 }
                 if let Some(&(r0, r1)) = row_spans.get(idx) {
@@ -2873,7 +2952,7 @@ pub fn layout_grid_container(
             );
             let mut idx = 0usize;
             for child in container.children.iter_mut() {
-                if child.style.display == Display::None {
+                if !is_grid_item(child) {
                     continue;
                 }
                 let item_idx = idx;
@@ -2960,7 +3039,7 @@ pub fn layout_grid_container(
     {
         let mut idx = 0usize;
         for child in container.children.iter_mut() {
-            if child.style.display == Display::None {
+            if !is_grid_item(child) {
                 continue;
             }
             let item_idx = idx;
@@ -3019,7 +3098,7 @@ pub fn layout_grid_container(
     {
         let mut idx = 0usize;
         for child in container.children.iter_mut() {
-            if child.style.display == Display::None {
+            if !is_grid_item(child) {
                 continue;
             }
             if matches!(child.style.height, Length::FitContent) {
@@ -3046,7 +3125,7 @@ pub fn layout_grid_container(
     {
         let mut idx = 0usize;
         for child in container.children.iter_mut() {
-            if child.style.display == Display::None {
+            if !is_grid_item(child) {
                 continue;
             }
             let item_idx = idx;
@@ -3169,7 +3248,7 @@ pub fn layout_grid_container(
     {
         let mut idx = 0usize;
         for child in container.children.iter_mut() {
-            if child.style.display == Display::None {
+            if !is_grid_item(child) {
                 continue;
             }
             let item_idx = idx;
@@ -3208,7 +3287,7 @@ pub fn layout_grid_container(
     // reads Static for `position: relative`. A static item is not the
     // containing block and its abspos children are left alone.
     for child in container.children.iter_mut() {
-        if child.style.display == Display::None
+        if !is_grid_item(child)
             || matches!(child.style.position, rustkit_css::Position::Static)
         {
             continue;
@@ -3537,7 +3616,7 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
         let mut sum = 0.0f32;
         let mut item_count = 0usize;
         for child in &layout_box.children {
-            if child.style.display == Display::None {
+            if !is_grid_item(child) {
                 continue;
             }
             // css-flexbox-1 §4: an out-of-flow child is not a flex item, so it
@@ -3583,7 +3662,7 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     // which is how white space at a line's edges is removed.
     let mut pending_space = 0.0f32;
     for child in &layout_box.children {
-        if child.style.display == Display::None {
+        if !is_grid_item(child) {
             continue;
         }
         if matches!(
@@ -3864,7 +3943,7 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
         let mut widest = 0.0f32;
         let mut item_count = 0usize;
         for child in &layout_box.children {
-            if child.style.display == Display::None {
+            if !is_grid_item(child) {
                 continue;
             }
             if matches!(
@@ -3894,7 +3973,7 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
     let mut max_contribution = 0.0f32;
     let mut inline_run = 0.0f32;
     for child in &layout_box.children {
-        if child.style.display == Display::None {
+        if !is_grid_item(child) {
             continue;
         }
         if matches!(
@@ -4139,9 +4218,15 @@ fn distribute_span_contributions(
                     // and 450 in 600; Chromium 40 and 560). And with a
                     // spanning item over a flexible track, every track keeps
                     // its own items' floor (`a_span_covers_a_flexible_track`).
+                    // A definite max (`minmax(0, 756px)`) has room under its
+                    // growth limit, and that room is free space for the
+                    // maximize step, not a content floor. css-grid-1 §12.5
+                    // sizes only intrinsic tracks: a 964px header overflows
+                    // the 756px max, and the 917px shell then shares the
+                    // free space as 577 + 316. Growing the base here made
+                    // the feed column 964.
                     (span > 1 || !t.flexible_with_fixed_min || span_over_flexible)
-                        && (t.is_min_content || t.is_max_content || t.is_flexible
-                            || t.growth_limit > t.base_size)
+                        && (t.is_min_content || t.is_max_content || t.is_flexible)
                 })
                 .collect();
             if growable.is_empty() {
@@ -4227,7 +4312,7 @@ fn size_grid_tracks_filling(
     for track in tracks.iter_mut() {
         // Resolve min percentage (base_size)
         if let Some(pct) = track.percent {
-            let resolved_size = percent_of(pct, container_size);
+            let resolved_size = percent_of(pct, container_size) + track.percent_fixed;
             track.base_size = resolved_size;
             track.size = resolved_size;
             // If no max percentage and not flexible, growth_limit = base_size
@@ -4235,9 +4320,10 @@ fn size_grid_tracks_filling(
                 track.growth_limit = resolved_size;
             }
         }
-        // Resolve max percentage (growth_limit)
+        // Resolve max percentage (growth_limit). `calc(100% - 340px)` is the
+        // percentage of the grid container plus the fixed term.
         if let Some(pct) = track.max_percent {
-            let resolved_size = percent_of(pct, container_size);
+            let resolved_size = percent_of(pct, container_size) + track.max_percent_fixed;
             track.growth_limit = resolved_size;
             // If track hasn't been sized yet, use base_size
             if track.size < track.base_size {
@@ -7674,6 +7760,35 @@ mod tests {
         let items = [(0, 1, 100.0), (1, 1, 100.0), (0, 2, 256.0)];
         distribute_span_contributions(&mut rows, &items, 16.0, 2);
         assert_eq!((rows[0].base_size, rows[1].base_size), (120.0, 120.0));
+    }
+
+    #[test]
+    fn fixed_minmax_keeps_its_base_and_the_shell_shares_577() {
+        // Reddit's feed: `minmax(0, 756px) minmax(0, 316px)` in a 917px
+        // shell with a 24px gap. A 964px header must not become the column.
+        let mut cols = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Px(756.0)),
+            )),
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Px(316.0)),
+            )),
+        ];
+        distribute_span_contributions(&mut cols, &[(0, 1, 964.0), (1, 1, 316.0)], 0.0, 1);
+        assert_eq!(
+            (cols[0].base_size, cols[1].base_size),
+            (0.0, 0.0),
+            "content sized a fixed max"
+        );
+        size_grid_tracks(&mut cols, 917.0, 24.0);
+        assert!(
+            (cols[0].size - 577.0).abs() < 1.0 && (cols[1].size - 316.0).abs() < 1.0,
+            "tracks {:?} {:?}",
+            cols[0].size,
+            cols[1].size
+        );
     }
 
     #[test]

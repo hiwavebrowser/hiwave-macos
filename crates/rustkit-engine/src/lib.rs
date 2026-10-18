@@ -9158,8 +9158,16 @@ impl Engine {
                     }
                 }
 
-                // Check for display: none
+                // Check for display: none. The element generates no box, but
+                // getComputedStyle still returns the style that hid it: a
+                // closed popover is `display: none; position: fixed`. Dropping
+                // the style here made that position read as the empty string,
+                // and the 5384px panel stayed indistinguishable from an
+                // in-flow box that had never been a popover.
                 if style.display == rustkit_css::Display::None {
+                    let mut hidden = LayoutBox::new(BoxType::Block, style);
+                    hidden.node_id = Some(node.id.raw());
+                    note_boxless_style(&hidden);
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
 
@@ -9428,6 +9436,13 @@ impl Engine {
                     if self.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
+                    // The general element path transfers position after this
+                    // return. Without it, `position:absolute` on a checkbox
+                    // never reaches the layout box, and blockifying the
+                    // control (it is an inline-block in the UA sheet) makes
+                    // Wikipedia's menu checkbox an in-flow block the size of
+                    // its dropdown — the Donate link sits under that box.
+                    Self::transfer_own_positioning(&mut b);
                     return b;
                 }
 
@@ -9519,6 +9534,7 @@ impl Engine {
                     if self.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
+                    Self::transfer_own_positioning(&mut b);
                     return b;
                 }
 
@@ -9596,6 +9612,7 @@ impl Engine {
                     if self.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
+                    Self::transfer_own_positioning(&mut b);
                     return b;
                 }
 
@@ -19868,8 +19885,35 @@ fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
     // assumes the 16px root, as `fit-content()` and `flex-basis` do.
     match parse_length(value)? {
         rustkit_css::Length::Zero => Some(rustkit_css::TrackSize::Px(0.0)),
+        // `calc(756px)` collapses to `Length::Px` before it gets here. The
+        // `_` arm used to drop it, so `minmax(0, calc(756px))` never became
+        // a track and the feed column filled its container (996) instead of
+        // stopping at 577.
+        rustkit_css::Length::Px(px) => Some(rustkit_css::TrackSize::Px(px)),
+        rustkit_css::Length::Em(em) => Some(rustkit_css::TrackSize::Px(em * 16.0)),
         rustkit_css::Length::Rem(rem) => Some(rustkit_css::TrackSize::Px(rem * 16.0)),
+        rustkit_css::Length::Percent(pct) => Some(rustkit_css::TrackSize::Percent(pct)),
+        rustkit_css::Length::Calc(sum) => track_size_from_calc(*sum),
         _ => None,
+    }
+}
+
+/// A mixed `calc()` track. `em`/`rem` fold into the fixed term at the 16px
+/// root, the same assumption `rem` tracks already make. Viewport units are
+/// not a percentage of the grid container, so a calc that uses them is left
+/// unparsed rather than treated as a fixed length.
+fn track_size_from_calc(sum: rustkit_css::CalcSum) -> Option<rustkit_css::TrackSize> {
+    if sum.vw != 0.0 || sum.vh != 0.0 || sum.vmin != 0.0 || sum.vmax != 0.0 {
+        return None;
+    }
+    let fixed = sum.px + (sum.em + sum.rem) * 16.0;
+    if sum.percent == 0.0 {
+        Some(rustkit_css::TrackSize::Px(fixed))
+    } else {
+        Some(rustkit_css::TrackSize::Calc {
+            percent: sum.percent,
+            px: fixed,
+        })
     }
 }
 

@@ -536,3 +536,751 @@ fn a_header_of_custom_elements_survives_a_resize() {
         "{text:?}"
     );
 }
+
+/// Wikipedia's empty `#siteNotice` carries `margin: 24px 0` inside a grid
+/// item. The two margins adjoin, so the row is 24px and the content starts
+/// there — not 48px, which is the +20px gap under the header.
+#[test]
+fn an_empty_sitenotice_collapses_its_own_margins_inside_the_grid_row() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#".page{display:grid;width:1200px;grid-template-columns:minmax(0,1fr);"#,
+        r#"grid-template-areas:'siteNotice' 'pageContent'}"#,
+        r#".vector-sitenotice-container{grid-area:siteNotice}"#,
+        r#".mw-content-container{grid-area:pageContent}"#,
+        r#"#siteNotice{font-size:0.8em;margin:24px 0;position:relative;text-align:center}"#,
+        r#"#content{height:10px}</style>"#,
+        r#"<div class="page"><div class="vector-sitenotice-container" id="wrap">"#,
+        r#"<div id="siteNotice"></div></div>"#,
+        r#"<div class="mw-content-container"><main id="content"></main></div></div>"#,
+    ));
+    let notice = rect(&mut engine, view, "siteNotice");
+    let wrap = rect(&mut engine, view, "wrap");
+    let content = rect(&mut engine, view, "content");
+    assert!(notice.3 < 1.0, "empty notice has a border box {notice:?}");
+    assert!(
+        (wrap.3 - 24.0).abs() < 0.5,
+        "sitenotice row is not the collapsed 24px margin: {wrap:?}"
+    );
+    assert!(
+        (content.1 - 24.0).abs() < 0.5,
+        "content did not start under the collapsed margin: {content:?}"
+    );
+}
+
+/// Vector's menu checkbox is `position:absolute; width/height:100%` inside
+/// `.vector-dropdown{position:relative}`. Blockifying it must not stretch it
+/// over the header, or the Donate link never receives the click.
+#[test]
+fn a_dropdown_checkbox_stays_inside_its_relative_dropdown() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}"#,
+        r#".mw-header{display:flex;align-items:center;width:800px;height:66px}"#,
+        r#".vector-header-start,.vector-header-end{display:flex;align-items:center}"#,
+        r#".vector-header-end{flex-grow:1;justify-content:flex-end}"#,
+        r#".vector-dropdown{position:relative}"#,
+        r#".vector-dropdown .vector-dropdown-checkbox{position:absolute;top:0;left:0;"#,
+        r#"z-index:1;opacity:0;width:100%;height:100%;margin:0;padding:0}"#,
+        r#"label{display:inline-flex;width:40px;height:32px}</style>"#,
+        r#"<header class="mw-header" id="hdr"><div class="vector-header-start"><nav>"#,
+        r#"<div class="vector-dropdown" id="dd">"#,
+        r#"<input type="checkbox" id="cb" class="vector-dropdown-checkbox">"#,
+        r#"<label id="lab">Menu</label></div></nav></div>"#,
+        r#"<div class="vector-header-end"><a id="donate" href="https://donate.wikimedia.org/">Donate</a>"#,
+        r#"</div></header>"#,
+    ));
+    let cb = rect(&mut engine, view, "cb");
+    let dd = rect(&mut engine, view, "dd");
+    let donate = rect(&mut engine, view, "donate");
+    assert!(
+        (cb.2 - dd.2).abs() < 1.0 && (cb.3 - dd.3).abs() < 1.0 && dd.2 < 80.0,
+        "checkbox escaped the dropdown: cb {cb:?} dd {dd:?}"
+    );
+    assert!(
+        donate.0 > cb.0 + cb.2,
+        "checkbox covers Donate: cb {cb:?} donate {donate:?}"
+    );
+}
+
+/// Reddit's feed column. `minmax(0, calc(756px)) minmax(0, calc(316px))`
+/// in a 917px grid with a 24px gap is 577 + 316, and
+/// `minmax(0, calc(100% - 340px))` is the same 577. Dropping the calc
+/// left one column the width of the container.
+#[test]
+fn a_calc_track_list_gives_the_feed_column_577() {
+    for columns in [
+        "minmax(0, calc(756px)) minmax(0, calc(316px))",
+        "minmax(0, calc(100% - 340px)) minmax(0, 316px)",
+    ] {
+        let (mut engine, view) = loaded(&format!(
+            concat!(
+                r#"<!doctype html><style>body{{margin:0}}"#,
+                r#"#m{{display:grid;width:917px;gap:24px;grid-template-columns:{columns}}}"#,
+                r#"#a,#b{{height:60px}}</style>"#,
+                r#"<div id="m"><div id="a"></div><div id="b"></div></div>"#,
+            ),
+            columns = columns
+        ));
+        let a = rect(&mut engine, view, "a");
+        let b = rect(&mut engine, view, "b");
+        assert!(
+            (a.2 - 577.0).abs() < 1.0 && (b.2 - 316.0).abs() < 1.0 && (b.0 - 601.0).abs() < 1.0,
+            "{columns}: a {a:?} b {b:?}"
+        );
+    }
+}
+
+/// The shell that puts the feed at x=339: `315px 965px` with the feed in
+/// column 2 and the sidebar `position:fixed`.
+#[test]
+fn the_feed_column_starts_after_the_fixed_sidebar() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#"#g{display:grid;width:1280px;grid-template-columns:315px 965px}"#,
+        r#"#sub{grid-column-start:2;height:40px}"#,
+        r#"#side{position:fixed;top:56px;width:315px;height:40px}</style>"#,
+        r#"<div id="g"><div id="sub"></div><div id="side"></div></div>"#,
+    ));
+    let sub = rect(&mut engine, view, "sub");
+    let side = rect(&mut engine, view, "side");
+    assert!(
+        (sub.0 - 315.0).abs() < 1.0 && (sub.2 - 965.0).abs() < 1.0,
+        "feed column {sub:?}"
+    );
+    assert!(
+        side.0.abs() < 1.0 && (side.1 - 56.0).abs() < 1.0,
+        "fixed sidebar was a grid item {side:?}"
+    );
+}
+
+/// An inline-flex search box is the width of its in-flow item. The 1623px
+/// absolute and the fixed popover do not join that width.
+#[test]
+fn an_inline_flex_ignores_the_absolute_and_the_popover() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#"#s{display:inline-flex}#b{width:100px;height:20px}"#,
+        r#"#a{position:absolute;width:1623px;height:20px;left:0}"#,
+        r#"#pop{width:3000px}</style>"#,
+        r#"<div id="s"><div id="b"></div><div id="a"></div>"#,
+        r#"<div id="pop" popover style="display:block"></div></div>"#,
+        r#"<main id="main" style="height:20px">m</main>"#,
+    ));
+    let s = rect(&mut engine, view, "s");
+    let main = rect(&mut engine, view, "main");
+    assert!(
+        (s.2 - 100.0).abs() < 1.0 && s.3 < 40.0,
+        "search container took the absolute's width {s:?}"
+    );
+    assert!(main.0.abs() < 1.0, "search container pushed main {main:?}");
+}
+
+/// `#p:not(:popover-open){display:none}` beats `#p{display:flex}`, so a
+/// closed search panel does not cover the page.
+#[test]
+fn a_closed_popover_loses_to_not_popover_open() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#"#p{display:flex;width:200px;height:40px}"#,
+        r#"#p:not(:popover-open){display:none}</style>"#,
+        r#"<div id="p" popover>Search</div><main id="m">feed</main>"#,
+    ));
+    let p = rect(&mut engine, view, "p");
+    assert_eq!(
+        eval(
+            &mut engine,
+            view,
+            "getComputedStyle(document.getElementById('p')).display"
+        ),
+        "none"
+    );
+    assert!(
+        p.2 == 0.0 && p.3 == 0.0,
+        "closed search panel has a box {p:?}"
+    );
+}
+
+/// A flex-item credit span stays one line when its only tall child is a
+/// closed popover, even where an author `display:flex` would have shown it.
+#[test]
+fn a_credit_span_stays_one_line_when_its_popover_is_closed() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}"#,
+        r#"#row{display:flex;width:545px}#credit{display:flex}"#,
+        r#"#menu{display:flex;width:200px;height:800px}"#,
+        r#"#menu:not(:popover-open){display:none}</style>"#,
+        r#"<div id="row"><span id="credit">username"#,
+        r#"<span id="menu" popover>Search panel text</span></span></div>"#,
+    ));
+    let credit = rect(&mut engine, view, "credit");
+    let menu = rect(&mut engine, view, "menu");
+    assert!(menu.2 == 0.0 && menu.3 == 0.0, "popover shown {menu:?}");
+    assert!(
+        credit.2 < 200.0 && credit.3 < 40.0,
+        "credit span stretched around the closed popover {credit:?}"
+    );
+}
+
+/// Microsoft's header row: `display:contents` hoists the nowrap links into
+/// `nav`, `uhf-contextual-nav` is `flex: 1`, and `.hidden` is
+/// `display:none !important`. Logo, links and actions stay on one row
+/// inside the 1152px container.
+#[test]
+fn the_microsoft_header_row_keeps_the_logo_and_nav_on_one_line() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}"#,
+        r#"#bar{display:flex;flex-direction:row;align-items:center;gap:10px;"#,
+        r#"width:1152px;height:54px}"#,
+        r#"uhf-brand{display:flex}.logo{display:flex;width:137px;height:54px}"#,
+        r#"uhf-contextual-nav{flex:1}.desk{display:inline}"#,
+        r#"nav.uhf{display:flex;align-items:center;gap:5px;min-width:0}"#,
+        r#".contents{display:contents}"#,
+        r#"a.link{display:flex;white-space:nowrap;height:54px;padding:0 8px}"#,
+        r#".hidden{display:none!important}"#,
+        r#"uhf-actions{display:flex;margin-left:auto}#act{width:80px;height:54px}</style>"#,
+        r#"<div id="bar"><uhf-brand><div class="contents">"#,
+        r#"<a class="logo" id="logo"></a></div></uhf-brand>"#,
+        r#"<uhf-contextual-nav id="navhost"><uhf-contextual-nav-desktop class="desk">"#,
+        r#"<nav class="uhf"><uhf-overflow-menu class="contents"><div class="contents">"#,
+        r#"<div class="contents"><a class="link" id="l1">Microsoft 365</a>"#,
+        r#"<a class="link" id="l2">Azure</a>"#,
+        r#"<a class="link hidden" id="hid">Support</a></div></div></uhf-overflow-menu>"#,
+        r#"</nav></uhf-contextual-nav-desktop></uhf-contextual-nav>"#,
+        r#"<uhf-actions id="actions"><div id="act"></div></uhf-actions></div>"#,
+    ));
+    let logo = rect(&mut engine, view, "logo");
+    let l1 = rect(&mut engine, view, "l1");
+    let hid = rect(&mut engine, view, "hid");
+    let actions = rect(&mut engine, view, "actions");
+    assert!(
+        (logo.2 - 137.0).abs() < 1.0 && (l1.1 - logo.1).abs() < 2.0 && l1.0 > logo.0,
+        "logo and nav are not one row: logo {logo:?} l1 {l1:?}"
+    );
+    assert!(hid.2 == 0.0 && hid.3 == 0.0, "hidden link shown {hid:?}");
+    assert!(
+        actions.0 + actions.2 <= 1152.5,
+        "header row overflowed: actions {actions:?} l1 {l1:?}"
+    );
+}
+
+/// Yahoo's page grid is `repeat(1, minmax(0, 1fr))` / `auto 1fr auto`, and
+/// the header is an inline-flex of `display:contents` wrappers. Resizing
+/// away and back must leave the story painted, not only the logo.
+#[test]
+fn the_yahoo_grid_keeps_the_story_after_a_resize() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}"#,
+        r#".page{display:grid;min-height:100vh;grid-template-columns:repeat(1,minmax(0,1fr));"#,
+        r#"grid-template-rows:auto 1fr auto}"#,
+        r#"header{display:inline-flex;width:100%;flex-direction:column}"#,
+        r#".row{display:inline-flex;width:100%}.contents{display:contents}"#,
+        r#"#logo{display:block;width:80px;height:24px}#story{height:40px}</style>"#,
+        r#"<div class="page" id="page"><header id="uh"><div class="row">"#,
+        r#"<div class="contents"><a id="logo">Yahoo</a></div>"#,
+        r#"<div class="contents"><div id="search" style="width:200px;height:20px">find</div></div>"#,
+        r#"</div><div class="contents"></div></header>"#,
+        r#"<div id="mid"><div id="story">Headlines</div></div>"#,
+        r#"<footer id="foot" style="height:20px">foot</footer></div>"#,
+    ));
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 400,
+                height: 300,
+            },
+        )
+        .expect("shrink");
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+        )
+        .expect("grow");
+    let story = rect(&mut engine, view, "story");
+    let logo = rect(&mut engine, view, "logo");
+    let text = painted(&engine, view);
+    assert!(logo.2 > 8.0, "logo vanished {logo:?}");
+    assert!(
+        story.3 > 20.0 && story.1 > logo.1,
+        "story vanished after resize {story:?} logo {logo:?}"
+    );
+    assert!(
+        text.contains("Yahoo") && text.contains("Headlines"),
+        "{text:?}"
+    );
+}
+
+/// Microsoft's header row is `height: 54px` and the container is
+/// `height: 100%; display: flex; align-items: center`. The block pre-pass
+/// stacks the three 54px items to 162px. Centring them in that stack puts
+/// the row on the header's bottom edge.
+#[test]
+fn a_percent_height_header_row_centres_inside_the_bar() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#"header{height:54px}#c{display:flex;flex-direction:row;align-items:center;height:100%;gap:10px}"#,
+        r#"#b{width:137px;height:54px}#n{flex:1;height:54px}#a{width:80px;height:54px;margin-left:auto}</style>"#,
+        r#"<header id="h"><div id="c"><div id="b"></div><div id="n"></div><div id="a"></div></div></header>"#,
+    ));
+    let h = rect(&mut engine, view, "h");
+    let b = rect(&mut engine, view, "b");
+    let n = rect(&mut engine, view, "n");
+    let a = rect(&mut engine, view, "a");
+    assert!(
+        (b.1 - h.1).abs() < 1.0 && (n.1 - b.1).abs() < 1.0 && (a.1 - b.1).abs() < 1.0,
+        "header row left the bar: h {h:?} b {b:?} n {n:?} a {a:?}"
+    );
+    assert!(
+        n.0 > b.0 && a.0 > n.0 && a.0 + a.2 <= h.2 + 1.0,
+        "logo and nav are not one row inside the header: h {h:?} b {b:?} n {n:?} a {a:?}"
+    );
+}
+
+/// Upgrading a search component attaches a shadow root and an adopted
+/// sheet. The sheet's `:host` sizes the host; the suggestions popover and
+/// the credit menu stay closed (`:not(:popover-open)` beats the sheet's
+/// `display:flex`), so neither the 5384px panel nor the 800px menu joins
+/// the host.
+#[test]
+fn an_upgraded_search_keeps_its_popover_closed() {
+    let (mut engine, view) = loaded(
+        r#"<!doctype html><body style="margin:0"><x-search id="h"></x-search><main id="m">feed</main></body>"#,
+    );
+    engine
+        .execute_script(
+            view,
+            r#"
+class XSearch extends HTMLElement {
+  constructor() {
+    super();
+    var root = this.attachShadow({ mode: 'open' });
+    var sheet = new CSSStyleSheet();
+    sheet.replaceSync(':host{display:inline-flex;height:32px} #box{width:200px;height:32px} #panel{display:flex;width:5384px;height:400px} #panel:not(:popover-open){display:none} #credit{display:flex} #menu{display:flex;width:200px;height:800px} #menu:not(:popover-open){display:none}');
+    root.adoptedStyleSheets = [sheet];
+    root.innerHTML = '<div id="box"></div><div id="panel" popover="auto">suggestions</div><span id="credit">user<div id="menu" popover="manual">menu</div></span>';
+  }
+}
+customElements.define('x-search', XSearch);
+"#,
+        )
+        .expect("upgrade");
+    let shape = eval(
+        &mut engine,
+        view,
+        r#"
+        var h = document.getElementById('h');
+        var root = h.shadowRoot;
+        var hr = h.getBoundingClientRect();
+        var panel = root.getElementById('panel');
+        var menu = root.getElementById('menu');
+        var credit = root.getElementById('credit');
+        var pr = panel.getBoundingClientRect();
+        var mr = menu.getBoundingClientRect();
+        var cr = credit.getBoundingClientRect();
+        var main = document.getElementById('m').getBoundingClientRect();
+        [getComputedStyle(h).display, Math.round(hr.width), Math.round(hr.height), getComputedStyle(panel).display, Math.round(pr.width), Math.round(pr.height), getComputedStyle(menu).display, Math.round(mr.height), Math.round(cr.width), Math.round(cr.height), Math.round(main.x)].join('|')
+        "#,
+    );
+    let parts: Vec<&str> = shape.split('|').collect();
+    assert_eq!(parts[0], "inline-flex", "{shape}");
+    let host_w: f64 = parts[1].parse().unwrap();
+    let host_h: f64 = parts[2].parse().unwrap();
+    assert!(
+        host_w < 500.0 && host_h < 80.0,
+        "upgraded search took the popover's size: {shape}"
+    );
+    assert_eq!(parts[3], "none", "suggestions popover open: {shape}");
+    assert_eq!(parts[6], "none", "credit menu open: {shape}");
+    let credit_h: f64 = parts[9].parse().unwrap();
+    let main_x: f64 = parts[10].parse().unwrap();
+    assert!(credit_h < 40.0, "credit bar grew around the menu: {shape}");
+    assert!(main_x.abs() < 1.0, "search pushed main: {shape}");
+}
+
+/// The suggestions panel and the credit menu are not in the shadow HTML as
+/// popovers. The upgrade sets `popover` on the element (HTML's reflected
+/// IDL). Until that attribute exists the UA does not hide them, and the
+/// panel's 5384px row and the menu's 800px column join the host.
+#[test]
+fn an_upgraded_search_popover_property_stays_closed() {
+    let (mut engine, view) = loaded(
+        r#"<!doctype html><body style="margin:0"><x-search id="h"></x-search><main id="m">feed</main></body>"#,
+    );
+    engine
+        .execute_script(
+            view,
+            r#"
+class XSearch extends HTMLElement {
+  constructor() {
+    super();
+    var root = this.attachShadow({ mode: 'open' });
+    var sheet = new CSSStyleSheet();
+    sheet.replaceSync(':host{display:inline-flex} #box{width:200px;height:32px} #credit{display:inline-flex}');
+    root.adoptedStyleSheets = [sheet];
+    root.innerHTML = '<div id="box"></div><div id="panel"><div style="width:5384px;height:400px"></div></div><span id="credit">user<div id="menu"><div style="width:20px;height:800px"></div></div></span>';
+    var panel = root.getElementById('panel');
+    var menu = root.getElementById('menu');
+    panel.popover = 'auto';
+    menu.popover = 'manual';
+    window.__pop = [panel.popover, menu.popover, panel.getAttribute('popover'), menu.getAttribute('popover')].join('|');
+  }
+}
+customElements.define('x-search', XSearch);
+"#,
+        )
+        .expect("upgrade");
+    assert_eq!(
+        eval(&mut engine, view, "window.__pop"),
+        "auto|manual|auto|manual"
+    );
+    let shape = eval(
+        &mut engine,
+        view,
+        r#"
+        var h = document.getElementById('h');
+        var root = h.shadowRoot;
+        var hr = h.getBoundingClientRect();
+        var panel = root.getElementById('panel');
+        var credit = root.getElementById('credit');
+        var pr = panel.getBoundingClientRect();
+        var cr = credit.getBoundingClientRect();
+        var main = document.getElementById('m').getBoundingClientRect();
+        [Math.round(hr.width), Math.round(hr.height), getComputedStyle(panel).display, getComputedStyle(panel).position, Math.round(pr.width), Math.round(pr.height), Math.round(cr.width), Math.round(cr.height), Math.round(main.x)].join('|')
+        "#,
+    );
+    let parts: Vec<&str> = shape.split('|').collect();
+    let host_w: f64 = parts[0].parse().unwrap();
+    let host_h: f64 = parts[1].parse().unwrap();
+    assert!(
+        host_w < 500.0 && host_h < 80.0,
+        "search container took the closed popover: {shape}"
+    );
+    assert_eq!(parts[2], "none", "popover display: {shape}");
+    assert_eq!(parts[3], "fixed", "popover position: {shape}");
+    let credit_h: f64 = parts[7].parse().unwrap();
+    let main_x: f64 = parts[8].parse().unwrap();
+    assert!(credit_h < 40.0, "credit span took the closed menu: {shape}");
+    assert!(main_x.abs() < 1.0, "search pushed main: {shape}");
+}
+
+/// Reddit hides a hovercard's card with
+/// `faceplate-hovercard:not(:defined) > [slot=content] { display: none }`
+/// until the element upgrades. The upgrade's adopted sheet then keeps the
+/// card in `[faceplate-popper-content] { position: fixed; visibility: hidden }`
+/// inside a `:host { display: contents }` root. The slotted credit span stays
+/// one line; the card does not join it.
+#[test]
+fn an_upgraded_hovercard_stays_out_of_the_credit_bar() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}"#,
+        r#"faceplate-hovercard:not(:defined) > [slot="content"]{display:none}"#,
+        r#"span.flex{display:flex;align-items:center}"#,
+        r#"</style><span id="credit" class="flex" slot="credit-bar">"#,
+        r#"<faceplate-hovercard id="card"><span id="name">u/name</span>"#,
+        r#"<div id="cardbody" slot="content" style="width:400px;height:800px"></div>"#,
+        r#"</faceplate-hovercard></span>"#,
+    ));
+    let before = rect(&mut engine, view, "credit");
+    assert!(
+        before.3 < 40.0,
+        "undefined hovercard already stretched the credit bar {before:?}"
+    );
+    engine
+        .execute_script(
+            view,
+            r#"
+class FaceplateHovercard extends HTMLElement {
+  constructor() {
+    super();
+    var root = this.attachShadow({ mode: 'open' });
+    var sheet = new CSSStyleSheet();
+    sheet.replaceSync(':host{display:contents}#faceplate-tooltip{display:flex;flex-direction:column;width:fit-content}[faceplate-popper-content]{position:fixed;visibility:hidden;opacity:0}');
+    root.adoptedStyleSheets = [sheet];
+    root.innerHTML = '<slot></slot><div id="faceplate-tooltip" faceplate-popper-content><slot name="content"></slot></div>';
+  }
+}
+customElements.define('faceplate-hovercard', FaceplateHovercard);
+"#,
+        )
+        .expect("upgrade");
+    let shape = eval(
+        &mut engine,
+        view,
+        r#"
+        var card = document.getElementById('card');
+        var tip = card.shadowRoot.getElementById('faceplate-tooltip');
+        var credit = document.getElementById('credit').getBoundingClientRect();
+        var body = document.getElementById('cardbody').getBoundingClientRect();
+        [getComputedStyle(card).display, getComputedStyle(tip).position, getComputedStyle(tip).visibility, Math.round(credit.width), Math.round(credit.height), Math.round(body.height)].join('|')
+        "#,
+    );
+    let parts: Vec<&str> = shape.split('|').collect();
+    assert_eq!(parts[0], "contents", "host display: {shape}");
+    assert_eq!(parts[1], "fixed", "closed card stayed in flow: {shape}");
+    assert_eq!(parts[2], "hidden", "closed card visible: {shape}");
+    let credit_h: f64 = parts[4].parse().unwrap();
+    assert!(
+        credit_h < 40.0,
+        "credit span grew when the hovercard upgraded: {shape}"
+    );
+}
+
+/// The header search row is `display:flex` inside a `flex: 1 1 0%` item.
+/// `.hidden` is `display:none`; `.m\:block` is `display:block` only from
+/// 960px. A closed suggestions box (`position:fixed`) must not stretch the
+/// row to 5384, and at a desktop viewport the `m:block` span keeps a box.
+#[test]
+fn an_upgraded_search_row_stays_in_the_header() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#".hidden{display:none}@media (min-width:960px){.m\:block{display:block}}"#,
+        r#"header{height:56px;overflow:hidden}nav{display:flex;height:56px;align-items:center}"#,
+        r#".flex-1{flex:1 1 0%;height:40px}.flex{display:flex}.w-full{width:100%}"#,
+        r#"[faceplate-popper-content]{position:fixed;visibility:hidden;opacity:0}"#,
+        r#"</style><header id="h"><nav>"#,
+        r#"<div id="search" class="flex-1"><div id="row" class="flex w-full">"#,
+        r#"<span id="desk" class="hidden m:block" style="width:2019px;height:32px">Find</span>"#,
+        r#"<div id="drop" faceplate-popper-content style="width:5384px;height:560px"></div>"#,
+        r#"</div><div id="sib" style="width:40px;height:40px"></div></div></nav></header>"#,
+    ));
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 800,
+            },
+        )
+        .expect("desktop");
+    let search = rect(&mut engine, view, "search");
+    let desk = rect(&mut engine, view, "desk");
+    let drop = rect(&mut engine, view, "drop");
+    let sib = rect(&mut engine, view, "sib");
+    // Chrome at 1280: `.m\:block` wins over `.hidden`, so the flex item's
+    // min-content is the 2019px span. The fixed suggestions box is out of
+    // flow and does not push that to 5384 or the row past the header.
+    assert!(
+        search.2 > 1500.0 && search.2 < 2500.0,
+        "search row took the suggestions width {search:?} drop {drop:?}"
+    );
+    assert!(desk.2 > 100.0, "m:block span lost its box at 1280 {desk:?}");
+    assert!(
+        sib.0 < search.0 + search.2 + 80.0,
+        "sibling left the header: search {search:?} sib {sib:?}"
+    );
+    assert!(
+        search.3 < 80.0,
+        "search row grew to the suggestions height {search:?} drop {drop:?}"
+    );
+}
+
+/// `shreddit-feed` upgrades to `display: flex; flex-direction: column` inside
+/// the `minmax(0, 756px)` track. A 964px header row overflows the post;
+/// the post stays the track width (Chrome: 577 in a 917px shell with a
+/// 316px rail and a 24px gap).
+#[test]
+fn an_upgraded_feed_column_keeps_the_post_at_the_track() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#"@media (min-width:768px){"#,
+        r#".xs\:\[\&\.fixed-sidebar\]\:grid-cols-\[minmax\(0\,756px\)_minmax\(0\,316px\)\].fixed-sidebar{"#,
+        r#"grid-template-columns:minmax(0,756px) minmax(0,316px);color:rgb(1, 2, 3)}}"#,
+        r#"#shell{display:grid;width:917px;column-gap:24px}"#,
+        r#"#feed{display:flex;flex-direction:column}"#,
+        r#"#header{display:flex}#wide{width:964px;height:32px;flex:none}"#,
+        r#"#rail{width:316px}</style>"#,
+        r#"<div id="shell" class="xs:[&.fixed-sidebar]:grid-cols-[minmax(0,756px)_minmax(0,316px)] fixed-sidebar">"#,
+        r#"<div id="feed"><article id="post"><div id="header"><div id="wide"></div></div>"#,
+        r#"</article></div><aside id="rail"></aside></div>"#,
+    ));
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 800,
+            },
+        )
+        .expect("desktop");
+    let color = eval(
+        &mut engine,
+        view,
+        "getComputedStyle(document.getElementById('shell')).color",
+    );
+    assert_eq!(color, "rgb(1, 2, 3)", "escaped grid class did not match");
+    let feed = rect(&mut engine, view, "feed");
+    let post = rect(&mut engine, view, "post");
+    let header = rect(&mut engine, view, "header");
+    let rail = rect(&mut engine, view, "rail");
+    assert!(
+        (feed.2 - 577.0).abs() < 2.0,
+        "feed column is not the 577px track {feed:?}"
+    );
+    assert!(
+        (post.2 - 577.0).abs() < 2.0,
+        "post grew to its header's min-content {post:?} header {header:?}"
+    );
+    assert!(
+        (header.2 - 577.0).abs() < 2.0,
+        "post header filled the wide row {header:?}"
+    );
+    assert!(
+        (rail.0 - 601.0).abs() < 2.0 && (rail.2 - 316.0).abs() < 2.0,
+        "rail {rail:?}"
+    );
+}
+
+/// The same shell after the custom elements upgrade. `shreddit-feed`'s
+/// adopted sheet sets `:host { display: flex; flex-direction: column }`,
+/// and `shreddit-post`'s sets a block host with a flex header in the
+/// shadow. The 964px header child overflows the 577px track. The slotted
+/// credit span stays one line.
+#[test]
+fn an_upgraded_post_keeps_the_track_and_the_credit_line() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#"@media (min-width:768px){"#,
+        r#".xs\:\[\&\.fixed-sidebar\]\:grid-cols-\[minmax\(0\,756px\)_minmax\(0\,316px\)\].fixed-sidebar{"#,
+        r#"grid-template-columns:minmax(0,756px) minmax(0,316px)}}"#,
+        r#"#shell{display:grid;width:917px;column-gap:24px}"#,
+        r#"span.flex{display:flex;align-items:center;height:32px}"#,
+        r#"#rail{width:316px}</style>"#,
+        r#"<div id="shell" class="xs:[&.fixed-sidebar]:grid-cols-[minmax(0,756px)_minmax(0,316px)] fixed-sidebar">"#,
+        r#"<shreddit-feed id="feed"><article><shreddit-post id="post">"#,
+        r#"<span id="credit" class="flex" slot="credit-bar">u/name</span>"#,
+        r#"</shreddit-post></article></shreddit-feed><aside id="rail"></aside></div>"#,
+    ));
+    engine
+        .execute_script(
+            view,
+            r#"
+class ShredditFeed extends HTMLElement {
+  constructor() {
+    super();
+    var root = this.attachShadow({ mode: 'open' });
+    var sheet = new CSSStyleSheet();
+    sheet.replaceSync(':host{display:flex;flex-direction:column}');
+    root.adoptedStyleSheets = [sheet];
+    root.innerHTML = '<slot></slot>';
+  }
+}
+class ShredditPost extends HTMLElement {
+  constructor() {
+    super();
+    var root = this.attachShadow({ mode: 'open' });
+    var sheet = new CSSStyleSheet();
+    sheet.replaceSync(':host{display:block;position:relative}.header{display:flex}slot[name=credit-bar]{display:block}');
+    root.adoptedStyleSheets = [sheet];
+    root.innerHTML = '<div class="header" id="header"><div id="wide" style="width:964px;height:32px"></div></div><slot name="credit-bar"></slot><slot></slot>';
+  }
+}
+customElements.define('shreddit-feed', ShredditFeed);
+customElements.define('shreddit-post', ShredditPost);
+"#,
+        )
+        .expect("upgrade");
+    let shape = eval(
+        &mut engine,
+        view,
+        r#"
+        var post = document.getElementById('post');
+        var header = post.shadowRoot.getElementById('header').getBoundingClientRect();
+        var wide = post.shadowRoot.getElementById('wide').getBoundingClientRect();
+        var feed = document.getElementById('feed').getBoundingClientRect();
+        var postR = post.getBoundingClientRect();
+        var credit = document.getElementById('credit').getBoundingClientRect();
+        var rail = document.getElementById('rail').getBoundingClientRect();
+        [feed.width, postR.width, header.width, wide.width, credit.height, rail.x, rail.width, getComputedStyle(post).display].join('|')
+        "#,
+    );
+    let parts: Vec<&str> = shape.split('|').collect();
+    let nums: Vec<f64> = parts[..7].iter().map(|s| s.parse().unwrap()).collect();
+    assert!(
+        (nums[0] - 577.0).abs() < 2.0 && (nums[1] - 577.0).abs() < 2.0,
+        "upgraded column left the track {shape}"
+    );
+    assert!(
+        (nums[2] - 577.0).abs() < 2.0 && (nums[3] - 964.0).abs() < 2.0,
+        "header grew to the wide child {shape}"
+    );
+    assert!(nums[4] < 40.0, "slotted credit bar grew {shape}");
+    assert!(
+        (nums[5] - 601.0).abs() < 2.0 && (nums[6] - 316.0).abs() < 2.0,
+        "rail {shape}"
+    );
+    assert_eq!(parts[7], "block", "post display {shape}");
+}
+
+/// `.m\:block` / `.m\:hidden` live in an adopted sheet, and the host is
+/// narrower than 960px. The query is the viewport, so a 1280px window
+/// shows the desktop span and hides the hamburger even though the host
+/// column is 200px.
+#[test]
+fn an_adopted_sheet_matches_m_block_against_the_viewport() {
+    let (mut engine, view) = loaded(
+        r#"<!doctype html><style>body{margin:0}</style><faceplate-header id="host" style="display:block;width:200px"></faceplate-header>"#,
+    );
+    engine
+        .execute_script(
+            view,
+            r#"
+class FaceplateHeader extends HTMLElement {
+  constructor() {
+    super();
+    var root = this.attachShadow({ mode: 'open' });
+    var sheet = new CSSStyleSheet();
+    sheet.replaceSync('span{display:block}.hidden{display:none}@media (min-width:960px){.m\\:block{display:block}.m\\:hidden{display:none}}');
+    root.adoptedStyleSheets = [sheet];
+    root.innerHTML = '<span id="desk" class="hidden m:block" style="width:2019px;height:32px"></span><span id="burger" class="m:hidden" style="width:44px;height:40px"></span>';
+  }
+}
+customElements.define('faceplate-header', FaceplateHeader);
+"#,
+        )
+        .expect("upgrade");
+    let at = |engine: &mut Engine, width: u32| {
+        engine
+            .resize_view(
+                view,
+                Bounds {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height: 800,
+                },
+            )
+            .expect("resize");
+        eval(
+            engine,
+            view,
+            r#"
+            var root = document.getElementById('host').shadowRoot;
+            var desk = root.getElementById('desk').getBoundingClientRect();
+            var burger = root.getElementById('burger').getBoundingClientRect();
+            [desk.width, burger.width].join('|')
+            "#,
+        )
+    };
+    let narrow = at(&mut engine, 800);
+    assert_eq!(
+        narrow, "0|44",
+        "below 960 the desktop span kept a box {narrow}"
+    );
+    let wide = at(&mut engine, 1280);
+    assert!(
+        wide.starts_with("2019|0") || wide.starts_with("2019.0|0"),
+        "desktop span lost its box inside the narrow host {wide}"
+    );
+}
