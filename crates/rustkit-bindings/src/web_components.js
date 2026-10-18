@@ -24,6 +24,11 @@
     var pending = {};               // name -> [resolve] for whenDefined
     var state = typeof WeakMap === 'function' ? new WeakMap() : new Map();
     var stack = [];                 // upgrade/construct in progress
+    var scopes = [];                // [CEReactions] element queues, innermost last
+    var backup = [];                // reactions enqueued with the stack empty
+    var backupScheduled = false;
+    var processingBackup = false;
+    var reactionQueues = typeof WeakMap === 'function' ? new WeakMap() : new Map();
     var rawCreateElement = null;    // the DOM's own createElement, below
     var selector = '';              // joined defined names, for subtree scans
     var shadowHost = g.__rkShadowInternals || null;  // tells the DOM a name is defined
@@ -50,16 +55,87 @@
     function stateOf(el) { return state.get(el); }
 
     // ---- reactions
+    // HTML §4.13.6. Each [CEReactions] member pushes an element queue and
+    // invokes it on the way out, after its own steps finish. Reactions
+    // therefore see the completed mutation and have run before the call
+    // returns to script. cloneNode and importNode are both annotated, so
+    // an upgrade enqueued while cloning (create an element with the
+    // synchronous custom elements flag unset) runs when that call returns.
+    // That is the ordinary rule, the same one innerHTML and append use.
+    // With the stack empty, the reaction waits on the backup microtask.
     function connectedNow(el) { return !!el.isConnected; }
+    function reactionQueue(el) {
+        var q = reactionQueues.get(el);
+        if (!q) reactionQueues.set(el, q = []);
+        return q;
+    }
+    function scheduleMicrotask(fn) {
+        if (typeof g.queueMicrotask === 'function') g.queueMicrotask(fn);
+        else Promise.resolve().then(fn);
+    }
+    function scheduleBackup() {
+        if (backupScheduled || processingBackup) return;
+        backupScheduled = true;
+        scheduleMicrotask(function () {
+            backupScheduled = false;
+            processingBackup = true;
+            try { invoke(backup); }
+            finally { processingBackup = false; }
+        });
+    }
+    function enqueueElement(el) {
+        var queue = scopes.length ? scopes[scopes.length - 1] : backup;
+        if (queue.indexOf(el) < 0) queue.push(el);
+        if (!scopes.length) scheduleBackup();
+    }
+    function enqueueCallback(el, fn, args) {
+        if (!fn) return;
+        reactionQueue(el).push(function () { call(fn, el, args); });
+        enqueueElement(el);
+    }
+    function enqueueUpgrade(el, def) {
+        reactionQueue(el).push(function () { upgrade(el, def); });
+        enqueueElement(el);
+    }
+    function invoke(queue) {
+        while (queue.length) {
+            var el = queue.shift();
+            var rq = reactionQueue(el);
+            while (rq.length) {
+                var reaction = rq.shift();
+                try { reaction(); } catch (e) { report(e); }
+            }
+        }
+    }
+    // Push a queue, run fn, pop, invoke. An exception from fn is rethrown
+    // after the queue runs (HTML §4.13.6, [CEReactions] steps).
+    function withReactions(fn) {
+        scopes.push([]);
+        var result, exception, threw = false;
+        try { result = fn(); }
+        catch (e) { threw = true; exception = e; }
+        var queue = scopes.pop();
+        invoke(queue);
+        if (threw) throw exception;
+        return result;
+    }
     function enqueueConnected(el, st) {
-        if (st.connected || !connectedNow(el)) return;
+        if (!st || st.failed || st.connected || !connectedNow(el)) return;
         st.connected = true;
-        if (st.def.connected) call(st.def.connected, el, []);
+        enqueueCallback(el, st.def.connected, []);
     }
     function enqueueDisconnected(el, st) {
-        if (!st.connected || connectedNow(el)) return;
+        if (!st || st.failed || !st.connected || connectedNow(el)) return;
         st.connected = false;
-        if (st.def.disconnected) call(st.def.disconnected, el, []);
+        if (st.def.disconnected) enqueueCallback(el, st.def.disconnected, []);
+    }
+    // A move stays connected, so the isConnected check above would skip it.
+    // The node was connected before the call; disconnectedCallback still runs.
+    function enqueueMoved(el) {
+        var st = stateOf(el);
+        if (!st || st.failed || !st.connected) return;
+        st.connected = false;
+        if (st.def.disconnected) enqueueCallback(el, st.def.disconnected, []);
     }
 
     // Template contents belong to the inert template document (no browsing
@@ -73,15 +149,34 @@
     }
 
     // Upgrade: run the definition's constructor on an element that already
-    // exists (HTML "upgrade an element").
+    // exists (HTML "upgrade an element"). Attribute and connected reactions
+    // are enqueued before the constructor, then run when the current queue
+    // is next drained — after the constructor when nothing nested pops a
+    // queue first. A [CEReactions] call inside the constructor drains them
+    // before that call returns, which is the spec's re-entrancy rule.
     function upgrade(el, def) {
         if (inInertDocument(el)) return;
         var existing = stateOf(el);
         if (existing && (existing.def === def || existing.failed)) return;
-        var record = { element: el, constructed: false };
-        var st = { def: def, connected: false, failed: false };
+        var st = { def: def, connected: false, failed: true };
         Object.setPrototypeOf(el, def.ctor.prototype);
         state.set(el, st);
+        var observed = def.observed;
+        if (observed.length && def.attributeChanged && typeof el.getAttributeNames === 'function') {
+            el.getAttributeNames().forEach(function (n) {
+                if (observed.indexOf(n) >= 0) enqueueCallback(el, def.attributeChanged, [n, null, el.getAttribute(n)]);
+            });
+        }
+        // Captured now, invoked with the queue. A clone is still
+        // disconnected here, so connectedCallback stays queued for the
+        // later insertion. Attributes present at upgrade are reported from
+        // null before that callback, which is what the first connected
+        // layout sees together with property bindings committed in between.
+        if (connectedNow(el)) {
+            st.connected = true;
+            enqueueCallback(el, def.connected, []);
+        }
+        var record = { element: el, constructed: false };
         stack.push(record);
         var result, threw = false;
         try {
@@ -95,25 +190,10 @@
         if (threw || result !== el) {
             if (!threw) report(domError('The custom element constructor did not produce the element being upgraded.', 'InvalidStateError'));
             st.failed = true;
+            reactionQueue(el).length = 0;
             return;
         }
-        // Attributes present at upgrade time are "changed" from null.
-        // They run after the constructor and before connectedCallback, while
-        // the element is still disconnected when this upgrade came from a
-        // clone. Lit's property parts (and the attributes they reflect)
-        // commit after that and before insertion, so connectedCallback — and
-        // the first layout it causes — sees the parsed attributes and the
-        // property bindings together. Upgrading only at insertion drops the
-        // property inside the constructor and lays the connected element out
-        // once without it, then again when Lit's update microtask puts it
-        // back (the post/credit-bar height jump while a component upgrades).
-        var observed = def.observed;
-        if (observed.length && def.attributeChanged && typeof el.getAttributeNames === 'function') {
-            el.getAttributeNames().forEach(function (n) {
-                if (observed.indexOf(n) >= 0) call(def.attributeChanged, el, [n, null, el.getAttribute(n)]);
-            });
-        }
-        enqueueConnected(el, st);
+        st.failed = false;
     }
 
     // Everything in `root` (and root itself) whose name is defined.
@@ -133,44 +213,20 @@
         if (el.nodeType !== 1) return null;
         return byName[String(el.localName).toLowerCase()] || null;
     }
-    // After an insertion: upgrade what can be, and connect what is now connected.
+    // After a tree change: enqueue an upgrade where the synchronous custom
+    // elements flag was unset, or a connected reaction for an element that
+    // is already custom. Does not walk a <template>'s contents. Those nodes
+    // belong to the inert template-contents document, which has no browsing
+    // context; importNode of the content is what upgrades them.
     function reconcile(root) {
-        candidates(root).forEach(function (el) {
-            var def = definitionOf(el);
-            if (!def) return;
-            var st = stateOf(el);
-            if (!st) { upgrade(el, def); return; }
-            if (!st.failed) enqueueConnected(el, st);
-        });
-    }
-    // DOM "clone a single node" creates the copy with the synchronous
-    // custom elements flag unset, so a defined name is left "undefined"
-    // and an upgrade reaction is queued. cloneNode is not [CEReactions];
-    // the reaction stack is empty, and the spec's backup queue would be a
-    // microtask. That is too late for Lit: it importNodes the template,
-    // commits property parts on the clone, then insertBefore. The upgrade
-    // has to finish before importNode returns, while the copy is still
-    // disconnected, so the property setter (installed by the constructor's
-    // class) stores the value. A microtask — or an upgrade deferred to the
-    // insertion — runs the constructor after that assignment. Lit then
-    // treats the assignment as a pre-upgrade own property, deletes it, and
-    // reapplies it in performUpdate, which is a microtask after
-    // connectedCallback. hostConnected reads the property and finds null.
-    //
-    // Flush the upgrade before returning to the caller, once the whole
-    // copy exists (HTML §4.13.6: reactions run as a batch just before
-    // user script resumes, not mid-clone). A <template>'s content is not
-    // a descendant, and a clone of that content stays in the inert
-    // document, so neither is upgraded. Lit upgrades by importNode into
-    // this document, which adopts first. connectedCallback stays queued
-    // for insertion: the copy is detached, and enqueueConnected checks
-    // isConnected.
-    function upgradeClone(root) {
-        if (!names.length || !root || inInertDocument(root)) return;
+        if (inInertDocument(root)) return;
         candidates(root).forEach(function (el) {
             if (inInertDocument(el)) return;
             var def = definitionOf(el);
-            if (def && !stateOf(el)) upgrade(el, def);
+            if (!def) return;
+            var st = stateOf(el);
+            if (!st) { enqueueUpgrade(el, def); return; }
+            if (!st.failed) enqueueConnected(el, st);
         });
     }
     // Before a removal: the connected custom elements that may leave the document.
@@ -212,21 +268,39 @@
     var DocumentProto = Object.getPrototypeOf(document);
     var originalCreate = DocumentProto.createElement;
     rawCreateElement = originalCreate;
-    DocumentProto.createElement = function (tag) {
-        var el = originalCreate.apply(this, arguments);
-        if (!names.length || inInertDocument(el)) return el;
+    // createElement is [CEReactions] and sets the synchronous custom elements
+    // flag, so the constructor runs inside the call and the queue pops as
+    // it returns. createElementNS does the same for the HTML namespace.
+    // The inert template document has no browsing context, so a name
+    // created there stays a plain element.
+    function constructDefined(el) {
+        if (inInertDocument(el)) return el;
         var def = definitionOf(el);
-        if (def) {
-            try {
-                var made = new def.ctor();
-                return made;
-            } catch (e) {
-                report(e);
-                return el; // an element that failed to construct stays a plain one
-            }
+        if (!def) return el;
+        try {
+            return new def.ctor();
+        } catch (e) {
+            report(e);
+            return el; // an element that failed to construct stays a plain one
         }
-        return el;
+    }
+    DocumentProto.createElement = function () {
+        var self = this, args = arguments;
+        if (!names.length) return originalCreate.apply(self, args);
+        return withReactions(function () { return constructDefined(originalCreate.apply(self, args)); });
     };
+    if (typeof DocumentProto.createElementNS === 'function') {
+        var originalCreateNS = DocumentProto.createElementNS;
+        DocumentProto.createElementNS = function (ns) {
+            var self = this, args = arguments;
+            if (!names.length) return originalCreateNS.apply(self, args);
+            return withReactions(function () {
+                var el = originalCreateNS.apply(self, args);
+                var html = ns == null || ns === '' || ns === 'http://www.w3.org/1999/xhtml';
+                return html ? constructDefined(el) : el;
+            });
+        };
+    }
 
     // The connected elements named `name`, in shadow-including tree order
     // (HTML §4.13.4 define, step "upgrade candidates"): a host's shadow
@@ -285,9 +359,13 @@
         names.push(name);
         selector = names.join(',');
         if (shadowHost) shadowHost.call('define', document, name);
-        // Every connected element of that name that already exists upgrades,
-        // shadow trees included.
-        upgradeCandidates(name).forEach(function (el) { upgrade(el, def); });
+        // define is [CEReactions]. Every connected element of that name
+        // upgrades when the call returns, shadow trees included, in
+        // shadow-including tree order. One element's reactions finish
+        // before the next element's upgrade starts.
+        withReactions(function () {
+            upgradeCandidates(name).forEach(function (el) { enqueueUpgrade(el, def); });
+        });
         if (pending[name]) {
             pending[name].forEach(function (resolve) { resolve(ctor); });
             delete pending[name];
@@ -309,8 +387,10 @@
         if (byName[name]) return Promise.resolve(byName[name].ctor);
         return new Promise(function (resolve) { (pending[name] || (pending[name] = [])).push(resolve); });
     };
+    // upgrade is [CEReactions]: constructors run before it returns.
     CustomElementRegistry.prototype.upgrade = function (root) {
-        reconcile(root);
+        if (!names.length || !root) return;
+        withReactions(function () { reconcile(root); });
     };
     Object.defineProperty(CustomElementRegistry.prototype, Symbol.toStringTag, { value: 'CustomElementRegistry', configurable: true });
     var registry = Object.create(CustomElementRegistry.prototype);
@@ -318,10 +398,17 @@
     Object.defineProperty(g, 'customElements', { value: registry, writable: true, configurable: true, enumerable: true });
 
     // ---- wrapping the tree and attribute mutators
+    // adoptNode is installed later (web_document.js) and calls this.
+    Object.defineProperty(g, '__rkCE', { value: { withReactions: withReactions } });
+
     function protoWith(name) {
         return [g.Node, g.Element, g.Document, g.DocumentFragment, g.CharacterData].filter(function (C) {
             return C && C.prototype && Object.prototype.hasOwnProperty.call(C.prototype, name);
         }).map(function (C) { return C.prototype; });
+    }
+    function defineMethod(proto, name, fn) {
+        fn.__rkCE = true;
+        Object.defineProperty(proto, name, { value: fn, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, name) });
     }
     function nodesIn(args) {
         var out = [];
@@ -333,133 +420,175 @@
         });
         return out;
     }
-    // Insertions: reconcile what was inserted. `which` names the argument
-    // positions that are nodes (all, or the first).
+    // One [CEReactions] scope around `native`. `after` enqueues reactions
+    // for the current scope; they run when withReactions returns.
+    function wrapMethod(proto, name, after) {
+        var native = proto && proto[name];
+        if (typeof native !== 'function' || native.__rkCE) return;
+        defineMethod(proto, name, function () {
+            var self = this, args = arguments;
+            if (!names.length) return native.apply(self, args);
+            return withReactions(function () {
+                var result = native.apply(self, args);
+                if (after) after(self, args, result);
+                return result;
+            });
+        });
+    }
+    // Insertions: reconcile what was inserted. `firstOnly` is the Node
+    // methods that take one node; the ParentNode/ChildNode methods take
+    // the rest of the arguments.
     function wrapInsert(name, firstOnly) {
         protoWith(name).forEach(function (proto) {
             var native = proto[name];
             if (typeof native !== 'function' || native.__rkCE) return;
-            var wrapped = function () {
-                if (!names.length) return native.apply(this, arguments);
-                var inserted = nodesIn(firstOnly ? [arguments[0]] : arguments);
-                // A node that is already connected and is inserted again is a
-                // move: disconnected, then connected at its new place.
-                var moving = [];
-                inserted.forEach(function (n) { moving = moving.concat(connectedCustom(n)); });
-                // A replacement also removes: collect what leaves first.
-                var leaving = [];
-                if (name === 'replaceChild' && arguments[1]) leaving = connectedCustom(arguments[1]);
-                if (name === 'replaceWith') leaving = connectedCustom(this);
-                if (name === 'replaceChildren') { var self = this; leaving = connectedCustom(this).filter(function (el) { return el !== self; }); }
-                var result = native.apply(this, arguments);
-                afterRemoval(leaving);
-                moving.forEach(function (el) {
-                    var st = stateOf(el);
-                    if (!st || !st.connected) return;
-                    st.connected = false;
-                    if (st.def.disconnected) call(st.def.disconnected, el, []);
+            defineMethod(proto, name, function () {
+                var self = this, args = arguments;
+                if (!names.length) return native.apply(self, args);
+                return withReactions(function () {
+                    var inserted = nodesIn(firstOnly ? [args[0]] : args);
+                    // A node that is already connected and is inserted again
+                    // is a move: disconnected, then connected at its new place.
+                    var moving = [];
+                    inserted.forEach(function (n) { moving = moving.concat(connectedCustom(n)); });
+                    var leaving = [];
+                    if (name === 'replaceChild' && args[1]) leaving = connectedCustom(args[1]);
+                    if (name === 'replaceWith') leaving = connectedCustom(self);
+                    if (name === 'replaceChildren') leaving = connectedCustom(self).filter(function (el) { return el !== self; });
+                    var result = native.apply(self, args);
+                    afterRemoval(leaving);
+                    moving.forEach(enqueueMoved);
+                    inserted.forEach(reconcile);
+                    return result;
                 });
-                inserted.forEach(reconcile);
-                return result;
-            };
-            wrapped.__rkCE = true;
-            Object.defineProperty(proto, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, name) });
+            });
         });
     }
     ['appendChild', 'insertBefore', 'replaceChild'].forEach(function (n) { wrapInsert(n, true); });
     ['append', 'prepend', 'before', 'after', 'replaceWith', 'replaceChildren'].forEach(function (n) { wrapInsert(n, false); });
 
-    // The native copy finishes first, so a parent's constructor runs
-    // against a tree whose descendants already exist, then each descendant
-    // upgrades in tree order. importNode is not cloneNode: the host import
-    // adopts the copy into this document, and only that copy may upgrade.
-    // cloneNode keeps the source node document.
-    ['cloneNode', 'importNode'].forEach(function (name) {
-        protoWith(name).forEach(function (proto) {
-            var native = proto[name];
-            if (typeof native !== 'function' || native.__rkCE) return;
-            var wrapped = function () {
-                var copy = native.apply(this, arguments);
-                upgradeClone(copy);
-                return copy;
-            };
-            wrapped.__rkCE = true;
-            Object.defineProperty(proto, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, name) });
-        });
+    // Both are [CEReactions, NewObject]. The host copy finishes first, then
+    // each defined name enqueues an upgrade. The queue runs when the call
+    // returns, parent before descendants, while the copy is disconnected.
+    // importNode is not cloneNode here: the host import adopts into this
+    // document before reconcile, so that copy upgrades. cloneNode keeps
+    // the source node document, and upgrade refuses a copy that is still
+    // inert. A <template> element's contents are not descendants.
+    protoWith('cloneNode').forEach(function (proto) {
+        wrapMethod(proto, 'cloneNode', function (_self, _args, copy) { reconcile(copy); });
     });
+    wrapMethod(DocumentProto, 'importNode', function (_self, _args, copy) { reconcile(copy); });
+    protoWith('normalize').forEach(function (proto) { wrapMethod(proto, 'normalize'); });
+    if (g.Range) {
+        ['deleteContents', 'extractContents', 'cloneContents', 'insertNode', 'surroundContents'].forEach(function (n) {
+            wrapMethod(g.Range.prototype, n);
+        });
+    }
 
     function wrapRemove(name, victim) {
         protoWith(name).forEach(function (proto) {
             var native = proto[name];
             if (typeof native !== 'function' || native.__rkCE) return;
-            var wrapped = function () {
-                if (!names.length) return native.apply(this, arguments);
-                var leaving = connectedCustom(victim(this, arguments));
-                var result = native.apply(this, arguments);
-                afterRemoval(leaving);
-                return result;
-            };
-            wrapped.__rkCE = true;
-            Object.defineProperty(proto, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, name) });
+            defineMethod(proto, name, function () {
+                var self = this, args = arguments;
+                if (!names.length) return native.apply(self, args);
+                return withReactions(function () {
+                    var leaving = connectedCustom(victim(self, args));
+                    var result = native.apply(self, args);
+                    afterRemoval(leaving);
+                    return result;
+                });
+            });
         });
     }
-    wrapRemove('removeChild', function (self, args) { return args[0]; });
+    wrapRemove('removeChild', function (_self, args) { return args[0]; });
     wrapRemove('remove', function (self) { return self; });
 
-    // innerHTML / textContent setters replace the children: those leave.
-    function wrapSetter(proto, prop, replacesChildren) {
+    // innerHTML / textContent / innerText replace the children: those leave.
+    // `mode` 'html' also upgrades what the parse inserted. 'text' only
+    // disconnects. 'scope' pushes a queue around a setter that delegates
+    // to another [CEReactions] member (id, className, DOMTokenList.value).
+    function wrapSetter(proto, prop, mode) {
+        if (!proto) return;
         var d = Object.getOwnPropertyDescriptor(proto, prop);
         if (!d || !d.set || d.set.__rkCE) return;
         var set = d.set;
         var wrapped = function (v) {
-            if (!names.length) return set.call(this, v);
-            var leaving = connectedCustom(this).filter(function (el) { return el !== this; }, this);
-            var result = set.call(this, v);
-            afterRemoval(leaving);
-            if (prop === 'innerHTML') reconcile(this);
-            return result;
+            var self = this;
+            if (!names.length) return set.call(self, v);
+            return withReactions(function () {
+                var leaving = mode === 'scope' ? [] : connectedCustom(self).filter(function (el) { return el !== self; });
+                var result = set.call(self, v);
+                afterRemoval(leaving);
+                if (mode === 'html') reconcile(self);
+                return result;
+            });
         };
         wrapped.__rkCE = true;
         Object.defineProperty(proto, prop, { get: d.get, set: wrapped, enumerable: d.enumerable, configurable: true });
     }
-    wrapSetter(g.Element.prototype, 'innerHTML');
-    wrapSetter(g.Node.prototype, 'textContent');
+    wrapSetter(g.Element.prototype, 'innerHTML', 'html');
+    wrapSetter(g.Node.prototype, 'textContent', 'text');
+    if (g.HTMLElement) wrapSetter(g.HTMLElement.prototype, 'innerText', 'text');
+    wrapSetter(g.Element.prototype, 'id', 'scope');
+    wrapSetter(g.Element.prototype, 'className', 'scope');
+    if (g.CharacterData) wrapSetter(g.CharacterData.prototype, 'nodeValue', 'scope');
 
     protoWith('insertAdjacentHTML').forEach(function (proto) {
-        var native = proto.insertAdjacentHTML;
-        if (native.__rkCE) return;
-        var wrapped = function (where) {
-            var result = native.apply(this, arguments);
-            if (names.length) {
-                var w = String(where).toLowerCase();
-                reconcile(w === 'beforebegin' || w === 'afterend' ? this.parentNode : this);
-            }
-            return result;
-        };
-        wrapped.__rkCE = true;
-        Object.defineProperty(proto, 'insertAdjacentHTML', { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, 'insertAdjacentHTML') });
+        wrapMethod(proto, 'insertAdjacentHTML', function (self, args) {
+            var w = String(args[0]).toLowerCase();
+            reconcile(w === 'beforebegin' || w === 'afterend' ? self.parentNode : self);
+        });
+    });
+    // Delegates to insertBefore, which is [CEReactions] itself, so the
+    // reaction runs on that nested exit — still before this call returns.
+    protoWith('insertAdjacentElement').forEach(function (proto) {
+        wrapMethod(proto, 'insertAdjacentElement');
     });
 
-    // Attributes: attributeChangedCallback for the observed ones.
-    function wrapAttribute(name, newValue) {
-        var native = g.Element.prototype[name];
+    // Attributes: attributeChangedCallback for the observed ones. An element
+    // whose upgrade has not finished (state "failed"/"precustomized") is
+    // not custom yet, so a setAttribute inside its constructor does not
+    // enqueue a second callback. The ones upgrade queued still run.
+    function wrapAttribute(proto, name) {
+        var native = proto && proto[name];
         if (typeof native !== 'function' || native.__rkCE) return;
-        var wrapped = function (attr) {
-            if (!names.length) return native.apply(this, arguments);
-            var st = stateOf(this);
-            var key = String(attr);
-            var watched = st && !st.failed && st.def.attributeChanged && st.def.observed.indexOf(key) >= 0;
-            var old = watched ? this.getAttribute(key) : null;
-            var result = native.apply(this, arguments);
-            if (watched) {
-                var now = this.getAttribute(key);
-                if (name !== 'removeAttribute' || old !== null) call(st.def.attributeChanged, this, [key, old, now]);
-            }
-            return result;
-        };
-        wrapped.__rkCE = true;
-        Object.defineProperty(g.Element.prototype, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(g.Element.prototype, name) });
+        defineMethod(proto, name, function (attr) {
+            var self = this, args = arguments;
+            if (!names.length) return native.apply(self, args);
+            return withReactions(function () {
+                var st = stateOf(self);
+                var key = String(attr);
+                var watched = st && !st.failed && st.def.attributeChanged && st.def.observed.indexOf(key) >= 0;
+                var old = watched ? self.getAttribute(key) : null;
+                var result = native.apply(self, args);
+                if (watched) {
+                    var now = self.getAttribute(key);
+                    if (name !== 'removeAttribute' || old !== null) {
+                        enqueueCallback(self, st.def.attributeChanged, [key, old, now]);
+                    }
+                }
+                return result;
+            });
+        });
     }
-    wrapAttribute('setAttribute');
-    wrapAttribute('removeAttribute');
+    wrapAttribute(g.Element.prototype, 'setAttribute');
+    wrapAttribute(g.Element.prototype, 'removeAttribute');
+    // These call setAttribute/removeAttribute. A scope here keeps the
+    // member on the stack; the nested call enqueues the one callback.
+    wrapMethod(g.Element.prototype, 'setAttributeNS');
+    wrapMethod(g.Element.prototype, 'removeAttributeNS');
+    wrapMethod(g.Element.prototype, 'toggleAttribute');
+    if (g.DOMTokenList) {
+        ['add', 'remove', 'toggle', 'replace'].forEach(function (n) { wrapMethod(g.DOMTokenList.prototype, n); });
+        wrapSetter(g.DOMTokenList.prototype, 'value', 'scope');
+    }
+    if (g.NamedNodeMap) {
+        ['setNamedItem', 'setNamedItemNS', 'removeNamedItem', 'removeNamedItemNS'].forEach(function (n) {
+            wrapMethod(g.NamedNodeMap.prototype, n);
+        });
+    }
+    if (g.Attr) {
+        ['value', 'nodeValue', 'textContent'].forEach(function (n) { wrapSetter(g.Attr.prototype, n, 'scope'); });
+    }
 })(typeof globalThis === 'object' ? globalThis : this);

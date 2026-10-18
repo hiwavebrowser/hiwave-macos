@@ -2020,7 +2020,7 @@ const WRAPPERS_JS: &str = r#"
     [Element, CharacterData].forEach(function (C) {
         C.prototype.remove = function () {
             var p = this.parentNode;
-            if (p) p.removeChild(this);
+            if (p) write('remove', p, this, null, 'remove');
         };
     });
     // DOM §4.2.3 replace: validate by inserting `node` first (insertBefore
@@ -2054,7 +2054,10 @@ const WRAPPERS_JS: &str = r#"
         var nodes = Array.prototype.map.call(args, function (a) {
             return a != null && a[SLOT] ? a : g.document.createTextNode(String(a));
         });
-        nodes.forEach(function (n) { var p = n.parentNode; if (p) p.removeChild(n); });
+        // Internal remove, not IDL removeChild. append/prepend/before/after
+        // are one [CEReactions] call; flushing per node would run reactions
+        // before the rest of the call finished.
+        nodes.forEach(function (n) { var p = n.parentNode; if (p) write('remove', p, n, null, 'removeChild'); });
         return nodes;
     }
     function insertAll(parent, nodes, ref, method) {
@@ -2085,7 +2088,7 @@ const WRAPPERS_JS: &str = r#"
         C.prototype.replaceChildren = function () {
             var self = this, nodes = toNodes(arguments);
             batch(function () {
-                while (self.firstChild) self.removeChild(self.firstChild);
+                while (self.firstChild) write('remove', self, self.firstChild, null, 'replaceChildren');
                 insertAll(self, nodes, null, 'replaceChildren');
             });
         };
@@ -2116,7 +2119,7 @@ const WRAPPERS_JS: &str = r#"
             batch(function () {
                 if (self.parentNode === p) {
                     insertAll(p, nodes, self, 'replaceWith');
-                    p.removeChild(self);
+                    write('remove', p, self, null, 'replaceWith');
                 } else {
                     insertAll(p, nodes, next, 'replaceWith');
                 }
@@ -2577,9 +2580,13 @@ const WRAPPERS_JS: &str = r#"
         // (<html> parses as <body>), through a detached holder of that name.
         var ctx = spot[0].localName === 'html' ? 'body' : spot[0].localName;
         var holder = create('element', ctx, 'insertAdjacentHTML');
-        holder.innerHTML = String(html);
+        // Fragment parsing and internal inserts, not the innerHTML setter
+        // or IDL insertBefore. Those are their own [CEReactions] calls and
+        // would run upgrades and connectedCallback once per node, before
+        // the rest of this call finished.
+        setData(holder, 'setHTML', String(html), null, 'insertAdjacentHTML');
         Array.prototype.slice.call(holder.childNodes).forEach(function (n) {
-            spot[0].insertBefore(n, spot[1]);
+            write('insert', spot[0], n, spot[1], 'insertAdjacentHTML');
         });
     };
 
