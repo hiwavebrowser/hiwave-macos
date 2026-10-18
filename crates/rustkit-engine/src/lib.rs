@@ -38810,6 +38810,65 @@ mod script_selector_tests {
         assert_eq!(js("var a = document.getElementById('a'); a.style.display = 'inline'; getComputedStyle(a).display"), "inline");
     }
 
+    /// The content view installs this matcher whenever JavaScript is on.
+    /// A query is the scope's descendants, so a detached element, a fragment,
+    /// template contents, and a shadow root each answer from their own tree.
+    /// Combinators (`>`, a descendant) are the engine matcher: the fallback
+    /// matches none of them. The document and a shadow host do not see in.
+    #[test]
+    fn engine_matcher_scopes_detached_fragment_template_and_shadow() {
+        let (mut engine, view) = loaded("<html><body></body></html>");
+        let saw = eval(
+            &mut engine,
+            view,
+            r#"
+            var d = document.createElement('div');
+            d.innerHTML = '<p class="outer"><b id="db">x</b></p>';
+            var frag = document.createDocumentFragment();
+            var fp = document.createElement('p');
+            fp.className = 'outer';
+            var fb = document.createElement('b');
+            fb.id = 'fb';
+            fp.appendChild(fb);
+            frag.appendChild(fp);
+            var t = document.createElement('template');
+            t.innerHTML = '<p class="outer"><b id="tb">y</b></p>';
+            var host = document.createElement('div');
+            var root = host.attachShadow({ mode: 'open' });
+            root.innerHTML = '<p class="outer"><b id="sb">z</b></p>';
+            function probe(scope, id) {
+                var el = scope.querySelector('#' + id);
+                return [
+                    el && el.id,
+                    scope.querySelectorAll('p > b').length,
+                    scope.querySelectorAll('.outer b').length,
+                    el && el.matches('p > b'),
+                    el && el.closest('.outer') && el.closest('.outer').className,
+                    String(document.querySelector('#' + id)),
+                    String(document.getElementById(id))
+                ].join(':');
+            }
+            var bad = 'no';
+            try { frag.querySelector('p:frobnicate'); } catch (e) { bad = e.name; }
+            [
+                probe(d, 'db'),
+                probe(frag, 'fb'),
+                probe(t.content, 'tb'),
+                String(t.querySelector('b')),
+                t.content.ownerDocument !== document && t.content.ownerDocument.defaultView === null,
+                probe(root, 'sb'),
+                String(host.querySelector('b')),
+                document.querySelectorAll('b').length,
+                bad
+            ].join('|')
+            "#,
+        );
+        assert_eq!(
+            saw,
+            "db:1:1:true:outer:null:null|fb:1:1:true:outer:null:null|tb:1:1:true:outer:null:null|null|true|sb:1:1:true:outer:null:null|null|0|SyntaxError"
+        );
+    }
+
     #[test]
     fn matches_and_closest_use_the_cascade_matcher() {
         let (mut engine, view) = loaded(CARDS);
