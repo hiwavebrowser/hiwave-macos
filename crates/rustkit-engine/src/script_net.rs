@@ -16,7 +16,7 @@
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
 
@@ -440,6 +440,27 @@ pub(crate) const MAX_MODULES_PER_PAGE: usize = 2_000;
 /// modules concurrently).
 const MAX_MODULE_ROUNDS: u32 = 64;
 
+/// Outstanding imports, named on the way out of [`pump_modules`].
+struct RememberWaiting<'a>(&'a DomBindings);
+
+impl Drop for RememberWaiting<'_> {
+    fn drop(&mut self) {
+        let waiting: Vec<String> = self
+            .0
+            .pending_module_imports()
+            .into_iter()
+            .map(|item| {
+                if item.dynamic {
+                    format!("dynamic {}", item.url)
+                } else {
+                    item.url
+                }
+            })
+            .collect();
+        crate::page_trace::note_module_waiting_on(&waiting);
+    }
+}
+
 /// Fetch what a started module graph has asked for until it asks for nothing
 /// more. Static imports of one module are fetched concurrently (HTML "fetch
 /// the descendants of a module script"): each completion is parsed and its
@@ -447,6 +468,10 @@ const MAX_MODULE_ROUNDS: u32 = 64;
 /// policy's module entry point; this decides nothing. A module that is
 /// refused, mistyped, missing or too many is supplied as an error, so the
 /// graph fails as a whole and none of its code runs.
+///
+/// `static_only` leaves dynamic `import()` queued. The parser's deferred
+/// list uses that: `DOMContentLoaded` waits for static imports, not for
+/// `import()`. The pump after that event passes `false`.
 ///
 /// `fetched` counts the modules already pulled in on this page.
 pub(crate) async fn pump_modules(
@@ -456,9 +481,14 @@ pub(crate) async fn pump_modules(
     deadline: tokio::time::Instant,
     document: &Url,
     fetched: &mut usize,
+    static_only: bool,
     inspector: &Arc<Inspector>,
 ) -> Pump {
     let mut out = Pump::default();
+    // The outstanding import list is named on the way out, including when
+    // the graph is left for a later pump. `DOMContentLoaded` does not wait
+    // for dynamic `import()` (`static_only`).
+    let _remember = RememberWaiting(bindings);
     type Task<'a> = Pin<
         Box<dyn Future<Output = (String, Result<rustkit_bindings::FetchedModule, String>)> + 'a>,
     >;
@@ -468,7 +498,13 @@ pub(crate) async fn pump_modules(
 
     loop {
         if rounds < MAX_MODULE_ROUNDS {
-            let Ok(mut urls) = catch_unwind(AssertUnwindSafe(|| bindings.take_module_requests()))
+            let Ok(mut urls) = catch_unwind(AssertUnwindSafe(|| {
+                if static_only {
+                    bindings.take_static_module_requests()
+                } else {
+                    bindings.take_module_requests()
+                }
+            }))
             else {
                 out.poisoned = true;
                 return out;
@@ -617,6 +653,7 @@ pub(crate) async fn pump_all(
                         deadline,
                         document,
                         modules_fetched,
+                        false,
                         inspector,
                     )
                     .await
@@ -1410,6 +1447,9 @@ struct PrefetchSlot {
     /// When the prefetch thread stored the body. The main thread's `body_ms`
     /// is later, by this much, if it was busy parsing.
     ready_at: Mutex<Option<std::time::Instant>>,
+    /// The main thread already recorded `body_ms` / `held_ms` for this slot
+    /// (a scan yield saw the body before `Module::parse` returned).
+    observed: AtomicBool,
     notify: tokio::sync::Notify,
 }
 
@@ -1501,6 +1541,7 @@ fn ensure_module_prefetch_hook() {
     ONCE.get_or_init(|| {
         rustkit_js::set_module_url_hook(Some(start_module_prefetch));
         rustkit_js::set_module_scan_hook(Some(module_scan_boundary));
+        rustkit_js::set_module_yield_hook(Some(observe_ready_module_bodies));
         rustkit_js::install_import_specifier_hook();
     });
 }
@@ -1544,7 +1585,7 @@ pub(crate) fn install_module_prefetch(
     ModulePrefetchGuard { prefetch, previous }
 }
 
-fn start_module_prefetch(url: &str, critical: bool) {
+fn start_module_prefetch(url: &str, critical: bool, referrer: &str) {
     let Some(prefetch) = CURRENT_PREFETCH.with(|slot| slot.borrow().clone()) else {
         return;
     };
@@ -1554,6 +1595,9 @@ fn start_module_prefetch(url: &str, critical: bool) {
     let Ok(parsed) = Url::parse(url) else {
         return;
     };
+    // `critical` is false for `import()`. The trace names the importer even
+    // when this URL was already queued by the scan.
+    crate::page_trace::note_module_import(referrer, url, !critical);
     {
         let mut slots = prefetch.slots.lock().unwrap_or_else(|err| err.into_inner());
         if slots.contains_key(url) {
@@ -1562,6 +1606,7 @@ fn start_module_prefetch(url: &str, critical: bool) {
         slots.insert(url.to_string(), Arc::new(PrefetchSlot {
             result: Mutex::new(None),
             ready_at: Mutex::new(None),
+            observed: AtomicBool::new(false),
             notify: tokio::sync::Notify::new(),
         }));
     }
@@ -1707,6 +1752,64 @@ async fn run_prefetch_job(job: PrefetchJob) {
         }),
     };
     job.slot.store(outcome);
+}
+
+thread_local! {
+    static OBSERVING_MODULES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A source scan is on the main thread. Bodies that finished while it walked
+/// are recorded here, and their own imports are queued, before `Module::parse`
+/// of the module being scanned returns. `held_ms` is then the wait until this
+/// observation, not the rest of that parse.
+fn observe_ready_module_bodies() {
+    if OBSERVING_MODULES.with(|flag| flag.replace(true)) {
+        return;
+    }
+    struct ClearObserve;
+    impl Drop for ClearObserve {
+        fn drop(&mut self) {
+            OBSERVING_MODULES.with(|flag| flag.set(false));
+        }
+    }
+    let _clear = ClearObserve;
+    let prefetch = CURRENT_PREFETCH.with(|slot| slot.borrow().clone());
+    let Some(prefetch) = prefetch else {
+        return;
+    };
+    let scanning = rustkit_js::scanning_module_url();
+    let ready = {
+        let slots = prefetch.slots.lock().unwrap_or_else(|err| err.into_inner());
+        let mut ready = Vec::new();
+        for (url, slot) in slots.iter() {
+            if scanning.as_deref() == Some(url.as_str()) {
+                slot.observed.store(true, Ordering::Release);
+                continue;
+            }
+            if slot.observed.swap(true, Ordering::AcqRel) {
+                continue;
+            }
+            let stored = slot.result.lock().unwrap_or_else(|err| err.into_inner()).clone();
+            let Some(Ok(module)) = stored else {
+                slot.observed.store(false, Ordering::Release);
+                continue;
+            };
+            let held_ms = slot
+                .ready_at
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .map(|ready| ready.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            ready.push((url.clone(), module, held_ms));
+        }
+        ready
+    };
+    for (url, module, held_ms) in ready {
+        crate::page_trace::note_module_fetch(&url, "body");
+        crate::page_trace::note_module_held(&url, held_ms);
+        crate::page_trace::note_module_dependency(&url, Some(module.status));
+        rustkit_js::scan_module_imports(&module.final_url, &module.source);
+    }
 }
 
 /// The body started for `url`, if a prefetch is in flight or finished.

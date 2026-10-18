@@ -47,7 +47,8 @@ pub(crate) struct HostModuleLoader {
     /// Imports waiting for their source.
     waiting: RefCell<Vec<Waiter>>,
     /// URLs the graph asked for that the host has not been told about yet.
-    requested: RefCell<Vec<String>>,
+    /// `dynamic` is an `import()`, which does not keep a load promise pending.
+    requested: RefCell<Vec<RequestedModule>>,
     /// URLs ever handed to the host (a URL is asked for once).
     asked: RefCell<HashSet<String>>,
     /// The page's import maps, merged.
@@ -113,10 +114,13 @@ impl ModuleLoader for HostModuleLoader {
             sender: tx,
         });
         if self.asked.borrow_mut().insert(url.clone()) {
-            self.requested.borrow_mut().push(url.clone());
+            self.requested.borrow_mut().push(RequestedModule {
+                url: url.clone(),
+                dynamic,
+            });
             // The fetch starts here if the call-time hook has not already
             // started it. `start` dedups, so a second notice is a no-op.
-            note_module_url(&url, !dynamic);
+            note_module_url(&url, !dynamic, referrer_url.as_deref().unwrap_or(""));
         }
         match rx.await {
             Ok(res) => res,
@@ -327,9 +331,28 @@ impl JsRuntime {
     }
 
     /// The URLs the graph has asked for since the last call, each at most
-    /// once, in the order Boa asked.
+    /// once, in the order Boa asked. Includes dynamic `import()`.
     pub fn take_module_requests(&mut self) -> Vec<String> {
-        std::mem::take(&mut *self.modules.loader.requested.borrow_mut())
+        self.take_module_requests_filtered(true)
+    }
+
+    /// Static imports only. Dynamic `import()` stays queued for the pump
+    /// that runs after `DOMContentLoaded`.
+    pub fn take_static_module_requests(&mut self) -> Vec<String> {
+        self.take_module_requests_filtered(false)
+    }
+
+    fn take_module_requests_filtered(&mut self, include_dynamic: bool) -> Vec<String> {
+        let mut requested = self.modules.loader.requested.borrow_mut();
+        let mut urls = Vec::new();
+        requested.retain(|item| {
+            if item.dynamic && !include_dynamic {
+                return true;
+            }
+            urls.push(item.url.clone());
+            false
+        });
+        urls
     }
 
     /// Give the host's answer for `requested`: its source, or why there is
@@ -540,14 +563,50 @@ impl JsRuntime {
     /// string-literal `import()`, before this source is parsed.
     fn prefetch_source_imports(&self, module_url: &str, source: &str) {
         let _guard = push_active_loader(self.modules.loader.clone());
-        // Hold the scan open until every specifier in this source is queued,
-        // so a dynamic `import()` cannot take a connection ahead of a static
-        // import written later in the same file.
-        note_module_scan(true);
-        let _scan = ModuleScanGuard;
-        for (specifier, dynamic) in import_specifiers(source) {
-            prefetch_specifier_kind(module_url, &specifier, !dynamic);
+        scan_module_imports(module_url, source);
+    }
+}
+
+/// One URL Boa has asked the host to fetch.
+struct RequestedModule {
+    url: String,
+    dynamic: bool,
+}
+
+thread_local! {
+    static SCANNING_URL: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The module whose source is currently being scanned, if any.
+pub fn scanning_module_url() -> Option<String> {
+    SCANNING_URL.with(|slot| slot.borrow().clone())
+}
+
+/// Scan `source` for static imports and string-literal `import()`, and start
+/// those fetches. The active loader must already be installed (a module
+/// parse, or a nested observe during that scan).
+pub fn scan_module_imports(module_url: &str, source: &str) {
+    let loader = ACTIVE_LOADER.with(|slot| slot.borrow().clone());
+    let Some(loader) = loader else {
+        return;
+    };
+    let _guard = push_active_loader(loader);
+    let previous = SCANNING_URL.with(|slot| slot.borrow_mut().replace(module_url.to_string()));
+    struct ScanUrlGuard(Option<String>);
+    impl Drop for ScanUrlGuard {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            SCANNING_URL.with(|slot| *slot.borrow_mut() = previous);
         }
+    }
+    let _url = ScanUrlGuard(previous);
+    // Hold the scan open until every specifier in this source is queued,
+    // so a dynamic `import()` cannot take a connection ahead of a static
+    // import written later in the same file.
+    note_module_scan(true);
+    let _scan = ModuleScanGuard;
+    for (specifier, dynamic) in import_specifiers(source) {
+        prefetch_specifier_kind(module_url, &specifier, !dynamic);
     }
 }
 
@@ -588,12 +647,37 @@ pub(crate) fn push_active_loader(loader: Rc<HostModuleLoader>) -> ActiveLoaderGu
 }
 
 /// Called with a resolved module URL as soon as that URL is known.
-pub fn set_module_url_hook(hook: Option<fn(&str, bool)>) {
+/// `(url, critical, referrer)`. `referrer` is empty when the importer has
+/// no URL. `critical` is false for `import()`.
+pub fn set_module_url_hook(hook: Option<fn(&str, bool, &str)>) {
     let ptr = match hook {
         Some(hook) => hook as *mut (),
         None => std::ptr::null_mut(),
     };
     URL_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Called while a source is being scanned, so the host can observe module
+/// bodies that arrived during the scan instead of after the parse.
+pub fn set_module_yield_hook(hook: Option<fn()>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    YIELD_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
+}
+
+static YIELD_HOOK: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+fn note_scan_yield() {
+    let ptr = YIELD_HOOK.load(std::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ptr` was stored from `fn()`, or it is null and we returned.
+    let hook: fn() = unsafe { std::mem::transmute(ptr) };
+    hook();
 }
 
 /// `begin` is true at the start of a source scan and false when it ends.
@@ -618,14 +702,14 @@ fn note_module_scan(begin: bool) {
     hook(begin);
 }
 
-fn note_module_url(url: &str, critical: bool) {
+fn note_module_url(url: &str, critical: bool, referrer: &str) {
     let ptr = URL_HOOK.load(std::sync::atomic::Ordering::Relaxed);
     if ptr.is_null() {
         return;
     }
-    // SAFETY: `ptr` was stored from `fn(&str, bool)`, or it is null and we returned.
-    let hook: fn(&str, bool) = unsafe { std::mem::transmute(ptr) };
-    hook(url, critical);
+    // SAFETY: `ptr` was stored from `fn(&str, bool, &str)`, or it is null and we returned.
+    let hook: fn(&str, bool, &str) = unsafe { std::mem::transmute(ptr) };
+    hook(url, critical, referrer);
 }
 
 /// Resolve `specifier` and, when it is an http(s) or data URL, start its fetch.
@@ -645,7 +729,7 @@ fn prefetch_specifier_kind(referrer: &str, specifier: &str, critical: bool) {
         return;
     };
     if matches!(url.scheme(), "http" | "https" | "data") {
-        note_module_url(url.as_str(), critical);
+        note_module_url(url.as_str(), critical, referrer.unwrap_or(""));
     }
 }
 
@@ -671,6 +755,12 @@ fn import_specifiers(source: &str) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
+        // A multi-megabyte bundle spends seconds in this walk. Bodies that
+        // arrived for specifiers already queued are observed here, not after
+        // `Module::parse` returns.
+        if i.is_multiple_of(50_000) {
+            note_scan_yield();
+        }
         if chars[i].is_whitespace() {
             i += 1;
             continue;

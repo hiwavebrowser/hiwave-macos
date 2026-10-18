@@ -73,8 +73,10 @@ the four `reason` values do not name: `shadow tree`, `not a javascript type`,
 slot it consumed) so a gap in the inline labels names that script.
 `module_timeline`, when any module was prefetched, is one record per URL:
 `requested_ms`, `start_ms`, `body_ms`, `parsed_ms`, and `held_ms` (how long
-the body sat ready before the main thread took it). `body_ms` is that
-observation, not the moment the prefetch thread finished the read.
+the body sat ready before the main thread noticed it, which can be during
+another module's scan). `body_ms` is that observation, not the moment the
+prefetch thread finished the read. `waiting_on` on a
+`waiting on a dependency` row is that module's outstanding imports.
 Inline scripts the parser inserted are labeled `inline#N` in document order,
 counting external scripts, including ones inside a shadow tree, a `<template>`
 content fragment, or `<noscript>`, and ones whose type is not javascript

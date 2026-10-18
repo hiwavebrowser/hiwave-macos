@@ -4738,6 +4738,7 @@ impl Engine {
                     tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
                     document,
                     &mut modules_fetched,
+                    false,
                     &inspector,
                 )
                 .await;
@@ -6186,6 +6187,12 @@ impl Engine {
                                         tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
                                         document,
                                         &mut count,
+                                        // Static imports of this deferred or
+                                        // async module only. A dynamic
+                                        // `import()` queued by an earlier
+                                        // script stays for the pump after
+                                        // DOMContentLoaded.
+                                        true,
                                         &inspector,
                                     )),
                                 )
