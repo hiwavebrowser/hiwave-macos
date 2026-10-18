@@ -14,7 +14,10 @@ mod import_map;
 #[cfg(feature = "boa")]
 mod module;
 #[cfg(feature = "boa")]
-pub use module::{DynamicImportFailure, FetchedModule, ModuleHandle, ModuleState};
+pub use module::{
+    install_import_specifier_hook, set_module_url_hook, DynamicImportFailure, FetchedModule,
+    ModuleHandle, ModuleState,
+};
 pub use control::{mono_us, ThreadStamp, ViewControl, Watchdog};
 
 /// Arm the JS call-stack high-water in the VM (see `boa_engine::vm::stack_sample`).
@@ -546,6 +549,7 @@ impl JsRuntime {
     pub fn run_jobs(&mut self) -> Result<(), JsError> {
         #[cfg(feature = "boa")]
         {
+            let _loader = module::push_active_loader(self.modules.loader.clone());
             let _job = DiagJob::enter("microtask");
             let result = self.context.run_jobs();
             self.consume_interrupt();
@@ -778,6 +782,9 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         {
             use boa_engine::Source;
+            // `import()` during this script resolves against this runtime's
+            // loader and starts its fetch at the call, not at the later job.
+            let _loader = module::push_active_loader(self.modules.loader.clone());
 
             // Max frame depth is per script, including the microtask drain
             // below. The live counters are not touched: a stop already
@@ -2011,7 +2018,39 @@ mod tests {
             assert_eq!(logged.len(), 1, "{logged:?}");
             assert!(logged[0].starts_with("depth=4 "), "{}", logged[0]);
             assert!(logged[0].contains("histogram=set x=4"), "{}", logged[0]);
-            assert!(logged[0].contains("set x > set x"), "{}", logged[0]);
+            assert!(
+                logged[0].contains("set x @rustkit#embedder:"),
+                "{}",
+                logged[0]
+            );
+            assert!(
+                logged[0].contains(" > set x @rustkit#embedder:"),
+                "{}",
+                logged[0]
+            );
+
+            // A named script's frames carry url:line:col. The histogram
+            // still counts the short name.
+            lines().lock().unwrap().clear();
+            let named = runtime
+                .evaluate_script_named(
+                    "var n = 0; var obj = { set y(v) { n++; if (n < 6) this.y = v; } }; obj.y = 1; n",
+                    "inline#host",
+                )
+                .unwrap();
+            assert!(matches!(named, JsValue::Number(n) if n == 6.0));
+            let named_log = lines().lock().unwrap().clone();
+            assert_eq!(named_log.len(), 1, "{named_log:?}");
+            assert!(
+                named_log[0].contains("histogram=set y=4"),
+                "{}",
+                named_log[0]
+            );
+            assert!(
+                named_log[0].contains("set y @inline#host:"),
+                "{}",
+                named_log[0]
+            );
         }
 
         let word = Arc::new(AtomicU64::new(0));

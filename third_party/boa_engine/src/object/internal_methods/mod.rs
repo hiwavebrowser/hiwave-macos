@@ -1201,7 +1201,7 @@ fn non_existent_call(
     context: &mut InternalMethodCallContext<'_>,
 ) -> JsResult<CallValue> {
     Err(JsNativeError::typ()
-        .with_message("not a callable function")
+        .with_message(crate::vm::Vm::not_callable_message(context, _argument_count))
         .with_realm(context.realm().clone())
         .into())
 }

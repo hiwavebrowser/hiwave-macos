@@ -166,8 +166,18 @@ struct FetchedNote {
     reason: Option<&'static str>,
     /// Why a parser script was recorded when the four `reason`s do not say
     /// which kind of miss it was (`shadow tree`, `not a javascript type`,
-    /// `template`, `inserted after the parser snapshot`).
+    /// `template`, `noscript`, `inserted after the parser snapshot`).
     detail: Option<&'static str>,
+    /// The `inline#N` slot this script consumed, when its label is a URL.
+    inline_slot: Option<u32>,
+}
+
+struct ModuleFetch {
+    url: String,
+    requested_ms: Option<u64>,
+    start_ms: Option<u64>,
+    body_ms: Option<u64>,
+    parsed_ms: Option<u64>,
 }
 
 struct ParserEv {
@@ -188,6 +198,7 @@ struct Active {
     console: Vec<(u64, String)>,
     mutations: Vec<(u64, &'static str, usize, String)>,
     parser: Vec<ParserEv>,
+    modules: Vec<ModuleFetch>,
     render: Option<serde_json::Value>,
     next_order: u32,
     pending: Vec<Pending>,
@@ -365,6 +376,7 @@ pub(crate) fn begin(url: &str) -> Option<Session> {
             console: Vec::new(),
             mutations: Vec::new(),
             parser: Vec::new(),
+            modules: Vec::new(),
             render: None,
             next_order: 0,
             pending: Vec::new(),
@@ -659,6 +671,7 @@ fn remember(
             dependency,
             reason: if executed { None } else { reason },
             detail: None,
+            inline_slot: None,
         });
     });
 }
@@ -855,12 +868,70 @@ pub(crate) fn remember_script_label(node: usize, label: String) -> bool {
 }
 
 /// The next `inline#N`, counting every javascript script in discovery order.
-pub(crate) fn next_inline_label() -> String {
+/// The number is also recorded on an external script (`fetched_scripts.inline`),
+/// whose label is its URL, so a gap in the `inline#` list can be named.
+pub(crate) fn next_inline_slot() -> (u32, String) {
     CATALOG.with(|catalog| {
         let mut catalog = catalog.borrow_mut();
         catalog.next_inline += 1;
-        format!("inline#{}", catalog.next_inline)
+        let slot = u32::try_from(catalog.next_inline).unwrap_or(u32::MAX);
+        (slot, format!("inline#{slot}"))
     })
+}
+
+/// The next `inline#N`, counting every javascript script in discovery order.
+pub(crate) fn next_inline_label() -> String {
+    next_inline_slot().1
+}
+
+/// Remember that `url` consumed inline slot `slot`.
+pub(crate) fn note_inline_slot(url: &str, slot: u32) {
+    if !enabled() {
+        return;
+    }
+    with_active(|active| {
+        if let Some(note) = active.fetched.iter_mut().find(|note| note.url == url) {
+            note.inline_slot = Some(slot);
+        }
+    });
+}
+
+/// One moment in a module fetch: `requested`, `start`, `body`, or `parsed`.
+/// Recorded on the thread that observed it. The prefetch thread does not
+/// call this.
+pub(crate) fn note_module_fetch(url: &str, phase: &str) {
+    if !enabled() || url.is_empty() {
+        return;
+    }
+    let url = clamp(url);
+    with_active(|active| {
+        let now = active.elapsed();
+        if active.modules.iter().all(|entry| entry.url != url) {
+            if active.modules.len() >= MAX_SCRIPTS {
+                return;
+            }
+            active.modules.push(ModuleFetch {
+                url: url.clone(),
+                requested_ms: None,
+                start_ms: None,
+                body_ms: None,
+                parsed_ms: None,
+            });
+        }
+        let Some(entry) = active.modules.iter_mut().find(|entry| entry.url == url) else {
+            return;
+        };
+        let slot = match phase {
+            "requested" => &mut entry.requested_ms,
+            "start" => &mut entry.start_ms,
+            "body" => &mut entry.body_ms,
+            "parsed" => &mut entry.parsed_ms,
+            _ => return,
+        };
+        if slot.is_none() {
+            *slot = Some(now);
+        }
+    });
 }
 
 /// A `<script>` whose type is not javascript. It does not take an `inline#N`.
@@ -1055,7 +1126,19 @@ fn snapshot(active: &Active) -> Snapshot {
                     note.executed,
                     note.reason,
                     note.detail,
+                    note.inline_slot,
                 )
+            })
+            .collect(),
+        modules: active
+            .modules
+            .iter()
+            .map(|entry| ModuleFetch {
+                url: entry.url.clone(),
+                requested_ms: entry.requested_ms,
+                start_ms: entry.start_ms,
+                body_ms: entry.body_ms,
+                parsed_ms: entry.parsed_ms,
             })
             .collect(),
         console: active.console.clone(),
@@ -1079,7 +1162,16 @@ struct Snapshot {
     dcl_ms: Option<u64>,
     load_ms: Option<u64>,
     scripts: Vec<(String, u32, &'static str, u64)>,
-    fetched: Vec<(String, Option<u16>, bool, bool, Option<&'static str>, Option<&'static str>)>,
+    fetched: Vec<(
+        String,
+        Option<u16>,
+        bool,
+        bool,
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<u32>,
+    )>,
+    modules: Vec<ModuleFetch>,
     console: Vec<(u64, String)>,
     mutations: Vec<(u64, &'static str, usize, String)>,
     parser: Vec<(&'static str, u64, String)>,
@@ -1114,13 +1206,25 @@ fn emit_snapshot(active: &Snapshot, max_js_stack: usize, console: bool) {
         fetched_scripts: active
             .fetched
             .iter()
-            .map(|(url, status, fetched, executed, reason, detail)| FetchedJson {
+            .map(|(url, status, fetched, executed, reason, detail, inline)| FetchedJson {
                 url,
                 status: *status,
                 fetched: *fetched,
                 executed: *executed,
                 reason: *reason,
                 detail: *detail,
+                inline: *inline,
+            })
+            .collect(),
+        module_timeline: active
+            .modules
+            .iter()
+            .map(|entry| ModuleJson {
+                url: &entry.url,
+                requested_ms: entry.requested_ms,
+                start_ms: entry.start_ms,
+                body_ms: entry.body_ms,
+                parsed_ms: entry.parsed_ms,
             })
             .collect(),
         shield: shield_label(),
@@ -1189,6 +1293,8 @@ struct TraceJson<'a> {
     load_ms: Option<u64>,
     scripts: Vec<ScriptJson<'a>>,
     fetched_scripts: Vec<FetchedJson<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    module_timeline: Vec<ModuleJson<'a>>,
     shield: &'a str,
     console: Vec<ConsoleJson<'a>>,
     mutations: Vec<MutationJson<'a>>,
@@ -1223,6 +1329,21 @@ struct FetchedJson<'a> {
     reason: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inline: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct ModuleJson<'a> {
+    url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parsed_ms: Option<u64>,
 }
 
 #[derive(Serialize)]

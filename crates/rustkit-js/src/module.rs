@@ -114,6 +114,9 @@ impl ModuleLoader for HostModuleLoader {
         });
         if self.asked.borrow_mut().insert(url.clone()) {
             self.requested.borrow_mut().push(url.clone());
+            // The fetch starts here if the call-time hook has not already
+            // started it. `start` dedups, so a second notice is a no-op.
+            note_module_url(&url);
         }
         match rx.await {
             Ok(res) => res,
@@ -239,6 +242,10 @@ impl JsRuntime {
         if self.modules.entries.contains_key(url) {
             return Ok(ModuleHandle(url.to_string()));
         }
+        // Static imports (and string-literal `import()`) are known before
+        // the parse. The fetch starts now, so it runs while `Module::parse`
+        // is still walking this source.
+        self.prefetch_source_imports(url, source);
         let existing = self.modules.loader.modules.borrow().get(url).cloned();
         let module = match existing {
             Some(module) => module,
@@ -316,6 +323,7 @@ impl JsRuntime {
                         if fetched.final_url != requested {
                             self.sources.remember(requested, &fetched.source);
                         }
+                        self.prefetch_source_imports(&fetched.final_url, &fetched.source);
                         let path = Path::new(fetched.final_url.as_str());
                         match Module::parse(
                             Source::from_bytes(fetched.source.as_str()).with_path(path),
@@ -370,6 +378,7 @@ impl JsRuntime {
     /// Advance a started module as far as it can go and say where it is:
     /// once its graph is loaded it is linked and evaluated.
     pub fn poll_module(&mut self, handle: &ModuleHandle) -> ModuleState {
+        let _loader = push_active_loader(self.modules.loader.clone());
         let _ = self.context.run_jobs();
         self.consume_interrupt();
         let Some(entry) = self.modules.entries.get_mut(&handle.0) else {
@@ -500,5 +509,305 @@ impl JsRuntime {
         }
         settled.sort_by(|a, b| a.0.cmp(&b.0));
         settled
+    }
+
+    /// Tell the embedder about every static import, and every
+    /// string-literal `import()`, before this source is parsed.
+    fn prefetch_source_imports(&self, module_url: &str, source: &str) {
+        let _guard = push_active_loader(self.modules.loader.clone());
+        for specifier in static_import_specifiers(source) {
+            prefetch_specifier(module_url, &specifier);
+        }
+    }
+}
+
+thread_local! {
+    static ACTIVE_LOADER: RefCell<Option<Rc<HostModuleLoader>>> = const { RefCell::new(None) };
+}
+
+/// Process-wide. A thread-local hook is invisible to every test thread but
+/// the one that installed it, so the fetch would start only when the import
+/// job ran.
+static URL_HOOK: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// Restores the loader a nested script was resolving imports against.
+pub(crate) struct ActiveLoaderGuard {
+    previous: Option<Rc<HostModuleLoader>>,
+}
+
+impl Drop for ActiveLoaderGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ACTIVE_LOADER.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// Module specifiers resolved while this guard is alive use `loader`.
+pub(crate) fn push_active_loader(loader: Rc<HostModuleLoader>) -> ActiveLoaderGuard {
+    let previous = ACTIVE_LOADER.with(|slot| slot.borrow_mut().replace(loader));
+    ActiveLoaderGuard { previous }
+}
+
+/// Called with a resolved module URL as soon as that URL is known.
+pub fn set_module_url_hook(hook: Option<fn(&str)>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    URL_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn note_module_url(url: &str) {
+    let ptr = URL_HOOK.load(std::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ptr` was stored from `fn(&str)`, or it is null and we returned.
+    let hook: fn(&str) = unsafe { std::mem::transmute(ptr) };
+    hook(url);
+}
+
+/// Resolve `specifier` and, when it is an http(s) or data URL, start its fetch.
+pub fn prefetch_specifier(referrer: &str, specifier: &str) {
+    let loader = ACTIVE_LOADER.with(|slot| slot.borrow().clone());
+    let Some(loader) = loader else {
+        return;
+    };
+    let referrer = if referrer.is_empty() { None } else { Some(referrer) };
+    let Ok(url) = loader.resolve(specifier, referrer) else {
+        return;
+    };
+    if matches!(url.scheme(), "http" | "https" | "data") {
+        note_module_url(url.as_str());
+    }
+}
+
+/// Install Boa's dynamic-import hook so `import()` starts a fetch when the
+/// call is evaluated, before the import job runs.
+pub fn install_import_specifier_hook() {
+    boa_engine::module::set_import_specifier_hook(Some(|referrer, specifier| {
+        prefetch_specifier(referrer, specifier);
+    }));
+}
+
+/// Static `import` / `export from` specifiers, plus string-literal
+/// `import("...")`. A computed `import(url)` is not visible here; that
+/// fetch starts when the call runs.
+pub fn static_import_specifiers(source: &str) -> Vec<String> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if chars[i] == '/' && chars.get(i + 1) == Some(&'/') {
+            i += 2;
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = (i + 2).min(chars.len());
+            continue;
+        }
+        if matches!(chars[i], '\'' | '"' | '`') {
+            i = skip_string(&chars, i);
+            continue;
+        }
+        if is_ident_start(chars[i]) {
+            let start = i;
+            i += 1;
+            while i < chars.len() && is_ident_continue(chars[i]) {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            if word == "import" {
+                let mut j = skip_ws(&chars, i);
+                if chars.get(j) == Some(&'(') {
+                    j = skip_ws(&chars, j + 1);
+                    if let Some((specifier, next)) = read_string_literal(&chars, j) {
+                        out.push(specifier);
+                        i = next;
+                    }
+                    continue;
+                }
+                if let Some((specifier, next)) = read_string_literal(&chars, j) {
+                    out.push(specifier);
+                    i = next;
+                    continue;
+                }
+                if let Some(specifier) = from_specifier(&chars, i) {
+                    out.push(specifier);
+                }
+                continue;
+            }
+            if word == "export" {
+                if let Some(specifier) = from_specifier(&chars, i) {
+                    out.push(specifier);
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    is_ident_start(ch) || ch.is_ascii_digit()
+}
+
+fn skip_ws(chars: &[char], mut i: usize) -> usize {
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+fn skip_string(chars: &[char], start: usize) -> usize {
+    let quote = chars[start];
+    let mut i = start + 1;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            i += 2;
+            continue;
+        }
+        if chars[i] == quote {
+            return i + 1;
+        }
+        if quote == '`' && chars[i] == '$' && chars.get(i + 1) == Some(&'{') {
+            i += 2;
+            let mut depth = 1;
+            while i < chars.len() && depth > 0 {
+                if chars[i] == '{' {
+                    depth += 1;
+                    i += 1;
+                    continue;
+                }
+                if chars[i] == '}' {
+                    depth -= 1;
+                    i += 1;
+                    continue;
+                }
+                if matches!(chars[i], '\'' | '"' | '`') {
+                    i = skip_string(chars, i);
+                    continue;
+                }
+                if chars[i] == '\\' {
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    chars.len()
+}
+
+fn read_string_literal(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let quote = *chars.get(start)?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let mut out = String::new();
+    let mut i = start + 1;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            if let Some(next) = chars.get(i + 1).copied() {
+                out.push(next);
+                i += 2;
+                continue;
+            }
+        }
+        if chars[i] == quote {
+            return Some((out, i + 1));
+        }
+        if chars[i] == '\n' {
+            return None;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    None
+}
+
+/// The string after the first top-level `from` before the next `;`.
+fn from_specifier(chars: &[char], mut i: usize) -> Option<String> {
+    let mut depth = 0i32;
+    while i < chars.len() {
+        if chars[i] == ';' && depth == 0 {
+            return None;
+        }
+        if chars[i] == '{' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if chars[i] == '}' {
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+        if matches!(chars[i], '\'' | '"' | '`') {
+            i = skip_string(chars, i);
+            continue;
+        }
+        if depth == 0 && is_ident_start(chars[i]) {
+            let start = i;
+            i += 1;
+            while i < chars.len() && is_ident_continue(chars[i]) {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            if word == "from" {
+                let j = skip_ws(chars, i);
+                return read_string_literal(chars, j).map(|(specifier, _)| specifier);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+#[cfg(test)]
+mod specifier_tests {
+    use super::static_import_specifiers;
+
+    #[test]
+    fn static_and_literal_dynamic_imports_are_visible_before_parse() {
+        let source = r#"
+            import './a.js';
+            import value from "./b.js";
+            import { c } from './c.js';
+            export { d } from "./d.js";
+            import("./e.js");
+            import(built);
+            const text = "import './nope.js'";
+        "#;
+        assert_eq!(
+            static_import_specifiers(source),
+            vec![
+                "./a.js".to_string(),
+                "./b.js".to_string(),
+                "./c.js".to_string(),
+                "./d.js".to_string(),
+                "./e.js".to_string(),
+            ]
+        );
     }
 }

@@ -10,14 +10,25 @@
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use crate::{
-    Context, JsObject,
+    Context, JsObject, js_string,
     builtins::function::{BoundFunction, OrdinaryFunction},
     native_function::NativeFunctionObject,
+    property::PropertyKey,
 };
 
+/// One host re-entry. `name` is the short name the histogram counts.
+/// `label` is that name plus, when known, ` @url:line:col`, or
+/// `native {binding} @host` for a native function.
+#[derive(Clone, Debug)]
+pub(crate) struct Frame {
+    name: String,
+    label: String,
+}
+
 /// `depth` is the host re-entry count. `histogram` is `name=count` pairs,
-/// most frequent first. `frames` is the innermost 20 names, outermost of
-/// that window first.
+/// most frequent first. `frames` is the innermost 20 labels, outermost of
+/// that window first. A label is `name @url:line:col`, or
+/// `native {binding} @host`.
 pub type HostStackDiag = fn(depth: usize, histogram: &str, frames: &str);
 
 static HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
@@ -53,7 +64,7 @@ pub(crate) fn enter(context: &mut Context, func: &JsObject) -> bool {
     if !ARMED.load(Ordering::Relaxed) {
         return false;
     }
-    context.vm.host_frames.push(function_name(func));
+    context.vm.host_frames.push(function_frame(func));
     note(context);
     true
 }
@@ -94,13 +105,13 @@ fn note(context: &mut Context) {
     hook(context.vm.host_call_depth, &histogram, &frames);
 }
 
-fn snapshot(stack: &[String]) -> (String, String) {
+fn snapshot(stack: &[Frame]) -> (String, String) {
     let mut counts: Vec<(&str, usize)> = Vec::new();
-    for name in stack {
-        if let Some(slot) = counts.iter_mut().find(|(n, _)| *n == name.as_str()) {
+    for frame in stack {
+        if let Some(slot) = counts.iter_mut().find(|(n, _)| *n == frame.name.as_str()) {
             slot.1 += 1;
         } else {
-            counts.push((name.as_str(), 1));
+            counts.push((frame.name.as_str(), 1));
         }
     }
     counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
@@ -122,16 +133,65 @@ fn snapshot(stack: &[String]) -> (String, String) {
     if start > 0 {
         frames.push_str("… > ");
     }
-    for (i, name) in stack[start..].iter().enumerate() {
+    for (i, frame) in stack[start..].iter().enumerate() {
         if i > 0 {
             frames.push_str(" > ");
         }
-        frames.push_str(&flat(name));
+        frames.push_str(&flat(&frame.label));
     }
     (histogram, frames)
 }
 
+fn function_frame(func: &JsObject) -> Frame {
+    let name = function_name(func);
+    let label = match js_location(func) {
+        Some(location) => format!("{name} @{location}"),
+        None if is_native(func) => format!("native {name} @host"),
+        None => name.clone(),
+    };
+    Frame { name, label }
+}
+
+fn is_native(func: &JsObject) -> bool {
+    func.downcast_ref::<NativeFunctionObject>().is_some()
+}
+
+/// Where this function was compiled, `url:line:col`. Empty when the
+/// function has no source path (a native, or an unnamed eval).
+fn js_location(func: &JsObject) -> Option<String> {
+    let fun = func.downcast_ref::<OrdinaryFunction>()?;
+    let map = fun.code.source_info().map();
+    let path = map.path().to_string();
+    if path.is_empty() || path.starts_with("unknown") {
+        return None;
+    }
+    let position = map.entries().iter().find_map(|entry| entry.position());
+    match position {
+        Some(position) => Some(format!(
+            "{path}:{}:{}",
+            position.line_number(),
+            position.column_number()
+        )),
+        None => Some(path),
+    }
+}
+
 fn function_name(func: &JsObject) -> String {
+    // A DOM getter's compiled name is empty or `get`. The `name` data
+    // property is set to `get Interface.prop` and is more specific. Read
+    // the data value only: a getter here would re-enter script.
+    if let Some(specific) = data_name(func) {
+        if specific.contains('.') || specific.starts_with("get ") || specific.starts_with("set ") {
+            let code = code_name(func);
+            if specific != code {
+                return named(&specific);
+            }
+        }
+    }
+    code_name(func)
+}
+
+fn code_name(func: &JsObject) -> String {
     if let Some(fun) = func.downcast_ref::<OrdinaryFunction>() {
         return named(&fun.code.name().to_std_string_escaped());
     }
@@ -142,6 +202,13 @@ fn function_name(func: &JsObject) -> String {
         return named(&format!("bound {}", function_name(bound.target_function())));
     }
     "(anonymous)".to_string()
+}
+
+fn data_name(func: &JsObject) -> Option<String> {
+    let object = func.try_borrow().ok()?;
+    let key = PropertyKey::from(js_string!("name"));
+    let value = object.properties().get(&key)?.value()?.as_string()?;
+    Some(value.to_std_string_escaped())
 }
 
 fn named(name: &str) -> String {

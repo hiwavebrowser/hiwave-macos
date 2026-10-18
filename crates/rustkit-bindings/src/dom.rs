@@ -1640,8 +1640,23 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(o);
         return s.gen === gen ? N.collect(s.gen, s.id, kind, String(arg)) : '';
     }
+    // The host-stack log reads a function's `name` data property. A DOM
+    // getter's compiled name is empty; this labels it `get Interface.prop`
+    // so a re-entry through it can be told from a page getter named `get`.
+    function namedFn(label, fn) {
+        try { Object.defineProperty(fn, 'name', { value: label }); } catch (e) {}
+        return fn;
+    }
+    function ifaceName(proto) {
+        var ctor = proto && proto.constructor;
+        return (ctor && ctor.name) || 'Node';
+    }
     function getter(proto, name, fn) {
-        Object.defineProperty(proto, name, { get: fn, configurable: true, enumerable: true });
+        Object.defineProperty(proto, name, {
+            get: namedFn('get ' + ifaceName(proto) + '.' + name, fn),
+            configurable: true,
+            enumerable: true
+        });
     }
 
     [NodeList, HTMLCollection].forEach(function (C) {
@@ -1656,7 +1671,12 @@ const WRAPPERS_JS: &str = r#"
     getter(Node.prototype, 'nodeType', function () { return info(this, 'type'); });
     getter(Node.prototype, 'nodeName', function () { return info(this, 'name'); });
     function accessor(proto, name, get, set) {
-        Object.defineProperty(proto, name, { get: get, set: set, configurable: true, enumerable: true });
+        Object.defineProperty(proto, name, {
+            get: namedFn('get ' + ifaceName(proto) + '.' + name, get),
+            set: namedFn('set ' + ifaceName(proto) + '.' + name, set),
+            configurable: true,
+            enumerable: true
+        });
     }
     // Writes to a node's own data. A string answer is the DOMException to
     // throw; an old-document wrapper names no node (-1) and throws NotFoundError.
@@ -2352,10 +2372,10 @@ const WRAPPERS_JS: &str = r#"
             Object.defineProperty(l, TOKENS, { value: this });
             // The indexed getter (`classList[0]`) answers like item().
             l = new Proxy(l, {
-                get: function (t, p, r) {
+                get: namedFn('get DOMTokenList.proxy', function (t, p, r) {
                     return typeof p === 'string' && /^(0|[1-9][0-9]*)$/.test(p)
                         ? tokens(t)[Number(p)] : Reflect.get(t, p, r);
-                }
+                })
             });
             classLists.set(this, l);
         }
@@ -2497,13 +2517,13 @@ const WRAPPERS_JS: &str = r#"
             Object.defineProperty(decl, k, { value: own[k], writable: false, configurable: true, enumerable: false });
         });
         return new Proxy(decl, {
-            get: function (t, p, r) {
+            get: namedFn('get CSSStyleDeclaration.computed', function (t, p, r) {
                 if (typeof p !== 'string' || p in t) return Reflect.get(t, p, r);
                 if (/^(0|[1-9][0-9]*)$/.test(p)) return names[Number(p)];
                 var n = kebab(p.indexOf('--') === 0 ? p : p);
                 return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : (p === 'cssFloat' ? (m['float'] || '') : '');
-            },
-            set: function (t, p) { if (typeof p === 'string' && !(p in t)) ro(); return false; }
+            }),
+            set: namedFn('set CSSStyleDeclaration.computed', function (t, p) { if (typeof p === 'string' && !(p in t)) ro(); return false; })
         });
     }
     g.getComputedStyle = function getComputedStyle(el) {
@@ -2621,16 +2641,16 @@ const WRAPPERS_JS: &str = r#"
         var target = Object.create(CSSStyleDeclaration.prototype);
         Object.defineProperty(target, OWNER, { value: el });
         st = new Proxy(target, {
-            get: function (t, p) {
+            get: namedFn('get CSSStyleDeclaration.proxy', function (t, p) {
                 if (typeof p !== 'string' || p in t) return Reflect.get(t, p, st);
                 if (/^\d+$/.test(p)) return t.item(Number(p)) || undefined;
                 return t.getPropertyValue(cssName(p));
-            },
-            set: function (t, p, v) {
+            }),
+            set: namedFn('set CSSStyleDeclaration.proxy', function (t, p, v) {
                 if (typeof p !== 'string' || p in t) return Reflect.set(t, p, v, st);
                 t.setProperty(cssName(p), v);
                 return true;
-            }
+            })
         });
         styles.set(el, st);
         return st;

@@ -150,7 +150,7 @@ pub struct Vm {
     // re-entered, parallel to `host_call_depth` while the console log is on.
     // `host_stack_logged` remembers which of 256/512/1000 this climb already
     // reported. See `host_stack`.
-    pub(crate) host_frames: Vec<String>,
+    pub(crate) host_frames: Vec<host_stack::Frame>,
     pub(crate) host_stack_logged: u8,
 
     /// Deepest JavaScript frame count (excluding the dummy frame) since
@@ -339,6 +339,12 @@ impl Stack {
         self.stack[index] = function;
     }
 
+    /// `this` under the calling convention, if the stack is deep enough.
+    pub(crate) fn calling_convention_get_this(&self, argument_count: usize) -> Option<&JsValue> {
+        let index = self.stack.len().checked_sub(argument_count.saturating_add(2))?;
+        self.stack.get(index)
+    }
+
     /// Insert the function arguments at the top of the stack according to the calling convention.
     /// This will insert the given values at the position of the function arguments.
     pub(crate) fn calling_convention_insert_arguments(
@@ -509,6 +515,24 @@ impl Vm {
             #[cfg(feature = "trace")]
             current_frame: None,
         }
+    }
+
+    /// HIWAVE PATCH: a call of a value that is not a function. The text
+    /// still begins with `not a callable function` and names the callee's
+    /// type and `this`'s type.
+    pub(crate) fn not_callable_message(context: &Context, argument_count: usize) -> String {
+        let callee = context
+            .vm
+            .stack
+            .calling_convention_get_function(argument_count)
+            .type_of();
+        let this = context
+            .vm
+            .stack
+            .calling_convention_get_this(argument_count)
+            .map(JsValue::type_of)
+            .unwrap_or("unknown");
+        format!("not a callable function: callee is {callee}, this is {this}")
     }
 
     #[track_caller]

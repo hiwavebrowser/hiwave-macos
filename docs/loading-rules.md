@@ -18,12 +18,13 @@ Spec:
 
 **Pending parsing-blocking script.** At most one classic external script
 without `async` or `defer`, plus an inline classic script that is still
-waiting on a stylesheet. HiWave loads external stylesheets before the
-script walk (the `stylesheet` parser pause). It then awaits each
+waiting on a stylesheet. HiWave loads external stylesheets, then web
+fonts, before the script walk (the `stylesheet` parser pause, and a
+`font` pause when the font fetch took at least 1ms). It then awaits each
 parser-blocking classic script when the walk reaches it, and records a
 `script fetch` pause only for that wait. An inline classic script has no
-fetch wait. A later inline script does not wait for an earlier `async`
-script.
+fetch wait. It does not wait for an earlier `async` script, and it does
+not wait for images.
 
 **List of scripts that will execute in order as soon as possible.**
 Script-created external classic scripts with the force-async flag clear
@@ -65,10 +66,17 @@ Those network waits are answered after `readyState` becomes `interactive`.
 `fetch()` and XHR callbacks still run before `load_url` returns, from the
 pump that follows `DOMContentLoaded`.
 
+Images are discovered with the document and their fetches start then, so
+they progress during the script walk. The load awaits whatever is still
+out only after `DOMContentLoaded` and before `window` `load`. A remaining
+stall of at least 1ms is an `image` parser pause. The pause is the stall
+at that point, not the whole image fetch: the request started with the
+scripts. An inline classic script never waits on that fetch.
+
 `window` `load` and `readyState` `complete` wait for the parser's `async`
-set and for external scripts inserted while the document was loading. Each
-inserted script runs and fires `load` or `error` first. A script inserted
-from the load handler itself does not hold the event.
+set, for images, and for external scripts inserted while the document was
+loading. Each inserted script runs and fires `load` or `error` first. A
+script inserted from the load handler itself does not hold the event.
 
 A yielding load (`load_url_yielding`) still returns once `DOMContentLoaded`
 has fired and an inserted script is outstanding. Live turns run one arrived
@@ -81,23 +89,54 @@ scripts run before that return, after `interactive` is recorded.
 is fetched concurrently. The graph is instantiated once those descendants
 are present. HiWave does this in one walk:
 
+- the fetch starts as soon as the specifier is known. A static `import`,
+  `export from`, or string-literal `import("...")` is scanned before
+  `Module::parse`, and the HTTP request starts then, on
+  `rk-module-prefetch`. A computed `import(url)` starts when that call is
+  evaluated, before the import job runs and before any later statement in
+  the same script
 - siblings discovered together are started together
-- when one body arrives it is parsed immediately, and that module's own
-  static imports start while its siblings are still in flight
+- when one body arrives, its own static imports start before that body is
+  parsed, while its siblings are still in flight
 
-A chain (module A imports B, B imports C) stays serial until each body is
-parsed, because the next URL is not known before that. Dynamic `import()`
-is not a parser-blocking dependency. The network pump fetches it in the
-same wave as `fetch()` / XHR from that turn, so an unrelated request does
-not hold the import.
+`module_timeline` records each of those URLs: `requested_ms` when the
+specifier was known, `start_ms` when the prefetch was queued, `body_ms`
+when the bytes were taken, and `parsed_ms` when the module was supplied.
+The gap between `requested_ms` and `body_ms` is the fetch. The gap between
+`body_ms` and `parsed_ms` is parse and compile. A gap before `requested_ms`
+is time until the specifier existed.
+
+A static chain (module A imports B, B imports C) still waits for A's body
+before B's specifier can be read, and for B's body before C's. It does not
+also wait for A's parse. A dynamic chain waits until each `import()` call
+runs. Reddit's loader (`SML.load`) builds the next
+`www.redditstatic.com/js/concat?…` URL and loads it. A string literal in
+the source starts during the parent's parse. A computed specifier starts
+at the call, which is as early as the URL exists. The per-origin limit of
+6 is a connection slot, not a walk that parses one module before requesting
+the next. These fetches do not use the inserted-script queue.
+
+Dynamic `import()` is not a parser-blocking dependency. An unrelated
+`fetch()` from the same turn does not hold it.
 
 ## Scripts the parser snapshot does not run
 
 **`<template>` contents.** The parser moves a template's children into a
 document fragment. They are not in the document tree. The trace records
-them with `detail: "template"` and they do not run. Inserting the fragment
-prepares them: an inline classic script runs on that insertion, before the
-next statement. `innerHTML` does not run scripts.
+them with `detail: "template"` and `reason: "never reached"`, and they do
+not run. Inserting or cloning the fragment prepares the copy: an inline
+classic script runs on that insertion, before the next statement, including
+when the destination is a shadow root. The original template entry stays
+unrun. A script that is not connected yet (a disconnected shadow, a
+fragment) waits until a later insertion connects it. `innerHTML` does not
+run scripts. An inline module, once connected, runs as `import()` of a
+`data:` URL.
+
+**`<noscript>`.** Scripting is on, so HTML treats the contents as text and
+Chrome does not run a script there. This parser still builds the elements
+(the tokenizer has no body `noscript` raw-text switch). The runner does not
+execute them. The trace records `detail: "noscript"` and
+`reason: "never reached"`.
 
 **Declarative shadow trees.** A script in a shadow tree is part of the
 document. It runs in shadow-including tree order (the host, then the shadow
@@ -132,3 +171,22 @@ before requesting the next.
 
 Parser-script fetches are not spawned. They live in the load's script plan.
 Dropping the load drops them.
+
+## Host re-entry
+
+The host-stack histogram still counts short function names. The frames
+string, the innermost 20, is `name @url:line:col` for a compiled function
+and `native {binding} @host` for a native function. A DOM getter's name is
+`get Interface.prop`. The style, computed-style, and classList proxies are
+`get CSSStyleDeclaration.proxy`, `get CSSStyleDeclaration.computed`, and
+`get DOMTokenList.proxy` (and the matching `set` names).
+
+A climb whose names are half `get` and half `(anonymous)` is a JavaScript
+getter, or a Proxy `get` trap, re-entering an anonymous function through
+native code: the host call is the step between those two frames. The native
+side can be a custom-element upgrade inside a getter, an IDL attribute that
+dispatches to a userland getter, or a style or layout flush that runs
+observers. A page Proxy trap named `get` looks the same until the frames
+carry a URL. No headless run reproduced a depth of 256, so this note does
+not claim that recursion is fixed. A Mac trace with the longer frames names
+the getter.

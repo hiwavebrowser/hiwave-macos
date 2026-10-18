@@ -869,6 +869,35 @@ pub fn take_dynamic_import_failures() -> Vec<DynamicImportFailure> {
     DYNAMIC_IMPORT_FAILURES.with(|slot| slot.borrow_mut().drain(..).collect())
 }
 
+/// HIWAVE PATCH: told when a dynamic `import()` has its specifier, before
+/// the import job runs. `referrer` is the importing script or module path
+/// (empty when there is none). The hook starts the fetch immediately.
+pub type ImportSpecifierHook = fn(referrer: &str, specifier: &str);
+
+static IMPORT_SPECIFIER_HOOK: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// Install the dynamic-import hook. `None` clears it.
+pub fn set_import_specifier_hook(hook: Option<ImportSpecifierHook>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    IMPORT_SPECIFIER_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Tell the hook a dynamic `import()` specifier is known.
+pub fn note_import_specifier(referrer: &str, specifier: &str) {
+    let ptr = IMPORT_SPECIFIER_HOOK.load(std::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ptr` was stored from an `ImportSpecifierHook`, or it is null
+    // and we already returned. One static function is installed.
+    let hook: ImportSpecifierHook = unsafe { std::mem::transmute(ptr) };
+    hook(referrer, specifier);
+}
+
 #[test]
 #[allow(clippy::missing_panics_doc)]
 fn into_js_module() {

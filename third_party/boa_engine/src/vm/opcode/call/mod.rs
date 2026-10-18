@@ -34,7 +34,10 @@ impl CallEval {
 
         let Some(object) = func.as_object() else {
             return Err(JsNativeError::typ()
-                .with_message("not a callable function")
+                .with_message(crate::vm::Vm::not_callable_message(
+                    context,
+                    argument_count.into(),
+                ))
                 .into());
         };
 
@@ -118,7 +121,7 @@ impl CallEvalSpread {
 
         let Some(object) = func.as_object() else {
             return Err(JsNativeError::typ()
-                .with_message("not a callable function")
+                .with_message(crate::vm::Vm::not_callable_message(context, 0))
                 .into());
         };
         // Taken from `13.3.6.1 Runtime Semantics: Evaluation`
@@ -190,20 +193,17 @@ impl Call {
             .calling_convention_get_function(argument_count.into());
 
         let Some(object) = func.as_object() else {
-            return Err(Self::handle_not_callable());
+            return Err(JsNativeError::typ()
+                .with_message(crate::vm::Vm::not_callable_message(
+                    context,
+                    argument_count.into(),
+                ))
+                .into());
         };
 
         object.__call__(argument_count.into()).resolve(context)?;
 
         Ok(())
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn handle_not_callable() -> JsError {
-        JsNativeError::typ()
-            .with_message("not a callable function")
-            .into()
     }
 }
 
@@ -243,7 +243,7 @@ impl CallSpread {
 
         let Some(object) = func.as_object() else {
             return Err(JsNativeError::typ()
-                .with_message("not a callable function")
+                .with_message(crate::vm::Vm::not_callable_message(context, argument_count))
                 .into());
         };
 
@@ -656,6 +656,14 @@ impl ImportCall {
                 return Ok(());
             }
         };
+
+        // The specifier is known now. The fetch starts here, while this
+        // script is still running, not when the import job is pumped.
+        let referrer_path = referrer
+            .path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        crate::module::note_import_specifier(&referrer_path, &specifier_text);
 
         // 8. Perform HostLoadImportedModule(referrer, specifierString, empty, promiseCapability).
         let job = NativeAsyncJob::with_realm(

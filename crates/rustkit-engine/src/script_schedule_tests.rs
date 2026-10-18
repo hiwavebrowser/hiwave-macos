@@ -487,3 +487,249 @@ fn a_shadow_script_and_a_head_script_run_in_tree_order() {
         "head script missing: {fetched:?}"
     );
 }
+
+fn trace_file(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "hiwave-schedule-{name}-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+/// A slow image does not delay an inline script or DOMContentLoaded.
+/// It does delay `window` `load`. The remaining stall is an `image` pause.
+#[test]
+fn an_image_does_not_delay_an_inline_script_or_dom_content_loaded() {
+    let trace_path = trace_file("image");
+    let _trace = page_trace::force_file_for_test(&trace_path);
+    let page = r#"<html><head>
+<script>var t0 = Date.now(); var order = [];</script>
+<script>
+order.push('inline:' + (Date.now() - t0));
+document.addEventListener('DOMContentLoaded', function () {
+  order.push('dcl:' + (Date.now() - t0));
+});
+window.addEventListener('load', function () {
+  order.push('load:' + (Date.now() - t0));
+});
+</script>
+</head><body><img src="/slow.png"></body></html>"#;
+    let (mut engine, view, _server) = load(
+        page,
+        vec![route("/slow.png", "image/png", "not-a-png", SLOW)],
+    );
+    let order = js(&mut engine, view, "order.join(',')");
+    let tags: Vec<&str> = order
+        .split(',')
+        .map(|part| part.split(':').next().unwrap())
+        .collect();
+    assert_eq!(tags, ["inline", "dcl", "load"], "{order}");
+    assert!(
+        part_ms(&order, "inline") < 400,
+        "inline waited on the image: {order}"
+    );
+    assert!(
+        part_ms(&order, "dcl") < 400,
+        "DOMContentLoaded waited on the image: {order}"
+    );
+    assert!(
+        part_ms(&order, "load") >= 700,
+        "load did not wait for the image: {order}"
+    );
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trace_path).expect("trace")).unwrap();
+    let _ = std::fs::remove_file(&trace_path);
+    let parser = trace["parser"].as_array().unwrap();
+    assert!(
+        parser.iter().any(|pause| pause["blocked_on"] == "image"),
+        "image stall was not traced: {parser:?}"
+    );
+}
+
+/// `import()` starts the fetch when the call runs, before later work in
+/// the same script. A computed specifier cannot start any earlier.
+#[test]
+fn a_dynamic_import_starts_during_the_calling_script() {
+    let trace_path = trace_file("import");
+    let _trace = page_trace::force_file_for_test(&trace_path);
+    let page = r#"<html><head>
+<script>
+import('/mod.js');
+var end = Date.now() + 500;
+while (Date.now() < end) {}
+fetch('/mark');
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, server) = load(
+        page,
+        vec![
+            route(
+                "/mod.js",
+                "text/javascript",
+                "window.mod = true;",
+                Duration::from_millis(20),
+            ),
+            route("/mark", "text/plain", "ok", Duration::ZERO),
+        ],
+    );
+    assert_eq!(js(&mut engine, view, "String(window.mod)"), "true");
+    let starts = server.starts.lock().unwrap();
+    let at = |name: &str| {
+        starts
+            .iter()
+            .find(|(path, _)| path == name)
+            .map(|(_, stamp)| *stamp)
+            .unwrap_or_else(|| panic!("{name} was not requested: {starts:?}"))
+    };
+    let ahead = at("/mark").saturating_duration_since(at("/mod.js"));
+    assert!(
+        ahead >= Duration::from_millis(300),
+        "import() waited until the script finished ({ahead:?}): {starts:?}"
+    );
+    drop(starts);
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trace_path).expect("trace")).unwrap();
+    let _ = std::fs::remove_file(&trace_path);
+    let timeline = trace["module_timeline"].as_array().expect("module_timeline");
+    let module = timeline
+        .iter()
+        .find(|item| item["url"].as_str().unwrap_or("").ends_with("/mod.js"))
+        .expect("mod.js missing from module_timeline");
+    assert!(module["requested_ms"].is_number(), "{module}");
+    assert!(module["start_ms"].is_number(), "{module}");
+    assert!(module["body_ms"].is_number(), "{module}");
+}
+
+/// An external script consumes an inline slot. The label stays the URL.
+/// The slot is `fetched_scripts.inline`, so inline#2 is not a missing node.
+#[test]
+fn an_external_script_records_the_inline_slot_it_consumed() {
+    let trace_path = trace_file("slot");
+    let _trace = page_trace::force_file_for_test(&trace_path);
+    let page = r#"<html><head>
+<script>var a = 1;</script>
+<script src="/ext.js"></script>
+<script>var b = 2;</script>
+</head><body>hi</body></html>"#;
+    let (_engine, _view, _server) = load(
+        page,
+        vec![route(
+            "/ext.js",
+            "text/javascript",
+            "var c = 3;",
+            Duration::ZERO,
+        )],
+    );
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trace_path).expect("trace")).unwrap();
+    let _ = std::fs::remove_file(&trace_path);
+    let fetched = trace["fetched_scripts"].as_array().unwrap();
+    assert!(
+        fetched
+            .iter()
+            .any(|item| item["url"] == "inline#1" && item["executed"] == true),
+        "{fetched:?}"
+    );
+    assert!(
+        fetched
+            .iter()
+            .any(|item| item["url"] == "inline#3" && item["executed"] == true),
+        "{fetched:?}"
+    );
+    let external = fetched
+        .iter()
+        .find(|item| item["url"].as_str().unwrap_or("").ends_with("/ext.js"))
+        .expect("external script");
+    assert_eq!(external["inline"], 2, "{external}");
+}
+
+/// Cloning a template script into a connected shadow root runs it.
+/// The original template entry stays unrun.
+#[test]
+fn a_template_script_cloned_into_a_shadow_root_runs() {
+    let trace_path = trace_file("clone");
+    let _trace = page_trace::force_file_for_test(&trace_path);
+    let page = r#"<html><head>
+<script>var order = [];</script>
+<template id="t"><script>order.push('templated')</script></template>
+<script>
+var host = document.createElement('div');
+document.body.appendChild(host);
+host.attachShadow({ mode: 'open' }).appendChild(document.getElementById('t').content.cloneNode(true));
+order.push('after');
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(page, Vec::new());
+    assert_eq!(js(&mut engine, view, "order.join(',')"), "templated,after");
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trace_path).expect("trace")).unwrap();
+    let _ = std::fs::remove_file(&trace_path);
+    let fetched = trace["fetched_scripts"].as_array().unwrap();
+    let template = fetched
+        .iter()
+        .find(|item| item["detail"] == "template")
+        .expect("template script");
+    assert_eq!(template["executed"], false, "{template}");
+    // The clone lives in the shadow tree. The late catalog records it there
+    // once it has run; a clone that is marked before that catalog is
+    // `script-inserted inline`.
+    assert!(
+        fetched.iter().any(|item| {
+            item["executed"] == true
+                && (item["detail"] == "shadow tree" || item["detail"] == "script-inserted inline")
+        }),
+        "{fetched:?}"
+    );
+}
+
+/// A script inserted into a disconnected shadow runs when the host connects.
+#[test]
+fn a_script_in_a_disconnected_shadow_runs_when_the_host_connects() {
+    let page = r#"<html><head>
+<script>
+var order = [];
+order.push('before');
+var host = document.createElement('div');
+var root = host.attachShadow({ mode: 'open' });
+var s = document.createElement('script');
+s.textContent = "order.push('shadow')";
+root.appendChild(s);
+order.push('mid');
+document.body.appendChild(host);
+order.push('after');
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(page, Vec::new());
+    assert_eq!(
+        js(&mut engine, view, "order.join(',')"),
+        "before,mid,shadow,after"
+    );
+}
+
+/// With scripting on, a script inside `<noscript>` does not run.
+/// The trace records it. Chrome would not run it either.
+#[test]
+fn a_noscript_script_does_not_run() {
+    let trace_path = trace_file("noscript");
+    let _trace = page_trace::force_file_for_test(&trace_path);
+    let page = r#"<html><head>
+<script>var order = [];</script>
+<noscript><script>order.push('noscript')</script></noscript>
+<script>order.push('after')</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(page, Vec::new());
+    assert_eq!(js(&mut engine, view, "order.join(',')"), "after");
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trace_path).expect("trace")).unwrap();
+    let _ = std::fs::remove_file(&trace_path);
+    let fetched = trace["fetched_scripts"].as_array().unwrap();
+    let noscript = fetched
+        .iter()
+        .find(|item| item["detail"] == "noscript")
+        .expect("noscript script missing from the trace");
+    assert_eq!(noscript["executed"], false, "{noscript}");
+    assert_eq!(noscript["reason"], "never reached", "{noscript}");
+}

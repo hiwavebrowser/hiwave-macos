@@ -252,13 +252,21 @@ fn not_a_function() {
                 let a = {};
                 let b = true;
             "#}),
-        TestAction::assert_native_error("a()", JsNativeErrorKind::Type, "not a callable function"),
+        TestAction::assert_native_error(
+            "a()",
+            JsNativeErrorKind::Type,
+            "not a callable function: callee is object, this is undefined",
+        ),
         TestAction::assert_native_error(
             "a.a()",
             JsNativeErrorKind::Type,
-            "not a callable function",
+            "not a callable function: callee is undefined, this is object",
         ),
-        TestAction::assert_native_error("b()", JsNativeErrorKind::Type, "not a callable function"),
+        TestAction::assert_native_error(
+            "b()",
+            JsNativeErrorKind::Type,
+            "not a callable function: callee is boolean, this is undefined",
+        ),
     ]);
 }
 

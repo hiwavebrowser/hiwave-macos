@@ -497,6 +497,9 @@ pub(crate) async fn pump_modules(
                         continue;
                     }
                     inflight.push(Box::pin(async move {
+                        if let Some(prefetched) = take_prefetched_module(&url).await {
+                            return (url, prefetched);
+                        }
                         let parsed = match Url::parse(&url) {
                             Ok(parsed) => parsed,
                             Err(_) => return (url, Err("unparseable module url".to_string())),
@@ -549,6 +552,7 @@ pub(crate) async fn pump_modules(
         let (supplied, _) = super::with_script_js(bindings, || {
             catch_unwind(AssertUnwindSafe(|| bindings.supply_module(&url, outcome)))
         });
+        crate::page_trace::note_module_fetch(&url, "parsed");
         if supplied.is_err() {
             out.poisoned = true;
             return out;
@@ -1374,6 +1378,293 @@ fn run_inserted(
         }
     }
     false
+}
+
+/// A module body fetched ahead of `Module::parse` or a dynamic `import()` job.
+#[derive(Clone)]
+struct PrefetchedModule {
+    final_url: String,
+    source: String,
+    status: u16,
+    body_len: usize,
+    content_type: Option<String>,
+}
+
+struct PrefetchSlot {
+    result: Mutex<Option<Result<PrefetchedModule, String>>>,
+    notify: tokio::sync::Notify,
+}
+
+impl PrefetchSlot {
+    async fn wait(&self) -> Result<PrefetchedModule, String> {
+        loop {
+            let notified = self.notify.notified();
+            if let Some(result) = self.result.lock().unwrap_or_else(|err| err.into_inner()).clone() {
+                return result;
+            }
+            notified.await;
+        }
+    }
+
+    fn store(&self, result: Result<PrefetchedModule, String>) {
+        *self.result.lock().unwrap_or_else(|err| err.into_inner()) = Some(result);
+        self.notify.notify_waiters();
+    }
+}
+
+struct ModulePrefetch {
+    policy: Arc<FetchPolicy>,
+    loader: Arc<ResourceLoader>,
+    document: Url,
+    inspector: Arc<Inspector>,
+    slots: Mutex<std::collections::HashMap<String, Arc<PrefetchSlot>>>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct PrefetchJob {
+    policy: Arc<FetchPolicy>,
+    loader: Arc<ResourceLoader>,
+    document: Url,
+    url: Url,
+    slot: Arc<PrefetchSlot>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+thread_local! {
+    static CURRENT_PREFETCH: std::cell::RefCell<Option<Arc<ModulePrefetch>>> =
+        const { std::cell::RefCell::new(None) };
+    static PREFETCH_GUARDS: std::cell::RefCell<std::collections::HashMap<String, crate::inspector::RequestGuard>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Holds the module prefetch for one load or live turn. Dropping it cancels
+/// results that have not been consumed. A nested install restores the outer one.
+pub(crate) struct ModulePrefetchGuard {
+    prefetch: Arc<ModulePrefetch>,
+    previous: Option<Arc<ModulePrefetch>>,
+}
+
+impl Drop for ModulePrefetchGuard {
+    fn drop(&mut self) {
+        self.prefetch
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let previous = self.previous.take();
+        if previous.is_none() {
+            PREFETCH_GUARDS.with(|guards| guards.borrow_mut().clear());
+        }
+        CURRENT_PREFETCH.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.prefetch))
+            {
+                *slot = previous;
+            }
+        });
+    }
+}
+
+fn ensure_module_prefetch_hook() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        rustkit_js::set_module_url_hook(Some(start_module_prefetch));
+        rustkit_js::install_import_specifier_hook();
+    });
+}
+
+/// Fetch module URLs on `rk-module-prefetch` while this guard is alive.
+/// The page fetch policy still limits connections. This is not the
+/// inserted-script queue.
+pub(crate) fn install_module_prefetch(
+    policy: Arc<FetchPolicy>,
+    loader: Arc<ResourceLoader>,
+    document: Url,
+    inspector: Arc<Inspector>,
+) -> ModulePrefetchGuard {
+    ensure_module_prefetch_hook();
+    let prefetch = Arc::new(ModulePrefetch {
+        policy,
+        loader,
+        document,
+        inspector,
+        slots: Mutex::new(std::collections::HashMap::new()),
+        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let previous = CURRENT_PREFETCH.with(|slot| slot.borrow_mut().replace(Arc::clone(&prefetch)));
+    ModulePrefetchGuard { prefetch, previous }
+}
+
+fn start_module_prefetch(url: &str) {
+    let Some(prefetch) = CURRENT_PREFETCH.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    if prefetch.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Ok(parsed) = Url::parse(url) else {
+        return;
+    };
+    {
+        let mut slots = prefetch.slots.lock().unwrap_or_else(|err| err.into_inner());
+        if slots.contains_key(url) {
+            return;
+        }
+        slots.insert(url.to_string(), Arc::new(PrefetchSlot {
+            result: Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        }));
+    }
+    crate::page_trace::note_module_fetch(url, "requested");
+    let slot = prefetch
+        .slots
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(url)
+        .cloned();
+    let Some(slot) = slot else {
+        return;
+    };
+    if let Some(guard) = prefetch.inspector.begin_request(
+        &parsed,
+        "GET",
+        ResourceType::Module,
+        Some("script"),
+    ) {
+        PREFETCH_GUARDS.with(|guards| {
+            guards.borrow_mut().insert(url.to_string(), guard);
+        });
+    }
+    let job = PrefetchJob {
+        policy: Arc::clone(&prefetch.policy),
+        loader: Arc::clone(&prefetch.loader),
+        document: prefetch.document.clone(),
+        url: parsed,
+        slot,
+        cancelled: Arc::clone(&prefetch.cancelled),
+    };
+    if prefetch_sender().try_send(job).is_err() {
+        prefetch
+            .slots
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(url);
+        PREFETCH_GUARDS.with(|guards| {
+            guards.borrow_mut().remove(url);
+        });
+        return;
+    }
+    crate::page_trace::note_module_fetch(url, "start");
+}
+
+fn prefetch_sender() -> &'static tokio::sync::mpsc::Sender<PrefetchJob> {
+    static TX: OnceLock<tokio::sync::mpsc::Sender<PrefetchJob>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PrefetchJob>(1024);
+        std::thread::Builder::new()
+            .name("rk-module-prefetch".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("module prefetch runtime");
+                let local = tokio::task::LocalSet::new();
+                rt.block_on(local.run_until(async move {
+                    while let Some(job) = rx.recv().await {
+                        tokio::task::spawn_local(async move {
+                            run_prefetch_job(job).await;
+                        });
+                    }
+                }));
+            })
+            .expect("module prefetch thread");
+        tx
+    })
+}
+
+async fn run_prefetch_job(job: PrefetchJob) {
+    if job.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        job.slot.store(Err("cancelled".into()));
+        return;
+    }
+    let fetched = job
+        .policy
+        .fetch_module(&job.loader, &job.url, &job.document)
+        .await;
+    if job.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        job.slot.store(Err("cancelled".into()));
+        return;
+    }
+    let outcome = match fetched {
+        Ok(module) => Ok(PrefetchedModule {
+            final_url: module.final_url.to_string(),
+            source: module.source,
+            status: module.status,
+            body_len: module.body_len,
+            content_type: module
+                .content_type
+                .as_ref()
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
+        }),
+        Err(denial) => Err(match denial {
+            rustkit_net::policy::Denial::Shield => "shield".to_string(),
+            rustkit_net::policy::Denial::Timeout => "timed out".to_string(),
+            _ => NETWORK_ERROR.to_string(),
+        }),
+    };
+    job.slot.store(outcome);
+}
+
+/// The body started for `url`, if a prefetch is in flight or finished.
+/// `None` means this load did not prefetch it and the caller should fetch.
+async fn take_prefetched_module(url: &str) -> Option<Result<rustkit_bindings::FetchedModule, String>> {
+    let prefetch = CURRENT_PREFETCH.with(|slot| slot.borrow().clone())?;
+    let slot = prefetch
+        .slots
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(url)
+        .cloned()?;
+    let result = slot.wait().await;
+    finish_prefetch_guard(url, &result);
+    crate::page_trace::note_module_fetch(url, "body");
+    Some(match result {
+        Ok(module) => {
+            crate::page_trace::note_module_dependency(url, Some(module.status));
+            Ok(rustkit_bindings::FetchedModule {
+                final_url: module.final_url,
+                source: module.source,
+            })
+        }
+        Err(message) => {
+            if message == "shield" {
+                crate::page_trace::note_blocked(url);
+                Err(NETWORK_ERROR.to_string())
+            } else {
+                Err(message)
+            }
+        }
+    })
+}
+
+fn finish_prefetch_guard(url: &str, result: &Result<PrefetchedModule, String>) {
+    let guard = PREFETCH_GUARDS.with(|guards| guards.borrow_mut().remove(url));
+    let Some(guard) = guard else {
+        return;
+    };
+    match result {
+        Ok(module) => guard.response(
+            module.status,
+            module.content_type.as_deref(),
+            None,
+            Some(module.body_len as u64),
+            false,
+        ),
+        Err(message) if message == "timed out" => guard.fail(FailureStage::Timeout, "timed out"),
+        Err(message) if message == "shield" => guard.fail(FailureStage::Policy, "blocked"),
+        Err(message) => guard.fail(FailureStage::Connect, message),
+    }
 }
 
 fn finish_inserted_guard(guard: Option<crate::inspector::RequestGuard>, fetched: &FetchedInserted) {

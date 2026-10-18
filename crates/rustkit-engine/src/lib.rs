@@ -923,6 +923,9 @@ struct ViewState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
+    /// Parser images still outstanding when the load yielded at
+    /// `DOMContentLoaded`. Awaited before `window` `load`.
+    pending_parser_images: Option<ParkedImages>,
     /// External classic scripts the page inserted whose fetches are still
     /// out, or finished and not yet run. The fetch is not tied to a turn
     /// deadline. A live turn runs one whose fetch has finished (an
@@ -1002,6 +1005,7 @@ impl ViewState {
         // The last document's requests are nobody's now.
         self.live_requests.clear();
         self.live_images.clear();
+        self.pending_parser_images = None;
         // The previous document's inserted scripts must not run here. A
         // fetch still out is discarded when its result arrives. A load tail
         // parked on that document must not fire `load` on this one.
@@ -1215,12 +1219,50 @@ struct ScriptSlot {
 /// next classic script. `async` is awaited after `DOMContentLoaded`.
 struct ScriptPlan {
     slots: Vec<ScriptSlot>,
+    /// Parser images. Polled with the script fetches so they progress
+    /// during the script walk, and awaited only before `window` `load`.
+    images: Option<script_net::LiveFuture<FetchedImages>>,
+    images_done: Option<FetchedImages>,
+}
+
+/// Images discovered with the parser, parked when a yielding load returns
+/// at `DOMContentLoaded` and finished before `window` `load`.
+enum ParkedImages {
+    Fetching(script_net::LiveFuture<FetchedImages>),
+    Ready(FetchedImages),
 }
 
 impl ScriptPlan {
+    fn attach_images(&mut self, fut: script_net::LiveFuture<FetchedImages>) {
+        self.images = Some(fut);
+        // Start the sockets now. Later polls use the load's waker.
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(&waker);
+        self.poll_images(&mut cx);
+    }
+
+    fn poll_images(&mut self, cx: &mut std::task::Context<'_>) {
+        let Some(fut) = self.images.as_mut() else {
+            return;
+        };
+        if let std::task::Poll::Ready(fetched) = fut.as_mut().poll(cx) {
+            self.images = None;
+            self.images_done = Some(fetched);
+        }
+    }
+
+    /// Move a still-running or finished image fetch off the plan.
+    fn take_images(&mut self) -> Option<ParkedImages> {
+        if let Some(done) = self.images_done.take() {
+            return Some(ParkedImages::Ready(done));
+        }
+        self.images.take().map(ParkedImages::Fetching)
+    }
+
     /// Poll every in-flight fetch. A completion stores the body and, for a
     /// module, the final URL as the label.
     fn poll_pending(&mut self, cx: &mut std::task::Context<'_>) {
+        self.poll_images(cx);
         for slot in &mut self.slots {
             if !matches!(slot.body, SlotBody::Pending(_)) {
                 continue;
@@ -1907,6 +1949,27 @@ fn script_in_shadow(node: &Node) -> bool {
     while let Some(parent) = current {
         if parent.is_shadow_root() {
             return true;
+        }
+        current = parent.parent();
+    }
+    false
+}
+
+/// Scripting is enabled, so a `<script>` inside `<noscript>` is not run
+/// (HTML: the contents are raw text). The trace still records it.
+fn script_in_noscript(node: &Node) -> bool {
+    let mut current = node.parent();
+    let mut guard = 0u32;
+    while let Some(parent) = current {
+        if parent
+            .tag_name()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("noscript"))
+        {
+            return true;
+        }
+        guard += 1;
+        if guard > 10_000 {
+            break;
         }
         current = parent.parent();
     }
@@ -2613,6 +2676,7 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            pending_parser_images: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -2703,6 +2767,7 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            pending_parser_images: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -2792,6 +2857,7 @@ impl Engine {
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            pending_parser_images: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -4145,6 +4211,8 @@ impl Engine {
             self.abandon_load_tail(id, nav_id);
             return;
         }
+        // Parser images hold window `load`, not DOMContentLoaded.
+        self.finish_parked_images(id).await;
         let horizon = self.config.timer_horizon_ms;
         let net_rounds = self.config.script_network_rounds;
         let loader = self.loader.clone();
@@ -4520,6 +4588,16 @@ impl Engine {
             .views
             .get(&id)
             .is_some_and(|view| view.load_tail.is_some());
+        let _module_prefetch = self.views.get(&id).and_then(|view| {
+            let policy = view.script_policy.clone()?;
+            let document = view.url.clone()?;
+            Some(script_net::install_module_prefetch(
+                policy,
+                self.loader.clone(),
+                document,
+                view.inspector.clone(),
+            ))
+        });
         if defer_post_load_timers {
             let _tail_js = install_script_js(
                 std::time::Duration::from_millis(self.config.script_budget_ms),
@@ -5335,13 +5413,12 @@ impl Engine {
         Ok(())
     }
 
-    /// Collect the document's `<script>`s in document order and start
-    /// fetching the external ones. The returned future borrows nothing from
-    /// the engine, so `load_url` polls it alongside `load_subresources`:
     /// Every `<script>` the parser put in the document, including ones inside
-    /// a shadow tree and ones whose type is not javascript. The runner still
-    /// executes only the light-tree scripts it executed before; this records
-    /// the rest, with a reason, under the same `inline#N` numbering.
+    /// a shadow tree, a `<template>`, or `<noscript>`, and ones whose type is
+    /// not javascript. Shadow scripts run. Template and noscript scripts are
+    /// recorded and not run. An external script keeps the `inline#N` slot it
+    /// consumed, on `fetched_scripts.inline`, so a gap in the inline labels
+    /// names that script.
     fn catalog_scripts(
         &self,
         id: EngineViewId,
@@ -5365,6 +5442,7 @@ impl Engine {
                 return;
             }
             let in_shadow = script_in_shadow(node);
+            let in_noscript = !template && script_in_noscript(node);
             match script_timing(node) {
                 None => {
                     let label = page_trace::next_type_label(script_type_essence(node));
@@ -5374,6 +5452,8 @@ impl Engine {
                         &label,
                         if template {
                             "template"
+                        } else if in_noscript {
+                            "noscript"
                         } else {
                             "not a javascript type"
                         },
@@ -5381,12 +5461,19 @@ impl Engine {
                     page_trace::note_script_reason(&label, "never reached");
                 }
                 Some(Err(outcome)) => {
-                    let reserved = page_trace::next_inline_label();
-                    let label = script_external_label(node, base).unwrap_or(reserved);
+                    let (slot, reserved) = page_trace::next_inline_slot();
+                    let external = script_external_label(node, base);
+                    let label = external.clone().unwrap_or(reserved);
                     page_trace::remember_script_label(node_id, label.clone());
                     page_trace::note_observed(&label, &outcome);
+                    if external.is_some() {
+                        page_trace::note_inline_slot(&label, slot);
+                    }
                     if template {
                         page_trace::note_detail(&label, "template");
+                        page_trace::note_script_reason(&label, "never reached");
+                    } else if in_noscript {
+                        page_trace::note_detail(&label, "noscript");
                         page_trace::note_script_reason(&label, "never reached");
                     } else if in_shadow {
                         page_trace::note_detail(&label, "shadow tree");
@@ -5395,8 +5482,9 @@ impl Engine {
                     }
                 }
                 Some(Ok(_)) => {
-                    let reserved = page_trace::next_inline_label();
-                    let label = script_external_label(node, base).unwrap_or(reserved);
+                    let (slot, reserved) = page_trace::next_inline_slot();
+                    let external = script_external_label(node, base);
+                    let label = external.clone().unwrap_or(reserved);
                     page_trace::remember_script_label(node_id, label.clone());
                     let status = if label.starts_with("inline#") {
                         None
@@ -5404,9 +5492,16 @@ impl Engine {
                         Some(200)
                     };
                     page_trace::note_parser_script(&label, status);
+                    if external.is_some() {
+                        page_trace::note_inline_slot(&label, slot);
+                    }
                     if template {
                         // Inert until script inserts the content (HTML template contents).
                         page_trace::note_detail(&label, "template");
+                        page_trace::note_script_reason(&label, "never reached");
+                    } else if in_noscript {
+                        // Scripting is on: noscript contents do not run.
+                        page_trace::note_detail(&label, "noscript");
                         page_trace::note_script_reason(&label, "never reached");
                     } else if in_shadow {
                         page_trace::note_detail(&label, "shadow tree");
@@ -5577,6 +5672,10 @@ impl Engine {
             if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
                 return;
             }
+            // A script inside `<noscript>` is not executed while scripting is on.
+            if script_in_noscript(node) {
+                return;
+            }
             let Some(classified) = script_timing(node) else {
                 return;
             };
@@ -5617,7 +5716,11 @@ impl Engine {
                 body,
             });
         });
-        Some(ScriptPlan { slots })
+        Some(ScriptPlan {
+            slots,
+            images: None,
+            images_done: None,
+        })
     }
 
     /// Fetch and run external scripts the page inserted.
@@ -6321,6 +6424,15 @@ impl Engine {
             if nav_cancel::cancelled(watch) {
                 return;
             }
+            // Images discovered with the document wait here, after
+            // DOMContentLoaded and before window `load`. An inline classic
+            // script has already run.
+            if index == 1 {
+                self.finish_plan_images(id, plan, bindings, watch).await;
+                if nav_cancel::cancelled(watch) {
+                    return;
+                }
+            }
             // What the scripts (or the previous step) wrote is laid out
             // before the next step runs, so its script reads fresh geometry.
             self.refresh_layout_for_script(id, bindings);
@@ -6414,6 +6526,7 @@ impl Engine {
                     }
                 }
                 if yielded {
+                    self.park_plan_images(id, plan);
                     break;
                 }
             }
@@ -6928,11 +7041,25 @@ impl Engine {
         } else {
             None
         };
+        // Module fetches start when the specifier is known, on a thread that
+        // keeps running during `Module::parse`. Not the inserted-script queue.
+        let _module_prefetch = match (script_policy.clone(), self.views.get(&id)) {
+            (Some(policy), Some(view)) => Some(script_net::install_module_prefetch(
+                policy,
+                self.loader.clone(),
+                url.clone(),
+                view.inspector.clone(),
+            )),
+            _ => None,
+        };
+        // Images are deferred only when scripts will run: an inline classic
+        // script must not wait for them. They are awaited before window load.
+        let defer_images = script_plan.is_some();
         // The subresource future borrows `self`. Keep that borrow inside this
         // block so the script walk below can use `self` again. Script fetches
         // are polled here and stay in `script_plan`, which does not borrow `self`.
         let subresources = {
-            let subresources_fut = self.load_subresources_for(id, Some(watch));
+            let subresources_fut = self.load_subresources_for(id, Some(watch), defer_images);
             tokio::pin!(subresources_fut);
             let joined = futures::future::poll_fn(|cx| {
                 if let Some(plan) = script_plan.as_mut() {
@@ -6948,9 +7075,15 @@ impl Engine {
         };
         drop(style_memo);
         // This will trigger additional relayouts as resources arrive
-        if let Err(e) = subresources {
-            warn!(?e, "Failed to load some subresources");
-            // Continue even if some resources fail to load
+        let image_plan = match subresources {
+            Ok(plan) => plan,
+            Err(e) => {
+                warn!(?e, "Failed to load some subresources");
+                None
+            }
+        };
+        if let (Some(plan), Some(scripts)) = (image_plan, script_plan.as_mut()) {
+            scripts.attach_images(Box::pin(Self::fetch_planned_images(plan)));
         }
         // Still deferred means load_subresources failed before laying out.
         if !self.nav_superseded(id, generation)
@@ -14007,6 +14140,96 @@ impl Engine {
         fetched.loaded
     }
 
+    fn park_plan_images(&mut self, id: EngineViewId, plan: &mut ScriptPlan) {
+        let Some(parked) = plan.take_images() else {
+            return;
+        };
+        if let Some(view) = self.views.get_mut(&id) {
+            view.pending_parser_images = Some(parked);
+        }
+    }
+
+    /// Await parser images that are still out and lay them out. `bindings`
+    /// is set while the script runner holds them off the view, so geometry
+    /// is published there. A stall of at least 1ms is an `image` parser pause.
+    async fn finish_plan_images(
+        &mut self,
+        id: EngineViewId,
+        plan: &mut ScriptPlan,
+        bindings: &DomBindings,
+        watch: Option<&NavWatch>,
+    ) {
+        let waiting = plan.images.is_some();
+        let started = waiting.then(std::time::Instant::now);
+        let fetched = if let Some(done) = plan.images_done.take() {
+            Some(done)
+        } else if let Some(fut) = plan.images.take() {
+            match nav_cancel::unless_cancelled(watch, fut).await {
+                Some(fetched) => Some(fetched),
+                None => return,
+            }
+        } else {
+            None
+        };
+        if let Some(started) = started {
+            let ms = started.elapsed().as_millis() as u64;
+            if ms >= 1 {
+                page_trace::note_parser_pause("image", ms, "images");
+            }
+        }
+        let Some(fetched) = fetched else {
+            return;
+        };
+        self.keep_and_relayout_images(id, fetched, Some(bindings));
+    }
+
+    async fn finish_parked_images(&mut self, id: EngineViewId) {
+        let Some(parked) = self
+            .views
+            .get_mut(&id)
+            .and_then(|view| view.pending_parser_images.take())
+        else {
+            return;
+        };
+        let (fetched, stall) = match parked {
+            ParkedImages::Ready(done) => (done, std::time::Duration::ZERO),
+            ParkedImages::Fetching(fut) => {
+                let started = std::time::Instant::now();
+                let fetched = fut.await;
+                (fetched, started.elapsed())
+            }
+        };
+        if stall.as_millis() >= 1 {
+            page_trace::note_parser_pause("image", stall.as_millis() as u64, "images");
+        }
+        self.keep_and_relayout_images(id, fetched, None);
+    }
+
+    fn keep_and_relayout_images(
+        &mut self,
+        id: EngineViewId,
+        fetched: FetchedImages,
+        bindings: Option<&DomBindings>,
+    ) {
+        let count = self.keep_fetched_images(fetched);
+        if count == 0 {
+            return;
+        }
+        info!(count, "Loaded images");
+        if let Err(e) = self.relayout_for(id, RelayoutCause::ImageLoaded { count }) {
+            warn!(?e, "Failed to relayout after images");
+            return;
+        }
+        let Some(bindings) = bindings else {
+            return;
+        };
+        if let Some(view) = self.views.get(&id) {
+            if let Some(layout) = view.layout.as_ref() {
+                publish_geometry(bindings, layout);
+            }
+        }
+    }
+
     /// Who a subresource request comes from: the document URL and the
     /// referrer policy in force. The policy is the last valid
     /// `<meta name="referrer">` in the document, else the response's
@@ -14047,17 +14270,23 @@ impl Engine {
 
     /// Load all subresources (stylesheets, images) for a view.
     pub async fn load_subresources(&mut self, id: EngineViewId) -> Result<(), EngineError> {
-        self.load_subresources_for(id, None).await
+        self.load_subresources_for(id, None, false).await?;
+        Ok(())
     }
 
     /// [`Engine::load_subresources`] for a load that may be cancelled: each
     /// phase (sheets, fonts, images) races its fetches against the cancel
     /// and is checked before what it fetched is applied.
+    /// `defer_images` plans images and returns them instead of awaiting.
+    /// The navigation does that so an inline script and `DOMContentLoaded`
+    /// do not wait on images. `load_subresources` passes false and still
+    /// waits here. `Ok(None)` is a cancel or a plan with nothing to fetch.
     async fn load_subresources_for(
         &mut self,
         id: EngineViewId,
         watch: Option<&NavWatch>,
-    ) -> Result<(), EngineError> {
+        defer_images: bool,
+    ) -> Result<Option<ImagePlan>, EngineError> {
         // Load external stylesheets.
         //
         // The assignment below is UNCONDITIONAL on purpose. It used to sit
@@ -14074,7 +14303,7 @@ impl Engine {
         let Some(external_stylesheets) =
             nav_cancel::unless_cancelled(watch, self.load_external_stylesheets(id)).await
         else {
-            return Ok(());
+            return Ok(None);
         };
         page_trace::note_parser_pause(
             "stylesheet",
@@ -14111,11 +14340,16 @@ impl Engine {
         // Web fonts: faces declared in the external sheets that just arrived
         // (plus any inline data: faces not yet loaded), then the network ones.
         let local_fonts = self.load_local_web_fonts(id);
+        let fonts_started = std::time::Instant::now();
         let Some(remote_fonts) =
             nav_cancel::unless_cancelled(watch, self.load_remote_web_fonts(id)).await
         else {
-            return Ok(());
+            return Ok(None);
         };
+        let font_ms = fonts_started.elapsed().as_millis() as u64;
+        if font_ms >= 1 {
+            page_trace::note_parser_pause("font", font_ms, "web fonts");
+        }
         let fonts_loaded = local_fonts + remote_fonts;
         if fonts_loaded > 0 {
             info!(count = fonts_loaded, "Loaded web fonts");
@@ -14145,13 +14379,18 @@ impl Engine {
             self.relayout(id)?;
         }
 
-        // Load images
+        // Images do not block the parser or DOMContentLoaded. A navigation
+        // plans them here and awaits them before window `load`.
         if nav_cancel::cancelled(watch) {
-            return Ok(());
+            return Ok(None);
+        }
+        if defer_images {
+            let plan = self.plan_image_loads(id, false)?;
+            return Ok(plan.filter(|plan| !plan.is_empty()));
         }
         let Some(image_count) = nav_cancel::unless_cancelled(watch, self.load_images(id)).await
         else {
-            return Ok(());
+            return Ok(None);
         };
         let image_count = image_count?;
         if image_count > 0 && !nav_cancel::cancelled(watch) {
@@ -14160,7 +14399,7 @@ impl Engine {
             self.relayout_for(id, RelayoutCause::ImageLoaded { count: image_count })?;
         }
 
-        Ok(())
+        Ok(None)
     }
 
     // -----------------------------------------------------------------

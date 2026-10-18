@@ -56,6 +56,10 @@
     // Created and not yet started: inserts look for scripts only while
     // there is one.
     var fresh = 0;
+    // Scripts prepared while their host was still disconnected. A later
+    // insert that connects them runs them. Lit fills a shadow root before
+    // the host is in the document.
+    var pending = [];
     var JS_TYPE = /^(?:(?:text|application)\/(?:x-)?(?:java|ecma)script|text\/javascript1\.[0-5]|text\/(?:jscript|livescript))$/;
 
     function isScript(n) {
@@ -100,8 +104,21 @@
         if (el[STATE] === 'fresh') return false;
         return rootOf(el) === g.document;
     }
+    function flushPending() {
+        if (!pending.length) return;
+        var rest = [];
+        for (var i = 0; i < pending.length; i++) {
+            if (pending[i].isConnected) prepare(pending[i]);
+            else rest.push(pending[i]);
+        }
+        pending = rest;
+    }
     function prepare(el) {
-        if (el[STATE] === 'started' || !el.isConnected) return;
+        if (el[STATE] === 'started') return;
+        if (!el.isConnected) {
+            if (pending.indexOf(el) < 0) pending.push(el);
+            return;
+        }
         var src = el.getAttribute('src');
         if (src === null && el.textContent === '') return;
         var k = kind(el);
@@ -123,7 +140,17 @@
             internals.fetch(el, url, keepsOrder(el));
             return;
         }
-        if (k === 'module') return;
+        if (k === 'module') {
+            // An inline module runs when it is inserted (HTML prepare a
+            // script). `import()` of its text is a classic dynamic import
+            // of a data URL, which the module fetch allows on the first hop.
+            var text = el.textContent;
+            import('data:text/javascript;charset=utf-8,' + encodeURIComponent(text)).then(function () {
+                try { if (internals.traceInline) internals.traceInline(el); } catch (e) {}
+                fire(el, 'load');
+            }, function () { fire(el, 'error'); });
+            return;
+        }
         try { if (internals.traceInline) internals.traceInline(el); } catch (e) {}
         var was = internals.current(el);
         try {
@@ -179,13 +206,16 @@
             function walk(n) {
                 if (!n || n.localName === 'template') return;
                 consider(n);
+                // A shadow tree is not a child of its host. Scripts inserted
+                // into a disconnected shadow are reached when the host connects.
+                if (n.shadowRoot) walk(n.shadowRoot);
                 for (var c = n.firstChild; c; c = c.nextSibling) walk(c);
             }
             if (isScript(node)) consider(node);
             else walk(node);
             // Text added to a script already in the document.
             if (isScript(parent)) consider(parent);
-            return found.length ? function () { found.forEach(prepare); } : null;
+            return found.length || pending.length ? function () { flushPending(); found.forEach(prepare); } : null;
         },
         // A `src` set, or text written, on a script already in the document.
         changed: function (node, op, name) {

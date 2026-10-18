@@ -66,14 +66,23 @@ shield was left unset; Chrome writes `off (stock Chrome)`), `ready_state`
 The diff does not compare `shield`, `fetched_scripts`, or `parser` durations.
 `fetched_scripts` also carries `detail` when a script was missed for a reason
 the four `reason` values do not name: `shadow tree`, `not a javascript type`,
-`template`, `inserted after the parser snapshot`, or `script-inserted inline`.
+`template`, `noscript`, `inserted after the parser snapshot`, or
+`script-inserted inline`. An external script carries `inline` (the `inline#N`
+slot it consumed) so a gap in the inline labels names that script.
+`module_timeline`, when any module was prefetched, is one record per URL:
+`requested_ms`, `start_ms`, `body_ms`, `parsed_ms`.
 Inline scripts the parser inserted are labeled `inline#N` in document order,
-counting external scripts, including ones inside a shadow tree or a `<template>`
-content fragment and ones whose type is not javascript (`type:<essence>#N`,
-which does not take an `inline#N`). A `template` script is inert until inserted.
+counting external scripts, including ones inside a shadow tree, a `<template>`
+content fragment, or `<noscript>`, and ones whose type is not javascript
+(`type:<essence>#N`, which does not take an `inline#N`). A `template` script
+is inert until its content is inserted or cloned. A `noscript` script does
+not run while scripting is on.
 
-`parser` is one record per pause: `blocked_on` is `stylesheet`, `script fetch`,
-or `script execute`, with `ms` and `target`. Chrome fills stylesheet and
+`parser` is one record per pause: `blocked_on` is `stylesheet`, `font`,
+`script fetch`, `script execute`, or `image`, with `ms` and `target`.
+`font` and `image` are recorded only when that stall was at least 1ms.
+The `image` pause is the wait still left before `window` `load`, not a wait
+before the first inline script. Chrome fills stylesheet and
 script fetch from resource timing. HiWave also records each script execution.
 The trace stays open after a yielded load returns at DOMContentLoaded, until
 the page has been quiet for two seconds or `HIWAVE_DUMP_RENDER_AT_MS` has
