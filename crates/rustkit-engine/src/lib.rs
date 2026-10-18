@@ -906,6 +906,14 @@ struct ViewState {
     /// `innerHeight`). A later resize at this size is not an event, and a
     /// queued size the view has already left is not dispatched.
     announced_viewport: Option<(u32, u32)>,
+    /// Mac host frame, for tests. Production reads the NSView, and only
+    /// when [`place_host_frame`](crate) moved it since the last
+    /// `set_view_bounds`. A frame that is not ahead is a stale read and
+    /// must not become the layout width.
+    #[cfg(test)]
+    test_host_frame: Option<(u32, u32)>,
+    #[cfg(test)]
+    test_frame_ahead: bool,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
     script_log: Vec<ScriptRecord>,
     /// The document response's `Referrer-Policy` header, if it had a valid one.
@@ -2672,6 +2680,10 @@ impl Engine {
             headless_bounds: None,
             pending_resize: None,
             announced_viewport: None,
+            #[cfg(test)]
+            test_host_frame: None,
+            #[cfg(test)]
+            test_frame_ahead: false,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
@@ -2763,6 +2775,10 @@ impl Engine {
             headless_bounds: None,
             pending_resize: None,
             announced_viewport: None,
+            #[cfg(test)]
+            test_host_frame: None,
+            #[cfg(test)]
+            test_frame_ahead: false,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
@@ -2853,6 +2869,10 @@ impl Engine {
             headless_bounds: Some(bounds),
             pending_resize: None,
             announced_viewport: None,
+            #[cfg(test)]
+            test_host_frame: None,
+            #[cfg(test)]
+            test_frame_ahead: false,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
@@ -2898,6 +2918,12 @@ impl Engine {
         self.apply_view_bounds(id, bounds)?;
         if let Some(view) = self.views.get_mut(&id) {
             view.pending_resize = None;
+            // This call is the viewport. A host frame left over from a
+            // sidebar move must not replace it.
+            #[cfg(test)]
+            {
+                view.test_frame_ahead = false;
+            }
         }
         self.layout_after_resize(id, bounds).map(|_| ())
     }
@@ -2926,8 +2952,33 @@ impl Engine {
         self.apply_view_bounds(id, bounds)?;
         if let Some(view) = self.views.get_mut(&id) {
             view.pending_resize = Some(bounds);
+            // Confirming bounds retires an unconfirmed host frame. The
+            // frame is the viewport only when it moved after this call
+            // (`place_host_frame` while the engine was borrowed).
+            #[cfg(test)]
+            {
+                view.test_frame_ahead = false;
+            }
         }
         Ok(())
+    }
+
+    /// Test double for the macOS host frame (`raw_view_content_size`).
+    ///
+    /// `ahead` is the mark [`rustkit_viewhost::place_raw_view`] leaves and
+    /// [`Engine::set_view_bounds`] clears. A frame that is not ahead is a
+    /// stale read of the NSView and is not the layout viewport.
+    #[cfg(test)]
+    pub(crate) fn set_test_host_frame(
+        &mut self,
+        id: EngineViewId,
+        ahead: bool,
+        size: Option<(u32, u32)>,
+    ) {
+        if let Some(view) = self.views.get_mut(&id) {
+            view.test_frame_ahead = ahead;
+            view.test_host_frame = size;
+        }
     }
 
     /// Lay out a view whose bounds changed since its last layout, and tell
@@ -2988,18 +3039,26 @@ impl Engine {
             // queued size does not.
             self.apply_view_bounds(id, bounds)?;
         }
-        if self.views.get(&id).and_then(|view| view.announced_viewport)
-            == Some((bounds.width, bounds.height))
-        {
+        let published = (bounds.width, bounds.height);
+        if self.views.get(&id).and_then(|view| view.announced_viewport) == Some(published) {
             return Ok(false);
         }
-        // Re-layout if we have content
-        if self
+        // The document is already laid out at this size. Rebuilding was
+        // logged `resize` and reflowed boxes (a 1280 header became 1060)
+        // while the viewport the page was built at had not changed.
+        // Publishing `window.innerWidth` is the whole of what is left.
+        let same_layout = self
             .views
             .get(&id)
-            .ok_or(EngineError::ViewNotFound(id))?
-            .document
-            .is_some()
+            .and_then(|view| view.laid_with.as_ref())
+            .is_some_and(|with| with.size == published);
+        if !same_layout
+            && self
+                .views
+                .get(&id)
+                .ok_or(EngineError::ViewNotFound(id))?
+                .document
+                .is_some()
         {
             self.relayout_for(id, RelayoutCause::Resize)?;
         }
@@ -3056,13 +3115,23 @@ impl Engine {
         self.presenter.host_bounds(view.viewhost_id).ok()
     }
 
-    /// The host view's frame, when a load moved it without borrowing the
-    /// engine (`place_host_frame`). `None` for a headless view and on
-    /// platforms without that frame.
+    /// The host view's frame, when [`rustkit_viewhost::place_raw_view`]
+    /// moved it after the last `set_view_bounds`. `None` when that frame
+    /// is not ahead of the stored viewport: a bare read of the NSView was
+    /// 1060 (the 220px sidebar) while the viewport stayed 1280×696, and
+    /// dispatching it was a `resize` relayout at an unchanged viewport.
     fn live_frame_size(&self, id: EngineViewId) -> Option<(u32, u32)> {
+        #[cfg(test)]
+        if self.views.get(&id).is_some_and(|view| view.test_frame_ahead) {
+            return self.views.get(&id).and_then(|view| view.test_host_frame);
+        }
         #[cfg(target_os = "macos")]
         {
-            return rustkit_viewhost::raw_view_content_size(self.host_view_raw(id));
+            let raw = self.host_view_raw(id);
+            if rustkit_viewhost::host_frame_is_ahead(raw) {
+                return rustkit_viewhost::raw_view_content_size(raw);
+            }
+            return None;
         }
         #[cfg(not(target_os = "macos"))]
         {

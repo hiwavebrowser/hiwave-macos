@@ -319,6 +319,38 @@ fn clip_view_layer(view: id) {
     }
 }
 
+/// Raw views whose frame `place_raw_view` moved and `set_bounds` has not
+/// since confirmed. `place_raw_view` cannot borrow the engine (a load holds
+/// it), so the mark lives with the pointer. A frame read that is not in
+/// here is stale: adopting it laid the page out at the sidebar width while
+/// the viewport `set_view_bounds` stored was unchanged.
+static FRAME_AHEAD: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<isize>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(target_os = "macos")]
+fn note_frame_ahead(view: isize) {
+    if view == 0 {
+        return;
+    }
+    if let Ok(mut ahead) = FRAME_AHEAD.lock() {
+        ahead.insert(view);
+    }
+}
+
+fn clear_frame_ahead(view: isize) {
+    if view == 0 {
+        return;
+    }
+    if let Ok(mut ahead) = FRAME_AHEAD.lock() {
+        ahead.remove(&view);
+    }
+}
+
+/// Whether `place_raw_view` moved `view` since the last `set_bounds`.
+pub fn host_frame_is_ahead(view: isize) -> bool {
+    view != 0 && FRAME_AHEAD.lock().map(|ahead| ahead.contains(&view)).unwrap_or(false)
+}
+
 /// Move an existing `NSView` and clip its layer. Does not touch the engine,
 /// so a content load can inset the page while the engine is borrowed.
 #[cfg(target_os = "macos")]
@@ -326,6 +358,7 @@ pub fn place_raw_view(view: isize, bounds: Bounds) {
     if view == 0 {
         return;
     }
+    let raw = view;
     let view = view as id;
     unsafe {
         let superview: id = msg_send![view, superview];
@@ -339,6 +372,10 @@ pub fn place_raw_view(view: isize, bounds: Bounds) {
                 cocoa::foundation::NSSize::new(bounds.width as f64, bounds.height as f64),
             );
             let _: () = msg_send![view, setFrame: frame];
+            // The frame moved and the engine's stored bounds did not.
+            // A failed setFrame (no superview) leaves the old frame; that
+            // read is not a new viewport.
+            note_frame_ahead(raw);
         }
         clip_view_layer(view);
     }
@@ -925,7 +962,11 @@ impl ViewHost {
             guard.hwnd_raw
         };
         drop(views);
-        let _ = hwnd_raw;
+        // The stored bounds are the viewport. A frame `place_raw_view` left
+        // behind is no longer ahead of them, even when setFrame could not
+        // run (no superview): reading that frame back laid the page out at
+        // 1060 while this call had stored 1280.
+        clear_frame_ahead(hwnd_raw);
 
         #[cfg(windows)]
         {
