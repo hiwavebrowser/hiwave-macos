@@ -1814,6 +1814,11 @@ impl DomBindings {
         self.runtime.borrow_mut().take_module_requests()
     }
 
+    /// Static imports only. Dynamic `import()` stays queued.
+    pub fn take_static_module_requests(&self) -> Vec<String> {
+        self.runtime.borrow_mut().take_static_module_requests()
+    }
+
     /// Imports whose source has not been supplied yet.
     pub fn pending_module_imports(&self) -> Vec<PendingImport> {
         self.runtime.borrow().pending_module_imports()

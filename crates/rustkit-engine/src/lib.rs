@@ -4740,6 +4740,7 @@ impl Engine {
                     tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
                     document,
                     &mut modules_fetched,
+                    false,
                     &inspector,
                 )
                 .await;
@@ -6188,6 +6189,12 @@ impl Engine {
                                         tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
                                         document,
                                         &mut count,
+                                        // Static imports of this deferred or
+                                        // async module only. A dynamic
+                                        // `import()` queued by an earlier
+                                        // script stays for the pump after
+                                        // DOMContentLoaded.
+                                        true,
                                         &inspector,
                                     )),
                                 )
@@ -6235,18 +6242,19 @@ impl Engine {
                                         // still running): the element hears `load`.
                                         Ok(rustkit_bindings::ModuleState::Done)
                                         | Ok(rustkit_bindings::ModuleState::Evaluating) => {
-                                            page_trace::resolve_module_dependencies(true, None);
+                                            page_trace::resolve_module_graph(&module_url, true, None);
                                             (ScriptOutcome::Ran, Some("load"))
                                         }
                                         // The graph loaded and ran, and threw: reported,
                                         // and the fetch itself succeeded.
                                         Ok(rustkit_bindings::ModuleState::Threw(message)) => {
-                                            page_trace::resolve_module_dependencies(true, None);
+                                            page_trace::resolve_module_graph(&module_url, true, None);
                                             (ScriptOutcome::Threw(message), Some("load"))
                                         }
                                         // The graph could not be loaded or linked.
                                         Ok(rustkit_bindings::ModuleState::Failed(message)) => {
-                                            page_trace::resolve_module_dependencies(
+                                            page_trace::resolve_module_graph(
+                                                &module_url,
                                                 false,
                                                 Some("module graph error"),
                                             );
@@ -6258,7 +6266,8 @@ impl Engine {
                                             )
                                         }
                                         Ok(rustkit_bindings::ModuleState::Loading) => {
-                                            page_trace::resolve_module_dependencies(
+                                            page_trace::resolve_module_graph(
+                                                &module_url,
                                                 false,
                                                 Some("waiting on a dependency"),
                                             );
@@ -6273,7 +6282,7 @@ impl Engine {
                                                     }
                                                 })
                                                 .collect();
-                                            page_trace::note_module_waiting_on(&waiting);
+                                            page_trace::note_module_waiting_on(&module_url, &waiting);
                                             (
                                                 ScriptOutcome::Threw(
                                                     "module imports were not loaded".into(),

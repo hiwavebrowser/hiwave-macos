@@ -15,8 +15,10 @@ mod import_map;
 mod module;
 #[cfg(feature = "boa")]
 pub use module::{
-    install_import_specifier_hook, set_module_scan_hook, set_module_url_hook, DynamicImportFailure,
-    FetchedModule, ModuleHandle, ModuleState, PendingImport,
+    install_import_specifier_hook, scan_module_imports, scanning_module_url, set_module_scan_hook,
+    set_module_url_hook,
+    set_module_yield_hook, DynamicImportFailure, FetchedModule, ModuleHandle, ModuleState,
+    PendingImport,
 };
 pub use control::{mono_us, ThreadStamp, ViewControl, Watchdog};
 

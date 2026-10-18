@@ -787,6 +787,97 @@ document.addEventListener('DOMContentLoaded', function () {
     );
 }
 
+/// A classic `import()` is not a static dependency of the deferred module
+/// that runs next. `DOMContentLoaded` does not wait for that body. Chrome
+/// reaches DCL before a chunk the parser did not import statically; the
+/// pre-DCL pump must not parse it just because an earlier script asked.
+#[test]
+fn an_earlier_dynamic_import_does_not_delay_the_deferred_module_or_dom_content_loaded() {
+    let page = r#"<html><head>
+<script>
+window.t0 = Date.now();
+window.order = [];
+import('./slow.js');
+window.order.push('classic:' + (Date.now() - window.t0));
+</script>
+<script type="module" src="/mod.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  window.order.push('dcl:' + (Date.now() - window.t0));
+});
+window.addEventListener('load', function () {
+  window.order.push('load:' + (Date.now() - window.t0));
+});
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(
+        page,
+        vec![
+            route(
+                "/mod.js",
+                "text/javascript",
+                "window.order.push('mod:' + (Date.now() - window.t0));",
+                Duration::ZERO,
+            ),
+            route(
+                "/slow.js",
+                "text/javascript",
+                "window.order.push('slow:' + (Date.now() - window.t0));",
+                SLOW,
+            ),
+        ],
+    );
+    let order = js(&mut engine, view, "window.order.join(',')");
+    let tags: Vec<&str> = order
+        .split(',')
+        .map(|part| part.split(':').next().unwrap())
+        .collect();
+    assert_eq!(tags, ["classic", "mod", "dcl", "slow", "load"], "{order}");
+    assert!(
+        part_ms(&order, "dcl") < 400,
+        "DOMContentLoaded waited on the dynamic import: {order}"
+    );
+    assert!(
+        part_ms(&order, "slow") >= 700,
+        "slow.js did not wait out its fetch: {order}"
+    );
+}
+
+/// `<script type=module async>` is the as-soon-as-possible set. It does not
+/// delay DOMContentLoaded, including its static imports.
+#[test]
+fn an_async_module_does_not_delay_dom_content_loaded() {
+    let page = r#"<html><head>
+<script>window.t0 = Date.now(); window.order = [];</script>
+<script type="module" async src="/slow.js"></script>
+<script>
+window.order.push('inline:' + (Date.now() - window.t0));
+document.addEventListener('DOMContentLoaded', function () {
+  window.order.push('dcl:' + (Date.now() - window.t0));
+});
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(
+        page,
+        vec![route(
+            "/slow.js",
+            "text/javascript",
+            "window.order.push('async:' + (Date.now() - window.t0));",
+            SLOW,
+        )],
+    );
+    let order = js(&mut engine, view, "window.order.join(',')");
+    let tags: Vec<&str> = order
+        .split(',')
+        .map(|part| part.split(':').next().unwrap())
+        .collect();
+    assert_eq!(tags, ["inline", "dcl", "async"], "{order}");
+    assert!(
+        part_ms(&order, "dcl") < 400,
+        "DOMContentLoaded waited on the async module: {order}"
+    );
+}
+
 /// String-literal `import()` is prefetched, but it does not take a
 /// connection ahead of a static import in the same module, and it does
 /// not delay DOMContentLoaded.

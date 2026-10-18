@@ -1793,6 +1793,30 @@ const WRAPPERS_JS: &str = r#"
         media.play = function play() {
             return Promise.reject(new g.DOMException('The element has no supported sources.', 'NotSupportedError'));
         };
+        // HTMLVideoElement.requestVideoFrameCallback. Nothing is presented;
+        // the callback still runs so a player waiting on the first frame
+        // does not throw on a missing method.
+        var rvfcSeq = 0, rvfcTimers = {};
+        media.requestVideoFrameCallback = function requestVideoFrameCallback(cb) {
+            var id = ++rvfcSeq, el = this;
+            rvfcTimers[id] = g.setTimeout(function () {
+                delete rvfcTimers[id];
+                if (typeof cb !== 'function') return;
+                var now = (g.performance && g.performance.now) ? g.performance.now() : 0;
+                try {
+                    cb(now, {
+                        presentationTime: now, expectedDisplayTime: now, width: 0, height: 0,
+                        mediaTime: Number(el.currentTime) || 0, presentedFrames: 0, processingDuration: 0
+                    });
+                } catch (e) { try { __rk.reportError(e); } catch (_) {} }
+            }, 16);
+            return id;
+        };
+        media.cancelVideoFrameCallback = function cancelVideoFrameCallback(id) {
+            if (rvfcTimers[id] != null) { g.clearTimeout(rvfcTimers[id]); delete rvfcTimers[id]; }
+        };
+        Object.defineProperty(media, 'videoWidth', { get: function () { return 0; }, configurable: true });
+        Object.defineProperty(media, 'videoHeight', { get: function () { return 0; }, configurable: true });
         [['paused', true], ['ended', false], ['readyState', 0], ['currentTime', 0], ['duration', NaN], ['error', null]].forEach(function (p) {
             Object.defineProperty(media, p[0], { value: p[1], writable: true, enumerable: true, configurable: true });
         });
