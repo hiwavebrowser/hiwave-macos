@@ -106,6 +106,8 @@ mod web_intl_tests;
 mod mutation_observer_tests;
 #[cfg(test)]
 mod web_messaging_tests;
+#[cfg(test)]
+mod job_kind_tests;
 mod web_crypto;
 mod web_scroll;
 mod web_url;
@@ -501,7 +503,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
         if (typeof cb !== 'function') throw new TypeError("Failed to execute 'queueMicrotask' on 'Window': The callback provided as parameter 1 is not a function.");
-        Promise.resolve().then(function () { try { cb(); } catch (e) { report(e); } });
+        Promise.resolve().then(function queueMicrotask() { try { cb(); } catch (e) { report(e); } });
     };
 
     function call(timer) {
@@ -1872,6 +1874,9 @@ impl DomBindings {
             "window.__rustkit_run_timers({}, {})",
             horizon_ms, max_callbacks
         ))?;
+        // Atomics.waitAsync and any other Boa timeout job. The page's own
+        // setTimeout already ran above; these are not microtasks of it.
+        self.runtime.borrow_mut().run_due_timer_jobs()?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
             _ => 0,
@@ -1886,10 +1891,21 @@ impl DomBindings {
             "window.__rustkit_advance_timers({}, {})",
             delta_ms, max_callbacks
         ))?;
+        self.runtime.borrow_mut().run_due_timer_jobs()?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
             _ => 0,
         })
+    }
+
+    /// Boa timer jobs that are due (not the page's `setTimeout` queue).
+    pub fn run_due_timer_jobs(&self) -> Result<u32, BindingError> {
+        self.runtime.borrow_mut().run_due_timer_jobs().map_err(Into::into)
+    }
+
+    /// The microtask checkpoint that most recently finished on this thread.
+    pub fn last_job_census(&self) -> rustkit_js::JobCensus {
+        self.runtime.borrow().last_job_census()
     }
 
     /// Milliseconds until the page's next timer is due on the virtual clock
