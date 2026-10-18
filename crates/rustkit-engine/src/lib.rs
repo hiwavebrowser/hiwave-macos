@@ -9640,6 +9640,19 @@ impl Engine {
 
                     if !has_element_children {
                         let text = node.text_content();
+                        // The leaf measures `label` as a single line. Source
+                        // indentation is part of that string, and
+                        // `white-space: normal` (the initial value, and the
+                        // UA button value) was never applied, so a
+                        // pretty-printed "PCs & Devices" button laid out
+                        // ~3100px wide and the unstyled Microsoft header
+                        // scrolled to 3199. Collapse with the same rules as
+                        // inline text. `pre` / `pre-wrap` / `break-spaces`
+                        // keep the raw characters.
+                        let text = rustkit_layout::text::collapse_whitespace(
+                            &text,
+                            style.white_space,
+                        );
                         let label = if text.trim().is_empty() {
                             // No text, no children: an empty button renders
                             // empty, not a placeholder word.
