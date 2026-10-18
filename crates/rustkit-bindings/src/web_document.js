@@ -70,15 +70,21 @@
     getter('pointerLockElement', function () { return null; });
     value('hasFocus', function hasFocus() { return true; });
     value('exitFullscreen', function exitFullscreen() { return Promise.resolve(); });
+    // adoptNode is [CEReactions] (DOM). One document, so there is no
+    // adoptedCallback; a connected node is removed and its
+    // disconnectedCallback runs when this call returns.
     value('adoptNode', function adoptNode(node) {
-        if (node === null || typeof node !== 'object' || typeof node.nodeType !== 'number') {
-            throw new TypeError("Failed to execute 'adoptNode' on 'Document': parameter 1 is not of type 'Node'.");
-        }
-        if (node.nodeType === 9) {
-            throw new g.DOMException("Failed to execute 'adoptNode' on 'Document': The node provided is a document, which may not be adopted.", 'NotSupportedError');
-        }
-        if (node.parentNode) node.parentNode.removeChild(node);
-        return node;
+        var run = function () {
+            if (node === null || typeof node !== 'object' || typeof node.nodeType !== 'number') {
+                throw new TypeError("Failed to execute 'adoptNode' on 'Document': parameter 1 is not of type 'Node'.");
+            }
+            if (node.nodeType === 9) {
+                throw new g.DOMException("Failed to execute 'adoptNode' on 'Document': The node provided is a document, which may not be adopted.", 'NotSupportedError');
+            }
+            if (node.parentNode) node.parentNode.removeChild(node);
+            return node;
+        };
+        return g.__rkCE ? g.__rkCE.withReactions(run) : run();
     });
 
     // ---- collections: HTMLCollection-shaped snapshots.

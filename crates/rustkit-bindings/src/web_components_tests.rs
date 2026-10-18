@@ -316,3 +316,289 @@ fn define_upgrades_elements_inside_shadow_trees() {
         "true"
     );
 }
+
+/// Each `[CEReactions]` family invokes its element queue before returning.
+/// A marker pushed on the next line sits after the callbacks, and a
+/// multi-node call lets the first callback see every node the call inserted.
+
+fn host_page() -> DomBindings {
+    bound("<html><body><div id=host></div></body></html>")
+}
+
+#[test]
+fn reactions_run_on_exit_of_insertion_methods() {
+    let b = host_page();
+    b.evaluate(
+        "class XI extends HTMLElement { \
+             connectedCallback() { log.push('c:' + this.id + ':' + this.parentNode.childElementCount); } } \
+         customElements.define('x-i', XI); \
+         var host = document.getElementById('host'); \
+         function el(id) { var e = document.createElement('x-i'); e.id = id; return e; } \
+         log.length = 0; \
+         host.append(el('a'), el('b')); log.push('append'); \
+         host.prepend(el('c')); log.push('prepend'); \
+         document.getElementById('a').before(el('d')); log.push('before'); \
+         document.getElementById('a').after(el('e')); log.push('after'); \
+         host.insertBefore(el('f'), null); log.push('insertBefore'); \
+         host.appendChild(el('g')); log.push('appendChild'); \
+         host.insertAdjacentElement('beforeend', el('h')); log.push('adjacent');",
+    )
+    .unwrap();
+    assert_eq!(
+        ev(&b, "log.join()"),
+        "c:a:2,c:b:2,append,c:c:3,prepend,c:d:4,before,c:e:5,after,c:f:6,insertBefore,c:g:7,appendChild,c:h:8,adjacent"
+    );
+}
+
+#[test]
+fn reactions_run_on_exit_of_replace_children_and_replace_with() {
+    let b = host_page();
+    b.evaluate(
+        "class XR extends HTMLElement { \
+             connectedCallback() { log.push('c:' + this.id + ':' + host.childElementCount + ':' + (this.nextElementSibling ? this.nextElementSibling.id : 'end')); } \
+             disconnectedCallback() { log.push('d:' + this.id + ':' + this.isConnected + ':' + host.childElementCount + ':' + host.firstElementChild.id); } } \
+         customElements.define('x-r', XR); \
+         var host = document.getElementById('host'); \
+         function el(id) { var e = document.createElement('x-r'); e.id = id; return e; } \
+         host.append(el('a'), el('b')); log.length = 0; \
+         host.replaceChildren(el('c'), el('d')); log.push('replaceChildren'); \
+         var other = document.createElement('div'); document.body.appendChild(other); host = other; \
+         var w = el('w'); other.appendChild(w); log.push('armed'); \
+         w.replaceWith(el('n1'), el('n2')); log.push('replaceWith');",
+    )
+    .unwrap();
+    assert_eq!(
+        ev(&b, "log.join()"),
+        "d:a:false:2:c,d:b:false:2:c,c:c:2:d,c:d:2:end,replaceChildren,c:w:1:end,armed,d:w:false:2:n1,c:n1:2:n2,c:n2:2:end,replaceWith"
+    );
+}
+
+#[test]
+fn reactions_run_on_exit_of_removal() {
+    let b = host_page();
+    b.evaluate(
+        "class XD extends HTMLElement { \
+             disconnectedCallback() { log.push('d:' + this.id); } \
+             connectedCallback() { log.push('c:' + this.id); } } \
+         customElements.define('x-d', XD); \
+         var host = document.getElementById('host'); \
+         var a = document.createElement('x-d'); a.id = 'a'; host.appendChild(a); log.length = 0; \
+         var removed = host.removeChild(a); log.push('removeChild:' + (removed === a) + ':' + a.isConnected); \
+         host.appendChild(a); a.remove(); log.push('remove:' + a.isConnected);",
+    )
+    .unwrap();
+    assert_eq!(ev(&b, "log.join()"), "d:a,removeChild:true:false,c:a,d:a,remove:false");
+}
+
+#[test]
+fn reactions_run_on_exit_of_attribute_methods() {
+    let b = host_page();
+    b.evaluate(
+        "class XF extends HTMLElement { \
+             static get observedAttributes() { return ['a', 'b', 'id', 'class']; } \
+             attributeChangedCallback(n, o, v) { log.push(n + ':' + o + '>' + v); } } \
+         customElements.define('x-f', XF); var e = new XF(); \
+         e.setAttribute('a', '1'); log.push('set'); \
+         e.setAttributeNS(null, 'a', '2'); log.push('ns'); \
+         e.removeAttributeNS(null, 'a'); log.push('rmns'); \
+         e.setAttribute('b', 'x'); log.push('setb'); \
+         e.toggleAttribute('b'); log.push('toggle'); \
+         e.id = 'i'; log.push('id'); \
+         e.className = 'c'; log.push('className'); \
+         e.classList.add('z'); log.push('classList'); \
+         e.setAttribute('a', '3'); e.attributes.removeNamedItem('a'); log.push('named'); \
+         e.setAttribute('a', '4'); e.getAttributeNode('a').value = '5'; log.push('attr');",
+    )
+    .unwrap();
+    assert_eq!(
+        ev(&b, "log.join()"),
+        "a:null>1,set,a:1>2,ns,a:2>null,rmns,b:null>x,setb,b:x>null,toggle,id:null>i,id,class:null>c,className,class:c>c z,classList,a:null>3,a:3>null,named,a:null>4,a:4>5,attr"
+    );
+}
+
+#[test]
+fn reactions_run_on_exit_of_inner_html() {
+    let b = host_page();
+    b.evaluate(
+        "class XH extends HTMLElement { \
+             constructor() { super(); log.push('ctor:' + this.id + ':' + (this.parentNode ? this.parentNode.childElementCount : 0) + ':' + this.isConnected); } \
+             connectedCallback() { log.push('connected:' + this.id + ':' + this.parentNode.childElementCount); } } \
+         customElements.define('x-h', XH); log.length = 0; \
+         document.getElementById('host').innerHTML = '<x-h id=one></x-h><x-h id=two></x-h>'; \
+         log.push('done');",
+    )
+    .unwrap();
+    assert_eq!(
+        ev(&b, "log.join()"),
+        "ctor:one:2:true,connected:one:2,ctor:two:2:true,connected:two:2,done"
+    );
+}
+
+#[test]
+fn reactions_run_on_exit_of_insert_adjacent_html() {
+    let b = host_page();
+    b.evaluate(
+        "class XH extends HTMLElement { \
+             constructor() { super(); log.push('ctor:' + this.id + ':' + (this.parentNode ? this.parentNode.childElementCount : 0)); } \
+             connectedCallback() { log.push('connected:' + this.id + ':' + this.parentNode.childElementCount + ':' + this.isConnected); } } \
+         customElements.define('x-h', XH); log.length = 0; \
+         document.getElementById('host').insertAdjacentHTML('beforeend', '<x-h id=three></x-h><x-h id=four></x-h>'); \
+         log.push('done');",
+    )
+    .unwrap();
+    assert_eq!(
+        ev(&b, "log.join()"),
+        "ctor:three:2,connected:three:2:true,ctor:four:2,connected:four:2:true,done"
+    );
+}
+
+#[test]
+fn reactions_run_on_exit_of_clone_node() {
+    let b = host_page();
+    b.evaluate(
+        "var holder = document.createElement('div'); \
+         holder.innerHTML = '<x-c id=p tone=live><x-c id=c></x-c></x-c>'; \
+         class XC extends HTMLElement { \
+             static get observedAttributes() { return ['tone']; } \
+             constructor() { super(); var child = this.firstChild; \
+                 log.push('ctor:' + this.id + ':' + this.isConnected + ':' + (child && child.nodeType === 1 ? (child instanceof XC) : 'leaf')); } \
+             attributeChangedCallback(n, o, v) { log.push('attr:' + this.id + ':' + n + ':' + o + ':' + v + ':' + this.isConnected); } \
+             connectedCallback() { log.push('connected:' + this.id); } } \
+         customElements.define('x-c', XC); log.length = 0; \
+         var copy = holder.firstChild.cloneNode(true); \
+         log.push('done:' + copy.isConnected + ':' + (copy instanceof XC) + ':' + (copy.firstChild instanceof XC) + ':' + (holder.firstChild instanceof XC));",
+    )
+    .unwrap();
+    assert_eq!(
+        ev(&b, "log.join()"),
+        "ctor:p:false:false,attr:p:tone:null:live:false,ctor:c:false:leaf,done:false:true:true:false"
+    );
+}
+
+#[test]
+fn reactions_run_on_exit_of_import_node() {
+    let b = host_page();
+    b.evaluate(
+        "class XC extends HTMLElement { \
+             static get observedAttributes() { return ['tone']; } \
+             constructor() { super(); log.push('ctor:' + this.id + ':' + this.isConnected); } \
+             attributeChangedCallback(n, o, v) { log.push('attr:' + this.id + ':' + o + ':' + v + ':' + this.isConnected); } \
+             connectedCallback() { log.push('connected'); } } \
+         customElements.define('x-c', XC); \
+         var t = document.createElement('template'); \
+         t.innerHTML = '<x-c id=p tone=live><x-c id=c></x-c></x-c>'; \
+         log.length = 0; \
+         var frag = document.importNode(t.content, true); \
+         log.push('done:' + frag.firstChild.isConnected + ':' + (frag.firstChild instanceof XC) + ':' + (frag.firstChild.firstChild instanceof XC) + ':' + (t.content.firstChild instanceof XC));",
+    )
+    .unwrap();
+    assert_eq!(
+        ev(&b, "log.join()"),
+        "ctor:p:false,attr:p:null:live:false,ctor:c:false,done:false:true:true:false"
+    );
+}
+
+#[test]
+fn reactions_run_on_exit_of_adopt_node() {
+    let b = host_page();
+    b.evaluate(
+        "class XA extends HTMLElement { \
+             disconnectedCallback() { log.push('d:' + this.id); } \
+             adoptedCallback() { log.push('adopted'); } } \
+         customElements.define('x-a', XA); \
+         var host = document.getElementById('host'); \
+         var a = document.createElement('x-a'); a.id = 'a'; host.appendChild(a); log.length = 0; \
+         var back = document.adoptNode(a); \
+         log.push('adopt:' + (back === a) + ':' + a.isConnected); \
+         var loose = document.createElement('x-a'); \
+         var n = log.length; document.adoptNode(loose); \
+         log.push('loose:' + loose.isConnected + ':' + (log.length === n));",
+    )
+    .unwrap();
+    assert_eq!(ev(&b, "log.join()"), "d:a,adopt:true:false,loose:false:true");
+}
+
+#[test]
+fn reactions_run_on_exit_of_normalize() {
+    let b = host_page();
+    b.evaluate(
+        "class XN extends HTMLElement { \
+             connectedCallback() { log.push('c:' + this.id); } \
+             disconnectedCallback() { log.push('d:' + this.id); } } \
+         customElements.define('x-n', XN); \
+         var host = document.getElementById('host'); \
+         var a = document.createElement('x-n'); a.id = 'a'; host.appendChild(a); \
+         host.appendChild(document.createTextNode('x')); \
+         host.appendChild(document.createTextNode('')); \
+         host.appendChild(document.createTextNode('y')); \
+         var b = document.createElement('x-n'); b.id = 'b'; host.appendChild(b); \
+         log.length = 0; host.normalize(); \
+         log.push('done:' + host.childNodes.length + ':' + host.childNodes[1].data + ':' + a.isConnected + ':' + b.isConnected);",
+    )
+    .unwrap();
+    assert_eq!(ev(&b, "log.join()"), "done:3:xy:true:true");
+}
+
+#[test]
+fn reactions_run_on_exit_of_text_setters() {
+    let b = host_page();
+    b.evaluate(
+        "class XT extends HTMLElement { disconnectedCallback() { log.push('d:' + this.id); } } \
+         customElements.define('x-t', XT); \
+         var host = document.getElementById('host'); \
+         var a = document.createElement('x-t'); a.id = 'a'; host.appendChild(a); log.length = 0; \
+         host.textContent = 'gone'; log.push('text:' + a.isConnected + ':' + host.textContent); \
+         host.appendChild(document.createTextNode('z')); \
+         var a2 = document.createElement('x-t'); a2.id = 'a2'; host.appendChild(a2); \
+         host.firstChild.nodeValue = 'q'; log.push('nv:' + host.firstChild.data + ':' + a2.isConnected); \
+         host.innerText = 't'; log.push('it:' + a2.isConnected + ':' + host.innerText);",
+    )
+    .unwrap();
+    assert_eq!(ev(&b, "log.join()"), "d:a,text:false:gone,nv:q:true,d:a2,it:false:t");
+}
+
+#[test]
+fn reactions_run_on_exit_of_define_and_create_element() {
+    let b = bound(PAGE);
+    b.evaluate(
+        "class XA extends HTMLElement { \
+             static get observedAttributes() { return ['color']; } \
+             constructor() { super(); log.push('ctor:' + this.id); } \
+             attributeChangedCallback(n, o, v) { log.push('attr:' + this.id + ':' + n + ':' + o + ':' + v); } \
+             connectedCallback() { \
+                 var sib = this.id === 'a1' ? document.getElementById('a2') : null; \
+                 log.push('connected:' + this.id + ':' + this.isConnected + ':' + (sib ? (sib instanceof XA) : 'nosib')); \
+             } } \
+         customElements.define('x-a', XA); \
+         var n = log.length; var made = document.createElement('x-a'); \
+         log.push('created:' + (made instanceof XA) + ':' + (log.length === n + 1)); \
+         var ns = document.createElementNS('http://www.w3.org/1999/xhtml', 'x-a'); \
+         log.push('ns:' + (ns instanceof XA)); \
+         var svg = document.createElementNS('http://www.w3.org/2000/svg', 'x-a'); \
+         log.push('svg:' + (svg instanceof XA)); \
+         var box = document.createElement('div'); box.innerHTML = '<x-u id=u></x-u>'; \
+         class XU extends HTMLElement { constructor() { super(); log.push('up:' + this.id + ':' + this.isConnected); } } \
+         customElements.define('x-u', XU); \
+         customElements.upgrade(box); log.push('upgrade:' + (box.firstChild instanceof XU));",
+    )
+    .unwrap();
+    assert_eq!(
+        ev(&b, "log.join()"),
+        "ctor:a1,attr:a1:color:null:red,connected:a1:true:false,ctor:a2,connected:a2:true:nosib,ctor:,created:true:true,ctor:,ns:true,svg:false,up:u:false,upgrade:true"
+    );
+}
+
+#[test]
+fn reactions_run_on_exit_of_range_delete_contents() {
+    let b = host_page();
+    b.evaluate(
+        "class XG extends HTMLElement { disconnectedCallback() { log.push('d:' + this.id); } } \
+         customElements.define('x-g', XG); \
+         var host = document.getElementById('host'); \
+         var a = document.createElement('x-g'); a.id = 'a'; host.appendChild(a); \
+         var range = document.createRange(); range.selectNode(a); log.length = 0; \
+         range.deleteContents(); log.push('range:' + a.isConnected + ':' + host.childElementCount);",
+    )
+    .unwrap();
+    assert_eq!(ev(&b, "log.join()"), "d:a,range:false:0");
+}
