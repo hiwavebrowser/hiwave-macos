@@ -1217,8 +1217,10 @@ var e = new TypeError('page text'); e.name = 'SECRET_NAME'; throw e;
             // cannot read is dropped.
             "script_error ReferenceError: <error len=38> script=inline#5 rejection=false",
             // Fourth R1 hold @ 47fc7abb: no message is kept by its text,
-            // the engine's own words included.
-            "script_error TypeError: <error len=23> @inline#6:1:9 script=inline#6 rejection=false",
+            // the engine's own words included. A call of a non-function
+            // names the callee type and `this` type
+            // ("not a callable function: callee is undefined, this is undefined").
+            "script_error TypeError: <error len=63> @inline#6:1:9 script=inline#6 rejection=false",
         ]
     );
 }

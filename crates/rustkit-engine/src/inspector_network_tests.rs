@@ -149,9 +149,12 @@ fn a_small_load_is_recorded_in_this_exact_order() {
             // so that layout is the initial load's.
             "relayout initial_load",
             "request #3 GET image /pic.png by=parser",
+            // The image is started with the document and awaited after the
+            // parser script. `console.log` runs when the parser reaches it,
+            // without waiting for the image body.
+            "console Log <string len=2> @inline#1:1:9",
             "response #3 200 image/png",
             "relayout image_loaded(count=1)",
-            "console Log <string len=2> @inline#1:1:9",
             "load_finished over_budget=0",
         ]
     );

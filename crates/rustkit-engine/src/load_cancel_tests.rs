@@ -280,9 +280,10 @@ enum Point {
 
 /// The plan's acceptance for M3b: a load with a spinning script and twenty
 /// slow subresources is cancelled within 200 ms, and the next navigation
-/// then loads normally. A load's scripts run after its subresources here,
-/// so the spin and the twenty fetches are never in flight together: the
-/// cancel is sent at each point in turn.
+/// then loads normally. Image requests are written before the script and
+/// the bodies are not awaited, so the spin and the fetches can be in
+/// flight together. A cancel while the server holds the images stops the
+/// load before the spin or during it.
 fn cancel_a_spinning_load_with_twenty_slow_subresources(point: Point) {
     let prefix = match point {
         Point::SubresourcesHeld => "/held",
@@ -352,7 +353,18 @@ fn cancel_a_spinning_load_with_twenty_slow_subresources(point: Point) {
     );
     match point {
         Point::SubresourcesHeld => {
-            assert!(log.is_empty(), "the spin never started: {log:?}");
+            // Images are not a parser barrier, so the spin may already be
+            // running when the held requests are cancelled. It must not
+            // have run to completion, and the held responses must not
+            // have been applied. An empty log is a cancel that landed
+            // while the sockets were still being started.
+            if let Some((_, outcome)) = log.iter().find(|(source, _)| source == "inline#1") {
+                assert_ne!(
+                    *outcome,
+                    ScriptOutcome::Ran,
+                    "the spin was stopped: {log:?}"
+                );
+            }
             assert_eq!(server.held_answered.load(Ordering::SeqCst), 0);
         }
         Point::Spinning => {
