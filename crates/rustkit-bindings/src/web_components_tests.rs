@@ -280,6 +280,51 @@ fn lit_property_binding_is_visible_when_the_child_connects() {
     );
 }
 
+/// Template contents stay in the inert document. They are not upgraded
+/// there, nor by cloning the template or its content. importNode adopts
+/// into this document and upgrades the copy while it is still
+/// disconnected. Moving a content node into the page upgrades it.
+/// Cloning an ordinary detached element upgrades that copy too.
+#[test]
+fn template_contents_stay_unupgraded_until_adopted() {
+    let b = bound("<html><body></body></html>");
+    b.evaluate(
+        "class Child extends HTMLElement {} \
+         customElements.define('x-child', Child); \
+         var t = document.createElement('template'); \
+         t.innerHTML = '<x-child id=\"c\"></x-child>'; \
+         var inner = t.content.firstChild; \
+         var clonedTpl = t.cloneNode(true); \
+         var clonedContent = t.content.cloneNode(true); \
+         var imported = document.importNode(t.content, true); \
+         var importedTpl = document.importNode(t, true); \
+         var loose = document.createElement('div'); \
+         loose.innerHTML = '<x-child id=\"l\"></x-child>'; \
+         var looseCopy = loose.cloneNode(true); \
+         var el = document.createElement('x-child'); \
+         var elCopy = el.cloneNode(true); \
+         var made = t.content.ownerDocument.createElement('x-child'); \
+         log.push([ \
+             'content:' + (inner instanceof Child) + ':' + (inner.ownerDocument === document) + ':' + (inner.ownerDocument.defaultView === null), \
+             'cloneTpl:' + (clonedTpl.content.firstChild instanceof Child) + ':' + (clonedTpl.content.firstChild.ownerDocument === inner.ownerDocument), \
+             'cloneContent:' + (clonedContent.firstChild instanceof Child) + ':' + (clonedContent.firstChild.ownerDocument === inner.ownerDocument), \
+             'import:' + (imported.firstChild instanceof Child) + ':' + imported.firstChild.isConnected + ':' + (imported.firstChild.ownerDocument === document), \
+             'importTpl:' + (importedTpl.content.firstChild instanceof Child) + ':' + (importedTpl.content.ownerDocument !== document), \
+             'loose:' + (loose.firstChild instanceof Child) + ':' + loose.firstChild.isConnected, \
+             'looseCopy:' + (looseCopy.firstChild instanceof Child) + ':' + looseCopy.firstChild.isConnected, \
+             'elCopy:' + (elCopy instanceof Child) + ':' + elCopy.isConnected, \
+             'inertCreate:' + (made instanceof Child) + ':' + (made.ownerDocument === inner.ownerDocument) \
+         ].join('|')); \
+         document.body.appendChild(inner); \
+         log.push('moved:' + (inner instanceof Child) + ':' + inner.isConnected + ':' + (inner.ownerDocument === document));",
+    )
+    .unwrap();
+    assert_eq!(
+        ev(&b, "log.join('|')"),
+        "content:false:false:true|cloneTpl:false:true|cloneContent:false:true|import:true:false:true|importTpl:false:true|loose:true:false|looseCopy:true:false|elCopy:true:false|inertCreate:false:true|moved:true:true:true"
+    );
+}
+
 /// `:defined` is answered from the DOM: each define records its name there,
 /// and only names that were defined.
 #[test]

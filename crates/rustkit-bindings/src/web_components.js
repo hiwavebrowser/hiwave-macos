@@ -62,9 +62,20 @@
         if (st.def.disconnected) call(st.def.disconnected, el, []);
     }
 
+    // Template contents belong to the inert template document (no browsing
+    // context: its defaultView is null). Reactions are for this document.
+    // importNode adopts into this document before the wrapper below runs;
+    // cloneNode does not, so a copy of template content stays inert.
+    function inInertDocument(node) {
+        if (!node || typeof node.nodeType !== 'number') return false;
+        var doc = node.nodeType === 9 ? node : node.ownerDocument;
+        return !!(doc && doc !== document && doc.defaultView == null);
+    }
+
     // Upgrade: run the definition's constructor on an element that already
     // exists (HTML "upgrade an element").
     function upgrade(el, def) {
+        if (inInertDocument(el)) return;
         var existing = stateOf(el);
         if (existing && (existing.def === def || existing.failed)) return;
         var record = { element: el, constructed: false };
@@ -148,15 +159,16 @@
     //
     // Flush the upgrade before returning to the caller, once the whole
     // copy exists (HTML §4.13.6: reactions run as a batch just before
-    // user script resumes, not mid-clone). Do not walk a <template>'s
-    // content. Those nodes belong to the inert template-contents document,
-    // which has no browsing context, so they are not upgraded here; Lit
-    // upgrades them by importNode'ing the content into this document.
-    // connectedCallback stays queued for insertion: the copy is detached,
-    // and enqueueConnected checks isConnected.
+    // user script resumes, not mid-clone). A <template>'s content is not
+    // a descendant, and a clone of that content stays in the inert
+    // document, so neither is upgraded. Lit upgrades by importNode into
+    // this document, which adopts first. connectedCallback stays queued
+    // for insertion: the copy is detached, and enqueueConnected checks
+    // isConnected.
     function upgradeClone(root) {
-        if (!names.length || !root) return;
+        if (!names.length || !root || inInertDocument(root)) return;
         candidates(root).forEach(function (el) {
+            if (inInertDocument(el)) return;
             var def = definitionOf(el);
             if (def && !stateOf(el)) upgrade(el, def);
         });
@@ -202,7 +214,7 @@
     rawCreateElement = originalCreate;
     DocumentProto.createElement = function (tag) {
         var el = originalCreate.apply(this, arguments);
-        if (!names.length) return el;
+        if (!names.length || inInertDocument(el)) return el;
         var def = definitionOf(el);
         if (def) {
             try {
@@ -357,20 +369,23 @@
     ['appendChild', 'insertBefore', 'replaceChild'].forEach(function (n) { wrapInsert(n, true); });
     ['append', 'prepend', 'before', 'after', 'replaceWith', 'replaceChildren'].forEach(function (n) { wrapInsert(n, false); });
 
-    // importNode is cloneNode (one document). Upgrading the copy here
-    // covers both. The native clone finishes first, so a parent's
-    // constructor runs against a tree whose descendants already exist,
-    // then each descendant upgrades in tree order.
-    protoWith('cloneNode').forEach(function (proto) {
-        var native = proto.cloneNode;
-        if (typeof native !== 'function' || native.__rkCE) return;
-        var wrapped = function () {
-            var copy = native.apply(this, arguments);
-            upgradeClone(copy);
-            return copy;
-        };
-        wrapped.__rkCE = true;
-        Object.defineProperty(proto, 'cloneNode', { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, 'cloneNode') });
+    // The native copy finishes first, so a parent's constructor runs
+    // against a tree whose descendants already exist, then each descendant
+    // upgrades in tree order. importNode is not cloneNode: the host import
+    // adopts the copy into this document, and only that copy may upgrade.
+    // cloneNode keeps the source node document.
+    ['cloneNode', 'importNode'].forEach(function (name) {
+        protoWith(name).forEach(function (proto) {
+            var native = proto[name];
+            if (typeof native !== 'function' || native.__rkCE) return;
+            var wrapped = function () {
+                var copy = native.apply(this, arguments);
+                upgradeClone(copy);
+                return copy;
+            };
+            wrapped.__rkCE = true;
+            Object.defineProperty(proto, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, name) });
+        });
     });
 
     function wrapRemove(name, victim) {
