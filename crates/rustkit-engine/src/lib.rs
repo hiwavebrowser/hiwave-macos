@@ -4118,7 +4118,12 @@ impl Engine {
                 log_script_stopped("event:load", 0, take_script_js_overrun());
             }
             match caught {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    // The blocking path records this inside the load step.
+                    // The yielded tail fired `load` without it, so `load_ms`
+                    // stayed null after the event.
+                    page_trace::note_ready("complete");
+                }
                 Ok(Err(message)) => log.push(ScriptRecord {
                     source: "event:load".into(),
                     bytes: 0,
@@ -4414,6 +4419,10 @@ impl Engine {
             );
             self.advance_load_tail(id).await;
         }
+        // A frozen page does not lay out on this clock. Stamp the at-ms
+        // render dump from the latest snapshot when the trace clock passes
+        // the mark, instead of waiting for a later commit.
+        render_dump::poll_at_ms();
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get_mut(&id) else {

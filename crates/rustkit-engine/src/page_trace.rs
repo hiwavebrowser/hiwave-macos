@@ -1531,6 +1531,78 @@ mod tests {
     }
 
     #[cfg(feature = "headless")]
+    fn yielded_load_site(
+        path: &str,
+        _cookie: &str,
+    ) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/a.js" => {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                (
+                    200,
+                    "text/javascript",
+                    vec![],
+                    "window.aRan = true;".into(),
+                )
+            }
+            _ => (
+                200,
+                "text/html",
+                vec![],
+                "<!doctype html><html><body><script>\
+                 var s = document.createElement('script');\
+                 s.src = '/a.js';\
+                 document.head.appendChild(s);\
+                 </script></body></html>"
+                    .into(),
+            ),
+        }
+    }
+
+    /// The yielded tail fires `window` `load`. `load_ms` stays null until
+    /// that event, then records it.
+    #[cfg(feature = "headless")]
+    #[test]
+    fn a_yielded_load_records_load_ms_when_load_fires() {
+        let path = std::env::temp_dir().join(format!(
+            "hiwave-trace-{}-yield-load.json",
+            std::process::id()
+        ));
+        let _force = force_file_for_test(&path);
+        let _finish = FinishParked;
+        let server = crate::error_page_script_tests::serve(yielded_load_site);
+        let (mut engine, view, runtime) = crate::error_page_script_tests::engine();
+        let yielded = runtime
+            .block_on(engine.load_url_yielding(view, server.url("/")))
+            .expect("yielded load");
+        assert!(
+            matches!(yielded, crate::LoadYield::Yielded),
+            "the inserted script should hold load: {yielded:?}"
+        );
+        let mid: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("trace")).unwrap();
+        assert!(mid["dcl_ms"].is_number());
+        assert!(mid["load_ms"].is_null(), "load has not fired: {mid}");
+        let started = std::time::Instant::now();
+        loop {
+            let ready = engine
+                .execute_script(view, "document.readyState")
+                .unwrap_or_default();
+            if ready.contains("complete") {
+                break;
+            }
+            if started.elapsed() > std::time::Duration::from_secs(10) {
+                panic!("load did not fire: {ready}");
+            }
+            runtime.block_on(engine.pump_live(view, 16));
+        }
+        let end: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("trace")).unwrap();
+        assert!(end["load_ms"].is_number(), "load fired but load_ms is null: {end}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(feature = "headless")]
     fn trace_site(
         path: &str,
         _cookie: &str,
