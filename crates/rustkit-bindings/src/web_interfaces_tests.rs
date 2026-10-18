@@ -229,9 +229,14 @@ fn cdatasection_and_processinginstruction_interfaces_exist() {
 #[test]
 fn window_inherits_from_window_prototype_and_event_target_prototype() {
     let b = bound();
-    // 1. Object.getPrototypeOf(window) === Window.prototype
+    // The named-properties object sits between window and Window.prototype,
+    // so an element id is visible as a bare identifier. Window.prototype is
+    // the next object on that chain.
     assert_eq!(
-        ev(&b, "String(Object.getPrototypeOf(window) === Window.prototype)"),
+        ev(
+            &b,
+            "var mid = Object.getPrototypeOf(window); String(mid !== Window.prototype && Object.getPrototypeOf(mid) === Window.prototype)"
+        ),
         "true"
     );
     // 2. window instanceof Window
