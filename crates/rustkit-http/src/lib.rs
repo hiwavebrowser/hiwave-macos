@@ -575,7 +575,11 @@ impl Client {
 
         // Drive the connection; ends when the request completes and both
         // sides close. JoinHandle dropped deliberately: the task owns nothing
-        // beyond the connection it is draining.
+        // beyond the connection it is draining. The task is bound to whichever
+        // runtime is current here. Page loads and live turns share the process
+        // host runtime, so this task is still driven after the load returns.
+        // A runtime built for the load and dropped at DOMContentLoaded aborts
+        // it, and the request half then fails with a broken pipe.
         tokio::spawn(async move {
             let _ = connection.await;
         });

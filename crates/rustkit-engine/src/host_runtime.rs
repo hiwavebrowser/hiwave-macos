@@ -13,6 +13,13 @@
 //! `block_on`: a current-thread runtime has one core, and `load_url`'s
 //! future is `!Send`, so this cannot be a multi-thread runtime.
 //!
+//! Parser image fetches are that future. They are polled during the script
+//! walk and, when [`Engine::load_url_yielding`](crate::Engine::load_url_yielding)
+//! returns at `DOMContentLoaded`, parked on the view until a later live
+//! turn awaits them. They are not spawned onto another runtime. An HTTP/2
+//! connection driver `tokio::spawn`ed from inside one is on this runtime
+//! too, so returning from the load does not abort the connection.
+//!
 //! `shutdown_background` is how a runtime is dropped from inside itself
 //! without polling its tasks on the way down. Nothing here drops the
 //! runtime, so that call is not used. `spawn_blocking` is not used either:
@@ -237,5 +244,163 @@ mod tests {
                 .await
                 .expect("the same runtime still drives the timer");
         });
+    }
+
+    /// A yielding load returns at DOMContentLoaded while a parser image
+    /// fetch is still in flight. The bytes arrive afterwards, on a later
+    /// [`drive`]. Dropping the load's runtime at the return used to kill
+    /// that socket (Wikipedia: "No route to host"; an h2 page: broken pipe).
+    #[test]
+    fn an_image_fetch_started_before_dom_content_loaded_finishes_after_the_load_returns() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let seen = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen_thread = Arc::clone(&seen);
+        let release_thread = Arc::clone(&release);
+        let stop_thread = Arc::clone(&stop);
+        thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while !stop_thread.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(20)
+            {
+                match listener.accept() {
+                    Ok((sock, _)) => {
+                        let seen = Arc::clone(&seen_thread);
+                        let release = Arc::clone(&release_thread);
+                        thread::spawn(move || answer(sock, &seen, &release));
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        fn answer(mut sock: TcpStream, seen: &AtomicBool, release: &AtomicBool) {
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(3)));
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 8192 {
+                match sock.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                }
+            }
+            let head = String::from_utf8_lossy(&buf);
+            let path = head.split_whitespace().nth(1).unwrap_or("");
+            let (content_type, body, hold) = if path.ends_with("/logo.svg") {
+                seen.store(true, Ordering::SeqCst);
+                (
+                    "image/svg+xml",
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="140" height="22"></svg>"#,
+                    true,
+                )
+            } else if path.ends_with("/hold.js") {
+                thread::sleep(Duration::from_millis(200));
+                ("text/javascript", "/* hold */", false)
+            } else if path.ends_with("/tail.js") {
+                thread::sleep(Duration::from_millis(1500));
+                ("text/javascript", "window.tailRan = true;", false)
+            } else {
+                (
+                    "text/html",
+                    r#"<!doctype html><img src="/logo.svg" alt="logo"><script src="/hold.js"></script><script>
+var s = document.createElement('script');
+s.src = '/tail.js';
+document.head.appendChild(s);
+</script>"#,
+                    false,
+                )
+            };
+            if hold {
+                let started = std::time::Instant::now();
+                while !release.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(8)
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            let bytes = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(bytes.as_bytes());
+        }
+
+        let mut engine =
+            super::super::Engine::new(super::super::EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(rustkit_viewhost::Bounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 80,
+            })
+            .expect("view");
+        let url = url::Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let yielded = drive(async { engine.load_url_yielding(view, url).await.expect("yield") });
+        assert_eq!(
+            yielded,
+            super::super::LoadYield::Yielded,
+            "the inserted script is still out, so the load returns at DOMContentLoaded"
+        );
+        assert!(
+            seen.load(Ordering::SeqCst),
+            "the image request was started before the load returned"
+        );
+        assert!(
+            matches!(
+                engine.views.get(&view).unwrap().pending_parser_images,
+                Some(super::super::ParkedImages::Fetching(_))
+            ),
+            "the image fetch is still in flight when load_url_yielding returns"
+        );
+        release.store(true, Ordering::SeqCst);
+
+        let started = std::time::Instant::now();
+        loop {
+            let done = engine
+                .views
+                .get(&view)
+                .is_some_and(|state| state.load_tail.is_none())
+                && !engine.views[&view].navigation.is_loading();
+            if done {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(8),
+                "the yielded load did not finish"
+            );
+            drive(async {
+                engine.pump_live(view, 16).await;
+            });
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            engine
+                .svg_cache
+                .keys()
+                .any(|key| key.ends_with("/logo.svg")),
+            "the image body arrived after the load returned: {:?}",
+            engine.svg_cache.keys().collect::<Vec<_>>()
+        );
+        drive(async {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                tokio::time::sleep(Duration::from_millis(20)),
+            )
+            .await
+            .expect("the host runtime is still driving timers");
+        });
+        stop.store(true, Ordering::SeqCst);
     }
 }
