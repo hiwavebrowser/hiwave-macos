@@ -529,6 +529,11 @@ pub enum EngineEvent {
     },
     /// Favicon detected.
     FaviconDetected { view_id: EngineViewId, url: Url },
+    /// A laid-out frame, when this engine has no presenter of its own.
+    /// The content thread's load publishes these while the load is still
+    /// running; the window presents them. A commit with no display list
+    /// is not sent.
+    FrameCommitted(FrameCommit),
 }
 
 /// The `Accept` of an image request: Chrome's image header without
@@ -1153,6 +1158,12 @@ const LIVE_NETWORK_BUDGET: std::time::Duration = std::time::Duration::from_secs(
 /// for its requests and then failed them, so one slow request stopped
 /// input, timers and paint for two seconds and never arrived.
 const LIVE_NETWORK_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// How long a turn waits for a fetch that was queued while a response was
+/// being delivered, so the request is on the wire before a navigation in
+/// the same task can drop it. [`script_net::settle_live`] returns as soon
+/// as one answer is ready, so a loopback beacon does not wait this long.
+const LIVE_HANDOFF_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How long a request started by the live loop may take before the page gets
 /// a network error for it.
@@ -4613,6 +4624,38 @@ impl Engine {
                 live_requests.insert(at, Box::pin(std::future::ready(answer)));
             }
             out.in_flight = live_requests.len();
+            // A fetch queued while a response was delivered (a beacon in
+            // the same task as `location.href` or `link.click()`) is not
+            // in the take above. Start it before this turn returns. The
+            // next command may replace the document, and a request that
+            // is still only queued is dropped with it. Chrome starts a
+            // plain `fetch` before the navigation commits and aborts the
+            // response; this is that fetch, not `sendBeacon` or
+            // `keepalive`. The completed body waits for a later turn, and
+            // a navigation drops it.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())) {
+                Ok(requests) if !requests.is_empty() => {
+                    let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
+                    live_requests.extend(requests.into_iter().map(|request| {
+                        script_net::start_live(
+                            policy.clone(),
+                            loader.clone(),
+                            request,
+                            deadline,
+                            inspector.clone(),
+                        )
+                    }));
+                    let handed =
+                        script_net::settle_live(live_requests, LIVE_HANDOFF_SLICE).await;
+                    for (at, answer) in handed.into_iter().enumerate() {
+                        script_net::log_live_handoff(&answer.1, "handed off");
+                        live_requests.insert(at, Box::pin(std::future::ready(answer)));
+                    }
+                    out.in_flight = live_requests.len();
+                }
+                Ok(_) => {}
+                Err(_) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
+            }
             // The modules a dynamic `import()` asked for are still fetched
             // inside the turn, unless its budget is gone: they are asked
             // for again on the next.
@@ -5772,12 +5815,19 @@ impl Engine {
         }
         let _ = bindings.set_ready_state("loading");
         let scripts_started = std::time::Instant::now();
+        let mut frame_at = std::time::Instant::now();
         let modules_fetched = Cell::new(0usize);
         let mut external_scripts = 0usize;
         // What listeners reported while a script ran, for the script log at
         // the next lifecycle step.
         let mut carried: Vec<String> = Vec::new();
         for (index, (label, _, source, node_id, is_module)) in runnable.into_iter().enumerate() {
+            // Between scripts, on the same cadence as a live turn: the load
+            // stays pending and the poll loop publishes the frame.
+            if frame_at.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
+                tokio::task::yield_now().await;
+                frame_at = std::time::Instant::now();
+            }
             // Between two scripts: a cancelled load runs none of the rest.
             #[cfg(test)]
             load_phase(&format!("script:{index}"));
@@ -6084,7 +6134,7 @@ impl Engine {
         let mut yielded = false;
         // Lifecycle events and timers. Listener/callback exceptions are
         // caught in JS and drained after each step.
-        let steps: [(&str, &dyn Fn() -> Result<(), String>); 3] = [
+        let steps: [(&str, &dyn Fn() -> Result<(), String>); 2] = [
             ("event:DOMContentLoaded", &|| {
                 bindings.set_ready_state("interactive").map_err(strip)?;
                 bindings
@@ -6098,13 +6148,6 @@ impl Engine {
                 bindings.set_ready_state("complete").map_err(strip)?;
                 bindings
                     .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load")
-                    .map_err(strip)
-            }),
-            ("timers", &|| {
-                let _job = rustkit_js::DiagJob::enter("timer");
-                bindings
-                    .run_timers(horizon_ms, MAX_TIMER_CALLBACKS)
-                    .map(|n| timers_ran.set(n))
                     .map_err(strip)
             }),
         ];
@@ -6132,10 +6175,9 @@ impl Engine {
             if poisoned.get() {
                 return;
             }
-            // The step's requests are answered now; after the timers step,
-            // each round also runs the timers the responses scheduled.
-            let timers = (source == "timers").then_some((horizon_ms, MAX_TIMER_CALLBACKS));
-            if let Some(found) = pump(timers).await {
+            // The step's requests are answered now. The timer horizon is
+            // its own loop below, so a response here does not run timers.
+            if let Some(found) = pump(None).await {
                 for record in found.records {
                     inspector_glue::log_script(log, &inspector, record);
                 }
@@ -6213,6 +6255,100 @@ impl Engine {
             {
                 return;
             }
+        }
+        // The timer horizon, one frame at a time. A callback that changes
+        // the page is laid out before the next slice, and the yield lets
+        // the load's poll loop publish that frame while later timers and
+        // the parser's remaining work continue. A single callback is not
+        // cut short: the slice stops between callbacks.
+        if !yielded && !poisoned.get() && !nav_cancel::cancelled(watch) {
+            let mut remaining = MAX_TIMER_CALLBACKS;
+            loop {
+                if nav_cancel::cancelled(watch) {
+                    return;
+                }
+                self.refresh_layout_for_script(id, bindings);
+                let step_started = std::time::Instant::now();
+                let (caught, stopped) = with_script_js(bindings, || {
+                    let _job = rustkit_js::DiagJob::enter("timer");
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                    }))
+                });
+                let (ran, frame_yield) = match caught {
+                    Ok(Ok(ran)) => ran,
+                    Ok(Err(e)) => {
+                        inspector_glue::log_script(
+                            log,
+                            &inspector,
+                            ScriptRecord {
+                                source: "timers".into(),
+                                bytes: 0,
+                                elapsed_ms: 0,
+                                outcome: ScriptOutcome::Threw(strip(e)),
+                            },
+                        );
+                        break;
+                    }
+                    Err(_) => {
+                        poisoned.set(true);
+                        inspector_glue::log_script(
+                            log,
+                            &inspector,
+                            ScriptRecord {
+                                source: "timers".into(),
+                                bytes: 0,
+                                elapsed_ms: 0,
+                                outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                            },
+                        );
+                        return;
+                    }
+                };
+                if stopped {
+                    log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
+                }
+                timers_ran.set(timers_ran.get() + ran);
+                remaining = remaining.saturating_sub(ran);
+                info!(
+                    source = "timers",
+                    elapsed_ms = step_started.elapsed().as_millis() as u64,
+                    callbacks = timers_ran.get(),
+                    "Page lifecycle step done"
+                );
+                if !frame_yield || remaining == 0 || stopped || script_js_exhausted() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            if nav_cancel::cancelled(watch) {
+                return;
+            }
+            if let Some(found) = pump(Some((horizon_ms, MAX_TIMER_CALLBACKS))).await {
+                for record in found.records {
+                    inspector_glue::log_script(log, &inspector, record);
+                }
+                for message in found.threw {
+                    let record = ScriptRecord {
+                        source: "network".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(message),
+                    };
+                    inspector_glue::log_script(log, &inspector, record);
+                }
+                if found.poisoned {
+                    let record = ScriptRecord {
+                        source: "network".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                    };
+                    inspector_glue::log_script(log, &inspector, record);
+                    return;
+                }
+            }
+            inspector_glue::drain_reports(bindings, &inspector, log, "timers");
         }
         if yielded {
             return;
@@ -6714,6 +6850,11 @@ impl Engine {
         };
         if !defer {
             self.relayout_for(id, RelayoutCause::InitialLoad)?;
+            // The first frame is on the event channel. Yield before any
+            // script runs, so the load's poll loop can publish it before
+            // a beacon the script sends. A fast answer must not be the
+            // first thing the window can show.
+            tokio::task::yield_now().await;
         }
 
         // Load external resources (stylesheets, images, fonts), and fetch
@@ -6759,6 +6900,7 @@ impl Engine {
                 view.initial_layout_deferred = false;
             }
             self.relayout_for(id, RelayoutCause::InitialLoad)?;
+            tokio::task::yield_now().await;
         }
 
         // Subresource loading awaited the network too: a stop during a
@@ -16838,6 +16980,18 @@ impl Engine {
                 .views
                 .get_mut(&id)
                 .ok_or(EngineError::ViewNotFound(id))?;
+            let canvas = view
+                .layout
+                .as_ref()
+                .map(|root| {
+                    let color = root.style.background_color;
+                    if color.a > 0.0 {
+                        color.to_f64_array()
+                    } else {
+                        [1.0, 1.0, 1.0, 1.0]
+                    }
+                })
+                .unwrap_or([1.0, 1.0, 1.0, 1.0]);
             let commit = FrameCommit {
                 generation: view.frame_generation,
                 nav_generation: view.nav_id,
@@ -16846,6 +17000,7 @@ impl Engine {
                 max_scroll_offset: view.max_scroll_offset,
                 laid_out_for: view.laid_with.as_ref().map_or((0, 0), |w| w.size),
                 input: view.input_pending.take(),
+                canvas,
             };
             (view.viewhost_id, view.headless_bounds.is_some(), commit)
         };
@@ -16881,6 +17036,12 @@ impl Engine {
             // A draw for any other reason presents the commit already held.
         } else if self.presenter.is_none() {
             // The window thread presents. This thread only publishes.
+            // The event is how a load still in progress hands the frame
+            // over: the load future holds this engine, and the poll loop
+            // can read the channel while that future is pending.
+            if commit.list.is_some() {
+                let _ = self.event_tx.send(EngineEvent::FrameCommitted(commit.clone()));
+            }
             self.page_commits.insert(id, commit);
             return Ok(());
         } else {

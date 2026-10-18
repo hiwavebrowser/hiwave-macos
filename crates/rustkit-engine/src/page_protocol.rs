@@ -179,6 +179,9 @@ pub enum PageEvent {
         url: String,
         replace: bool,
         nav_id: u64,
+        /// The user activated a link or submitted a form. A script's
+        /// `location.href`, `link.click()` or `form.submit()` is false.
+        from_user: bool,
     },
     Focused(bool),
     /// Not produced on this PR. The variant is the protocol's.
@@ -455,6 +458,7 @@ impl PageEndpoint {
                         url,
                         replace: false,
                         nav_id,
+                        from_user: true,
                     });
                     let _ = reply.send(true);
                 } else {
@@ -486,6 +490,7 @@ impl PageEndpoint {
                         url,
                         replace: false,
                         nav_id,
+                        from_user: true,
                     });
                 }
                 let _ = reply.send(outcome);
@@ -518,6 +523,7 @@ impl PageEndpoint {
                         url,
                         replace: false,
                         nav_id,
+                        from_user: true,
                     });
                 }
                 let _ = reply.send(url);
@@ -530,6 +536,7 @@ impl PageEndpoint {
                         url,
                         replace,
                         nav_id,
+                        from_user: false,
                     });
                 }
                 let _ = reply.send(taken);
@@ -576,14 +583,16 @@ impl PageEndpoint {
     /// lets the engine allocate; any other id is the window's.
     ///
     /// Events the load emits while a fetch is outstanding are forwarded
-    /// every couple of milliseconds. The load future borrows only the
-    /// engine, so the event channel can be read while it is pending.
+    /// every couple of milliseconds, including a frame the load published
+    /// after layout. The load future borrows only the engine, so the event
+    /// channel can be read while it is pending.
     async fn load_yielding(&mut self, url: Url, nav_id: u64) {
         let view = self.view;
+        let wake = self.wake_window;
         let engine = &mut self.engine;
         let engine_events = &mut self.engine_events;
         let tx = &self.events;
-        let wake = self.wake_window;
+        let last_commit = &mut self.last_commit;
         let mut load = Box::pin(async move {
             if nav_id == 0 {
                 engine.load_url_yielding(view, url).await
@@ -594,6 +603,9 @@ impl PageEndpoint {
         loop {
             // Polled on the runtime's waker via the sleep below: a fetch
             // that completes during the sleep is observed on the next poll.
+            // `yield_now` inside the load returns Pending on the first poll
+            // and Ready on the next, so a frame sent before that yield is
+            // forwarded before the load continues into scripts.
             let polled = std::future::Future::poll(
                 load.as_mut(),
                 &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
@@ -603,11 +615,11 @@ impl PageEndpoint {
                     if let Err(e) = result {
                         tracing::error!(error = %e, "Failed to load URL");
                     }
-                    forward_events(engine_events, tx, nav_id, wake);
+                    forward_events(engine_events, tx, last_commit, nav_id, wake);
                     return;
                 }
                 std::task::Poll::Pending => {
-                    forward_events(engine_events, tx, nav_id, wake);
+                    forward_events(engine_events, tx, last_commit, nav_id, wake);
                     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                 }
             }
@@ -633,16 +645,23 @@ impl PageEndpoint {
             return;
         };
         let nav_id = self.engine.nav_id(self.view).unwrap_or(0);
-        self.emit(PageEvent::NavigateRequested { url, replace, nav_id });
+        self.emit(PageEvent::NavigateRequested {
+            url,
+            replace,
+            nav_id,
+            from_user: false,
+        });
     }
 
     fn translate_engine_events(&mut self) {
         let nav_id = self.engine.nav_id(self.view).unwrap_or(0);
+        let wake = self.wake_window;
         forward_events(
             &mut self.engine_events,
             &self.events,
+            &mut self.last_commit,
             nav_id,
-            self.wake_window,
+            wake,
         );
     }
 
@@ -697,15 +716,25 @@ impl PageEndpoint {
     pub(crate) async fn run(mut self) {
         let mut clock = tokio::time::Instant::now();
         loop {
-            let cmds = self.drain_coalesced();
+            let mut cmds = self.drain_coalesced();
             if cmds.is_empty() {
                 let elapsed = clock.elapsed().as_millis() as u64;
                 clock = tokio::time::Instant::now();
                 let turn = self.engine.pump_live(self.view, elapsed).await;
                 self.after_page_change();
-                let wait_ms = turn.next_timer_ms.unwrap_or(50).clamp(2, 50);
-                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-                continue;
+                // A resize (or any other command) that arrived during the
+                // turn is applied before the next timer slice. The frame
+                // yield returns between timer tasks; the bounds message is
+                // waiting here, and the next pump lays the page out. The
+                // sleep is only the wait for the next timer. A single
+                // callback that does not return is not a yield: the bounds
+                // wait until that callback does.
+                cmds = self.drain_coalesced();
+                if cmds.is_empty() {
+                    let wait_ms = turn.next_timer_ms.unwrap_or(50).clamp(2, 50);
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
             }
             for cmd in cmds {
                 let close = matches!(cmd, PageCmd::Close);
@@ -752,6 +781,7 @@ impl PageEndpoint {
 fn forward_events(
     engine_events: &mut Option<tokio::sync::mpsc::UnboundedReceiver<EngineEvent>>,
     tx: &Sender<PageEvent>,
+    last_commit: &mut Option<(u64, u64, (f32, f32))>,
     nav_id: u64,
     wake: bool,
 ) {
@@ -797,6 +827,19 @@ fn forward_events(
                 }]
             }
             EngineEvent::ViewFocused { .. } => vec![PageEvent::Focused(true)],
+            EngineEvent::FrameCommitted(commit) => {
+                if commit.list.is_none() {
+                    Vec::new()
+                } else {
+                    let key = (commit.nav_generation, commit.generation, commit.scroll_offset);
+                    if *last_commit == Some(key) {
+                        Vec::new()
+                    } else {
+                        *last_commit = Some(key);
+                        vec![PageEvent::Commit(commit)]
+                    }
+                }
+            }
             EngineEvent::ConsoleMessage { .. }
             | EngineEvent::ViewResized { .. }
             | EngineEvent::DownloadStarted { .. }

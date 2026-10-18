@@ -76,6 +76,10 @@ pub struct FrameCommit {
     /// The earliest input the page took since its last commit, for the
     /// input-to-present log.
     pub input: Option<InputMark>,
+    /// The page's canvas colour (CSS 2.1 §14.2), as the window should
+    /// clear a surface that is larger than `laid_out_for`. Opaque; a
+    /// transparent canvas is white.
+    pub canvas: [f64; 4],
 }
 
 /// The window thread's half of the engine: every NSView/HWND, every GPU
@@ -393,7 +397,9 @@ impl Presenter {
             max_scroll_offset: (0.0, 0.0),
             laid_out_for: (0, 0),
             input: None,
+            canvas: self.background_color,
         });
+        let canvas = commit.canvas;
         let display_list: Option<&DisplayList> = commit.list.as_deref();
         let generation = commit.generation;
         let scroll_offset = commit.scroll_offset;
@@ -450,7 +456,7 @@ impl Presenter {
             let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
             if let Some(renderer) = &mut self.renderer {
                 // A headless view is drawn unscrolled, as it always was.
-                Self::execute(renderer, display_list, (0.0, 0.0), &texture_view)?;
+                Self::execute(renderer, display_list, (0.0, 0.0), &texture_view, canvas)?;
             } else {
                 // Fallback to compositor solid color
                 self.compositor
@@ -481,7 +487,7 @@ impl Presenter {
             {
                 let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
                 if let Some(renderer) = &mut self.renderer {
-                    Self::execute(renderer, display_list, scroll_offset, &texture_view)?;
+                    Self::execute(renderer, display_list, scroll_offset, &texture_view, canvas)?;
                 } else {
                     // Fallback to compositor solid color (shouldn't normally happen)
                     drop(output); // Release the texture
@@ -526,9 +532,11 @@ impl Presenter {
         display_list: Option<&DisplayList>,
         scroll_offset: (f32, f32),
         target: &wgpu::TextureView,
+        canvas: [f64; 4],
     ) -> Result<(), EngineError> {
         let commands = display_list.map(|dl| dl.commands.as_slice()).unwrap_or(&[]);
         renderer.set_scroll_offset(scroll_offset);
+        renderer.set_clear_color(canvas);
         let drawn = renderer
             .execute(commands, target)
             .map_err(|e| EngineError::RenderError(e.to_string()));
@@ -557,7 +565,13 @@ impl Presenter {
                     .compositor
                     .get_headless_texture_view(viewhost_id)
                     .map_err(|e| EngineError::RenderError(e.to_string()))?;
-                Self::execute(renderer, Some(display_list), scroll_offset, &target)
+                Self::execute(
+                    renderer,
+                    Some(display_list),
+                    scroll_offset,
+                    &target,
+                    [1.0, 1.0, 1.0, 1.0],
+                )
             }
             Some(path) => {
                 renderer.set_scroll_offset(scroll_offset);
@@ -845,7 +859,9 @@ impl WindowSurface {
 
     /// The NSView and the GPU surface take `bounds` now. The page lays out
     /// when it receives the same bounds as a message. The surface is new,
-    /// so the commit already on screen is drawn again.
+    /// so the caller draws the commit already published again: anchored at
+    /// the top left, with the page's canvas colour in the area the old
+    /// layout does not cover.
     pub fn resize(&mut self, bounds: Bounds) -> Result<(), EngineError> {
         self.shown = None;
         self.presenter.apply_bounds(self.viewhost_id, false, bounds)
@@ -894,6 +910,7 @@ mod present_choice_tests {
             max_scroll_offset: (0.0, 0.0),
             laid_out_for: if laid_out { (800, 600) } else { (0, 0) },
             input: None,
+            canvas: [1.0, 1.0, 1.0, 1.0],
         }
     }
 

@@ -690,6 +690,55 @@ mod tests {
         solid_colors(commit).contains(&(r, g, b))
     }
 
+    /// One loopback server. `release` is the flag a held response waits on.
+    /// Every request path is appended to the returned log.
+    fn serve(
+        handler: impl Fn(&str, &AtomicBool) -> (u16, &'static str, Vec<u8>) + Send + Sync + 'static,
+    ) -> (u16, Arc<AtomicBool>, Arc<Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let release = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let release_for_server = Arc::clone(&release);
+        let seen_for_server = Arc::clone(&seen);
+        let handler = Arc::new(handler);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let release_for_server = Arc::clone(&release_for_server);
+                let seen_for_server = Arc::clone(&seen_for_server);
+                let handler = Arc::clone(&handler);
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    let header_end = loop {
+                        if let Some(i) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&request[..header_end]);
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    seen_for_server.lock().unwrap_or_else(|e| e.into_inner()).push(path.clone());
+                    let (status, content_type, body) = handler(&path, &release_for_server);
+                    let status_text = if status == 200 { "200 OK" } else { "404 Not Found" };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(&body);
+                });
+            }
+        });
+        (port, release, seen)
+    }
+
     #[test]
     fn script_navigation_is_reported_with_the_documents_nav_id() {
         let page = page();
@@ -721,15 +770,19 @@ mod tests {
                 events.iter().any(|event| matches!(event, PageEvent::NavigateRequested { url, .. } if url.contains(needle)))
             });
             let found = events.iter().find_map(|event| match event {
-                PageEvent::NavigateRequested { url, replace: flag, nav_id } if url.contains(needle) => {
-                    Some((url.clone(), *flag, *nav_id))
-                }
+                PageEvent::NavigateRequested {
+                    url,
+                    replace: flag,
+                    nav_id,
+                    from_user,
+                } if url.contains(needle) => Some((url.clone(), *flag, *nav_id, *from_user)),
                 _ => None,
             });
-            let Some((url, flag, nav_id)) = found else {
+            let Some((url, flag, nav_id, from_user)) = found else {
                 panic!("{script} produced no navigation: {events:?}");
             };
             assert_eq!(flag, replace, "{url}");
+            assert!(!from_user, "{url} was the user's click");
             assert_eq!(nav_id, nav, "{url} was not tagged with the document");
             // Id 0 is untagged and is kept. A request from this document is
             // stale once a newer navigation has been accepted.
@@ -738,6 +791,7 @@ mod tests {
                     url: url.clone(),
                     replace: flag,
                     nav_id: nav,
+                    from_user: false,
                 }],
                 nav + 1,
             );
@@ -852,6 +906,221 @@ mod tests {
         }
         assert!(saw_green, "no frame was published between the timer tasks");
         assert!(!blue_first, "the later timer was painted before that frame");
+    }
+
+    /// The laid-out frame is published while the load is still waiting on a
+    /// script, not only when the load returns.
+    #[test]
+    fn a_commit_is_published_while_the_load_is_still_waiting() {
+        let (port, release, _seen) = serve(|path, release_flag| {
+            if path == "/hold.js" {
+                let start = Instant::now();
+                while !release_flag.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(8) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                return (200, "text/javascript", b"/* held */".to_vec());
+            }
+            (
+                200,
+                "text/html",
+                br#"<html><body style="margin:0"><div style="height:30px;margin:6px 20px;background:#ff0000"></div><script src="/hold.js"></script></body></html>"#.to_vec(),
+            )
+        });
+        let page = page();
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let events = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(commit) if has_color(commit, 255, 0, 0)))
+        });
+        let commit = events.iter().find_map(|event| match event {
+            PageEvent::Commit(commit) if has_color(commit, 255, 0, 0) => Some(commit),
+            _ => None,
+        });
+        let Some(commit) = commit else {
+            release.store(true, Ordering::Release);
+            panic!("no laid-out frame while the load was waiting: {events:?}");
+        };
+        assert!(
+            commit.list.as_ref().is_some_and(|list| !list.commands.is_empty()),
+            "the frame during the load had no display list"
+        );
+        assert!(
+            !events.iter().any(|event| {
+                matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })
+            }),
+            "the frame arrived only when the load finished: {events:?}"
+        );
+        release.store(true, Ordering::Release);
+        let finished = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| {
+                matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })
+            })
+        });
+        assert!(
+            finished.iter().any(|event| {
+                matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })
+            }),
+            "the load never finished after the script was released"
+        );
+    }
+
+    #[test]
+    fn the_commit_carries_the_canvas_colour() {
+        let page = page();
+        let mut loaded = page.load_html(
+            r#"<html><body style="margin:0;background:#112233"><p>x</p></body></html>"#,
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(5), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(_)))
+        });
+        let commit = events.iter().find_map(|event| match event {
+            PageEvent::Commit(commit) => Some(commit),
+            _ => None,
+        });
+        let Some(commit) = commit else {
+            panic!("no frame: {events:?}");
+        };
+        let canvas = commit.canvas;
+        assert!((canvas[0] - 17.0 / 255.0).abs() < 0.02, "{canvas:?}");
+        assert!((canvas[1] - 34.0 / 255.0).abs() < 0.02, "{canvas:?}");
+        assert!((canvas[2] - 51.0 / 255.0).abs() < 0.02, "{canvas:?}");
+        assert!((canvas[3] - 1.0).abs() < 0.02, "{canvas:?}");
+    }
+
+    /// A plain `fetch` queued while a response is delivered, in the same
+    /// turn as `location.href`, is handed to the network before the
+    /// document can be replaced. That is h16's start beacon: not
+    /// `sendBeacon` and not `keepalive`.
+    #[test]
+    fn a_fetch_queued_with_a_navigation_is_started_before_the_document_is_replaced() {
+        let (port, _release, seen) = serve(|path, _release| {
+            if path.starts_with("/tick") {
+                return (200, "text/plain", b"go".to_vec());
+            }
+            if path.starts_with("/start") {
+                return (200, "text/plain", b"started".to_vec());
+            }
+            (200, "text/html", b"<p id=\"t\">ready</p>".to_vec())
+        });
+        let page = page();
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let loaded = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| {
+                matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })
+            })
+        });
+        assert!(
+            loaded.iter().any(|event| {
+                matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })
+            }),
+            "the page never finished loading"
+        );
+        let _ = page.poll();
+        let mut armed = page.eval(
+            "fetch('/tick').then(function (r) { return r.text(); }).then(function (reply) { \
+                if (reply !== 'go') return; \
+                fetch('/start'); \
+                location.href = '/next.html'; \
+             }); 'armed'",
+        );
+        assert!(wait_recv(&mut armed, Duration::from_secs(5)).unwrap().unwrap().contains("armed"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut asked = false;
+        while Instant::now() < deadline && !asked {
+            for event in page.poll() {
+                if let PageEvent::NavigateRequested { url, from_user, .. } = event {
+                    if url.contains("next.html") {
+                        assert!(!from_user, "a script navigation was the user's");
+                        // Replace the document now, as the window does. A
+                        // fetch that is still only queued dies with it.
+                        let _ = page.navigate(
+                            Url::parse(&format!("http://127.0.0.1:{port}/left.html")).unwrap(),
+                        );
+                        asked = true;
+                        break;
+                    }
+                }
+            }
+            if !asked {
+                std::thread::yield_now();
+            }
+        }
+        assert!(asked, "the page never asked to navigate");
+        std::thread::sleep(Duration::from_millis(100));
+        let paths = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(
+            paths.iter().any(|path| path.starts_with("/start")),
+            "the start fetch was not on the wire before the document was replaced: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn a_user_click_keeps_its_origin() {
+        let page = page();
+        let mut loaded = page.load_html(
+            r#"<a id="l" href="https://example.com/clicked" style="display:block;position:absolute;left:0;top:0;width:800px;height:600px">go</a>"#,
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = poll_until(&page, Duration::from_secs(3), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(_)))
+        });
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        page.input(PageInput::Click {
+            x: 20.0,
+            y: 20.0,
+            reply,
+        });
+        let events = poll_until(&page, Duration::from_secs(5), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, PageEvent::NavigateRequested { url, .. } if url.contains("clicked")))
+        });
+        let found = events.iter().find_map(|event| match event {
+            PageEvent::NavigateRequested { url, from_user, .. } if url.contains("clicked") => {
+                Some(*from_user)
+            }
+            _ => None,
+        });
+        assert_eq!(found, Some(true), "the click was not the user's: {events:?}");
+    }
+
+    #[test]
+    fn a_resize_during_a_timer_task_is_applied_at_the_next_yield() {
+        let page = page();
+        let mut loaded = page.load_html(r#"<div id="t" style="width:40px;height:40px;background:#cccccc"></div>"#);
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = poll_until(&page, Duration::from_secs(3), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(_)))
+        });
+        let mut arm = page.eval(
+            r#"setTimeout(function () {
+                var end = Date.now() + 40;
+                while (Date.now() < end) {}
+            }, 0);
+            'armed'"#,
+        );
+        assert!(wait_recv(&mut arm, Duration::from_secs(5)).unwrap().unwrap().contains("armed"));
+        std::thread::sleep(Duration::from_millis(10));
+        page.resize(
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            },
+            1.0,
+        );
+        let events = poll_until(&page, Duration::from_secs(3), |events| {
+            events.iter().any(|event| {
+                matches!(event, PageEvent::Commit(commit) if commit.laid_out_for.0 == 640)
+            })
+        });
+        assert!(
+            events.iter().any(|event| {
+                matches!(event, PageEvent::Commit(commit) if commit.laid_out_for.0 == 640)
+            }),
+            "the resize was not laid out after the timer task yielded: {events:?}"
+        );
     }
 
     #[test]
