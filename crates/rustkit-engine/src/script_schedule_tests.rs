@@ -733,3 +733,111 @@ fn a_noscript_script_does_not_run() {
     assert_eq!(noscript["executed"], false, "{noscript}");
     assert_eq!(noscript["reason"], "never reached", "{noscript}");
 }
+
+/// A parser-inserted module is deferred. Its fetch and its run are not
+/// parser pauses. DOMContentLoaded still waits for it, after the classic
+/// inline script.
+#[test]
+fn a_deferred_module_does_not_pause_the_parser() {
+    let trace_path = trace_file("defer-mod");
+    let _trace = page_trace::force_file_for_test(&trace_path);
+    let page = r#"<html><head>
+<script>window.t0 = Date.now(); window.order = [];</script>
+<script type="module" src="/mod.js"></script>
+<script>
+window.order.push('inline:' + (Date.now() - window.t0));
+document.addEventListener('DOMContentLoaded', function () {
+  window.order.push('dcl:' + (Date.now() - window.t0));
+});
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(
+        page,
+        vec![route(
+            "/mod.js",
+            "text/javascript",
+            "window.order.push('mod:' + (Date.now() - window.t0));",
+            SLOW,
+        )],
+    );
+    let order = js(&mut engine, view, "window.order.join(',')");
+    let tags: Vec<&str> = order
+        .split(',')
+        .map(|part| part.split(':').next().unwrap())
+        .collect();
+    assert_eq!(tags, ["inline", "mod", "dcl"], "{order}");
+    assert!(
+        part_ms(&order, "inline") < 400,
+        "inline waited on the module: {order}"
+    );
+    assert!(
+        part_ms(&order, "dcl") >= 700,
+        "DOMContentLoaded did not wait for the deferred module: {order}"
+    );
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trace_path).expect("trace")).unwrap();
+    let _ = std::fs::remove_file(&trace_path);
+    let parser = trace["parser"].as_array().unwrap();
+    assert!(
+        parser.iter().all(|pause| {
+            let target = pause["target"].as_str().unwrap_or("");
+            !target.contains("mod.js")
+        }),
+        "deferred module paused the parser: {parser:?}"
+    );
+}
+
+/// String-literal `import()` is prefetched, but it does not take a
+/// connection ahead of a static import in the same module, and it does
+/// not delay DOMContentLoaded.
+#[test]
+fn dynamic_imports_do_not_delay_a_static_import_or_dom_content_loaded() {
+    let page = r#"<html><head>
+<script>window.t0 = Date.now();</script>
+<script type="module">
+import('./d0.js');
+import('./d1.js');
+import('./d2.js');
+import('./d3.js');
+import('./d4.js');
+import('./d5.js');
+import './need.js';
+</script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  window.dcl = Date.now() - window.t0;
+});
+</script>
+</head><body>hi</body></html>"#;
+    let mut routes = vec![route(
+        "/need.js",
+        "text/javascript",
+        "window.needed = true;",
+        Duration::ZERO,
+    )];
+    for name in ["/d0.js", "/d1.js", "/d2.js", "/d3.js", "/d4.js", "/d5.js"] {
+        routes.push(route(name, "text/javascript", "export const n = 1;", SLOW));
+    }
+    let (mut engine, view, server) = load(page, routes);
+    assert_eq!(js(&mut engine, view, "String(window.needed)"), "true");
+    let dcl = js(&mut engine, view, "String(window.dcl)")
+        .parse::<u128>()
+        .expect("dcl");
+    assert!(dcl < 400, "DOMContentLoaded waited on dynamic import(): {dcl}");
+    let starts = server.starts.lock().unwrap();
+    let at = |name: &str| {
+        starts
+            .iter()
+            .find(|(path, _)| path == name)
+            .map(|(_, stamp)| *stamp)
+    };
+    let need = at("/need.js").expect("need.js was not requested");
+    for name in ["/d0.js", "/d1.js", "/d2.js", "/d3.js", "/d4.js", "/d5.js"] {
+        let stamp = at(name).unwrap_or_else(|| panic!("{name} was not requested: {starts:?}"));
+        let behind = stamp.saturating_duration_since(need);
+        assert!(
+            behind < Duration::from_millis(400),
+            "{name} started {behind:?} after need.js; static import was held"
+        );
+    }
+}

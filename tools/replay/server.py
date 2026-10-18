@@ -278,6 +278,7 @@ class ReplayHandler(BaseHTTPRequestHandler):
             body = f"HAR entry not found: {self.command.upper()} {normalized}\n".encode("utf-8")
             self._send(404, "Not Found", [(b"Content-Type", b"text/plain; charset=utf-8")], body, send_body, 0)
             return
+        # Once per response, not per chunk. Concat `time` is already the max.
         delay = float(entry.get("time") or 0) * float(self.server.time_scale)
         if delay > 0:
             time.sleep(delay / 1000.0)

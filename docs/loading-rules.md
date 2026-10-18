@@ -41,7 +41,9 @@ scripts, or `DOMContentLoaded`. HiWave runs the parser's `async` set after
 the body arrived earlier. That is allowed (the "as soon as possible" task
 can be queued after the parser finishes) and keeps the order stable. A slow
 `async` fetch can delay `load`. It does not delay `DOMContentLoaded`, and
-it is not a `script fetch` parser pause.
+it is not a `script fetch` parser pause. A `script execute` pause is only
+a parser-blocking classic script. A deferred module's fetch and run are
+not parser pauses, even though `DOMContentLoaded` waits for that module.
 
 **List of scripts that will execute when the document has finished
 parsing.** External `defer` scripts and module scripts that are not
@@ -101,10 +103,21 @@ are present. HiWave does this in one walk:
 
 `module_timeline` records each of those URLs: `requested_ms` when the
 specifier was known, `start_ms` when the prefetch was queued, `body_ms`
-when the bytes were taken, and `parsed_ms` when the module was supplied.
-The gap between `requested_ms` and `body_ms` is the fetch. The gap between
-`body_ms` and `parsed_ms` is parse and compile. A gap before `requested_ms`
-is time until the specifier existed.
+when the main thread took the bytes, `held_ms` when that body had already
+been sitting ready on the prefetch thread, and `parsed_ms` when the module
+was supplied. The gap between `requested_ms` and `body_ms` is the fetch
+plus any wait until the main thread looked. `held_ms` is that second wait.
+The gap between `body_ms` and `parsed_ms` is parse and compile. A gap
+before `requested_ms` is time until the specifier existed.
+
+A string-literal `import()` is queued in the same scan, but it does not
+take a connection until the static imports from that scan have stored
+their bodies. It is not a load dependency of the module, so it does not
+delay `DOMContentLoaded`. A computed `import(url)` is not critical either.
+
+When a module's load promise is still pending, `fetched_scripts` records
+`reason: "waiting on a dependency"` and `waiting_on` names the import URLs
+that have not been supplied (a dynamic one is prefixed `dynamic`).
 
 A static chain (module A imports B, B imports C) still waits for A's body
 before B's specifier can be read, and for B's body before C's. It does not

@@ -116,7 +116,7 @@ impl ModuleLoader for HostModuleLoader {
             self.requested.borrow_mut().push(url.clone());
             // The fetch starts here if the call-time hook has not already
             // started it. `start` dedups, so a second notice is a no-op.
-            note_module_url(&url);
+            note_module_url(&url, !dynamic);
         }
         match rx.await {
             Ok(res) => res,
@@ -165,6 +165,15 @@ pub enum ModuleState {
     Failed(String),
     /// The graph loaded and ran, and evaluation threw.
     Threw(String),
+}
+
+/// A module import the host has been asked for and has not supplied yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingImport {
+    pub url: String,
+    pub specifier: String,
+    /// `import()`, not a static dependency of the module graph.
+    pub dynamic: bool,
 }
 
 /// A module's source as the host fetched it.
@@ -297,6 +306,22 @@ impl JsRuntime {
                 specifier: failure.specifier,
                 url: failure.url,
                 reason: failure.reason,
+            })
+            .collect()
+    }
+
+    /// Imports whose source has not been supplied. A static one keeps the
+    /// module's load promise pending. A dynamic one does not.
+    pub fn pending_module_imports(&self) -> Vec<PendingImport> {
+        self.modules
+            .loader
+            .waiting
+            .borrow()
+            .iter()
+            .map(|waiter| PendingImport {
+                url: waiter.url.clone(),
+                specifier: waiter.specifier.clone(),
+                dynamic: waiter.dynamic,
             })
             .collect()
     }
@@ -515,9 +540,22 @@ impl JsRuntime {
     /// string-literal `import()`, before this source is parsed.
     fn prefetch_source_imports(&self, module_url: &str, source: &str) {
         let _guard = push_active_loader(self.modules.loader.clone());
-        for specifier in static_import_specifiers(source) {
-            prefetch_specifier(module_url, &specifier);
+        // Hold the scan open until every specifier in this source is queued,
+        // so a dynamic `import()` cannot take a connection ahead of a static
+        // import written later in the same file.
+        note_module_scan(true);
+        let _scan = ModuleScanGuard;
+        for (specifier, dynamic) in import_specifiers(source) {
+            prefetch_specifier_kind(module_url, &specifier, !dynamic);
         }
+    }
+}
+
+struct ModuleScanGuard;
+
+impl Drop for ModuleScanGuard {
+    fn drop(&mut self) {
+        note_module_scan(false);
     }
 }
 
@@ -550,7 +588,7 @@ pub(crate) fn push_active_loader(loader: Rc<HostModuleLoader>) -> ActiveLoaderGu
 }
 
 /// Called with a resolved module URL as soon as that URL is known.
-pub fn set_module_url_hook(hook: Option<fn(&str)>) {
+pub fn set_module_url_hook(hook: Option<fn(&str, bool)>) {
     let ptr = match hook {
         Some(hook) => hook as *mut (),
         None => std::ptr::null_mut(),
@@ -558,18 +596,46 @@ pub fn set_module_url_hook(hook: Option<fn(&str)>) {
     URL_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn note_module_url(url: &str) {
+/// `begin` is true at the start of a source scan and false when it ends.
+pub fn set_module_scan_hook(hook: Option<fn(bool)>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    SCAN_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
+}
+
+static SCAN_HOOK: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+fn note_module_scan(begin: bool) {
+    let ptr = SCAN_HOOK.load(std::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ptr` was stored from `fn(bool)`, or it is null and we returned.
+    let hook: fn(bool) = unsafe { std::mem::transmute(ptr) };
+    hook(begin);
+}
+
+fn note_module_url(url: &str, critical: bool) {
     let ptr = URL_HOOK.load(std::sync::atomic::Ordering::Relaxed);
     if ptr.is_null() {
         return;
     }
-    // SAFETY: `ptr` was stored from `fn(&str)`, or it is null and we returned.
-    let hook: fn(&str) = unsafe { std::mem::transmute(ptr) };
-    hook(url);
+    // SAFETY: `ptr` was stored from `fn(&str, bool)`, or it is null and we returned.
+    let hook: fn(&str, bool) = unsafe { std::mem::transmute(ptr) };
+    hook(url, critical);
 }
 
 /// Resolve `specifier` and, when it is an http(s) or data URL, start its fetch.
+/// Static imports use this. A dynamic `import()` does not.
+#[allow(dead_code)]
 pub fn prefetch_specifier(referrer: &str, specifier: &str) {
+    prefetch_specifier_kind(referrer, specifier, true);
+}
+
+fn prefetch_specifier_kind(referrer: &str, specifier: &str, critical: bool) {
     let loader = ACTIVE_LOADER.with(|slot| slot.borrow().clone());
     let Some(loader) = loader else {
         return;
@@ -579,7 +645,7 @@ pub fn prefetch_specifier(referrer: &str, specifier: &str) {
         return;
     };
     if matches!(url.scheme(), "http" | "https" | "data") {
-        note_module_url(url.as_str());
+        note_module_url(url.as_str(), critical);
     }
 }
 
@@ -587,14 +653,20 @@ pub fn prefetch_specifier(referrer: &str, specifier: &str) {
 /// call is evaluated, before the import job runs.
 pub fn install_import_specifier_hook() {
     boa_engine::module::set_import_specifier_hook(Some(|referrer, specifier| {
-        prefetch_specifier(referrer, specifier);
+        prefetch_specifier_kind(referrer, specifier, false);
     }));
 }
 
 /// Static `import` / `export from` specifiers, plus string-literal
 /// `import("...")`. A computed `import(url)` is not visible here; that
 /// fetch starts when the call runs.
+#[allow(dead_code)]
 pub fn static_import_specifiers(source: &str) -> Vec<String> {
+    import_specifiers(source).into_iter().map(|(specifier, _)| specifier).collect()
+}
+
+/// `(specifier, dynamic)`. `dynamic` is a string-literal `import()`.
+fn import_specifiers(source: &str) -> Vec<(String, bool)> {
     let chars: Vec<char> = source.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -634,24 +706,24 @@ pub fn static_import_specifiers(source: &str) -> Vec<String> {
                 if chars.get(j) == Some(&'(') {
                     j = skip_ws(&chars, j + 1);
                     if let Some((specifier, next)) = read_string_literal(&chars, j) {
-                        out.push(specifier);
+                        out.push((specifier, true));
                         i = next;
                     }
                     continue;
                 }
                 if let Some((specifier, next)) = read_string_literal(&chars, j) {
-                    out.push(specifier);
+                    out.push((specifier, false));
                     i = next;
                     continue;
                 }
                 if let Some(specifier) = from_specifier(&chars, i) {
-                    out.push(specifier);
+                    out.push((specifier, false));
                 }
                 continue;
             }
             if word == "export" {
                 if let Some(specifier) = from_specifier(&chars, i) {
-                    out.push(specifier);
+                    out.push((specifier, false));
                 }
             }
             continue;
@@ -809,5 +881,54 @@ mod specifier_tests {
                 "./e.js".to_string(),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::ModuleState;
+    use crate::JsRuntime;
+
+    #[test]
+    fn a_dynamic_import_is_not_a_load_dependency() {
+        let mut rt = JsRuntime::new().expect("runtime");
+        rt.set_module_base("https://example.test/");
+        let handle = rt
+            .begin_module(
+                "https://example.test/app.js",
+                "import './a.js'; import('./b.js'); export const ready = true;",
+            )
+            .expect("parse");
+        let pending = rt.pending_module_imports();
+        assert!(
+            pending.iter().any(|item| item.url.ends_with("/a.js") && !item.dynamic),
+            "{pending:?}"
+        );
+        assert!(
+            pending.iter().all(|item| !item.url.ends_with("/b.js")),
+            "dynamic import() held the load promise: {pending:?}"
+        );
+        assert_eq!(rt.poll_module(&handle), ModuleState::Loading);
+    }
+
+    /// Release-mode cost of parsing a bundle the size of reddit's `Bv…` chunk.
+    /// Debug builds skip the timing assert; `PARSE_358KB_MS` is the measurement.
+    #[test]
+    fn parse_time_of_a_358kb_module() {
+        let mut body = String::from("export default function bundle(){");
+        while body.len() < 358 * 1024 {
+            body.push_str("var a=1;a=a+1;");
+        }
+        body.push_str("return a;}");
+        let mut rt = JsRuntime::new().expect("runtime");
+        rt.set_module_base("https://example.test/");
+        let started = std::time::Instant::now();
+        rt.begin_module("https://example.test/bundle.js", &body)
+            .expect("parse");
+        let ms = started.elapsed().as_millis();
+        eprintln!("PARSE_358KB_MS {ms} bytes {}", body.len());
+        if !cfg!(debug_assertions) {
+            assert!(ms < 8_000, "release parse of 358KB took {ms} ms");
+        }
     }
 }

@@ -170,6 +170,8 @@ struct FetchedNote {
     detail: Option<&'static str>,
     /// The `inline#N` slot this script consumed, when its label is a URL.
     inline_slot: Option<u32>,
+    /// Outstanding import URLs when `reason` is `waiting on a dependency`.
+    waiting_on: Option<String>,
 }
 
 struct ModuleFetch {
@@ -178,6 +180,9 @@ struct ModuleFetch {
     start_ms: Option<u64>,
     body_ms: Option<u64>,
     parsed_ms: Option<u64>,
+    /// How long the body sat ready on the prefetch thread before the main
+    /// thread took it. `body_ms` is that later observation.
+    held_ms: Option<u64>,
 }
 
 struct ParserEv {
@@ -536,6 +541,7 @@ pub(crate) fn resolve_module_dependencies(executed: bool, reason: Option<&'stati
             if executed {
                 note.executed = true;
                 note.reason = None;
+                note.waiting_on = None;
             } else if let Some(reason) = reason {
                 note.reason = Some(reason);
             }
@@ -653,6 +659,7 @@ fn remember(
             if executed {
                 note.executed = true;
                 note.reason = None;
+                note.waiting_on = None;
             } else if let Some(reason) = reason {
                 if !note.executed {
                     note.reason = Some(reason);
@@ -672,6 +679,7 @@ fn remember(
             reason: if executed { None } else { reason },
             detail: None,
             inline_slot: None,
+            waiting_on: None,
         });
     });
 }
@@ -916,6 +924,7 @@ pub(crate) fn note_module_fetch(url: &str, phase: &str) {
                 start_ms: None,
                 body_ms: None,
                 parsed_ms: None,
+                held_ms: None,
             });
         }
         let Some(entry) = active.modules.iter_mut().find(|entry| entry.url == url) else {
@@ -930,6 +939,42 @@ pub(crate) fn note_module_fetch(url: &str, phase: &str) {
         };
         if slot.is_none() {
             *slot = Some(now);
+        }
+    });
+}
+
+/// The prefetch thread stored this body `held_ms` before the main thread
+/// observed it (`body_ms`).
+pub(crate) fn note_module_held(url: &str, held_ms: u64) {
+    if !enabled() || url.is_empty() {
+        return;
+    }
+    let url = clamp(url);
+    with_active(|active| {
+        if let Some(entry) = active.modules.iter_mut().find(|entry| entry.url == url) {
+            if entry.held_ms.is_none() {
+                entry.held_ms = Some(held_ms);
+            }
+        }
+    });
+}
+
+/// Name the imports still outstanding for every note waiting on a dependency.
+pub(crate) fn note_module_waiting_on(urls: &[String]) {
+    if !enabled() || urls.is_empty() {
+        return;
+    }
+    let joined = urls
+        .iter()
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    with_active(|active| {
+        for note in &mut active.fetched {
+            if note.reason == Some("waiting on a dependency") && note.waiting_on.is_none() {
+                note.waiting_on = Some(joined.clone());
+            }
         }
     });
 }
@@ -1127,6 +1172,7 @@ fn snapshot(active: &Active) -> Snapshot {
                     note.reason,
                     note.detail,
                     note.inline_slot,
+                    note.waiting_on.clone(),
                 )
             })
             .collect(),
@@ -1139,6 +1185,7 @@ fn snapshot(active: &Active) -> Snapshot {
                 start_ms: entry.start_ms,
                 body_ms: entry.body_ms,
                 parsed_ms: entry.parsed_ms,
+                held_ms: entry.held_ms,
             })
             .collect(),
         console: active.console.clone(),
@@ -1170,6 +1217,7 @@ struct Snapshot {
         Option<&'static str>,
         Option<&'static str>,
         Option<u32>,
+        Option<String>,
     )>,
     modules: Vec<ModuleFetch>,
     console: Vec<(u64, String)>,
@@ -1206,7 +1254,7 @@ fn emit_snapshot(active: &Snapshot, max_js_stack: usize, console: bool) {
         fetched_scripts: active
             .fetched
             .iter()
-            .map(|(url, status, fetched, executed, reason, detail, inline)| FetchedJson {
+            .map(|(url, status, fetched, executed, reason, detail, inline, waiting_on)| FetchedJson {
                 url,
                 status: *status,
                 fetched: *fetched,
@@ -1214,6 +1262,7 @@ fn emit_snapshot(active: &Snapshot, max_js_stack: usize, console: bool) {
                 reason: *reason,
                 detail: *detail,
                 inline: *inline,
+                waiting_on: waiting_on.as_deref(),
             })
             .collect(),
         module_timeline: active
@@ -1225,6 +1274,7 @@ fn emit_snapshot(active: &Snapshot, max_js_stack: usize, console: bool) {
                 start_ms: entry.start_ms,
                 body_ms: entry.body_ms,
                 parsed_ms: entry.parsed_ms,
+                held_ms: entry.held_ms,
             })
             .collect(),
         shield: shield_label(),
@@ -1331,6 +1381,8 @@ struct FetchedJson<'a> {
     detail: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inline: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waiting_on: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -1344,6 +1396,8 @@ struct ModuleJson<'a> {
     body_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    held_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -1497,6 +1551,11 @@ mod tests {
             "https://example.test/wait.js",
             ScriptOutcome::Threw("module imports were not loaded".into()),
         ));
+        note_module_dependency("https://example.test/child.js", Some(200));
+        resolve_module_dependencies(false, Some("waiting on a dependency"));
+        note_module_waiting_on(&["https://example.test/missing.js".into()]);
+        note_module_fetch("https://example.test/child.js", "body");
+        note_module_held("https://example.test/child.js", 40);
         drop(_session);
         let body = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -1523,6 +1582,16 @@ mod tests {
         assert_eq!(reason("inline#9")["executed"], false);
         assert_eq!(reason("https://example.test/graph.js")["reason"], "module graph error");
         assert_eq!(reason("https://example.test/wait.js")["reason"], "waiting on a dependency");
+        assert_eq!(
+            reason("https://example.test/child.js")["waiting_on"],
+            "https://example.test/missing.js"
+        );
+        let timeline = value["module_timeline"].as_array().unwrap();
+        let child = timeline
+            .iter()
+            .find(|item| item["url"] == "https://example.test/child.js")
+            .expect("child module");
+        assert_eq!(child["held_ms"], 40);
         let scripts = value["scripts"].as_array().unwrap();
         assert!(scripts.iter().any(|script| script["url"] == "https://example.test/ran.js" && script["event"] == "execute"));
         assert!(!scripts.iter().any(|script| script["url"] == "inline#9" && script["event"] == "execute"));

@@ -49,7 +49,7 @@ pub(crate) fn note_location(url: &str, replace: bool) {
 }
 mod net_bridge;
 pub use net_bridge::{NetDelivery, NetRequest};
-pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
+pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState, PendingImport};
 #[cfg(test)]
 mod net_bridge_tests;
 #[cfg(test)]
@@ -1802,6 +1802,11 @@ impl DomBindings {
     /// The URLs a module graph has asked for since the last call.
     pub fn take_module_requests(&self) -> Vec<String> {
         self.runtime.borrow_mut().take_module_requests()
+    }
+
+    /// Imports whose source has not been supplied yet.
+    pub fn pending_module_imports(&self) -> Vec<PendingImport> {
+        self.runtime.borrow().pending_module_imports()
     }
 
     /// Dynamic `import()` calls that rejected since the last call.

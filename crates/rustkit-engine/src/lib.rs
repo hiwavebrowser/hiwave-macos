@@ -6260,6 +6260,18 @@ impl Engine {
                                                 false,
                                                 Some("waiting on a dependency"),
                                             );
+                                            let waiting: Vec<String> = bindings
+                                                .pending_module_imports()
+                                                .into_iter()
+                                                .map(|item| {
+                                                    if item.dynamic {
+                                                        format!("dynamic {}", item.url)
+                                                    } else {
+                                                        item.url
+                                                    }
+                                                })
+                                                .collect();
+                                            page_trace::note_module_waiting_on(&waiting);
                                             (
                                                 ScriptOutcome::Threw(
                                                     "module imports were not loaded".into(),
@@ -6283,7 +6295,8 @@ impl Engine {
                     elapsed_ms,
                     outcome,
                 };
-                page_trace::note_parser_pause("script execute", record.elapsed_ms, &record.source);
+                // A non-async module is deferred. It runs after parsing and
+                // before DOMContentLoaded. That wait is not a parser pause.
                 inspector_glue::log_script(log, &inspector, record);
                 inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &label);
                 if let Some(event) = event {
@@ -6321,7 +6334,11 @@ impl Engine {
                 let _ = bindings.set_current_script(None);
                 result
             });
-            page_trace::note_parser_pause("script execute", record.elapsed_ms, &record.source);
+            // Only a parser-blocking classic script holds the parser while
+            // it runs. `defer` and `async` do not.
+            if plan.slots[slot_index].timing == Some(ScriptTiming::Classic) {
+                page_trace::note_parser_pause("script execute", record.elapsed_ms, &record.source);
+            }
             let source = record.source.clone();
             inspector_glue::log_script(log, &inspector, record);
             // What its listeners threw (a synchronous `click()`, an `on*`
