@@ -35,6 +35,10 @@ pub(crate) struct RejectionHooks {
     pending: RefCell<std::collections::VecDeque<JsObject>>,
     /// Engine-owned promises: never reported.
     ignored: RefCell<std::collections::VecDeque<JsObject>>,
+    /// Rejections a handler later caught. Lit's update cycle catches the
+    /// previous update's rejection inside `__enqueueUpdate` and refires it,
+    /// so the original never stays unhandled. Kept only while tracking is on.
+    handled: RefCell<std::collections::VecDeque<JsValue>>,
 }
 
 impl HostHooks for RejectionHooks {
@@ -51,15 +55,42 @@ impl HostHooks for RejectionHooks {
         if self.ignored.borrow().iter().any(|p| JsObject::equals(p, &promise)) {
             return;
         }
-        let mut pending = self.pending.borrow_mut();
         match operation {
             OperationType::Reject => {
+                let mut pending = self.pending.borrow_mut();
                 if pending.len() >= MAX_PENDING {
                     pending.pop_front();
                 }
                 pending.push_back(promise);
             }
-            OperationType::Handle => pending.retain(|p| !JsObject::equals(p, &promise)),
+            OperationType::Handle => {
+                let found = {
+                    let mut pending = self.pending.borrow_mut();
+                    pending
+                        .iter()
+                        .position(|p| JsObject::equals(p, &promise))
+                        .and_then(|pos| pending.remove(pos))
+                };
+                let Some(object) = found else {
+                    return;
+                };
+                let Ok(caught) = JsPromise::from_object(object) else {
+                    return;
+                };
+                let PromiseState::Rejected(reason) = caught.state() else {
+                    return;
+                };
+                // A primitive rejection (`Promise.reject(1).catch(...)`) is
+                // not an update failure. Lit throws an Error object.
+                if reason.as_object().is_none() {
+                    return;
+                }
+                let mut handled = self.handled.borrow_mut();
+                if handled.len() >= 32 {
+                    handled.pop_front();
+                }
+                handled.push_back(reason);
+            }
         }
     }
 }
@@ -92,5 +123,11 @@ impl RejectionHooks {
                 }
             })
             .collect()
+    }
+
+    /// Error rejections that gained a handler since the last call. Lit's
+    /// `__enqueueUpdate` catches the previous update this way.
+    pub(crate) fn take_handled(&self) -> Vec<JsValue> {
+        std::mem::take(&mut *self.handled.borrow_mut()).into_iter().collect()
     }
 }

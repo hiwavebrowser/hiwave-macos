@@ -216,6 +216,11 @@ pub struct Node {
     /// root, its host (weak, so host and root do not keep each other
     /// alive). `None` on every other node (see `shadow.rs`).
     shadow: RefCell<Option<shadow::ShadowLink>>,
+    /// CSS text of `adoptedStyleSheets`, in array order. Set on a
+    /// `Document` node or a shadow root. Empty strings are disabled sheets
+    /// and are not applied. The cascade reads this; it is not a `<style>`
+    /// element, so it does not change the child count.
+    adopted_styles: RefCell<Vec<String>>,
 }
 
 impl Node {
@@ -230,7 +235,20 @@ impl Node {
             next_sibling: RefCell::new(None),
             event_target: EventTarget::new(),
             shadow: RefCell::new(None),
+            adopted_styles: RefCell::new(Vec::new()),
         })
+    }
+
+    /// Replace the CSS text adopted by this document or shadow root.
+    /// One string per `adoptedStyleSheets` entry, in order. An empty
+    /// string is a disabled sheet and is skipped by style resolution.
+    pub fn set_adopted_styles(&self, texts: Vec<String>) {
+        *self.adopted_styles.borrow_mut() = texts;
+    }
+
+    /// CSS text adopted by this document or shadow root, in array order.
+    pub fn adopted_styles(&self) -> Vec<String> {
+        self.adopted_styles.borrow().clone()
     }
 
     /// Get the tag name for element nodes.
@@ -780,6 +798,7 @@ impl Document {
         }
         let new = Node::new(id, node_type);
         new.event_target.adopt_listeners(&old.event_target);
+        *new.adopted_styles.borrow_mut() = old.adopted_styles.borrow().clone();
 
         let children = std::mem::take(&mut *old.children.borrow_mut());
         for child in &children {

@@ -1576,6 +1576,13 @@ impl DomBindings {
         self.runtime.borrow_mut().take_error_reports()
     }
 
+    /// Promise rejections a handler caught since the last call. Lit's
+    /// `__enqueueUpdate` catches the previous update's rejection here.
+    /// Empty unless error reports are on (`HIWAVE_CONSOLE_LOG`).
+    pub fn take_swallowed_rejection_reports(&self) -> Vec<rustkit_js::ErrorReport> {
+        self.runtime.borrow_mut().take_swallowed_rejection_reports()
+    }
+
     /// Unimplemented Web API members page script reached since the last
     /// call: `(interface, member, times, first caller's position)`. Only
     /// [`UNSUPPORTED_MEMBERS`] are ever returned.

@@ -213,4 +213,12 @@ pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source
             script_error(inspector, &report, source);
         }
     }
+    if mirror {
+        for report in bindings.take_swallowed_rejection_reports() {
+            let window = report.frames.first().and_then(|frame| {
+                bindings.script_source(&frame.path).and_then(|text| crate::console_log::excerpt(&text, frame.line, frame.column))
+            });
+            crate::console_log::swallowed_rejection(&report, source, window);
+        }
+    }
 }

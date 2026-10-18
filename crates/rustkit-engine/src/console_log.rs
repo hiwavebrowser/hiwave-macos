@@ -212,10 +212,21 @@ fn is_callee_char(ch: char) -> bool {
 }
 
 pub(crate) fn page_error(report: &ErrorReport, script: &str, window: Option<SourceWindow>) {
+    let kind = if report.rejection { "unhandled rejection" } else { "uncaught" };
+    page_error_kind(report, script, window, kind);
+}
+
+/// A rejection Lit's update cycle (or any other handler) caught. Same line
+/// as [`page_error`], with a different kind so a swallowed update failure
+/// is visible under `HIWAVE_CONSOLE_LOG`.
+pub(crate) fn swallowed_rejection(report: &ErrorReport, script: &str, window: Option<SourceWindow>) {
+    page_error_kind(report, script, window, "swallowed rejection");
+}
+
+fn page_error_kind(report: &ErrorReport, script: &str, window: Option<SourceWindow>, kind: &str) {
     if !enabled() {
         return;
     }
-    let kind = if report.rejection { "unhandled rejection" } else { "uncaught" };
     let name = report.name.unwrap_or("Error");
     let (message, _) = cap(report.message.as_deref().unwrap_or(""), MAX_MESSAGE_CHARS);
     let (url, line, column) = report.frames.first().map(|frame| (resolve(&frame.path), frame.line, frame.column)).unwrap_or_else(
@@ -660,6 +671,44 @@ throw new Error('boom-inline');
         assert!(call.contains("callee box.missing"), "{call}\n{text}");
         assert!(call.contains("source ") && call.contains("box.missing("), "{call}");
         assert_eq!(call.lines().count(), 1, "{call}");
+    }
+
+    fn swallowed_page(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        if path == "/" {
+            (
+                200,
+                "text/html",
+                vec![],
+                r#"<!doctype html><html><body><script>
+Promise.reject(new Error('swallowed-update')).catch(function () {});
+Promise.reject(1).catch(function () {});
+</script></body></html>"#
+                    .into(),
+            )
+        } else {
+            (404, "text/plain", vec![], "missing".into())
+        }
+    }
+
+    /// A rejection a handler caught (Lit's update cycle) is logged while the
+    /// mirror is on, and a caught primitive is not.
+    #[test]
+    fn a_caught_error_rejection_is_logged_as_swallowed() {
+        let _reset = Reset;
+        force_for_test(Some(true));
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        let server = serve(swallowed_page);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+        let text = sink.lock().unwrap().join("\n");
+        assert!(text.contains("swallowed rejection"), "{text}");
+        assert!(text.contains("swallowed-update"), "{text}");
+        assert!(!text.contains("unhandled rejection"), "{text}");
     }
 
     #[test]

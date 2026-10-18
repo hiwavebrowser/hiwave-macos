@@ -345,6 +345,8 @@ mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
+mod lit_render_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
@@ -8106,6 +8108,17 @@ impl Engine {
 
         // Add external stylesheets (loaded from <link> elements)
         stylesheets.extend(external_stylesheets.iter().cloned());
+        // `document.adoptedStyleSheets` follows the document's `<style>`
+        // and `<link>` sheets. The document node holds the text.
+        for text in document.root().adopted_styles() {
+            if text.is_empty() {
+                continue;
+            }
+            match Stylesheet::parse(&text) {
+                Ok(stylesheet) => stylesheets.push(stylesheet),
+                Err(e) => warn!(?e, "Failed to parse an adopted stylesheet"),
+            }
+        }
 
         Self::keep_rules_for_viewport(&mut stylesheets, viewport);
         // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.

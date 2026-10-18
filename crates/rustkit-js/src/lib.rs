@@ -633,6 +633,28 @@ impl JsRuntime {
         }
     }
 
+    /// Rejections a handler caught since the last call (with reports on).
+    /// Lit's update cycle swallows the previous update's error here and
+    /// refires it; the refire is an unhandled rejection only if nothing
+    /// awaits the next update. These are the ones that were caught.
+    pub fn take_swallowed_rejection_reports(&mut self) -> Vec<ErrorReport> {
+        #[cfg(feature = "boa")]
+        {
+            if !self.diag.on.get() {
+                return Vec::new();
+            }
+            self.rejections
+                .take_handled()
+                .into_iter()
+                .map(|reason| self.diag.describe(&reason, None, true, &mut self.context))
+                .collect()
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            Vec::new()
+        }
+    }
+
     /// What listeners and timers threw since the last call (reported by
     /// the embedder's scripts through the host natives), as text:
     /// `TypeError: x is not a function`, a thrown object as
@@ -1618,6 +1640,32 @@ mod tests {
         assert_eq!((r.value, r.name, r.message.as_deref(), r.message_len, r.rejection), ("error", Some("TypeError"), None, Some(4), true));
         assert_eq!(r.frames, vec![ScriptPosition { path: "inline#1".into(), line: 1, column: 16 }]);
         assert!(runtime.take_error_reports().is_empty(), "taken once");
+    }
+
+    /// A handler that catches an Error is not an unhandled rejection. Lit's
+    /// update cycle does this (`__enqueueUpdate` catches the previous
+    /// update). The reason is reported separately so a swallowed update
+    /// failure is still visible.
+    #[test]
+    fn a_handled_error_rejection_is_reported_as_swallowed() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_error_reports(true, true);
+        runtime
+            .evaluate_script(
+                "Promise.reject(new Error('update failed')).catch(function () {});\
+                 Promise.reject(1).catch(function () {});",
+            )
+            .unwrap();
+        let unhandled = runtime.take_error_reports();
+        assert!(unhandled.is_empty(), "{unhandled:?}");
+        let swallowed = runtime.take_swallowed_rejection_reports();
+        assert_eq!(swallowed.len(), 1, "{swallowed:?}");
+        let r = &swallowed[0];
+        assert_eq!(
+            (r.name, r.message.as_deref(), r.rejection),
+            (Some("Error"), Some("update failed"), true)
+        );
+        assert!(runtime.take_swallowed_rejection_reports().is_empty(), "taken once");
     }
 
     #[test]

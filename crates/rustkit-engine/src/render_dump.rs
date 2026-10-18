@@ -591,7 +591,7 @@ fn shadow_json(node: &Node) -> Value {
     json!({
         "mode": mode,
         "child_count": root.children().len(),
-        "adopted_stylesheets": 0
+        "adopted_stylesheets": root.adopted_styles().len()
     })
 }
 
