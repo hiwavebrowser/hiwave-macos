@@ -283,3 +283,256 @@ fn a_shown_popover_is_fixed_and_fit_content_and_a_closed_one_is_hidden() {
     assert!(!text.contains("secret"), "{text:?}");
     assert!(!text.contains("closed dialog"), "{text:?}");
 }
+
+fn rect(engine: &mut Engine, view: EngineViewId, id: &str) -> (f64, f64, f64, f64) {
+    let raw = eval(
+        engine,
+        view,
+        &format!(
+            "var r = document.getElementById('{id}').getBoundingClientRect(); \
+             [r.x, r.y, r.width, r.height].join()"
+        ),
+    );
+    let mut n = raw
+        .split(',')
+        .map(|p| p.trim().parse::<f64>().unwrap_or(f64::NAN));
+    (
+        n.next().unwrap_or(f64::NAN),
+        n.next().unwrap_or(f64::NAN),
+        n.next().unwrap_or(f64::NAN),
+        n.next().unwrap_or(f64::NAN),
+    )
+}
+
+/// The credit span stays the inline line. A block inside it is broken out
+/// (CSS 2.1 §9.2.1.1) instead of the span becoming a 964×800 block.
+#[test]
+fn an_inline_credit_span_splits_around_its_block_and_stays_a_line() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}</style>"#,
+        r#"<shreddit-post id="post"><template shadowrootmode="open"><style>"#,
+        r#":host{display:block;width:964px}.contents{display:contents}</style>"#,
+        r#"<div class="contents"><slot name="credit-bar"></slot></div>"#,
+        r#"</template><span id="credit" slot="credit-bar">"#,
+        r#"username and the credit line"#,
+        r#"<span id="extra" style="display:block;height:800px;width:200px"></span>"#,
+        r#"</span></shreddit-post>"#,
+    ));
+    let credit = rect(&mut engine, view, "credit");
+    let extra = rect(&mut engine, view, "extra");
+    let post = rect(&mut engine, view, "post");
+    assert!(
+        credit.2 < 500.0 && credit.3 < 40.0,
+        "credit span became a block {credit:?}"
+    );
+    assert!(
+        (extra.3 - 800.0).abs() < 1.0 && extra.1 + 1.0 >= credit.1 + credit.3,
+        "block was not broken out below the line: extra {extra:?} credit {credit:?}"
+    );
+    assert_eq!(
+        eval(
+            &mut engine,
+            view,
+            "getComputedStyle(document.getElementById('credit')).display"
+        ),
+        "inline"
+    );
+    assert!(post.2 > 900.0, "post column {post:?}");
+}
+
+/// A blank line between an inline custom element and its block child is not
+/// a 20px strut (the wikipedia header gap).
+#[test]
+fn a_block_inside_an_inline_does_not_keep_a_whitespace_line() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}</style>"#,
+        r#"<header id="h"><x-bar id="bar">"#,
+        "\n  ",
+        r#"<div id="inner" style="height:40px"></div>"#,
+        "\n",
+        r#"</x-bar></header><div id="below" style="height:10px"></div>"#,
+    ));
+    let inner = rect(&mut engine, view, "inner");
+    let below = rect(&mut engine, view, "below");
+    let bar = rect(&mut engine, view, "bar");
+    assert!((inner.3 - 40.0).abs() < 1.0, "{inner:?}");
+    assert!(
+        below.1 < 45.0,
+        "header gained a line box: below at {} (inner {inner:?})",
+        below.1
+    );
+    assert!(bar.3 < 45.0, "custom element grew a strut: {bar:?}");
+}
+
+/// Unknown elements in a flex row are flex items. They sit on one line
+/// inside the row, not on an overflowing max-content line (microsoft header).
+#[test]
+fn custom_elements_in_a_flex_row_stay_on_one_line_inside_the_row() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}"#,
+        r#"#row{display:flex;width:320px}</style>"#,
+        r#"<header id="row"><ms-logo id="logo">Logo</ms-logo>"#,
+        r#"<ms-nav id="nav">Home Office Windows Xbox</ms-nav></header>"#,
+        r#"<div id="next" style="height:8px"></div>"#,
+    ));
+    let row = rect(&mut engine, view, "row");
+    let logo = rect(&mut engine, view, "logo");
+    let nav = rect(&mut engine, view, "nav");
+    let next = rect(&mut engine, view, "next");
+    assert!((row.2 - 320.0).abs() < 1.0, "row {row:?}");
+    assert!(
+        nav.0 > logo.0 + 1.0 && (nav.1 - logo.1).abs() < 2.0,
+        "logo and nav stacked or overflowed: logo {logo:?} nav {nav:?}"
+    );
+    assert!(
+        nav.0 + nav.2 <= 321.0,
+        "nav ran past the row: nav {nav:?} row {row:?}"
+    );
+    assert!(next.1 < 40.0, "row grew a second line: next at {}", next.1);
+}
+
+/// `display: contents` children join the flex row and are blockified, so
+/// they still fit the row instead of summing a max-content line.
+#[test]
+fn contents_children_join_a_flex_row_without_overflowing_it() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}"#,
+        r#"#row{display:flex;width:300px}#wrap{display:contents}</style>"#,
+        r#"<div id="row"><div id="wrap"><a id="logo">MS</a>"#,
+        r#"<nav id="nav">Products</nav></div></div>"#,
+    ));
+    let logo = rect(&mut engine, view, "logo");
+    let nav = rect(&mut engine, view, "nav");
+    assert!(
+        nav.0 > logo.0 && (nav.1 - logo.1).abs() < 2.0,
+        "contents children did not join the row: logo {logo:?} nav {nav:?}"
+    );
+    assert!(
+        nav.0 + nav.2 <= 301.0,
+        "nav overflowed the flex row: {nav:?}"
+    );
+    assert_eq!(
+        eval(
+            &mut engine,
+            view,
+            "getComputedStyle(document.getElementById('logo')).display"
+        ),
+        "block",
+        "a flex item that arrived through display:contents was not blockified"
+    );
+}
+
+/// A shown popover is fixed and fit-content. It does not push `main` and
+/// it does not stretch a credit bar that contains it.
+#[test]
+fn a_popover_menu_does_not_stretch_the_credit_bar_or_push_main() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}"#,
+        r#"#credit{display:inline-flex}"#,
+        r#"#main{height:40px}</style>"#,
+        r#"<div id="page" style="display:flex;width:800px">"#,
+        r#"<span id="credit">username and the credit line"#,
+        r#"<div id="menu" popover="manual">Search</div></span>"#,
+        r#"<main id="main">feed</main></div>"#,
+    ));
+    let credit = rect(&mut engine, view, "credit");
+    let menu = rect(&mut engine, view, "menu");
+    let main = rect(&mut engine, view, "main");
+    assert_eq!(
+        eval(
+            &mut engine,
+            view,
+            "getComputedStyle(document.getElementById('menu')).display"
+        ),
+        "none",
+        "a closed popover was shown"
+    );
+    assert!(
+        menu.2 == 0.0 && menu.3 == 0.0,
+        "closed popover has a box {menu:?}"
+    );
+    assert!(
+        credit.2 < 500.0 && credit.3 < 80.0,
+        "credit bar stretched around the popover {credit:?}"
+    );
+    assert!(
+        main.0 < 500.0 && main.0 + 1.0 >= credit.0 + credit.2,
+        "main was pushed by the search box: main {main:?} credit {credit:?}"
+    );
+
+    // Author `display` shows the panel. It is out of flow, so main stays
+    // put and the panel stays fit-content rather than the page width.
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}"#,
+        r#"#menu{display:block}#main{height:40px}</style>"#,
+        r#"<div id="page" style="display:flex;width:800px">"#,
+        r#"<div id="menu" popover="manual">Search</div>"#,
+        r#"<main id="main">feed</main></div>"#,
+    ));
+    let menu = rect(&mut engine, view, "menu");
+    let main = rect(&mut engine, view, "main");
+    assert_eq!(
+        eval(
+            &mut engine,
+            view,
+            "getComputedStyle(document.getElementById('menu')).position"
+        ),
+        "fixed"
+    );
+    assert!(
+        menu.2 > 10.0 && menu.2 < 400.0,
+        "shown popover is not fit-content: {menu:?}"
+    );
+    assert!(
+        (main.0).abs() < 1.0,
+        "fixed popover pushed main to x={}: {main:?}",
+        main.0
+    );
+}
+
+/// A header of custom elements is still there after a resize back to the
+/// original viewport (yahoo came back blank apart from the logo).
+#[test]
+fn a_header_of_custom_elements_survives_a_resize() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px sans-serif}"#,
+        r#"#bar{display:flex;width:100%} y-logo{display:block}"#,
+        r#"#main{height:80px}</style>"#,
+        r#"<header id="bar"><y-logo id="logo">Yahoo</y-logo>"#,
+        r#"<y-nav id="nav">News</y-nav></header><main id="main">stories</main>"#,
+    ));
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 400,
+                height: 300,
+            },
+        )
+        .expect("shrink");
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+        )
+        .expect("grow");
+    let logo = rect(&mut engine, view, "logo");
+    let main = rect(&mut engine, view, "main");
+    let text = painted(&engine, view);
+    assert!(
+        logo.2 > 8.0 && logo.3 > 8.0,
+        "logo vanished after resize {logo:?}"
+    );
+    assert!(main.3 > 40.0, "main vanished after resize {main:?}");
+    assert!(
+        text.contains("Yahoo") && text.contains("stories"),
+        "{text:?}"
+    );
+}

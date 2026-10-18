@@ -8047,49 +8047,104 @@ impl Engine {
         }
     }
 
-    /// CSS 2.1 §9.2.1.1: an inline whose only in-flow boxes are block-level
-    /// is broken around them. It generates no line box and no strut, and
-    /// its border box is the union of those blocks (a culled inline).
-    /// `<x-el><div style="height:9px"></div></x-el>` is that case: the
-    /// host's computed display stays `inline`, but dropping the host as an
-    /// empty inline also dropped the block, so the host and the block both
-    /// measured 0×0 and whatever followed slid up. Lay the host out as a
-    /// block box — computed `display` is unchanged — so the blocks get a
-    /// block container and the host's border box is their union.
+    /// An in-flow block-level box. Atomic inlines are `BoxType::Block` but
+    /// they stay on the line. Floats and absolute/fixed boxes are not in
+    /// the inline's flow.
+    fn is_in_flow_block_box(grand: &LayoutBox) -> bool {
+        let out_of_flow = matches!(
+            grand.position,
+            rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+        ) || grand.float != rustkit_layout::Float::None;
+        if out_of_flow {
+            return false;
+        }
+        matches!(grand.box_type, BoxType::Block | BoxType::AnonymousBlock)
+            && !grand.style.display.is_atomic_inline()
+    }
+
+    fn is_out_of_flow_box(grand: &LayoutBox) -> bool {
+        matches!(
+            grand.position,
+            rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+        ) || grand.float != rustkit_layout::Float::None
+    }
+
+    /// CSS 2.1 §9.2.1.1: an inline box that contains an in-flow block-level
+    /// box is broken around that block. The block becomes a sibling of the
+    /// inline's fragments. A run of inline content on either side stays an
+    /// inline fragment (the parent's block layout wraps the surrounding
+    /// line in an anonymous block). A whitespace-only run is not a line
+    /// box — it would be a ~20px strut where Chrome collapses the break.
     ///
-    /// An inline that already has line content or its own box (padding,
-    /// border, background, a width) is left as an inline. Those already
-    /// produce a box; reboxing them would change boxes that match.
-    fn rebox_culled_inline(child: &mut LayoutBox) {
+    /// The inline is not turned into a block box. Doing that made the
+    /// element's border box the stretch width of its parent and the sum of
+    /// its block children (a credit bar 964×827, a search container whose
+    /// max-content blew a flex/grid track out past the viewport).
+    ///
+    /// A fully culled inline (no fragment) keeps a computed `display` of
+    /// `inline` and a border box that is the union of the hoisted blocks,
+    /// which is what `getBoundingClientRect` reports for
+    /// `<x-el><div style="height:9px"></div></x-el>`.
+    fn split_inline_around_blocks(mut child: LayoutBox) -> Vec<LayoutBox> {
         if !matches!(child.box_type, BoxType::Inline)
             || child.style.display != rustkit_css::Display::Inline
+            || !child.children.iter().any(Self::is_in_flow_block_box)
         {
-            return;
+            return vec![child];
         }
-        if Self::has_visible_styling(&child.style) || Self::has_content_children(child) {
-            return;
-        }
-        let mut saw_block = false;
-        for grand in &child.children {
-            let out_of_flow = matches!(
-                grand.position,
-                rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
-            ) || grand.float != rustkit_layout::Float::None;
-            if out_of_flow {
-                continue;
-            }
-            let block = matches!(grand.box_type, BoxType::Block | BoxType::AnonymousBlock)
-                && !grand.style.display.is_atomic_inline();
-            if !block {
-                // A text run, an atomic inline, or another inline: this one
-                // still has line content (or nothing we can promote).
+        note_boxless_style(&child);
+        let kids = std::mem::take(&mut child.children);
+        let mut pieces = Vec::new();
+        let mut run = Vec::new();
+        let mut hoisted = Vec::new();
+        let mut emitted_fragment = false;
+        let flush = |run: &mut Vec<LayoutBox>,
+                     pieces: &mut Vec<LayoutBox>,
+                     shell: &LayoutBox,
+                     emitted: &mut bool| {
+            if run.is_empty() {
                 return;
             }
-            saw_block = true;
+            let mut flow = Vec::new();
+            let mut parked = Vec::new();
+            for box_ in run.drain(..) {
+                if Self::is_out_of_flow_box(&box_) {
+                    parked.push(box_);
+                } else {
+                    flow.push(box_);
+                }
+            }
+            let has_line = flow.iter().any(|b| {
+                !matches!(&b.box_type, BoxType::Text(t) if t.trim().is_empty())
+            });
+            if has_line {
+                let mut fragment = shell.clone();
+                fragment.children = flow;
+                fragment.children.extend(parked);
+                pieces.push(fragment);
+                *emitted = true;
+            } else {
+                pieces.extend(parked);
+            }
+        };
+        for grand in kids {
+            if Self::is_in_flow_block_box(&grand) {
+                flush(&mut run, &mut pieces, &child, &mut emitted_fragment);
+                if let Some(id) = grand.node_id {
+                    hoisted.push(id);
+                }
+                pieces.push(grand);
+            } else {
+                run.push(grand);
+            }
         }
-        if saw_block {
-            child.box_type = BoxType::Block;
+        flush(&mut run, &mut pieces, &child, &mut emitted_fragment);
+        if !emitted_fragment {
+            if let Some(id) = child.node_id {
+                note_culled_inline(id, hoisted);
+            }
         }
+        pieces
     }
 
     /// Check if a layout box has content children (text, images, form controls).
@@ -9756,7 +9811,7 @@ impl Engine {
                         _ => SiblingContext::SOLE,
                     };
                     let restyle = restyle_child(node.id.raw(), child.id.raw());
-                    let mut child_box = match restyle {
+                    let child_box = match restyle {
                         RestyleChild::Skip => LayoutBox::new(BoxType::Block, ComputedStyle::new()),
                         _ => self.build_layout_from_parent_style_and_path(
                             child,
@@ -9820,11 +9875,12 @@ impl Engine {
                         continue;
                     }
 
-                    // A culled inline (only in-flow block children, no line
-                    // box of its own) becomes a block box before the include
-                    // test, so those children are not discarded with it.
-                    Self::rebox_culled_inline(&mut child_box);
-
+                    // CSS 2.1 §9.2.1.1: break an inline around its in-flow
+                    // blocks. Each piece is included on its own, so a block
+                    // is not discarded with an empty inline and the inline
+                    // is not reboxed into a block.
+                    let pieces = Self::split_inline_around_blocks(child_box);
+                    for child_box in pieces {
                     // Determine if box should be included in layout tree
                     let should_include = match child_box.box_type {
                         BoxType::Block | BoxType::AnonymousBlock => {
@@ -9863,6 +9919,7 @@ impl Engine {
                         }) {
                             Self::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
                         }
+                    }
                     }
                 }
                 drop(table_hints);
@@ -20229,10 +20286,26 @@ pub(crate) struct BoxlessStyle {
 thread_local! {
     static BOXLESS_STYLES: std::cell::RefCell<HashMap<usize, BoxlessStyle>> =
         std::cell::RefCell::new(HashMap::new());
+    /// A fully culled inline (CSS 2.1 §9.2.1.1: no line box of its own, only
+    /// block-level children that were hoisted out) has no fragment. Its
+    /// border box is the union of those blocks' border boxes. Values are the
+    /// hoisted elements' node ids.
+    static CULLED_INLINE_BLOCKS: std::cell::RefCell<HashMap<usize, Vec<usize>>> =
+        std::cell::RefCell::new(HashMap::new());
 }
 
 fn clear_boxless_styles() {
     BOXLESS_STYLES.with(|slot| slot.borrow_mut().clear());
+    CULLED_INLINE_BLOCKS.with(|slot| slot.borrow_mut().clear());
+}
+
+fn note_culled_inline(inline_id: usize, block_ids: Vec<usize>) {
+    if block_ids.is_empty() {
+        return;
+    }
+    CULLED_INLINE_BLOCKS.with(|slot| {
+        slot.borrow_mut().insert(inline_id, block_ids);
+    });
 }
 
 /// Remember `box_`'s computed style for an element the box tree will not
@@ -20350,6 +20423,47 @@ fn geometry_snapshot(
     BOXLESS_STYLES.with(|slot| {
         for (node, recorded) in slot.borrow().iter() {
             styles.entry(*node).or_insert_with(|| recorded.lines.clone());
+        }
+    });
+    // A culled inline has no fragment. Its border box is the union of the
+    // blocks it was split around. A real fragment for the same node wins.
+    CULLED_INLINE_BLOCKS.with(|slot| {
+        for (inline_id, block_ids) in slot.borrow().iter() {
+            if out.contains_key(inline_id) {
+                continue;
+            }
+            let mut union: Option<rustkit_bindings::BoxGeometry> = None;
+            for id in block_ids {
+                let Some(part) = out.get(id).copied() else {
+                    continue;
+                };
+                union = Some(match union {
+                    None => part,
+                    Some(acc) => {
+                        let (l, t) = (acc.x.min(part.x), acc.y.min(part.y));
+                        let (r, b) = (
+                            (acc.x + acc.width).max(part.x + part.width),
+                            (acc.y + acc.height).max(part.y + part.height),
+                        );
+                        rustkit_bindings::BoxGeometry {
+                            x: l,
+                            y: t,
+                            width: r - l,
+                            height: b - t,
+                            border_left: acc.border_left,
+                            border_top: acc.border_top,
+                            client_width: acc.client_width.max(part.client_width),
+                            client_height: acc.client_height.max(part.client_height),
+                            scroll_width: acc.scroll_width.max(part.scroll_width),
+                            scroll_height: acc.scroll_height.max(part.scroll_height),
+                            position: acc.position,
+                        }
+                    }
+                });
+            }
+            if let Some(union) = union {
+                out.insert(*inline_id, union);
+            }
         }
     });
     (out, styles)
