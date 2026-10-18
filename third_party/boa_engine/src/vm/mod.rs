@@ -152,6 +152,9 @@ pub struct Vm {
     // reported. See `host_stack`.
     pub(crate) host_frames: Vec<host_stack::Frame>,
     pub(crate) host_stack_logged: u8,
+    /// Property key of the accessor `call` is about to enter, if the host
+    /// stack is armed. `enter` takes it so a nested call does not inherit it.
+    pub(crate) host_getter_key: Option<String>,
 
     /// Deepest JavaScript frame count (excluding the dummy frame) since
     /// [`Context::reset_recursion_max`](crate::Context::reset_recursion_max).
@@ -508,6 +511,7 @@ impl Vm {
             host_call_depth: 0,
             host_frames: Vec::new(),      // HIWAVE PATCH (host stack)
             host_stack_logged: 0,         // HIWAVE PATCH (host stack)
+            host_getter_key: None,        // HIWAVE PATCH (host stack)
             max_frame_depth: Cell::new(0), // HIWAVE PATCH (recursion)
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]

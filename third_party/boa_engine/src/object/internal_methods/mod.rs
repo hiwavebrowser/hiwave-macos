@@ -697,6 +697,29 @@ pub(crate) fn ordinary_has_property(
     }
 }
 
+/// Call an accessor and, while the host-stack log is armed, remember `key`
+/// for that one frame. The previous key is restored even when the call throws,
+/// and `enter` takes the key so a nested call does not inherit it.
+fn call_accessor(
+    func: &JsValue,
+    this: &JsValue,
+    args: &[JsValue],
+    key: &PropertyKey,
+    context: &mut InternalMethodPropertyContext<'_>,
+) -> JsResult<JsValue> {
+    let armed = crate::vm::host_stack::armed();
+    let previous = if armed {
+        context.vm.host_getter_key.replace(key.to_string())
+    } else {
+        None
+    };
+    let result = func.call(this, args, context);
+    if armed {
+        context.vm.host_getter_key = previous;
+    }
+    result
+}
+
 /// Abstract operation `OrdinaryGet`.
 ///
 /// More information:
@@ -737,7 +760,7 @@ pub(crate) fn ordinary_get(
                 // 6. Let getter be desc.[[Get]].
                 DescriptorKind::Accessor { get: Some(get), .. } if !get.is_undefined() => {
                     // 8. Return ? Call(getter, Receiver).
-                    get.call(&receiver, &[], context)
+                    call_accessor(get, &receiver, &[], key, context)
                 }
                 // 7. If getter is undefined, return undefined.
                 _ => Ok(JsValue::undefined()),
@@ -790,7 +813,7 @@ pub(crate) fn ordinary_try_get(
                 // 6. Let getter be desc.[[Get]].
                 DescriptorKind::Accessor { get: Some(get), .. } if !get.is_undefined() => {
                     // 8. Return ? Call(getter, Receiver).
-                    get.call(&receiver, &[], context).map(Some)
+                    call_accessor(get, &receiver, &[], key, context).map(Some)
                 }
                 // 7. If getter is undefined, return undefined.
                 _ => Ok(Some(JsValue::undefined())),
@@ -917,7 +940,7 @@ pub(crate) fn ordinary_set(
     match own_desc.set() {
         Some(set) if !set.is_undefined() => {
             // 7. Perform ? Call(setter, Receiver, « V »).
-            set.call(&receiver, &[value], context)?;
+            call_accessor(set, &receiver, &[value], &key, context)?;
 
             // 8. Return true.
             Ok(true)

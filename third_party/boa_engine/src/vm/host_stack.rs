@@ -16,9 +16,10 @@ use crate::{
     property::PropertyKey,
 };
 
-/// One host re-entry. `name` is the short name the histogram counts.
-/// `label` is that name plus, when known, ` @url:line:col`, or
-/// `native {binding} @host` for a native function.
+/// One host re-entry. `name` is the short name the histogram counts (capped).
+/// `label` is that name, the property key of a getter or setter (` [key]`),
+/// and when known ` @url:line:col`. A native is `native {name} @host`.
+/// The URL and the line:col are not truncated.
 #[derive(Clone, Debug)]
 pub(crate) struct Frame {
     name: String,
@@ -27,8 +28,8 @@ pub(crate) struct Frame {
 
 /// `depth` is the host re-entry count. `histogram` is `name=count` pairs,
 /// most frequent first. `frames` is the innermost 20 labels, outermost of
-/// that window first. A label is `name @url:line:col`, or
-/// `native {binding} @host`.
+/// that window first. A label is `name [key] @url:line:col` for an accessor
+/// (the key is omitted otherwise), or `native {name} @host`.
 pub type HostStackDiag = fn(depth: usize, histogram: &str, frames: &str);
 
 static HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
@@ -38,6 +39,7 @@ static ARMED: AtomicBool = AtomicBool::new(false);
 static FIRST_MARK: AtomicUsize = AtomicUsize::new(256);
 
 const NAME_CHARS: usize = 80;
+const KEY_CHARS: usize = 80;
 const HISTOGRAM_NAMES: usize = 40;
 const FRAME_WINDOW: usize = 20;
 
@@ -60,11 +62,18 @@ pub fn set_host_stack_first_mark(mark: Option<usize>) {
     FIRST_MARK.store(mark.unwrap_or(256), Ordering::Relaxed);
 }
 
+pub(crate) fn armed() -> bool {
+    ARMED.load(Ordering::Relaxed)
+}
+
 pub(crate) fn enter(context: &mut Context, func: &JsObject) -> bool {
+    // Take the key even when disarmed so a stale key cannot leak into a
+    // later armed frame. Nested non-getter calls then see `None`.
+    let key = context.vm.host_getter_key.take();
     if !ARMED.load(Ordering::Relaxed) {
         return false;
     }
-    context.vm.host_frames.push(function_frame(func));
+    context.vm.host_frames.push(function_frame(func, key.as_deref()));
     note(context);
     true
 }
@@ -120,7 +129,7 @@ fn snapshot(stack: &[Frame]) -> (String, String) {
         if i > 0 {
             histogram.push(',');
         }
-        histogram.push_str(&flat(name));
+        histogram.push_str(&flat_name(name));
         histogram.push('=');
         histogram.push_str(&count.to_string());
     }
@@ -137,17 +146,21 @@ fn snapshot(stack: &[Frame]) -> (String, String) {
         if i > 0 {
             frames.push_str(" > ");
         }
-        frames.push_str(&flat(&frame.label));
+        frames.push_str(&flat_label(&frame.label));
     }
     (histogram, frames)
 }
 
-fn function_frame(func: &JsObject) -> Frame {
+fn function_frame(func: &JsObject, key: Option<&str>) -> Frame {
     let name = function_name(func);
-    let label = match js_location(func) {
-        Some(location) => format!("{name} @{location}"),
-        None if is_native(func) => format!("native {name} @host"),
+    let shown = match key.map(flat_key).filter(|key| !key.is_empty()) {
+        Some(key) => format!("{name} [{key}]"),
         None => name.clone(),
+    };
+    let label = match js_location(func) {
+        Some(location) => format!("{shown} @{location}"),
+        None if is_native(func) => format!("native {shown} @host"),
+        None => shown,
     };
     Frame { name, label }
 }
@@ -215,11 +228,12 @@ fn named(name: &str) -> String {
     if name.is_empty() {
         "(anonymous)".to_string()
     } else {
-        flat(name)
+        flat_name(name)
     }
 }
 
-fn flat(name: &str) -> String {
+/// Histogram names stay short so a long URL cannot drown the counts.
+fn flat_name(name: &str) -> String {
     let mut out: String = name
         .chars()
         .take(NAME_CHARS)
@@ -232,4 +246,31 @@ fn flat(name: &str) -> String {
         out.push('…');
     }
     out
+}
+
+fn flat_key(key: &str) -> String {
+    let mut out: String = key
+        .chars()
+        .take(KEY_CHARS)
+        .map(|c| match c {
+            '"' | '\n' | '\r' | '[' | ']' => '\'',
+            _ => c,
+        })
+        .collect();
+    if key.chars().count() > KEY_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+/// Frame labels keep the full script URL and line:col. Quotes and newlines
+/// are flattened so the log line stays one line.
+fn flat_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|c| match c {
+            '"' | '\n' | '\r' => '\'',
+            _ => c,
+        })
+        .collect()
 }

@@ -341,9 +341,56 @@ fn on_host_stack(depth: usize, histogram: &str, frames: &str) {
     if !enabled() {
         return;
     }
+    let frames = expand_frames(frames);
     emit(format!(
         "host stack depth={depth} histogram=\"{histogram}\" frames=\"{frames}\""
     ));
+}
+
+/// `frames` is `label > label`. A label's location is ` @path:line:col`.
+/// `path` may be an engine alias (`inserted#N`); the line and column stay.
+/// The split is the trailing `:digits:digits`, so `https://` is part of the path.
+fn expand_frames(frames: &str) -> String {
+    let mut out = String::new();
+    let mut rest = frames;
+    while !rest.is_empty() {
+        let (piece, next) = match rest.find(" > ") {
+            Some(i) => (&rest[..i], &rest[i + 3..]),
+            None => (rest, ""),
+        };
+        if !out.is_empty() {
+            out.push_str(" > ");
+        }
+        out.push_str(&expand_frame(piece));
+        rest = next;
+    }
+    out
+}
+
+fn expand_frame(label: &str) -> String {
+    let Some(at) = label.rfind(" @") else {
+        return label.to_string();
+    };
+    let head = &label[..at];
+    let loc = &label[at + 2..];
+    let (path, line_col) = split_trailing_line_col(loc);
+    format!("{head} @{}{line_col}", resolve(path))
+}
+
+fn split_trailing_line_col(loc: &str) -> (&str, String) {
+    let Some((rest, col)) = loc.rsplit_once(':') else {
+        return (loc, String::new());
+    };
+    if col.is_empty() || !col.bytes().all(|b| b.is_ascii_digit()) {
+        return (loc, String::new());
+    }
+    let Some((path, line)) = rest.rsplit_once(':') else {
+        return (loc, String::new());
+    };
+    if line.is_empty() || !line.bytes().all(|b| b.is_ascii_digit()) {
+        return (loc, String::new());
+    }
+    (path, format!(":{line}:{col}"))
 }
 
 fn on_interrupt(site: &'static str, message: &'static str, limit: &'static str) {
@@ -580,6 +627,33 @@ mod tests {
         assert!(line.contains("host stack depth=512"), "{line}");
         assert!(line.contains("histogram=\"set x=512\""), "{line}");
         assert!(line.contains("frames=\"set x > set x\""), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+    }
+
+    #[test]
+    fn host_stack_frames_expand_the_full_script_url_and_keep_line_col() {
+        let _reset = Reset;
+        force_for_test(Some(true));
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        let long = format!("https://www.redditstatic.com/{}", "chunk.js?".repeat(20));
+        assert!(long.chars().count() > 80, "{}", long.chars().count());
+        alias("inserted#host-stack-url", &long);
+        on_host_stack(
+            4,
+            "get=2,get state=2",
+            "get [state] @inserted#host-stack-url:12:4 > get state [state] @inserted#host-stack-url:40:8",
+        );
+        let lines = sink.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = &lines[0];
+        assert!(line.contains(&format!("get [state] @{long}:12:4")), "{line}");
+        assert!(
+            line.contains(&format!("get state [state] @{long}:40:8")),
+            "{line}"
+        );
+        assert!(!line.contains("inserted#host-stack-url"), "{line}");
+        assert!(!line.contains('…'), "{line}");
         assert!(!line.contains('\n'), "{line}");
     }
 }

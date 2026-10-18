@@ -2019,15 +2019,16 @@ mod tests {
             assert!(logged[0].starts_with("depth=4 "), "{}", logged[0]);
             assert!(logged[0].contains("histogram=set x=4"), "{}", logged[0]);
             assert!(
-                logged[0].contains("set x @rustkit#embedder:"),
+                logged[0].contains("set x [x] @rustkit#embedder:"),
                 "{}",
                 logged[0]
             );
             assert!(
-                logged[0].contains(" > set x @rustkit#embedder:"),
+                logged[0].contains(" > set x [x] @rustkit#embedder:"),
                 "{}",
                 logged[0]
             );
+            assert!(logged[0].contains(":1:"), "{}", logged[0]);
 
             // A named script's frames carry url:line:col. The histogram
             // still counts the short name.
@@ -2047,10 +2048,36 @@ mod tests {
                 named_log[0]
             );
             assert!(
-                named_log[0].contains("set y @inline#host:"),
+                named_log[0].contains("set y [y] @inline#host:"),
                 "{}",
                 named_log[0]
             );
+            assert!(named_log[0].contains(":1:"), "{}", named_log[0]);
+
+            // A long script URL is not cut at 80 characters, and a getter
+            // frame names the property as well as url:line:col.
+            lines().lock().unwrap().clear();
+            let long = format!(
+                "https://www.redditstatic.com/js/concat?prefix={}",
+                "BY5aoJvoEB".repeat(12)
+            );
+            assert!(long.chars().count() > 80, "{}", long.chars().count());
+            let got = runtime
+                .evaluate_script_named(
+                    "var n = 0; var obj = { get z() { n++; if (n < 6) return this.z; } }; obj.z; n",
+                    &long,
+                )
+                .unwrap();
+            assert!(matches!(got, JsValue::Number(n) if n == 6.0));
+            let long_log = lines().lock().unwrap().clone();
+            assert_eq!(long_log.len(), 1, "{long_log:?}");
+            assert!(long_log[0].contains("histogram=get z=4"), "{}", long_log[0]);
+            assert!(
+                long_log[0].contains(&format!("get z [z] @{long}:1:")),
+                "{}",
+                long_log[0]
+            );
+            assert!(!long_log[0].contains('…'), "{}", long_log[0]);
         }
 
         let word = Arc::new(AtomicU64::new(0));
