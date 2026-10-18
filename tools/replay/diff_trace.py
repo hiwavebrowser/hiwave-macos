@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Print the first divergence between a HiWave trace and a Chrome trace.
+"""Print the first divergence between a Chrome trace and a HiWave trace.
+
+Pass the files with ``--chrome`` and ``--hiwave``. The report names both
+sides with those labels.
 
 Both files use the schema written by chrome_trace.mjs and by HiWave when
 HIWAVE_TRACE_JSON or HIWAVE_CONSOLE_LOG=1 is set. Timestamps are shown and
@@ -169,14 +172,12 @@ def first_divergence(left: dict, right: dict, left_name: str = "hiwave", right_n
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Print the first divergence of two page traces")
-    parser.add_argument("left", help="HiWave trace JSON")
-    parser.add_argument("right", help="Chrome trace JSON")
-    parser.add_argument("--left-name", default="hiwave")
-    parser.add_argument("--right-name", default="chrome")
+    parser.add_argument("--chrome", required=True, help="Chrome trace JSON")
+    parser.add_argument("--hiwave", required=True, help="HiWave trace JSON")
     args = parser.parse_args()
-    left = json.loads(Path(args.left).read_text(encoding="utf-8"))
-    right = json.loads(Path(args.right).read_text(encoding="utf-8"))
-    found = first_divergence(left, right, args.left_name, args.right_name)
+    chrome = json.loads(Path(args.chrome).read_text(encoding="utf-8"))
+    hiwave = json.loads(Path(args.hiwave).read_text(encoding="utf-8"))
+    found = first_divergence(chrome, hiwave, "chrome", "hiwave")
     if found is None:
         print("no divergence")
         return

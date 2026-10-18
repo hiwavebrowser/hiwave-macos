@@ -15,6 +15,14 @@ one-off certificate (--ignore-certificate-errors on the Chrome side).
 A miss is logged as `MISS METHOD url` and answered 404. Cookie and
 Authorization values are never written to that log.
 
+redditstatic ``js/concat`` URLs are built at runtime, so the chunk list
+often matches no recorded entry. Those requests are answered by splitting
+recorded concat bodies into ``SML.dm`` chunk registrations (see concat.py)
+or, when that split is not exact, by the smallest set of recorded bodies
+that covers the requested chunks. The strategy is logged as ``CONCAT split``
+or ``CONCAT cover``. A chunk that is still absent is logged as
+``CONCAT missing <id>``. Cookie values are not part of that log.
+
 No recorded HAR belongs in the repo. Use fixtures/synthetic.har for tests.
 """
 
@@ -35,7 +43,23 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from concat import ConcatBody, assemble, chunk_ids, split_body
 from normalize import normalize_url
+
+def _entry_text(entry: dict) -> str:
+    response = entry.get("response") or {}
+    content = response.get("content") or {}
+    encoding = str(content.get("encoding") or "").lower()
+    text = content.get("text") or ""
+    if encoding == "base64" and isinstance(text, str) and text:
+        try:
+            return base64.b64decode(text).decode("utf-8", errors="replace")
+        except Exception:
+            return text
+    if isinstance(text, str):
+        return text
+    return bytes(text).decode("utf-8", errors="replace")
+
 
 HOP_BY_HOP = {
     "connection",
@@ -55,28 +79,88 @@ class HarArchive:
         self.cursor: Dict[Tuple[str, str], int] = {}
         self.misses: List[str] = []
         self._lock = threading.Lock()
+        self._notes: List[str] = []
+        self.concat_slices: Dict[str, str] = {}
+        self.concat_bodies: List[ConcatBody] = []
         log = data.get("log", data)
         for entry in log.get("entries", []):
             request = entry.get("request") or {}
             method = str(request.get("method") or "GET").upper()
-            key = (method, normalize_url(str(request.get("url") or "")))
+            url = str(request.get("url") or "")
+            key = (method, normalize_url(url))
             self.by_key.setdefault(key, []).append(entry)
+            if method == "GET":
+                self._index_concat(url, entry)
+
+    def _index_concat(self, url: str, entry: dict) -> None:
+        ids = chunk_ids(url)
+        if not ids:
+            return
+        text = _entry_text(entry)
+        body = ConcatBody(
+            ids=ids,
+            text=text,
+            time_ms=float(entry.get("time") or 0),
+            entry=entry,
+        )
+        self.concat_bodies.append(body)
+        pieces = split_body(text, ids)
+        if pieces is None:
+            return
+        for chunk_id, piece in pieces.items():
+            self.concat_slices.setdefault(chunk_id, piece)
 
     @classmethod
     def from_file(cls, path: str | Path) -> "HarArchive":
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             return cls(json.load(handle))
 
-    def take(self, method: str, url: str) -> Optional[dict]:
+    def take(self, method: str, url: str) -> Tuple[Optional[dict], List[str]]:
+        """Return the HAR entry (or a concat assembly) and log lines for this request.
+
+        Log lines never include cookie or authorization values.
+        """
         key = (method.upper(), normalize_url(url))
         with self._lock:
             entries = self.by_key.get(key)
-            if not entries:
-                self.misses.append(f"MISS {key[0]} {key[1]}")
-                return None
-            index = self.cursor.get(key, 0)
-            self.cursor[key] = index + 1
-            return entries[min(index, len(entries) - 1)]
+            if entries:
+                index = self.cursor.get(key, 0)
+                self.cursor[key] = index + 1
+                return entries[min(index, len(entries) - 1)], []
+            assembled, notes = self._assemble_concat(url)
+            if assembled is not None:
+                self._notes.extend(notes)
+                return assembled, notes
+            self.misses.append(f"MISS {key[0]} {key[1]}")
+            self._notes.extend(notes)
+            return None, notes
+
+    def _assemble_concat(self, url: str) -> Tuple[Optional[dict], List[str]]:
+        requested = chunk_ids(url)
+        if not requested:
+            return None, []
+        found = assemble(requested, self.concat_slices, self.concat_bodies)
+        if found is None:
+            notes = [f"CONCAT missing {chunk_id}" for chunk_id in requested]
+            return None, notes
+        text, strategy, missing, sources = found
+        if strategy == "split":
+            notes = [f"CONCAT split chunks={len(requested)}"]
+        else:
+            notes = [f"CONCAT cover bodies={len(sources)}"]
+        notes.extend(f"CONCAT missing {chunk_id}" for chunk_id in missing)
+        time_ms = max((source.time_ms for source in sources), default=0)
+        base = sources[0].entry if sources else {}
+        response = dict(base.get("response") or {})
+        content = dict(response.get("content") or {})
+        content["text"] = text
+        content["encoding"] = ""
+        content["mimeType"] = content.get("mimeType") or "application/javascript"
+        content["size"] = len(text.encode("utf-8"))
+        response["status"] = 200
+        response["statusText"] = response.get("statusText") or "OK"
+        response["content"] = content
+        return {"time": time_ms, "response": response}, notes
 
 
 class ReplayServer(ThreadingHTTPServer):
@@ -183,7 +267,9 @@ class ReplayHandler(BaseHTTPRequestHandler):
                     break
                 remaining -= len(chunk)
         target = self._target_url()
-        entry = self.server.archive.take(self.command, target)
+        entry, notes = self.server.archive.take(self.command, target)
+        for line in notes:
+            self.server.log_miss(line)
         if entry is None:
             normalized = normalize_url(target)
             # The miss line is method + URL only. Header values (cookies)
