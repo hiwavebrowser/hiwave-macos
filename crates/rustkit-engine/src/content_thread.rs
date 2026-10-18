@@ -811,6 +811,50 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_is_published_between_timer_tasks() {
+        let page = page();
+        let mut loaded = page.load_html(
+            r#"<div id="t" style="width:80px;height:40px;background:#cccccc"></div>"#,
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = poll_until(&page, Duration::from_secs(3), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(_)))
+        });
+        let _ = page.poll();
+        let mut arm = page.eval(
+            r#"setTimeout(function () {
+                document.getElementById('t').style.background = '#00ff00';
+                var end = Date.now() + 40;
+                while (Date.now() < end) {}
+            }, 0);
+            setTimeout(function () {
+                document.getElementById('t').style.background = '#0000ff';
+            }, 0);
+            'armed'"#,
+        );
+        assert!(wait_recv(&mut arm, Duration::from_secs(5)).unwrap().unwrap().contains("armed"));
+        let mut saw_green = false;
+        let mut blue_first = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !saw_green {
+            for event in page.poll() {
+                let PageEvent::Commit(commit) = event else { continue };
+                let green = has_color(&commit, 0, 255, 0);
+                let blue = has_color(&commit, 0, 0, 255);
+                if blue && !saw_green {
+                    blue_first = true;
+                }
+                if green {
+                    saw_green = true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(saw_green, "no frame was published between the timer tasks");
+        assert!(!blue_first, "the later timer was painted before that frame");
+    }
+
+    #[test]
     fn native_stack_overflow_aborts_the_child_and_leaves_this_process() {
         if std::env::var_os("HIWAVE_OVERFLOW_CHILD").is_some() {
             let joined = std::thread::Builder::new()

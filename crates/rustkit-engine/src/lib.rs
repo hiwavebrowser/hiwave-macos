@@ -1133,6 +1133,13 @@ const MAX_TIMER_CALLBACKS: u32 = 10_000;
 /// get a turn in between.
 const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
 
+/// Wall-clock budget of one live turn's timer phase. A rendering update
+/// can happen between tasks (HTML event loop): once this much real time
+/// has passed, the turn publishes its frame and leaves timers that are
+/// still due for the next turn. Callbacks that finish inside the budget
+/// still run in the one turn, which is what a pump of a few timers observes.
+const LIVE_FRAME_MS: u64 = 16;
+
 /// Longest one turn of the live loop waits for the modules a dynamic
 /// `import()` asked for, which are still fetched inside the turn. The loop is
 /// the UI thread, so a module slower than this fails rather than hold the
@@ -1351,6 +1358,10 @@ pub struct LivePump {
     /// The page was laid out again: a callback wrote to the DOM, or an image
     /// it added arrived.
     pub relaid_out: bool,
+    /// The turn stopped between timer callbacks because a frame was due
+    /// (~16 ms of wall time). Timers still due run on the next turn, and
+    /// [`Self::next_timer_ms`] is 0 so that turn is not delayed.
+    pub yielded_for_frame: bool,
     /// Milliseconds until the page's next timer is due. `None`: it has none,
     /// and the loop can sleep until the next input.
     pub next_timer_ms: Option<u64>,
@@ -4497,18 +4508,32 @@ impl Engine {
         // Where in `threw` the error that unwound a stopped script is. The
         // stop has its own record, and the error reads as the loop limit's.
         let mut unwound = None;
+        // Set when a frame's worth of real time passed between timer tasks.
+        let frame_yield = std::cell::Cell::new(false);
 
         // Timers first: what they ask of the network is answered this turn.
         // Not while a load tail is open, and not on the turn that just
         // fired `load`: that turn already ran the load's timer horizon, and
         // `elapsed_ms` includes time from before `load`.
+        //
+        // Due timers are not drained for the whole turn. After about 16 ms
+        // of wall time the turn returns so a frame can be published, and
+        // the timers still due run on the next one. Both the content thread
+        // and the flag-off live loop use this turn; a handful of timers
+        // that finish inside the budget still run together, as before.
         let timer_stopped = if defer_post_load_timers {
             false
         } else {
             let (timers, timer_stopped) = with_script_js(bindings, || {
                 let _job = rustkit_js::DiagJob::enter("timer");
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
+                    let (ran, yielded) = bindings.advance_timers_for_frame(
+                        elapsed_ms,
+                        MAX_LIVE_TIMER_CALLBACKS,
+                        LIVE_FRAME_MS,
+                    )?;
+                    frame_yield.set(yielded);
+                    Ok::<_, rustkit_bindings::BindingError>(ran)
                 }))
             });
             match timers {
@@ -4525,6 +4550,7 @@ impl Engine {
             inspector_glue::drain_errors(bindings, &view.inspector, "timers");
             timer_stopped
         };
+        out.yielded_for_frame = frame_yield.get();
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
@@ -4663,7 +4689,11 @@ impl Engine {
         }
         let reported = bindings.take_reported_errors();
         inspector_glue::drain_quiet(bindings, &view.inspector, "network");
-        out.next_timer_ms = if held_back { Some(0) } else { bindings.next_timer_delay() };
+        out.next_timer_ms = if held_back || out.yielded_for_frame {
+            Some(0)
+        } else {
+            bindings.next_timer_delay()
+        };
         view.script_log.extend(stopped);
         let threw = threw
             .into_iter()

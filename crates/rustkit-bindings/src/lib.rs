@@ -564,6 +564,37 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         }
         return ran;
     };
+    // Like `__rustkit_advance_timers`, but stop between callbacks once
+    // `frameMs` of wall time has passed so the host can publish a frame.
+    // A negative return is `-callbacks` and means timers are still due.
+    // Zero frame budget never stops early. Callbacks that finish inside
+    // the budget run in this call, and the clock and animation-frame round
+    // match `__rustkit_advance_timers`.
+    window.__rustkit_advance_timers_framed = function (delta, max, frameMs) {
+        var target = now + delta;
+        var start = Date.now();
+        var ran = 0;
+        while (ran < max) {
+            var n = runTimers(target, 1, true);
+            if (n === 0) break;
+            ran += n;
+            if (frameMs > 0 && (Date.now() - start) >= frameMs) return -ran;
+        }
+        if (ran >= max) return ran;
+        if (now < target) now = target;
+        var round = [];
+        for (var i = 0; i < timers.length; i++) {
+            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
+        }
+        for (var j = 0; j < round.length && ran < max; j++) {
+            var at = timers.indexOf(round[j]);
+            if (at < 0) continue;
+            timers.splice(at, 1);
+            ran++;
+            call(round[j]);
+        }
+        return ran;
+    };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
     window.__rustkit_next_timer = function () {
         var due = -1;
@@ -1855,6 +1886,25 @@ impl DomBindings {
         Ok(match ran {
             JsValue::Number(n) => n as u32,
             _ => 0,
+        })
+    }
+
+    /// [`Self::advance_timers`], stopping between callbacks once `frame_ms`
+    /// of wall time has passed. `true` means timers were still due.
+    pub fn advance_timers_for_frame(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+    ) -> Result<(u32, bool), BindingError> {
+        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
+            "window.__rustkit_advance_timers_framed({}, {}, {})",
+            delta_ms, max_callbacks, frame_ms
+        ))?;
+        Ok(match ran {
+            JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
+            JsValue::Number(n) => (n as u32, false),
+            _ => (0, false),
         })
     }
 
