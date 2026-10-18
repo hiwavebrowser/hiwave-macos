@@ -1551,3 +1551,95 @@ fn the_netflix_hero_card_stays_508_wide_at_1060() {
         "hero text wrapped to the min-content width: h1 {heading:?} form {form:?}"
     );
 }
+/// Vector hides the unpinned appearance control in the header when the
+/// pinned preference is on:
+/// `.vector-feature-appearance-pinned-clientpref-1 .vector-user-links
+/// .vector-appearance-landmark { display: none }` inside `@media screen`.
+/// The dropdown then has no box, so it cannot sit on Donate.
+#[test]
+fn the_pinned_appearance_dropdown_has_no_box_over_donate() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><html class="client-js vector-feature-appearance-pinned-clientpref-1">"#,
+        r#"<head><style>"#,
+        r#"@media screen{"#,
+        r#".vector-feature-appearance-pinned-clientpref-1 .vector-user-links .vector-appearance-landmark,"#,
+        r#".vector-feature-appearance-pinned-clientpref-0 .vector-column-end .vector-appearance-landmark{display:none}"#,
+        r#".client-nojs .vector-appearance-landmark{display:none}}"#,
+        r#".mw-header{display:flex;align-items:center;height:66px;width:1280px;margin:0}"#,
+        r#".vector-user-links{display:flex;margin-left:auto;align-items:center}"#,
+        r#".vector-dropdown{position:relative}"#,
+        r#".vector-dropdown-checkbox{position:absolute;top:0;left:0;z-index:1;opacity:0;width:100%;height:100%;margin:0;padding:0}"#,
+        r#"body{margin:0}a{margin-left:12px}"#,
+        r#"</style></head><body><header class="mw-header" id="hdr">"#,
+        r#"<nav class="vector-user-links"><nav class="vector-appearance-landmark">"#,
+        r#"<div id="vector-appearance-dropdown" class="vector-dropdown">"#,
+        r#"<input class="vector-dropdown-checkbox" type="checkbox" id="cb">"#,
+        r#"<label id="lab">Appearance</label></div></nav>"#,
+        r#"<a id="donate" href="https://donate.wikimedia.org/">Donate</a></nav></header></body></html>"#,
+    ));
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 800,
+            },
+        )
+        .expect("desktop");
+    let shown = eval(
+        &mut engine,
+        view,
+        r#"var d=document.getElementById('vector-appearance-dropdown'); var r=d.getBoundingClientRect(); [getComputedStyle(d).display, getComputedStyle(d.parentElement).display, Math.round(r.width), Math.round(r.height), Math.round(r.x)].join('|')"#,
+    );
+    let parts: Vec<&str> = shown.split('|').collect();
+    assert_eq!(
+        parts.first().copied(),
+        Some("none"),
+        "appearance dropdown generated a box: {shown}"
+    );
+    let width: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    assert!(
+        width < 1.0,
+        "appearance dropdown covers the header: {shown}"
+    );
+}
+
+/// Below Vector's 1120px breakpoint the appearance menu is unpinned into
+/// the header. The control is an `inline-flex` icon button with
+/// `min-width: 44px` inside `.vector-dropdown`. The dropdown's intrinsic
+/// width has to include that minimum: a 10px box lets the 44px button
+/// paint over Donate.
+#[test]
+fn an_unpinned_appearance_button_does_not_cover_donate() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#".mw-header{display:flex;align-items:center;height:66px;width:1000px}"#,
+        r#".vector-user-links{display:flex;margin-left:auto;align-items:center}"#,
+        r#".vector-dropdown{position:relative}"#,
+        r#".vector-dropdown-checkbox{position:absolute;top:0;left:0;opacity:0;width:100%;height:100%;margin:0}"#,
+        r#".cdx-button{display:inline-flex;align-items:center;box-sizing:border-box;min-height:32px}"#,
+        r#".cdx-button--icon-only{min-width:44px;min-height:44px}"#,
+        r#".cdx-button--icon-only span+span{position:absolute;width:1px;height:1px;overflow:hidden}"#,
+        r#"a{margin-left:4px}"#,
+        r#"</style><header class="mw-header"><nav class="vector-user-links">"#,
+        r#"<nav class="vector-appearance-landmark"><div id="dd" class="vector-dropdown">"#,
+        r#"<input class="vector-dropdown-checkbox" type="checkbox">"#,
+        r#"<label id="lab" class="cdx-button cdx-button--icon-only"><span class="icon"></span>"#,
+        r#"<span>Appearance</span></label></div></nav>"#,
+        r#"<a id="donate" href="https://donate.wikimedia.org/">Donate</a>"#,
+        r#"</nav></header>"#,
+    ));
+    let dd = rect(&mut engine, view, "dd");
+    let lab = rect(&mut engine, view, "lab");
+    let donate = rect(&mut engine, view, "donate");
+    assert!(
+        dd.2 >= 44.0 - 0.5 && lab.2 >= 44.0 - 0.5,
+        "appearance dropdown ignored the 44px button: dd {dd:?} lab {lab:?}"
+    );
+    assert!(
+        donate.0 + 1.0 >= dd.0 + dd.2,
+        "appearance button covers Donate: dd {dd:?} lab {lab:?} donate {donate:?}"
+    );
+}

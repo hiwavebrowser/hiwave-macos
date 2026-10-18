@@ -422,6 +422,10 @@ mod tests {
         assert!(!m("(min-width: 10)", w, h));
         // Narrower viewports, where the `max-` forms are the ones that hold.
         assert!(m("(max-width: calc(1119px))", 1000.0, h));
+        // Vector's breakpoint is `max-width: calc(1120px - 1px)`, 1119px.
+        assert!(m("screen and (max-width: calc(1120px - 1px))", 1000.0, h));
+        assert!(m("screen and (max-width: calc(1120px - 1px))", 1119.0, h));
+        assert!(!m("screen and (max-width: calc(1120px - 1px))", 1120.0, h));
         assert!(m("(max-width: calc(639px))", 600.0, h));
         assert!(!m("(min-width: calc(639px))", 600.0, h));
     }
