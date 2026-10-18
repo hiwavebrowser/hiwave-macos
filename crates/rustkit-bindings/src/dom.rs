@@ -199,6 +199,28 @@ impl DomHost {
         std::mem::take(&mut self.inline_ran)
     }
 
+    /// Every descendant of a `<template>` content fragment, not the fragment
+    /// itself. Nested template contents are their own map entries, so this
+    /// does not walk into a template element (its children already moved).
+    /// Parser catalog uses this: those scripts are not in the document tree.
+    pub(crate) fn for_each_template_descendant(&self, visit: &mut dyn FnMut(&Rc<Node>)) {
+        fn walk(node: &Rc<Node>, visit: &mut dyn FnMut(&Rc<Node>)) {
+            for child in node.children() {
+                visit(&child);
+                if let Some(root) = child.shadow_root() {
+                    walk(&root, visit);
+                }
+                if is_template(&child) {
+                    continue;
+                }
+                walk(&child, visit);
+            }
+        }
+        for content in self.templates.borrow().values() {
+            walk(content, visit);
+        }
+    }
+
     fn document_for(&self, generation: &JsValue) -> Option<&Rc<Document>> {
         match generation {
             JsValue::Number(n) if *n == self.generation as f64 => self.document.as_ref(),

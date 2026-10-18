@@ -844,6 +844,17 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_inline_ran()
     }
 
+    /// Descendants of every `<template>` content fragment. The parser moved
+    /// those children out of the document, so a tree walk does not see them.
+    pub fn for_each_template_descendant(
+        &self,
+        mut visit: impl FnMut(&std::rc::Rc<rustkit_dom::Node>),
+    ) {
+        self.dom_host
+            .borrow()
+            .for_each_template_descendant(&mut visit);
+    }
+
     /// Back `document.cookie` with the browser's jar: `get` answers the
     /// cookies script may read for this document, `set` stores one
     /// assignment. Without this, `document.cookie` is a string that keeps
