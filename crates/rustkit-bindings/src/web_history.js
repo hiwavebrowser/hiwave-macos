@@ -1,13 +1,51 @@
 // Session history of one document (HTML §7.4) and the anchor URL parts
 // (HTMLHyperlinkElementUtils, HTML §4.6.3).
 //
-// There is no real navigation here: pushState/replaceState add or rewrite
-// entries of the current document, and back/forward/go move between them,
-// updating `location` and firing `popstate` from a task. Entries made by an
-// engine navigation (`set_location`) start a fresh list.
+// pushState/replaceState add or rewrite entries of the current document, and
+// back/forward/go move between them, updating `location` and firing
+// `popstate` from a task. Entries made by an engine navigation
+// (`set_location`) start a fresh list. `window.navigation` (web_navigation.js)
+// shares this list through `__rkSession`.
+//
+// History.state and History.length are accessor properties on
+// History.prototype (WebIDL). The getter brand-checks `this` and reads the
+// entry; it does not [[Get]] `state` again, so a polyfill can save the
+// getter and call it. Location's URL parts and `window.location` are
+// [LegacyUnforgeable]: own, non-configurable accessors. Part setters do
+// nothing when the value already matches, because `set_location` writes the
+// parts after it has synced `href`.
 (function (g) {
     var loc = g.location;
     var entries, index;
+    var NO_STATE = Symbol('rk.noNavState');
+    var HISTORY = Symbol('rk.history');
+    var LOCATION = Symbol('rk.location');
+    Object.defineProperty(loc, LOCATION, { value: 1 });
+    function requireLoc(recv) {
+        if (!recv || recv[LOCATION] !== 1) throw new TypeError('Illegal invocation');
+    }
+    // web_navigation.js fills these in. `start` / `traverse` return
+    // 'done', 'cancel', or 'native'.
+    var hooks = { start: null, traverse: null, entryChanged: null };
+    var suppress = false;
+
+    function named(label, fn) {
+        try { Object.defineProperty(fn, 'name', { value: label }); } catch (e) {}
+        return fn;
+    }
+    function uuid() {
+        var c = g.crypto;
+        if (c && typeof c.randomUUID === 'function') {
+            try { return c.randomUUID(); } catch (e) {}
+        }
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (ch) {
+            var r = Math.random() * 16 | 0;
+            return (ch === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+        });
+    }
+    function requireHistory(recv) {
+        if (!recv || recv[HISTORY] !== 1) throw new TypeError('Illegal invocation');
+    }
 
     function domError(message, name) {
         return new DOMException(message, name);
@@ -35,23 +73,40 @@
     // a navigation replaces the document; it used to read back the string
     // script assigned, relative or not. Another fragment of this document
     // is the fragment navigation; anything else is a request.
-    function go(target) {
+    function nativeGo(target) {
         var current;
         try { current = new URL(hrefValue); } catch (e) { return; }
         // Only a URL with a fragment is a fragment navigation; the
         // document's own URL without one loads it again (HTML §7.4.2.2
         // step 12), as `location.href = location.href` does in Chrome.
         if (!sameDocument(current, target) || target.href.indexOf('#') < 0) return requestNavigation(target);
-        if (target.href !== current.href) g.__rustkit_fragment_navigation(target.href);
+        if (target.href !== current.href) fragmentCommit(target.href);
+    }
+    function go(target) {
+        if (suppress) return;
+        var handling = replacing ? 'replace' : 'auto';
+        if (hooks.start) {
+            var decision = hooks.start(target, handling);
+            if (decision !== 'native') return;
+        }
+        nativeGo(target);
     }
     // `location.reload()`: the same URL again, as a request like the rest.
-    loc.reload = function () {
-        try { requestNavigation(new URL(hrefValue), true); } catch (e) {}
-    };
-    loc.replace = function (url) {
+    function reload() {
+        try {
+            var target = new URL(hrefValue);
+            if (!suppress && hooks.start) {
+                var decision = hooks.start(target, 'reload');
+                if (decision !== 'native') return;
+            }
+            requestNavigation(target, true);
+        } catch (e) {}
+    }
+    function replace(url) {
         replacing = true;
         try { loc.href = String(url); } finally { replacing = false; }
-    };
+    }
+    function assign(url) { loc.href = String(url); }
     // `<meta http-equiv=refresh>` (HTML §4.2.5.3, "shared declarative
     // refresh steps"): once the document has loaded, the first one that
     // parses asks for its URL (or this document again) after its seconds.
@@ -87,16 +142,51 @@
             return;
         }
     }
-    Object.defineProperty(loc, 'href', {
-        get: function () { return hrefValue; },
-        set: function (v) {
-            if (syncing) { hrefValue = String(v); return; }
-            var target;
-            try { target = new URL(String(v), hrefValue); } catch (e) { return; }
-            go(target);
-        },
-        enumerable: true, configurable: true
+    function partValue(name) {
+        try { return new URL(hrefValue)[name]; } catch (e) { return ''; }
+    }
+    function setPart(name, value) {
+        if (syncing) return;
+        var current;
+        try { current = new URL(hrefValue); } catch (e) { return; }
+        var next = new URL(current.href);
+        next[name] = value;
+        if (next.href === current.href) return;
+        go(next);
+    }
+    function lockAccessor(obj, name, get, set) {
+        var desc = {
+            get: named('get Location.' + name, get),
+            enumerable: true,
+            configurable: false
+        };
+        if (set) desc.set = named('set Location.' + name, set);
+        Object.defineProperty(obj, name, desc);
+    }
+    function lockMethod(obj, name, fn) {
+        Object.defineProperty(obj, name, {
+            value: fn, writable: true, enumerable: true, configurable: false
+        });
+    }
+    lockAccessor(loc, 'href', function () { requireLoc(this); return hrefValue; }, function (v) {
+        requireLoc(this);
+        if (syncing) { hrefValue = String(v); return; }
+        var target;
+        try { target = new URL(String(v), hrefValue); } catch (e) { return; }
+        go(target);
     });
+    ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'].forEach(function (name) {
+        lockAccessor(loc, name, function () { requireLoc(this); return partValue(name); }, function (v) {
+            requireLoc(this);
+            setPart(name, v);
+        });
+    });
+    // origin is readonly. `set_location` assigns it in sloppy mode, which
+    // does nothing when there is no setter.
+    lockAccessor(loc, 'origin', function () { requireLoc(this); return partValue('origin'); });
+    lockMethod(loc, 'assign', assign);
+    lockMethod(loc, 'replace', replace);
+    lockMethod(loc, 'reload', reload);
     // Location's stringifier is its href (HTML §7.3). `new URL(path, location)`
     // and `String(location)` use it; without it the base is "[object Object]"
     // and the URL constructor throws Invalid URL.
@@ -117,9 +207,9 @@
     // accessor the assignment replaced the Location object with a string.
     try {
         Object.defineProperty(g, 'location', {
-            get: function () { return loc; },
-            set: function (v) { loc.href = String(v); },
-            enumerable: true, configurable: true
+            get: named('get Window.location', function () { return loc; }),
+            set: named('set Window.location', function (v) { loc.href = String(v); }),
+            enumerable: true, configurable: false
         });
     } catch (e) {}
     // The engine's own write of a new document's URL.
@@ -129,8 +219,11 @@
     };
     // A new document: one entry, the current URL, no state.
     var listening = false;
+    function blankEntry(url) {
+        return { url: url, state: null, key: uuid(), id: uuid(), navState: NO_STATE };
+    }
     g.__rustkit_history_reset = function () {
-        entries = [{ url: loc.href, state: null }];
+        entries = [blankEntry(loc.href)];
         index = 0;
         // Listened for once the document is bound: window's listeners
         // are not all in place when this file runs.
@@ -164,7 +257,22 @@
             }
             url = target.href;
         }
-        var entry = { url: url, state: state };
+        // A push starts a new navigation entry (new key, no Navigation API
+        // state). A replace keeps the key and the Navigation API state.
+        var placed = place(url, state, push ? NO_STATE : undefined, push, !push);
+        if (hooks.entryChanged) hooks.entryChanged(push ? 'push' : 'replace', placed.from, placed.entry);
+    }
+    // `navState === undefined` keeps the current entry's Navigation API state.
+    // `keepKey` keeps the session key (replace). Does not fire events.
+    function place(url, classicState, navState, push, keepKey, key, id) {
+        var from = entries[index];
+        var entry = {
+            url: url,
+            state: classicState,
+            key: key || (keepKey ? from.key : uuid()),
+            id: id || uuid(),
+            navState: navState === undefined ? from.navState : navState
+        };
         if (push) {
             entries.length = index + 1;
             entries.push(entry);
@@ -173,6 +281,7 @@
             entries[index] = entry;
         }
         setLocation(url);
+        return { from: from, entry: entry };
     }
     // Traversal is queued, so the delta is applied when the task runs.
     function traverse(delta) {
@@ -181,26 +290,50 @@
         setTimeout(function () {
             var to = index + delta;
             if (to < 0 || to >= entries.length) return;
-            var oldURL = loc.href;
-            index = to;
-            setLocation(entries[to].url);
-            g.dispatchEvent(new PopStateEvent('popstate', { state: entries[to].state }));
-            if (new URL(oldURL).hash !== loc.hash) {
-                g.dispatchEvent(new HashChangeEvent('hashchange', { oldURL: oldURL, newURL: loc.href }));
+            if (!suppress && hooks.traverse) {
+                hooks.traverse(entries[to]);
+                return;
             }
+            commitTraverse(to);
         }, 0);
+    }
+    function commitTraverse(to) {
+        if (to < 0 || to >= entries.length) return;
+        var from = entries[index];
+        var oldURL = loc.href;
+        index = to;
+        setLocation(entries[to].url);
+        g.dispatchEvent(new PopStateEvent('popstate', { state: entries[to].state }));
+        if (new URL(oldURL).hash !== loc.hash) {
+            g.dispatchEvent(new HashChangeEvent('hashchange', { oldURL: oldURL, newURL: loc.href }));
+        }
+        if (hooks.entryChanged) hooks.entryChanged('traverse', from, entries[to]);
     }
 
     // The engine followed a link to a fragment of this document (HTML
     // §7.4.2.3.3): a new entry, the new URL, then `hashchange`.
-    g.__rustkit_fragment_navigation = function (href) {
+    function fragmentCommit(href, key, id) {
         var oldURL = loc.href;
         if (oldURL === href) return;
+        var from = entries[index];
         entries.length = index + 1;
-        entries.push({ url: href, state: null });
+        var entry = {
+            url: href, state: null, key: key || uuid(), id: id || uuid(), navState: from.navState
+        };
+        entries.push(entry);
         index++;
         setLocation(href);
         g.dispatchEvent(new HashChangeEvent('hashchange', { oldURL: oldURL, newURL: loc.href }));
+        if (hooks.entryChanged) hooks.entryChanged('push', from, entry);
+    }
+    g.__rustkit_fragment_navigation = function (href) {
+        var target;
+        try { target = new URL(href); } catch (e) { return; }
+        if (!suppress && hooks.start) {
+            var decision = hooks.start(target, 'push');
+            if (decision !== 'native') return;
+        }
+        fragmentCommit(href);
     };
 
     // What script's `link.click()` does once no listener cancelled it: the
@@ -226,8 +359,14 @@
 
     function History() { throw new TypeError('Illegal constructor'); }
     var hp = History.prototype;
-    Object.defineProperty(hp, 'length', { get: function () { return entries.length; }, enumerable: true, configurable: true });
-    Object.defineProperty(hp, 'state', { get: function () { return entries[index].state; }, enumerable: true, configurable: true });
+    Object.defineProperty(hp, 'length', {
+        get: named('get History.length', function () { requireHistory(this); return entries.length; }),
+        enumerable: true, configurable: true
+    });
+    Object.defineProperty(hp, 'state', {
+        get: named('get History.state', function () { requireHistory(this); return entries[index].state; }),
+        enumerable: true, configurable: true
+    });
     Object.defineProperty(hp, 'scrollRestoration', { value: 'auto', writable: true, enumerable: true, configurable: true });
     hp.pushState = function (state, title, url) { update('pushState', arguments, true); };
     hp.replaceState = function (state, title, url) { update('replaceState', arguments, false); };
@@ -237,6 +376,39 @@
     Object.defineProperty(hp, Symbol.toStringTag, { value: 'History', configurable: true });
     Object.defineProperty(g, 'History', { value: History, writable: true, configurable: true });
     g.history = Object.create(hp);
+    Object.defineProperty(g.history, HISTORY, { value: 1 });
+
+    function isFragment(target) {
+        var current;
+        try { current = new URL(hrefValue); } catch (e) { return false; }
+        return sameDocument(current, target) && target.href !== current.href;
+    }
+    Object.defineProperty(g, '__rkSession', {
+        value: {
+            noState: NO_STATE,
+            hooks: hooks,
+            entries: function () { return entries; },
+            index: function () { return index; },
+            href: function () { return hrefValue; },
+            current: function () { return entries[index]; },
+            request: requestNavigation,
+            fragment: fragmentCommit,
+            place: place,
+            commitTraverse: commitTraverse,
+            hashChanged: function (oldURL) {
+                if (new URL(oldURL).hash !== loc.hash) {
+                    g.dispatchEvent(new HashChangeEvent('hashchange', { oldURL: oldURL, newURL: loc.href }));
+                }
+            },
+            isFragment: isFragment,
+            rewritable: rewritable,
+            sameDocument: sameDocument,
+            domError: domError,
+            setSuppress: function (v) { suppress = !!v; },
+            suppressed: function () { return suppress; }
+        },
+        configurable: true
+    });
 
     // ---- HTMLAnchorElement / HTMLAreaElement URL parts.
     // The href attribute parsed against the document URL, or null.

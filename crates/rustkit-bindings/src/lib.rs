@@ -77,6 +77,8 @@ mod form_controls_tests;
 #[cfg(test)]
 mod web_history_tests;
 #[cfg(test)]
+mod web_navigation_tests;
+#[cfg(test)]
 mod geometry_tests;
 #[cfg(test)]
 mod range_tests;
@@ -740,6 +742,9 @@ impl DomBindings {
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
         runtime.evaluate_script(include_str!("web_history.js"))?;
+        // Navigation API. AbortSignal and structuredClone are already installed
+        // (inject_globals runs web_blob.js); the session list was just published.
+        runtime.evaluate_script(include_str!("web_navigation.js"))?;
         // window.scrollTo/scrollBy/scrollX/scrollY, Element.scrollTop/scrollIntoView (web_scroll.js).
         let scroll = web_scroll::SharedScroll::default();
         web_scroll::install(&mut runtime, &scroll)?;
