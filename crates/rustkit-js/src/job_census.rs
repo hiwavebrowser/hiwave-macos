@@ -20,6 +20,10 @@ use std::time::Duration;
 const MAX_LABELS: usize = 64;
 /// Labels kept on the finished census, slowest first.
 const TOP_SOURCES: usize = 8;
+/// Host-binding labels kept on one drain and in the cumulative map.
+const MAX_HOST_LABELS: usize = 128;
+/// Host bindings reported, slowest first.
+const TOP_HOST: usize = 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobSource {
@@ -37,6 +41,8 @@ pub struct JobCensus {
     pub generic: u64,
     pub callbacks: u64,
     pub sources: Vec<JobSource>,
+    /// Host bindings this drain called, slowest first (at most [`TOP_HOST`]).
+    pub host: Vec<JobSource>,
 }
 
 impl JobCensus {
@@ -48,15 +54,26 @@ impl JobCensus {
             .map(|source| format!("{}×{}/{}ms", source.label, source.count, source.elapsed_ms))
             .collect::<Vec<_>>()
             .join(",");
+        let host = self
+            .host
+            .iter()
+            .map(|source| format!("{}×{}/{}ms", source.label, source.count, source.elapsed_ms))
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "jobs={} ms={} promise={} async={} generic={} callbacks={} top={}",
+            "jobs={} ms={} promise={} async={} generic={} callbacks={} top={}{}",
             self.jobs,
             self.elapsed_ms,
             self.promise,
             self.async_continuations,
             self.generic,
             self.callbacks,
-            if top.is_empty() { "-".to_string() } else { top }
+            if top.is_empty() { "-".to_string() } else { top },
+            if host.is_empty() {
+                String::new()
+            } else {
+                format!(" host={host}")
+            }
         )
     }
 
@@ -73,24 +90,45 @@ impl JobCensus {
 struct Acc {
     callbacks: u64,
     sources: HashMap<String, (u64, u128)>,
+    host: HashMap<String, (u64, u128)>,
 }
 
-impl Acc {
-    fn note(&mut self, label: String, elapsed: Duration) {
-        let key = if self.sources.len() >= MAX_LABELS && !self.sources.contains_key(&label) {
-            "other".to_string()
-        } else {
-            label
-        };
-        let entry = self.sources.entry(key).or_insert((0, 0));
-        entry.0 = entry.0.saturating_add(1);
-        entry.1 = entry.1.saturating_add(elapsed.as_nanos());
-    }
+fn note_map(map: &mut HashMap<String, (u64, u128)>, label: String, elapsed: Duration, cap: usize) {
+    let key = if map.len() >= cap && !map.contains_key(&label) {
+        "other".to_string()
+    } else {
+        label
+    };
+    let entry = map.entry(key).or_insert((0, 0));
+    entry.0 = entry.0.saturating_add(1);
+    entry.1 = entry.1.saturating_add(elapsed.as_nanos());
+}
+
+fn ranked(map: &HashMap<String, (u64, u128)>, limit: usize) -> Vec<JobSource> {
+    let mut sources: Vec<JobSource> = map
+        .iter()
+        .map(|(label, (count, nanos))| JobSource {
+            label: label.clone(),
+            count: *count,
+            elapsed_ms: (nanos / 1_000_000) as u64,
+        })
+        .collect();
+    sources.sort_by(|a, b| {
+        b.elapsed_ms
+            .cmp(&a.elapsed_ms)
+            .then(b.count.cmp(&a.count))
+            .then(a.label.cmp(&b.label))
+    });
+    sources.truncate(limit);
+    sources
 }
 
 thread_local! {
     static OPEN: RefCell<Option<Acc>> = const { RefCell::new(None) };
     static LAST: RefCell<JobCensus> = RefCell::new(JobCensus::default());
+    /// Every host call on this thread, including those outside a drain.
+    /// A sync script's DOM writes happen before `run_jobs`.
+    static HOST: RefCell<HashMap<String, (u64, u128)>> = RefCell::new(HashMap::new());
 }
 
 pub(crate) fn begin() {
@@ -98,6 +136,7 @@ pub(crate) fn begin() {
         *slot.borrow_mut() = Some(Acc {
             callbacks: 0,
             sources: HashMap::new(),
+            host: HashMap::new(),
         });
     });
 }
@@ -114,7 +153,7 @@ pub(crate) fn note_callback(label: String, elapsed: Duration) {
             return;
         };
         acc.callbacks = acc.callbacks.saturating_add(1);
-        acc.note(label, elapsed);
+        note_map(&mut acc.sources, label, elapsed, MAX_LABELS);
     });
 }
 
@@ -125,8 +164,40 @@ pub(crate) fn note_source(label: &str, elapsed: Duration) {
         let Some(acc) = open.as_mut() else {
             return;
         };
-        acc.note(label.to_string(), elapsed);
+        note_map(&mut acc.sources, label.to_string(), elapsed, MAX_LABELS);
     });
+}
+
+/// One call through a host binding. Recorded on the open drain when a
+/// checkpoint is running, and always on the thread's cumulative map.
+pub fn note_host_call(label: &str, elapsed: Duration) {
+    let label = label.to_string();
+    HOST.with(|slot| {
+        note_map(
+            &mut slot.borrow_mut(),
+            label.clone(),
+            elapsed,
+            MAX_HOST_LABELS,
+        );
+    });
+    OPEN.with(|slot| {
+        let mut open = slot.borrow_mut();
+        let Some(acc) = open.as_mut() else {
+            return;
+        };
+        note_map(&mut acc.host, label, elapsed, MAX_HOST_LABELS);
+    });
+}
+
+/// Drop the cumulative host-call map. A harness calls this before a run
+/// so an earlier script on the same thread is not in the top list.
+pub fn reset_host_calls() {
+    HOST.with(|slot| slot.borrow_mut().clear());
+}
+
+/// The slowest host bindings on this thread since [`reset_host_calls`].
+pub fn top_host_calls(limit: usize) -> Vec<JobSource> {
+    HOST.with(|slot| ranked(&slot.borrow(), limit))
 }
 
 pub(crate) fn finish(
@@ -137,27 +208,13 @@ pub(crate) fn finish(
     elapsed: Duration,
 ) -> JobCensus {
     let acc = OPEN.with(|slot| slot.borrow_mut().take());
-    let (callbacks, sources) = match acc {
-        Some(acc) => {
-            let mut sources: Vec<JobSource> = acc
-                .sources
-                .into_iter()
-                .map(|(label, (count, nanos))| JobSource {
-                    label,
-                    count,
-                    elapsed_ms: (nanos / 1_000_000) as u64,
-                })
-                .collect();
-            sources.sort_by(|a, b| {
-                b.elapsed_ms
-                    .cmp(&a.elapsed_ms)
-                    .then(b.count.cmp(&a.count))
-                    .then(a.label.cmp(&b.label))
-            });
-            sources.truncate(TOP_SOURCES);
-            (acc.callbacks, sources)
-        }
-        None => (0, Vec::new()),
+    let (callbacks, sources, host) = match acc {
+        Some(acc) => (
+            acc.callbacks,
+            ranked(&acc.sources, TOP_SOURCES),
+            ranked(&acc.host, TOP_HOST),
+        ),
+        None => (0, Vec::new(), Vec::new()),
     };
     let census = JobCensus {
         jobs,
@@ -167,6 +224,7 @@ pub(crate) fn finish(
         generic,
         callbacks,
         sources,
+        host,
     };
     LAST.with(|slot| *slot.borrow_mut() = census.clone());
     census
@@ -197,5 +255,48 @@ mod tests {
             "the reaction's compiled name is on the census: {census:?}"
         );
         assert_eq!(census.count_labeled("timer"), 0, "{census:?}");
+    }
+
+    #[test]
+    fn an_await_resume_is_named_for_the_function() {
+        let mut runtime = crate::JsRuntime::new().unwrap();
+        runtime
+            .evaluate_script("async function paint() { await 1; } paint();")
+            .unwrap();
+        let census = runtime.last_job_census();
+        assert!(
+            census.count_labeled("await paint") >= 1,
+            "the resume builtin carries the function name: {census:?}"
+        );
+        assert_eq!(
+            census.count_labeled("native"),
+            0,
+            "an empty builtin name is no longer the label: {census:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_binding_is_timed_by_its_name() {
+        crate::reset_host_calls();
+        let mut runtime = crate::JsRuntime::new().unwrap();
+        runtime
+            .register_host_function(
+                "probe",
+                1,
+                Box::new(|args| match args.first() {
+                    Some(crate::JsValue::String(op)) => crate::JsValue::String(op.clone()),
+                    _ => crate::JsValue::Undefined,
+                }),
+            )
+            .unwrap();
+        runtime
+            .evaluate_script("probe('setAttr'); probe('setAttr');")
+            .unwrap();
+        let top = crate::top_host_calls(5);
+        assert!(
+            top.iter()
+                .any(|source| source.label == "probe" && source.count >= 2),
+            "the binding name is the host-call key: {top:?}"
+        );
     }
 }

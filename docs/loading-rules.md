@@ -168,7 +168,13 @@ microtasks: the content thread would still drain `run_jobs` before the
 next yield, and a content frame is produced when that thread returns to
 the host. A drain of 50 ms or more logs its census (`hiwave::jobs`, and
 on this line when the phase is `jobs`): how many jobs, which kind, and
-the callbacks Boa can name. What a spec-shaped event loop step would
+the callbacks Boa can name. An `await` resume is named `await {function}`
+(or `await @{path}` when the function has no name); an empty name used to
+be logged as `native`. Host bindings are timed by name, and a DOM write
+by its op (`__rustkit_dom_write:setAttr:class`). The window thread drives
+one host runtime for the load and for later live turns, so an image
+timeout started during the load is still polled on that runtime after the
+load returns. What a spec-shaped event loop step would
 change, and what M4 already provides, is `docs/event-loop-gap.md`. That
 step is not implemented.
 

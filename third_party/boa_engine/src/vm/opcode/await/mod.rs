@@ -1,6 +1,6 @@
 use super::RegisterOperand;
 use crate::{
-    Context, JsArgs, JsExpect, JsResult, JsValue,
+    Context, JsArgs, JsExpect, JsResult, JsString, JsValue,
     builtins::{
         Promise, async_generator::AsyncGenerator, generator::GeneratorContext,
         promise::PromiseCapability,
@@ -89,6 +89,10 @@ impl Await {
             .map(|cap| JsValue::from(cap.promise))
             .unwrap_or_default();
 
+        // HIWAVE PATCH (job census): both resume builtins share one name.
+        // The spec string is empty, which the checkpoint logged as `native`.
+        let resume_name = await_resume_name(context);
+
         let r#gen = GeneratorContext::from_current(context, None);
 
         let captures = Gc::new(Cell::new(Some(r#gen)));
@@ -172,7 +176,9 @@ impl Await {
                 captures.clone(),
             ),
         )
-        .name(js_string!())
+        // HIWAVE PATCH (job census): not the spec's `""`. Script does not
+        // receive this builtin; the name is for the job census.
+        .name(resume_name.clone())
         .length(1)
         .build();
 
@@ -255,7 +261,8 @@ impl Await {
                 captures,
             ),
         )
-        .name(js_string!())
+        // HIWAVE PATCH (job census): same name as the fulfilled resume.
+        .name(resume_name)
         .length(1)
         .build();
 
@@ -277,6 +284,36 @@ impl Await {
 // An async function's promise is rejected with the first string; a generator
 // or a module body takes the others. The site name still says which reaction
 // resumed the body.
+/// HIWAVE PATCH (job census): `await {function}`, or `await @{path}` when
+/// the function has no name. The path tail is short so a `data:` URL does
+/// not own the label. The spec name of these builtins is `""`.
+fn await_resume_name(context: &Context) -> JsString {
+    let code = context.vm.frame().code_block();
+    let function = code.name().to_std_string_escaped();
+    if !function.is_empty() {
+        return js_string!(format!("await {function}").as_str());
+    }
+    let path = match code.path() {
+        crate::vm::SourcePath::Path(path) => {
+            let text = path.to_string_lossy();
+            let count = text.chars().count();
+            if count > 48 {
+                text.chars().skip(count - 48).collect()
+            } else {
+                text.into_owned()
+            }
+        }
+        crate::vm::SourcePath::Eval => "eval".to_string(),
+        crate::vm::SourcePath::Json => "json".to_string(),
+        crate::vm::SourcePath::None => String::new(),
+    };
+    if path.is_empty() {
+        js_string!("await")
+    } else {
+        js_string!(format!("await @{path}").as_str())
+    }
+}
+
 fn resume_interrupt_message(
     async_function: bool,
     async_generator: bool,

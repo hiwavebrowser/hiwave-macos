@@ -201,9 +201,14 @@ fn reddit_bv_chunks_report_a_job_census() {
             },
             di: function () {}
         };
+        globalThis.CLIENT_CONFIG = {
+            STATIC_BASE_URL: 'https://www.redditstatic.com/',
+            REDDITSTATIC_CF_MIGRATION: 'control_1'
+        };
         "#,
     )
     .unwrap();
+    rustkit_js::reset_host_calls();
     let url = "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=BvOWmaNPEJ,DZDBx0nCO6,Dyg3q1gB6W";
     let started = std::time::Instant::now();
     let handle = b.begin_module(url, &source).expect("module parsed");
@@ -212,15 +217,46 @@ fn reddit_bv_chunks_report_a_job_census() {
     let poll_census = b.last_job_census();
     let defined = ev(&b, "Object.keys(defined).join(',')");
     let errors = ev(&b, "errors.join(' | ')");
+    let host = rustkit_js::top_host_calls(20);
+    let host_line = host
+        .iter()
+        .map(|source| format!("{}×{}/{}ms", source.label, source.count, source.elapsed_ms))
+        .collect::<Vec<_>>()
+        .join(",");
     eprintln!(
-        "BV_CENSUS bytes={} eval_ms={} state={state:?} defined={defined} errors={errors} begin=[{}] poll=[{}]",
+        "BV_CENSUS bytes={} eval_ms={} state={state:?} defined={defined} errors={errors} begin=[{}] poll=[{}] host=[{}]",
         source.len(),
         started.elapsed().as_millis(),
         begin_census.summary(),
-        poll_census.summary()
+        poll_census.summary(),
+        if host_line.is_empty() { "-".to_string() } else { host_line }
     );
     assert!(
         poll_census.jobs > 0 || begin_census.jobs > 0 || !defined.is_empty() || !errors.is_empty(),
         "the chunk produced neither jobs nor a factory result"
+    );
+}
+
+#[test]
+fn a_class_write_is_named_by_the_host_binding() {
+    rustkit_js::reset_host_calls();
+    let b = page();
+    b.evaluate(
+        r#"
+        var el = document.createElement('div');
+        document.body.appendChild(el);
+        el.setAttribute('class', 'a');
+        el.setAttribute('style', 'color:red');
+        "#,
+    )
+    .unwrap();
+    let top = rustkit_js::top_host_calls(20);
+    assert!(
+        top.iter().any(|source| source.label == "__rustkit_dom_write:setAttr:class"),
+        "setAttribute('class') is its own host row: {top:?}"
+    );
+    assert!(
+        top.iter().any(|source| source.label == "__rustkit_dom_write:setAttr:style"),
+        "setAttribute('style') is its own host row: {top:?}"
     );
 }

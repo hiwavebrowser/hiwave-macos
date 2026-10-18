@@ -829,13 +829,35 @@ impl Document {
         shadow::move_link(&old, &new);
 
         self.nodes.borrow_mut().insert(id, new.clone());
-        let mut by_id = self.elements_by_id.borrow_mut();
-        by_id.retain(|_, n| n.id != id);
-        if let Some(value) = new.get_attribute("id").filter(|v| !v.is_empty()) {
-            by_id.entry(value.to_string()).or_insert_with(|| new.clone());
-        }
-        drop(by_id);
+        // One entry, not the whole id table. The old `retain` walked every
+        // id on every attribute and text write, so a Lit render's
+        // `setAttribute` scaled with the document. First id still wins:
+        // a duplicate that does not own the entry is left alone, and a
+        // free id is inserted only when absent.
+        self.reindex_element_id(id, &old, &new);
         Some(new)
+    }
+
+    /// Point the id table at `new` after `old` (the same NodeId) was replaced.
+    fn reindex_element_id(&self, id: NodeId, old: &Rc<Node>, new: &Rc<Node>) {
+        let old_key = old
+            .get_attribute("id")
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let new_key = new
+            .get_attribute("id")
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let mut by_id = self.elements_by_id.borrow_mut();
+        if let Some(old_key) = old_key.as_deref() {
+            let owns = by_id.get(old_key).is_some_and(|node| node.id == id);
+            if owns {
+                by_id.remove(old_key);
+            }
+        }
+        if let Some(new_key) = new_key {
+            by_id.entry(new_key).or_insert_with(|| new.clone());
+        }
     }
 
     /// Parse `html` as the contents of a `context` element (the HTML
@@ -1350,6 +1372,73 @@ mod node_write_tests {
         assert_eq!(doc.get_element_by_id("b").unwrap().id, id);
         doc.replace_node_data(id, element("div", &[])).unwrap();
         assert!(doc.get_element_by_id("b").is_none());
+    }
+
+    /// The parser keeps the last duplicate. A class write on an element that
+    /// does not own the table entry must not steal it, and a class write on
+    /// the owner retargets the entry at the replacement `Rc`.
+    #[test]
+    fn a_duplicate_id_stays_with_the_element_that_owns_it() {
+        let doc = Document::parse_html(
+            "<html><body><div id=dup class=first></div><span id=dup class=second></span></body></html>",
+        )
+        .unwrap();
+        let kids = doc.body().unwrap().children();
+        let (first_id, owner_id) = (kids[0].id, kids[1].id);
+        assert_eq!(doc.get_element_by_id("dup").unwrap().id, owner_id);
+
+        doc.replace_node_data(first_id, element("div", &[("id", "dup"), ("class", "z")]))
+            .unwrap();
+        let found = doc.get_element_by_id("dup").unwrap();
+        assert_eq!(found.id, owner_id);
+        assert_eq!(found.get_attribute("class"), Some("second"));
+
+        doc.replace_node_data(owner_id, element("span", &[("id", "dup"), ("class", "y")]))
+            .unwrap();
+        let found = doc.get_element_by_id("dup").unwrap();
+        assert_eq!(found.id, owner_id);
+        assert_eq!(found.get_attribute("class"), Some("y"));
+        assert!(Rc::ptr_eq(&doc.get_node(owner_id).unwrap(), &found));
+        assert_eq!(
+            doc.get_node(first_id).unwrap().get_attribute("class"),
+            Some("z")
+        );
+    }
+
+    /// Every id still names its own node after a class write, including the
+    /// node that was rewritten. The elapsed time is printed; a wall-clock
+    /// bound would flake, and the cost being fixed is the full-table scan.
+    #[test]
+    fn a_class_change_keeps_every_id_on_the_new_node() {
+        const N: usize = 4_000;
+        const WRITES: usize = 200;
+        let mut html = String::from("<html><body>");
+        for i in 0..N {
+            html.push_str(&format!("<div id=n{i} class=a></div>"));
+        }
+        html.push_str("</body></html>");
+        let doc = Document::parse_html(&html).unwrap();
+        let target = doc.get_element_by_id("n2000").unwrap().id;
+        let started = std::time::Instant::now();
+        for i in 0..WRITES {
+            let class = format!("c{i}");
+            doc.replace_node_data(target, element("div", &[("id", "n2000"), ("class", &class)]))
+                .unwrap();
+        }
+        eprintln!(
+            "ID_INDEX ids={N} writes={WRITES} ms={}",
+            started.elapsed().as_millis()
+        );
+        for i in 0..N {
+            let node = doc.get_element_by_id(&format!("n{i}")).unwrap();
+            if i == 2000 {
+                assert_eq!(node.id, target);
+                assert_eq!(node.get_attribute("class"), Some("c199"));
+                assert!(Rc::ptr_eq(&doc.get_node(target).unwrap(), &node));
+            } else {
+                assert_eq!(node.get_attribute("class"), Some("a"));
+            }
+        }
     }
 
     #[test]

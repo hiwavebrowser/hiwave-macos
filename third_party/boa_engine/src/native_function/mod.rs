@@ -92,6 +92,17 @@ pub struct NativeFunctionObject {
     // END HIWAVE PATCH
 }
 
+impl NativeFunctionObject {
+    /// The name stored by `FunctionObjectBuilder`.
+    ///
+    /// The `name` data property can be empty (an engine builtin the spec
+    /// names `""`) while this is not. A host labeling a callback reads it
+    /// then.
+    pub fn name(&self) -> &JsString {
+        &self.name
+    }
+}
+
 // SAFETY: this traces all fields that need to be traced by the GC.
 unsafe impl Trace for NativeFunctionObject {
     custom_trace!(this, mark, {
