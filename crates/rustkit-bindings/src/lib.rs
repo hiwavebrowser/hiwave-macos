@@ -535,6 +535,20 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.__rustkit_run_timers = function (horizon, max) {
         return runTimers(horizon, max, false);
     };
+    // The load's clock, one callback at a time, so the host can publish a
+    // frame between them. A negative return is `-callbacks` and means the
+    // horizon still has timers due. Zero frame budget never stops early.
+    window.__rustkit_run_timers_framed = function (horizon, max, frameMs) {
+        var start = Date.now();
+        var ran = 0;
+        while (ran < max) {
+            var n = runTimers(horizon, 1, false);
+            if (n === 0) break;
+            ran += n;
+            if (frameMs > 0 && (Date.now() - start) >= frameMs) return -ran;
+        }
+        return ran;
+    };
     // The live loop's clock: `delta` ms of real time have passed. Run what
     // came due and leave the clock there, so a timer set next (by a click,
     // say) counts from now and not from the last callback. With callbacks
@@ -570,6 +584,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // Zero frame budget never stops early. Callbacks that finish inside
     // the budget run in this call, and the clock and animation-frame round
     // match `__rustkit_advance_timers`.
+    //
+    // The elapsed delta is applied even when a callback ran long enough to
+    // stop the turn. Leaving the clock at that callback's due time drops
+    // the time already spent, so the next interval waits a full extra
+    // period after Stop. Timers still due are at or before `target` and
+    // run on the next turn.
     window.__rustkit_advance_timers_framed = function (delta, max, frameMs) {
         var target = now + delta;
         var start = Date.now();
@@ -578,7 +598,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             var n = runTimers(target, 1, true);
             if (n === 0) break;
             ran += n;
-            if (frameMs > 0 && (Date.now() - start) >= frameMs) return -ran;
+            if (frameMs > 0 && (Date.now() - start) >= frameMs) {
+                if (now < target) now = target;
+                return -ran;
+            }
         }
         if (ran >= max) return ran;
         if (now < target) now = target;
@@ -1875,6 +1898,25 @@ impl DomBindings {
         })
     }
 
+    /// [`Self::run_timers`], stopping between callbacks once `frame_ms` of
+    /// wall time has passed. `true` means the horizon still has timers due.
+    pub fn run_timers_for_frame(
+        &self,
+        horizon_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+    ) -> Result<(u32, bool), BindingError> {
+        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
+            "window.__rustkit_run_timers_framed({}, {}, {})",
+            horizon_ms, max_callbacks, frame_ms
+        ))?;
+        Ok(match ran {
+            JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
+            JsValue::Number(n) => (n as u32, false),
+            _ => (0, false),
+        })
+    }
+
     /// Move the virtual clock on by `delta_ms` (the live loop's real elapsed
     /// time) and run the timers that came due, at most `max_callbacks` of
     /// them. Returns how many ran.
@@ -2770,6 +2812,24 @@ mod tests {
         assert_eq!(bindings.next_timer_delay(), Some(10));
         assert_eq!(bindings.advance_timers(0, 100).unwrap(), 0);
         assert_eq!(bindings.advance_timers(60, 100).unwrap(), 6);
+    }
+
+    /// A callback that runs past the frame budget must not swallow the
+    /// elapsed time the turn was given. The next timer is due from the
+    /// clock the turn reached, so Stop is not followed by a full extra period.
+    #[test]
+    fn a_frame_yield_still_advances_the_virtual_clock() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "setTimeout(function () { var end = Date.now() + 30; while (Date.now() < end) {} }, 0);
+                 setTimeout(function () {}, 200);",
+            )
+            .unwrap();
+        let (ran, yielded) = bindings.advance_timers_for_frame(80, 10, 16).unwrap();
+        assert!(yielded, "the long callback did not yield the frame");
+        assert_eq!(ran, 1);
+        assert_eq!(bindings.next_timer_delay(), Some(120));
     }
 
     /// Chromium 143, a `requestAnimationFrame` loop across a task that holds
