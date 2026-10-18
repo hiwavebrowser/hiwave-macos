@@ -1284,3 +1284,137 @@ customElements.define('faceplate-header', FaceplateHeader);
         "desktop span lost its box inside the narrow host {wide}"
     );
 }
+
+/// Reddit's feed shell, from the public page (1 Oct 2026 snapshot).
+///
+/// `m:` is `@media (min-width: 1200px)`, and that same query holds
+/// `--flex-nav-width` (272px, or 315px with `.flex-nav-upsell`),
+/// `grid-template-columns: var(--flex-nav-width) 1fr`, and
+/// `max-width: calc(100vw - var(--flex-nav-width, 0px))` on
+/// `.subgrid-container`. The container is also `m:w-[1120px]` with 24px
+/// padding. Chrome at 1280 with the upsell: sub 315×965, shell 339×917,
+/// feed 577. Without the clamp the 1120px width's content box is 1072 and
+/// the feed track is 732. At 1060 every `m:` rule drops: the shell is the
+/// full viewport with 16px padding, the feed is 688, the hamburger
+/// (`m:hidden`) is 44px, and the search is the flex remainder, not 560px.
+#[test]
+fn the_reddit_shell_clamps_to_the_viewport_minus_the_nav() {
+    let html = r#"<!doctype html><style>
+html,body{margin:0}
+.grid{display:grid;width:100%}
+@media (min-width:1200px){
+.grid-container:not(.grid-full),.grid-container:not(.grid-full).flex-nav-expanded{--flex-nav-width:272px}
+.grid-container:not(.grid-full).flex-nav-expanded.flex-nav-upsell{--flex-nav-width:315px}
+.grid-container:not(.grid-full){display:grid;width:100%;grid-template-columns:var(--flex-nav-width) 1fr}
+.grid-container:not(.grid-full) .subgrid-container{max-width:calc(100vw - var(--flex-nav-width, 0px))}
+}
+.box-border{box-sizing:border-box}
+.w-full{width:100%}
+.hidden{display:none}
+.flex{display:flex}
+.flex-col{display:flex;flex-direction:column}
+.order-2{order:2}
+.mx-auto{margin-left:auto;margin-right:auto}
+.flex-1{flex:1 1 0%}
+nav{display:flex;align-items:center;height:56px;width:100%}
+#logo{width:120px;height:40px;flex:none}
+#burger{width:44px;height:40px;flex:none}
+#feed,#side{height:40px}
+.main-container{display:grid;width:100%;gap:1.5rem;grid-template-columns:minmax(0,1fr)}
+@media (min-width:768px){
+  .xs\:px-md{padding-left:1rem;padding-right:1rem}
+}
+@media (min-width:960px){
+  .s\:\[\&\.fixed-sidebar\]\:grid-cols-\[minmax\(0\,756px\)_minmax\(0\,316px\)\].fixed-sidebar{
+    grid-template-columns:minmax(0,756px) minmax(0,316px)
+  }
+}
+@media (min-width:1200px){
+  .m\:col-start-2{grid-column-start:2}
+  .m\:w-\[1120px\]{width:1120px}
+  .m\:px-lg{padding-left:1.5rem;padding-right:1.5rem}
+  .m\:hidden{display:none}
+  .m\:block{display:block}
+  .m\:w-\[560px\]{width:560px}
+  .m\:mx-auto{margin-left:auto;margin-right:auto}
+}
+</style>
+<div class="grid-container theme-rpl grid flex-nav-expanded flex-nav-upsell">
+  <div style="position:fixed;width:315px;height:40px"></div>
+  <div id="sub" class="subgrid-container m:col-start-2 box-border flex flex-col order-2 w-full m:w-[1120px] xs:px-md m:px-lg mx-auto">
+    <div id="shell" class="main-container fixed-sidebar s:[&.fixed-sidebar]:grid-cols-[minmax(0,756px)_minmax(0,316px)]">
+      <div id="feed"></div><div id="side"></div>
+    </div>
+  </div>
+</div>
+<header><nav>
+  <button id="burger" class="m:hidden">menu</button>
+  <div id="logo"></div>
+  <div id="search" class="flex-1 flex">
+    <div class="flex w-full">
+      <div id="box" class="flex w-full m:block m:w-[560px] m:mx-auto"><div id="bar" class="w-full" style="height:40px">Search</div></div>
+    </div>
+  </div>
+</nav></header>"#;
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+        })
+        .expect("view");
+    engine.load_html(view, html).expect("load");
+    let measure = |engine: &mut Engine| {
+        eval(
+            engine,
+            view,
+            r#"
+            function r(id){var b=document.getElementById(id).getBoundingClientRect();return [b.x,b.width].join(' ')}
+            [r('sub'),r('shell'),r('feed'),r('side'),r('burger'),r('box'),r('search'),innerWidth].join('|')
+            "#,
+        )
+    };
+    let wide = measure(&mut engine);
+    let near = |got: &str, expect: &[f64]| {
+        let nums = numbers(&got.replace([' ', '|'], ","));
+        nums.len() == expect.len()
+            && nums
+                .iter()
+                .zip(expect)
+                .all(|(g, e)| (*g - *e).abs() < 2.0)
+    };
+    assert!(
+        near(
+            &wide,
+            &[
+                315.0, 965.0, 339.0, 917.0, 339.0, 577.0, 940.0, 316.0, 0.0, 0.0, 420.0, 560.0,
+                120.0, 1160.0, 1280.0,
+            ],
+        ),
+        "1280 shell {wide}"
+    );
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1060,
+                height: 800,
+            },
+        )
+        .expect("resize");
+    let narrow = measure(&mut engine);
+    assert!(
+        near(
+            &narrow,
+            &[
+                0.0, 1060.0, 16.0, 1028.0, 16.0, 688.0, 728.0, 316.0, 0.0, 44.0, 164.0, 896.0,
+                164.0, 896.0, 1060.0,
+            ],
+        ),
+        "1060 shell {narrow}"
+    );
+}

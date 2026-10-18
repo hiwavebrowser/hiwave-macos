@@ -551,33 +551,75 @@ fn layout_flex_container_at(
         };
         match spec_px {
             Some(v) => {
+                // The specified width is not the used width. Reddit's
+                // subgrid is `width: 1120px; max-width: calc(100vw - 315px)`
+                // and `display: flex`. The grid item's border box is already
+                // 965, but this arm used to hand the column 1120 minus
+                // padding (1072). The feed track then came out 732 instead
+                // of 577. A percentage max/min still needs the containing
+                // block, which this arm does not have.
+                let (max_l, min_l) = match cross_axis {
+                    Axis::Horizontal => (&style.max_width, &style.min_width),
+                    Axis::Vertical => (&style.max_height, &style.min_height),
+                };
+                let mut used = v;
+                if !has_percentage(max_l) {
+                    let max_v = resolve_max_length(container, max_l, 0.0);
+                    if max_v.is_finite() {
+                        used = used.min(max_v);
+                    }
+                }
+                if !has_percentage(min_l)
+                    && !matches!(min_l, Length::Auto | Length::FitContent)
+                {
+                    used = used.max(resolve_length(container, min_l, 0.0));
+                }
                 if container.style.box_sizing == rustkit_css::BoxSizing::BorderBox {
-                    Some((v - pb).max(0.0))
+                    Some((used - pb).max(0.0))
                 } else {
-                    Some(v)
+                    Some(used)
                 }
             }
-            // `container_cross_size` is the CONTAINING BLOCK's content size,
-            // not this container's. For the `width: auto` case above, the
-            // used inner cross size is that minus the container's OWN margin,
-            // border and padding — handing back the raw containing-block
-            // number stretches every child past the container by exactly its
-            // own edges. That is #81's defect inverted: items grew by their
-            // padding instead of shrinking by it.
+            // Two callers reach this arm. A direct one hands the containing
+            // block and leaves `content.width` at 0: the used inner size is
+            // that block minus this container's own margin, border and
+            // padding. Handing the raw containing-block number back stretches
+            // every child past the container by exactly its own edges (#81,
+            // inverted). The block and grid passes hand this container's own
+            // box instead, and that content width is already inside the edges.
             None if container_cross_size > 0.0 => {
-                let own_edges = match cross_axis {
-                    Axis::Horizontal => {
-                        container.dimensions.margin.horizontal()
-                            + container.dimensions.border.horizontal()
-                            + container.dimensions.padding.horizontal()
-                    }
-                    Axis::Vertical => {
-                        container.dimensions.margin.vertical()
-                            + container.dimensions.border.vertical()
-                            + container.dimensions.padding.vertical()
-                    }
-                };
-                Some((container_cross_size - own_edges).max(0.0))
+                // The block and grid passes resolve a used content width
+                // (`width: 100%` under border-box is the border box minus
+                // padding) and hand this function that box. Subtracting
+                // the padding again shrinks every child by the container's
+                // own edges: reddit's subgrid at 1060 is a 1060px border
+                // box with 16px of padding each side, so the column's
+                // inner size is 1028, and a second subtraction made it
+                // 996 (feed track 656 instead of 688).
+                //
+                // A direct caller that hands the containing block leaves
+                // `content.width` at 0. That is the case that still
+                // subtracts — `test_auto_width_column_stretches_to_inner_width_not_containing_block`.
+                let already_resolved = cross_axis == Axis::Horizontal
+                    && container.dimensions.content.width > 0.0
+                    && (container.dimensions.content.width - container_cross_size).abs() < 0.5;
+                if already_resolved {
+                    Some(container_cross_size)
+                } else {
+                    let own_edges = match cross_axis {
+                        Axis::Horizontal => {
+                            container.dimensions.margin.horizontal()
+                                + container.dimensions.border.horizontal()
+                                + container.dimensions.padding.horizontal()
+                        }
+                        Axis::Vertical => {
+                            container.dimensions.margin.vertical()
+                                + container.dimensions.border.vertical()
+                                + container.dimensions.padding.vertical()
+                        }
+                    };
+                    Some((container_cross_size - own_edges).max(0.0))
+                }
             }
             None => None,
         }
@@ -4613,6 +4655,47 @@ mod tests {
             "stretched child width {} should be the container's inner width 1230, \
              not the containing block's 1280 (overflowing by the container's own edges)",
             child_width
+        );
+    }
+
+    #[test]
+    fn a_percent_width_column_keeps_the_resolved_content_width() {
+        // Production call shape. `calculate_block_width` has already turned
+        // `width: 100%; box-sizing: border-box; padding: 0 16px` on a 1060px
+        // containing block into content width 1028, and the block path then
+        // passes that box. The column's children stretch to 1028. Treating
+        // the box as a containing block and subtracting the padding again
+        // made them 996 — reddit's feed track at a 1060 layout width.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.width = Length::Percent(100.0);
+        style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        style.align_items = AlignItems::Stretch;
+
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        container.dimensions.padding = EdgeSizes {
+            left: 16.0,
+            right: 16.0,
+            ..Default::default()
+        };
+        container.dimensions.content = Rect::new(16.0, 0.0, 1028.0, 0.0);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Percent(100.0);
+        child_style.height = Length::Px(40.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+
+        let own = container.dimensions.clone();
+        layout_flex_container(&mut container, &own);
+
+        let child_width = container.children[0].dimensions.border_box().width;
+        assert!(
+            (child_width - 1028.0).abs() < 0.5,
+            "stretched child width {child_width} should be the resolved content \
+             width 1028, not 1028 minus the padding a second time (996)"
         );
     }
 
