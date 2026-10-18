@@ -5653,6 +5653,15 @@ impl Engine {
         // What listeners reported while a script ran, for the script log at
         // the next lifecycle step.
         let mut carried: Vec<String> = Vec::new();
+        // Every script the parser fetched is in the trace even when this
+        // loop returns before it runs. `fetched_scripts` then says why.
+        for (label, _, source, _, _) in &runnable {
+            match source {
+                Ok(_) if label.starts_with("inline#") => page_trace::note_parser_script(label, None),
+                Ok(_) => page_trace::note_parser_script(label, Some(200)),
+                Err(outcome) => page_trace::note_observed(label, outcome),
+            }
+        }
         for (index, (label, _, source, node_id, is_module)) in runnable.into_iter().enumerate() {
             // Between two scripts: a cancelled load runs none of the rest.
             #[cfg(test)]
@@ -5744,7 +5753,10 @@ impl Engine {
                             (ScriptOutcome::EngineFailed(EngineFailure::Panic), None)
                         }
                         // A syntax error: the module graph was never built.
-                        Ok(Err(message)) => (ScriptOutcome::Threw(message), Some("error")),
+                        Ok(Err(message)) => {
+                            page_trace::note_script_reason(&label, "module graph error");
+                            (ScriptOutcome::Threw(message), Some("error"))
+                        }
                         Ok(Ok(handle)) => {
                             if let (Some(policy), Some(document)) = (&policy, &document_url) {
                                 let mut count = modules_fetched.get();
@@ -5804,26 +5816,40 @@ impl Engine {
                                         // still running): the element hears `load`.
                                         Ok(rustkit_bindings::ModuleState::Done)
                                         | Ok(rustkit_bindings::ModuleState::Evaluating) => {
+                                            page_trace::resolve_module_dependencies(true, None);
                                             (ScriptOutcome::Ran, Some("load"))
                                         }
                                         // The graph loaded and ran, and threw: reported,
                                         // and the fetch itself succeeded.
                                         Ok(rustkit_bindings::ModuleState::Threw(message)) => {
+                                            page_trace::resolve_module_dependencies(true, None);
                                             (ScriptOutcome::Threw(message), Some("load"))
                                         }
                                         // The graph could not be loaded or linked.
-                                        Ok(rustkit_bindings::ModuleState::Failed(message)) => (
-                                            ScriptOutcome::Threw(format!(
-                                                "module graph failed: {message}"
-                                            )),
-                                            Some("error"),
-                                        ),
-                                        Ok(rustkit_bindings::ModuleState::Loading) => (
-                                            ScriptOutcome::Threw(
-                                                "module imports were not loaded".into(),
-                                            ),
-                                            Some("error"),
-                                        ),
+                                        Ok(rustkit_bindings::ModuleState::Failed(message)) => {
+                                            page_trace::resolve_module_dependencies(
+                                                false,
+                                                Some("module graph error"),
+                                            );
+                                            (
+                                                ScriptOutcome::Threw(format!(
+                                                    "module graph failed: {message}"
+                                                )),
+                                                Some("error"),
+                                            )
+                                        }
+                                        Ok(rustkit_bindings::ModuleState::Loading) => {
+                                            page_trace::resolve_module_dependencies(
+                                                false,
+                                                Some("waiting on a dependency"),
+                                            );
+                                            (
+                                                ScriptOutcome::Threw(
+                                                    "module imports were not loaded".into(),
+                                                ),
+                                                Some("error"),
+                                            )
+                                        }
                                     }
                                 }
                             }

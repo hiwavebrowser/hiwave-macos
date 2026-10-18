@@ -482,11 +482,17 @@ pub(crate) async fn pump_modules(
             .await;
             inspector::answer_module(guard, &fetched);
             match fetched {
-                Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
-                    final_url: module.final_url.to_string(),
-                    source: module.source,
-                }),
+                Ok(Ok(module)) => {
+                    crate::page_trace::note_module_dependency(url, Some(module.status));
+                    Ok(rustkit_bindings::FetchedModule {
+                        final_url: module.final_url.to_string(),
+                        source: module.source,
+                    })
+                }
                 Ok(Err(denial)) => {
+                    if matches!(denial, rustkit_net::policy::Denial::Shield) {
+                        crate::page_trace::note_blocked(url);
+                    }
                     debug!(%url, ?denial, "Module fetch denied");
                     Err(NETWORK_ERROR.to_string())
                 }

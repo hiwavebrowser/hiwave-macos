@@ -12,6 +12,52 @@ use hiwave_core::HiWaveResult;
 
 pub use filter_lists::{FilterListManager, FilterListSource, FILTER_LISTS};
 
+/// `HIWAVE_REPLAY` is an http(s) proxy. While it is set, filter-list
+/// downloads must not reach easylist.to. Empty or non-http values do not
+/// count: they also leave the replay proxy off.
+pub fn replay_blocks_network(replay: Option<&str>) -> bool {
+    match replay.map(str::trim) {
+        Some(raw) if raw.starts_with("http://") || raw.starts_with("https://") => true,
+        _ => false,
+    }
+}
+
+/// What the trace header and the shield startup log should say.
+///
+/// `HIWAVE_SHIELD=off` wins. `HIWAVE_SHIELD=on` keeps the shield, and says
+/// so when replay is also on (lists stay cached). Unset `HIWAVE_SHIELD`
+/// during replay defaults to off so a replay matches stock Chrome. The same
+/// rules are applied by the page trace; keep the strings in step with
+/// `page_trace::shield_choice_label`.
+pub fn shield_choice_label(shield: Option<&str>, shield_off_set: bool, replay: Option<&str>) -> &'static str {
+    match shield.map(str::trim).filter(|value| !value.is_empty()).map(|value| value.to_ascii_lowercase()).as_deref() {
+        Some("off" | "0" | "false") => return "off (HIWAVE_SHIELD=off)",
+        Some("on" | "1" | "true") => {
+            return if replay_blocks_network(replay) {
+                "on (filter lists stay cached under HIWAVE_REPLAY)"
+            } else {
+                "on"
+            };
+        }
+        _ => {}
+    }
+    if shield_off_set {
+        return "off (HIWAVE_SHIELD_OFF)";
+    }
+    if replay_blocks_network(replay) {
+        return "off (HIWAVE_REPLAY defaults HIWAVE_SHIELD=off)";
+    }
+    "on"
+}
+
+/// [`shield_choice_label`] from the process environment.
+pub fn shield_choice_from_env() -> &'static str {
+    let shield = std::env::var("HIWAVE_SHIELD").ok();
+    let off = std::env::var("HIWAVE_SHIELD_OFF").is_ok();
+    let replay = std::env::var("HIWAVE_REPLAY").ok();
+    shield_choice_label(shield.as_deref(), off, replay.as_deref())
+}
+
 /// Ad blocker powered by Brave's adblock-rust engine
 pub struct AdBlocker {
     engine: Engine,
@@ -104,10 +150,29 @@ impl AdBlocker {
         Self::with_rules(&rules)
     }
 
+    /// No rules and not enabled. Used when the shield is off so startup does
+    /// not download EasyList and nothing is blocked (including the starter list).
+    pub fn disabled() -> Self {
+        let mut blocker = Self::with_rules(&[]);
+        blocker.enabled = false;
+        blocker
+    }
+
     /// Creates ad blocker with full EasyList/EasyPrivacy filter lists
-    /// Falls back to default rules if filter lists can't be loaded
+    /// Falls back to default rules if filter lists can't be loaded.
+    ///
+    /// `HIWAVE_SHIELD=off`, `HIWAVE_SHIELD_OFF`, or an `HIWAVE_REPLAY` http(s)
+    /// URL with `HIWAVE_SHIELD` unset returns [`disabled`](Self::disabled) and
+    /// does not download filter lists. An explicit `HIWAVE_SHIELD=on` during
+    /// replay still builds the engine, but [`filter_lists`] refuses the
+    /// network and uses the cache.
     pub fn with_filter_lists() -> Self {
-        log::info!("Initializing ad blocker with EasyList/EasyPrivacy");
+        let choice = shield_choice_from_env();
+        if choice.starts_with("off") {
+            log::info!("shield {choice}; EasyList is not downloaded");
+            return Self::disabled();
+        }
+        log::info!("Initializing ad blocker with EasyList/EasyPrivacy ({choice})");
 
         match FilterListManager::new() {
             Some(manager) => {
@@ -370,6 +435,41 @@ mod tests {
         let source = Url::parse("https://example.com/").unwrap();
         assert!(!blocker.should_block(&url, &source, ResourceType::Script));
         assert_eq!(blocker.get_stats().requests_blocked, 0);
+    }
+
+    #[test]
+    fn replay_defaults_the_shield_off_unless_it_is_explicitly_on() {
+        assert!(crate::replay_blocks_network(Some("http://127.0.0.1:9")));
+        assert!(crate::replay_blocks_network(Some("https://127.0.0.1:9")));
+        assert!(!crate::replay_blocks_network(None));
+        assert!(!crate::replay_blocks_network(Some("")));
+        assert!(!crate::replay_blocks_network(Some("ftp://127.0.0.1:9")));
+        assert_eq!(
+            crate::shield_choice_label(None, false, Some("http://127.0.0.1:9")),
+            "off (HIWAVE_REPLAY defaults HIWAVE_SHIELD=off)"
+        );
+        assert_eq!(
+            crate::shield_choice_label(Some("on"), false, Some("http://127.0.0.1:9")),
+            "on (filter lists stay cached under HIWAVE_REPLAY)"
+        );
+        assert_eq!(
+            crate::shield_choice_label(Some("off"), false, None),
+            "off (HIWAVE_SHIELD=off)"
+        );
+        assert_eq!(
+            crate::shield_choice_label(None, true, None),
+            "off (HIWAVE_SHIELD_OFF)"
+        );
+        assert_eq!(crate::shield_choice_label(None, false, None), "on");
+    }
+
+    #[test]
+    fn a_disabled_shield_does_not_block_gtag() {
+        let blocker = AdBlocker::disabled();
+        let url = Url::parse("https://www.googletagmanager.com/gtag/js").unwrap();
+        let source = Url::parse("https://www.reddit.com/").unwrap();
+        assert!(!blocker.is_enabled());
+        assert!(!blocker.should_block(&url, &source, ResourceType::Script));
     }
 
     #[test]
