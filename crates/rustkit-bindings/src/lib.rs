@@ -3133,6 +3133,32 @@ mod tests {
         ));
     }
 
+    // A widget built off-document (recaptcha's anchor, for one) asks the
+    // fragment for its textarea before it is inserted. The collection is
+    // the element's descendants, not the document's tree.
+    #[test]
+    fn tag_and_class_collections_include_a_disconnected_subtree() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var d = document.createElement('div'); \
+                 d.innerHTML = '<div></div><textarea class=\"g-recaptcha-response\" id=\"g-recaptcha-response\"></textarea>'; \
+                 var area = d.getElementsByTagName('TEXTAREA'); \
+                 var r = [area.length, area.item(0) && area.item(0).id, \
+                          d.getElementsByTagName('div').length, \
+                          d.getElementsByClassName('g-recaptcha-response').length, \
+                          d.getElementsByTagName('*').length, \
+                          document.getElementsByTagName('textarea').length]; \
+                 document.body.appendChild(d); \
+                 r.push(document.getElementsByTagName('TEXTAREA').length); \
+                 r.push(d.getElementsByTagName('TEXTAREA').item(0) === area.item(0)); \
+                 r.join(',')"
+            ),
+            "1,g-recaptcha-response,1,1,2,0,1,true"
+        );
+    }
+
     #[test]
     fn unbound_document_reads_are_null() {
         let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();

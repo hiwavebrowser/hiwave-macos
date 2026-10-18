@@ -1113,7 +1113,8 @@ pub(crate) fn install(
                 return JsValue::Null;
             };
             let arg = string_arg(args, 3).unwrap_or("");
-            if let (Some("selector"), Some(matcher)) = (string_arg(args, 2), host.matcher.as_ref())
+            let kind = string_arg(args, 2);
+            if let (Some("selector"), Some(matcher)) = (kind, host.matcher.as_ref())
             {
                 // The scope itself decides validity, so an invalid selector
                 // throws even where nothing could match. Matching reads each
@@ -1126,20 +1127,41 @@ pub(crate) fn install(
                 descendant_elements(&scope, &mut all);
                 return id_list(all.into_iter().filter(|n| matcher(n, arg, &host.checked) == Some(true)));
             }
-            let found = match string_arg(args, 2) {
-                Some("tag") if arg == "*" => {
-                    let mut all = Vec::new();
-                    document.traverse(|n| {
-                        if n.is_element() {
-                            all.push(n.clone());
-                        }
-                    });
-                    all
+            // Element.getElementsByTagName / getElementsByClassName are the
+            // element's descendants, including a tree that is not in the
+            // document yet. A document-wide walk misses that tree, so the
+            // collection is empty and the page reads a property of the
+            // missing element.
+            let found = if scope.id != document.root().id && matches!(kind, Some("tag" | "class")) {
+                let mut all = Vec::new();
+                descendant_elements(&scope, &mut all);
+                let want = arg.to_lowercase();
+                all.into_iter()
+                    .filter(|n| match kind {
+                        Some("tag") if arg == "*" => true,
+                        Some("tag") => n.tag_name().is_some_and(|t| t.to_lowercase() == want),
+                        Some("class") => n.get_attribute("class").is_some_and(|c| {
+                            c.split_whitespace().any(|cls| cls == arg)
+                        }),
+                        _ => false,
+                    })
+                    .collect()
+            } else {
+                match kind {
+                    Some("tag") if arg == "*" => {
+                        let mut all = Vec::new();
+                        document.traverse(|n| {
+                            if n.is_element() {
+                                all.push(n.clone());
+                            }
+                        });
+                        all
+                    }
+                    Some("tag") => document.get_elements_by_tag_name(arg),
+                    Some("class") => document.get_elements_by_class_name(arg),
+                    Some("selector") => QuerySelector::select(document, arg),
+                    _ => return JsValue::Null,
                 }
-                Some("tag") => document.get_elements_by_tag_name(arg),
-                Some("class") => document.get_elements_by_class_name(arg),
-                Some("selector") => QuerySelector::select(document, arg),
-                _ => return JsValue::Null,
             };
             if scope.id == document.root().id {
                 // `#id` selectors read the id table, which keeps removed nodes.
