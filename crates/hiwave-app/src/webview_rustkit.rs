@@ -58,8 +58,9 @@ pub struct RustKitView {
     surface: Option<RefCell<WindowSurface>>,
     /// Navigation the window has asked for. Older events are dropped.
     accepted_nav: Cell<u64>,
-    /// A navigation the page decided on, harvested from events.
-    script_nav: RefCell<Option<(String, bool)>>,
+    /// A navigation the page decided on, harvested from events:
+    /// url, replace, and whether the user activated it.
+    script_nav: RefCell<Option<(String, bool, bool)>>,
     /// Newest commit whose navigation is still the one on screen.
     latest_commit: RefCell<Option<FrameCommit>>,
     /// The view ID within the engine. `None` after [`PageCmd::Close`].
@@ -542,17 +543,19 @@ impl RustKitView {
     /// from a timer). The caller navigates.
     /// A reload, `location.replace()` or a meta refresh replaces the
     /// current history entry when it is loaded, as in Chrome.
-    pub fn take_script_navigation(&self) -> Option<String> {
+    /// The URL, and whether the user activated the navigation (a click or
+    /// a form submit) rather than the page's script.
+    pub fn take_script_navigation(&self) -> Option<(String, bool)> {
         if self.content.is_some() {
             self.harvest();
             let taken = self.script_nav.borrow_mut().take()?;
             self.replace_next.set(taken.1);
-            return Some(taken.0);
+            return Some((taken.0, taken.2));
         }
         let (url, replace) =
             self.ask(|reply| PageCmd::Input(PageInput::TakeNavigation { reply }))??;
         self.replace_next.set(replace);
-        Some(url)
+        Some((url, false))
     }
 
     /// Whether a content element currently holds focus.
@@ -676,6 +679,10 @@ impl RustKitView {
                     .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
             }
             thread.resize(bounds, scale);
+            // The page lays out when it next yields. Until then the last
+            // commit is drawn at the new size: top-left, canvas colour in
+            // the area the old layout does not cover.
+            self.present_latest();
             return Ok(());
         }
         match self.ask(|reply| PageCmd::Resize {
@@ -870,8 +877,13 @@ impl RustKitView {
                 PageEvent::LoadState { state, .. } => {
                     *self.loading.borrow_mut() = matches!(state, LoadState::Started);
                 }
-                PageEvent::NavigateRequested { url, replace, .. } => {
-                    *self.script_nav.borrow_mut() = Some((url, replace));
+                PageEvent::NavigateRequested {
+                    url,
+                    replace,
+                    from_user,
+                    ..
+                } => {
+                    *self.script_nav.borrow_mut() = Some((url, replace, from_user));
                 }
                 PageEvent::Focused(_)
                 | PageEvent::Cursor(_)

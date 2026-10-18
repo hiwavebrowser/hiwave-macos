@@ -2251,9 +2251,17 @@ fn main() {
                         if let Some(tag) = view.focus_at_point(content_x as f32, content_y as f32) {
                             info!(%tag, "Focused content element");
                         }
-                        if let Some(url) = view.link_at_point(content_x as f32, content_y as f32) {
-                            info!(%url, "Link clicked");
-                            let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        // The content view already recorded this click when
+                        // the page runs on its own thread. Asking here races
+                        // that thread, and a miss is logged as a script
+                        // navigation. The click comes back as
+                        // NavigateRequested with the user as its origin.
+                        if !rustkit_engine::content_thread_enabled() {
+                            if let Some(url) = view.link_at_point(content_x as f32, content_y as f32)
+                            {
+                                info!(%url, "Link clicked");
+                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                            }
                         }
                     }
                 }
@@ -2586,8 +2594,12 @@ fn main() {
                     // a submit from a timer. Until 2026-10-06 these were
                     // dropped: only the user's own click on a link or a
                     // submit button went anywhere (hand tests H14, H16).
-                    if let Some(url) = view.take_script_navigation() {
-                        info!(%url, "Script navigation");
+                    if let Some((url, from_user)) = view.take_script_navigation() {
+                        if from_user {
+                            info!(%url, "Link clicked");
+                        } else {
+                            info!(%url, "Script navigation");
+                        }
                         let _ = click_proxy.send_event(UserEvent::Navigate(url));
                     }
                     view.render();
