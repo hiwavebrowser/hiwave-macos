@@ -3,10 +3,14 @@
 //!
 //! Times are milliseconds from the start of the navigation. `scripts` records
 //! each `<script>` as `execute` when it runs and `load` or `error` when the
-//! element is told; a fetch that never ran is `error` only. `mutations` are
-//! subtree inserts and removes of more than 50 nodes (the same threshold as
-//! the Chrome probe). `max_js_stack` is the deepest JS call stack during the
-//! load, not the native host-call depth.
+//! element is told; a fetch that never ran is `error` only. `fetched_scripts`
+//! lists every parser script and module dependency the load fetched, with
+//! `executed` and, when it did not run, `reason` (`blocked`, `module graph
+//! error`, `waiting on a dependency`, or `never reached`). `shield` is the
+//! startup choice (`HIWAVE_SHIELD`, or off by default under `HIWAVE_REPLAY`).
+//! `mutations` are subtree inserts and removes of more than 50 nodes (the
+//! same threshold as the Chrome probe). `max_js_stack` is the deepest JS call
+//! stack during the load, not the native host-call depth.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -119,6 +123,16 @@ struct Pending {
     event: &'static str,
 }
 
+struct FetchedNote {
+    url: String,
+    status: Option<u16>,
+    fetched: bool,
+    executed: bool,
+    /// A module graph dependency, not a parser `<script>`.
+    dependency: bool,
+    reason: Option<&'static str>,
+}
+
 struct Active {
     generation: u64,
     url: String,
@@ -127,6 +141,7 @@ struct Active {
     dcl_ms: Option<u64>,
     load_ms: Option<u64>,
     scripts: Vec<ScriptEv>,
+    fetched: Vec<FetchedNote>,
     console: Vec<(u64, String)>,
     mutations: Vec<(u64, &'static str, usize, String)>,
     next_order: u32,
@@ -171,6 +186,7 @@ pub(crate) fn begin(url: &str) -> Option<Session> {
             dcl_ms: None,
             load_ms: None,
             scripts: Vec::new(),
+            fetched: Vec::new(),
             console: Vec::new(),
             mutations: Vec::new(),
             next_order: 0,
@@ -193,6 +209,11 @@ fn finish(generation: u64) {
         return;
     };
     let max_js_stack = rustkit_js::js_stack_sample();
+    let active = {
+        let mut active = active;
+        fill_unexecuted(&mut active);
+        active
+    };
     if SAMPLES.fetch_sub(1, Ordering::Relaxed) == 1 {
         rustkit_js::set_js_stack_sample(false);
     }
@@ -240,6 +261,7 @@ pub(crate) fn note_record(record: &ScriptRecord) {
     }
     let url = record.source.as_str();
     let callback = url.starts_with("event:") || matches!(url, "timers" | "network" | "importmap");
+    let ran = apply_outcome(url, record, callback);
     match &record.outcome {
         ScriptOutcome::Nomodule => drop_pending(url),
         ScriptOutcome::FetchFailed(_) | ScriptOutcome::Skipped(_) | ScriptOutcome::OverBudget => {
@@ -252,19 +274,259 @@ pub(crate) fn note_record(record: &ScriptRecord) {
             note_console(&engine_failure_text(url, failure));
         }
         ScriptOutcome::Threw(message) => {
-            if !callback {
+            if ran {
                 push_script(url, "execute");
                 flush_pending(url);
             }
             note_console(message);
         }
         ScriptOutcome::Ran => {
-            if !callback {
+            if ran {
                 push_script(url, "execute");
                 flush_pending(url);
             }
         }
     }
+}
+
+/// A parser script whose body is already in hand (`status` 200) or an inline
+/// script (`status` none). Recorded before the runner so a load that returns
+/// early still explains the ones it never started.
+pub(crate) fn note_parser_script(url: &str, status: Option<u16>) {
+    remember(url, true, status, false, false, None);
+}
+
+/// Record a script that already failed, without emitting an `execute` event.
+/// The runner calls [`note_record`] again if it reaches the script.
+pub(crate) fn note_observed(url: &str, outcome: &ScriptOutcome) {
+    let record = ScriptRecord {
+        source: url.to_string(),
+        bytes: 0,
+        elapsed_ms: 0,
+        outcome: outcome.clone(),
+    };
+    let _ = apply_outcome(url, &record, false);
+}
+
+/// A module dependency fetched for `import()`. Not executed until the graph
+/// that asked for it is evaluated.
+pub(crate) fn note_module_dependency(url: &str, status: Option<u16>) {
+    remember(url, true, status, true, false, None);
+}
+
+/// The shield (or another blocker) refused this script.
+pub(crate) fn note_blocked(url: &str) {
+    remember(url, false, None, false, false, Some("blocked"));
+}
+
+/// Set a reason before [`note_record`] when the outcome text does not carry
+/// one (a module that failed to parse). A later execute clears it.
+pub(crate) fn note_script_reason(url: &str, reason: &'static str) {
+    remember(url, true, None, false, false, Some(reason));
+}
+
+/// The module dependencies fetched since the previous resolution either ran
+/// with the graph (`executed`) or all failed for `reason`.
+pub(crate) fn resolve_module_dependencies(executed: bool, reason: Option<&'static str>) {
+    if !enabled() {
+        return;
+    }
+    with_active(|active| {
+        for note in &mut active.fetched {
+            if !note.dependency || note.executed || note.reason.is_some() {
+                continue;
+            }
+            if executed {
+                note.executed = true;
+                note.reason = None;
+            } else if let Some(reason) = reason {
+                note.reason = Some(reason);
+            }
+        }
+    });
+}
+
+fn apply_outcome(url: &str, record: &ScriptRecord, callback: bool) -> bool {
+    if callback {
+        return false;
+    }
+    match &record.outcome {
+        ScriptOutcome::Nomodule => false,
+        ScriptOutcome::Ran => {
+            remember(url, true, status_of(url, record), false, true, None);
+            true
+        }
+        ScriptOutcome::Threw(message) if is_module_graph(message) => {
+            remember(url, true, status_of(url, record), false, false, Some("module graph error"));
+            false
+        }
+        ScriptOutcome::Threw(message) if is_waiting(message) => {
+            remember(url, true, status_of(url, record), false, false, Some("waiting on a dependency"));
+            false
+        }
+        ScriptOutcome::Threw(_) => {
+            if reason_of(url).is_some() {
+                false
+            } else {
+                remember(url, true, status_of(url, record), false, true, None);
+                true
+            }
+        }
+        ScriptOutcome::FetchFailed(failure) => {
+            if is_blocked_failure(failure) {
+                remember(url, false, status_of_failure(failure), false, false, Some("blocked"));
+            } else {
+                remember(url, false, status_of_failure(failure), false, false, None);
+            }
+            false
+        }
+        ScriptOutcome::Skipped(_) | ScriptOutcome::OverBudget => {
+            remember(url, true, status_of(url, record), false, false, Some("never reached"));
+            false
+        }
+        ScriptOutcome::EngineFailed(_) => false,
+    }
+}
+
+fn status_of(url: &str, record: &ScriptRecord) -> Option<u16> {
+    if url.starts_with("inline#") || record.bytes == 0 {
+        None
+    } else {
+        Some(200)
+    }
+}
+
+fn status_of_failure(failure: &FetchFailure) -> Option<u16> {
+    match failure {
+        FetchFailure::Status(status) => Some(*status),
+        FetchFailure::Transport(_) => None,
+    }
+}
+
+fn is_module_graph(message: &str) -> bool {
+    message.starts_with("module graph failed")
+}
+
+fn is_waiting(message: &str) -> bool {
+    message.contains("module imports were not loaded")
+}
+
+fn is_blocked_failure(failure: &FetchFailure) -> bool {
+    match failure {
+        FetchFailure::Transport(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("blocked") || message.contains("shield")
+        }
+        FetchFailure::Status(_) => false,
+    }
+}
+
+fn reason_of(url: &str) -> Option<&'static str> {
+    with_active(|active| {
+        active
+            .fetched
+            .iter()
+            .find(|note| note.url == url)
+            .and_then(|note| note.reason)
+    })
+}
+
+fn remember(
+    url: &str,
+    fetched: bool,
+    status: Option<u16>,
+    dependency: bool,
+    executed: bool,
+    reason: Option<&'static str>,
+) {
+    if !enabled() || url.is_empty() {
+        return;
+    }
+    with_active(|active| {
+        if let Some(note) = active.fetched.iter_mut().find(|note| note.url == url) {
+            if fetched {
+                note.fetched = true;
+            }
+            if status.is_some() {
+                note.status = status;
+            }
+            if dependency {
+                note.dependency = true;
+            }
+            if executed {
+                note.executed = true;
+                note.reason = None;
+            } else if let Some(reason) = reason {
+                if !note.executed {
+                    note.reason = Some(reason);
+                }
+            }
+            return;
+        }
+        if active.fetched.len() >= MAX_SCRIPTS {
+            return;
+        }
+        active.fetched.push(FetchedNote {
+            url: url.to_string(),
+            status,
+            fetched,
+            executed,
+            dependency,
+            reason: if executed { None } else { reason },
+        });
+    });
+}
+
+fn fill_unexecuted(active: &mut Active) {
+    for note in &mut active.fetched {
+        if note.executed || note.reason.is_some() || !note.fetched {
+            continue;
+        }
+        note.reason = Some(if note.dependency {
+            "waiting on a dependency"
+        } else {
+            "never reached"
+        });
+    }
+}
+
+/// Same decision as `hiwave_shield::shield_choice_label`. The engine does not
+/// depend on the shield crate; the strings are covered by tests on both sides.
+fn shield_choice_label(shield: Option<&str>, shield_off_set: bool, replay: Option<&str>) -> &'static str {
+    let blocks = matches!(
+        replay.map(str::trim),
+        Some(raw) if raw.starts_with("http://") || raw.starts_with("https://")
+    );
+    match shield
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("off" | "0" | "false") => return "off (HIWAVE_SHIELD=off)",
+        Some("on" | "1" | "true") => {
+            return if blocks {
+                "on (filter lists stay cached under HIWAVE_REPLAY)"
+            } else {
+                "on"
+            };
+        }
+        _ => {}
+    }
+    if shield_off_set {
+        return "off (HIWAVE_SHIELD_OFF)";
+    }
+    if blocks {
+        return "off (HIWAVE_REPLAY defaults HIWAVE_SHIELD=off)";
+    }
+    "on"
+}
+
+fn shield_label() -> &'static str {
+    let shield = std::env::var("HIWAVE_SHIELD").ok();
+    let off = std::env::var("HIWAVE_SHIELD_OFF").is_ok();
+    let replay = std::env::var("HIWAVE_REPLAY").ok();
+    shield_choice_label(shield.as_deref(), off, replay.as_deref())
 }
 
 fn engine_failure_text(url: &str, failure: &EngineFailure) -> String {
@@ -295,7 +557,13 @@ pub(crate) fn note_element_event(url: &str, event: &str) {
             .scripts
             .iter()
             .any(|script| script.url == url && script.event == "execute");
-        if executed {
+        // A script that will not run (module graph error, blocked, …) still
+        // records the element event. Waiting for `execute` would drop it.
+        let explained = active
+            .fetched
+            .iter()
+            .any(|note| note.url == url && note.reason.is_some() && !note.executed);
+        if executed || explained {
             push_script_on(active, url, event);
             flush = true;
         } else {
@@ -468,6 +736,19 @@ fn snapshot(active: &Active) -> Snapshot {
             .iter()
             .map(|script| (script.url.clone(), script.order, script.event, script.t_ms))
             .collect(),
+        fetched: active
+            .fetched
+            .iter()
+            .map(|note| {
+                (
+                    note.url.clone(),
+                    note.status,
+                    note.fetched,
+                    note.executed,
+                    note.reason,
+                )
+            })
+            .collect(),
         console: active.console.clone(),
         mutations: active
             .mutations
@@ -483,6 +764,7 @@ struct Snapshot {
     dcl_ms: Option<u64>,
     load_ms: Option<u64>,
     scripts: Vec<(String, u32, &'static str, u64)>,
+    fetched: Vec<(String, Option<u16>, bool, bool, Option<&'static str>)>,
     console: Vec<(u64, String)>,
     mutations: Vec<(u64, &'static str, usize, String)>,
 }
@@ -512,6 +794,18 @@ fn emit_snapshot(active: &Snapshot, max_js_stack: usize, console: bool) {
                 t_ms: *t_ms,
             })
             .collect(),
+        fetched_scripts: active
+            .fetched
+            .iter()
+            .map(|(url, status, fetched, executed, reason)| FetchedJson {
+                url,
+                status: *status,
+                fetched: *fetched,
+                executed: *executed,
+                reason: *reason,
+            })
+            .collect(),
+        shield: shield_label(),
         console: active
             .console
             .iter()
@@ -566,6 +860,8 @@ struct TraceJson<'a> {
     dcl_ms: Option<u64>,
     load_ms: Option<u64>,
     scripts: Vec<ScriptJson<'a>>,
+    fetched_scripts: Vec<FetchedJson<'a>>,
+    shield: &'a str,
     console: Vec<ConsoleJson<'a>>,
     mutations: Vec<MutationJson<'a>>,
     max_js_stack: usize,
@@ -583,6 +879,17 @@ struct ScriptJson<'a> {
     order: u32,
     event: &'a str,
     t_ms: u64,
+}
+
+#[derive(Serialize)]
+struct FetchedJson<'a> {
+    url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+    fetched: bool,
+    executed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -703,6 +1010,78 @@ mod tests {
         assert_eq!(scripts[0]["event"], "execute");
         assert_eq!(scripts[1]["event"], "load");
         assert_eq!(scripts[0]["order"], scripts[1]["order"]);
+    }
+
+    #[test]
+    fn a_script_that_never_runs_records_why() {
+        let path = std::env::temp_dir().join(format!("hiwave-trace-{}-why.json", std::process::id()));
+        let _force = force_file_for_test(&path);
+        let _session = begin("https://example.test/why").unwrap();
+        note_parser_script("inline#1", None);
+        note_parser_script("https://example.test/ran.js", Some(200));
+        note_record(&record("https://example.test/ran.js", ScriptOutcome::Ran));
+        note_parser_script("https://example.test/later.js", Some(200));
+        note_blocked("https://www.googletagmanager.com/gtag/js");
+        note_module_dependency("https://www.redditstatic.com/js/concat?chunks=aaa", Some(200));
+        note_script_reason("inline#9", "module graph error");
+        note_record(&record(
+            "inline#9",
+            ScriptOutcome::Threw("Unexpected token".into()),
+        ));
+        note_record(&record(
+            "https://example.test/graph.js",
+            ScriptOutcome::Threw("module graph failed: boom".into()),
+        ));
+        note_record(&record(
+            "https://example.test/wait.js",
+            ScriptOutcome::Threw("module imports were not loaded".into()),
+        ));
+        drop(_session);
+        let body = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let fetched = value["fetched_scripts"].as_array().unwrap();
+        let reason = |url: &str| {
+            fetched
+                .iter()
+                .find(|item| item["url"] == url)
+                .unwrap_or_else(|| panic!("missing {url}"))
+        };
+        assert_eq!(reason("inline#1")["executed"], false);
+        assert_eq!(reason("inline#1")["reason"], "never reached");
+        assert_eq!(reason("https://example.test/ran.js")["executed"], true);
+        assert!(reason("https://example.test/ran.js").get("reason").is_none());
+        assert_eq!(reason("https://example.test/later.js")["reason"], "never reached");
+        assert_eq!(reason("https://www.googletagmanager.com/gtag/js")["reason"], "blocked");
+        assert_eq!(reason("https://www.googletagmanager.com/gtag/js")["fetched"], false);
+        assert_eq!(
+            reason("https://www.redditstatic.com/js/concat?chunks=aaa")["reason"],
+            "waiting on a dependency"
+        );
+        assert_eq!(reason("inline#9")["reason"], "module graph error");
+        assert_eq!(reason("inline#9")["executed"], false);
+        assert_eq!(reason("https://example.test/graph.js")["reason"], "module graph error");
+        assert_eq!(reason("https://example.test/wait.js")["reason"], "waiting on a dependency");
+        let scripts = value["scripts"].as_array().unwrap();
+        assert!(scripts.iter().any(|script| script["url"] == "https://example.test/ran.js" && script["event"] == "execute"));
+        assert!(!scripts.iter().any(|script| script["url"] == "inline#9" && script["event"] == "execute"));
+        assert!(value["shield"].is_string());
+    }
+
+    #[test]
+    fn shield_choice_matches_the_replay_default() {
+        assert_eq!(
+            shield_choice_label(None, false, Some("http://127.0.0.1:9")),
+            "off (HIWAVE_REPLAY defaults HIWAVE_SHIELD=off)"
+        );
+        assert_eq!(
+            shield_choice_label(Some("on"), false, Some("https://127.0.0.1:9")),
+            "on (filter lists stay cached under HIWAVE_REPLAY)"
+        );
+        assert_eq!(shield_choice_label(Some("off"), false, None), "off (HIWAVE_SHIELD=off)");
+        assert_eq!(shield_choice_label(None, true, None), "off (HIWAVE_SHIELD_OFF)");
+        assert_eq!(shield_choice_label(None, false, None), "on");
+        assert_eq!(shield_choice_label(None, false, Some("")), "on");
     }
 
     #[test]

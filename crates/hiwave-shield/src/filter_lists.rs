@@ -78,6 +78,13 @@ impl FilterListManager {
 
     /// Download a filter list from the source
     fn download(&self, source: &FilterListSource) -> Result<String, String> {
+        if crate::replay_blocks_network(std::env::var("HIWAVE_REPLAY").ok().as_deref()) {
+            return Err(format!(
+                "not downloading {} under HIWAVE_REPLAY",
+                source.name
+            ));
+        }
+
         log::info!(
             "Downloading filter list: {} from {}",
             source.name,

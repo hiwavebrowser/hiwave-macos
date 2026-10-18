@@ -63,20 +63,32 @@ pub struct ShieldInterceptHandler {
     on_blocked: Option<Box<dyn Fn(&str) + Send + Sync>>,
 }
 
+/// `HIWAVE_SHIELD=off` / `HIWAVE_SHIELD_OFF`, or `HIWAVE_REPLAY` with the
+/// shield left unset. Read once: the env does not change during a run.
+/// While this is set the domain floor is not applied and the EasyList
+/// worker is not started, so nothing is fetched from easylist.to.
+fn shield_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| hiwave_shield::shield_choice_from_env().starts_with("off"))
+}
+
 impl ShieldInterceptHandler {
     /// Create a new shield intercept handler with default blocked domains.
     pub fn new() -> Self {
         // Kick the background engine build immediately so the
         // allow-until-ready window starts closing at construction, not at
-        // the first request.
-        let _ = shield_worker();
+        // the first request. A replay (or an explicit off) does not start
+        // it: that build downloads EasyList.
+        if !shield_off() {
+            let _ = shield_worker();
+        }
         let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
             .iter()
             .map(|s| s.to_string())
             .collect();
 
         Self {
-            enabled: Arc::new(AtomicBool::new(true)),
+            enabled: Arc::new(AtomicBool::new(!shield_off())),
             blocked_count: Arc::new(AtomicU64::new(0)),
             blocked_domains,
             census: Arc::new(ShieldCensus::default()),
@@ -87,15 +99,17 @@ impl ShieldInterceptHandler {
     /// Create with a shared counter for tracking blocked requests.
     pub fn with_counter(blocked_count: Arc<AtomicU64>) -> Self {
         // Production constructor (webview_rustkit path): start closing the
-        // pending window here too, not only in new().
-        let _ = shield_worker();
+        // pending window here too, not only in new(). Replay does not.
+        if !shield_off() {
+            let _ = shield_worker();
+        }
         let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
             .iter()
             .map(|s| s.to_string())
             .collect();
 
         Self {
-            enabled: Arc::new(AtomicBool::new(true)),
+            enabled: Arc::new(AtomicBool::new(!shield_off())),
             blocked_count,
             blocked_domains,
             census: Arc::new(ShieldCensus::default()),
@@ -225,10 +239,12 @@ impl InterceptHandler for ShieldInterceptHandler {
         self.census.attempted(dest);
 
         // Global kill-switch (debugging): HIWAVE_SHIELD_OFF=1 wins over
-        // everything, read once per process.
+        // everything, read once per process. HIWAVE_REPLAY defaults the
+        // same way (HIWAVE_SHIELD=off) so the domain floor cannot block
+        // gtag while EasyList is also left undownloaded.
         static KILL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let killed = *KILL.get_or_init(|| std::env::var("HIWAVE_SHIELD_OFF").is_ok());
-        if killed || !self.enabled.load(Ordering::Relaxed) {
+        if killed || shield_off() || !self.enabled.load(Ordering::Relaxed) {
             return InterceptAction::Allow;
         }
 
@@ -301,6 +317,9 @@ struct ShieldQuery {
 }
 
 fn shield_worker() -> Option<std::sync::mpsc::Sender<ShieldQuery>> {
+    if shield_off() {
+        return None;
+    }
     use std::sync::mpsc;
     static WORKER: std::sync::OnceLock<Option<std::sync::Mutex<mpsc::Sender<ShieldQuery>>>> =
         std::sync::OnceLock::new();
