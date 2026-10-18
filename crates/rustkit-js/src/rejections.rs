@@ -145,7 +145,18 @@ fn callback_label(func: &JsFunction) -> String {
             format!("{name} @{path}")
         };
     }
-    data_name(func).unwrap_or_else(|| "native".to_string())
+    if let Some(name) = data_name(func) {
+        return name;
+    }
+    // The `name` property is empty for a builtin created as `""`. The
+    // builder still stores a name on the native object when one was set.
+    if let Some(native) = func.downcast_ref::<boa_engine::native_function::NativeFunctionObject>() {
+        let name = flat_label(&native.name().to_std_string_escaped(), 80);
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    "native".to_string()
 }
 
 fn data_name(func: &JsFunction) -> Option<String> {

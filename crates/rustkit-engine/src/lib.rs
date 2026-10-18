@@ -319,6 +319,8 @@ pub use inspector::{
     InspectorSnapshot, InspectorSummary, SourceLocation, UnsupportedApiCount, FailureStage, ResourceType,
 };
 pub use rustkit_bindings::MutationKind;
+mod host_runtime;
+pub use host_runtime::drive as drive_host;
 mod script_net;
 #[cfg(test)]
 mod script_net_tests;
