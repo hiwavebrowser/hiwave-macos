@@ -115,9 +115,36 @@ take a connection until the static imports from that scan have stored
 their bodies. It is not a load dependency of the module, so it does not
 delay `DOMContentLoaded`. A computed `import(url)` is not critical either.
 
-When a module's load promise is still pending, `fetched_scripts` records
-`reason: "waiting on a dependency"` and `waiting_on` names the import URLs
-that have not been supplied (a dynamic one is prefixed `dynamic`).
+The pump that runs a parser module, before `DOMContentLoaded`, fetches
+only that module's static imports. A dynamic `import()` an earlier classic
+script or an earlier module already evaluated is left queued. It is fetched
+by the pump after `DOMContentLoaded`, with `fetch()` and XHR. Parsing it
+inside the next deferred module's pump is what made a chunk requested
+seconds into the load hold `DOMContentLoaded`: Chrome's probe
+(`tools/replay/probe.js`, read by `chrome_trace.mjs`) records
+`DOMContentLoaded` from `performance.now()`, and on this replay that is
+about 61 ms. That is earlier than the chunk's own body, so Chrome did not
+have the chunk on the pre-DCL path. A parser-inserted module without
+`async` still waits, static imports included. `type=module async` does not.
+There is no HAR or `scripts.md` in this tree to name which tag the chunk's
+parent was; the ordering above is the one the spec and that Chrome
+timestamp both allow.
+
+`held_ms` is how long the body sat ready before the main thread noticed
+it. The notice happens while another module's source is scanned, not after
+that module's `Module::parse` returns. The gap from `body_ms` to
+`parsed_ms` is still this module's own parse. A multi-megabyte parse on
+the main thread is that gap. It is not an extra sleep after the body was
+ready, and it is not the replay server: a HAR entry's `time` is slept once
+per response.
+
+When a module's load promise is still pending, or a fetched dependency
+never runs, `fetched_scripts` records `reason: "waiting on a dependency"`
+and `waiting_on` names the import URLs recorded for that module (a dynamic
+one is prefixed `dynamic`). The name is filled when the trace closes if
+the load promise was never polled. The list is the edges noted when the
+specifier was requested, not a string attached only while the promise was
+still pending.
 
 A static chain (module A imports B, B imports C) still waits for A's body
 before B's specifier can be read, and for B's body before C's. It does not

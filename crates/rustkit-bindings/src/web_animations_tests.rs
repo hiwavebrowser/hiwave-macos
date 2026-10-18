@@ -142,4 +142,40 @@ fn a_named_element_is_a_window_property() {
         ev(&b, "try { notARealElement; 'defined'; } catch (e) { e.name; }"),
         "ReferenceError"
     );
+    assert_eq!(ev(&b, "videoElement.videoWidth + ',' + videoElement.videoHeight"), "0,0");
+    assert_eq!(
+        ev(
+            &b,
+            "var saw = 'no';
+             var id = videoElement.requestVideoFrameCallback(function () { saw = 'yes'; });
+             typeof id + ':' + saw"
+        ),
+        "number:no"
+    );
+    b.run_timers(32, 10).unwrap();
+    assert_eq!(ev(&b, "saw"), "yes");
+    ev(&b, "videoElement.cancelVideoFrameCallback(id);");
+}
+
+/// A module's free `videoElement` uses the same named-properties object as a
+/// classic script. The lookup does not throw when the element is in the
+/// document. A missing id still throws.
+#[test]
+fn a_module_sees_a_named_video_element() {
+    let b = bound();
+    let handle = b
+        .begin_module(
+            "https://example.test/player.js",
+            "globalThis.__video = videoElement === document.getElementById('videoElement');
+             try { notARealElement; globalThis.__missing = 'defined'; }
+             catch (e) { globalThis.__missing = e.name; }",
+        )
+        .unwrap();
+    let state = b.poll_module(&handle);
+    assert!(
+        matches!(state, rustkit_js::ModuleState::Done),
+        "module did not evaluate: {state:?}"
+    );
+    assert_eq!(ev(&b, "String(__video)"), "true");
+    assert_eq!(ev(&b, "__missing"), "ReferenceError");
 }

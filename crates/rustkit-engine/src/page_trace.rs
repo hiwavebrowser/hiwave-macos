@@ -174,6 +174,12 @@ struct FetchedNote {
     waiting_on: Option<String>,
 }
 
+struct ModuleEdge {
+    parent: String,
+    child: String,
+    dynamic: bool,
+}
+
 struct ModuleFetch {
     url: String,
     requested_ms: Option<u64>,
@@ -209,6 +215,11 @@ struct Active {
     pending: Vec<Pending>,
     scope_ended: bool,
     last_activity: u64,
+    /// `parent` imports `child`. Filled when the specifier is requested, so
+    /// a note closed at the end of the trace can still name what it waits on.
+    imports: Vec<ModuleEdge>,
+    /// Last outstanding import list, used when a note has no edges of its own.
+    last_waiting: Option<String>,
 }
 
 impl Active {
@@ -387,6 +398,8 @@ pub(crate) fn begin(url: &str) -> Option<Session> {
             pending: Vec::new(),
             scope_ended: false,
             last_activity: 0,
+            imports: Vec::new(),
+            last_waiting: None,
         });
     });
     flush_file();
@@ -546,6 +559,9 @@ pub(crate) fn resolve_module_dependencies(executed: bool, reason: Option<&'stati
                 note.reason = Some(reason);
             }
         }
+        if reason == Some("waiting on a dependency") {
+            assign_waiting(active);
+        }
     });
 }
 
@@ -684,6 +700,42 @@ fn remember(
     });
 }
 
+fn waiting_label(edges: &[ModuleEdge], url: &str) -> Option<String> {
+    let mut names = Vec::new();
+    for edge in edges {
+        if edge.parent != url {
+            continue;
+        }
+        let label = if edge.dynamic {
+            format!("dynamic {}", edge.child)
+        } else {
+            edge.child.clone()
+        };
+        if !names.contains(&label) {
+            names.push(label);
+            if names.len() == 8 {
+                break;
+            }
+        }
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(", "))
+    }
+}
+
+fn assign_waiting(active: &mut Active) {
+    let fallback = active.last_waiting.clone();
+    let edges = &active.imports;
+    for note in &mut active.fetched {
+        if note.reason != Some("waiting on a dependency") || note.waiting_on.is_some() {
+            continue;
+        }
+        note.waiting_on = waiting_label(edges, &note.url).or_else(|| fallback.clone());
+    }
+}
+
 fn fill_unexecuted(active: &mut Active) {
     for note in &mut active.fetched {
         if note.executed || note.reason.is_some() || !note.fetched {
@@ -695,6 +747,7 @@ fn fill_unexecuted(active: &mut Active) {
             "never reached"
         });
     }
+    assign_waiting(active);
 }
 
 /// Same decision as `hiwave_shield::shield_choice_label`. The engine does not
@@ -959,7 +1012,39 @@ pub(crate) fn note_module_held(url: &str, held_ms: u64) {
     });
 }
 
+/// `parent` asked for `child`. A dynamic `import()` is marked so the trace
+/// can prefix it. A later static edge for the same pair replaces a dynamic one.
+pub(crate) fn note_module_import(parent: &str, child: &str, dynamic: bool) {
+    if !enabled() || parent.is_empty() || child.is_empty() || parent == child {
+        return;
+    }
+    let parent = clamp(parent);
+    let child = clamp(child);
+    with_active(|active| {
+        if let Some(edge) = active
+            .imports
+            .iter_mut()
+            .find(|edge| edge.parent == parent && edge.child == child)
+        {
+            if edge.dynamic && !dynamic {
+                edge.dynamic = false;
+            }
+            return;
+        }
+        if active.imports.len() >= MAX_SCRIPTS {
+            return;
+        }
+        active.imports.push(ModuleEdge {
+            parent,
+            child,
+            dynamic,
+        });
+    });
+}
+
 /// Name the imports still outstanding for every note waiting on a dependency.
+/// The list is kept either way: notes that gain the reason when the trace
+/// closes still receive it.
 pub(crate) fn note_module_waiting_on(urls: &[String]) {
     if !enabled() || urls.is_empty() {
         return;
@@ -971,11 +1056,8 @@ pub(crate) fn note_module_waiting_on(urls: &[String]) {
         .collect::<Vec<_>>()
         .join(", ");
     with_active(|active| {
-        for note in &mut active.fetched {
-            if note.reason == Some("waiting on a dependency") && note.waiting_on.is_none() {
-                note.waiting_on = Some(joined.clone());
-            }
-        }
+        active.last_waiting = Some(joined);
+        assign_waiting(active);
     });
 }
 
@@ -1554,6 +1636,17 @@ mod tests {
         note_module_dependency("https://example.test/child.js", Some(200));
         resolve_module_dependencies(false, Some("waiting on a dependency"));
         note_module_waiting_on(&["https://example.test/missing.js".into()]);
+        note_module_dependency("https://example.test/bnu.js", Some(200));
+        note_module_import(
+            "https://example.test/bnu.js",
+            "https://example.test/need.js",
+            false,
+        );
+        note_module_import(
+            "https://example.test/bnu.js",
+            "https://example.test/later.js",
+            true,
+        );
         note_module_fetch("https://example.test/child.js", "body");
         note_module_held("https://example.test/child.js", 40);
         drop(_session);
@@ -1585,6 +1678,11 @@ mod tests {
         assert_eq!(
             reason("https://example.test/child.js")["waiting_on"],
             "https://example.test/missing.js"
+        );
+        assert_eq!(reason("https://example.test/bnu.js")["reason"], "waiting on a dependency");
+        assert_eq!(
+            reason("https://example.test/bnu.js")["waiting_on"],
+            "https://example.test/need.js, dynamic https://example.test/later.js"
         );
         let timeline = value["module_timeline"].as_array().unwrap();
         let child = timeline
