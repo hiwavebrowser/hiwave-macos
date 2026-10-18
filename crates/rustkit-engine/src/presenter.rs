@@ -771,6 +771,43 @@ impl Presenter {
     }
 }
 
+/// What of a [`FrameCommit`] is already on screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ShownFrame {
+    pub nav_generation: u64,
+    pub generation: u64,
+    pub scroll_offset: (f32, f32),
+}
+
+/// Whether `commit` should be drawn over `shown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PresentChoice {
+    /// No display list yet. Drawing this is the background, and it must not
+    /// count as the frame on screen or the laid-out frame is dropped.
+    WaitForLayout,
+    AlreadyShown,
+    Draw,
+}
+
+/// A new navigation is a different frame even when its generation and
+/// scroll match the one on screen. A commit with no display list is not
+/// presented.
+pub(crate) fn present_choice(shown: Option<ShownFrame>, commit: &FrameCommit) -> PresentChoice {
+    if commit.list.is_none() {
+        return PresentChoice::WaitForLayout;
+    }
+    let key = ShownFrame {
+        nav_generation: commit.nav_generation,
+        generation: commit.generation,
+        scroll_offset: commit.scroll_offset,
+    };
+    if shown == Some(key) {
+        PresentChoice::AlreadyShown
+    } else {
+        PresentChoice::Draw
+    }
+}
+
 /// The window thread's surface for a page that lives on the content thread.
 ///
 /// The NSView, the GPU surface and the renderer are created here, on the
@@ -782,7 +819,7 @@ pub struct WindowSurface {
     presenter: Presenter,
     viewhost_id: ViewId,
     id: super::EngineViewId,
-    shown: Option<(u64, (f32, f32))>,
+    shown: Option<ShownFrame>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -807,8 +844,10 @@ impl WindowSurface {
     }
 
     /// The NSView and the GPU surface take `bounds` now. The page lays out
-    /// when it receives the same bounds as a message.
+    /// when it receives the same bounds as a message. The surface is new,
+    /// so the commit already on screen is drawn again.
     pub fn resize(&mut self, bounds: Bounds) -> Result<(), EngineError> {
+        self.shown = None;
         self.presenter.apply_bounds(self.viewhost_id, false, bounds)
     }
 
@@ -816,13 +855,18 @@ impl WindowSurface {
         self.presenter.grab_keyboard(self.viewhost_id)
     }
 
-    /// Draw `commit` when its generation or its scroll offset differs from
-    /// the frame on screen. Generation-only dedup would drop a scroll.
+    /// Draw `commit` when its navigation, generation or scroll offset
+    /// differs from the frame on screen. A commit that has not been laid
+    /// out is not drawn and does not become the frame on screen.
     pub fn present_commit(&mut self, commit: &FrameCommit, images: &ImageManager) -> Result<(), EngineError> {
-        let key = (commit.generation, commit.scroll_offset);
-        if self.shown == Some(key) {
+        if present_choice(self.shown, commit) != PresentChoice::Draw {
             return Ok(());
         }
+        let key = ShownFrame {
+            nav_generation: commit.nav_generation,
+            generation: commit.generation,
+            scroll_offset: commit.scroll_offset,
+        };
         self.presenter.commit(self.id, commit.clone());
         let drawn = self.presenter.present(self.id, self.viewhost_id, false, images);
         let noted = match &drawn {
@@ -834,6 +878,52 @@ impl WindowSurface {
             self.shown = Some(key);
         }
         drawn.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod present_choice_tests {
+    use super::*;
+
+    fn commit(nav: u64, generation: u64, laid_out: bool) -> FrameCommit {
+        FrameCommit {
+            generation,
+            nav_generation: nav,
+            list: laid_out.then(|| Arc::new(DisplayList::new())),
+            scroll_offset: (0.0, 0.0),
+            max_scroll_offset: (0.0, 0.0),
+            laid_out_for: if laid_out { (800, 600) } else { (0, 0) },
+            input: None,
+        }
+    }
+
+    #[test]
+    fn a_commit_before_layout_is_not_the_frame_on_screen() {
+        assert_eq!(
+            present_choice(None, &commit(1, 0, false)),
+            PresentChoice::WaitForLayout
+        );
+        // Recording that empty frame would hide the laid-out one when the
+        // generation matches.
+        let laid_out = commit(1, 1, true);
+        assert_eq!(present_choice(None, &laid_out), PresentChoice::Draw);
+    }
+
+    #[test]
+    fn a_new_navigation_is_drawn_when_the_generation_matches() {
+        let shown = ShownFrame {
+            nav_generation: 1,
+            generation: 1,
+            scroll_offset: (0.0, 0.0),
+        };
+        assert_eq!(
+            present_choice(Some(shown), &commit(1, 1, true)),
+            PresentChoice::AlreadyShown
+        );
+        assert_eq!(
+            present_choice(Some(shown), &commit(2, 1, true)),
+            PresentChoice::Draw
+        );
     }
 }
 

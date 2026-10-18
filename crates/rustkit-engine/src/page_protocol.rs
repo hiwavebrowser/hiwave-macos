@@ -210,9 +210,10 @@ pub struct PageEndpoint {
     engine: Engine,
     engine_events: Option<tokio::sync::mpsc::UnboundedReceiver<EngineEvent>>,
     view: EngineViewId,
-    /// Generation and scroll of the last [`PageEvent::Commit`] sent.
-    /// Scroll-only updates keep the generation and must still be delivered.
-    last_commit: Option<(u64, (f32, f32))>,
+    /// Navigation, generation and scroll of the last [`PageEvent::Commit`]
+    /// sent. A new document can reuse a generation; the navigation is what
+    /// makes that frame a different one. Scroll-only updates keep both.
+    last_commit: Option<(u64, u64, (f32, f32))>,
     /// `SetVisible`, recorded for the content thread. Nothing reads it yet.
     #[allow(dead_code)]
     visible: bool,
@@ -649,12 +650,17 @@ impl PageEndpoint {
         let Some(commit) = self.engine.latest_commit(self.view).cloned() else {
             return;
         };
-        if self.last_commit.is_some_and(|(generation, scroll)| {
-            generation == commit.generation && scroll == commit.scroll_offset
-        }) {
+        // A commit from before this document was laid out has no display
+        // list. Publishing it lets the window present the background and
+        // then drop the real frame when the generation matches.
+        if commit.list.is_none() {
             return;
         }
-        self.last_commit = Some((commit.generation, commit.scroll_offset));
+        let key = (commit.nav_generation, commit.generation, commit.scroll_offset);
+        if self.last_commit == Some(key) {
+            return;
+        }
+        self.last_commit = Some(key);
         self.emit(PageEvent::Commit(commit));
     }
 

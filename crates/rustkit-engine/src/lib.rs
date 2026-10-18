@@ -16823,14 +16823,29 @@ impl Engine {
             self.presenter
                 .as_ref()
                 .and_then(|presenter| presenter.latest(id))
-                .map(|previous| (previous.generation, previous.scroll_offset))
+                .map(|previous| {
+                    (
+                        previous.nav_generation,
+                        previous.generation,
+                        previous.scroll_offset,
+                    )
+                })
         } else {
-            self.page_commits
-                .get(&id)
-                .map(|previous| (previous.generation, previous.scroll_offset))
+            self.page_commits.get(&id).map(|previous| {
+                (
+                    previous.nav_generation,
+                    previous.generation,
+                    previous.scroll_offset,
+                )
+            })
         };
-        let moved = previous.map_or(true, |(generation, scroll)| {
-            generation != commit.generation || scroll != commit.scroll_offset
+        // A new document can land on the same generation the previous one
+        // used. The navigation is part of the frame's identity, or that
+        // document's display list is never stored.
+        let moved = previous.map_or(true, |(nav, generation, scroll)| {
+            nav != commit.nav_generation
+                || generation != commit.generation
+                || scroll != commit.scroll_offset
         });
         if !moved {
             // A draw for any other reason presents the commit already held.

@@ -673,6 +673,23 @@ mod tests {
         events
     }
 
+    fn solid_colors(commit: &crate::FrameCommit) -> Vec<(u8, u8, u8)> {
+        let Some(list) = commit.list.as_ref() else {
+            return Vec::new();
+        };
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::SolidColor(color, _) => Some((color.r, color.g, color.b)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn has_color(commit: &crate::FrameCommit, r: u8, g: u8, b: u8) -> bool {
+        solid_colors(commit).contains(&(r, g, b))
+    }
+
     #[test]
     fn script_navigation_is_reported_with_the_documents_nav_id() {
         let page = page();
@@ -758,6 +775,38 @@ mod tests {
                 _ => true,
             }),
             "the default document replaced the restore: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn the_first_commit_is_the_laid_out_frame() {
+        let page = page();
+        let mut loaded = page.load_html(
+            r#"<html><body style="margin:0"><div style="height:30px;margin:6px 20px;background:#ff0000"></div></body></html>"#,
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(5), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(_)))
+        });
+        let commits: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                PageEvent::Commit(commit) => Some(commit),
+                _ => None,
+            })
+            .collect();
+        assert!(!commits.is_empty(), "no frame was published: {events:?}");
+        let first = commits[0];
+        assert!(first.generation > 0, "generation {}", first.generation);
+        assert!(first.nav_generation > 0, "nav {}", first.nav_generation);
+        assert!(
+            first.list.as_ref().is_some_and(|list| !list.commands.is_empty()),
+            "the first frame had no display list"
+        );
+        assert!(
+            has_color(first, 255, 0, 0),
+            "the red band was not in the first frame: {:?}",
+            solid_colors(first)
         );
     }
 
