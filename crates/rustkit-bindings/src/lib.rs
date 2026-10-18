@@ -99,6 +99,8 @@ mod traversal_tests;
 #[cfg(test)]
 mod document_members_tests;
 #[cfg(test)]
+mod web_animations_tests;
+#[cfg(test)]
 mod web_intl_tests;
 #[cfg(test)]
 mod mutation_observer_tests;
@@ -732,6 +734,9 @@ impl DomBindings {
         // DOMMatrix (web_dommatrix.js): members pages read without feature-testing.
         runtime.evaluate_script(include_str!("web_document.js"))?;
         runtime.evaluate_script(include_str!("web_dommatrix.js"))?;
+        // Element.animate / document.timeline, and window named properties
+        // (an element id is visible as a bare identifier).
+        runtime.evaluate_script(include_str!("web_animations.js"))?;
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
         // insertRule writes into the <style>'s text, which the engine restyles from.
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
