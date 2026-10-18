@@ -475,14 +475,21 @@ fn layout_flex_container_at(
         Axis::Vertical => style_definite_inner_main
             .unwrap_or(container_box.content.height.max(style_min_inner_main)),
     };
-    // Deliberately NOT given the same treatment: the cross-axis analogue (an
-    // inset-stretched ROW container centring items in a stale cursor) is the
-    // same spec line, but no case on this corpus exercises it and
-    // `definite_inner_cross` subtracts the container's own edges a second
-    // time from whatever lands here. Recorded as a finding, not half-landed.
+    // A row's cross size is its height. `height: 100%` was resolved by the
+    // block pass (`resolved_percent_inner_height`) and a grid item's used
+    // height arrives as `used_inner_height`, but `content.height` is still
+    // the pre-pass stack of the children. Centring in that stack drops the
+    // items by half the extra: Microsoft's 54px header row, three 54px
+    // items stacked to 162, `align-items: center`, sits the logo and the
+    // nav on the bar's bottom edge. The resolved height is the line.
+    let resolved_row_cross = if cross_axis == Axis::Vertical {
+        used_inner_height.or(resolved_percent_inner_height)
+    } else {
+        None
+    };
     let container_cross_size = match cross_axis {
         Axis::Horizontal => container_box.content.width,
-        Axis::Vertical => container_box.content.height,
+        Axis::Vertical => resolved_row_cross.unwrap_or(container_box.content.height),
     };
 
     // Check if the flex container has a definite cross size
@@ -517,7 +524,10 @@ fn layout_flex_container_at(
     // children-stacked height in content.height (logo 38.4 + nav 25.6 = 64
     // inside a height:60px header), which would center every item 2px low.
     // Px lengths resolve here; anything else falls back to the passed size.
-    let definite_inner_cross = if let (Axis::Vertical, Some(h)) = (cross_axis, used_inner_height) {
+    let definite_inner_cross = if let Some(h) = resolved_row_cross {
+        // Already the inner height: the block pass resolved `height: 100%`
+        // against the containing block, and a grid row handed its used
+        // inner height. Subtracting padding here would take it twice.
         Some(h)
     } else if has_definite_cross_size {
         let (spec, pb) = match cross_axis {
@@ -991,6 +1001,12 @@ fn layout_flex_container_at(
             // settings toggles (inline-flex, height:26px) ballooned to their
             // stacked children's 40.4px whenever they sat in a flex row.
             if item.has_explicit_cross_size {
+                continue;
+            }
+            // Stretched into a definite line, the used cross size is the
+            // line, and content overflows (§9.4). Growing to the child here
+            // undoes that: the feed post became as wide as its 964px header.
+            if item.stretches(style.align_items) && definite_inner_cross.is_some() {
                 continue;
             }
             // Only recompute if cross_size is still using fallback (line_height or similar)
@@ -1882,8 +1898,21 @@ fn create_flex_item<'a>(
         // 24x24 close button 36 tall (font_size*1.5+12, the intrinsic button
         // height) and inflated the header to 53 against Chrome's 41.
         0.0
-    } else {
+    } else if matches!(
+        layout_box.box_type,
+        crate::BoxType::FormControl(_) | crate::BoxType::Image { .. }
+    ) {
+        // Replaced items keep their intrinsic cross size as a minimum.
+        // A non-replaced item does not: see the other arm.
         intrinsic_cross + cross_pb
+    } else {
+        // `min-width`/`min-height: auto` on the CROSS axis is 0. §4.5's
+        // automatic minimum is the main-axis min-size property only. A
+        // content floor here stops `align-items: stretch` from using the
+        // line: a column item in a 577px grid track stayed 964 wide, the
+        // width of its header row, and the post measured 996 against
+        // Chrome's 577. The wide child overflows the item.
+        0.0
     };
     let max_cross = if max_cross.is_finite() {
         spec_cross_to_border_box(max_cross)
@@ -2205,7 +2234,7 @@ fn calculate_cross_sizes(
         .fold(0.0, f32::max);
 
     // PASS 2: Apply stretch behavior based on container sizing
-    for (i, item) in line.items.iter_mut().enumerate() {
+    for item in line.items.iter_mut() {
         // Per CSS spec: stretch only applies if cross size is "auto"
         // Items with explicit height/width should NOT be stretched
         if item.stretches(align_items) && !item.has_explicit_cross_size {
@@ -2218,8 +2247,10 @@ fn calculate_cross_sizes(
                 line_cross_size - item.cross_margin_start - item.cross_margin_end
             };
 
-            // Stretch, but never below content size
-            item.cross_size = stretch_target.max(content_cross_sizes[i]);
+            // The stretch size is the line. A content floor is the
+            // main-axis automatic minimum, not a cross-size rule: Chrome
+            // leaves a 964px child overflowing a 577px column item.
+            item.cross_size = stretch_target;
         }
 
         // Clamp to min/max
