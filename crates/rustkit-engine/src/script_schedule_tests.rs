@@ -1,0 +1,489 @@
+//! Ordering and timing of the HTML script lists, against a local server.
+//!
+//! Each case is one of the parser-timeline violations from the reddit replay:
+//! an `async` fetch must not hold an inline script or `DOMContentLoaded`;
+//! static module imports start together; `fetch()` does not hold
+//! `DOMContentLoaded`; a script inserted by the page runs on insertion.
+
+use super::*;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+struct Server {
+    port: u16,
+    starts: Arc<Mutex<Vec<(String, Instant)>>>,
+}
+
+struct Route {
+    path: &'static str,
+    content_type: &'static str,
+    body: String,
+    delay: Duration,
+}
+
+fn serve(routes: Vec<Route>) -> Server {
+    let routes = Arc::new(routes);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let recorded = starts.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let routes = routes.clone();
+            let recorded = recorded.clone();
+            std::thread::spawn(move || {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 2048];
+                loop {
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&request);
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((path.clone(), Instant::now()));
+                let route = routes.iter().find(|route| route.path == path);
+                if let Some(route) = route {
+                    if !route.delay.is_zero() {
+                        std::thread::sleep(route.delay);
+                    }
+                }
+                let content_type = route
+                    .map(|route| route.content_type)
+                    .unwrap_or("text/plain");
+                let body = route.map(|route| route.body.clone()).unwrap_or_default();
+                let status = if route.is_some() {
+                    "200 OK"
+                } else {
+                    "404 Not Found"
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    Server { port, starts }
+}
+
+fn route(path: &'static str, content_type: &'static str, body: &str, delay: Duration) -> Route {
+    Route {
+        path,
+        content_type,
+        body: body.to_string(),
+        delay,
+    }
+}
+
+fn load(html: &str, mut routes: Vec<Route>) -> (Engine, EngineViewId, Server) {
+    routes.insert(0, route("/", "text/html", html, Duration::ZERO));
+    let server = serve(routes);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load");
+    (engine, view, server)
+}
+
+fn js(engine: &mut Engine, view: EngineViewId, source: &str) -> String {
+    let value = engine.execute_script(view, source).unwrap();
+    value
+        .strip_prefix("String(\"")
+        .and_then(|v| v.strip_suffix("\")"))
+        .unwrap_or(&value)
+        .to_string()
+}
+
+fn part_ms(order: &str, name: &str) -> u128 {
+    for part in order.split(',') {
+        let Some((tag, ms)) = part.split_once(':') else {
+            continue;
+        };
+        if tag == name {
+            return ms.parse().unwrap_or_else(|_| panic!("bad ms in {order}"));
+        }
+    }
+    panic!("no {name} in {order}");
+}
+
+const SLOW: Duration = Duration::from_millis(800);
+const IMPORT_DELAY: Duration = Duration::from_millis(250);
+
+/// An `async` script's slow fetch does not delay the following inline script
+/// or DOMContentLoaded. The async script still runs, after that event.
+#[test]
+fn an_async_fetch_does_not_delay_an_inline_script_or_dom_content_loaded() {
+    let trace_path = std::env::temp_dir().join(format!(
+        "hiwave-schedule-async-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _trace = page_trace::force_file_for_test(&trace_path);
+    let page = r#"<html><head>
+<script>var t0 = Date.now(); var order = [];</script>
+<script src="/async.js" async></script>
+<script>
+order.push('inline:' + (Date.now() - t0));
+document.addEventListener('DOMContentLoaded', function () {
+  order.push('dcl:' + (Date.now() - t0));
+});
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(
+        page,
+        vec![route(
+            "/async.js",
+            "text/javascript",
+            "order.push('async:' + (Date.now() - t0));",
+            SLOW,
+        )],
+    );
+    let order = js(&mut engine, view, "order.join(',')");
+    let tags: Vec<&str> = order
+        .split(',')
+        .map(|part| part.split(':').next().unwrap())
+        .collect();
+    assert_eq!(tags, ["inline", "dcl", "async"], "{order}");
+    assert!(
+        part_ms(&order, "inline") < 400,
+        "inline waited on the async fetch: {order}"
+    );
+    assert!(
+        part_ms(&order, "dcl") < 400,
+        "DOMContentLoaded waited on the async fetch: {order}"
+    );
+    assert!(
+        part_ms(&order, "async") >= 700,
+        "async script did not wait for its body: {order}"
+    );
+
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trace_path).expect("trace")).unwrap();
+    let _ = std::fs::remove_file(&trace_path);
+    let dcl_ms = trace["dcl_ms"].as_u64().unwrap();
+    let async_at = trace["scripts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|script| {
+            script["url"].as_str().unwrap_or("").contains("async.js")
+                && script["event"] == "execute"
+        })
+        .and_then(|script| script["t_ms"].as_u64())
+        .expect("async execute");
+    assert!(
+        async_at >= dcl_ms + 700,
+        "async script ran in the parser's blocking stretch: dcl {dcl_ms} execute {async_at}"
+    );
+    let parser = trace["parser"].as_array().unwrap();
+    assert!(
+        parser.iter().all(|pause| {
+            !(pause["blocked_on"] == "script fetch"
+                && pause["target"].as_str().unwrap_or("").contains("async.js"))
+        }),
+        "async fetch paused the parser: {parser:?}"
+    );
+}
+
+/// Three static imports of one module are requested together, not after
+/// each previous body has been parsed.
+#[test]
+fn static_module_imports_are_fetched_concurrently() {
+    let page = r#"<html><head>
+<script type="module">
+import './a.js';
+import './b.js';
+import './c.js';
+window.mods = 'ran';
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, server) = load(
+        page,
+        vec![
+            route(
+                "/a.js",
+                "text/javascript",
+                "export const a = 1;",
+                IMPORT_DELAY,
+            ),
+            route(
+                "/b.js",
+                "text/javascript",
+                "export const b = 2;",
+                IMPORT_DELAY,
+            ),
+            route(
+                "/c.js",
+                "text/javascript",
+                "export const c = 3;",
+                IMPORT_DELAY,
+            ),
+        ],
+    );
+    assert_eq!(js(&mut engine, view, "window.mods"), "ran");
+    let starts = server.starts.lock().unwrap();
+    let mut times = Vec::new();
+    for name in ["/a.js", "/b.js", "/c.js"] {
+        let stamp = starts
+            .iter()
+            .find(|(path, _)| path == name)
+            .map(|(_, at)| *at)
+            .unwrap_or_else(|| panic!("{name} was not requested: {starts:?}"));
+        times.push(stamp);
+    }
+    let spread = times
+        .iter()
+        .max()
+        .unwrap()
+        .saturating_duration_since(*times.iter().min().unwrap());
+    assert!(
+        spread < Duration::from_millis(150),
+        "static imports were not concurrent ({spread:?}): {starts:?}"
+    );
+}
+
+/// A dynamic import is not held behind an unrelated fetch from the same turn.
+#[test]
+fn a_dynamic_import_is_not_serialized_behind_an_unrelated_fetch() {
+    let page = r#"<html><head>
+<script>
+fetch('/slow-net');
+import('./mod.js');
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, server) = load(
+        page,
+        vec![
+            route("/slow-net", "text/plain", "ok", SLOW),
+            route(
+                "/mod.js",
+                "text/javascript",
+                "window.mod = true;",
+                Duration::from_millis(50),
+            ),
+        ],
+    );
+    assert_eq!(js(&mut engine, view, "String(window.mod)"), "true");
+    let starts = server.starts.lock().unwrap();
+    let at = |name: &str| {
+        starts
+            .iter()
+            .find(|(path, _)| path == name)
+            .map(|(_, stamp)| *stamp)
+            .unwrap_or_else(|| panic!("{name} was not requested: {starts:?}"))
+    };
+    let spread = at("/mod.js").saturating_duration_since(at("/slow-net"));
+    let spread = std::cmp::max(
+        spread,
+        at("/slow-net").saturating_duration_since(at("/mod.js")),
+    );
+    assert!(
+        spread < Duration::from_millis(200),
+        "dynamic import waited for the unrelated fetch ({spread:?}): {starts:?}"
+    );
+}
+
+/// `fetch()` does not delay DOMContentLoaded. The callback runs after it.
+#[test]
+fn a_fetch_does_not_delay_dom_content_loaded() {
+    let page = r#"<html><head>
+<script>
+var t0 = Date.now();
+var order = [];
+fetch('/policy').then(function () { order.push('policy:' + (Date.now() - t0)); });
+document.addEventListener('DOMContentLoaded', function () {
+  order.push('dcl:' + (Date.now() - t0));
+});
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(page, vec![route("/policy", "text/plain", "ok", SLOW)]);
+    let order = js(&mut engine, view, "order.join(',')");
+    let tags: Vec<&str> = order
+        .split(',')
+        .map(|part| part.split(':').next().unwrap())
+        .collect();
+    assert_eq!(tags, ["dcl", "policy"], "{order}");
+    assert!(
+        part_ms(&order, "dcl") < 400,
+        "DOMContentLoaded waited on fetch(): {order}"
+    );
+    assert!(part_ms(&order, "policy") >= 700, "{order}");
+}
+
+/// A dynamically inserted inline script runs before the next statement.
+#[test]
+fn an_inserted_inline_script_runs_synchronously() {
+    let page = r#"<html><head>
+<script>
+var order = [];
+var s = document.createElement('script');
+s.textContent = "order.push('inserted')";
+document.head.appendChild(s);
+order.push('after');
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(page, Vec::new());
+    assert_eq!(js(&mut engine, view, "order.join(',')"), "inserted,after");
+}
+
+/// A dynamically inserted external script runs before the load returns.
+#[test]
+fn an_inserted_external_script_runs() {
+    let page = r#"<html><head>
+<script>
+var s = document.createElement('script');
+s.src = '/ext.js';
+document.head.appendChild(s);
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(
+        page,
+        vec![route(
+            "/ext.js",
+            "text/javascript",
+            "window.ext = true;",
+            Duration::ZERO,
+        )],
+    );
+    assert_eq!(js(&mut engine, view, "String(window.ext)"), "true");
+}
+
+/// `.async = false` keeps insertion order, and neither script delays
+/// DOMContentLoaded. They still run before `load` returns.
+#[test]
+fn inserted_scripts_with_async_false_run_in_order_after_dom_content_loaded() {
+    let page = r#"<html><head>
+<script>
+var order = [];
+document.addEventListener('DOMContentLoaded', function () { order.push('dcl'); });
+var slow = document.createElement('script');
+slow.src = '/slow.js';
+slow.async = false;
+var fast = document.createElement('script');
+fast.src = '/fast.js';
+fast.async = false;
+document.head.appendChild(slow);
+document.head.appendChild(fast);
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(
+        page,
+        vec![
+            route(
+                "/slow.js",
+                "text/javascript",
+                "order.push('slow');",
+                Duration::from_millis(400),
+            ),
+            route(
+                "/fast.js",
+                "text/javascript",
+                "order.push('fast');",
+                Duration::ZERO,
+            ),
+        ],
+    );
+    assert_eq!(js(&mut engine, view, "order.join(',')"), "dcl,slow,fast");
+}
+
+/// A script inside `<template>` is recorded and does not run until its
+/// content is inserted. The insert runs it synchronously.
+#[test]
+fn a_template_script_is_inert_until_its_content_is_inserted() {
+    let trace_path = std::env::temp_dir().join(format!(
+        "hiwave-schedule-template-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _trace = page_trace::force_file_for_test(&trace_path);
+    let page = r#"<html><head>
+<script>var order = [];</script>
+<template id="t"><script>order.push('templated')</script></template>
+<script>
+document.body.appendChild(document.getElementById('t').content);
+order.push('after');
+</script>
+</head><body>hi</body></html>"#;
+    let (mut engine, view, _server) = load(page, Vec::new());
+    assert_eq!(js(&mut engine, view, "order.join(',')"), "templated,after");
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trace_path).expect("trace")).unwrap();
+    let _ = std::fs::remove_file(&trace_path);
+    let fetched = trace["fetched_scripts"].as_array().unwrap();
+    let template = fetched
+        .iter()
+        .find(|item| item["detail"] == "template")
+        .expect("template script missing from the trace");
+    assert_eq!(template["executed"], true, "{template}");
+}
+
+/// A declarative shadow script runs in tree order, before a following
+/// light-DOM script. A head script is in the trace and runs.
+#[test]
+fn a_shadow_script_and_a_head_script_run_in_tree_order() {
+    let trace_path = std::env::temp_dir().join(format!(
+        "hiwave-schedule-shadow-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _trace = page_trace::force_file_for_test(&trace_path);
+    let page = r#"<html><head>
+<script>var order = ['head'];</script>
+</head><body>
+<div><template shadowrootmode="open"><script>order.push('shadow')</script></template></div>
+<script>order.push('after')</script>
+</body></html>"#;
+    let (mut engine, view, _server) = load(page, Vec::new());
+    assert_eq!(
+        js(&mut engine, view, "order.join(',')"),
+        "head,shadow,after"
+    );
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trace_path).expect("trace")).unwrap();
+    let _ = std::fs::remove_file(&trace_path);
+    let fetched = trace["fetched_scripts"].as_array().unwrap();
+    assert!(
+        fetched
+            .iter()
+            .any(|item| item["detail"] == "shadow tree" && item["executed"] == true),
+        "{fetched:?}"
+    );
+    assert!(
+        fetched
+            .iter()
+            .any(|item| item["url"] == "inline#1" && item["executed"] == true),
+        "head script missing: {fetched:?}"
+    );
+}

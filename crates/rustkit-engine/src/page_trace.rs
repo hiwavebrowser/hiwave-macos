@@ -166,7 +166,7 @@ struct FetchedNote {
     reason: Option<&'static str>,
     /// Why a parser script was recorded when the four `reason`s do not say
     /// which kind of miss it was (`shadow tree`, `not a javascript type`,
-    /// `inserted after the parser snapshot`).
+    /// `template`, `inserted after the parser snapshot`).
     detail: Option<&'static str>,
 }
 

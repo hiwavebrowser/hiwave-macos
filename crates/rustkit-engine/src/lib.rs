@@ -11,6 +11,7 @@
 //! 4. **Resource sharing**: Share compositor and network resources
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -346,6 +347,8 @@ mod script_net_engine_tests;
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lit_render_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_schedule_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1181,20 +1184,123 @@ enum ScriptTiming {
     Classic,
     /// `defer` external script: after the document is parsed, in order.
     Defer,
-    /// `async` external script: when it arrives (here, after the deferred ones).
+    /// `async` external script: after `DOMContentLoaded`, before `window`
+    /// `load`. It never blocks the parser or another script.
     Async,
+}
+
+/// One parser `<script>` whose body is inline, already fetched, or still
+/// in flight. The future stays inside the load so dropping the load cancels
+/// the fetch. Nothing here is `tokio::spawn`ed.
+enum SlotBody {
+    Inline(String),
+    Ready(Result<String, ScriptOutcome>),
+    Pending(futures::future::LocalBoxFuture<'static, (String, Result<String, ScriptOutcome>)>),
+}
+
+struct ScriptSlot {
+    label: String,
+    node_id: usize,
+    /// `None` for a script that is logged and not run (`nomodule`, a
+    /// non-script that still reached this list).
+    timing: Option<ScriptTiming>,
+    is_module: bool,
+    body: SlotBody,
+}
+
+/// Parser scripts for one document, in shadow-including tree order.
+///
+/// External fetches start when the plan is first polled and run alongside
+/// stylesheets. Only a parser-blocking classic script is awaited before the
+/// next classic script. `async` is awaited after `DOMContentLoaded`.
+struct ScriptPlan {
+    slots: Vec<ScriptSlot>,
+}
+
+impl ScriptPlan {
+    /// Poll every in-flight fetch. A completion stores the body and, for a
+    /// module, the final URL as the label.
+    fn poll_pending(&mut self, cx: &mut std::task::Context<'_>) {
+        for slot in &mut self.slots {
+            if !matches!(slot.body, SlotBody::Pending(_)) {
+                continue;
+            }
+            let SlotBody::Pending(mut fut) = std::mem::replace(
+                &mut slot.body,
+                SlotBody::Ready(Err(ScriptOutcome::Skipped("fetch dropped"))),
+            ) else {
+                continue;
+            };
+            match std::pin::Pin::new(&mut fut).poll(cx) {
+                std::task::Poll::Ready((label, result)) => {
+                    if !label.is_empty() {
+                        slot.label = label;
+                    }
+                    slot.body = SlotBody::Ready(result);
+                }
+                std::task::Poll::Pending => slot.body = SlotBody::Pending(fut),
+            }
+        }
+    }
+
+    /// Poll `fut` and every script fetch together, so a module walk or a
+    /// stylesheet does not stall a script whose request has already started.
+    async fn drive<F: std::future::Future>(&mut self, fut: F) -> F::Output {
+        let mut fut = std::pin::pin!(fut);
+        std::future::poll_fn(|cx| {
+            self.poll_pending(cx);
+            fut.as_mut().poll(cx)
+        })
+        .await
+    }
+
+    /// Wait until `index` has a body. Every other fetch is polled too.
+    async fn await_ready(&mut self, index: usize) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        std::future::poll_fn(|cx| {
+            self.poll_pending(cx);
+            let ready = match self.slots.get(index) {
+                Some(slot) => !matches!(slot.body, SlotBody::Pending(_)),
+                None => true,
+            };
+            if ready {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+        started.elapsed()
+    }
+
+    fn take_source(
+        &mut self,
+        index: usize,
+    ) -> (
+        String,
+        usize,
+        Result<String, ScriptOutcome>,
+        bool,
+        Option<ScriptTiming>,
+    ) {
+        let slot = &mut self.slots[index];
+        let label = std::mem::take(&mut slot.label);
+        let node_id = slot.node_id;
+        let is_module = slot.is_module;
+        let timing = slot.timing;
+        let body = std::mem::replace(&mut slot.body, SlotBody::Ready(Ok(String::new())));
+        let result = match body {
+            SlotBody::Inline(text) => Ok(text),
+            SlotBody::Ready(result) => result,
+            SlotBody::Pending(_) => Err(ScriptOutcome::Skipped("script was still fetching")),
+        };
+        (label, node_id, result, is_module, timing)
+    }
 }
 
 /// The largest page script `run_page_scripts` starts. Instagram's 3.9 MB
 /// bundle ran in 3.3s; youtube's 10.8 MB one did not finish in 16s.
 const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
-
-/// One `<script>` after fetching: its log label, then its source text or
-/// the reason it will not run.
-/// `(label, node id, fetched source or why not, is a module script)`. A
-/// module's label is the URL it was finally served from (`inline#n` for an
-/// inline one).
-type FetchedScript = (String, usize, Result<(ScriptTiming, String), ScriptOutcome>, bool);
 
 /// What happened to one piece of page script on the load path.
 #[derive(Debug, Clone, PartialEq)]
@@ -5236,33 +5342,53 @@ impl Engine {
     /// a shadow tree and ones whose type is not javascript. The runner still
     /// executes only the light-tree scripts it executed before; this records
     /// the rest, with a reason, under the same `inline#N` numbering.
-    fn catalog_scripts(&self, document: &Document, base: Option<&Url>, late: bool) {
+    fn catalog_scripts(
+        &self,
+        id: EngineViewId,
+        document: &Document,
+        base: Option<&Url>,
+        late: bool,
+    ) {
         if !page_trace::enabled() {
             return;
         }
-        document.traverse_shadow_including(|node| {
-            if node.tag_name().map(|tag| tag.eq_ignore_ascii_case("script")) != Some(true) {
+        let record = |node: &rustkit_dom::Node, template: bool| {
+            if node
+                .tag_name()
+                .map(|tag| tag.eq_ignore_ascii_case("script"))
+                != Some(true)
+            {
                 return;
             }
-            let id = node.id.raw();
-            if page_trace::script_label(id).is_some() {
+            let node_id = node.id.raw();
+            if page_trace::script_label(node_id).is_some() {
                 return;
             }
             let in_shadow = script_in_shadow(node);
             match script_timing(node) {
                 None => {
                     let label = page_trace::next_type_label(script_type_essence(node));
-                    page_trace::remember_script_label(id, label.clone());
+                    page_trace::remember_script_label(node_id, label.clone());
                     page_trace::note_parser_script(&label, None);
-                    page_trace::note_detail(&label, "not a javascript type");
+                    page_trace::note_detail(
+                        &label,
+                        if template {
+                            "template"
+                        } else {
+                            "not a javascript type"
+                        },
+                    );
                     page_trace::note_script_reason(&label, "never reached");
                 }
                 Some(Err(outcome)) => {
                     let reserved = page_trace::next_inline_label();
                     let label = script_external_label(node, base).unwrap_or(reserved);
-                    page_trace::remember_script_label(id, label.clone());
+                    page_trace::remember_script_label(node_id, label.clone());
                     page_trace::note_observed(&label, &outcome);
-                    if in_shadow {
+                    if template {
+                        page_trace::note_detail(&label, "template");
+                        page_trace::note_script_reason(&label, "never reached");
+                    } else if in_shadow {
                         page_trace::note_detail(&label, "shadow tree");
                     } else if late {
                         page_trace::note_detail(&label, "inserted after the parser snapshot");
@@ -5271,19 +5397,33 @@ impl Engine {
                 Some(Ok(_)) => {
                     let reserved = page_trace::next_inline_label();
                     let label = script_external_label(node, base).unwrap_or(reserved);
-                    page_trace::remember_script_label(id, label.clone());
-                    let status = if label.starts_with("inline#") { None } else { Some(200) };
+                    page_trace::remember_script_label(node_id, label.clone());
+                    let status = if label.starts_with("inline#") {
+                        None
+                    } else {
+                        Some(200)
+                    };
                     page_trace::note_parser_script(&label, status);
-                    if in_shadow {
-                        page_trace::note_detail(&label, "shadow tree");
+                    if template {
+                        // Inert until script inserts the content (HTML template contents).
+                        page_trace::note_detail(&label, "template");
                         page_trace::note_script_reason(&label, "never reached");
+                    } else if in_shadow {
+                        page_trace::note_detail(&label, "shadow tree");
                     } else if late {
                         page_trace::note_detail(&label, "inserted after the parser snapshot");
-                        page_trace::note_script_reason(&label, "never reached");
                     }
                 }
             }
-        });
+        };
+        document.traverse_shadow_including(|node| record(node, false));
+        if late {
+            return;
+        }
+        // Template contents were moved out of the tree before this catalog.
+        if let Some(bindings) = self.views.get(&id).and_then(|view| view.bindings.as_ref()) {
+            bindings.for_each_template_descendant(|node| record(node, true));
+        }
     }
 
     fn drain_inline_scripts(&self, id: EngineViewId) {
@@ -5301,156 +5441,183 @@ impl Engine {
         }
     }
 
-    /// script bytes arrive while stylesheets, images and fonts do, instead
-    /// of after them. A fetch that is still waiting when the network cap
-    /// runs out fails; that cap is not the script budget.
-    fn fetch_page_scripts(
+    /// Build the parser's script list and start external fetches without
+    /// waiting. `load_url` polls the plan while stylesheets load. A fetch
+    /// still waiting when the network cap runs out fails; that cap is not
+    /// the script budget. Dropping the plan drops the fetches.
+    fn plan_page_scripts(
         &self,
         id: EngineViewId,
         base: &Url,
         policy: Option<Arc<FetchPolicy>>,
-    ) -> Option<futures::future::LocalBoxFuture<'static, Vec<FetchedScript>>> {
+    ) -> Option<ScriptPlan> {
         let document = self.views.get(&id).and_then(|v| v.document.clone())?;
-        self.catalog_scripts(&document, Some(base), false);
+        self.catalog_scripts(id, &document, Some(base), false);
 
-        // Collect in document order.
-        enum Body {
-            Inline(String),
-            External(Url),
-        }
-        let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), ScriptOutcome>, bool)> = Vec::new();
+        let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
+        let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
+        let base_url = base.clone();
+        use futures::FutureExt;
+
+        let fetch_module = |url: Url, label: String| {
+            let policy = policy.clone();
+            let loader = loader.clone();
+            let base_url = base_url.clone();
+            let inspector = inspector.clone();
+            async move {
+                let result = match &policy {
+                    None => Err((
+                        label.clone(),
+                        ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                            "no network policy for this page".into(),
+                        )),
+                    )),
+                    Some(policy) => {
+                        let guard = inspector.begin_request(
+                            &url,
+                            "GET",
+                            ResourceType::Module,
+                            Some("parser"),
+                        );
+                        let fetch =
+                            await_with_chrome_ui(policy.fetch_module(&loader, &url, &base_url));
+                        let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
+                        let fetched = tokio::time::timeout_at(deadline, fetch).await;
+                        inspector::answer_module(guard, &fetched);
+                        match fetched {
+                            Ok(Ok(module)) => Ok((module.final_url.to_string(), module.source)),
+                            Ok(Err(denial)) => Err((
+                                label,
+                                ScriptOutcome::FetchFailed(match denial {
+                                    rustkit_net::policy::Denial::BadStatus(status) => {
+                                        FetchFailure::Status(status)
+                                    }
+                                    denial => FetchFailure::Transport(format!("{denial}")),
+                                }),
+                            )),
+                            Err(_) => Err((
+                                label,
+                                ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                    "timed out".into(),
+                                )),
+                            )),
+                        }
+                    }
+                };
+                match result {
+                    Ok((label, source)) => (label, Ok(source)),
+                    Err((label, outcome)) => (label, Err(outcome)),
+                }
+            }
+            .boxed_local()
+        };
+        let fetch_classic = |url: Url, label: String| {
+            let loader = loader.clone();
+            let referrer = referrer.clone();
+            let inspector = inspector.clone();
+            async move {
+                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
+                let guard = inspector
+                    .begin_request(&url, "GET", ResourceType::Script, Some("parser"))
+                    .map(|g| g.timeout_at(deadline, "timed out"));
+                let fetched = tokio::time::timeout_at(
+                    deadline,
+                    await_with_chrome_ui(
+                        loader.fetch(referrer.get_for(url, RequestDestination::Script)),
+                    ),
+                )
+                .await;
+                let result = match fetched {
+                    Ok(Ok(response)) if response.ok() => {
+                        let received = guard.map(|g| g.received(&response));
+                        match await_with_chrome_ui(response.text()).await {
+                            Ok(text) => {
+                                if let Some(received) = received {
+                                    received.read(text.len());
+                                }
+                                Ok(text)
+                            }
+                            Err(e) => {
+                                if let Some(received) = received {
+                                    received.fail(FailureStage::Decode, "body is not UTF-8");
+                                }
+                                Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                    format!("{e}"),
+                                )))
+                            }
+                        }
+                    }
+                    Ok(Ok(response)) => {
+                        if let Some(guard) = guard {
+                            guard.received(&response).unread();
+                        }
+                        Err(ScriptOutcome::FetchFailed(FetchFailure::Status(
+                            response.status.as_u16(),
+                        )))
+                    }
+                    Ok(Err(e)) => {
+                        inspector::fail_net(guard, &e);
+                        Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                            format!("{e}"),
+                        )))
+                    }
+                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                        "timed out".into(),
+                    ))),
+                };
+                (label, result)
+            }
+            .boxed_local()
+        };
+
+        let mut slots = Vec::new();
         let mut index = 0usize;
-        document.traverse(|node| {
+        document.traverse_shadow_including(|node| {
             if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
                 return;
             }
-            let Some(timing) = script_timing(node) else { return };
+            let Some(classified) = script_timing(node) else {
+                return;
+            };
             index += 1;
             let src = node.get_attribute("src").map(str::trim);
             let label = page_trace::script_label(node.id.raw()).unwrap_or_else(|| match src {
-                Some(s) => base.join(s).map(|u| u.to_string()).unwrap_or_else(|_| s.to_string()),
+                Some(s) => base_url
+                    .join(s)
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|_| s.to_string()),
                 None => format!("inline#{index}"),
             });
-            let entry = timing.and_then(|timing| match src {
-                Some(s) => base
-                    .join(s)
-                    .map(|u| (timing, Body::External(u)))
-                    .map_err(|_| ScriptOutcome::Skipped("unparseable src")),
-                None => Ok((timing, Body::Inline(node.text_content()))),
-            });
-            entries.push((label, node.id.raw(), entry, is_module_script(node)));
-        });
-        // A document with no scripts still has a lifecycle: `load` fires and
-        // the timers run (a `<meta http-equiv=refresh>`'s among them).
-
-        // Each fetch has its own network cap, from when it starts. The
-        // script budget is not spent here: a slow script still runs once
-        // its body arrives.
-
-        // Fetch every external script concurrently, keeping document order.
-        use futures::{stream::StreamExt, FutureExt};
-        const MAX_CONCURRENT_SCRIPT_LOADS: usize = 8;
-        let loader = self.loader.clone();
-        let referrer = self.subresource_referrer(id);
-        let base = base.clone();
-        let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
-        Some(
-            futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module)| {
-                let loader = loader.clone();
-                let referrer = referrer.clone();
-                let policy = policy.clone();
-                let base = base.clone();
-                let inspector = inspector.clone();
-                async move {
-                    let mut label = label;
-                    let result = match entry {
-                        Err(outcome) => Err(outcome),
-                        Ok((timing, Body::Inline(text))) => Ok((timing, text)),
-                        // A module is fetched through the policy's one
-                        // module entry point (script destination, CORS,
-                        // JavaScript MIME, 2xx, shield, budgets); its
-                        // identity is the URL it ends up at.
-                        Ok((timing, Body::External(url))) if is_module => match &policy {
-                            None => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                "no network policy for this page".into(),
-                            ))),
-                            Some(policy) => {
-                                let guard = inspector.begin_request(&url, "GET", ResourceType::Module, Some("parser"));
-                                let fetch = await_with_chrome_ui(policy.fetch_module(&loader, &url, &base));
-                                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
-                                let fetched = tokio::time::timeout_at(deadline, fetch).await;
-                                inspector::answer_module(guard, &fetched);
-                                match fetched {
-                                    Ok(Ok(module)) => {
-                                        label = module.final_url.to_string();
-                                        Ok((timing, module.source))
-                                    }
-                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(match denial {
-                                        rustkit_net::policy::Denial::BadStatus(status) => {
-                                            FetchFailure::Status(status)
-                                        }
-                                        denial => FetchFailure::Transport(format!("{denial}")),
-                                    })),
-                                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                        "timed out".into(),
-                                    ))),
-                                }
+            let is_module = is_module_script(node);
+            let (timing, body) = match classified {
+                Err(outcome) => (None, SlotBody::Ready(Err(outcome))),
+                Ok(timing) => {
+                    let body = match src {
+                        Some(s) => match base_url.join(s) {
+                            Err(_) => {
+                                SlotBody::Ready(Err(ScriptOutcome::Skipped("unparseable src")))
                             }
+                            Ok(url) => SlotBody::Pending(if is_module {
+                                fetch_module(url, label.clone())
+                            } else {
+                                fetch_classic(url, label.clone())
+                            }),
                         },
-                        Ok((timing, Body::External(url))) => {
-                            let fetch = async {
-                                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
-                                let guard = inspector
-                                    .begin_request(&url, "GET", ResourceType::Script, Some("parser"))
-                                    .map(|g| g.timeout_at(deadline, "timed out"));
-                                let fetched = tokio::time::timeout_at(
-                                    deadline,
-                                    await_with_chrome_ui(loader.fetch(referrer.get_for(url, RequestDestination::Script))),
-                                )
-                                .await;
-                                match fetched {
-                                    Ok(Ok(response)) if response.ok() => {
-                                        let received = guard.map(|g| g.received(&response));
-                                        match await_with_chrome_ui(response.text()).await {
-                                            Ok(text) => {
-                                                if let Some(received) = received {
-                                                    received.read(text.len());
-                                                }
-                                                Ok((timing, text))
-                                            }
-                                            Err(e) => {
-                                                if let Some(received) = received {
-                                                    received.fail(FailureStage::Decode, "body is not UTF-8");
-                                                }
-                                                Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(format!("{e}"))))
-                                            }
-                                        }
-                                    }
-                                    Ok(Ok(response)) => {
-                                        if let Some(guard) = guard {
-                                            guard.received(&response).unread();
-                                        }
-                                        Err(ScriptOutcome::FetchFailed(FetchFailure::Status(response.status.as_u16())))
-                                    }
-                                    Ok(Err(e)) => {
-                                        inspector::fail_net(guard, &e);
-                                        Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(format!("{e}"))))
-                                    }
-                                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                        "timed out".into(),
-                                    ))),
-                                }
-                            };
-                            fetch.await
-                        }
+                        None => SlotBody::Inline(node.text_content()),
                     };
-                    (label, node_id, result, is_module)
+                    (Some(timing), body)
                 }
-            }))
-            .buffered(MAX_CONCURRENT_SCRIPT_LOADS)
-            .collect::<Vec<_>>()
-            .boxed_local(),
-        )
+            };
+            slots.push(ScriptSlot {
+                label,
+                node_id: node.id.raw(),
+                timing,
+                is_module,
+                body,
+            });
+        });
+        Some(ScriptPlan { slots })
     }
 
     /// Fetch and run external scripts the page inserted.
@@ -5583,7 +5750,7 @@ impl Engine {
     async fn run_page_scripts(
         &mut self,
         id: EngineViewId,
-        fetched: Vec<FetchedScript>,
+        mut plan: ScriptPlan,
         budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
         watch: Option<&NavWatch>,
@@ -5611,7 +5778,7 @@ impl Engine {
         let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
         self.run_page_scripts_with(
             id,
-            fetched,
+            &mut plan,
             budget,
             policy,
             &bindings,
@@ -5625,7 +5792,7 @@ impl Engine {
         }
         if let Some(document) = self.views.get(&id).and_then(|v| v.document.clone()) {
             let base = self.views.get(&id).and_then(|v| v.url.clone());
-            self.catalog_scripts(&document, base.as_ref(), true);
+            self.catalog_scripts(id, &document, base.as_ref(), true);
         }
         let parked = script_net::take_parked_deliveries();
         if let Some(view) = self.views.get_mut(&id) {
@@ -5644,7 +5811,7 @@ impl Engine {
     async fn run_page_scripts_with(
         &mut self,
         id: EngineViewId,
-        fetched: Vec<FetchedScript>,
+        plan: &mut ScriptPlan,
         _budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
         bindings: &DomBindings,
@@ -5657,7 +5824,9 @@ impl Engine {
         let net_rounds = self.config.script_network_rounds;
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
-        let Some(view) = self.views.get(&id) else { return };
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
         let document_url = view.url.clone();
         let inspector = view.inspector.clone();
         let view_document = view.document.clone();
@@ -5665,30 +5834,34 @@ impl Engine {
         bindings.set_loop_iteration_limit(loop_limit);
         bindings.set_max_job_iterations(loop_limit.min(100_000));
 
-        // Execution order: classic, defer (module scripts run here, in
-        // document order with them), async (stable within each). A module
-        // whose fetch failed keeps its place so its `error` event fires in
-        // order; a classic script failure is only logged.
-        type Job = (String, u8, Result<String, ScriptOutcome>, usize, bool);
-        let mut runnable: Vec<Job> = Vec::new();
-        for (label, node_id, result, is_module) in fetched {
-            match result {
-                Ok((timing, text)) => {
-                    let key = match timing {
-                        ScriptTiming::Classic => 0,
-                        ScriptTiming::Defer => 1,
-                        ScriptTiming::Async => 2,
+        // Parser-blocking classic scripts, then deferred scripts (including
+        // non-async modules), in tree order within each list. `async` is
+        // not in this list: it runs after DOMContentLoaded. A script with
+        // no timing (`nomodule`) is logged and does not run.
+        let mut before: Vec<(usize, u8)> = Vec::new();
+        let mut asap: Vec<usize> = Vec::new();
+        for (index, slot) in plan.slots.iter().enumerate() {
+            match slot.timing {
+                Some(ScriptTiming::Classic) => before.push((index, 0)),
+                Some(ScriptTiming::Defer) => before.push((index, 1)),
+                Some(ScriptTiming::Async) => asap.push(index),
+                None => {
+                    let outcome = match &slot.body {
+                        SlotBody::Ready(Err(outcome)) => outcome.clone(),
+                        _ => ScriptOutcome::Skipped("not a runnable script"),
                     };
-                    runnable.push((label, key, Ok(text), node_id, is_module));
-                }
-                Err(outcome) if is_module => runnable.push((label, 1, Err(outcome), node_id, true)),
-                Err(outcome) => {
-                    let record = ScriptRecord { source: label, bytes: 0, elapsed_ms: 0, outcome };
+                    let record = ScriptRecord {
+                        source: slot.label.clone(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome,
+                    };
                     inspector_glue::log_script(log, &inspector, record);
                 }
             }
         }
-        runnable.sort_by_key(|(_, key, _, _, _)| *key);
+        before.sort_by_key(|(_, key)| *key);
+        let before: Vec<usize> = before.into_iter().map(|(index, _)| index).collect();
 
         // A panic inside the JS engine leaves its state unknowable: record
         // it and run nothing more on this page.
@@ -5717,7 +5890,8 @@ impl Engine {
                     Err(_) => {
                         poisoned.set(true);
                         ScriptOutcome::EngineFailed(EngineFailure::Panic)
-                    }                }
+                    }
+                }
             };
             ScriptRecord {
                 source,
@@ -5770,16 +5944,39 @@ impl Engine {
         // What listeners reported while a script ran, for the script log at
         // the next lifecycle step.
         let mut carried: Vec<String> = Vec::new();
-        // Every script the parser fetched is in the trace even when this
-        // loop returns before it runs. `fetched_scripts` then says why.
-        for (label, _, source, _, _) in &runnable {
-            match source {
-                Ok(_) if label.starts_with("inline#") => page_trace::note_parser_script(label, None),
-                Ok(_) => page_trace::note_parser_script(label, Some(200)),
-                Err(outcome) => page_trace::note_observed(label, outcome),
+        // Every parser script is in the trace even when this loop returns
+        // before it runs. `fetched_scripts` then says why.
+        for slot in &plan.slots {
+            if slot.timing.is_none() {
+                continue;
+            }
+            if slot.label.starts_with("inline#") {
+                page_trace::note_parser_script(&slot.label, None);
+            } else {
+                page_trace::note_parser_script(&slot.label, Some(200));
             }
         }
-        for (index, (label, _, source, node_id, is_module)) in runnable.into_iter().enumerate() {
+        // `$slots` is one HTML list. Called for the parser-blocking and
+        // deferred scripts before DOMContentLoaded, and for `async` after it.
+        macro_rules! run_slots {
+            ($slots:expr) => {
+        for (index, slot_index) in $slots.into_iter().enumerate() {
+            let Some(waited) = nav_cancel::unless_cancelled(watch, plan.await_ready(slot_index)).await else {
+                return;
+            };
+            let blocking = plan.slots[slot_index].timing == Some(ScriptTiming::Classic);
+            let pause_label = plan.slots[slot_index].label.clone();
+            // Only a parser-blocking classic script pauses the parser on its
+            // fetch. `async` and `defer` do not. A body that already arrived
+            // during the stylesheet fetch records no pause.
+            if blocking && waited.as_millis() >= 1 {
+                page_trace::note_parser_pause(
+                    "script fetch",
+                    waited.as_millis() as u64,
+                    &pause_label,
+                );
+            }
+            let (label, node_id, source, is_module, _) = plan.take_source(slot_index);
             // Between two scripts: a cancelled load runs none of the rest.
             #[cfg(test)]
             load_phase(&format!("script:{index}"));
@@ -5879,7 +6076,7 @@ impl Engine {
                                 let mut count = modules_fetched.get();
                                 let found = nav_cancel::unless_cancelled(
                                     watch,
-                                    script_net::pump_modules(
+                                    plan.drive(script_net::pump_modules(
                                         bindings,
                                         policy,
                                         &loader,
@@ -5887,7 +6084,7 @@ impl Engine {
                                         document,
                                         &mut count,
                                         &inspector,
-                                    ),
+                                    )),
                                 )
                                 .await;
                                 let Some(found) = found else { return };
@@ -6029,6 +6226,9 @@ impl Engine {
             // keeps it for the next lifecycle step (`carried`).
             inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &source);
         }
+            };
+        }
+        run_slots!(before);
         if poisoned.get() || nav_cancel::cancelled(watch) {
             return;
         }
@@ -6080,34 +6280,6 @@ impl Engine {
                 }
             }
         };
-        let after_scripts = pump(None).await;
-        if nav_cancel::cancelled(watch) {
-            return;
-        }
-        if let Some(mut found) = after_scripts {
-            for record in found.records.drain(..) {
-                inspector_glue::log_script(log, &inspector, record);
-            }
-            if found.poisoned {
-                let record = ScriptRecord {
-                    source: "network".into(),
-                    bytes: 0,
-                    elapsed_ms: 0,
-                    outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
-                };
-                inspector_glue::log_script(log, &inspector, record);
-                return;
-            }
-            for message in found.threw {
-                let record = ScriptRecord {
-                    source: "network".into(),
-                    bytes: 0,
-                    elapsed_ms: 0,
-                    outcome: ScriptOutcome::Threw(message),
-                };
-                inspector_glue::log_script(log, &inspector, record);
-            }
-        }
 
         let timers_ran = Cell::new(0u32);
         let mut yielded = false;
@@ -6118,10 +6290,16 @@ impl Engine {
                 bindings.set_ready_state("interactive").map_err(strip)?;
                 page_trace::note_ready("interactive");
                 bindings
-                    .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Document, "DOMContentLoaded")
+                    .fire_lifecycle_event(
+                        rustkit_bindings::LifecycleTarget::Document,
+                        "DOMContentLoaded",
+                    )
                     .map_err(strip)?;
                 bindings
-                    .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "DOMContentLoaded")
+                    .fire_lifecycle_event(
+                        rustkit_bindings::LifecycleTarget::Window,
+                        "DOMContentLoaded",
+                    )
                     .map_err(strip)
             }),
             ("event:load", &|| {
@@ -6163,10 +6341,22 @@ impl Engine {
             if poisoned.get() {
                 return;
             }
+            // `async` scripts run after DOMContentLoaded has been recorded
+            // and before `window` `load`. Their fetch does not pause the
+            // parser. A slow one can still delay `load`.
+            if index == 0 {
+                let pending = std::mem::take(&mut asap);
+                run_slots!(pending);
+                if poisoned.get() || nav_cancel::cancelled(watch) {
+                    return;
+                }
+            }
             // The step's requests are answered now; after the timers step,
             // each round also runs the timers the responses scheduled.
+            // `fetch` / XHR are not part of DOMContentLoaded: this pump is
+            // after that event.
             let timers = (source == "timers").then_some((horizon_ms, MAX_TIMER_CALLBACKS));
-            if let Some(found) = pump(timers).await {
+            if let Some(found) = plan.drive(pump(timers)).await {
                 for record in found.records {
                     inspector_glue::log_script(log, &inspector, record);
                 }
@@ -6680,6 +6870,15 @@ impl Engine {
             return Ok(());
         }
 
+        // Catalog parser scripts before the first layout. A layout catalogs
+        // again for scripts the page inserted; that pass must not be the one
+        // that first sees the parser's own scripts.
+        if self.config.javascript_enabled {
+            if let Some(document) = self.views.get(&id).and_then(|view| view.document.clone()) {
+                self.catalog_scripts(id, &document, Some(&url), false);
+            }
+        }
+
         // Initial layout and render (inline data:-sourced faces first; the
         // remote ones arrive with the other subresources below)
         self.load_local_web_fonts(id);
@@ -6692,7 +6891,11 @@ impl Engine {
             .get(&id)
             .and_then(|v| {
                 let doc = v.document.as_ref()?;
-                Some(!self.discover_external_stylesheets(doc, v.url.as_ref()).is_empty())
+                Some(
+                    !self
+                        .discover_external_stylesheets(doc, v.url.as_ref())
+                        .is_empty(),
+                )
             })
             .unwrap_or(false);
         if let Some(view) = self.views.get_mut(&id) {
@@ -6716,40 +6919,33 @@ impl Engine {
             self.relayout_for(id, RelayoutCause::InitialLoad)?;
         }
 
-        // Load external resources (stylesheets, images, fonts), and fetch
-        // the page's scripts at the same time. Scripts still run after the
-        // subresources; only their network time overlaps.
-        let script_fetch = if self.config.javascript_enabled {
-            self.fetch_page_scripts(id, &url, script_policy.clone())
+        // Stylesheets block parser scripts. External script fetches start
+        // now and are polled while the stylesheets load, but the load does
+        // not wait for an `async`, `defer`, or module body before the
+        // script walk. A cancel drops the plan and every fetch still out.
+        let mut script_plan = if self.config.javascript_enabled {
+            self.plan_page_scripts(id, &url, script_policy.clone())
         } else {
             None
         };
-        let script_fetch_started = std::time::Instant::now();
-        let subresources = async {
-            let result = self.load_subresources_for(id, Some(watch)).await;
-            (result, std::time::Instant::now())
+        // The subresource future borrows `self`. Keep that borrow inside this
+        // block so the script walk below can use `self` again. Script fetches
+        // are polled here and stay in `script_plan`, which does not borrow `self`.
+        let subresources = {
+            let subresources_fut = self.load_subresources_for(id, Some(watch));
+            tokio::pin!(subresources_fut);
+            let joined = futures::future::poll_fn(|cx| {
+                if let Some(plan) = script_plan.as_mut() {
+                    plan.poll_pending(cx);
+                }
+                subresources_fut.as_mut().poll(cx)
+            });
+            watch.unless_cancelled(Box::pin(joined)).await
         };
-        let scripts = async move {
-            match script_fetch {
-                Some(fetch) => Some((fetch.await, std::time::Instant::now())),
-                None => None,
-            }
-        };
-        // A cancel drops every fetch still out, the page's scripts too.
-        let Some(((subresources, _subresources_done), scripts)) = watch
-            .unless_cancelled(Box::pin(async { futures::join!(subresources, scripts) }))
-            .await
-        else {
+        let Some(subresources) = subresources else {
             debug!(?id, %url, "Navigation cancelled during its subresources");
             return Ok(());
         };
-        if let Some((_, fetch_done)) = scripts.as_ref() {
-            page_trace::note_parser_pause(
-                "script fetch",
-                fetch_done.saturating_duration_since(script_fetch_started).as_millis() as u64,
-                "page scripts",
-            );
-        }
         drop(style_memo);
         // This will trigger additional relayouts as resources arrive
         if let Err(e) = subresources {
@@ -6784,11 +6980,11 @@ impl Engine {
         // The script budget is JavaScript time only. How long the fetches
         // took, including a fetch that outlasted the subresources, does
         // not spend it.
-        if let Some((fetched, _fetch_done)) = scripts {
+        if let Some(plan) = script_plan {
             let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
             self.run_page_scripts(
                 id,
-                fetched,
+                plan,
                 budget,
                 script_policy,
                 Some(watch),
@@ -7376,7 +7572,7 @@ impl Engine {
             self.drain_inline_scripts(id);
             let base = self.views.get(&id).and_then(|v| v.url.clone());
             if let Some(document) = self.views.get(&id).and_then(|v| v.document.clone()) {
-                self.catalog_scripts(&document, base.as_ref(), true);
+                self.catalog_scripts(id, &document, base.as_ref(), true);
             }
             render_dump::after_commit(&document, &laid, paint.as_ref());
         } else {
@@ -7659,7 +7855,7 @@ impl Engine {
             self.drain_inline_scripts(id);
             let base = self.views.get(&id).and_then(|v| v.url.clone());
             if let Some(doc) = self.views.get(&id).and_then(|v| v.document.clone()) {
-                self.catalog_scripts(&doc, base.as_ref(), true);
+                self.catalog_scripts(id, &doc, base.as_ref(), true);
             }
             render_dump::after_commit(document, &laid_for_dump, paint.as_ref());
         }
@@ -31003,7 +31199,7 @@ window.addEventListener('load', function () {
         let order = engine.execute_script(view, "order.join(',')").unwrap();
         assert_eq!(
             order,
-            r#"String("inline1,classic,inline2,defer,module,async,dcl:interactive,load:complete,timer")"#
+            r#"String("inline1,classic,inline2,defer,module,dcl:interactive,async,load:complete,timer")"#
         );
 
         let log = engine.script_log(view).unwrap();

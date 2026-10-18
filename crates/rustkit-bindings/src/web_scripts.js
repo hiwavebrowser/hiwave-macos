@@ -12,11 +12,13 @@
 // and puts it in the in-order list. An external module is `import()`ed. An
 // inline classic script runs at once.
 //
-// Only elements script created are prepared (`createElement`, an HTML
-// `createElementNS`, or a copy of one not yet started): the parser's scripts
-// ran (or were skipped) with the load, and `innerHTML` never runs scripts.
-// Each element is prepared once. Not here (stated): inline module scripts and
-// `document.write`.
+// Only elements script created, or scripts that have not started and are not
+// already in this document, are prepared (`createElement`, an HTML
+// `createElementNS`, a copy of one not yet started, or a script moved out of
+// a `<template>` content fragment or another document). The parser's scripts
+// ran (or were skipped) with the load. `innerHTML` never runs scripts: that
+// setter does not come through here. Each element is prepared once. Not here
+// (stated): inline module scripts and `document.write`.
 (function (g) {
     var internals = g.__rkScriptInternals;
     delete g.__rkScriptInternals;
@@ -73,14 +75,42 @@
     function fire(el, type) {
         resolved.then(function () { el.dispatchEvent(new Event_(type)); });
     }
+    // Walk to the root, crossing a shadow root to its host. A script whose
+    // root is this document was already in the tree (the parser's, or one
+    // this already started). A script whose root is a fragment (`<template>`
+    // content) or another document has not started. `isConnected` is the
+    // wrong test here: a DOMParser document shares the node table, so its
+    // nodes look connected before they join this document.
+    function rootOf(n) {
+        var p = n, guard = 0, host;
+        while (p && guard++ < 10000) {
+            if (p.parentNode) { p = p.parentNode; continue; }
+            if (p.nodeType === 11 && HOOKS.hostOf) {
+                host = HOOKS.hostOf(p);
+                if (host && host !== p) { p = host; continue; }
+            }
+            break;
+        }
+        return p;
+    }
+    // True once the element has started, or it already lives in this document
+    // and was not created fresh (a parser script, including one in a shadow tree).
+    function prepared(el) {
+        if (el[STATE] === 'started') return true;
+        if (el[STATE] === 'fresh') return false;
+        return rootOf(el) === g.document;
+    }
     function prepare(el) {
-        if (el[STATE] !== 'fresh' || !el.isConnected) return;
+        if (el[STATE] === 'started' || !el.isConnected) return;
         var src = el.getAttribute('src');
         if (src === null && el.textContent === '') return;
         var k = kind(el);
         if (!k) return;
+        var wasFresh = el[STATE] === 'fresh';
         el[STATE] = 'started';
-        fresh--;
+        // Only a createElement script incremented `fresh`. A template or
+        // fragment script must not drive that counter negative.
+        if (wasFresh) fresh--;
         if (k === 'classic' && el.hasAttribute('nomodule')) return;
         if (src !== null) {
             var url;
@@ -117,40 +147,51 @@
         // one) is prepared when it goes in. The parser's scripts, and those
         // `innerHTML` made, are started: their copies never run.
         cloned: function (from, copy) {
-            if (fresh === 0 || from == null || copy == null) return;
-            if (isScript(from)) {
-                if (from[STATE] === 'fresh') this.created(copy);
-                return;
+            if (from == null || copy == null) return;
+            // Tree order, including `<template>` content. `querySelectorAll`
+            // does not see those scripts: they are not descendants of the template.
+            function collect(n, out) {
+                if (!n) return;
+                if (isScript(n)) out.push(n);
+                if (n.localName === 'template' && n.content) {
+                    collect(n.content, out);
+                    return;
+                }
+                for (var c = n.firstChild; c; c = c.nextSibling) collect(c, out);
             }
-            if (typeof from.querySelectorAll !== 'function') return;
-            var a = from.querySelectorAll('script'), b = copy.querySelectorAll('script');
+            var a = [], b = [];
+            collect(from, a);
+            collect(copy, b);
             for (var i = 0; i < a.length && i < b.length; i++) {
-                if (a[i][STATE] === 'fresh') this.created(b[i]);
+                if (a[i][STATE] === 'fresh' || !prepared(a[i])) this.created(b[i]);
             }
         },
-        // Before `node` goes into `parent`: the fresh scripts it carries (a
-        // fragment empties as it goes in), prepared in tree order after.
-        // Walked, not queried: a fragment's scripts are not in the document
-        // the selector walks.
+        // Before `node` goes into `parent`: scripts that have not started,
+        // prepared in tree order after the insert. A fragment's scripts are
+        // walked, not queried. A node that is already in this document and
+        // carries no fresh script is a move of parser output: nothing runs again.
         inserting: function (node, parent) {
-            if (fresh === 0) return null;
+            if (fresh === 0 && rootOf(node) === g.document && !(isScript(parent) && !prepared(parent))) return null;
             var found = [];
+            function consider(n) {
+                if (isScript(n) && (n[STATE] === 'fresh' || !prepared(n))) found.push(n);
+            }
             function walk(n) {
                 if (!n || n.localName === 'template') return;
-                if (isScript(n)) found.push(n);
+                consider(n);
                 for (var c = n.firstChild; c; c = c.nextSibling) walk(c);
             }
-            if (isScript(node)) found.push(node);
+            if (isScript(node)) consider(node);
             else walk(node);
             // Text added to a script already in the document.
-            if (isScript(parent)) found.push(parent);
-            found = found.filter(function (s) { return s[STATE] === 'fresh'; });
+            if (isScript(parent)) consider(parent);
             return found.length ? function () { found.forEach(prepare); } : null;
         },
         // A `src` set, or text written, on a script already in the document.
         changed: function (node, op, name) {
             if (isScript(node) && op === 'setAttr' && String(name).toLowerCase() === 'async') node[FORCE_ASYNC] = false;
-            if (fresh === 0 || !isScript(node)) return;
+            if (!isScript(node)) return;
+            if (node[STATE] !== 'fresh' && prepared(node)) return;
             if (op === 'setText' || (op === 'setAttr' && String(name).toLowerCase() === 'src')) prepare(node);
         }
     };

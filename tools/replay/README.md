@@ -66,10 +66,11 @@ shield was left unset; Chrome writes `off (stock Chrome)`), `ready_state`
 The diff does not compare `shield`, `fetched_scripts`, or `parser` durations.
 `fetched_scripts` also carries `detail` when a script was missed for a reason
 the four `reason` values do not name: `shadow tree`, `not a javascript type`,
-`inserted after the parser snapshot`, or `script-inserted inline`. Inline
-scripts the parser inserted are labeled `inline#N` in document order, counting
-external scripts, including ones inside a shadow tree and ones whose type is
-not javascript (`type:<essence>#N`, which does not take an `inline#N`).
+`template`, `inserted after the parser snapshot`, or `script-inserted inline`.
+Inline scripts the parser inserted are labeled `inline#N` in document order,
+counting external scripts, including ones inside a shadow tree or a `<template>`
+content fragment and ones whose type is not javascript (`type:<essence>#N`,
+which does not take an `inline#N`). A `template` script is inert until inserted.
 
 `parser` is one record per pause: `blocked_on` is `stylesheet`, `script fetch`,
 or `script execute`, with `ms` and `target`. Chrome fills stylesheet and

@@ -19,6 +19,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use bytes::Bytes;
@@ -438,11 +439,13 @@ pub(crate) const MAX_MODULES_PER_PAGE: usize = 2_000;
 /// modules concurrently).
 const MAX_MODULE_ROUNDS: u32 = 64;
 
-/// Fetch what a started module graph has asked for, level by level, until it
-/// asks for nothing more. Every fetch is the policy's module entry point;
-/// this decides nothing. A module that is refused, mistyped, missing or too
-/// many is supplied as an error, so the graph fails as a whole and none of
-/// its code runs.
+/// Fetch what a started module graph has asked for until it asks for nothing
+/// more. Static imports of one module are fetched concurrently (HTML "fetch
+/// the descendants of a module script"): each completion is parsed and its
+/// own imports start while siblings are still in flight. Every fetch is the
+/// policy's module entry point; this decides nothing. A module that is
+/// refused, mistyped, missing or too many is supplied as an error, so the
+/// graph fails as a whole and none of its code runs.
 ///
 /// `fetched` counts the modules already pulled in on this page.
 pub(crate) async fn pump_modules(
@@ -455,63 +458,102 @@ pub(crate) async fn pump_modules(
     inspector: &Arc<Inspector>,
 ) -> Pump {
     let mut out = Pump::default();
-    for _ in 0..MAX_MODULE_ROUNDS {
-        let Ok(urls) = catch_unwind(AssertUnwindSafe(|| bindings.take_module_requests())) else {
-            out.poisoned = true;
-            return out;
-        };
-        if urls.is_empty() {
-            return out;
-        }
-        out.rounds += 1;
-        out.requests += urls.len();
+    type Task<'a> = Pin<
+        Box<dyn Future<Output = (String, Result<rustkit_bindings::FetchedModule, String>)> + 'a>,
+    >;
+    let mut inflight: FuturesUnordered<Task<'_>> = FuturesUnordered::new();
+    let mut rounds = 0u32;
 
-        // Within the page's module cap, fetch the level concurrently.
-        let room = MAX_MODULES_PER_PAGE.saturating_sub(*fetched);
-        *fetched += urls.len().min(room);
-        let outcomes = futures::future::join_all(urls.iter().enumerate().map(|(i, url)| async move {
-            if i >= room {
-                return Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})"));
-            }
-            let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
-            let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
-            let fetched = tokio::time::timeout_at(
-                deadline,
-                super::await_with_chrome_ui(policy.fetch_module(loader, &parsed, document)),
-            )
-            .await;
-            inspector::answer_module(guard, &fetched);
-            match fetched {
-                Ok(Ok(module)) => {
-                    crate::page_trace::note_module_dependency(url, Some(module.status));
-                    Ok(rustkit_bindings::FetchedModule {
-                        final_url: module.final_url.to_string(),
-                        source: module.source,
-                    })
-                }
-                Ok(Err(denial)) => {
-                    if matches!(denial, rustkit_net::policy::Denial::Shield) {
-                        crate::page_trace::note_blocked(url);
-                    }
-                    debug!(%url, ?denial, "Module fetch denied");
-                    Err(NETWORK_ERROR.to_string())
-                }
-                Err(_) => Err("timed out".to_string()),
-            }
-        }))
-        .await;
-
-        for (url, outcome) in urls.iter().zip(outcomes) {
-            let (supplied, _) = super::with_script_js(bindings, || {
-                catch_unwind(AssertUnwindSafe(|| bindings.supply_module(url, outcome)))
-            });
-            if supplied.is_err() {
+    loop {
+        if rounds < MAX_MODULE_ROUNDS {
+            let Ok(urls) = catch_unwind(AssertUnwindSafe(|| bindings.take_module_requests()))
+            else {
                 out.poisoned = true;
                 return out;
+            };
+            if urls.is_empty() && inflight.is_empty() {
+                return out;
             }
+            if !urls.is_empty() {
+                rounds += 1;
+                out.rounds += 1;
+                let room = MAX_MODULES_PER_PAGE.saturating_sub(*fetched);
+                *fetched += urls.len().min(room);
+                out.requests += urls.len();
+                for (i, url) in urls.into_iter().enumerate() {
+                    if i >= room {
+                        let (supplied, _) = super::with_script_js(bindings, || {
+                            catch_unwind(AssertUnwindSafe(|| {
+                                bindings.supply_module(
+                                    &url,
+                                    Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})")),
+                                )
+                            }))
+                        });
+                        if supplied.is_err() {
+                            out.poisoned = true;
+                            return out;
+                        }
+                        continue;
+                    }
+                    inflight.push(Box::pin(async move {
+                        let parsed = match Url::parse(&url) {
+                            Ok(parsed) => parsed,
+                            Err(_) => return (url, Err("unparseable module url".to_string())),
+                        };
+                        let guard = inspector.begin_request(
+                            &parsed,
+                            "GET",
+                            ResourceType::Module,
+                            Some("script"),
+                        );
+                        let fetched = tokio::time::timeout_at(
+                            deadline,
+                            super::await_with_chrome_ui(
+                                policy.fetch_module(loader, &parsed, document),
+                            ),
+                        )
+                        .await;
+                        inspector::answer_module(guard, &fetched);
+                        let outcome = match fetched {
+                            Ok(Ok(module)) => {
+                                crate::page_trace::note_module_dependency(
+                                    &url,
+                                    Some(module.status),
+                                );
+                                Ok(rustkit_bindings::FetchedModule {
+                                    final_url: module.final_url.to_string(),
+                                    source: module.source,
+                                })
+                            }
+                            Ok(Err(denial)) => {
+                                if matches!(denial, rustkit_net::policy::Denial::Shield) {
+                                    crate::page_trace::note_blocked(&url);
+                                }
+                                debug!(%url, ?denial, "Module fetch denied");
+                                Err(NETWORK_ERROR.to_string())
+                            }
+                            Err(_) => Err("timed out".to_string()),
+                        };
+                        (url, outcome)
+                    }));
+                }
+            }
+        } else if inflight.is_empty() {
+            return out;
+        }
+
+        let Some((url, outcome)) = inflight.next().await else {
+            return out;
+        };
+        let (supplied, _) = super::with_script_js(bindings, || {
+            catch_unwind(AssertUnwindSafe(|| bindings.supply_module(&url, outcome)))
+        });
+        if supplied.is_err() {
+            out.poisoned = true;
+            return out;
         }
     }
-    out
 }
 
 /// Take-fetch-deliver for the network a page can have waiting: script
@@ -539,13 +581,30 @@ pub(crate) async fn pump_all(
     const ALTERNATIONS: u32 = 4;
     let mut total = Pump::default();
     for _ in 0..ALTERNATIONS {
-        let net = pump(bindings, policy, loader, deadline, rounds, timers, inspector).await;
-        let modules = match document {
-            Some(document) => {
-                pump_modules(bindings, policy, loader, deadline, document, modules_fetched, inspector).await
+        // A dynamic `import()` and a `fetch`/`XHR` started by the same turn
+        // go out together. Waiting for every fetch before the module graph
+        // would serialize the import behind an unrelated request.
+        let net_fut = pump(
+            bindings, policy, loader, deadline, rounds, timers, inspector,
+        );
+        let module_fut = async {
+            match document {
+                Some(document) => {
+                    pump_modules(
+                        bindings,
+                        policy,
+                        loader,
+                        deadline,
+                        document,
+                        modules_fetched,
+                        inspector,
+                    )
+                    .await
+                }
+                None => Pump::default(),
             }
-            None => Pump::default(),
         };
+        let (net, modules) = futures::future::join(net_fut, module_fut).await;
         let worked = net.requests + modules.requests;
         total.poisoned |= net.poisoned || modules.poisoned;
         total.threw.extend(net.threw);
