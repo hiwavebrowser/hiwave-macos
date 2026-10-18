@@ -100,6 +100,8 @@ struct BuildState {
     /// The scope stack: the tree whose elements are being built is last.
     current: Vec<Rc<TreeStyle>>,
     viewport: Option<(f32, f32)>,
+    /// Device pixel ratio for this build's `@media` resolution features.
+    dpr: f32,
     javascript_enabled: bool,
     /// Each shadow root's sheets, parsed once per build.
     by_root: HashMap<usize, Rc<TreeStyle>>,
@@ -191,6 +193,7 @@ impl BuildScope {
         document: &Document,
         sheets: &Rc<Vec<Stylesheet>>,
         viewport: Option<(f32, f32)>,
+        dpr: f32,
         javascript_enabled: bool,
     ) -> Self {
         DEFINED.with(|d| *d.borrow_mut() = document.defined_custom_elements());
@@ -210,6 +213,7 @@ impl BuildScope {
                 host_in_chain: false,
             })],
             viewport,
+            dpr,
             javascript_enabled,
             by_root: HashMap::new(),
             by_text: HashMap::new(),
@@ -256,10 +260,10 @@ fn pop_tree() {
 
 /// The sheets of the shadow tree under `root`, parsed once per build.
 fn tree_style(root: &Rc<Node>) -> Option<Rc<TreeStyle>> {
-    let (viewport, javascript_enabled) = BUILD.with(|b| {
+    let (viewport, dpr, javascript_enabled) = BUILD.with(|b| {
         let b = b.borrow();
         let s = b.as_ref()?;
-        Some((s.viewport, s.javascript_enabled))
+        Some((s.viewport, s.dpr, s.javascript_enabled))
     })?;
     if let Some(hit) = BUILD.with(|b| b.borrow().as_ref()?.by_root.get(&root.id.raw()).cloned()) {
         return Some(hit);
@@ -269,7 +273,7 @@ fn tree_style(root: &Rc<Node>) -> Option<Rc<TreeStyle>> {
     let cached = BUILD.with(|b| b.borrow().as_ref()?.by_text.get(&key).cloned());
     let tree = match cached {
         Some(tree) => tree,
-        None => Rc::new(parse_tree_style(&texts, viewport)),
+        None => Rc::new(parse_tree_style(&texts, viewport, dpr)),
     };
     BUILD.with(|b| {
         if let Some(s) = b.borrow_mut().as_mut() {
@@ -318,14 +322,14 @@ fn style_texts(root: &Rc<Node>, javascript_enabled: bool) -> Vec<String> {
     out
 }
 
-fn parse_tree_style(texts: &[String], viewport: Option<(f32, f32)>) -> TreeStyle {
+fn parse_tree_style(texts: &[String], viewport: Option<(f32, f32)>, dpr: f32) -> TreeStyle {
     let mut sheets: Vec<Stylesheet> = texts
         .iter()
         .filter_map(|t| Stylesheet::parse(t).ok())
         .collect();
     // `@media` and `@layer` as for the document's sheets; a shadow tree's
     // layers are its own (CSS Cascade 5 §6.4.1: per tree).
-    super::Engine::keep_rules_for_viewport(&mut sheets, viewport);
+    super::Engine::keep_rules_for_viewport(&mut sheets, viewport, dpr);
     rustkit_css::assign_layer_order(&mut sheets);
     let mut tree = TreeStyle {
         sheets: Rc::new(Vec::new()),
@@ -893,6 +897,7 @@ mod tests {
         let tree = parse_tree_style(
             &[":host{color:red} p, :host(.a){margin:0} ::slotted(i){x:y} .b{z:w}".to_string()],
             None,
+            1.0,
         );
         let inner: Vec<&str> = tree.sheets[0].rules.iter().map(|r| r.selector.as_str()).collect();
         assert_eq!(inner, ["p", ".b"]);

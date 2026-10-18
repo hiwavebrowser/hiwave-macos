@@ -5392,6 +5392,7 @@ version = "0.1.0"
 dependencies = [
  "num_cpus",
  "rustkit-core",
+ "rustkit-css",
  "rustkit-dom",
  "rustkit-js",
  "serde",

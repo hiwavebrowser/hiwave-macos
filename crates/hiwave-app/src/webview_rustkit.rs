@@ -216,6 +216,9 @@ impl RustKitView {
         let view_id = engine
             .create_view(raw_handle, bounds)
             .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
+        // Retina is 2. The page's matchMedia resolution queries and
+        // devicePixelRatio read this; CSS px stay logical.
+        let _ = engine.set_device_pixel_ratio(view_id, window.scale_factor());
 
         info!(?view_id, "RustKit view created");
         let host_view = engine.host_view_raw(view_id);
@@ -536,6 +539,14 @@ impl RustKitView {
         }
         self.live_clock.set(Instant::now());
         Ok(())
+    }
+
+    /// Publish the window's backing scale (`window.devicePixelRatio`).
+    pub fn set_device_pixel_ratio(&self, ratio: f64) {
+        let Some(view_id) = self.view_id else { return };
+        if let Err(e) = self.engine.borrow_mut().set_device_pixel_ratio(view_id, ratio) {
+            debug!(error = %e, "devicePixelRatio update failed");
+        }
     }
 
     /// Set the bounds of the view.

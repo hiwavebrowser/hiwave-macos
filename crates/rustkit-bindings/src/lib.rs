@@ -63,6 +63,8 @@ mod web_streams_tests;
 #[cfg(test)]
 mod web_interfaces_tests;
 #[cfg(test)]
+mod media_query_list_tests;
+#[cfg(test)]
 mod web_blob_tests;
 #[cfg(test)]
 mod web_utils_tests;
@@ -107,6 +109,7 @@ mod mutation_observer_tests;
 #[cfg(test)]
 mod web_messaging_tests;
 mod web_crypto;
+mod web_media;
 mod web_scroll;
 mod web_url;
 
@@ -721,6 +724,9 @@ impl DomBindings {
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
+        // matchMedia over the cascade's media evaluator (web_media.js).
+        // Replaces the stub installed with the window object.
+        web_media::install(&mut runtime)?;
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_with_host(include_str!("web_components.js"))?;
@@ -1523,11 +1529,24 @@ impl DomBindings {
 
         let mut runtime = self.runtime.borrow_mut();
         runtime.evaluate_script(&format!(
-            "window.innerWidth = {}; window.innerHeight = {}; \
-             window.outerWidth = {}; window.outerHeight = {};",
-            width, height, width, height
+            "window.innerWidth = {width}; window.innerHeight = {height}; \
+             window.outerWidth = {width}; window.outerHeight = {height}; \
+             if (window.__rustkit_media_notify) window.__rustkit_media_notify();"
         ))?;
 
+        Ok(())
+    }
+
+    /// Set `window.devicePixelRatio` to the view's backing scale (1 in a
+    /// headless test, 2 on a Retina window) and tell `matchMedia` listeners
+    /// whose resolution query flipped.
+    pub fn set_device_pixel_ratio(&self, ratio: f64) -> Result<(), BindingError> {
+        let ratio = if ratio.is_finite() && ratio > 0.0 { ratio } else { 1.0 };
+        self.window.borrow_mut().device_pixel_ratio = ratio;
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "window.devicePixelRatio = {ratio}; \
+             if (window.__rustkit_media_notify) window.__rustkit_media_notify();"
+        ))?;
         Ok(())
     }
 

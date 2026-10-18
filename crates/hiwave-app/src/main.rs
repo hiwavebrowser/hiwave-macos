@@ -342,6 +342,8 @@ fn apply_layout(
 
     let _ = wry::WebView::set_bounds(chrome, chrome_rect);
     let _ = content.set_bounds(content_rect);
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    content.set_device_pixel_ratio(scale);
     let _ = inspector.set_bounds(inspector_rect);
     let _ = shelf.set_bounds(shelf_rect);
 }

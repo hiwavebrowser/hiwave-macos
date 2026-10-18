@@ -374,9 +374,8 @@ fn resize_count(engine: &Engine, view: EngineViewId) -> u32 {
 
 /// A host frame that reads 1060 while the viewport is still 1280×696 is not
 /// a resize. ResizeObserver callbacks are `observer_callback`, not `resize`.
-/// `matchMedia` does not schedule layout. `devicePixelRatio` stays 1.
-/// Nothing reads `visualViewport`. The layout width stays 1280, so `m:`
-/// does not flip and a scrollbar gutter is not subtracted.
+/// The layout width stays 1280, so `m:` does not flip and a scrollbar gutter
+/// is not subtracted. `matchMedia` reads that same width.
 #[test]
 fn a_stale_host_frame_does_not_resize_an_unchanged_viewport() {
     let (mut engine, view, _server, _rt) = load_sized(BREAKPOINT_PAGE, 1280, 696);
