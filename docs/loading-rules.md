@@ -131,20 +131,21 @@ parent was; the ordering above is the one the spec and that Chrome
 timestamp both allow.
 
 `held_ms` is how long the body sat ready before the main thread noticed
-it. The notice happens while another module's source is scanned, not after
-that module's `Module::parse` returns. The gap from `body_ms` to
-`parsed_ms` is still this module's own parse. A multi-megabyte parse on
-the main thread is that gap. It is not an extra sleep after the body was
-ready, and it is not the replay server: a HAR entry's `time` is slept once
-per response.
+it. The notice happens while another module is being scanned and, every
+64KiB, while `Module::parse` is still reading that module. The child's
+imports start then. The gap from `body_ms` to `parsed_ms` is still this
+module's own scan and Boa's parse. The scan walks bytes and does not allocate
+a string per identifier. What remains is `Module::parse` on the main thread.
+It is not an extra sleep after the body was ready, and it is not the replay
+server: a HAR entry's `time` is slept once per response.
 
 When a module's load promise is still pending, or a fetched dependency
 never runs, `fetched_scripts` records `reason: "waiting on a dependency"`
-and `waiting_on` names the import URLs recorded for that module (a dynamic
-one is prefixed `dynamic`). The name is filled when the trace closes if
-the load promise was never polled. The list is the edges noted when the
-specifier was requested, not a string attached only while the promise was
-still pending.
+and `waiting_on` names that module's own import URLs (a dynamic one is
+prefixed `dynamic`). Each URL is cut to 120 characters, so an inline
+module's `data:` URL does not fill the field. The name is that module's
+edges, not the pending list of a different script. A concat fetched for a
+later dynamic `import()` is not recorded as waiting on the inline module.
 
 A static chain (module A imports B, B imports C) still waits for A's body
 before B's specifier can be read, and for B's body before C's. It does not

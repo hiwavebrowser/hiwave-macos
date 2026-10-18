@@ -440,27 +440,6 @@ pub(crate) const MAX_MODULES_PER_PAGE: usize = 2_000;
 /// modules concurrently).
 const MAX_MODULE_ROUNDS: u32 = 64;
 
-/// Outstanding imports, named on the way out of [`pump_modules`].
-struct RememberWaiting<'a>(&'a DomBindings);
-
-impl Drop for RememberWaiting<'_> {
-    fn drop(&mut self) {
-        let waiting: Vec<String> = self
-            .0
-            .pending_module_imports()
-            .into_iter()
-            .map(|item| {
-                if item.dynamic {
-                    format!("dynamic {}", item.url)
-                } else {
-                    item.url
-                }
-            })
-            .collect();
-        crate::page_trace::note_module_waiting_on(&waiting);
-    }
-}
-
 /// Fetch what a started module graph has asked for until it asks for nothing
 /// more. Static imports of one module are fetched concurrently (HTML "fetch
 /// the descendants of a module script"): each completion is parsed and its
@@ -485,10 +464,10 @@ pub(crate) async fn pump_modules(
     inspector: &Arc<Inspector>,
 ) -> Pump {
     let mut out = Pump::default();
-    // The outstanding import list is named on the way out, including when
-    // the graph is left for a later pump. `DOMContentLoaded` does not wait
-    // for dynamic `import()` (`static_only`).
-    let _remember = RememberWaiting(bindings);
+    // Names on a waiting note come from that module's own import edges when
+    // the trace closes. The pending list is not copied onto every other
+    // module: an inline `data:` import would otherwise be what every later
+    // concat appeared to wait on.
     type Task<'a> = Pin<
         Box<dyn Future<Output = (String, Result<rustkit_bindings::FetchedModule, String>)> + 'a>,
     >;
@@ -601,10 +580,14 @@ pub(crate) async fn pump_modules(
         let Some((url, outcome)) = inflight.next().await else {
             return out;
         };
+        let supplied_ok = outcome.is_ok();
         let (supplied, _) = super::with_script_js(bindings, || {
             catch_unwind(AssertUnwindSafe(|| bindings.supply_module(&url, outcome)))
         });
         crate::page_trace::note_module_fetch(&url, "parsed");
+        if supplied_ok && supplied.is_ok() {
+            crate::page_trace::note_module_ran(&url);
+        }
         if supplied.is_err() {
             out.poisoned = true;
             return out;
