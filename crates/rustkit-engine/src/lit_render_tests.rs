@@ -269,3 +269,75 @@ window.__shape = [
         "block|50|20|block|40|10"
     );
 }
+
+const PLAYER_PAGE: &str = r#"<!DOCTYPE html><html><head>
+<script type="importmap">{
+  "imports": {
+    "lit": "/vendor/lit/index.js",
+    "lit/": "/vendor/lit/",
+    "lit-html": "/vendor/lit-html/lit-html.js",
+    "lit-html/": "/vendor/lit-html/",
+    "lit-element": "/vendor/lit-element/lit-element.js",
+    "lit-element/": "/vendor/lit-element/",
+    "@lit/reactive-element": "/vendor/reactive-element/reactive-element.js",
+    "@lit/reactive-element/": "/vendor/reactive-element/"
+  }
+}</script>
+</head><body>
+<script type="module">
+import { LitElement, html } from 'lit';
+class MediaEvents {
+  constructor(host) { (this.host = host).addController(this); }
+  hostConnected() {
+    const video = this.host.videoElement;
+    window.__saw = video && video._mark ? video._mark : 'null';
+    if (!video) throw new Error('MediaEventsController: videoElement is not defined');
+  }
+}
+class MediaUI extends LitElement {
+  static properties = { videoElement: { attribute: false } };
+  constructor() { super(); this.events = new MediaEvents(this); this._ctorConnected = this.isConnected; }
+  render() { return html`<span></span>`; }
+}
+class Player extends LitElement {
+  constructor() { super(); this.videoElement = document.createElement('video'); this.videoElement._mark = 'vid'; }
+  render() { return html`<x-media .videoElement=${this.videoElement}></x-media>`; }
+}
+customElements.define('x-media', MediaUI);
+customElements.define('x-player', Player);
+const player = document.createElement('x-player');
+document.body.appendChild(player);
+try {
+  await player.updateComplete;
+  const child = player.shadowRoot.querySelector('x-media');
+  window.__lit = [
+    window.__saw,
+    child && child.videoElement === player.videoElement,
+    child && child._ctorConnected
+  ].join('|');
+} catch (e) {
+  window.__lit = 'ERR|' + (e && e.message);
+}
+</script>
+</body></html>"#;
+
+/// The player's template is cloned, `x-media` upgrades while detached, the
+/// `.videoElement` part commits, then the fragment is inserted and
+/// `hostConnected` reads the property. `_ctorConnected` is false: the
+/// constructor ran at clone time, not when the node became connected.
+#[test]
+fn a_lit_child_reads_its_property_binding_from_connected_callback() {
+    let server = serve(PLAYER_PAGE.to_string());
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    if let Err(e) = rt.block_on(engine.load_url(view, url)) {
+        let records = engine.script_log(view);
+        panic!("load_url: {e}\n{records:#?}");
+    }
+    let saw = js(&mut engine, view, "window.__lit || 'missing'");
+    assert_eq!(saw, "vid|true|false", "script log: {:#?}", engine.script_log(view));
+}
