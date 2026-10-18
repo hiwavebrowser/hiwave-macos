@@ -323,6 +323,25 @@ class ConcatTests(unittest.TestCase):
         self.assertEqual(entry["response"]["content"]["text"], "whole-ab")
         self.assertEqual(notes, ["CONCAT cover bodies=1"])
 
+    def test_assembled_time_is_the_max_source_time(self):
+        recorded = self.archive([
+            _har_entry(
+                "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=aaa",
+                _sml("aaa"),
+                time_ms=100,
+            ),
+            _har_entry(
+                "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=bbb",
+                _sml("bbb"),
+                time_ms=4000,
+            ),
+        ])
+        entry, _notes = recorded.take(
+            "GET",
+            "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=aaa,bbb",
+        )
+        self.assertEqual(entry["time"], 4000)
+
     def test_logs_a_chunk_the_har_does_not_have(self):
         recorded = self.archive([
             _har_entry(

@@ -667,7 +667,10 @@ impl Client {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let (reader, mut writer) = tokio::io::split(stream);
-        let mut reader = BufReader::new(reader);
+        // 64KB, not the 8KB default: a module body is one Content-Length
+        // read, and a small buffer only adds round trips. There is no
+        // per-chunk delay here.
+        let mut reader = BufReader::with_capacity(64 * 1024, reader);
 
         // Build request
         let path = if let Some(query) = url.query() {

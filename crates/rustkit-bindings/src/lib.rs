@@ -49,7 +49,7 @@ pub(crate) fn note_location(url: &str, replace: bool) {
 }
 mod net_bridge;
 pub use net_bridge::{NetDelivery, NetRequest};
-pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
+pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState, PendingImport};
 #[cfg(test)]
 mod net_bridge_tests;
 #[cfg(test)]
@@ -98,6 +98,8 @@ mod reflect_tests;
 mod traversal_tests;
 #[cfg(test)]
 mod document_members_tests;
+#[cfg(test)]
+mod web_animations_tests;
 #[cfg(test)]
 mod web_intl_tests;
 #[cfg(test)]
@@ -732,6 +734,9 @@ impl DomBindings {
         // DOMMatrix (web_dommatrix.js): members pages read without feature-testing.
         runtime.evaluate_script(include_str!("web_document.js"))?;
         runtime.evaluate_script(include_str!("web_dommatrix.js"))?;
+        // Element.animate / document.timeline, and window named properties
+        // (an element id is visible as a bare identifier).
+        runtime.evaluate_script(include_str!("web_animations.js"))?;
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
         // insertRule writes into the <style>'s text, which the engine restyles from.
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
@@ -1802,6 +1807,11 @@ impl DomBindings {
     /// The URLs a module graph has asked for since the last call.
     pub fn take_module_requests(&self) -> Vec<String> {
         self.runtime.borrow_mut().take_module_requests()
+    }
+
+    /// Imports whose source has not been supplied yet.
+    pub fn pending_module_imports(&self) -> Vec<PendingImport> {
+        self.runtime.borrow().pending_module_imports()
     }
 
     /// Dynamic `import()` calls that rejected since the last call.
