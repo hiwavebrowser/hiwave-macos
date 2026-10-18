@@ -104,11 +104,25 @@ are present. HiWave does this in one walk:
 `module_timeline` records each of those URLs: `requested_ms` when the
 specifier was known, `start_ms` when the prefetch was queued, `body_ms`
 when the main thread took the bytes, `held_ms` when that body had already
-been sitting ready on the prefetch thread, and `parsed_ms` when the module
-was supplied. The gap between `requested_ms` and `body_ms` is the fetch
-plus any wait until the main thread looked. `held_ms` is that second wait.
-The gap between `body_ms` and `parsed_ms` is parse and compile. A gap
-before `requested_ms` is time until the specifier existed.
+been sitting ready on the prefetch thread, and `parsed_ms` when
+`supply_module` returned. The gap between `requested_ms` and `body_ms` is
+the fetch plus any wait until the main thread looked. `held_ms` is that
+second wait: the loader waiting on the body, not JavaScript. A gap before
+`requested_ms` is time until the specifier existed.
+
+`parsed_ms` is not `Module::parse`. It is stamped when the loader comes
+back, so one module's `parsed_ms` is the next module's `body_ms`. The work
+inside that return is split out: `scan_at_ms` / `scan_ms` is the import
+scan, `parse_at_ms` / `parse_ms` is `Module::parse` only, and `jobs_ms` is
+`run_jobs` (the page's promise jobs and microtasks, including a graph that
+resumed because this body arrived). `link_ms` and `eval_ms` are
+`Module::link` and `Module::evaluate` for that graph root. The same slices
+are `tasks` (`source`, `ms`, `url`, `t_ms`) and, while a window hold is
+open, a `Window thread task` line per slice. Boa 0.22's `boa_gc` exposes
+`force_collect` and no collection time, so a task has no `gc` source. A
+phase of 50 ms or more is also a `hiwave::module` warning, and each phase
+logs a start line so a silent stretch names the phase that is still
+running.
 
 A string-literal `import()` is queued in the same scan, but it does not
 take a connection until the static imports from that scan have stored
@@ -133,11 +147,26 @@ timestamp both allow.
 `held_ms` is how long the body sat ready before the main thread noticed
 it. The notice happens while another module is being scanned and, every
 64KiB, while `Module::parse` is still reading that module. The child's
-imports start then. The gap from `body_ms` to `parsed_ms` is still this
-module's own scan and Boa's parse. The scan walks bytes and does not allocate
-a string per identifier. What remains is `Module::parse` on the main thread.
-It is not an extra sleep after the body was ready, and it is not the replay
-server: a HAR entry's `time` is slept once per response.
+imports start then. The scan walks bytes and does not allocate a string
+per identifier. `parse_ms` is `Module::parse`. Whatever is left of
+`body_ms` to `parsed_ms` after `scan_ms` and `parse_ms` is `jobs_ms`: the
+main thread running JavaScript and its microtasks before the loader
+returns. It is not an extra sleep after the body was ready, and it is not
+the replay server: a HAR entry's `time` is slept once per response.
+
+That `jobs_ms` does not return to the host event loop. `run_jobs` drains
+promise jobs and microtasks, then the pump supplies the next body, all
+inside the one `load` window hold (`load_url` is `block_on` on the window
+thread). A Lit update is one of those microtasks (`await` in
+`requestUpdate`), so a chain of them is one task. Chrome ends the task
+after that checkpoint and can paint before the next module script. The
+chrome UI hook runs during a network wait, not during this JavaScript.
+`HIWAVE_CONTENT_THREAD` (the M4 content thread, not in this branch) would
+move the hold off the window thread, so chrome could paint while the page
+ran. It would not split the page's tasks or paint the content between Lit
+microtasks: the content thread would still drain `run_jobs` before the
+next yield, and a content frame is produced when that thread returns to
+the host.
 
 When a module's load promise is still pending, or a fetched dependency
 never runs, `fetched_scripts` records `reason: "waiting on a dependency"`
