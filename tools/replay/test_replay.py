@@ -20,7 +20,7 @@ sys.path.insert(0, str(HERE))
 
 from diff_trace import first_divergence  # noqa: E402
 from normalize import normalize_url  # noqa: E402
-from server import serve  # noqa: E402
+from server import HarArchive, serve  # noqa: E402
 
 HAR = HERE / "fixtures" / "synthetic.har"
 SECRET = "secret-cookie-value"
@@ -186,6 +186,129 @@ class DiffTests(unittest.TestCase):
         right = self.trace(max_js_stack=400)
         found = first_divergence(self.trace(), right)
         self.assertIn("max_js_stack", found)
+
+    def test_cli_names_chrome_and_hiwave(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            chrome = Path(tmp) / "chrome.json"
+            hiwave = Path(tmp) / "hiwave.json"
+            chrome.write_text(json.dumps(self.trace(browser="chrome", mutations=[])), encoding="utf-8")
+            hiwave.write_text(json.dumps(self.trace()), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(HERE / "diff_trace.py"),
+                    "--chrome",
+                    str(chrome),
+                    "--hiwave",
+                    str(hiwave),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("chrome:", result.stdout)
+        self.assertIn("hiwave:", result.stdout)
+        self.assertNotIn("secret-cookie-value", result.stdout)
+
+
+def _har_entry(url, body, time_ms=0):
+    return {
+        "time": time_ms,
+        "request": {"method": "GET", "url": url, "headers": []},
+        "response": {
+            "status": 200,
+            "statusText": "OK",
+            "headers": [{"name": "Content-Type", "value": "application/javascript"}],
+            "content": {"mimeType": "application/javascript", "text": body},
+        },
+    }
+
+
+def _sml(chunk_id):
+    return f'SML.dm("{chunk_id}",[],()=>{{}});'
+
+
+class ConcatTests(unittest.TestCase):
+    def archive(self, entries):
+        return HarArchive({"log": {"entries": entries}})
+
+    def test_splits_recorded_registrations_into_the_requested_order(self):
+        # Two recorded concat responses. A later request asks for a different
+        # mix and order. The bodies are SML.dm registrations split on the
+        # marker Reddit inserts between chunks.
+        recorded = self.archive([
+            _har_entry(
+                "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=aaa,bbb",
+                _sml("aaa") + "\n/* @sml-chunk */\n" + _sml("bbb"),
+            ),
+            _har_entry(
+                "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=ccc",
+                _sml("ccc"),
+            ),
+        ])
+        entry, notes = recorded.take(
+            "GET",
+            "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=ccc,aaa",
+        )
+        text = entry["response"]["content"]["text"]
+        self.assertLess(text.index('SML.dm("ccc"'), text.index('SML.dm("aaa"'))
+        self.assertNotIn('SML.dm("bbb"', text)
+        self.assertEqual(notes, ["CONCAT split chunks=2"])
+        self.assertNotIn(SECRET, "\n".join(notes))
+
+    def test_cover_uses_the_smallest_set_when_the_body_will_not_split(self):
+        # No module-factory boundary: each recorded body stays whole.
+        recorded = self.archive([
+            _har_entry(
+                "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=aaa,bbb",
+                "whole-ab",
+            ),
+            _har_entry(
+                "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=aaa",
+                "only-a",
+            ),
+            _har_entry(
+                "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=bbb",
+                "only-b",
+            ),
+        ])
+        entry, notes = recorded.take(
+            "GET",
+            "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=bbb,aaa",
+        )
+        self.assertEqual(entry["response"]["content"]["text"], "whole-ab")
+        self.assertEqual(notes, ["CONCAT cover bodies=1"])
+
+    def test_logs_a_chunk_the_har_does_not_have(self):
+        recorded = self.archive([
+            _har_entry(
+                "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=aaa",
+                _sml("aaa"),
+            ),
+        ])
+        entry, notes = recorded.take(
+            "GET",
+            "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=aaa,zzz",
+        )
+        self.assertIn('SML.dm("aaa"', entry["response"]["content"]["text"])
+        self.assertIn("CONCAT cover bodies=1", notes)
+        self.assertIn("CONCAT missing zzz", notes)
+        self.assertNotIn(SECRET, "\n".join(notes))
+
+    def test_an_exact_concat_url_stays_on_the_recorded_body(self):
+        recorded = self.archive([
+            _har_entry(
+                "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=aaa,bbb",
+                "recorded-as-is",
+            ),
+        ])
+        entry, notes = recorded.take(
+            "GET",
+            "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=aaa,bbb",
+        )
+        self.assertEqual(entry["response"]["content"]["text"], "recorded-as-is")
+        self.assertEqual(notes, [])
 
 
 class ChromeHelperTests(unittest.TestCase):

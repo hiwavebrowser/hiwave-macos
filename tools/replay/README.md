@@ -15,6 +15,14 @@ default port removed, fragment removed, query pairs sorted. The nth request
 for a key replays the nth entry, then repeats the last. A miss is logged as
 `MISS METHOD url` (no cookie or authorization values) and answered 404.
 
+`www.redditstatic.com/js/concat?prefix=…&chunks=id,id,…` is built by the
+page, so the chunk list often matches no recorded URL. The server parses
+those ids and, when a recorded body is `SML.dm("id", …)` registrations
+separated by `/* @sml-chunk */`, serves the requested chunks in that order
+(`CONCAT split` on stderr). When the body does not split that cleanly it
+sends the smallest set of recorded concat bodies that cover the request
+(`CONCAT cover`). A chunk that is in neither is logged as `CONCAT missing <id>`.
+
 Recorded response headers are sent. Hop-by-hop headers are dropped and
 `Content-Length` is the body that is written. The entry's `time` (milliseconds)
 is slept, multiplied by `--time-scale` (`0` sends immediately).
@@ -46,14 +54,22 @@ or `HIWAVE_CONSOLE_LOG=1` (one `PAGE_TRACE` line on stderr). Both together
 write the file and the line. The file is replaced as the load proceeds, and
 again when the load returns.
 
-Fields: `browser`, `url`, `ready_state` (`loading` / `interactive` /
-`complete` with `t_ms` from navigation start), `dcl_ms`, `load_ms`, `scripts`
-(`execute`, then `load` or `error`), `console` errors, `mutations` (one record
-per subtree add or remove of more than 50 nodes), `max_js_stack`.
+Fields: `browser`, `url`, `shield` (HiWave's `HIWAVE_SHIELD` choice;
+`off (HIWAVE_REPLAY defaults HIWAVE_SHIELD=off)` when replay is on and the
+shield was left unset; Chrome writes `off (stock Chrome)`), `ready_state`
+(`loading` / `interactive` / `complete` with `t_ms` from navigation start),
+`dcl_ms`, `load_ms`, `scripts` (`execute`, then `load` or `error`),
+`fetched_scripts` (HiWave: each parser script and module dependency, with
+`executed` and, if it did not run, `reason` of `blocked`, `module graph error`,
+`waiting on a dependency`, or `never reached`), `console` errors, `mutations`
+(one record per subtree add or remove of more than 50 nodes), `max_js_stack`.
+The diff does not compare `shield` or `fetched_scripts`.
 
 ```bash
-python3 tools/replay/diff_trace.py /tmp/hiwave.json /tmp/chrome.json
+python3 tools/replay/diff_trace.py --chrome /tmp/chrome.json --hiwave /tmp/hiwave.json
 ```
+
+The report labels the two sides `chrome` and `hiwave`.
 
 The diff prints the first structural mismatch and ignores timestamps. A `load`
 event only one side recorded is skipped when both sides executed that script.

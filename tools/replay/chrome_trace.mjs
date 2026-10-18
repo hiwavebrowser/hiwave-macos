@@ -224,6 +224,7 @@ async function main() {
     console: (probe && probe.console) || [],
     mutations: (probe && probe.mutations) || [],
     max_js_stack: Math.max(profileDepth, (probe && probe.max_js_stack) || 0),
+    shield: "off (stock Chrome)",
   };
   writeFileSync(out, JSON.stringify(trace, null, 2));
   console.log(`CHROME_TRACE ${out}`);
