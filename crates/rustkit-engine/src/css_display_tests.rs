@@ -1503,3 +1503,51 @@ fn a_button_font_variable_is_14px_semibold_not_600px() {
         "credit span stacked one item per line: {credit:?} join {join:?}"
     );
 }
+/// Netflix's hero card is a column flex item, `width: 100%`,
+/// `align-self: center`, `max-width: 31.75rem` from 960px. 31.75rem is 508px.
+/// The card must stay that wide; the heading and the email form wrap inside
+/// it rather than at the min-content of one word.
+#[test]
+fn the_netflix_hero_card_stays_508_wide_at_1060() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#".hero{display:flex;align-items:flex-end;justify-content:center;width:100%}"#,
+        r#".col{display:flex;flex-direction:column;flex:1}"#,
+        r#".wrap{display:flex;flex-direction:column;width:100%;max-width:120rem;"#,
+        r#"justify-content:center;padding:0 2rem 2rem 2rem}"#,
+        r#".card{display:flex;flex-direction:column;width:100%;margin-left:auto;"#,
+        r#"margin-right:auto;text-align:center;align-self:center;position:relative;"#,
+        r#"max-width:100%}"#,
+        r#"@media all and (min-width:600px){.card{max-width:27rem}}"#,
+        r#"@media all and (min-width:960px){.card{max-width:31.75rem}}"#,
+        r#"@media all and (min-width:1280px){.card{max-width:36.75rem}}"#,
+        r#"h1{font-size:2.5rem;font-weight:700;margin:0}"#,
+        r#"form{width:100%;max-width:36.625rem;margin:1rem auto 0}"#,
+        r#"</style><body><div class="hero"><div class="col"><div class="wrap">"#,
+        r#"<div class="card" id="card"><h1 id="h">Unlimited movies, TV shows, and more</h1>"#,
+        r#"<form id="f"><h3>Ready to watch? Enter your email to create or restart your membership.</h3>"#,
+        r#"<input id="email" type="email"></form></div></div></div></div></body>"#,
+    ));
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1060,
+                height: 800,
+            },
+        )
+        .expect("resize");
+    let card = rect(&mut engine, view, "card");
+    let heading = rect(&mut engine, view, "h");
+    let form = rect(&mut engine, view, "f");
+    assert!(
+        (card.2 - 508.0).abs() < 2.0,
+        "hero card is not the 31.75rem max-width: {card:?} h1 {heading:?} form {form:?}"
+    );
+    assert!(
+        heading.2 > 400.0 && form.2 > 400.0,
+        "hero text wrapped to the min-content width: h1 {heading:?} form {form:?}"
+    );
+}
