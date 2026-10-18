@@ -366,6 +366,8 @@ mod script_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod resize_coalesce_tests;
 #[cfg(all(test, feature = "headless"))]
+mod media_match_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_percent_basis_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
@@ -906,6 +908,10 @@ struct ViewState {
     /// `innerHeight`). A later resize at this size is not an event, and a
     /// queued size the view has already left is not dispatched.
     announced_viewport: Option<(u32, u32)>,
+    /// Backing scale (`window.devicePixelRatio`). 1 until the window
+    /// reports its scale (2 on Retina). Resolution media queries and
+    /// `matchMedia` both read it.
+    device_pixel_ratio: f32,
     /// Mac host frame, for tests. Production reads the NSView, and only
     /// when [`place_host_frame`](crate) moved it since the last
     /// `set_view_bounds`. A frame that is not ahead is a stale read and
@@ -2680,6 +2686,7 @@ impl Engine {
             headless_bounds: None,
             pending_resize: None,
             announced_viewport: None,
+            device_pixel_ratio: 1.0,
             #[cfg(test)]
             test_host_frame: None,
             #[cfg(test)]
@@ -2775,6 +2782,7 @@ impl Engine {
             headless_bounds: None,
             pending_resize: None,
             announced_viewport: None,
+            device_pixel_ratio: 1.0,
             #[cfg(test)]
             test_host_frame: None,
             #[cfg(test)]
@@ -2869,6 +2877,7 @@ impl Engine {
             headless_bounds: Some(bounds),
             pending_resize: None,
             announced_viewport: None,
+            device_pixel_ratio: 1.0,
             #[cfg(test)]
             test_host_frame: None,
             #[cfg(test)]
@@ -5311,6 +5320,48 @@ impl Engine {
         Some((bounds.width as f32, bounds.height as f32))
     }
 
+    /// The view's backing scale. Headless views stay at 1 until a test or
+    /// the window sets one.
+    fn view_device_pixel_ratio(&self, id: EngineViewId) -> f32 {
+        self.views
+            .get(&id)
+            .map(|view| view.device_pixel_ratio)
+            .unwrap_or(1.0)
+    }
+
+    /// Publish the window's backing scale. A change lays the document out
+    /// again so a resolution media query and `matchMedia` agree, then tells
+    /// the page. The same ratio twice is not a change.
+    pub fn set_device_pixel_ratio(
+        &mut self,
+        id: EngineViewId,
+        ratio: f64,
+    ) -> Result<(), EngineError> {
+        let ratio = if ratio.is_finite() && ratio > 0.0 {
+            ratio as f32
+        } else {
+            1.0
+        };
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
+        if (view.device_pixel_ratio - ratio).abs() < 0.001 {
+            return Ok(());
+        }
+        view.device_pixel_ratio = ratio;
+        let relayout = view.document.is_some();
+        if relayout {
+            self.relayout_for(id, RelayoutCause::Other("device_pixel_ratio"))?;
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|view| view.bindings.as_ref()) {
+            bindings
+                .set_device_pixel_ratio(ratio as f64)
+                .map_err(|e| EngineError::JsError(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Same, against a named view. Used where the build scope has already
     /// been cleared (display-list assembly runs after the layout build).
     fn resolve_resource_url_in(&self, id: EngineViewId, raw: &str) -> Option<Url> {
@@ -7041,6 +7092,10 @@ impl Engine {
             // `window.innerWidth/innerHeight` are this view's size, not the
             // bindings' 800x600 placeholder: pages pick layouts from them.
             if let Some((width, height)) = self.view_viewport(id) {
+                let dpr = self.view_device_pixel_ratio(id) as f64;
+                bindings
+                    .set_device_pixel_ratio(dpr)
+                    .map_err(|e| EngineError::JsError(e.to_string()))?;
                 bindings
                     .set_dimensions(width as f64, height as f64)
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
@@ -7438,6 +7493,10 @@ impl Engine {
             // `window.innerWidth/innerHeight` are this view's size, not the
             // bindings' 800x600 placeholder: pages pick layouts from them.
             if let Some((width, height)) = self.view_viewport(id) {
+                let dpr = self.view_device_pixel_ratio(id) as f64;
+                bindings
+                    .set_device_pixel_ratio(dpr)
+                    .map_err(|e| EngineError::JsError(e.to_string()))?;
                 bindings
                     .set_dimensions(width as f64, height as f64)
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
@@ -8535,7 +8594,11 @@ impl Engine {
 
     /// Drops the rules (and `@layer` statements) whose `@media` queries do
     /// not match `viewport`; with no viewport, every conditional one.
-    fn keep_rules_for_viewport(stylesheets: &mut [Stylesheet], viewport: Option<(f32, f32)>) {
+    fn keep_rules_for_viewport(
+        stylesheets: &mut [Stylesheet],
+        viewport: Option<(f32, f32)>,
+        dpr: f32,
+    ) {
         for sheet in stylesheets.iter_mut() {
             // A layer named inside an `@media` block that doesn't apply is
             // not declared, so its statement goes too. A statement's position
@@ -8546,7 +8609,7 @@ impl Engine {
                 for rule in &sheet.rules {
                     kept_before.push(kept);
                     if rule.media.is_empty()
-                        || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))
+                        || viewport.is_some_and(|(w, h)| rule.applies_with(w, h, dpr))
                     {
                         kept += 1;
                     }
@@ -8554,12 +8617,12 @@ impl Engine {
                 kept_before.push(kept);
                 sheet.layer_statements.retain_mut(|s| {
                     s.position = kept_before[s.position.min(kept_before.len() - 1)];
-                    s.media.is_empty() || viewport.is_some_and(|(w, h)| s.applies_at(w, h))
+                    s.media.is_empty() || viewport.is_some_and(|(w, h)| s.applies_with(w, h, dpr))
                 });
             }
             sheet.rules.retain(|rule| {
                 rule.media.is_empty()
-                    || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))
+                    || viewport.is_some_and(|(w, h)| rule.applies_with(w, h, dpr))
             });
         }
     }
@@ -8583,11 +8646,17 @@ impl Engine {
             .building_view
             .get()
             .and_then(|id| self.view_viewport(id));
+        let dpr = self
+            .building_view
+            .get()
+            .map(|id| self.view_device_pixel_ratio(id))
+            .unwrap_or(1.0);
         let memo_key = StyleMemoKey {
             view: self.building_view.get(),
             document: document as *const Document,
             external_sheets: external_stylesheets.len(),
             viewport,
+            dpr,
             focus: self.building_focus.get(),
             hover: self
                 .building_view
@@ -8646,7 +8715,7 @@ impl Engine {
             }
         }
 
-        Self::keep_rules_for_viewport(&mut stylesheets, viewport);
+        Self::keep_rules_for_viewport(&mut stylesheets, viewport, dpr);
         // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
         rustkit_css::assign_layer_order(&mut stylesheets);
         // The document tree's sheets. Shared, so the build can hand them
@@ -8657,6 +8726,7 @@ impl Engine {
             document,
             &stylesheets,
             viewport,
+            dpr,
             self.config.javascript_enabled,
         );
 
@@ -34691,6 +34761,9 @@ struct StyleMemoKey {
     document: *const Document,
     external_sheets: usize,
     viewport: Option<(f32, f32)>,
+    /// Device pixel ratio. Resolution media queries depend on it, so a
+    /// move onto a Retina display must not replay a 1x cascade.
+    dpr: f32,
     focus: Option<rustkit_dom::NodeId>,
     /// The hovered and the pressed element: `:hover` and `:active` style
     /// them and the elements above them.
@@ -35556,6 +35629,7 @@ mod incremental_restyle_tests {
                 focus: None,
                 hover: None,
                 active: None,
+                dpr: 1.0,
                 fonts: 0,
             };
             let mut changed = original.clone();
@@ -35578,6 +35652,7 @@ mod incremental_restyle_tests {
         assert_restarts("view", |key| key.view = Some(EngineViewId::new()));
         assert_restarts("external sheets", |key| key.external_sheets = 1);
         assert_restarts("viewport", |key| key.viewport = Some((800.0, 600.0)));
+        assert_restarts("device pixel ratio", |key| key.dpr = 2.0);
         assert_restarts("focus", |key| {
             key.focus = Some(rustkit_dom::NodeId::new(1))
         });
@@ -35841,6 +35916,7 @@ mod incremental_restyle_tests {
             focus: None,
             hover: None,
             active: None,
+            dpr: 1.0,
             fonts: 0,
         };
         let recorded_node = rustkit_dom::NodeId::new(7);
@@ -35898,6 +35974,7 @@ mod incremental_restyle_tests {
                 focus: None,
                 hover: None,
                 active: None,
+                dpr: 1.0,
                 fonts: 0,
             })
             .expect("records");

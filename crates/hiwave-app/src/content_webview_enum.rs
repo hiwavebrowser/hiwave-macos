@@ -72,6 +72,14 @@ impl ContentWebView {
         }
     }
 
+    /// The window's backing scale, for `devicePixelRatio` and resolution
+    /// media queries. A WRY content view has its own.
+    pub fn set_device_pixel_ratio(&self, ratio: f64) {
+        if let ContentWebView::RustKit(view) = self {
+            view.set_device_pixel_ratio(ratio);
+        }
+    }
+
     /// Render (for RustKit)
     #[allow(dead_code)]
     pub fn render(&self) {

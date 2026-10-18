@@ -301,7 +301,9 @@ impl JsRuntime {
         // The engine's promise, not the page's: a failure is the module's
         // error, never an unhandled rejection.
         self.rejections.forget(&JsObject::from(load.clone()));
+        let jobs_started = std::time::Instant::now();
         let _ = self.context.run_jobs();
+        note_module_phase(url, "jobs", phase_ms(jobs_started));
         self.consume_interrupt();
         self.modules.entries.insert(
             url.to_string(),
@@ -448,14 +450,22 @@ impl JsRuntime {
                 }
             }
         }
+        // Page JS resumed by this body (a graph whose load or evaluation
+        // was waiting) runs here, before the loader returns. `parsed` on
+        // the trace is that return, so this duration is the silent gap
+        // between the body and the next module.
+        let jobs_started = std::time::Instant::now();
         let _ = self.context.run_jobs();
+        note_module_phase(requested, "jobs", phase_ms(jobs_started));
     }
 
     /// Advance a started module as far as it can go and say where it is:
     /// once its graph is loaded it is linked and evaluated.
     pub fn poll_module(&mut self, handle: &ModuleHandle) -> ModuleState {
         let _loader = push_active_loader(self.modules.loader.clone());
+        let jobs_started = std::time::Instant::now();
         let _ = self.context.run_jobs();
+        note_module_phase(&handle.0, "jobs", phase_ms(jobs_started));
         self.consume_interrupt();
         let Some(entry) = self.modules.entries.get_mut(&handle.0) else {
             return ModuleState::Failed("unknown module".into());
@@ -477,7 +487,10 @@ impl JsRuntime {
                 PromiseState::Fulfilled(_) => {}
             }
             let module = entry.module.clone();
-            if let Err(e) = module.link(&mut self.context) {
+            let link_started = std::time::Instant::now();
+            let linked = module.link(&mut self.context);
+            note_module_phase(&handle.0, "link", phase_ms(link_started));
+            if let Err(e) = linked {
                 self.report_error(&e);
                 let message = describe(&e, &mut self.context);
                 if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
@@ -486,7 +499,10 @@ impl JsRuntime {
                 return ModuleState::Failed(message);
             }
             self.context.reset_recursion_max();
-            let evaluation = match module.evaluate(&mut self.context) {
+            let eval_started = std::time::Instant::now();
+            let evaluated = module.evaluate(&mut self.context);
+            note_module_phase(&handle.0, "eval", phase_ms(eval_started));
+            let evaluation = match evaluated {
                 Ok(p) => {
                     self.rejections.forget(&JsObject::from(p.clone()));
                     p
@@ -500,7 +516,9 @@ impl JsRuntime {
                     return ModuleState::Failed(message);
                 }
             };
+            let jobs_started = std::time::Instant::now();
             let _ = self.context.run_jobs();
+            note_module_phase(&handle.0, "jobs", phase_ms(jobs_started));
             self.consume_interrupt();
             if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                 entry.evaluation = Some(evaluation);
@@ -638,11 +656,14 @@ pub fn scan_module_imports(module_url: &str, source: &str) {
     // Hold the scan open until every specifier in this source is queued,
     // so a dynamic `import()` cannot take a connection ahead of a static
     // import written later in the same file.
+    note_module_phase(module_url, "scan-start", 0);
+    let scan_started = std::time::Instant::now();
     note_module_scan(true);
     let _scan = ModuleScanGuard;
     for (specifier, dynamic) in import_specifiers(source) {
         prefetch_specifier_kind(module_url, &specifier, !dynamic);
     }
+    note_module_phase(module_url, "scan", phase_ms(scan_started));
 }
 
 struct ModuleScanGuard;
@@ -735,6 +756,34 @@ fn note_module_scan(begin: bool) {
     // SAFETY: `ptr` was stored from `fn(bool)`, or it is null and we returned.
     let hook: fn(bool) = unsafe { std::mem::transmute(ptr) };
     hook(begin);
+}
+
+/// `(url, phase, ms)`. `phase` is `scan-start`, `scan`, `parse-start`,
+/// `parse`, `jobs`, `link`, or `eval`. `ms` is the duration; start phases
+/// pass 0.
+pub fn set_module_phase_hook(hook: Option<fn(&str, &'static str, u64)>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    PHASE_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
+}
+
+static PHASE_HOOK: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+fn note_module_phase(url: &str, phase: &'static str, ms: u64) {
+    let ptr = PHASE_HOOK.load(std::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() || url.is_empty() {
+        return;
+    }
+    // SAFETY: `ptr` was stored from `fn(&str, &'static str, u64)`, or it is null and we returned.
+    let hook: fn(&str, &'static str, u64) = unsafe { std::mem::transmute(ptr) };
+    hook(url, phase, ms);
+}
+
+fn phase_ms(started: std::time::Instant) -> u64 {
+    started.elapsed().as_millis() as u64
 }
 
 fn note_module_url(url: &str, critical: bool, referrer: &str) {
@@ -836,7 +885,11 @@ impl Read for YieldingSource<'_> {
 fn parse_module_source(url: &str, source: &str, context: &mut Context) -> JsResult<Module> {
     let path = Path::new(url);
     let reader = YieldingSource::new(source.as_bytes());
-    Module::parse(Source::from_reader(reader, Some(path)), None, context)
+    note_module_phase(url, "parse-start", 0);
+    let started = std::time::Instant::now();
+    let parsed = Module::parse(Source::from_reader(reader, Some(path)), None, context);
+    note_module_phase(url, "parse", phase_ms(started));
+    parsed
 }
 
 /// `(specifier, dynamic)`. `dynamic` is a string-literal `import()`.
@@ -1180,6 +1233,55 @@ mod host_tests {
             hits >= 2,
             "parse of {} bytes yielded {hits} times",
             body.len()
+        );
+    }
+
+    /// The public Bv concat, fetched as its three chunk files. Debug times
+    /// are slower than a Mac release build; the split is what matters.
+    #[test]
+    fn reddit_bv_body_splits_scan_from_parse_and_jobs() {
+        let dir = std::path::Path::new("/tmp/reddit-chunks");
+        let ids = ["BvOWmaNPEJ.js", "DZDBx0nCO6.js", "Dyg3q1gB6W.js"];
+        if ids.iter().any(|name| !dir.join(name).is_file()) {
+            eprintln!("BV_BENCH skipped (no /tmp/reddit-chunks)");
+            return;
+        }
+        let mut body = String::new();
+        for name in ids {
+            if !body.is_empty() {
+                body.push_str("\n/* @sml-chunk */\n");
+            }
+            body.push_str(&std::fs::read_to_string(dir.join(name)).unwrap());
+        }
+        let started = std::time::Instant::now();
+        let specs = super::import_specifiers(&body);
+        let scan_ms = started.elapsed().as_millis();
+        let url = "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks=BvOWmaNPEJ,DZDBx0nCO6,Dyg3q1gB6W";
+        let parent = "https://www.redditstatic.com/parent.js";
+        let mut rt = JsRuntime::new().expect("runtime");
+        rt.set_module_base("https://www.redditstatic.com/");
+        let started = std::time::Instant::now();
+        let handle = rt
+            .begin_module(parent, &format!("import '{url}';"))
+            .expect("parent");
+        let parent_ms = started.elapsed().as_millis();
+        assert_eq!(rt.poll_module(&handle), ModuleState::Loading);
+        let started = std::time::Instant::now();
+        rt.supply_module(
+            url,
+            Ok(super::FetchedModule {
+                final_url: url.to_string(),
+                source: body.clone(),
+            }),
+        );
+        let supply_ms = started.elapsed().as_millis();
+        let started = std::time::Instant::now();
+        let state = rt.poll_module(&handle);
+        let poll_ms = started.elapsed().as_millis();
+        eprintln!(
+            "BV_BENCH bytes={} specs={} scan_ms={scan_ms} parent_ms={parent_ms} supply_ms={supply_ms} poll_ms={poll_ms} state={state:?}",
+            body.len(),
+            specs.len()
         );
     }
 }

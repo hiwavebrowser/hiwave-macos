@@ -63,6 +63,8 @@ mod web_streams_tests;
 #[cfg(test)]
 mod web_interfaces_tests;
 #[cfg(test)]
+mod media_query_list_tests;
+#[cfg(test)]
 mod web_blob_tests;
 #[cfg(test)]
 mod web_utils_tests;
@@ -108,7 +110,10 @@ mod web_intl_tests;
 mod mutation_observer_tests;
 #[cfg(test)]
 mod web_messaging_tests;
+#[cfg(test)]
+mod job_kind_tests;
 mod web_crypto;
+mod web_media;
 mod web_scroll;
 mod web_url;
 
@@ -503,7 +508,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
         if (typeof cb !== 'function') throw new TypeError("Failed to execute 'queueMicrotask' on 'Window': The callback provided as parameter 1 is not a function.");
-        Promise.resolve().then(function () { try { cb(); } catch (e) { report(e); } });
+        Promise.resolve().then(function queueMicrotask() { try { cb(); } catch (e) { report(e); } });
     };
 
     function call(timer) {
@@ -723,6 +728,9 @@ impl DomBindings {
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
+        // matchMedia over the cascade's media evaluator (web_media.js).
+        // Replaces the stub installed with the window object.
+        web_media::install(&mut runtime)?;
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_with_host(include_str!("web_components.js"))?;
@@ -1528,11 +1536,24 @@ impl DomBindings {
 
         let mut runtime = self.runtime.borrow_mut();
         runtime.evaluate_script(&format!(
-            "window.innerWidth = {}; window.innerHeight = {}; \
-             window.outerWidth = {}; window.outerHeight = {};",
-            width, height, width, height
+            "window.innerWidth = {width}; window.innerHeight = {height}; \
+             window.outerWidth = {width}; window.outerHeight = {height}; \
+             if (window.__rustkit_media_notify) window.__rustkit_media_notify();"
         ))?;
 
+        Ok(())
+    }
+
+    /// Set `window.devicePixelRatio` to the view's backing scale (1 in a
+    /// headless test, 2 on a Retina window) and tell `matchMedia` listeners
+    /// whose resolution query flipped.
+    pub fn set_device_pixel_ratio(&self, ratio: f64) -> Result<(), BindingError> {
+        let ratio = if ratio.is_finite() && ratio > 0.0 { ratio } else { 1.0 };
+        self.window.borrow_mut().device_pixel_ratio = ratio;
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "window.devicePixelRatio = {ratio}; \
+             if (window.__rustkit_media_notify) window.__rustkit_media_notify();"
+        ))?;
         Ok(())
     }
 
@@ -1877,6 +1898,9 @@ impl DomBindings {
             "window.__rustkit_run_timers({}, {})",
             horizon_ms, max_callbacks
         ))?;
+        // Atomics.waitAsync and any other Boa timeout job. The page's own
+        // setTimeout already ran above; these are not microtasks of it.
+        self.runtime.borrow_mut().run_due_timer_jobs()?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
             _ => 0,
@@ -1891,10 +1915,21 @@ impl DomBindings {
             "window.__rustkit_advance_timers({}, {})",
             delta_ms, max_callbacks
         ))?;
+        self.runtime.borrow_mut().run_due_timer_jobs()?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
             _ => 0,
         })
+    }
+
+    /// Boa timer jobs that are due (not the page's `setTimeout` queue).
+    pub fn run_due_timer_jobs(&self) -> Result<u32, BindingError> {
+        self.runtime.borrow_mut().run_due_timer_jobs().map_err(Into::into)
+    }
+
+    /// The microtask checkpoint that most recently finished on this thread.
+    pub fn last_job_census(&self) -> rustkit_js::JobCensus {
+        self.runtime.borrow().last_job_census()
     }
 
     /// Milliseconds until the page's next timer is due on the virtual clock

@@ -28,7 +28,7 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use rustkit_bindings::{DomBindings, NetDelivery, NetRequest};
 use rustkit_net::policy::{FetchPolicy, RequestMode, ResponseKind, ScriptRequest, ScriptResponse};
 use rustkit_net::{CredentialsMode, RedirectMode, Request, RequestDestination, RequestId, ResourceLoader};
-use tracing::debug;
+use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::inspector::{self, FailureStage, Inspector, ResourceType};
@@ -1525,8 +1525,35 @@ fn ensure_module_prefetch_hook() {
         rustkit_js::set_module_url_hook(Some(start_module_prefetch));
         rustkit_js::set_module_scan_hook(Some(module_scan_boundary));
         rustkit_js::set_module_yield_hook(Some(observe_ready_module_bodies));
+        rustkit_js::set_module_phase_hook(Some(note_module_phase));
         rustkit_js::install_import_specifier_hook();
     });
+}
+
+fn note_module_phase(url: &str, phase: &'static str, ms: u64) {
+    crate::page_trace::note_module_phase(url, phase, ms);
+    crate::wgate::note_task(phase, url, ms);
+    let count = url.chars().count();
+    let brief = if count > 160 {
+        let head: String = url.chars().take(70).collect();
+        let tail: String = url.chars().skip(count.saturating_sub(80)).collect();
+        format!("{head}…{tail}")
+    } else {
+        url.to_string()
+    };
+    // Start lines exist so a multi-second gap names the phase that is still
+    // running. A finished slice of 50 ms or more is a warning, same threshold
+    // as a window hold, so a release log that hides info still shows it.
+    if phase.ends_with("start") {
+        info!(target: "hiwave::module", "module {phase} url={brief}");
+    } else if ms >= 50 && phase == "jobs" {
+        let census = rustkit_js::job_census_summary();
+        warn!(target: "hiwave::module", "module {phase} url={brief} ms={ms} {census}");
+    } else if ms >= 50 {
+        warn!(target: "hiwave::module", "module {phase} url={brief} ms={ms}");
+    } else {
+        info!(target: "hiwave::module", "module {phase} url={brief} ms={ms}");
+    }
 }
 
 fn module_scan_boundary(begin: bool) {

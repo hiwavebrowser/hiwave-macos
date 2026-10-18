@@ -119,9 +119,19 @@ impl fmt::Display for HoldMs {
     }
 }
 
+struct HoldTask {
+    source: &'static str,
+    detail: String,
+    ms: u64,
+}
+
 thread_local! {
     /// The stage milliseconds of the hold in progress on this thread.
     static HOLD_MS: Cell<HoldMs> = const { Cell::new(HoldMs { ms: [0.0; STAGES] }) };
+    /// Module work measured inside the outermost hold: scan, parse, jobs,
+    /// link, evaluate. `boa_gc` 0.22 exposes `force_collect` and no
+    /// collection time, so a task never has a `gc` source.
+    static HOLD_TASKS: std::cell::RefCell<Vec<HoldTask>> = const { std::cell::RefCell::new(Vec::new()) };
     /// How many [`WindowHold`] guards are open; only the outermost
     /// reports.
     static HOLD_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -202,6 +212,7 @@ pub(crate) fn hold(entry: &'static str) -> WindowHold {
     });
     if outermost {
         HOLD_MS.with(|c| c.set(HoldMs::default()));
+        HOLD_TASKS.with(|tasks| tasks.borrow_mut().clear());
     }
     WindowHold {
         entry,
@@ -220,12 +231,51 @@ impl Drop for WindowHold {
         let stages = HOLD_MS.with(|c| c.replace(HoldMs::default()));
         #[cfg(test)]
         LAST_ENTRY.with(|c| c.set(Some(self.entry)));
+        let tasks = HOLD_TASKS.with(|tasks| std::mem::take(&mut *tasks.borrow_mut()));
         if let Some(line) = hold_line(self.entry, total_ms, &stages) {
             #[cfg(test)]
             LAST_HOLD.with(|c| c.set(Some((self.entry, total_ms))));
             tracing::warn!("{line}");
+            for task in tasks {
+                tracing::warn!(
+                    "Window thread task source={} ms={} url={}",
+                    task.source,
+                    task.ms,
+                    task.detail
+                );
+            }
         }
     }
+}
+
+/// One slice of module work on this thread, recorded into the open window
+/// hold. `source` is `scan`, `parse`, `jobs`, `link`, or `eval`.
+pub(crate) fn note_task(source: &'static str, detail: &str, ms: u64) {
+    if ms == 0 || HOLD_DEPTH.with(|d| d.get()) == 0 {
+        return;
+    }
+    HOLD_TASKS.with(|tasks| {
+        let mut tasks = tasks.borrow_mut();
+        if tasks.len() >= 2_000 {
+            return;
+        }
+        tasks.push(HoldTask {
+            source,
+            detail: brief_task_url(detail),
+            ms,
+        });
+    });
+}
+
+fn brief_task_url(url: &str) -> String {
+    const MAX: usize = 160;
+    let count = url.chars().count();
+    if count <= MAX {
+        return url.to_string();
+    }
+    let head: String = url.chars().take(70).collect();
+    let tail: String = url.chars().skip(count - 80).collect();
+    format!("{head}…{tail}")
 }
 
 /// The log line of a hold, or `None` under the threshold. Pure, so the

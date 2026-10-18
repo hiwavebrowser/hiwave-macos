@@ -172,6 +172,9 @@ struct FetchedNote {
     inline_slot: Option<u32>,
     /// Outstanding import URLs when `reason` is `waiting on a dependency`.
     waiting_on: Option<String>,
+    /// `supply_module` returned for this URL. Static imports may still be
+    /// outstanding, so `executed` stays false until those have run too.
+    ran: bool,
 }
 
 #[derive(Clone)]
@@ -190,6 +193,31 @@ struct ModuleFetch {
     /// How long the body sat ready on the prefetch thread before the main
     /// thread took it. `body_ms` is that later observation.
     held_ms: Option<u64>,
+    /// Import scan, separate from `Module::parse`. Durations, summed if the
+    /// source is scanned more than once.
+    scan_ms: Option<u64>,
+    /// `Module::parse` only. The yield hook's nested scans are `scan_ms` on
+    /// the other module, not part of this number.
+    parse_ms: Option<u64>,
+    /// `Context::run_jobs` while this module was being supplied or polled:
+    /// promise jobs and microtasks, including a graph that resumed because
+    /// this body arrived.
+    jobs_ms: Option<u64>,
+    /// `Module::link` for this graph root.
+    link_ms: Option<u64>,
+    /// `Module::evaluate` for this graph root, before the jobs that follow it.
+    eval_ms: Option<u64>,
+    /// Milliseconds from navigation start when the import scan began.
+    scan_at_ms: Option<u64>,
+    /// Milliseconds from navigation start when `Module::parse` began.
+    parse_at_ms: Option<u64>,
+}
+
+struct TaskEv {
+    t_ms: u64,
+    source: &'static str,
+    ms: u64,
+    url: String,
 }
 
 struct ParserEv {
@@ -211,6 +239,7 @@ struct Active {
     mutations: Vec<(u64, &'static str, usize, String)>,
     parser: Vec<ParserEv>,
     modules: Vec<ModuleFetch>,
+    tasks: Vec<TaskEv>,
     render: Option<serde_json::Value>,
     next_order: u32,
     pending: Vec<Pending>,
@@ -392,6 +421,7 @@ pub(crate) fn begin(url: &str) -> Option<Session> {
             mutations: Vec::new(),
             parser: Vec::new(),
             modules: Vec::new(),
+            tasks: Vec::new(),
             render: None,
             next_order: 0,
             pending: Vec::new(),
@@ -547,11 +577,11 @@ pub(crate) fn resolve_module_graph(root: &str, executed: bool, reason: Option<&'
     if !enabled() {
         return;
     }
-    let root = clamp(root);
+    let root = root.to_string();
     with_active(|active| {
         let edges = active.imports.clone();
         for note in &mut active.fetched {
-            if !note.dependency || note.executed || note.reason.is_some() {
+            if !note.dependency || note.executed || blocked_reason(note.reason) {
                 continue;
             }
             if note.url != root && !static_descendant(&edges, &root, &note.url) {
@@ -559,15 +589,19 @@ pub(crate) fn resolve_module_graph(root: &str, executed: bool, reason: Option<&'
             }
             if executed {
                 note.executed = true;
+                note.ran = true;
                 note.reason = None;
                 note.waiting_on = None;
             } else if let Some(reason) = reason {
-                note.reason = Some(reason);
+                if note.reason.is_none() {
+                    note.reason = Some(reason);
+                }
             }
         }
         if reason == Some("waiting on a dependency") {
             assign_waiting(active);
         }
+        settle_ran(active);
     });
 }
 
@@ -579,21 +613,34 @@ pub(crate) fn resolve_module_dependencies(executed: bool, reason: Option<&'stati
     }
     with_active(|active| {
         for note in &mut active.fetched {
-            if !note.dependency || note.executed || note.reason.is_some() {
+            if !note.dependency || note.executed || blocked_reason(note.reason) {
                 continue;
             }
             if executed {
                 note.executed = true;
+                note.ran = true;
                 note.reason = None;
                 note.waiting_on = None;
             } else if let Some(reason) = reason {
-                note.reason = Some(reason);
+                if note.reason.is_none() {
+                    note.reason = Some(reason);
+                }
             }
         }
         if reason == Some("waiting on a dependency") {
             assign_waiting(active);
         }
+        settle_ran(active);
     });
+}
+
+/// A module-graph error or a block stays. `waiting on a dependency` is
+/// provisional: the graph can still run, and a later success clears it.
+fn blocked_reason(reason: Option<&'static str>) -> bool {
+    match reason {
+        None | Some("waiting on a dependency") => false,
+        Some(_) => true,
+    }
 }
 
 fn apply_outcome(url: &str, record: &ScriptRecord, callback: bool) -> bool {
@@ -727,6 +774,7 @@ fn remember(
             detail: None,
             inline_slot: None,
             waiting_on: None,
+            ran: false,
         });
     });
 }
@@ -742,10 +790,10 @@ fn short_waiting(text: &str) -> String {
     out
 }
 
-fn waiting_label(edges: &[ModuleEdge], url: &str) -> Option<String> {
+fn waiting_label(edges: &[ModuleEdge], executed: &[String], url: &str) -> Option<String> {
     let mut names = Vec::new();
     for edge in edges {
-        if edge.parent != url {
+        if edge.parent != url || executed.iter().any(|done| done == &edge.child) {
             continue;
         }
         let raw = if edge.dynamic {
@@ -790,15 +838,59 @@ fn static_descendant(edges: &[ModuleEdge], root: &str, url: &str) -> bool {
 
 fn assign_waiting(active: &mut Active) {
     let edges = active.imports.clone();
+    let executed: Vec<String> = active
+        .fetched
+        .iter()
+        .filter(|note| note.executed)
+        .map(|note| note.url.clone())
+        .collect();
     for note in &mut active.fetched {
         if note.reason != Some("waiting on a dependency") || note.waiting_on.is_some() {
             continue;
         }
-        note.waiting_on = waiting_label(&edges, &note.url);
+        note.waiting_on = waiting_label(&edges, &executed, &note.url);
+    }
+}
+
+/// A module whose body was supplied becomes executed once every static
+/// import it recorded has executed. One pass is not enough: the parent is
+/// updated after the child.
+fn settle_ran(active: &mut Active) {
+    loop {
+        let executed: Vec<String> = active
+            .fetched
+            .iter()
+            .filter(|note| note.executed)
+            .map(|note| note.url.clone())
+            .collect();
+        let ready: Vec<String> = active
+            .fetched
+            .iter()
+            .filter(|note| note.ran && !note.executed && !blocked_reason(note.reason))
+            .map(|note| note.url.clone())
+            .filter(|url| {
+                !active.imports.iter().any(|edge| {
+                    edge.parent == *url && !edge.dynamic && !executed.iter().any(|done| done == &edge.child)
+                })
+            })
+            .collect();
+        if ready.is_empty() {
+            break;
+        }
+        for url in ready {
+            if let Some(note) = active.fetched.iter_mut().find(|note| note.url == url) {
+                note.executed = true;
+                if note.reason == Some("waiting on a dependency") {
+                    note.reason = None;
+                }
+                note.waiting_on = None;
+            }
+        }
     }
 }
 
 fn fill_unexecuted(active: &mut Active) {
+    settle_ran(active);
     for note in &mut active.fetched {
         if note.executed || note.reason.is_some() || !note.fetched {
             continue;
@@ -1021,27 +1113,17 @@ pub(crate) fn note_inline_slot(url: &str, slot: u32) {
 
 /// One moment in a module fetch: `requested`, `start`, `body`, or `parsed`.
 /// Recorded on the thread that observed it. The prefetch thread does not
-/// call this.
+/// call this. `parsed` is when `supply_module` returns, not when
+/// `Module::parse` returns: the scan, the parse, and `run_jobs` sit between
+/// `body` and `parsed`.
 pub(crate) fn note_module_fetch(url: &str, phase: &str) {
     if !enabled() || url.is_empty() {
         return;
     }
-    let url = clamp(url);
+    let url = url.to_string();
     with_active(|active| {
         let now = active.elapsed();
-        if active.modules.iter().all(|entry| entry.url != url) {
-            if active.modules.len() >= MAX_SCRIPTS {
-                return;
-            }
-            active.modules.push(ModuleFetch {
-                url: url.clone(),
-                requested_ms: None,
-                start_ms: None,
-                body_ms: None,
-                parsed_ms: None,
-                held_ms: None,
-            });
-        }
+        ensure_module(active, &url);
         let Some(entry) = active.modules.iter_mut().find(|entry| entry.url == url) else {
             return;
         };
@@ -1058,13 +1140,88 @@ pub(crate) fn note_module_fetch(url: &str, phase: &str) {
     });
 }
 
+fn ensure_module(active: &mut Active, url: &str) {
+    if active.modules.iter().any(|entry| entry.url == url) {
+        return;
+    }
+    if active.modules.len() >= MAX_SCRIPTS {
+        return;
+    }
+    active.modules.push(ModuleFetch {
+        url: url.to_string(),
+        requested_ms: None,
+        start_ms: None,
+        body_ms: None,
+        parsed_ms: None,
+        held_ms: None,
+        scan_ms: None,
+        parse_ms: None,
+        jobs_ms: None,
+        link_ms: None,
+        eval_ms: None,
+        scan_at_ms: None,
+        parse_at_ms: None,
+    });
+}
+
+fn add_ms(slot: &mut Option<u64>, ms: u64) {
+    *slot = Some(slot.unwrap_or(0).saturating_add(ms));
+}
+
+/// A timed slice of module work. `phase` is `scan-start`, `scan`,
+/// `parse-start`, `parse`, `jobs`, `link`, or `eval`. Durations are
+/// milliseconds the caller measured. `boa_gc` does not report collection
+/// time, so there is no `gc` phase.
+pub(crate) fn note_module_phase(url: &str, phase: &'static str, ms: u64) {
+    if !enabled() || url.is_empty() {
+        return;
+    }
+    let url = url.to_string();
+    with_active(|active| {
+        let now = active.elapsed();
+        ensure_module(active, &url);
+        let Some(entry) = active.modules.iter_mut().find(|entry| entry.url == url) else {
+            return;
+        };
+        match phase {
+            "scan-start" => {
+                if entry.scan_at_ms.is_none() {
+                    entry.scan_at_ms = Some(now);
+                }
+            }
+            "parse-start" => {
+                if entry.parse_at_ms.is_none() {
+                    entry.parse_at_ms = Some(now);
+                }
+            }
+            "scan" => add_ms(&mut entry.scan_ms, ms),
+            "parse" => add_ms(&mut entry.parse_ms, ms),
+            "jobs" => add_ms(&mut entry.jobs_ms, ms),
+            "link" => add_ms(&mut entry.link_ms, ms),
+            "eval" => add_ms(&mut entry.eval_ms, ms),
+            _ => return,
+        }
+        if phase.ends_with("start") || ms == 0 {
+            return;
+        }
+        if active.tasks.len() < MAX_PARSER {
+            active.tasks.push(TaskEv {
+                t_ms: now.saturating_sub(ms),
+                source: phase,
+                ms,
+                url: short_waiting(&url),
+            });
+        }
+    });
+}
+
 /// The prefetch thread stored this body `held_ms` before the main thread
 /// observed it (`body_ms`).
 pub(crate) fn note_module_held(url: &str, held_ms: u64) {
     if !enabled() || url.is_empty() {
         return;
     }
-    let url = clamp(url);
+    let url = url.to_string();
     with_active(|active| {
         if let Some(entry) = active.modules.iter_mut().find(|entry| entry.url == url) {
             if entry.held_ms.is_none() {
@@ -1080,8 +1237,8 @@ pub(crate) fn note_module_import(parent: &str, child: &str, dynamic: bool) {
     if !enabled() || parent.is_empty() || child.is_empty() || parent == child {
         return;
     }
-    let parent = clamp(parent);
-    let child = clamp(child);
+    let parent = parent.to_string();
+    let child = child.to_string();
     with_active(|active| {
         if let Some(edge) = active
             .imports
@@ -1111,7 +1268,7 @@ pub(crate) fn note_module_waiting_on(owner: &str, urls: &[String]) {
     if !enabled() || owner.is_empty() || urls.is_empty() {
         return;
     }
-    let owner = clamp(owner);
+    let owner = owner.to_string();
     let joined = short_waiting(
         &urls.iter().take(8).map(|url| short_waiting(url)).collect::<Vec<_>>().join(", "),
     );
@@ -1130,7 +1287,7 @@ pub(crate) fn note_module_ran(url: &str) {
     if !enabled() || url.is_empty() {
         return;
     }
-    let url = clamp(url);
+    let url = url.to_string();
     with_active(|active| {
         let waiting_static = active.imports.iter().any(|edge| {
             edge.parent == url && !edge.dynamic && {
@@ -1142,16 +1299,35 @@ pub(crate) fn note_module_ran(url: &str) {
                     .unwrap_or(true)
             }
         });
-        if waiting_static {
-            return;
-        }
         if let Some(note) = active.fetched.iter_mut().find(|note| note.url == url) {
-            note.executed = true;
-            if note.reason == Some("waiting on a dependency") {
-                note.reason = None;
+            note.ran = true;
+            if waiting_static {
+                if note.reason.is_none() {
+                    note.reason = Some("waiting on a dependency");
+                }
+            } else {
+                note.executed = true;
+                if note.reason == Some("waiting on a dependency") {
+                    note.reason = None;
+                }
+                note.waiting_on = None;
             }
-            note.waiting_on = None;
         }
+        if waiting_static {
+            let edges = active.imports.clone();
+            let executed: Vec<String> = active
+                .fetched
+                .iter()
+                .filter(|note| note.executed)
+                .map(|note| note.url.clone())
+                .collect();
+            if let Some(note) = active.fetched.iter_mut().find(|note| note.url == url) {
+                if note.waiting_on.is_none() {
+                    note.waiting_on = waiting_label(&edges, &executed, &note.url);
+                }
+            }
+        }
+        settle_ran(active);
     });
 }
 
@@ -1362,6 +1538,23 @@ fn snapshot(active: &Active) -> Snapshot {
                 body_ms: entry.body_ms,
                 parsed_ms: entry.parsed_ms,
                 held_ms: entry.held_ms,
+                scan_ms: entry.scan_ms,
+                parse_ms: entry.parse_ms,
+                jobs_ms: entry.jobs_ms,
+                link_ms: entry.link_ms,
+                eval_ms: entry.eval_ms,
+                scan_at_ms: entry.scan_at_ms,
+                parse_at_ms: entry.parse_at_ms,
+            })
+            .collect(),
+        tasks: active
+            .tasks
+            .iter()
+            .map(|task| TaskEv {
+                t_ms: task.t_ms,
+                source: task.source,
+                ms: task.ms,
+                url: task.url.clone(),
             })
             .collect(),
         console: active.console.clone(),
@@ -1396,6 +1589,7 @@ struct Snapshot {
         Option<String>,
     )>,
     modules: Vec<ModuleFetch>,
+    tasks: Vec<TaskEv>,
     console: Vec<(u64, String)>,
     mutations: Vec<(u64, &'static str, usize, String)>,
     parser: Vec<(&'static str, u64, String)>,
@@ -1451,6 +1645,23 @@ fn emit_snapshot(active: &Snapshot, max_js_stack: usize, console: bool) {
                 body_ms: entry.body_ms,
                 parsed_ms: entry.parsed_ms,
                 held_ms: entry.held_ms,
+                scan_at_ms: entry.scan_at_ms,
+                scan_ms: entry.scan_ms,
+                parse_at_ms: entry.parse_at_ms,
+                parse_ms: entry.parse_ms,
+                jobs_ms: entry.jobs_ms,
+                link_ms: entry.link_ms,
+                eval_ms: entry.eval_ms,
+            })
+            .collect(),
+        tasks: active
+            .tasks
+            .iter()
+            .map(|task| TaskJson {
+                t_ms: task.t_ms,
+                source: task.source,
+                ms: task.ms,
+                url: &task.url,
             })
             .collect(),
         shield: shield_label(),
@@ -1521,6 +1732,11 @@ struct TraceJson<'a> {
     fetched_scripts: Vec<FetchedJson<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     module_timeline: Vec<ModuleJson<'a>>,
+    /// One slice of main-thread module work inside the load. `source` is
+    /// `scan`, `parse`, `jobs`, `link`, or `eval`. Boa 0.22's `boa_gc`
+    /// exposes `force_collect` and no collection time, so there is no `gc` row.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tasks: Vec<TaskJson<'a>>,
     shield: &'a str,
     console: Vec<ConsoleJson<'a>>,
     mutations: Vec<MutationJson<'a>>,
@@ -1574,6 +1790,28 @@ struct ModuleJson<'a> {
     parsed_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     held_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scan_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scan_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parse_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parse_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jobs_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eval_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct TaskJson<'a> {
+    t_ms: u64,
+    source: &'a str,
+    ms: u64,
+    url: &'a str,
 }
 
 #[derive(Serialize)]
@@ -1750,6 +1988,13 @@ mod tests {
         note_module_dependency("https://example.test/concat.js", Some(200));
         note_module_fetch("https://example.test/child.js", "body");
         note_module_held("https://example.test/child.js", 40);
+        note_module_phase("https://example.test/child.js", "scan-start", 0);
+        note_module_phase("https://example.test/child.js", "scan", 4);
+        note_module_phase("https://example.test/child.js", "parse-start", 0);
+        note_module_phase("https://example.test/child.js", "parse", 61);
+        note_module_phase("https://example.test/child.js", "jobs", 3100);
+        note_module_phase("https://example.test/app.js", "link", 12);
+        note_module_phase("https://example.test/app.js", "eval", 40);
         drop(_session);
         let body = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -1796,10 +2041,85 @@ mod tests {
             .find(|item| item["url"] == "https://example.test/child.js")
             .expect("child module");
         assert_eq!(child["held_ms"], 40);
+        assert_eq!(child["scan_ms"], 4);
+        assert_eq!(child["parse_ms"], 61);
+        assert_eq!(child["jobs_ms"], 3100);
+        assert!(child["scan_at_ms"].is_number());
+        assert!(child["parse_at_ms"].is_number());
+        let app = timeline
+            .iter()
+            .find(|item| item["url"] == "https://example.test/app.js")
+            .expect("graph root");
+        assert_eq!(app["link_ms"], 12);
+        assert_eq!(app["eval_ms"], 40);
+        let tasks = value["tasks"].as_array().unwrap();
+        assert!(tasks.iter().any(|task| task["source"] == "parse" && task["ms"] == 61));
+        assert!(tasks.iter().any(|task| task["source"] == "jobs" && task["ms"] == 3100));
         let scripts = value["scripts"].as_array().unwrap();
         assert!(scripts.iter().any(|script| script["url"] == "https://example.test/ran.js" && script["event"] == "execute"));
         assert!(!scripts.iter().any(|script| script["url"] == "inline#9" && script["event"] == "execute"));
         assert!(value["shield"].is_string());
+    }
+
+    #[test]
+    fn a_long_concat_url_keeps_its_name_and_runs_when_its_imports_do() {
+        let path = std::env::temp_dir().join(format!("hiwave-trace-{}-long.json", std::process::id()));
+        let _force = force_file_for_test(&path);
+        let _session = begin("https://example.test/long").unwrap();
+        // Longer than the 400-character text clamp. The fetched note, the
+        // import edge, and the execute stamp have to be the same string.
+        let long = format!(
+            "https://www.redditstatic.com/js/concat?prefix=en-US/&chunks={}",
+            "1Dk7H_9PMe,".repeat(40)
+        );
+        assert!(long.len() > 400, "{}", long.len());
+        let child = format!("{long}&next=child");
+        note_module_dependency(&long, Some(200));
+        note_module_import(&long, &child, false);
+        note_module_dependency(&child, Some(200));
+        note_module_ran(&long);
+        note_module_import("https://example.test/root.js", &long, false);
+        note_module_dependency("https://example.test/root.js", Some(200));
+        // The child has not run, so the long module stays waiting and names it.
+        drop(_session);
+        let waiting: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let fetched = waiting["fetched_scripts"].as_array().unwrap();
+        let long_note = fetched.iter().find(|item| item["url"] == long).expect("long url");
+        assert_eq!(long_note["executed"], false);
+        assert_eq!(long_note["reason"], "waiting on a dependency");
+        let waiting_on = long_note["waiting_on"].as_str().unwrap();
+        assert!(waiting_on.contains("1Dk7H_9PMe"), "{waiting_on}");
+        assert!(waiting_on.chars().count() <= 120, "{}", waiting_on.chars().count());
+        let _ = std::fs::remove_file(&path);
+
+        let path = std::env::temp_dir().join(format!("hiwave-trace-{}-long-ran.json", std::process::id()));
+        let _force = force_file_for_test(&path);
+        let _session = begin("https://example.test/long-ran").unwrap();
+        note_module_dependency(&long, Some(200));
+        note_module_import(&long, &child, false);
+        note_module_dependency(&child, Some(200));
+        note_module_ran(&child);
+        note_module_ran(&long);
+        resolve_module_graph("https://example.test/root.js", true, None);
+        // An earlier waiting stamp must not stick once the graph runs.
+        note_module_dependency("https://example.test/stuck.js", Some(200));
+        resolve_module_dependencies(false, Some("waiting on a dependency"));
+        resolve_module_dependencies(true, None);
+        drop(_session);
+        let ran: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let fetched = ran["fetched_scripts"].as_array().unwrap();
+        let long_note = fetched.iter().find(|item| item["url"] == long).expect("long url");
+        assert_eq!(long_note["executed"], true, "{long_note}");
+        assert!(long_note.get("waiting_on").is_none(), "{long_note}");
+        assert!(long_note.get("reason").is_none(), "{long_note}");
+        let stuck = fetched
+            .iter()
+            .find(|item| item["url"] == "https://example.test/stuck.js")
+            .expect("stuck");
+        assert_eq!(stuck["executed"], true, "{stuck}");
     }
 
     #[test]

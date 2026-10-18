@@ -2962,9 +2962,14 @@ pub struct LayerStatement {
 impl LayerStatement {
     /// Whether the statement's `@media` conditions hold (as `Rule::applies_at`).
     pub fn applies_at(&self, width: f32, height: f32) -> bool {
+        self.applies_with(width, height, 1.0)
+    }
+
+    /// [`applies_at`] at device pixel ratio `dpr`.
+    pub fn applies_with(&self, width: f32, height: f32, dpr: f32) -> bool {
         self.media
             .iter()
-            .all(|m| media::media_query_list_matches(m, width, height))
+            .all(|m| media::media_query_list_matches_with(m, width, height, dpr))
     }
 }
 
@@ -3050,9 +3055,14 @@ impl Rule {
     /// Whether the rule's `@media` conditions hold for a viewport of
     /// `width` x `height` CSS px.
     pub fn applies_at(&self, width: f32, height: f32) -> bool {
+        self.applies_with(width, height, 1.0)
+    }
+
+    /// [`applies_at`] at device pixel ratio `dpr`.
+    pub fn applies_with(&self, width: f32, height: f32, dpr: f32) -> bool {
         self.media
             .iter()
-            .all(|m| media::media_query_list_matches(m, width, height))
+            .all(|m| media::media_query_list_matches_with(m, width, height, dpr))
     }
 }
 
@@ -3129,7 +3139,7 @@ pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
 pub mod media;
-pub use media::media_query_list_matches;
+pub use media::{media_query_list_matches, media_query_list_matches_with};
 
 pub mod content;
 pub mod selector_escape;
