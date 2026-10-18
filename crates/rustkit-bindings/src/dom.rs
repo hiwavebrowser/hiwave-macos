@@ -22,10 +22,10 @@
 //! the NodeId, so wrappers and the identity cache are untouched by them.
 
 use crate::{inner_text, DomDirty, MutationKind, ScriptMutations};
-use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
+use rustkit_dom::{Document, Node, NodeId, NodeType};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 mod node_apis;
@@ -126,6 +126,12 @@ pub(crate) struct DomHost {
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
+    /// The document's associated inert template document (HTML §4.12.3).
+    /// One per bound document; template contents and their clones live
+    /// there until adopted into a real document.
+    inert_document: RefCell<Option<Rc<Node>>>,
+    /// Node ids whose node document is `inert_document`.
+    inert_nodes: RefCell<HashSet<usize>>,
 }
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
@@ -150,9 +156,21 @@ impl DomHost {
 
     /// Bind `document`, returning the new generation.
     pub(crate) fn bind(&mut self, document: Rc<Document>) -> u32 {
-        let templates = self.templates.get_mut();
-        templates.clear();
-        adopt_template_contents(&document, document.root(), templates);
+        self.inert_nodes.borrow_mut().clear();
+        *self.inert_document.borrow_mut() = None;
+        {
+            let mut templates = self.templates.borrow_mut();
+            templates.clear();
+            let mut inert_doc = self.inert_document.borrow_mut();
+            let mut inert_nodes = self.inert_nodes.borrow_mut();
+            adopt_template_contents(
+                &document,
+                document.root(),
+                &mut templates,
+                &mut inert_doc,
+                &mut inert_nodes,
+            );
+        }
         self.document = Some(document);
         self.generation += 1;
         self.values.clear();
@@ -306,6 +324,7 @@ fn pre_insert(
     parent: &Rc<Node>,
     node: &Rc<Node>,
     child: Option<Rc<Node>>,
+    inert: &mut HashSet<usize>,
 ) -> Result<(), &'static str> {
     // Only elements and fragments take children here; a Document's
     // one-element rules come with a later rung.
@@ -335,12 +354,17 @@ fn pre_insert(
     } else {
         vec![node.clone()]
     };
+    // Adopting into `parent` switches the node document: template contents
+    // stay in the inert document, everything else belongs to the window
+    // document (or a DOMParser document, which is not in this set).
+    let parent_inert = inert.contains(&parent.id.raw());
     for node in nodes {
         node.remove_from_parent();
         match &child {
-            Some(c) => parent.insert_before(node, c.clone()),
-            None => parent.append_child(node),
+            Some(c) => parent.insert_before(node.clone(), c.clone()),
+            None => parent.append_child(node.clone()),
         }
+        mark_tree(&node, inert, parent_inert);
     }
     Ok(())
 }
@@ -357,12 +381,15 @@ fn is_template(node: &Node) -> bool {
 /// a DocumentFragment outside the tree, not to the element. Gives every
 /// template in `root`'s subtree (`root` included, and templates nested in
 /// the moved content) a content fragment and moves its children there.
-/// Run on freshly parsed nodes only: children script appends to a
-/// template later stay real children, as in the spec.
+/// Those nodes' node document is the inert template document. Run on
+/// freshly parsed nodes only: children script appends to a template later
+/// stay real children, as in the spec.
 fn adopt_template_contents(
     document: &Document,
     root: &Rc<Node>,
     templates: &mut HashMap<usize, Rc<Node>>,
+    inert_doc: &mut Option<Rc<Node>>,
+    inert_nodes: &mut HashSet<usize>,
 ) {
     let mut pending = vec![root.clone()];
     while let Some(node) = pending.pop() {
@@ -375,11 +402,76 @@ fn adopt_template_contents(
                 child.remove_from_parent();
                 content.append_child(child);
             }
+            ensure_inert_document(document, inert_doc);
+            mark_tree(&content, inert_nodes, true);
             pending.push(content);
         }
         pending.extend(node.shadow_root());
         pending.extend(node.children());
     }
+}
+
+/// The one inert template document for this window document. Created on
+/// the first `<template>` contents, not at bind, so a page with no
+/// template pays nothing.
+fn ensure_inert_document(document: &Document, slot: &mut Option<Rc<Node>>) -> Rc<Node> {
+    if let Some(doc) = slot.clone() {
+        return doc;
+    }
+    let doc = document.create_node(NodeType::Document);
+    *slot = Some(doc.clone());
+    doc
+}
+
+/// Put `node` and its descendants (shadow trees included, template
+/// contents not: those have their own fragment) in or out of the inert
+/// template document.
+fn mark_tree(node: &Rc<Node>, inert: &mut HashSet<usize>, mark: bool) {
+    if mark {
+        inert.insert(node.id.raw());
+    } else {
+        inert.remove(&node.id.raw());
+    }
+    if let Some(root) = node.shadow_root() {
+        mark_tree(&root, inert, mark);
+    }
+    for child in node.children() {
+        mark_tree(&child, inert, mark);
+    }
+}
+
+/// A simple selector the document-wide fallback understands: a tag
+/// (ASCII-case-insensitive, `*` for every element), `#id`, `.class`, or
+/// a comma-separated list of those. Combinators and pseudos are left to
+/// the engine matcher; without one they match nothing.
+fn simple_selector_matches(node: &Rc<Node>, selector: &str) -> bool {
+    selector.split(',').any(|part| simple_selector_one(node, part.trim()))
+}
+
+fn simple_selector_one(node: &Rc<Node>, selector: &str) -> bool {
+    if selector.is_empty() || !node.is_element() {
+        return false;
+    }
+    if selector == "*" {
+        return true;
+    }
+    if let Some(id) = selector.strip_prefix('#') {
+        return !id.is_empty() && node.get_attribute("id") == Some(id);
+    }
+    if let Some(class) = selector.strip_prefix('.') {
+        return !class.is_empty()
+            && node
+                .get_attribute("class")
+                .is_some_and(|c| c.split_whitespace().any(|cls| cls == class));
+    }
+    if selector
+        .chars()
+        .any(|c| matches!(c, ' ' | '>' | '+' | '~' | '[' | ':' | '|' | '#' | '.'))
+    {
+        return false;
+    }
+    node.tag_name()
+        .is_some_and(|t| t.eq_ignore_ascii_case(selector))
 }
 
 /// `mutate(gen, op, parentId, nodeId, childId)`: one tree write. Answers
@@ -394,7 +486,8 @@ fn mutate(host: &DomHost, args: &[JsValue]) -> Result<(), &'static str> {
                 None | Some(JsValue::Null) | Some(JsValue::Undefined) => None,
                 Some(_) => Some(host.node_at(args, 4).ok_or("NotFoundError")?),
             };
-            pre_insert(&parent, &node, child)
+            let mut inert = host.inert_nodes.borrow_mut();
+            pre_insert(&parent, &node, child, &mut inert)
         }
         Some("remove") if is_child_of(&node, &parent) => {
             node.remove_from_parent();
@@ -439,9 +532,17 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             let html = string_arg(args, 3).unwrap_or("");
             let nodes = document.parse_fragment(html, context).map_err(|_| "SyntaxError")?;
             let fragment = document.create_node(NodeType::DocumentFragment);
-            let templates = &mut host.templates.borrow_mut();
+            let mut templates = host.templates.borrow_mut();
+            let mut inert_doc = host.inert_document.borrow_mut();
+            let mut inert_nodes = host.inert_nodes.borrow_mut();
             for child in nodes {
-                adopt_template_contents(document, &child, templates);
+                adopt_template_contents(
+                    document,
+                    &child,
+                    &mut templates,
+                    &mut inert_doc,
+                    &mut inert_nodes,
+                );
                 fragment.append_child(child);
             }
             return Ok((node_id(Some(fragment)), DomDirty::Clean));
@@ -449,11 +550,19 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         if kind == "document" {
             let parsed = Document::parse_html(&data).map_err(|_| "SyntaxError")?;
             let doc = document.create_node(NodeType::Document);
-            let templates = &mut host.templates.borrow_mut();
+            let mut templates = host.templates.borrow_mut();
+            let mut inert_doc = host.inert_document.borrow_mut();
+            let mut inert_nodes = host.inert_nodes.borrow_mut();
             for child in parsed.root().children() {
                 // The parsed tree's NodeIds are its own: clone with an
                 // empty template table, then give its templates content.
-                doc.append_child(clone_node(document, &child, true, &mut HashMap::new()));
+                doc.append_child(clone_node(
+                    document,
+                    &child,
+                    true,
+                    &mut HashMap::new(),
+                    &mut HashSet::new(),
+                ));
             }
             // An HTML document always has a body, but rustkit-html drops
             // it (and the text) for text-only input; supply an empty one.
@@ -470,7 +579,13 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
                     }));
                 }
             }
-            adopt_template_contents(document, &doc, templates);
+            adopt_template_contents(
+                document,
+                &doc,
+                &mut templates,
+                &mut inert_doc,
+                &mut inert_nodes,
+            );
             return Ok((node_id(Some(doc)), DomDirty::Clean));
         }
         let node_type = match kind {
@@ -488,7 +603,18 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         };
         // A detached node is in no tree, so nothing needs a restyle yet.
         let node = document.create_node(node_type);
-        adopt_template_contents(document, &node, &mut host.templates.borrow_mut());
+        {
+            let mut templates = host.templates.borrow_mut();
+            let mut inert_doc = host.inert_document.borrow_mut();
+            let mut inert_nodes = host.inert_nodes.borrow_mut();
+            adopt_template_contents(
+                document,
+                &node,
+                &mut templates,
+                &mut inert_doc,
+                &mut inert_nodes,
+            );
+        }
         return Ok((node_id(Some(node)), DomDirty::Clean));
     }
     let node = host.node_at(args, 2).ok_or("NotFoundError")?;
@@ -554,22 +680,29 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             }
             let data = string_arg(args, 3).unwrap_or("");
             if !data.is_empty() {
-                node.append_child(document.create_node(NodeType::Text(data.to_string())));
+                let text = document.create_node(NodeType::Text(data.to_string()));
+                node.append_child(text.clone());
+                if host.inert_nodes.borrow().contains(&node.id.raw()) {
+                    host.inert_nodes.borrow_mut().insert(text.id.raw());
+                }
             }
             Ok((JsValue::Null, DomDirty::Style))
         }
         // Documents and doctypes ignore textContent writes.
         ("setText", _) => Ok((JsValue::Null, DomDirty::Clean)),
         // Cloning a document needs a second Document; not yet.
-        ("clone", NodeType::Document) => Err("NotSupportedError"),
+        ("clone" | "import", NodeType::Document) => Err("NotSupportedError"),
         // The clone is detached, so nothing needs a restyle yet.
-        ("clone", _) => {
+        // `import` adopts the copy into this window document (DOM importNode).
+        ("clone" | "import", _) => {
             let deep = matches!(args.get(3), Some(JsValue::Boolean(true)));
-            let templates = &mut host.templates.borrow_mut();
-            Ok((
-                node_id(Some(clone_node(document, &node, deep, templates))),
-                DomDirty::Clean,
-            ))
+            let mut templates = host.templates.borrow_mut();
+            let mut inert_nodes = host.inert_nodes.borrow_mut();
+            let copy = clone_node(document, &node, deep, &mut templates, &mut inert_nodes);
+            if op == "import" {
+                mark_tree(&copy, &mut inert_nodes, false);
+            }
+            Ok((node_id(Some(copy)), DomDirty::Clean))
         }
         // HTML §8.5 innerHTML setter: parse as the element's contents (the
         // fragment parsing algorithm), then replace all children with it.
@@ -579,7 +712,9 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             let nodes = document
                 .parse_fragment(html, tag_name)
                 .map_err(|_| "SyntaxError")?;
-            let templates = &mut host.templates.borrow_mut();
+            let mut templates = host.templates.borrow_mut();
+            let mut inert_doc = host.inert_document.borrow_mut();
+            let mut inert_nodes = host.inert_nodes.borrow_mut();
             let target = templates
                 .get(&node.id.raw())
                 .cloned()
@@ -591,15 +726,40 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             for child in target.children() {
                 child.remove_from_parent();
             }
+            let target_inert = inert_nodes.contains(&target.id.raw());
             for child in nodes {
-                adopt_template_contents(document, &child, templates);
-                target.append_child(child);
+                adopt_template_contents(
+                    document,
+                    &child,
+                    &mut templates,
+                    &mut inert_doc,
+                    &mut inert_nodes,
+                );
+                target.append_child(child.clone());
+                if target_inert {
+                    mark_tree(&child, &mut inert_nodes, true);
+                }
             }
             Ok((JsValue::Null, DomDirty::Style))
         }
         ("setInnerText", NodeType::Element { .. }) => {
             inner_text::set_inner_text(document, &node, string_arg(args, 3).unwrap_or(""));
+            if host.inert_nodes.borrow().contains(&node.id.raw()) {
+                let mut inert = host.inert_nodes.borrow_mut();
+                for child in node.children() {
+                    mark_tree(&child, &mut inert, true);
+                }
+            }
             Ok((JsValue::Null, DomDirty::Style))
+        }
+        // A node created by the inert template document belongs to it.
+        ("claimInert", _) => {
+            {
+                let mut slot = host.inert_document.borrow_mut();
+                ensure_inert_document(document, &mut slot);
+            }
+            host.inert_nodes.borrow_mut().insert(node.id.raw());
+            Ok((JsValue::Null, DomDirty::Clean))
         }
         _ => Err("NotSupportedError"),
     }
@@ -773,15 +933,21 @@ fn clone_node(
     node: &Rc<Node>,
     deep: bool,
     templates: &mut HashMap<usize, Rc<Node>>,
+    inert: &mut HashSet<usize>,
 ) -> Rc<Node> {
     let copy = document.create_node(node.node_type.clone());
+    // A clone keeps the source's node document (DOM clone). importNode
+    // clears that afterwards.
+    if inert.contains(&node.id.raw()) {
+        inert.insert(copy.id.raw());
+    }
     if deep {
         for child in node.children() {
-            copy.append_child(clone_node(document, &child, true, templates));
+            copy.append_child(clone_node(document, &child, true, templates, inert));
         }
     }
     if let Some(content) = templates.get(&node.id.raw()).cloned() {
-        let content = clone_node(document, &content, deep, templates);
+        let content = clone_node(document, &content, deep, templates, inert);
         templates.insert(copy.id.raw(), content);
     }
     copy
@@ -957,7 +1123,13 @@ fn escape_into(s: &str, attribute: bool, out: &mut String) {
 }
 
 /// `info(gen, id, field)`: one read of one node.
-fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>) -> JsValue {
+fn node_info(
+    node: &Rc<Node>,
+    field: &str,
+    templates: &HashMap<usize, Rc<Node>>,
+    inert_owner: Option<usize>,
+    is_inert_doc: bool,
+) -> JsValue {
     match field {
         "type" => JsValue::Number(match node.node_type {
             NodeType::Element { .. } => 1.0,
@@ -1022,6 +1194,13 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
             JsValue::String(out)
         }
         "content" => node_id(templates.get(&node.id.raw()).cloned()),
+        // The inert template document this node belongs to, or null.
+        "inertOwner" => match inert_owner {
+            Some(id) => JsValue::Number(id as f64),
+            None => JsValue::Null,
+        },
+        // This node is the inert template document itself.
+        "inertDoc" => JsValue::Boolean(is_inert_doc),
         "innerText" if node.is_element() => JsValue::String(inner_text::inner_text(node)),
         _ => JsValue::Undefined,
     }
@@ -1114,18 +1293,31 @@ pub(crate) fn install(
             };
             let arg = string_arg(args, 3).unwrap_or("");
             let kind = string_arg(args, 2);
-            if let (Some("selector"), Some(matcher)) = (kind, host.matcher.as_ref())
-            {
+            if kind == Some("selector") {
                 // The scope itself decides validity, so an invalid selector
                 // throws even where nothing could match. Matching reads each
                 // element's whole ancestor chain, so `.outer p` scoped to
                 // an inner element still sees `.outer` above the scope.
-                if matcher(&scope, arg, &host.checked).is_none() {
-                    return JsValue::Boolean(false);
+                // Descendants, not the document: a query on a detached
+                // element, a fragment, template contents, or a shadow root
+                // must see that tree.
+                if let Some(matcher) = host.matcher.as_ref() {
+                    if matcher(&scope, arg, &host.checked).is_none() {
+                        return JsValue::Boolean(false);
+                    }
+                    let mut all = Vec::new();
+                    descendant_elements(&scope, &mut all);
+                    return id_list(
+                        all.into_iter()
+                            .filter(|n| matcher(n, arg, &host.checked) == Some(true)),
+                    );
                 }
                 let mut all = Vec::new();
                 descendant_elements(&scope, &mut all);
-                return id_list(all.into_iter().filter(|n| matcher(n, arg, &host.checked) == Some(true)));
+                return id_list(
+                    all.into_iter()
+                        .filter(|n| simple_selector_matches(n, arg)),
+                );
             }
             // Element.getElementsByTagName / getElementsByClassName are the
             // element's descendants, including a tree that is not in the
@@ -1159,7 +1351,6 @@ pub(crate) fn install(
                     }
                     Some("tag") => document.get_elements_by_tag_name(arg),
                     Some("class") => document.get_elements_by_class_name(arg),
-                    Some("selector") => QuerySelector::select(document, arg),
                     _ => return JsValue::Null,
                 }
             };
@@ -1183,14 +1374,12 @@ pub(crate) fn install(
             let (Some(node), Some(selector)) = (host.node(args), string_arg(args, 2)) else {
                 return JsValue::Null;
             };
-            let matched = match (&host.matcher, &host.document) {
-                (Some(matcher), _) => matcher(&node, selector, &host.checked),
-                (None, Some(document)) => Some(
-                    QuerySelector::select(document, selector)
-                        .iter()
-                        .any(|n| n.id == node.id),
-                ),
-                (None, None) => return JsValue::Null,
+            // The node itself, not a document search: `matches` and
+            // `closest` have to answer for an element that is not in the
+            // document yet.
+            let matched = match &host.matcher {
+                Some(matcher) => matcher(&node, selector, &host.checked),
+                None => Some(simple_selector_matches(&node, selector)),
             };
             match matched {
                 Some(b) => JsValue::Boolean(b),
@@ -1229,7 +1418,20 @@ pub(crate) fn install(
                     }
                     None => JsValue::String(String::new()),
                 },
-                (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
+                (Some(node), Some(field)) => {
+                    let is_inert_doc = host
+                        .inert_document
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|d| d.id == node.id);
+                    let inert_owner = if host.inert_nodes.borrow().contains(&node.id.raw()) {
+                        host.inert_document.borrow().as_ref().map(|d| d.id.raw())
+                    } else {
+                        None
+                    };
+                    let templates = host.templates.borrow();
+                    node_info(&node, field, &templates, inert_owner, is_inert_doc)
+                }
                 _ => JsValue::Null,
             }
         }),
@@ -1640,6 +1842,12 @@ const WRAPPERS_JS: &str = r#"
                   : Node.prototype;
         w = Object.create(proto);
         Object.defineProperty(w, SLOT, { value: { id: id, gen: gen } });
+        // The inert template document has no browsing context (HTML §4.12.3).
+        if (t === 9 && N.info(gen, id, 'inertDoc')) {
+            Object.defineProperty(w, 'defaultView', {
+                get: function () { return null; }, configurable: true, enumerable: true
+            });
+        }
         cache.set(id, w);
         return w;
     }
@@ -1736,13 +1944,16 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this);
         return list(NodeList.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', false);
     });
-    // A node in a DOMParser document is owned by it; every other node by
-    // the global document.
+    // A node in a DOMParser document is owned by it. Template contents
+    // (and clones that have not been adopted) are owned by the inert
+    // template document. Every other node by the global document.
     getter(Node.prototype, 'ownerDocument', function () {
         if (info(this, 'type') === 9) return null;
         var n = this;
         while (n.parentNode) n = n.parentNode;
-        return n.nodeType === 9 ? n : g.document;
+        if (n.nodeType === 9) return n;
+        var owner = info(this, 'inertOwner');
+        return typeof owner === 'number' ? wrap(owner) : g.document;
     });
     Node.prototype.hasChildNodes = function () { return this.firstChild !== null; };
 
@@ -2034,7 +2245,7 @@ const WRAPPERS_JS: &str = r#"
             n = host;
             while (n.parentNode) n = n.parentNode;
         }
-        return n.nodeType === 9 && slotOf(n).gen === gen;
+        return n.nodeType === 9 && slotOf(n).gen === gen && !info(n, 'inertDoc');
     });
 
     // HTML §4.12.3 template.content: the fragment its parsed children
@@ -2748,17 +2959,23 @@ const WRAPPERS_JS: &str = r#"
         }
         return null;
     };
+    // Nodes created by the inert template document belong to it.
+    function claim(doc, node) {
+        if (node && info(doc, 'inertDoc')) setData(node, 'claimInert', '', null, 'createElement');
+        return node;
+    }
     Document.prototype.createElement = function (tag) {
         tag = String(tag);
         var el = create('element', tag, 'createElement');
+        claim(this, el);
         if (HOOKS.scripts) HOOKS.scripts.created(el);
         return el;
     };
     Document.prototype.createTextNode = function (data) {
-        return create('text', String(data), 'createTextNode');
+        return claim(this, create('text', String(data), 'createTextNode'));
     };
     Document.prototype.createComment = function (data) {
-        return create('comment', String(data), 'createComment');
+        return claim(this, create('comment', String(data), 'createComment'));
     };
     // DOM §4.5 importNode: a copy for this document. Nodes here all share
     // the one Rust Document, so importing is cloning.
@@ -2768,10 +2985,12 @@ const WRAPPERS_JS: &str = r#"
             throw new DOMException("Failed to execute 'importNode' on 'Document': " +
                 'The node provided is a document, which may not be imported.', 'NotSupportedError');
         }
-        return node.cloneNode(!!deep);
+        var copy = wrap(setData(node, 'import', !!deep, null, 'importNode'));
+        if (HOOKS.scripts) HOOKS.scripts.cloned(node, copy);
+        return copy;
     };
     Document.prototype.createDocumentFragment = function () {
-        return create('fragment', '', 'createDocumentFragment');
+        return claim(this, create('fragment', '', 'createDocumentFragment'));
     };
     // DOM Range (DOM §5) and createContextualFragment (DOM Parsing). A new
     // range is collapsed at the start of its document. createContextualFragment

@@ -72,7 +72,18 @@ pub(super) fn install(runtime: &mut JsRuntime, host: &SharedDomHost) -> Result<(
                         namespace: namespace.to_string(),
                         attributes: Default::default(),
                     });
-                    adopt_template_contents(document, &node, &mut host.templates.borrow_mut());
+                    {
+                        let mut templates = host.templates.borrow_mut();
+                        let mut inert_doc = host.inert_document.borrow_mut();
+                        let mut inert_nodes = host.inert_nodes.borrow_mut();
+                        adopt_template_contents(
+                            document,
+                            &node,
+                            &mut templates,
+                            &mut inert_doc,
+                            &mut inert_nodes,
+                        );
+                    }
                     node_id(Some(node))
                 }
                 _ => JsValue::Null,

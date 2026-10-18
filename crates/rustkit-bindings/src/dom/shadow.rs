@@ -55,6 +55,11 @@ pub(super) fn install(
                     };
                     match document.attach_shadow(&node, init) {
                         Ok(root) => {
+                            // A shadow root shares its host's node document,
+                            // including the inert template document.
+                            if host.inert_nodes.borrow().contains(&node.id.raw()) {
+                                host.inert_nodes.borrow_mut().insert(root.id.raw());
+                            }
                             // The host's children stop rendering, until
                             // slotted.
                             d.set(d.get().max(DomDirty::Style));
