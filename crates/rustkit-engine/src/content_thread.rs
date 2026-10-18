@@ -253,8 +253,21 @@ impl ContentThread {
 
     pub fn load_html(&self, html: &str) -> oneshot::Receiver<Result<(), String>> {
         let (reply, rx) = oneshot::channel();
+        // Allocated here, not when the page later runs the command. A
+        // navigation queued behind this one then has the newer id, and a
+        // default document that lost the race does not replace it.
+        let nav_id = self.nav_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        let newest = self.nav_seq.load(Ordering::Acquire);
+        if newest == nav_id {
+            if let Some(Ok(boot)) = self.boot() {
+                if nav_id > 1 {
+                    boot.canceller.cancel_nav(nav_id - 1);
+                }
+            }
+        }
         let _ = self.cmd.send(PageCmd::LoadHtml {
             html: html.to_string(),
+            nav_id,
             reply,
         });
         rx
@@ -643,6 +656,108 @@ mod tests {
         ));
         assert!(
             matches!(out[2], PageCmd::Resize { bounds, scale, .. } if bounds.height == 30 && scale == 2.0)
+        );
+    }
+
+    fn poll_until(page: &ContentThread, budget: Duration, mut done: impl FnMut(&[PageEvent]) -> bool) -> Vec<PageEvent> {
+        let deadline = Instant::now() + budget;
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            events.extend(page.poll());
+            if done(&events) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        events.extend(page.poll());
+        events
+    }
+
+    #[test]
+    fn script_navigation_is_reported_with_the_documents_nav_id() {
+        let page = page();
+        let mut loaded = page.load_html(
+            r#"<a id="l" href="https://example.com/clicked">go</a><p id="t">x</p>"#,
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(5), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(commit) if commit.nav_generation > 0))
+        });
+        let nav = events.iter().find_map(|event| match event {
+            PageEvent::Commit(commit) if commit.nav_generation > 0 => Some(commit.nav_generation),
+            _ => None,
+        }).expect("document nav");
+
+        let cases = [
+            ("location.href = 'https://example.com/assigned'", "assigned", false),
+            ("location.replace('https://example.com/replaced')", "replaced", true),
+            ("document.getElementById('l').click()", "clicked", false),
+        ];
+        for (script, needle, replace) in cases {
+            let _ = page.poll();
+            let mut eval = page.eval(&format!("{script}; 'set'"));
+            assert!(
+                wait_recv(&mut eval, Duration::from_secs(5)).unwrap().unwrap().contains("set"),
+                "{script}"
+            );
+            let events = poll_until(&page, Duration::from_secs(3), |events| {
+                events.iter().any(|event| matches!(event, PageEvent::NavigateRequested { url, .. } if url.contains(needle)))
+            });
+            let found = events.iter().find_map(|event| match event {
+                PageEvent::NavigateRequested { url, replace: flag, nav_id } if url.contains(needle) => {
+                    Some((url.clone(), *flag, *nav_id))
+                }
+                _ => None,
+            });
+            let Some((url, flag, nav_id)) = found else {
+                panic!("{script} produced no navigation: {events:?}");
+            };
+            assert_eq!(flag, replace, "{url}");
+            assert_eq!(nav_id, nav, "{url} was not tagged with the document");
+            // Id 0 is untagged and is kept. A request from this document is
+            // stale once a newer navigation has been accepted.
+            let dropped = reject_stale(
+                vec![PageEvent::NavigateRequested {
+                    url: url.clone(),
+                    replace: flag,
+                    nav_id: nav,
+                }],
+                nav + 1,
+            );
+            assert!(dropped.is_empty(), "an older navigation request would be followed");
+        }
+    }
+
+    #[test]
+    fn a_queued_default_document_does_not_replace_a_newer_navigation() {
+        let page = page();
+        let mut loaded = page.load_html("<title>base</title><p id=\"t\">x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut spinning = page.eval("while (true) { document.getElementById('t'); }");
+        std::thread::sleep(Duration::from_millis(40));
+        let mut default_load = page.load_html("<title>default</title><p>new tab</p>");
+        let restored = page.navigate(Url::parse("data:text/html,<title>restored</title>").unwrap());
+        let _ = wait_recv(&mut spinning, Duration::from_secs(5));
+        let _ = wait_recv(&mut default_load, Duration::from_secs(5));
+        let events = poll_until(&page, Duration::from_secs(10), |events| {
+            reject_stale(events.to_vec(), restored).iter().any(|event| {
+                matches!(event, PageEvent::Title { text, .. } if text == "restored")
+            })
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let mut events = events;
+        events.extend(page.poll());
+        let kept = reject_stale(events, restored);
+        assert!(
+            kept.iter().any(|event| matches!(event, PageEvent::Title { text, .. } if text == "restored")),
+            "the restore never committed: {kept:?}"
+        );
+        assert!(
+            kept.iter().all(|event| match event {
+                PageEvent::Title { text, .. } => text == "restored" || text == "base",
+                _ => true,
+            }),
+            "the default document replaced the restore: {kept:?}"
         );
     }
 

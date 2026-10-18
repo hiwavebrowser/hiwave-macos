@@ -641,6 +641,7 @@ impl RustKitView {
         if self.view_id.is_some() {
             match self.ask(|reply| PageCmd::LoadHtml {
                 html: html.to_string(),
+                nav_id: 0,
                 reply,
             }) {
                 Some(Ok(())) => {}

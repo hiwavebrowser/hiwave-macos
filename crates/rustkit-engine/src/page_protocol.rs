@@ -41,8 +41,12 @@ pub enum PageCmd {
     /// id the cancel path reads; the handle's counter is the one a later
     /// thread will send.
     Navigate { url: Url, nav_id: u64 },
+    /// `nav_id` 0 lets the engine allocate (the same-thread path). A
+    /// non-zero id was allocated when the command was sent, and a newer
+    /// one already on the counter supersedes this document.
     LoadHtml {
         html: String,
+        nav_id: u64,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Cancel the load in progress. `true` when one was in progress.
@@ -329,11 +333,8 @@ impl PageEndpoint {
             PageCmd::Navigate { url, nav_id } => {
                 self.load_url(url, nav_id);
             }
-            PageCmd::LoadHtml { html, reply } => {
-                let result = self
-                    .engine
-                    .load_html(self.view, &html)
-                    .map_err(|e| e.to_string());
+            PageCmd::LoadHtml { html, nav_id, reply } => {
+                let result = self.load_html_cmd(&html, nav_id);
                 let _ = reply.send(result);
                 self.after_page_change();
             }
@@ -374,6 +375,9 @@ impl PageEndpoint {
                     .map_err(|e| e.to_string());
                 let _ = reply.send(result);
                 self.publish_commit();
+                // `location.href =` and `link.click()` from this script.
+                // The same-thread window asks with TakeNavigation instead.
+                self.report_script_navigation();
             }
             PageCmd::SetVisible { visible } => {
                 self.visible = visible;
@@ -536,6 +540,19 @@ impl PageEndpoint {
             }
         }
         self.publish_commit();
+        // A listener's `location.href =` or `link.click()` is not the
+        // click's own default action. The content thread reports it; the
+        // same-thread window still pulls with TakeNavigation.
+        self.report_script_navigation();
+    }
+
+    fn load_html_cmd(&mut self, html: &str, nav_id: u64) -> Result<(), String> {
+        let loaded = if nav_id == 0 {
+            self.engine.load_html(self.view, html)
+        } else {
+            self.engine.load_html_as(self.view, html, Some(nav_id))
+        };
+        loaded.map_err(|e| e.to_string())
     }
 
     fn load_url(&mut self, url: Url, nav_id: u64) {
@@ -599,6 +616,23 @@ impl PageEndpoint {
     fn after_page_change(&mut self) {
         self.translate_engine_events();
         self.publish_commit();
+        self.report_script_navigation();
+    }
+
+    /// A navigation the page's script asked for (`location.href`,
+    /// `location.replace`, `link.click()`, `form.submit()`), tagged with
+    /// the document that asked. Only the content thread reports it here.
+    /// The same-thread window sends [`PageInput::TakeNavigation`] and
+    /// would otherwise see an empty queue.
+    fn report_script_navigation(&mut self) {
+        if !self.wake_window {
+            return;
+        }
+        let Some((url, replace)) = self.engine.take_script_navigation_with_replace(self.view) else {
+            return;
+        };
+        let nav_id = self.engine.nav_id(self.view).unwrap_or(0);
+        self.emit(PageEvent::NavigateRequested { url, replace, nav_id });
     }
 
     fn translate_engine_events(&mut self) {
@@ -699,11 +733,8 @@ impl PageEndpoint {
                 let _ = reply.send(turn);
                 self.after_page_change();
             }
-            PageCmd::LoadHtml { html, reply } => {
-                let result = self
-                    .engine
-                    .load_html(self.view, &html)
-                    .map_err(|e| e.to_string());
+            PageCmd::LoadHtml { html, nav_id, reply } => {
+                let result = self.load_html_cmd(&html, nav_id);
                 let _ = reply.send(result);
                 self.after_page_change();
             }
@@ -881,6 +912,7 @@ mod tests {
         let (tx, mut rx) = oneshot::channel();
         handle.send(PageCmd::LoadHtml {
             html: "<p id=\"t\">hi</p>".into(),
+            nav_id: 0,
             reply: tx,
         });
         let (tx1, mut rx1) = oneshot::channel();

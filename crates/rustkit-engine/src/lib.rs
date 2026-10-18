@@ -6876,11 +6876,42 @@ impl Engine {
     /// This is used for loading inline HTML content like the Chrome UI,
     /// without making an HTTP request.
     pub fn load_html(&mut self, id: EngineViewId, html: &str) -> Result<(), EngineError> {
+        self.load_html_as(id, html, None)
+    }
+
+    /// [`Engine::load_html`] for a navigation id the window already
+    /// allocated. A stale id (a newer one exists, or this one was cancelled)
+    /// does not replace the document. `None` allocates, as [`Self::load_html`].
+    pub fn load_html_as(
+        &mut self,
+        id: EngineViewId,
+        html: &str,
+        preset_nav: Option<u64>,
+    ) -> Result<(), EngineError> {
         let _hold = wgate::hold("load_html");
         // A navigation of its own (M3b). Nothing in it awaits, so the only
         // cancel that can reach it is the interrupt word stopping a script.
         let _turn = rustkit_js::DiagTurn::enter("load");
-        let watch = self.begin_nav(id)?;
+        if let Some(nav_id) = preset_nav {
+            let newest = self.nav_seq.load(Ordering::Acquire);
+            let current = self.views.get(&id).map(|view| view.nav_id).unwrap_or(0);
+            let cancelled = self
+                .views
+                .get(&id)
+                .is_some_and(|view| view.control.nav_cancelled(nav_id));
+            if nav_id == 0 || newest > nav_id || nav_id < current || cancelled {
+                debug!(?id, nav_id, "HTML load rejected before it started");
+                return Ok(());
+            }
+        }
+        let watch = match preset_nav {
+            Some(nav_id) => self.begin_nav_as(id, nav_id)?,
+            None => self.begin_nav(id)?,
+        };
+        if preset_nav.is_some() && self.nav_superseded(id, watch.nav_id) {
+            debug!(?id, nav_id = watch.nav_id, "HTML load rejected: stale");
+            return Ok(());
+        }
         rustkit_js::set_diag_nav(watch.nav_id);
         console_log::doc("navigation-start", "url=about:blank");
         let _in_progress = LoadInProgress::begin(watch.canceller.control().clone(), watch.nav_id);

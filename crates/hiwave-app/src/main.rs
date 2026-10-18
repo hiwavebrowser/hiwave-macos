@@ -1287,8 +1287,16 @@ fn main() {
                 let _ = proxy.send_event(UserEvent::LiveTurn);
             }
         }));
-        rustkit_view.load_html_internal(ABOUT_HTML)
-            .expect("Failed to load initial HTML");
+        // A restored tab is queued below as `UserEvent::Navigate`. With the
+        // content thread both loads return immediately, and a new-tab
+        // document queued first used to be applied after the restore had
+        // already taken the newer navigation id (10/26 launches). The
+        // restore is the first command; a late default document carries an
+        // older id and is dropped.
+        if is_new_tab_url(&initial_url) {
+            rustkit_view.load_html_internal(ABOUT_HTML)
+                .expect("Failed to load initial HTML");
+        }
         
         UnifiedContentWebView::RustKit(Arc::new(rustkit_view))
     };
