@@ -233,6 +233,53 @@ fn upgrade_converts_a_detached_subtree_on_demand() {
     assert_eq!(ev(&b, "log.join()"), "defined,ctor,true");
 }
 
+/// Lit renders a parent by cloning a `<template>` (`importNode` of its
+/// content), upgrading the child custom elements in that detached copy,
+/// committing property parts (`.videoElement=${...}`), and only then
+/// inserting the fragment. The child's `connectedCallback` (Lit's
+/// `hostConnected`) reads the property. The constructor mirrors Lit's
+/// pre-upgrade save: an own property assigned before the accessor exists
+/// is deleted and would not be visible again until a later update.
+#[test]
+fn lit_property_binding_is_visible_when_the_child_connects() {
+    let b = bound("<html><body></body></html>");
+    b.evaluate(
+        "class Child extends HTMLElement { \
+             static get observedAttributes() { return ['tone']; } \
+             constructor() { \
+                 super(); \
+                 if (Object.prototype.hasOwnProperty.call(this, 'videoElement')) { \
+                     this._saved = this.videoElement; delete this.videoElement; \
+                 } \
+                 log.push('ctor:' + this.isConnected + ':' + (this.videoElement && this.videoElement._mark || 'none')); \
+             } \
+             attributeChangedCallback(n, o, v) { log.push('attr:' + n + ':' + o + ':' + v + ':' + this.isConnected); } \
+             connectedCallback() { log.push('connected:' + (this.videoElement && this.videoElement._mark || 'none') + ':' + this.getAttribute('tone') + ':' + this.isConnected); } \
+         } \
+         Object.defineProperty(Child.prototype, 'videoElement', { \
+             configurable: true, enumerable: true, \
+             get: function () { return this._ve; }, \
+             set: function (v) { this._ve = v; } \
+         }); \
+         customElements.define('x-child', Child); \
+         var video = document.createElement('video'); video._mark = 'vid'; \
+         var t = document.createElement('template'); \
+         t.innerHTML = '<x-child tone=\"live\"></x-child>'; \
+         log.push('template:' + (t.content.firstChild instanceof Child) + ':' + t.content.firstChild.isConnected); \
+         var frag = document.importNode(t.content, true); \
+         var child = frag.querySelector('x-child'); \
+         log.push('cloned:' + (child instanceof Child) + ':' + child.isConnected); \
+         child.videoElement = video; \
+         document.body.appendChild(frag);",
+    )
+    .unwrap();
+    assert_eq!(
+        ev(&b, "log.join('|')"),
+        "template:false:false|ctor:false:none|attr:tone:null:live:false|cloned:true:false|connected:vid:live:true",
+        "a property set on the upgraded clone is what connectedCallback reads"
+    );
+}
+
 /// `:defined` is answered from the DOM: each define records its name there,
 /// and only names that were defined.
 #[test]
