@@ -61,7 +61,9 @@ shield was left unset; Chrome writes `off (stock Chrome)`), `ready_state`
 `dcl_ms`, `load_ms`, `scripts` (`execute`, then `load` or `error`),
 `fetched_scripts` (HiWave: each parser script and module dependency, with
 `executed` and, if it did not run, `reason` of `blocked`, `module graph error`,
-`waiting on a dependency`, or `never reached`), `console` errors, `mutations`
+`waiting on a dependency`, or `never reached`; `waiting_on` names the
+outstanding import when the reason is `waiting on a dependency`), `console`
+errors, `mutations`
 (one record per subtree add or remove of more than 50 nodes), `max_js_stack`.
 The diff does not compare `shield`, `fetched_scripts`, or `parser` durations.
 `fetched_scripts` also carries `detail` when a script was missed for a reason
@@ -70,7 +72,9 @@ the four `reason` values do not name: `shadow tree`, `not a javascript type`,
 `script-inserted inline`. An external script carries `inline` (the `inline#N`
 slot it consumed) so a gap in the inline labels names that script.
 `module_timeline`, when any module was prefetched, is one record per URL:
-`requested_ms`, `start_ms`, `body_ms`, `parsed_ms`.
+`requested_ms`, `start_ms`, `body_ms`, `parsed_ms`, and `held_ms` (how long
+the body sat ready before the main thread took it). `body_ms` is that
+observation, not the moment the prefetch thread finished the read.
 Inline scripts the parser inserted are labeled `inline#N` in document order,
 counting external scripts, including ones inside a shadow tree, a `<template>`
 content fragment, or `<noscript>`, and ones whose type is not javascript
@@ -115,6 +119,11 @@ python3 tools/replay/diff_trace.py --chrome /tmp/chrome.json --hiwave /tmp/hiwav
 ```
 
 The report labels the two sides `chrome` and `hiwave`.
+
+The replay server sleeps each HAR entry's `time` once, multiplied by
+`--time-scale`, then writes the body in one shot. A concat response uses
+the max of its source entries' times, not the sum and not a sleep per
+chunk.
 
 The diff prints the first structural mismatch and ignores timestamps. A `load`
 event only one side recorded is skipped when both sides executed that script.

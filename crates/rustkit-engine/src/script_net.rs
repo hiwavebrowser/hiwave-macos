@@ -16,6 +16,7 @@
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
 
@@ -463,16 +464,31 @@ pub(crate) async fn pump_modules(
     >;
     let mut inflight: FuturesUnordered<Task<'_>> = FuturesUnordered::new();
     let mut rounds = 0u32;
+    let mut attempted = std::collections::HashSet::new();
 
     loop {
         if rounds < MAX_MODULE_ROUNDS {
-            let Ok(urls) = catch_unwind(AssertUnwindSafe(|| bindings.take_module_requests()))
+            let Ok(mut urls) = catch_unwind(AssertUnwindSafe(|| bindings.take_module_requests()))
             else {
                 out.poisoned = true;
                 return out;
             };
             if urls.is_empty() && inflight.is_empty() {
-                return out;
+                // A static import can still be waiting if a round returned
+                // before its URL was fetched again. One pass per URL: if it
+                // is still waiting afterwards, the trace names it.
+                urls = bindings
+                    .pending_module_imports()
+                    .into_iter()
+                    .filter(|item| !item.dynamic && attempted.insert(item.url.clone()))
+                    .map(|item| item.url)
+                    .collect();
+                if urls.is_empty() {
+                    return out;
+                }
+            }
+            for url in &urls {
+                attempted.insert(url.clone());
             }
             if !urls.is_empty() {
                 rounds += 1;
@@ -1323,7 +1339,6 @@ fn run_inserted(
                 ran
             });
             record.elapsed_ms = started.elapsed().as_millis() as u64;
-            crate::page_trace::note_parser_pause("script execute", record.elapsed_ms, &record.source);
             record.outcome = if stopped {
                 crate::log_script_stopped(&record.source, record.elapsed_ms, crate::take_script_js_overrun());
                 ScriptOutcome::OverBudget
@@ -1392,6 +1407,9 @@ struct PrefetchedModule {
 
 struct PrefetchSlot {
     result: Mutex<Option<Result<PrefetchedModule, String>>>,
+    /// When the prefetch thread stored the body. The main thread's `body_ms`
+    /// is later, by this much, if it was busy parsing.
+    ready_at: Mutex<Option<std::time::Instant>>,
     notify: tokio::sync::Notify,
 }
 
@@ -1407,9 +1425,19 @@ impl PrefetchSlot {
     }
 
     fn store(&self, result: Result<PrefetchedModule, String>) {
+        *self.ready_at.lock().unwrap_or_else(|err| err.into_inner()) = Some(std::time::Instant::now());
         *self.result.lock().unwrap_or_else(|err| err.into_inner()) = Some(result);
         self.notify.notify_waiters();
     }
+}
+
+/// Static module fetches are critical: a dynamic `import()` does not take a
+/// connection slot until those bodies have arrived. `scanning` stays non-zero
+/// while one source's specifiers are still being queued.
+struct PrefetchControl {
+    scanning: AtomicUsize,
+    critical_open: AtomicUsize,
+    notify: tokio::sync::Notify,
 }
 
 struct ModulePrefetch {
@@ -1419,6 +1447,7 @@ struct ModulePrefetch {
     inspector: Arc<Inspector>,
     slots: Mutex<std::collections::HashMap<String, Arc<PrefetchSlot>>>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    control: Arc<PrefetchControl>,
 }
 
 struct PrefetchJob {
@@ -1428,6 +1457,8 @@ struct PrefetchJob {
     url: Url,
     slot: Arc<PrefetchSlot>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    critical: bool,
+    control: Arc<PrefetchControl>,
 }
 
 thread_local! {
@@ -1469,8 +1500,21 @@ fn ensure_module_prefetch_hook() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
         rustkit_js::set_module_url_hook(Some(start_module_prefetch));
+        rustkit_js::set_module_scan_hook(Some(module_scan_boundary));
         rustkit_js::install_import_specifier_hook();
     });
+}
+
+fn module_scan_boundary(begin: bool) {
+    let Some(prefetch) = CURRENT_PREFETCH.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    if begin {
+        prefetch.control.scanning.fetch_add(1, Ordering::AcqRel);
+    } else {
+        prefetch.control.scanning.fetch_sub(1, Ordering::AcqRel);
+        prefetch.control.notify.notify_waiters();
+    }
 }
 
 /// Fetch module URLs on `rk-module-prefetch` while this guard is alive.
@@ -1490,12 +1534,17 @@ pub(crate) fn install_module_prefetch(
         inspector,
         slots: Mutex::new(std::collections::HashMap::new()),
         cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        control: Arc::new(PrefetchControl {
+            scanning: AtomicUsize::new(0),
+            critical_open: AtomicUsize::new(0),
+            notify: tokio::sync::Notify::new(),
+        }),
     });
     let previous = CURRENT_PREFETCH.with(|slot| slot.borrow_mut().replace(Arc::clone(&prefetch)));
     ModulePrefetchGuard { prefetch, previous }
 }
 
-fn start_module_prefetch(url: &str) {
+fn start_module_prefetch(url: &str, critical: bool) {
     let Some(prefetch) = CURRENT_PREFETCH.with(|slot| slot.borrow().clone()) else {
         return;
     };
@@ -1512,8 +1561,12 @@ fn start_module_prefetch(url: &str) {
         }
         slots.insert(url.to_string(), Arc::new(PrefetchSlot {
             result: Mutex::new(None),
+            ready_at: Mutex::new(None),
             notify: tokio::sync::Notify::new(),
         }));
+    }
+    if critical {
+        prefetch.control.critical_open.fetch_add(1, Ordering::AcqRel);
     }
     crate::page_trace::note_module_fetch(url, "requested");
     let slot = prefetch
@@ -1523,6 +1576,10 @@ fn start_module_prefetch(url: &str) {
         .get(url)
         .cloned();
     let Some(slot) = slot else {
+        if critical {
+            prefetch.control.critical_open.fetch_sub(1, Ordering::AcqRel);
+            prefetch.control.notify.notify_waiters();
+        }
         return;
     };
     if let Some(guard) = prefetch.inspector.begin_request(
@@ -1542,8 +1599,14 @@ fn start_module_prefetch(url: &str) {
         url: parsed,
         slot,
         cancelled: Arc::clone(&prefetch.cancelled),
+        critical,
+        control: Arc::clone(&prefetch.control),
     };
     if prefetch_sender().try_send(job).is_err() {
+        if critical {
+            prefetch.control.critical_open.fetch_sub(1, Ordering::AcqRel);
+            prefetch.control.notify.notify_waiters();
+        }
         prefetch
             .slots
             .lock()
@@ -1564,25 +1627,55 @@ fn prefetch_sender() -> &'static tokio::sync::mpsc::Sender<PrefetchJob> {
         std::thread::Builder::new()
             .name("rk-module-prefetch".into())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
+                // Several workers: a synchronous body decode on one job must
+                // not stall the sockets of the others. One current-thread
+                // runtime did that, so large concat bodies finished together.
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
                     .enable_all()
+                    .thread_name("rk-module-prefetch")
                     .build()
                     .expect("module prefetch runtime");
-                let local = tokio::task::LocalSet::new();
-                rt.block_on(local.run_until(async move {
+                rt.block_on(async move {
                     while let Some(job) = rx.recv().await {
-                        tokio::task::spawn_local(async move {
+                        tokio::spawn(async move {
                             run_prefetch_job(job).await;
                         });
                     }
-                }));
+                });
             })
             .expect("module prefetch thread");
         tx
     })
 }
 
+struct CriticalGuard(Arc<PrefetchControl>);
+
+impl Drop for CriticalGuard {
+    fn drop(&mut self) {
+        self.0.critical_open.fetch_sub(1, Ordering::AcqRel);
+        self.0.notify.notify_waiters();
+    }
+}
+
+async fn wait_for_prefetch_turn(job: &PrefetchJob) {
+    loop {
+        let notified = job.control.notify.notified();
+        tokio::pin!(notified);
+        let scanning = job.control.scanning.load(Ordering::Acquire);
+        let critical_open = job.control.critical_open.load(Ordering::Acquire);
+        // A critical job waits out the scan that queued it. A dynamic
+        // import waits until those static fetches have stored their bodies.
+        if scanning == 0 && (job.critical || critical_open == 0) {
+            return;
+        }
+        notified.await;
+    }
+}
+
 async fn run_prefetch_job(job: PrefetchJob) {
+    let _critical = job.critical.then(|| CriticalGuard(Arc::clone(&job.control)));
+    wait_for_prefetch_turn(&job).await;
     if job.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
         job.slot.store(Err("cancelled".into()));
         return;
@@ -1627,8 +1720,16 @@ async fn take_prefetched_module(url: &str) -> Option<Result<rustkit_bindings::Fe
         .get(url)
         .cloned()?;
     let result = slot.wait().await;
+    let held_ms = slot
+        .ready_at
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .map(|ready| ready.elapsed().as_millis() as u64);
     finish_prefetch_guard(url, &result);
     crate::page_trace::note_module_fetch(url, "body");
+    if let Some(held_ms) = held_ms {
+        crate::page_trace::note_module_held(url, held_ms);
+    }
     Some(match result {
         Ok(module) => {
             crate::page_trace::note_module_dependency(url, Some(module.status));
