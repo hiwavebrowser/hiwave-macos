@@ -1418,3 +1418,88 @@ nav{display:flex;align-items:center;height:56px;width:100%}
         "1060 shell {narrow}"
     );
 }
+
+/// Reddit's button font is `font: var(--button-font)`, and the custom
+/// property chain ends at `normal 600 0.875rem/1.25rem <family>`. The 600 is
+/// the weight. Reading it as the size made every `.button-medium` 600px and
+/// the join button 1528 wide, so the wrapping credit span collapsed to 0 and
+/// stacked to 827. The same text, measured as max-content on the resize
+/// relayout, was the search row's automatic minimum.
+#[test]
+fn a_button_font_variable_is_14px_semibold_not_600px() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>"#,
+        r#":root{--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"#,
+        r#"--font-14-20-semibold:normal 600 0.875rem/1.25rem var(--font-sans);"#,
+        r#"--font-12-16-semibold:normal 600 0.75rem/1rem var(--font-sans);"#,
+        r#"--font-button-md:var(--font-14-20-semibold);"#,
+        r#"--font-button-sm:var(--font-12-16-semibold)}"#,
+        r#".button{font:var(--button-font);display:inline-flex;align-items:center;height:32px;margin:0;padding:0 8px;border:0}"#,
+        r#".button-medium{--button-font:var(--font-button-md)}"#,
+        r#".button-small{--button-font:var(--font-button-sm)}"#,
+        r#"#host{font-size:18px}#bad{--button-font:600}"#,
+        r#"#cyc{--a:var(--b);--b:var(--a)}"#,
+        r#"body{margin:0}header{display:flex;align-items:center;width:100%;height:56px}"#,
+        r#"#search{display:flex;flex:1 1 auto;min-width:auto;height:40px;align-items:center}"#,
+        r#"#row{display:flex;width:545px;align-items:flex-start}"#,
+        r#"#credit{display:flex;flex-wrap:wrap;flex:1 1 auto;align-items:center;min-height:32px}"#,
+        r#"</style><body>"#,
+        r#"<header id="hdr"><a id="skip" class="button button-medium">Skip to main content</a>"#,
+        r#"<div id="search"><button id="find" class="button button-medium">Search</button></div></header>"#,
+        r#"<div id="row"><button id="join" class="button button-small">Join</button>"#,
+        r#"<span id="credit"><span>u/name</span><span>1h</span><span>award</span></span></div>"#,
+        r#"<p id="host"><button id="bad" class="button">Bad</button></p>"#,
+        r#"<button id="miss" class="button">Miss</button>"#,
+        r#"<p id="cyc"><button id="cycle" class="button" style="--button-font:var(--a)">Cycle</button></p>"#,
+        r#"</body>"#,
+    ));
+    let fonts = eval(
+        &mut engine,
+        view,
+        r#"[getComputedStyle(document.getElementById('find')).fontSize, getComputedStyle(document.getElementById('find')).fontWeight, getComputedStyle(document.getElementById('join')).fontSize, getComputedStyle(document.getElementById('join')).fontWeight].join('|')"#,
+    );
+    assert_eq!(
+        fonts, "14px|600|12px|600",
+        "button font shorthand parsed the weight as the size: {fonts}"
+    );
+    let invalid = eval(
+        &mut engine,
+        view,
+        r#"[getComputedStyle(document.getElementById('bad')).fontSize, getComputedStyle(document.getElementById('miss')).fontSize, getComputedStyle(document.getElementById('cycle')).fontSize].join('|')"#,
+    );
+    assert_eq!(
+        invalid, "18px|16px|16px",
+        "a font var() that is not a shorthand must inherit, not keep a partial size: {invalid}"
+    );
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1060,
+                height: 800,
+            },
+        )
+        .expect("resize");
+    let search = rect(&mut engine, view, "search");
+    let skip = rect(&mut engine, view, "skip");
+    let join = rect(&mut engine, view, "join");
+    let credit = rect(&mut engine, view, "credit");
+    assert!(
+        search.2 < 1060.0 && search.2 > 40.0,
+        "search flex item kept a content minimum from the 600px face: {search:?}"
+    );
+    assert!(
+        skip.2 < 400.0,
+        "skip link is the 600px face: {skip:?}"
+    );
+    assert!(
+        join.2 < 200.0,
+        "join button squeezed the credit span: {join:?}"
+    );
+    assert!(
+        credit.3 < 40.0 && credit.2 > 100.0,
+        "credit span stacked one item per line: {credit:?} join {join:?}"
+    );
+}
