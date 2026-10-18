@@ -1260,6 +1260,7 @@ fn run_inserted(
                 ran
             });
             record.elapsed_ms = started.elapsed().as_millis() as u64;
+            crate::page_trace::note_parser_pause("script execute", record.elapsed_ms, &record.source);
             record.outcome = if stopped {
                 crate::log_script_stopped(&record.source, record.elapsed_ms, crate::take_script_js_overrun());
                 ScriptOutcome::OverBudget

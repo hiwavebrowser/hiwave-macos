@@ -838,6 +838,12 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_inserted_scripts()
     }
 
+    /// Inline classic scripts that ran since the last drain, as raw node ids.
+    /// The page trace uses this; a caller that ignores it just drops the ids.
+    pub fn take_inline_ran(&self) -> Vec<usize> {
+        self.dom_host.borrow_mut().take_inline_ran()
+    }
+
     /// Back `document.cookie` with the browser's jar: `get` answers the
     /// cookies script may read for this document, `set` stores one
     /// assignment. Without this, `document.cookie` is a string that keeps

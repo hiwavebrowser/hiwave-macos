@@ -94,6 +94,7 @@
             return;
         }
         if (k === 'module') return;
+        try { if (internals.traceInline) internals.traceInline(el); } catch (e) {}
         var was = internals.current(el);
         try {
             indirectEval(el.textContent);

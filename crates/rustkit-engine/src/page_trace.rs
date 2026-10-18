@@ -11,8 +11,15 @@
 //! `mutations` are subtree inserts and removes of more than 50 nodes (the
 //! same threshold as the Chrome probe). `max_js_stack` is the deepest JS call
 //! stack during the load, not the native host-call depth.
+//!
+//! `parser` is the time the load spent blocked on a stylesheet fetch, a
+//! script fetch, or a script execution. `render` is the latest
+//! `HIWAVE_DUMP_RENDER` snapshot of `main#main-content`, when that dump is on.
+//! A yielded load keeps this trace open after `load_url` returns, until the
+//! page is quiet or `HIWAVE_DUMP_RENDER_AT_MS` has passed.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -25,7 +32,11 @@ use crate::{EngineFailure, FetchFailure, ScriptOutcome, ScriptRecord};
 const MAX_SCRIPTS: usize = 4_000;
 const MAX_CONSOLE: usize = 500;
 const MAX_MUTATIONS: usize = 500;
+const MAX_PARSER: usize = 2_000;
 const MAX_TEXT: usize = 400;
+/// No script, mutation, or console note for this long, after the load
+/// function has returned, counts as quiet.
+const QUIET_AFTER_MS: u64 = 2_000;
 
 #[derive(Clone)]
 enum Mode {
@@ -48,9 +59,31 @@ impl Mode {
     }
 }
 
+struct Catalog {
+    labels: HashMap<usize, String>,
+    next_inline: usize,
+    next_type: usize,
+}
+
+impl Catalog {
+    fn clear(&mut self) {
+        self.labels.clear();
+        self.next_inline = 0;
+        self.next_type = 0;
+    }
+}
+
 thread_local! {
     static LOCAL_MODE: RefCell<Option<Mode>> = const { RefCell::new(None) };
     static ACTIVE: RefCell<Option<Active>> = const { RefCell::new(None) };
+    static PARKED: Cell<u64> = const { Cell::new(0) };
+    static CATALOG: RefCell<Catalog> = RefCell::new(Catalog {
+        labels: HashMap::new(),
+        next_inline: 0,
+        next_type: 0,
+    });
+    /// The render dump held the mutation hook. Released when the trace finishes.
+    static DUMP_HELD: Cell<bool> = const { Cell::new(false) };
 }
 
 static ENV_MODE: Mutex<Mode> = Mutex::new(Mode::Off);
@@ -131,6 +164,16 @@ struct FetchedNote {
     /// A module graph dependency, not a parser `<script>`.
     dependency: bool,
     reason: Option<&'static str>,
+    /// Why a parser script was recorded when the four `reason`s do not say
+    /// which kind of miss it was (`shadow tree`, `not a javascript type`,
+    /// `inserted after the parser snapshot`).
+    detail: Option<&'static str>,
+}
+
+struct ParserEv {
+    blocked_on: &'static str,
+    ms: u64,
+    target: String,
 }
 
 struct Active {
@@ -144,8 +187,12 @@ struct Active {
     fetched: Vec<FetchedNote>,
     console: Vec<(u64, String)>,
     mutations: Vec<(u64, &'static str, usize, String)>,
+    parser: Vec<ParserEv>,
+    render: Option<serde_json::Value>,
     next_order: u32,
     pending: Vec<Pending>,
+    scope_ended: bool,
+    last_activity: u64,
 }
 
 impl Active {
@@ -161,8 +208,128 @@ pub struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        finish(self.generation);
+        on_scope_end(self.generation);
     }
+}
+
+fn on_scope_end(generation: u64) {
+    let keep = ACTIVE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(active) = slot.as_mut() else {
+            return false;
+        };
+        if active.generation != generation {
+            return false;
+        }
+        active.scope_ended = true;
+        should_keep(active)
+    });
+    if keep {
+        PARKED.with(|parked| parked.set(generation));
+        flush_file();
+        return;
+    }
+    crate::render_dump::write_quiet_if_due();
+    finish(generation);
+}
+
+/// The load function has returned and the trace is still open: either
+/// `readyState` is not `complete` yet (a yielded load) or a render dump was
+/// asked for at a later timestamp.
+fn should_keep(active: &Active) -> bool {
+    if let Some(at_ms) = crate::render_dump::dump_at_ms() {
+        if active.elapsed() < at_ms {
+            return true;
+        }
+    }
+    let complete = active.ready_state.iter().any(|(state, _)| state == "complete");
+    !complete && active.dcl_ms.is_some()
+}
+
+pub(crate) fn is_parked() -> bool {
+    PARKED.with(Cell::get) != 0
+}
+
+/// Hold the DOM mutation hook for the render dump, whether or not a trace
+/// file is open. Paired with [`release_hook`] from the dump's watch, or from
+/// [`finish`] when the watch was parked.
+pub(crate) fn hold_hook() {
+    if HOOKS.fetch_add(1, Ordering::Relaxed) == 0 {
+        rustkit_dom::set_large_mutation_hook(Some(on_dom_mutation));
+    }
+}
+
+pub(crate) fn release_hook() {
+    if HOOKS.fetch_sub(1, Ordering::Relaxed) == 1 {
+        rustkit_dom::set_large_mutation_hook(None);
+    }
+}
+
+pub(crate) fn set_dump_held(held: bool) {
+    DUMP_HELD.with(|cell| cell.set(held));
+}
+
+pub(crate) fn dump_held() -> bool {
+    DUMP_HELD.with(Cell::get)
+}
+
+/// Milliseconds since navigation start, when a trace is open.
+pub(crate) fn elapsed_ms() -> Option<u64> {
+    ACTIVE.with(|slot| slot.borrow().as_ref().map(Active::elapsed))
+}
+
+/// Test hook: finish a trace that [`on_scope_end`] left open.
+pub(crate) fn testing_finish_parked() {
+    let generation = PARKED.with(Cell::get);
+    if generation == 0 {
+        return;
+    }
+    PARKED.with(|parked| parked.set(0));
+    if dump_held() {
+        release_hook();
+        set_dump_held(false);
+    }
+    finish(generation);
+}
+
+/// A yielded load, or a dump time still in the future, left the trace open.
+/// Finish it once the page is quiet or the dump time has passed.
+pub(crate) fn poll_settle() {
+    let generation = PARKED.with(Cell::get);
+    if generation == 0 {
+        return;
+    }
+    let ready = ACTIVE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|active| active.generation == generation && settle_ready(active))
+    });
+    if !ready {
+        return;
+    }
+    crate::render_dump::write_quiet_if_due();
+    if dump_held() {
+        release_hook();
+        set_dump_held(false);
+    }
+    PARKED.with(|parked| parked.set(0));
+    finish(generation);
+}
+
+fn settle_ready(active: &Active) -> bool {
+    if !active.scope_ended {
+        return false;
+    }
+    if let Some(at_ms) = crate::render_dump::dump_at_ms() {
+        return active.elapsed() >= at_ms;
+    }
+    let idle = active.elapsed().saturating_sub(active.last_activity) >= QUIET_AFTER_MS;
+    let complete = active.ready_state.iter().any(|(state, _)| state == "complete");
+    idle && (complete || active.dcl_ms.is_some())
+}
+
+fn touch(active: &mut Active) {
+    active.last_activity = active.elapsed();
 }
 
 /// Start a trace for `url` when one of the env switches is on.
@@ -170,13 +337,21 @@ pub(crate) fn begin(url: &str) -> Option<Session> {
     if !enabled() {
         return None;
     }
+    let parked = PARKED.with(Cell::get);
+    if parked != 0 {
+        PARKED.with(|parked_cell| parked_cell.set(0));
+        if dump_held() {
+            release_hook();
+            set_dump_held(false);
+        }
+        finish(parked);
+    }
+    CATALOG.with(|catalog| catalog.borrow_mut().clear());
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     if SAMPLES.fetch_add(1, Ordering::Relaxed) == 0 {
         rustkit_js::set_js_stack_sample(true);
     }
-    if HOOKS.fetch_add(1, Ordering::Relaxed) == 0 {
-        rustkit_dom::set_large_mutation_hook(Some(on_dom_mutation));
-    }
+    hold_hook();
     ACTIVE.with(|slot| {
         *slot.borrow_mut() = Some(Active {
             generation,
@@ -189,8 +364,12 @@ pub(crate) fn begin(url: &str) -> Option<Session> {
             fetched: Vec::new(),
             console: Vec::new(),
             mutations: Vec::new(),
+            parser: Vec::new(),
+            render: None,
             next_order: 0,
             pending: Vec::new(),
+            scope_ended: false,
+            last_activity: 0,
         });
     });
     flush_file();
@@ -217,9 +396,8 @@ fn finish(generation: u64) {
     if SAMPLES.fetch_sub(1, Ordering::Relaxed) == 1 {
         rustkit_js::set_js_stack_sample(false);
     }
-    if HOOKS.fetch_sub(1, Ordering::Relaxed) == 1 {
-        rustkit_dom::set_large_mutation_hook(None);
-    }
+    release_hook();
+    CATALOG.with(|catalog| catalog.borrow_mut().clear());
     emit(&active, max_js_stack, true);
 }
 
@@ -228,6 +406,9 @@ fn on_dom_mutation(kind: &str, nodes: usize, target: &str) {
         "remove" => "remove",
         _ => "add",
     };
+    if kind == "add" && target.eq_ignore_ascii_case("MAIN") {
+        crate::render_dump::note_main_insert();
+    }
     note_mutation(kind, nodes, target);
 }
 
@@ -248,11 +429,15 @@ pub(crate) fn note_ready(state: &str) {
         if state == "complete" {
             active.load_ms.get_or_insert(t_ms);
         }
+        touch(active);
         true
     });
     if flush {
         flush_file();
     }
+    // A yielded load parked at DOMContentLoaded finishes here once
+    // `readyState` is `complete` and the page has gone quiet.
+    poll_settle();
 }
 
 pub(crate) fn note_record(record: &ScriptRecord) {
@@ -473,6 +658,7 @@ fn remember(
             executed,
             dependency,
             reason: if executed { None } else { reason },
+            detail: None,
         });
     });
 }
@@ -576,6 +762,7 @@ pub(crate) fn note_element_event(url: &str, event: &str) {
     if flush {
         flush_file();
     }
+    poll_settle();
 }
 
 pub(crate) fn note_console(text: &str) {
@@ -588,6 +775,7 @@ pub(crate) fn note_console(text: &str) {
             return false;
         }
         active.console.push((active.elapsed(), text));
+        touch(active);
         true
     });
     if flush {
@@ -606,11 +794,130 @@ pub(crate) fn note_mutation(kind: &'static str, nodes: usize, target: &str) {
         active
             .mutations
             .push((active.elapsed(), kind, nodes, target.to_string()));
+        touch(active);
         true
     });
     if flush {
         flush_file();
     }
+}
+
+/// The latest render dump. Replaced as later commits dump again.
+pub(crate) fn set_render(value: serde_json::Value) {
+    let flush = with_active(|active| {
+        active.render = Some(value);
+        true
+    });
+    if flush {
+        flush_file();
+    }
+}
+
+/// One stretch where the load could not parse because it was waiting on
+/// `stylesheet`, `script fetch`, or `script execute`.
+pub(crate) fn note_parser_pause(blocked_on: &'static str, ms: u64, target: &str) {
+    if !enabled() {
+        return;
+    }
+    let target = clamp(target);
+    let flush = with_active(|active| {
+        if active.parser.len() >= MAX_PARSER {
+            return false;
+        }
+        active.parser.push(ParserEv {
+            blocked_on,
+            ms,
+            target,
+        });
+        touch(active);
+        true
+    });
+    if flush {
+        flush_file();
+    }
+}
+
+/// The label already given to this script element, if the catalog saw it.
+pub(crate) fn script_label(node: usize) -> Option<String> {
+    CATALOG.with(|catalog| catalog.borrow().labels.get(&node).cloned())
+}
+
+/// Remember `label` for `node`. `false` when the node was already labeled.
+pub(crate) fn remember_script_label(node: usize, label: String) -> bool {
+    CATALOG.with(|catalog| {
+        let mut catalog = catalog.borrow_mut();
+        if catalog.labels.contains_key(&node) {
+            return false;
+        }
+        catalog.labels.insert(node, label);
+        true
+    })
+}
+
+/// The next `inline#N`, counting every javascript script in discovery order.
+pub(crate) fn next_inline_label() -> String {
+    CATALOG.with(|catalog| {
+        let mut catalog = catalog.borrow_mut();
+        catalog.next_inline += 1;
+        format!("inline#{}", catalog.next_inline)
+    })
+}
+
+/// A `<script>` whose type is not javascript. It does not take an `inline#N`.
+pub(crate) fn next_type_label(essence: &str) -> String {
+    CATALOG.with(|catalog| {
+        let mut catalog = catalog.borrow_mut();
+        catalog.next_type += 1;
+        let essence = if essence.is_empty() { "empty" } else { essence };
+        format!("type:{essence}#{}", catalog.next_type)
+    })
+}
+
+pub(crate) fn note_detail(url: &str, detail: &'static str) {
+    if !enabled() {
+        return;
+    }
+    with_active(|active| {
+        if let Some(note) = active.fetched.iter_mut().find(|note| note.url == url) {
+            if note.detail.is_none() {
+                note.detail = Some(detail);
+            }
+        }
+    });
+}
+
+/// A script-inserted inline script ran (`indirectEval`). Record it under its
+/// catalog label, or the next `inline#N` if the parser snapshot missed it.
+pub(crate) fn mark_node_executed(node: usize) {
+    if !enabled() {
+        return;
+    }
+    let already = CATALOG.with(|catalog| catalog.borrow().labels.get(&node).cloned());
+    let label = match already {
+        Some(label) => label,
+        None => {
+            let label = next_inline_label();
+            remember_script_label(node, label.clone());
+            label
+        }
+    };
+    let executed = with_active(|active| {
+        active
+            .fetched
+            .iter()
+            .any(|note| note.url == label && note.executed)
+    });
+    if executed {
+        return;
+    }
+    note_parser_script(&label, None);
+    note_detail(&label, "script-inserted inline");
+    note_record(&ScriptRecord {
+        source: label,
+        bytes: 0,
+        elapsed_ms: 0,
+        outcome: ScriptOutcome::Ran,
+    });
 }
 
 fn drop_pending(url: &str) {
@@ -673,6 +980,7 @@ fn push_script_on(active: &mut Active, url: &str, event: &str) {
             })
     };
     let t_ms = active.elapsed();
+    touch(active);
     active.scripts.push(ScriptEv {
         url: url.to_string(),
         order,
@@ -746,6 +1054,7 @@ fn snapshot(active: &Active) -> Snapshot {
                     note.fetched,
                     note.executed,
                     note.reason,
+                    note.detail,
                 )
             })
             .collect(),
@@ -755,6 +1064,12 @@ fn snapshot(active: &Active) -> Snapshot {
             .iter()
             .map(|(t_ms, kind, nodes, target)| (*t_ms, *kind, *nodes, target.clone()))
             .collect(),
+        parser: active
+            .parser
+            .iter()
+            .map(|pause| (pause.blocked_on, pause.ms, pause.target.clone()))
+            .collect(),
+        render: active.render.clone(),
     }
 }
 
@@ -764,9 +1079,11 @@ struct Snapshot {
     dcl_ms: Option<u64>,
     load_ms: Option<u64>,
     scripts: Vec<(String, u32, &'static str, u64)>,
-    fetched: Vec<(String, Option<u16>, bool, bool, Option<&'static str>)>,
+    fetched: Vec<(String, Option<u16>, bool, bool, Option<&'static str>, Option<&'static str>)>,
     console: Vec<(u64, String)>,
     mutations: Vec<(u64, &'static str, usize, String)>,
+    parser: Vec<(&'static str, u64, String)>,
+    render: Option<serde_json::Value>,
 }
 
 fn emit(active: &Active, max_js_stack: usize, console: bool) {
@@ -797,12 +1114,13 @@ fn emit_snapshot(active: &Snapshot, max_js_stack: usize, console: bool) {
         fetched_scripts: active
             .fetched
             .iter()
-            .map(|(url, status, fetched, executed, reason)| FetchedJson {
+            .map(|(url, status, fetched, executed, reason, detail)| FetchedJson {
                 url,
                 status: *status,
                 fetched: *fetched,
                 executed: *executed,
                 reason: *reason,
+                detail: *detail,
             })
             .collect(),
         shield: shield_label(),
@@ -825,6 +1143,16 @@ fn emit_snapshot(active: &Snapshot, max_js_stack: usize, console: bool) {
                 target,
             })
             .collect(),
+        parser: active
+            .parser
+            .iter()
+            .map(|(blocked_on, ms, target)| ParserJson {
+                blocked_on,
+                ms: *ms,
+                target,
+            })
+            .collect(),
+        render: active.render.as_ref(),
         max_js_stack,
     };
     let mode = mode();
@@ -864,6 +1192,9 @@ struct TraceJson<'a> {
     shield: &'a str,
     console: Vec<ConsoleJson<'a>>,
     mutations: Vec<MutationJson<'a>>,
+    parser: Vec<ParserJson<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render: Option<&'a serde_json::Value>,
     max_js_stack: usize,
 }
 
@@ -890,6 +1221,15 @@ struct FetchedJson<'a> {
     executed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ParserJson<'a> {
+    blocked_on: &'a str,
+    ms: u64,
+    target: &'a str,
 }
 
 #[derive(Serialize)]
@@ -1137,6 +1477,59 @@ mod tests {
         }
     }
 
+    struct FinishParked;
+    impl Drop for FinishParked {
+        fn drop(&mut self) {
+            testing_finish_parked();
+        }
+    }
+
+    #[test]
+    fn a_yielded_load_keeps_the_trace_open_past_dom_content_loaded() {
+        let path = std::env::temp_dir().join(format!(
+            "hiwave-trace-{}-parked.json",
+            std::process::id()
+        ));
+        let _force = force_file_for_test(&path);
+        let _finish = FinishParked;
+        let session = begin("https://example.test/yielded").expect("trace on");
+        note_ready("loading");
+        note_ready("interactive");
+        note_parser_pause("script fetch", 13, "page scripts");
+        note_parser_script("inline#7", None);
+        note_detail("inline#7", "shadow tree");
+        drop(session);
+        assert!(is_parked(), "DOMContentLoaded without complete parks the trace");
+        note_console("after-park");
+        drop(_finish);
+
+        let body = std::fs::read_to_string(&path).expect("trace file");
+        let _ = std::fs::remove_file(&path);
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let states: Vec<&str> = value["ready_state"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["state"].as_str().unwrap())
+            .collect();
+        assert_eq!(states, ["loading", "interactive"]);
+        assert!(value["dcl_ms"].is_number());
+        assert!(value["load_ms"].is_null());
+        let console = value["console"].as_array().unwrap();
+        assert!(console.iter().any(|item| item["text"] == "after-park"));
+        let parser = value["parser"].as_array().unwrap();
+        assert_eq!(parser[0]["blocked_on"], "script fetch");
+        assert_eq!(parser[0]["ms"], 13);
+        assert_eq!(parser[0]["target"], "page scripts");
+        let fetched = value["fetched_scripts"].as_array().unwrap();
+        let inline = fetched.iter().find(|item| item["url"] == "inline#7").unwrap();
+        assert_eq!(inline["executed"], false);
+        assert_eq!(inline["reason"], "never reached");
+        assert_eq!(inline["detail"], "shadow tree");
+        assert_eq!(value["max_js_stack"], 0);
+        assert!(!body.contains("secret-cookie-value"));
+    }
+
     #[cfg(feature = "headless")]
     fn trace_site(
         path: &str,
@@ -1205,5 +1598,106 @@ mod tests {
                 && item["nodes"].as_u64().unwrap() > 50
         }));
         assert!(value["max_js_stack"].as_u64().unwrap() >= 1);
+    }
+
+    #[cfg(feature = "headless")]
+    fn render_site(
+        path: &str,
+        _cookie: &str,
+    ) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/" => (
+                200,
+                "text/html",
+                vec![],
+                "<!doctype html><html><body>\
+                 <script type=\"application/json\">{\"k\":1}</script>\
+                 <script>window.ranInline = true;</script>\
+                 <main id=\"main-content\">\
+                   <shreddit-post class=\"post\"><span>a</span></shreddit-post>\
+                 </main>\
+                 <script>\
+                   var holder = document.createElement('div');\
+                   for (var i = 0; i < 60; i++) holder.appendChild(document.createElement('i'));\
+                   document.getElementById('main-content').appendChild(holder);\
+                 </script>\
+                 </body></html>"
+                    .into(),
+            ),
+            _ => (404, "text/plain", vec![], "missing".into()),
+        }
+    }
+
+    #[cfg(feature = "headless")]
+    #[test]
+    fn a_render_dump_records_main_and_an_unrun_inline_script() {
+        let trace_path = std::env::temp_dir().join(format!(
+            "hiwave-trace-{}-render.json",
+            std::process::id()
+        ));
+        let dump_path = std::env::temp_dir().join(format!(
+            "hiwave-render-{}-dump.json",
+            std::process::id()
+        ));
+        let _trace = force_file_for_test(&trace_path);
+        let _dump = crate::render_dump::force_for_test(&dump_path);
+        let server = crate::error_page_script_tests::serve(render_site);
+        let (mut engine, view, runtime) = crate::error_page_script_tests::engine();
+        runtime
+            .block_on(engine.load_url(view, server.url("/")))
+            .expect("load");
+        let trace_body = std::fs::read_to_string(&trace_path).expect("trace file");
+        let dump_body = std::fs::read_to_string(&dump_path).expect("render dump");
+        let _ = std::fs::remove_file(&trace_path);
+        let _ = std::fs::remove_file(&dump_path);
+        assert!(!trace_body.contains("secret-cookie-value"));
+        assert!(!dump_body.contains("secret-cookie-value"));
+        let trace: serde_json::Value = serde_json::from_str(&trace_body).unwrap();
+        let dump: serde_json::Value = serde_json::from_str(&dump_body).unwrap();
+        let dumps = dump["dumps"].as_array().expect("dumps");
+        assert!(dumps.iter().any(|item| item["when"] == "after-main-insert"));
+        let quiet = dumps
+            .iter()
+            .find(|item| item["when"] == "quiet")
+            .expect("quiet dump");
+        assert_eq!(quiet["main"]["tag"], "main");
+        assert_eq!(quiet["main"]["id"], "main-content");
+        let post = quiet["main"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|child| child["tag"] == "shreddit-post")
+            .expect("shreddit-post");
+        assert_eq!(post["custom_element"], "undefined");
+        assert_eq!(post["class"], "post");
+        assert!(post["hidden"] == false);
+        assert!(post["box"].is_object() || post["box"] == "no box");
+        assert!(post["in_display_list"].is_boolean());
+        assert!(post["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|child| child["tag"] == "span"));
+        assert!(quiet["display_list_items_in_main"].is_number());
+        let fetched = trace["fetched_scripts"].as_array().unwrap();
+        let data = fetched
+            .iter()
+            .find(|item| item["url"] == "type:application/json#1")
+            .expect("non-javascript script");
+        assert_eq!(data["executed"], false);
+        assert_eq!(data["reason"], "never reached");
+        assert_eq!(data["detail"], "not a javascript type");
+        let scripts = trace["scripts"].as_array().unwrap();
+        assert!(scripts
+            .iter()
+            .any(|script| script["event"] == "execute" && script["url"] == "inline#1"));
+        let parser = trace["parser"].as_array().unwrap();
+        assert!(parser
+            .iter()
+            .any(|pause| pause["blocked_on"] == "script execute"));
+        assert!(parser
+            .iter()
+            .any(|pause| pause["blocked_on"] == "stylesheet" || pause["blocked_on"] == "script fetch"));
+        assert_eq!(trace["render"]["main"]["tag"], "main");
     }
 }

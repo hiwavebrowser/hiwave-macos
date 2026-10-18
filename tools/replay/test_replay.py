@@ -182,6 +182,49 @@ class DiffTests(unittest.TestCase):
         found = first_divergence(self.trace(), right)
         self.assertIn("mutations[0]", found)
 
+    def test_render_compares_paint_and_ignores_the_box_rect(self):
+        painted = {
+            "t_ms": 1,
+            "when": "quiet",
+            "display_list_items_in_main": 4,
+            "main": {
+                "tag": "main",
+                "id": "main-content",
+                "class": "",
+                "custom_element": "uncustomized",
+                "hidden": False,
+                "shadow": None,
+                "style": {"display": "block", "visibility": "visible", "opacity": 1, "content-visibility": "visible", "position": "static", "height": "10px", "overflow": "visible"},
+                "box": {"x": 0, "y": 0, "width": 10, "height": 10},
+                "in_display_list": True,
+                "skip": None,
+                "children": [{
+                    "tag": "shreddit-post",
+                    "id": "",
+                    "class": "post",
+                    "custom_element": "defined",
+                    "hidden": False,
+                    "shadow": None,
+                    "style": {"display": "block", "visibility": "visible", "opacity": 1, "content-visibility": "visible", "position": "static", "height": "10px", "overflow": "visible"},
+                    "box": {"x": 1, "y": 2, "width": 3, "height": 4},
+                    "in_display_list": True,
+                    "skip": None,
+                    "children": [],
+                }],
+            },
+        }
+        other = json.loads(json.dumps(painted))
+        other["main"]["children"][0]["custom_element"] = "custom"
+        other["main"]["children"][0]["box"] = {"x": 9, "y": 9, "width": 9, "height": 9}
+        other["t_ms"] = 99
+        self.assertIsNone(first_divergence(self.trace(render=painted), self.trace(render=other)))
+        hidden = json.loads(json.dumps(painted))
+        hidden["main"]["children"][0]["in_display_list"] = False
+        hidden["main"]["children"][0]["skip"] = "display:none"
+        hidden["main"]["children"][0]["style"]["display"] = "none"
+        found = first_divergence(self.trace(render=painted), self.trace(render=hidden))
+        self.assertIn("render.main.children[0].display", found)
+
     def test_reports_a_wildly_different_stack_last(self):
         right = self.trace(max_js_stack=400)
         found = first_divergence(self.trace(), right)
@@ -368,6 +411,9 @@ class ChromeReplayTests(unittest.TestCase):
         )
         self.assertTrue(any("synthetic-error" in item["text"] for item in trace["console"]))
         self.assertTrue(any(item["type"] == "add" and item["target"] == "BODY" and item["nodes"] > 50 for item in trace["mutations"]))
+        self.assertIsInstance(trace["parser"], list)
+        self.assertIsNone(trace["render"]["main"])
+        self.assertNotIn(SECRET, json.dumps(trace))
 
 
 if __name__ == "__main__":
