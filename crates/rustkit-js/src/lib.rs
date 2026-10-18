@@ -48,6 +48,8 @@ pub fn js_stack_sample() -> usize {
 }
 #[cfg(feature = "boa")]
 mod executor;
+mod job_census;
+pub use job_census::{last_census as last_job_census, summary as job_census_summary, JobCensus};
 #[cfg(feature = "boa")]
 mod describe;
 #[cfg(feature = "boa")]
@@ -545,6 +547,27 @@ impl JsRuntime {
         self.config.timeout = timeout;
         #[cfg(feature = "boa")]
         self.executor.set_timeout(timeout);
+    }
+
+    /// The checkpoint that most recently finished on this thread.
+    pub fn last_job_census(&self) -> JobCensus {
+        job_census::last_census()
+    }
+
+    /// Timer tasks whose deadline has passed (`Atomics.waitAsync`), then
+    /// one microtask checkpoint. Not part of [`Self::run_jobs`].
+    pub fn run_due_timer_jobs(&mut self) -> Result<u32, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let _loader = module::push_active_loader(self.modules.loader.clone());
+            let result = self.executor.clone().run_due_timer_jobs(&mut self.context);
+            self.consume_interrupt();
+            result.map_err(|e| JsError::ExecutionError(e.to_string()))
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            Ok(0)
+        }
     }
 
     /// Run all currently pending jobs (microtasks and async completions).

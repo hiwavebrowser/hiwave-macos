@@ -17,10 +17,15 @@
 
 use std::cell::{Cell, RefCell};
 
+use boa_engine::builtins::function::OrdinaryFunction;
 use boa_engine::builtins::promise::{OperationType, PromiseState};
 use boa_engine::context::HostHooks;
-use boa_engine::object::builtins::JsPromise;
-use boa_engine::{Context, JsObject, JsValue};
+use boa_engine::job::JobCallback;
+use boa_engine::js_string;
+use boa_engine::object::builtins::{JsFunction, JsPromise};
+use boa_engine::property::PropertyKey;
+use boa_engine::vm::SourcePath;
+use boa_engine::{Context, JsObject, JsResult, JsValue};
 
 /// Most rejections held at once; past it the oldest is dropped (reported
 /// nowhere: a page rejecting this many promises per evaluation is already
@@ -42,6 +47,22 @@ pub(crate) struct RejectionHooks {
 }
 
 impl HostHooks for RejectionHooks {
+    fn call_job_callback(
+        &self,
+        job: &JobCallback,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        // The census names the reaction. Reading the compiled name and the
+        // script path runs none of the page's code.
+        let label = callback_label(job.callback());
+        let started = std::time::Instant::now();
+        let result = job.callback().call(this, args, context);
+        crate::job_census::note_callback(label, started.elapsed());
+        result
+    }
+
     fn promise_rejection_tracker(
         &self,
         promise: &JsObject<boa_engine::builtins::promise::Promise>,
@@ -52,7 +73,12 @@ impl HostHooks for RejectionHooks {
             return;
         }
         let promise = promise.clone().upcast();
-        if self.ignored.borrow().iter().any(|p| JsObject::equals(p, &promise)) {
+        if self
+            .ignored
+            .borrow()
+            .iter()
+            .any(|p| JsObject::equals(p, &promise))
+        {
             return;
         }
         match operation {
@@ -95,6 +121,60 @@ impl HostHooks for RejectionHooks {
     }
 }
 
+/// `name @path`, cut so a `data:` URL or a newline in a name cannot own the
+/// log line. Boa's public code block has the path and not the function's
+/// start line.
+fn callback_label(func: &JsFunction) -> String {
+    if let Some(ordinary) = func.downcast_ref::<OrdinaryFunction>() {
+        let code = ordinary.codeblock();
+        let name = flat_label(&code.name().to_std_string_escaped(), 80);
+        let name = if name.is_empty() {
+            "(anonymous)".to_string()
+        } else {
+            name
+        };
+        let path = match code.path() {
+            SourcePath::Path(path) => flat_label(&path.to_string_lossy(), 120),
+            SourcePath::Eval => "eval".to_string(),
+            SourcePath::Json => "json".to_string(),
+            SourcePath::None => String::new(),
+        };
+        return if path.is_empty() {
+            name
+        } else {
+            format!("{name} @{path}")
+        };
+    }
+    data_name(func).unwrap_or_else(|| "native".to_string())
+}
+
+fn data_name(func: &JsFunction) -> Option<String> {
+    let object = func.try_borrow().ok()?;
+    let key = PropertyKey::from(js_string!("name"));
+    let value = object.properties().get(&key)?.value()?.as_string()?;
+    let name = flat_label(&value.to_std_string_escaped(), 80);
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn flat_label(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if out.chars().count() >= max {
+            break;
+        }
+        out.push(if ch.is_control() || ch == ',' {
+            ' '
+        } else {
+            ch
+        });
+    }
+    out
+}
+
 impl RejectionHooks {
     /// `promise` is the engine's own: drop it if it is pending, and never
     /// report it.
@@ -102,7 +182,9 @@ impl RejectionHooks {
         if !self.tracking.get() {
             return;
         }
-        self.pending.borrow_mut().retain(|p| !JsObject::equals(p, promise));
+        self.pending
+            .borrow_mut()
+            .retain(|p| !JsObject::equals(p, promise));
         let mut ignored = self.ignored.borrow_mut();
         if ignored.len() >= MAX_IGNORED {
             ignored.pop_front();
@@ -128,6 +210,8 @@ impl RejectionHooks {
     /// Error rejections that gained a handler since the last call. Lit's
     /// `__enqueueUpdate` catches the previous update this way.
     pub(crate) fn take_handled(&self) -> Vec<JsValue> {
-        std::mem::take(&mut *self.handled.borrow_mut()).into_iter().collect()
+        std::mem::take(&mut *self.handled.borrow_mut())
+            .into_iter()
+            .collect()
     }
 }

@@ -166,7 +166,11 @@ move the hold off the window thread, so chrome could paint while the page
 ran. It would not split the page's tasks or paint the content between Lit
 microtasks: the content thread would still drain `run_jobs` before the
 next yield, and a content frame is produced when that thread returns to
-the host.
+the host. A drain of 50 ms or more logs its census (`hiwave::jobs`, and
+on this line when the phase is `jobs`): how many jobs, which kind, and
+the callbacks Boa can name. What a spec-shaped event loop step would
+change, and what M4 already provides, is `docs/event-loop-gap.md`. That
+step is not implemented.
 
 When a module's load promise is still pending, or a fetched dependency
 never runs, `fetched_scripts` records `reason: "waiting on a dependency"`

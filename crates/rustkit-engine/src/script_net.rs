@@ -1546,6 +1546,9 @@ fn note_module_phase(url: &str, phase: &'static str, ms: u64) {
     // as a window hold, so a release log that hides info still shows it.
     if phase.ends_with("start") {
         info!(target: "hiwave::module", "module {phase} url={brief}");
+    } else if ms >= 50 && phase == "jobs" {
+        let census = rustkit_js::job_census_summary();
+        warn!(target: "hiwave::module", "module {phase} url={brief} ms={ms} {census}");
     } else if ms >= 50 {
         warn!(target: "hiwave::module", "module {phase} url={brief} ms={ms}");
     } else {
