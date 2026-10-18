@@ -109,6 +109,9 @@ pub(crate) struct DomHost {
     /// first: the engine fetches and runs them
     /// (`DomBindings::take_inserted_scripts`).
     inserted_scripts: Vec<(usize, String)>,
+    /// Inline classic scripts that ran via `eval` (`web_scripts.js`). The
+    /// engine drains this for the page trace. Node ids only.
+    inline_ran: Vec<usize>,
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
@@ -140,6 +143,7 @@ impl DomHost {
         self.submit_requests.clear();
         self.navigation_requests.clear();
         self.inserted_scripts.clear();
+        self.inline_ran.clear();
         self.generation
     }
 
@@ -170,6 +174,10 @@ impl DomHost {
 
     pub(crate) fn take_inserted_scripts(&mut self) -> Vec<(usize, String)> {
         std::mem::take(&mut self.inserted_scripts)
+    }
+
+    pub(crate) fn take_inline_ran(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.inline_ran)
     }
 
     fn document_for(&self, generation: &JsValue) -> Option<&Rc<Document>> {
@@ -1222,6 +1230,23 @@ pub(crate) fn install(
         }),
     )?;
 
+    // `trace_inline(id)`: an inline classic script is about to run. The
+    // engine records it on the page trace. Nothing else happens here.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_trace_inline",
+        1,
+        Box::new(move |args| {
+            if let Some(JsValue::Number(id)) = args.first() {
+                let mut host = h.borrow_mut();
+                if host.inline_ran.len() < 4_000 {
+                    host.inline_ran.push(*id as usize);
+                }
+            }
+            JsValue::Null
+        }),
+    )?;
+
     // `inserted_script(id, url)`: script inserted this element with this
     // absolute `src`. Nothing is fetched here; the engine takes the queue.
     let h = host.clone();
@@ -1260,10 +1285,11 @@ const WRAPPERS_JS: &str = r#"
         write: __rustkit_dom_write, matches: __rustkit_dom_matches,
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
-        navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script
+        navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
+        traceInline: __rustkit_dom_trace_inline
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script'].forEach(function (n) {
+        'inserted_script', 'trace_inline'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -2941,6 +2967,10 @@ const WRAPPERS_JS: &str = r#"
         fetch: function (el, url) {
             var s = el[SLOT];
             if (s && s.gen === gen) N.insertedScript(s.id, String(url));
+        },
+        traceInline: function (el) {
+            var s = el && el[SLOT];
+            if (s && s.gen === gen && N.traceInline) N.traceInline(s.id);
         },
         // `document.currentScript` while an inserted inline script runs;
         // answers what it was.

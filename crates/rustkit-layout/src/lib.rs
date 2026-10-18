@@ -8476,6 +8476,66 @@ impl Default for DisplayList {
     }
 }
 
+/// Which element boxes emitted paint commands, and how many commands were
+/// emitted inside one element (the render dump's `main`). Armed only while
+/// `HIWAVE_DUMP_RENDER` is building a frame; an ordinary frame leaves the
+/// cell empty.
+struct PaintCaptureState {
+    main: Option<usize>,
+    painted: Vec<usize>,
+    commands_in_main: usize,
+}
+
+std::thread_local! {
+    static PAINT_CAPTURE: std::cell::RefCell<Option<PaintCaptureState>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The boxes that emitted at least one command during the build that just
+/// finished, and the number of commands emitted inside `main`.
+pub struct PaintCapture {
+    pub painted: Vec<usize>,
+    pub commands_in_main: usize,
+}
+
+/// Record paint attribution for the next [`DisplayList::build`]. `main` is
+/// the raw node id whose subtree's commands are counted.
+pub fn begin_paint_capture(main: Option<usize>) {
+    PAINT_CAPTURE.with(|slot| {
+        *slot.borrow_mut() = Some(PaintCaptureState {
+            main,
+            painted: Vec::new(),
+            commands_in_main: 0,
+        });
+    });
+}
+
+/// Take the attribution recorded since [`begin_paint_capture`].
+pub fn end_paint_capture() -> Option<PaintCapture> {
+    PAINT_CAPTURE.with(|slot| {
+        slot.borrow_mut().take().map(|state| PaintCapture {
+            painted: state.painted,
+            commands_in_main: state.commands_in_main,
+        })
+    })
+}
+
+fn note_painted_node(id: usize) {
+    PAINT_CAPTURE.with(|slot| {
+        if let Some(state) = slot.borrow_mut().as_mut() {
+            state.painted.push(id);
+        }
+    });
+}
+
+fn note_main_commands(count: usize) {
+    PAINT_CAPTURE.with(|slot| {
+        if let Some(state) = slot.borrow_mut().as_mut() {
+            state.commands_in_main = state.commands_in_main.saturating_add(count);
+        }
+    });
+}
+
 impl DisplayList {
     /// Create an empty display list.
     pub fn new() -> Self {
@@ -8550,6 +8610,19 @@ impl DisplayList {
         if opacity <= 0.0 {
             return;
         }
+        // `HIWAVE_DUMP_RENDER` records which boxes emitted commands. The flag
+        // is unset for an ordinary frame, which then only loads this cell.
+        let (capturing, main_command_start) = PAINT_CAPTURE.with(|slot| {
+            let slot = slot.borrow();
+            match slot.as_ref() {
+                None => (false, None),
+                Some(state) => {
+                    let counting = state.main.is_some() && state.main == layout_box.node_id;
+                    (true, counting.then_some(self.commands.len()))
+                }
+            }
+        });
+        let content_before = if capturing { self.commands.len() } else { 0 };
 
         let z_index = if layout_box.position != Position::Static {
             layout_box.z_index
@@ -8645,6 +8718,11 @@ impl DisplayList {
 
         // Render this box
         self.render_box_content(layout_box);
+        if capturing && self.commands.len() > content_before {
+            if let Some(id) = layout_box.node_id {
+                note_painted_node(id);
+            }
+        }
 
         // A block container starts (or ends) the `text-overflow: ellipsis`
         // scope its line boxes paint under; restored after its subtree.
@@ -8774,6 +8852,9 @@ impl DisplayList {
                 }
             }
             self.escapable_clips = outer;
+        }
+        if let Some(start) = main_command_start {
+            note_main_commands(self.commands.len().saturating_sub(start));
         }
     }
 

@@ -294,6 +294,7 @@ mod frame_commit_tests;
 mod wgate_engine_tests;
 mod diagnostics;
 mod page_trace;
+mod render_dump;
 pub use diagnostics::{
     DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
     DEFAULT_MAX_ELEMENTS, STYLE_PROPERTIES,
@@ -1367,6 +1368,34 @@ fn end_live_turn(
         bytes: 0,
         elapsed_ms,
         outcome: ScriptOutcome::OverBudget,
+    })
+}
+
+fn script_in_shadow(node: &Node) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.is_shadow_root() {
+            return true;
+        }
+        current = parent.parent();
+    }
+    false
+}
+
+fn script_type_essence(node: &Node) -> &str {
+    node.get_attribute("type")
+        .map(|value| value.split(';').next().unwrap_or("").trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("empty")
+}
+
+/// An external script's trace label, or `None` for an inline script (the
+/// catalog then uses the `inline#N` it just reserved).
+fn script_external_label(node: &Node, base: Option<&Url>) -> Option<String> {
+    let src = node.get_attribute("src").map(str::trim).filter(|src| !src.is_empty())?;
+    Some(match base {
+        Some(base) => base.join(src).map(|url| url.to_string()).unwrap_or_else(|_| src.to_string()),
+        None => src.to_string(),
     })
 }
 
@@ -4149,6 +4178,75 @@ impl Engine {
     /// Collect the document's `<script>`s in document order and start
     /// fetching the external ones. The returned future borrows nothing from
     /// the engine, so `load_url` polls it alongside `load_subresources`:
+    /// Every `<script>` the parser put in the document, including ones inside
+    /// a shadow tree and ones whose type is not javascript. The runner still
+    /// executes only the light-tree scripts it executed before; this records
+    /// the rest, with a reason, under the same `inline#N` numbering.
+    fn catalog_scripts(&self, document: &Document, base: Option<&Url>, late: bool) {
+        if !page_trace::enabled() {
+            return;
+        }
+        document.traverse_shadow_including(|node| {
+            if node.tag_name().map(|tag| tag.eq_ignore_ascii_case("script")) != Some(true) {
+                return;
+            }
+            let id = node.id.raw();
+            if page_trace::script_label(id).is_some() {
+                return;
+            }
+            let in_shadow = script_in_shadow(node);
+            match script_timing(node) {
+                None => {
+                    let label = page_trace::next_type_label(script_type_essence(node));
+                    page_trace::remember_script_label(id, label.clone());
+                    page_trace::note_parser_script(&label, None);
+                    page_trace::note_detail(&label, "not a javascript type");
+                    page_trace::note_script_reason(&label, "never reached");
+                }
+                Some(Err(outcome)) => {
+                    let reserved = page_trace::next_inline_label();
+                    let label = script_external_label(node, base).unwrap_or(reserved);
+                    page_trace::remember_script_label(id, label.clone());
+                    page_trace::note_observed(&label, &outcome);
+                    if in_shadow {
+                        page_trace::note_detail(&label, "shadow tree");
+                    } else if late {
+                        page_trace::note_detail(&label, "inserted after the parser snapshot");
+                    }
+                }
+                Some(Ok(_)) => {
+                    let reserved = page_trace::next_inline_label();
+                    let label = script_external_label(node, base).unwrap_or(reserved);
+                    page_trace::remember_script_label(id, label.clone());
+                    let status = if label.starts_with("inline#") { None } else { Some(200) };
+                    page_trace::note_parser_script(&label, status);
+                    if in_shadow {
+                        page_trace::note_detail(&label, "shadow tree");
+                        page_trace::note_script_reason(&label, "never reached");
+                    } else if late {
+                        page_trace::note_detail(&label, "inserted after the parser snapshot");
+                        page_trace::note_script_reason(&label, "never reached");
+                    }
+                }
+            }
+        });
+    }
+
+    fn drain_inline_scripts(&self, id: EngineViewId) {
+        let ran = self
+            .views
+            .get(&id)
+            .and_then(|view| view.bindings.as_ref())
+            .map(|bindings| bindings.take_inline_ran())
+            .unwrap_or_default();
+        if !page_trace::enabled() {
+            return;
+        }
+        for node in ran {
+            page_trace::mark_node_executed(node);
+        }
+    }
+
     /// script bytes arrive while stylesheets, images and fonts do, instead
     /// of after them. A fetch not finished `script_budget_ms` after this
     /// call is over budget.
@@ -4159,6 +4257,7 @@ impl Engine {
         policy: Option<Arc<FetchPolicy>>,
     ) -> Option<futures::future::LocalBoxFuture<'static, Vec<FetchedScript>>> {
         let document = self.views.get(&id).and_then(|v| v.document.clone())?;
+        self.catalog_scripts(&document, Some(base), false);
 
         // Collect in document order.
         enum Body {
@@ -4174,10 +4273,10 @@ impl Engine {
             let Some(timing) = script_timing(node) else { return };
             index += 1;
             let src = node.get_attribute("src").map(str::trim);
-            let label = match src {
+            let label = page_trace::script_label(node.id.raw()).unwrap_or_else(|| match src {
                 Some(s) => base.join(s).map(|u| u.to_string()).unwrap_or_else(|_| s.to_string()),
                 None => format!("inline#{index}"),
-            };
+            });
             let entry = timing.and_then(|timing| match src {
                 Some(s) => base
                     .join(s)
@@ -4329,6 +4428,13 @@ impl Engine {
         }
         self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log, watch)
             .await;
+        for node in bindings.take_inline_ran() {
+            page_trace::mark_node_executed(node);
+        }
+        if let Some(document) = self.views.get(&id).and_then(|v| v.document.clone()) {
+            let base = self.views.get(&id).and_then(|v| v.url.clone());
+            self.catalog_scripts(&document, base.as_ref(), true);
+        }
         if self.config.interrupt_scripts_at_budget {
             end_script_turn(&bindings);
         }
@@ -4637,6 +4743,7 @@ impl Engine {
                     elapsed_ms,
                     outcome,
                 };
+                page_trace::note_parser_pause("script execute", record.elapsed_ms, &record.source);
                 inspector_glue::log_script(log, &inspector, record);
                 inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &label);
                 if let Some(event) = event {
@@ -4669,6 +4776,7 @@ impl Engine {
                 let _ = bindings.set_current_script(None);
                 result
             });
+            page_trace::note_parser_pause("script execute", record.elapsed_ms, &record.source);
             let source = record.source.clone();
             inspector_glue::log_script(log, &inspector, record);
             // What its listeners threw (a synchronous `click()`, an `on*`
@@ -4873,6 +4981,9 @@ impl Engine {
             .ok_or(EngineError::ViewNotFound(id))?;
 
         info!(?id, %url, replace, "Loading URL");
+        // The dump watch is declared first so it drops after the trace. A
+        // yielded load parks the trace; the watch then stays open with it.
+        let _dump_watch = render_dump::watch();
         let _page_trace = page_trace::begin(url.as_str());
 
         // A load still in progress is left for this one.
@@ -5228,6 +5339,7 @@ impl Engine {
         } else {
             None
         };
+        let script_fetch_started = std::time::Instant::now();
         let subresources = async {
             let result = self.load_subresources_for(id, Some(watch)).await;
             (result, std::time::Instant::now())
@@ -5246,6 +5358,13 @@ impl Engine {
             debug!(?id, %url, "Navigation cancelled during its subresources");
             return Ok(());
         };
+        if let Some((_, fetch_done)) = scripts.as_ref() {
+            page_trace::note_parser_pause(
+                "script fetch",
+                fetch_done.saturating_duration_since(script_fetch_started).as_millis() as u64,
+                "page scripts",
+            );
+        }
         drop(style_memo);
         // This will trigger additional relayouts as resources arrive
         if let Err(e) = subresources {
@@ -5797,8 +5916,11 @@ impl Engine {
         }
         debug_layout_box(&root_box, 0);
 
-        // Generate display list
+        // Generate display list. The paint capture is only armed when
+        // HIWAVE_DUMP_RENDER is set; an ordinary frame builds the list as before.
+        let mut paint_guard = render_dump::PaintGuard::arm(render_dump::main_node(&document));
         let display_list = self.display_list_for(id, &root_box);
+        let paint = paint_guard.take();
 
         debug!(
             ?id,
@@ -5851,6 +5973,18 @@ impl Engine {
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
         view.inspector.laid_out();
+        let laid = view.layout.clone();
+
+        if let Some(laid) = laid {
+            self.drain_inline_scripts(id);
+            let base = self.views.get(&id).and_then(|v| v.url.clone());
+            if let Some(document) = self.views.get(&id).and_then(|v| v.document.clone()) {
+                self.catalog_scripts(&document, base.as_ref(), true);
+            }
+            render_dump::after_commit(&document, &laid, paint.as_ref());
+        } else {
+            page_trace::poll_settle();
+        }
 
         // Render
         self.render(id)?;
@@ -6106,7 +6240,9 @@ impl Engine {
             }
         }
         let patched = started.elapsed();
+        let mut paint_guard = render_dump::PaintGuard::arm(render_dump::main_node(document));
         let display_list = self.display_list_for(id, &laid);
+        let paint = paint_guard.take();
         let listed = started.elapsed();
         let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
         view.layout = Some(laid);
@@ -6120,7 +6256,16 @@ impl Engine {
         }
         view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
+        let laid_for_dump = view.layout.clone();
         let snapshot = started.elapsed();
+        if let Some(laid_for_dump) = laid_for_dump {
+            self.drain_inline_scripts(id);
+            let base = self.views.get(&id).and_then(|v| v.url.clone());
+            if let Some(doc) = self.views.get(&id).and_then(|v| v.document.clone()) {
+                self.catalog_scripts(&doc, base.as_ref(), true);
+            }
+            render_dump::after_commit(document, &laid_for_dump, paint.as_ref());
+        }
         self.render(id)?;
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
         let split = [
@@ -12318,11 +12463,17 @@ impl Engine {
         // Found by Athena on hiwave-windows (her #54 -> #59) and reported
         // across the fleet; this tree is the one she ported the shape FROM,
         // so it had the defect first.
+        let sheets_started = std::time::Instant::now();
         let Some(external_stylesheets) =
             nav_cancel::unless_cancelled(watch, self.load_external_stylesheets(id)).await
         else {
             return Ok(());
         };
+        page_trace::note_parser_pause(
+            "stylesheet",
+            sheets_started.elapsed().as_millis() as u64,
+            "external stylesheets",
+        );
         let external_stylesheets = external_stylesheets?;
         let count = external_stylesheets.len();
 

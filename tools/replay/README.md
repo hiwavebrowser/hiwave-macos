@@ -63,7 +63,42 @@ shield was left unset; Chrome writes `off (stock Chrome)`), `ready_state`
 `executed` and, if it did not run, `reason` of `blocked`, `module graph error`,
 `waiting on a dependency`, or `never reached`), `console` errors, `mutations`
 (one record per subtree add or remove of more than 50 nodes), `max_js_stack`.
-The diff does not compare `shield` or `fetched_scripts`.
+The diff does not compare `shield`, `fetched_scripts`, or `parser` durations.
+`fetched_scripts` also carries `detail` when a script was missed for a reason
+the four `reason` values do not name: `shadow tree`, `not a javascript type`,
+`inserted after the parser snapshot`, or `script-inserted inline`. Inline
+scripts the parser inserted are labeled `inline#N` in document order, counting
+external scripts, including ones inside a shadow tree and ones whose type is
+not javascript (`type:<essence>#N`, which does not take an `inline#N`).
+
+`parser` is one record per pause: `blocked_on` is `stylesheet`, `script fetch`,
+or `script execute`, with `ms` and `target`. Chrome fills stylesheet and
+script fetch from resource timing. HiWave also records each script execution.
+The trace stays open after a yielded load returns at DOMContentLoaded, until
+the page has been quiet for two seconds or `HIWAVE_DUMP_RENDER_AT_MS` has
+passed, whichever is later.
+
+`HIWAVE_DUMP_RENDER=<path>` writes `{ "dumps": [...] }` for `main#main-content`.
+The default writes each of the first 3 display-list commits after a large
+insertion into `MAIN`, and one more when the load is quiet.
+`HIWAVE_DUMP_RENDER_AT_MS` adds one dump at that many milliseconds after
+navigation start. Each dump is the path from `<main id=main-content>` to the
+first three `shreddit-post` elements, plus their direct children: tag, id,
+class, custom-element state (`undefined`, `defined`, `failed`, `custom`, and
+`uncustomized` for a built-in), the hidden attribute, shadow root
+(`mode`, `child_count`, `adopted_stylesheets`), slot assignment, computed
+display, visibility, opacity, content-visibility, position, height, and
+overflow, the layout box or `"no box"`, and whether the element was in the
+last display list. `display_list_items_in_main` is how many display-list
+commands were emitted inside main. `skip` is why a subtree was not painted:
+`no box`, `zero size`, `clipped`, `display:none`, `content-visibility`, or
+`unslotted light DOM`. The same object is copied onto the trace as `render`.
+Chrome writes `render` from `DOM.getDocument`, `CSS.getComputedStyleForNode`,
+and `DOM.getBoxModel`. Its `in_display_list` means the box model exists and
+the element is not `display:none`, `visibility:hidden`, or `opacity:0`, and
+its command count is the number of dumped elements that paint. The diff
+compares the tree and ignores the rect numbers and that count. `defined` and
+Chrome's `custom` compare equal.
 
 ```bash
 python3 tools/replay/diff_trace.py --chrome /tmp/chrome.json --hiwave /tmp/hiwave.json

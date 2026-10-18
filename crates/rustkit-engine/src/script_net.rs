@@ -537,6 +537,7 @@ pub(crate) async fn pump_inserted_scripts(
                     let ran = catch_unwind(AssertUnwindSafe(|| bindings.evaluate_named(&text, &name)));
                     let _ = bindings.set_current_script(None);
                     record.elapsed_ms = started.elapsed().as_millis() as u64;
+                    crate::page_trace::note_parser_pause("script execute", record.elapsed_ms, &record.source);
                     record.outcome = match ran {
                         Err(_) => ScriptOutcome::EngineFailed(EngineFailure::Panic),
                         Ok(Ok(_)) => ScriptOutcome::Ran,

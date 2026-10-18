@@ -112,6 +112,80 @@ def _stack_diverges(left: dict, right: dict) -> bool:
     return large > small * 2
 
 
+def _custom_element(value: object) -> str:
+    text = str(value or "")
+    if text in {"custom", "precustomized", "defined"}:
+        return "defined"
+    return text
+
+
+def _box_kind(box: object) -> str:
+    if box in (None, "no box"):
+        return "no box"
+    return "box"
+
+
+def _render_view(node: dict) -> dict:
+    style = node.get("style") or {}
+    shadow = node.get("shadow")
+    return {
+        "tag": node.get("tag"),
+        "id": node.get("id") or "",
+        "class": node.get("class") or "",
+        "custom_element": _custom_element(node.get("custom_element")),
+        "hidden": bool(node.get("hidden")),
+        "shadow_mode": None if not shadow else shadow.get("mode"),
+        "shadow_children": None if not shadow else shadow.get("child_count"),
+        "display": style.get("display"),
+        "visibility": style.get("visibility"),
+        "content_visibility": style.get("content-visibility"),
+        "position": style.get("position"),
+        "overflow": style.get("overflow"),
+        "box": _box_kind(node.get("box")),
+        "in_display_list": bool(node.get("in_display_list")),
+        "skip": node.get("skip"),
+        "children": [_render_view(child) for child in node.get("children") or []],
+    }
+
+
+def _first_render_diff(left: dict, right: dict, path: str) -> str | None:
+    for key in (
+        "tag", "id", "class", "custom_element", "hidden", "shadow_mode", "shadow_children",
+        "display", "visibility", "content_visibility", "position", "overflow",
+        "box", "in_display_list", "skip",
+    ):
+        if left.get(key) != right.get(key):
+            return f"{path}.{key}: {left.get(key)!r} vs {right.get(key)!r}"
+    kids_l = left.get("children") or []
+    kids_r = right.get("children") or []
+    if len(kids_l) != len(kids_r):
+        return f"{path}.children: {len(kids_l)} vs {len(kids_r)}"
+    for index, (child_l, child_r) in enumerate(zip(kids_l, kids_r)):
+        found = _first_render_diff(child_l, child_r, f"{path}.children[{index}]")
+        if found:
+            return found
+    return None
+
+
+def _render_divergence(left: object, right: object, left_name: str, right_name: str) -> str | None:
+    if left is None and right is None:
+        return None
+    main_l = (left or {}).get("main") if isinstance(left, dict) else None
+    main_r = (right or {}).get("main") if isinstance(right, dict) else None
+    if main_l is None and main_r is None:
+        return None
+    if main_l is None or main_r is None:
+        return (
+            f"first divergence: render.main\n"
+            f"  {left_name}: {'present' if main_l else 'absent'}\n"
+            f"  {right_name}: {'present' if main_r else 'absent'}"
+        )
+    found = _first_render_diff(_render_view(main_l), _render_view(main_r), "render.main")
+    if found is None:
+        return None
+    return f"first divergence: {found}"
+
+
 def first_divergence(left: dict, right: dict, left_name: str = "hiwave", right_name: str = "chrome") -> str | None:
     scripts = _align_scripts(list(left.get("scripts") or []), list(right.get("scripts") or []))
     if scripts is not None:
@@ -161,6 +235,9 @@ def first_divergence(left: dict, right: dict, left_name: str = "hiwave", right_n
                     f"  {left_name}: {item_l}\n"
                     f"  {right_name}: {item_r}"
                 )
+    render = _render_divergence(left.get("render"), right.get("render"), left_name, right_name)
+    if render is not None:
+        return render
     if _stack_diverges(left, right):
         return (
             f"first divergence: max_js_stack\n"
