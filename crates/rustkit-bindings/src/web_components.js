@@ -87,6 +87,15 @@
             return;
         }
         // Attributes present at upgrade time are "changed" from null.
+        // They run after the constructor and before connectedCallback, while
+        // the element is still disconnected when this upgrade came from a
+        // clone. Lit's property parts (and the attributes they reflect)
+        // commit after that and before insertion, so connectedCallback — and
+        // the first layout it causes — sees the parsed attributes and the
+        // property bindings together. Upgrading only at insertion drops the
+        // property inside the constructor and lays the connected element out
+        // once without it, then again when Lit's update microtask puts it
+        // back (the post/credit-bar height jump while a component upgrades).
         var observed = def.observed;
         if (observed.length && def.attributeChanged && typeof el.getAttributeNames === 'function') {
             el.getAttributeNames().forEach(function (n) {
@@ -121,6 +130,35 @@
             var st = stateOf(el);
             if (!st) { upgrade(el, def); return; }
             if (!st.failed) enqueueConnected(el, st);
+        });
+    }
+    // DOM "clone a single node" creates the copy with the synchronous
+    // custom elements flag unset, so a defined name is left "undefined"
+    // and an upgrade reaction is queued. cloneNode is not [CEReactions];
+    // the reaction stack is empty, and the spec's backup queue would be a
+    // microtask. That is too late for Lit: it importNodes the template,
+    // commits property parts on the clone, then insertBefore. The upgrade
+    // has to finish before importNode returns, while the copy is still
+    // disconnected, so the property setter (installed by the constructor's
+    // class) stores the value. A microtask — or an upgrade deferred to the
+    // insertion — runs the constructor after that assignment. Lit then
+    // treats the assignment as a pre-upgrade own property, deletes it, and
+    // reapplies it in performUpdate, which is a microtask after
+    // connectedCallback. hostConnected reads the property and finds null.
+    //
+    // Flush the upgrade before returning to the caller, once the whole
+    // copy exists (HTML §4.13.6: reactions run as a batch just before
+    // user script resumes, not mid-clone). Do not walk a <template>'s
+    // content. Those nodes belong to the inert template-contents document,
+    // which has no browsing context, so they are not upgraded here; Lit
+    // upgrades them by importNode'ing the content into this document.
+    // connectedCallback stays queued for insertion: the copy is detached,
+    // and enqueueConnected checks isConnected.
+    function upgradeClone(root) {
+        if (!names.length || !root) return;
+        candidates(root).forEach(function (el) {
+            var def = definitionOf(el);
+            if (def && !stateOf(el)) upgrade(el, def);
         });
     }
     // Before a removal: the connected custom elements that may leave the document.
@@ -318,6 +356,22 @@
     }
     ['appendChild', 'insertBefore', 'replaceChild'].forEach(function (n) { wrapInsert(n, true); });
     ['append', 'prepend', 'before', 'after', 'replaceWith', 'replaceChildren'].forEach(function (n) { wrapInsert(n, false); });
+
+    // importNode is cloneNode (one document). Upgrading the copy here
+    // covers both. The native clone finishes first, so a parent's
+    // constructor runs against a tree whose descendants already exist,
+    // then each descendant upgrades in tree order.
+    protoWith('cloneNode').forEach(function (proto) {
+        var native = proto.cloneNode;
+        if (typeof native !== 'function' || native.__rkCE) return;
+        var wrapped = function () {
+            var copy = native.apply(this, arguments);
+            upgradeClone(copy);
+            return copy;
+        };
+        wrapped.__rkCE = true;
+        Object.defineProperty(proto, 'cloneNode', { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, 'cloneNode') });
+    });
 
     function wrapRemove(name, victim) {
         protoWith(name).forEach(function (proto) {

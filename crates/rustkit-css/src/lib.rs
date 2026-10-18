@@ -1333,6 +1333,12 @@ pub enum TrackSize {
     MinMax(Box<TrackSize>, Box<TrackSize>),
     /// Fit content with maximum.
     FitContent(f32),
+    /// `calc()` mixing a percentage with a fixed length.
+    ///
+    /// A calc that reduces to one unit is stored as `Px` or `Percent`
+    /// instead. The percentage is in percent (`100.0` is `100%`); `px` is
+    /// the fixed term, which may be negative (`calc(100% - 340px)`).
+    Calc { percent: f32, px: f32 },
 }
 
 impl TrackSize {
