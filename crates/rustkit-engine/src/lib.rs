@@ -722,7 +722,9 @@ struct ImagePlan {
     svg_urls: Vec<Url>,
     /// Images already in a cache that the pass counts as loaded.
     already_loaded: usize,
-    deadline: tokio::time::Instant,
+    /// In-flight time for one image. Script execution does not spend it.
+    budget: std::time::Duration,
+    clocks: std::sync::Arc<FetchClockSet>,
     referrer: SubresourceReferrer,
     loader: Arc<ResourceLoader>,
     image_manager: Arc<ImageManager>,
@@ -1074,11 +1076,12 @@ pub struct EngineConfig {
     /// throws an error the script cannot catch. Boa has no wall-clock
     /// interrupt; this is what stops `while (true) {}` from hanging a load.
     pub script_loop_iteration_limit: u64,
-    /// Wall-clock budget for each subresource phase of a load (stylesheets,
-    /// then web fonts, then images). A fetch not finished when its phase's
-    /// budget runs out is dropped, and the page renders without it. The
-    /// network client's own timeout (30s) equals the real-site board's
-    /// whole capture budget, so one stalled stylesheet used to blank the page.
+    /// How long an image or a web font may be in flight while its fetch is
+    /// actually being driven. A render-blocking stylesheet does not use
+    /// this: it waits for the network client's own cap (30s), the same cap
+    /// as a script fetch. Synchronous script, and time a yielding load
+    /// parks the image future, are not part of it — the socket is not read
+    /// then, so that time is not the fetch being slow.
     pub subresource_budget_ms: u64,
     /// Register the script-network bridge on pages loaded from a URL, so
     /// the page's `XMLHttpRequest`/`fetch` (built on the bridge) can reach
@@ -1251,7 +1254,12 @@ enum ParkedImages {
 }
 
 impl ScriptPlan {
-    fn attach_images(&mut self, fut: script_net::LiveFuture<FetchedImages>) {
+    fn attach_images(
+        &mut self,
+        fut: script_net::LiveFuture<FetchedImages>,
+        clocks: std::sync::Arc<FetchClockSet>,
+    ) {
+        install_image_clocks(clocks);
         self.images = Some(fut);
     }
 
@@ -1735,11 +1743,218 @@ fn script_js_stopped_ms() -> u64 {
     SCRIPT_JS.with(|js| js.stopped_us.get() / 1000)
 }
 
+thread_local! {
+    /// Image fetches of the load on this thread. Script execution and a
+    /// parked yielding load stop their clocks.
+    static IMAGE_CLOCKS: std::cell::RefCell<Option<std::sync::Arc<FetchClockSet>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn install_image_clocks(clocks: std::sync::Arc<FetchClockSet>) {
+    IMAGE_CLOCKS.with(|slot| *slot.borrow_mut() = Some(clocks));
+}
+
+fn clear_image_clocks() {
+    IMAGE_CLOCKS.with(|slot| *slot.borrow_mut() = None);
+}
+
+struct ImageClockGuard;
+
+impl ImageClockGuard {
+    fn enter() -> Self {
+        IMAGE_CLOCKS.with(|slot| {
+            if let Some(clocks) = slot.borrow().as_ref() {
+                clocks.enter_script();
+            }
+        });
+        ImageClockGuard
+    }
+}
+
+impl Drop for ImageClockGuard {
+    fn drop(&mut self) {
+        IMAGE_CLOCKS.with(|slot| {
+            if let Some(clocks) = slot.borrow().as_ref() {
+                clocks.leave_script();
+            }
+        });
+    }
+}
+
+/// One image fetch's budget. It runs while the fetch is polled and stops
+/// while script is running or the future is parked on a yielding load.
+struct FetchClock {
+    limit: std::time::Duration,
+    state: std::sync::Mutex<FetchClockState>,
+}
+
+struct FetchClockState {
+    spent: std::time::Duration,
+    running_since: Option<std::time::Instant>,
+    /// Frozen by script or by parking; thaw starts it again.
+    armed: bool,
+}
+
+struct FetchClockSet {
+    limit: std::time::Duration,
+    script_depth: std::sync::atomic::AtomicUsize,
+    parked: std::sync::atomic::AtomicBool,
+    clocks: std::sync::Mutex<Vec<std::sync::Arc<FetchClock>>>,
+}
+
+impl FetchClockSet {
+    fn new(limit: std::time::Duration) -> Self {
+        Self {
+            limit,
+            script_depth: std::sync::atomic::AtomicUsize::new(0),
+            parked: std::sync::atomic::AtomicBool::new(false),
+            clocks: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn clock(self: &std::sync::Arc<Self>) -> std::sync::Arc<FetchClock> {
+        let clock = std::sync::Arc::new(FetchClock {
+            limit: self.limit,
+            state: std::sync::Mutex::new(FetchClockState {
+                spent: std::time::Duration::ZERO,
+                running_since: None,
+                armed: false,
+            }),
+        });
+        self.clocks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(clock.clone());
+        clock
+    }
+
+    fn holding(&self) -> bool {
+        self.parked.load(std::sync::atomic::Ordering::Acquire)
+            || self.script_depth.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+
+    fn enter_script(&self) {
+        if self
+            .script_depth
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            == 0
+        {
+            self.freeze();
+        }
+    }
+
+    fn leave_script(&self) {
+        if self
+            .script_depth
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+            && !self.parked.load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.thaw();
+        }
+    }
+
+    fn set_parked(&self, parked: bool) {
+        self.parked.store(parked, std::sync::atomic::Ordering::Release);
+        if parked {
+            self.freeze();
+        } else if self.script_depth.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            self.thaw();
+        }
+    }
+
+    fn freeze(&self) {
+        for clock in self.clocks.lock().unwrap_or_else(|err| err.into_inner()).iter() {
+            clock.freeze();
+        }
+    }
+
+    fn thaw(&self) {
+        for clock in self.clocks.lock().unwrap_or_else(|err| err.into_inner()).iter() {
+            clock.thaw();
+        }
+    }
+}
+
+impl FetchClock {
+    fn start(&self, set: &FetchClockSet) {
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if set.holding() {
+            state.armed = true;
+            return;
+        }
+        if state.running_since.is_none() {
+            state.running_since = Some(std::time::Instant::now());
+        }
+    }
+
+    fn freeze(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some(start) = state.running_since.take() {
+            state.spent += start.elapsed();
+            state.armed = true;
+        }
+    }
+
+    fn thaw(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if state.armed {
+            state.armed = false;
+            if state.running_since.is_none() {
+                state.running_since = Some(std::time::Instant::now());
+            }
+        }
+    }
+
+    fn remaining(&self) -> std::time::Duration {
+        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        let running = state
+            .running_since
+            .map(|start| start.elapsed())
+            .unwrap_or(std::time::Duration::ZERO);
+        self.limit.saturating_sub(state.spent.saturating_add(running))
+    }
+
+    fn expired(&self) -> bool {
+        self.remaining().is_zero()
+    }
+}
+
+/// `fut`, or `Err` when `clock` runs out while it is being driven.
+async fn within_fetch_budget<T>(
+    clock: std::sync::Arc<FetchClock>,
+    set: std::sync::Arc<FetchClockSet>,
+    fut: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    clock.start(&set);
+    tokio::pin!(fut);
+    loop {
+        if clock.expired() {
+            return Err(());
+        }
+        let sleep = tokio::time::sleep(clock.remaining());
+        tokio::pin!(sleep);
+        tokio::select! {
+            biased;
+            result = &mut fut => return Ok(result),
+            _ = &mut sleep => {
+                if clock.expired() {
+                    return Err(());
+                }
+            }
+        }
+    }
+}
+
 /// Run `body` as one script execution. With no budget installed, `body`
 /// just runs. The watchdog, when interruption is on, is armed for this
 /// call and disarmed before it returns, including when `body` panics.
 fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bool) {
-    let (active, nested) = SCRIPT_JS.with(|js| (js.limit_us.get() > 0, js.depth.get() > 0));
+    let nested = SCRIPT_JS.with(|js| js.depth.get() > 0);
+    // Image fetches are not polled while this runs. Their budget does not
+    // move; the outer execution already stopped it when this one is nested.
+    let _image_clocks = (!nested).then(ImageClockGuard::enter);
+    let active = SCRIPT_JS.with(|js| js.limit_us.get() > 0);
     if !active || nested {
         return (body(), false);
     }
@@ -7300,7 +7515,8 @@ impl Engine {
             }
         };
         if let (Some(plan), Some(scripts)) = (image_plan, script_plan.as_mut()) {
-            scripts.attach_images(Box::pin(Self::fetch_planned_images(plan)));
+            let clocks = plan.clocks.clone();
+            scripts.attach_images(Box::pin(Self::fetch_planned_images(plan)), clocks);
             scripts.start_image_sockets().await;
         }
         // Still deferred means load_subresources failed before laying out.
@@ -14263,20 +14479,22 @@ impl Engine {
         const MAX_CONCURRENT_CSS_LOADS: usize = 6;
 
         let loader = self.loader.clone();
-        let deadline = self.subresource_deadline();
         let referrer = self.subresource_referrer(id);
         let referrer = &referrer;
         let inspector = &view.inspector;
+        // Render-blocking. The loading rules give a fetch the network cap
+        // (the client's 30s), not a shorter per-resource cutoff: dropping
+        // the sheet leaves the page unstyled. One HTTP/2 connection per
+        // host carries these beside the script fetches started in the same
+        // turn, so a host that will not read a pile of new sockets still
+        // answers the sheets.
         let fetched: Vec<Option<Stylesheet>> = futures::stream::iter(urls.into_iter().map(|url| {
             let loader = loader.clone();
             async move {
                 info!(%url, "Loading external stylesheet");
                 let load = async {
-                    // Made inside the future the budget drops: a sheet still
-                    // loading at the deadline is recorded over budget.
                     let guard = inspector
-                        .begin_request(&url, "GET", ResourceType::Stylesheet, Some("parser"))
-                        .map(|g| g.over_budget_at(deadline, "subresource budget spent"));
+                        .begin_request(&url, "GET", ResourceType::Stylesheet, Some("parser"));
                     match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Style)).await {
                         Ok(response) => {
                             let received = guard.map(|g| g.received(&response));
@@ -14319,10 +14537,7 @@ impl Engine {
                         }
                     }
                 };
-                tokio::time::timeout_at(deadline, load).await.unwrap_or_else(|_| {
-                    warn!(%url, "Stylesheet over the subresource budget; rendering without it");
-                    None
-                })
+                load.await
             }
         }))
         .buffered(MAX_CONCURRENT_CSS_LOADS)
@@ -14451,11 +14666,13 @@ impl Engine {
             }
         }
 
+        let budget = std::time::Duration::from_millis(self.config.subresource_budget_ms);
         Ok(Some(ImagePlan {
             pending,
             svg_urls,
             already_loaded: loaded,
-            deadline: self.subresource_deadline(),
+            budget,
+            clocks: std::sync::Arc::new(FetchClockSet::new(budget)),
             referrer: self.subresource_referrer(id),
             loader: self.loader.clone(),
             image_manager,
@@ -14482,7 +14699,8 @@ impl Engine {
             pending,
             svg_urls,
             already_loaded,
-            deadline,
+            budget: _,
+            clocks,
             referrer,
             loader,
             image_manager,
@@ -14507,11 +14725,14 @@ impl Engine {
                 futures::stream::iter(svg_urls.into_iter().map(|url| {
                     let loader = loader.clone();
                     let initiator = initiator_of(&url);
+                    let clocks = clocks.clone();
                     async move {
                         info!(%url, "Loading SVG image");
+                        let clock = clocks.clock();
                         let guard = inspector.begin_request(&url, "GET", ResourceType::Image, Some(initiator));
-                        let fetched = match tokio::time::timeout_at(
-                            deadline,
+                        let fetched = match within_fetch_budget(
+                            clock,
+                            clocks,
                             loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)),
                         )
                         .await
@@ -14586,17 +14807,24 @@ impl Engine {
             let image_manager = image_manager.clone();
             let loader = loader.clone();
             let initiator = initiator_of(&url);
+            let clocks = clocks.clone();
+            let budget = clocks.limit;
             async move {
                 info!(%url, "Loading image");
+                let clock = clocks.clock();
+                // The inspector's mark is wall-clock from this image's first
+                // poll. The fetch itself is cut by `clock`, which stops
+                // during script.
+                let inspector_deadline = tokio::time::Instant::now() + budget;
                 let load = fetch_raster_image(
                     &loader,
                     &image_manager,
                     referrer,
                     url.clone(),
                     nav,
-                    Some((inspector, initiator, deadline)),
+                    Some((inspector, initiator, inspector_deadline)),
                 );
-                let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
+                let Ok(loaded) = within_fetch_budget(clock, clocks, load).await else {
                     warn!(%url, "Image over the subresource budget; rendering without it");
                     return (false, None);
                 };
@@ -14656,6 +14884,13 @@ impl Engine {
         let Some(parked) = plan.take_images() else {
             return;
         };
+        // The future is not polled again until the load tail. That gap is
+        // not time the fetch was slow.
+        IMAGE_CLOCKS.with(|slot| {
+            if let Some(clocks) = slot.borrow().as_ref() {
+                clocks.set_parked(true);
+            }
+        });
         if let Some(view) = self.views.get_mut(&id) {
             view.pending_parser_images = Some(parked);
         }
@@ -14692,6 +14927,7 @@ impl Engine {
         let Some(fetched) = fetched else {
             return;
         };
+        clear_image_clocks();
         self.keep_and_relayout_images(id, fetched, Some(bindings));
     }
 
@@ -14706,8 +14942,14 @@ impl Engine {
         let (fetched, stall) = match parked {
             ParkedImages::Ready(done) => (done, std::time::Duration::ZERO),
             ParkedImages::Fetching(fut) => {
+                IMAGE_CLOCKS.with(|slot| {
+                    if let Some(clocks) = slot.borrow().as_ref() {
+                        clocks.set_parked(false);
+                    }
+                });
                 let started = std::time::Instant::now();
                 let fetched = fut.await;
+                clear_image_clocks();
                 (fetched, started.elapsed())
             }
         };
@@ -32305,15 +32547,13 @@ document.currentScript.remove();
 
     #[test]
     fn a_stalled_subresource_is_dropped_at_the_subresource_budget() {
-        // apple.com on the real-site board: one stylesheet never answered,
-        // and the network client's 30s timeout ate the whole capture.
+        // A hung image or SVG is cut at the budget. A render-blocking
+        // stylesheet is not: that cutoff left pages unstyled.
         let page = r#"<html><head>
-<link rel="stylesheet" href="/slow.css">
 <link rel="stylesheet" href="/fast.css">
 </head><body><img src="/slow.png"><img src="/slow.svg">hi</body></html>"#;
         let port = serve(vec![
             ("/", "text/html", page.to_string()),
-            ("/slow.css", "text/css", "body { color: red }".into()),
             ("/fast.css", "text/css", "body { color: blue }".into()),
         ]);
         let config = EngineConfig {
@@ -32325,9 +32565,6 @@ document.currentScript.remove();
             took < std::time::Duration::from_millis(2_500),
             "waited for the stalled subresources: {took:?}"
         );
-        // The sheet that did arrive still applies — and it must be the fast
-        // one. A count-only assertion would still pass if the stalled red
-        // sheet somehow won and blue was dropped.
         let sheets = &engine.views[&view].external_stylesheets;
         assert_eq!(sheets.len(), 1);
         let colors: Vec<&str> = sheets[0]
@@ -32417,6 +32654,89 @@ document.currentScript.remove();
             engine.font_loader.faces_for(&partition).is_empty(),
             "no face bytes may be installed after a budget timeout"
         );
+    }
+
+    /// `/slow.css` answers after 3s. The subresource budget is 500ms. The
+    /// sheet is render-blocking, so the load waits for it and applies it.
+    #[test]
+    fn a_render_blocking_stylesheet_is_not_cut_at_the_subresource_budget() {
+        let page = r#"<html><head>
+<link rel="stylesheet" href="/slow.css">
+</head><body>hi</body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/slow.css", "text/css", "body { color: red }".into()),
+        ]);
+        let config = EngineConfig {
+            subresource_budget_ms: 500,
+            ..EngineConfig::default()
+        };
+        let (engine, view, took) = load_timed(config, port);
+        assert!(
+            took >= std::time::Duration::from_millis(2_000),
+            "the load did not wait for the render-blocking sheet: {took:?}"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "waited out the network cap instead of the sheet: {took:?}"
+        );
+        let sheets = &engine.views[&view].external_stylesheets;
+        assert_eq!(sheets.len(), 1, "the late sheet must still apply");
+        let colors: Vec<&str> = sheets[0]
+            .rules
+            .iter()
+            .flat_map(|r| &r.declarations)
+            .filter(|d| d.property == "color")
+            .filter_map(|d| match &d.value {
+                rustkit_css::PropertyValue::Specified(v) => Some(v.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(colors, ["red"]);
+    }
+
+    /// The image is fast. The script runs longer than the budget. The fetch
+    /// is not polled during that script, so the budget must not drop it.
+    #[test]
+    fn script_execution_does_not_spend_the_image_budget() {
+        let page = r#"<html><head><script>
+var t = Date.now();
+var i = 0;
+while (Date.now() - t < 700 && i < 50000000) i++;
+</script></head><body><img src="/pic.svg"></body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            (
+                "/pic.svg",
+                "image/svg+xml",
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>"#.into(),
+            ),
+        ]);
+        let config = EngineConfig {
+            subresource_budget_ms: 300,
+            ..EngineConfig::default()
+        };
+        let (engine, _view, _) = load_timed(config, port);
+        let base = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let pic = base.join("/pic.svg").unwrap();
+        assert!(
+            engine.svg_cache.contains_key(pic.as_str()),
+            "the image fetch was charged for script time and dropped"
+        );
+    }
+
+    #[test]
+    fn script_time_does_not_spend_the_fetch_clock() {
+        let set = std::sync::Arc::new(FetchClockSet::new(std::time::Duration::from_millis(80)));
+        let clock = set.clock();
+        clock.start(&set);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        set.enter_script();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(!clock.expired(), "script time spent the fetch budget");
+        set.leave_script();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(clock.expired(), "in-flight time must still run out the budget");
     }
 
     /// The first layout waits for linked sheets; when none of them arrives,

@@ -25,6 +25,7 @@ use tracing::{debug, trace, warn};
 use url::Url;
 
 mod addr;
+mod h2_pool;
 pub mod cookies;
 pub use cookies::{CookieJar, CookieSource};
 pub use addr::{is_local_name, is_public_ip, AddressPolicy, Resolve, ResolveFuture, SystemResolver};
@@ -243,6 +244,9 @@ pub struct Client {
     /// Where `Set-Cookie` goes and `Cookie` comes from, at every hop; `None`
     /// sends and keeps no cookies.
     cookies: Option<Arc<CookieJar>>,
+    /// One HTTP/2 connection per host. Clones share it: a stylesheet and a
+    /// script to the same host are streams, not two sockets.
+    h2_pool: Arc<h2_pool::H2Pool>,
     #[cfg(not(feature = "native-tls"))]
     tls_connector: TlsConnector,
     #[cfg(feature = "native-tls")]
@@ -269,6 +273,7 @@ impl Client {
             resolver: Arc::new(SystemResolver),
             max_body: None,
             cookies: None,
+            h2_pool: Arc::new(h2_pool::H2Pool::new()),
             tls_connector,
         })
     }
@@ -334,6 +339,7 @@ impl Client {
             resolver: Arc::new(SystemResolver),
             max_body: None,
             cookies: None,
+            h2_pool: Arc::new(h2_pool::H2Pool::new()),
             tls_connector,
         })
     }
@@ -520,6 +526,19 @@ impl Client {
         })
     }
 
+    fn h2_key(&self, host: &str, port: u16) -> h2_pool::H2Key {
+        let policy = match &self.address_policy {
+            AddressPolicy::Any => h2_pool::POLICY_ANY,
+            AddressPolicy::PublicOnly => h2_pool::POLICY_PUBLIC,
+            AddressPolicy::Custom(_) => h2_pool::POLICY_CUSTOM,
+        };
+        h2_pool::H2Key {
+            host: host.to_string(),
+            port,
+            policy,
+        }
+    }
+
     /// HTTPS request.
     async fn request_https(
         &self,
@@ -530,66 +549,103 @@ impl Client {
         headers: &HeaderMap,
         body: &Option<Bytes>,
     ) -> Result<RawResponse, HttpError> {
-        let addr = format!("{}:{}", host, port);
-        let stream = self.connect(host, port).await?;
-
-        let (tls_stream, negotiated) = self.connect_tls(host, &addr, stream).await?;
-
-        match negotiated {
-            NegotiatedProtocol::H2 => {
-                self.send_request_h2(tls_stream, method, url, headers, body)
-                    .await
+        let key = self.h2_key(host, port);
+        // A custom address policy does not share a socket with another policy.
+        if key.policy != h2_pool::POLICY_CUSTOM {
+            let slot = self.h2_pool.slot(key).await;
+            let cached = slot.lock().await.as_ref().cloned();
+            if let Some(send) = cached {
+                match self.dispatch_h2(send, method, url, headers, body).await {
+                    Ok(response) => return Ok(response),
+                    Err(e) if h2_connection_lost(&e) && is_idempotent(method) => {
+                        *slot.lock().await = None;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            NegotiatedProtocol::Http1 => {
-                self.send_request(tls_stream, host, method, url, headers, body)
-                    .await
+            let mut guard = slot.lock().await;
+            if let Some(send) = guard.as_ref().cloned() {
+                drop(guard);
+                return self.dispatch_h2(send, method, url, headers, body).await;
+            }
+            let dialed = self.dial_tls(host, port).await?;
+            match dialed {
+                Dialed::H2(send) => {
+                    *guard = Some(send.clone());
+                    drop(guard);
+                    self.dispatch_h2(send, method, url, headers, body).await
+                }
+                Dialed::Http1(stream) => {
+                    drop(guard);
+                    self.send_request(stream, host, method, url, headers, body).await
+                }
+            }
+        } else {
+            match self.dial_tls(host, port).await? {
+                Dialed::H2(send) => self.dispatch_h2(send, method, url, headers, body).await,
+                Dialed::Http1(stream) => {
+                    self.send_request(stream, host, method, url, headers, body).await
+                }
             }
         }
     }
 
-    /// Send one request over a freshly negotiated HTTP/2 connection.
-    ///
-    /// Real h2 (the `h2` crate over the rustls stream), not a facade: HPACK,
-    /// flow control (capacity released as body chunks arrive), server
-    /// half-close honored. One request per connection for now — matching the
-    /// existing h1 path, which also reconnects per request; connection reuse
-    /// is a lane follow-up for BOTH protocols, not an h2 regression.
-    ///
-    /// Connection-specific headers (Connection family) are h2-ILLEGAL and are
-    /// not sent; the browser-shaped known set from the h1 emission carries
-    /// over minus those, callers' headers after, all lowercase per RFC 9113.
-    async fn send_request_h2<S>(
+    /// TCP + TLS. HTTP/2 stores the sender on the pool's lock (the caller
+    /// holds it) after the connection driver is spawned.
+    async fn dial_tls(
         &self,
-        stream: S,
+        host: &str,
+        port: u16,
+    ) -> Result<
+        Dialed<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>,
+        HttpError,
+    > {
+        let addr = format!("{host}:{port}");
+        let stream = self.connect(host, port).await?;
+        let (tls_stream, negotiated) = self.connect_tls(host, &addr, stream).await?;
+        match negotiated {
+            NegotiatedProtocol::H2 => {
+                let (send, connection) = h2::client::handshake(tls_stream)
+                    .await
+                    .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
+                // The driver is bound to whichever runtime is current. Page
+                // loads and live turns share the process host runtime, so a
+                // stream opened during the load is still driven after it
+                // returns. One driver per host: every later request to this
+                // host is another stream, and `ready` waits when the server's
+                // stream limit is full instead of opening a socket the server
+                // will not read.
+                tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                Ok(Dialed::H2(send))
+            }
+            NegotiatedProtocol::Http1 => Ok(Dialed::Http1(tls_stream)),
+        }
+    }
+
+    /// One request on an HTTP/2 connection this process already drives.
+    ///
+    /// `ready` is the stream slot. Connection-specific headers are h2-illegal
+    /// and are not sent.
+    async fn dispatch_h2(
+        &self,
+        mut send_request: h2::client::SendRequest<Bytes>,
         method: &Method,
         url: &Url,
         headers: &HeaderMap,
         body: &Option<Bytes>,
-    ) -> Result<RawResponse, HttpError>
-    where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-    {
-        let (mut send_request, connection) = h2::client::handshake(stream)
+    ) -> Result<RawResponse, HttpError> {
+        send_request = send_request
+            .ready()
             .await
-            .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
-
-        // Drive the connection; ends when the request completes and both
-        // sides close. JoinHandle dropped deliberately: the task owns nothing
-        // beyond the connection it is draining. The task is bound to whichever
-        // runtime is current here. Page loads and live turns share the process
-        // host runtime, so this task is still driven after the load returns.
-        // A runtime built for the load and dropped at DOMContentLoaded aborts
-        // it, and the request half then fails with a broken pipe.
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+            .map_err(|e| HttpError::ConnectionFailed(format!("h2 ready: {e}")))?;
 
         let mut request = http::Request::builder()
             .method(method.clone())
             .uri(url.as_str())
             .version(http::Version::HTTP_2);
 
-        // Browser-shaped known set, minus h2-illegal connection headers.
         for (name, value) in h2_request_headers(&self.config.user_agent, headers) {
             request = request.header(name, value);
         }
@@ -620,7 +676,8 @@ impl Client {
         let mut recv = response.into_body();
         let mut collected: Vec<u8> = Vec::new();
         while let Some(chunk) = recv.data().await {
-            let chunk = chunk.map_err(|e| HttpError::InvalidResponse(format!("h2 body read: {e}")))?;
+            let chunk =
+                chunk.map_err(|e| HttpError::InvalidResponse(format!("h2 body read: {e}")))?;
             collected.extend_from_slice(&chunk);
             if self.max_body.is_some_and(|max| collected.len() > max) {
                 return Err(HttpError::BodyTooLarge(self.max_body.unwrap_or(0)));
@@ -630,7 +687,8 @@ impl Client {
         }
 
         let encoded_len = collected.len() as u64;
-        let body = decode_content_encoding_capped(Bytes::from(collected), &mut response_headers, self.max_body)?;
+        let body =
+            decode_content_encoding_capped(Bytes::from(collected), &mut response_headers, self.max_body)?;
 
         Ok(RawResponse {
             status,
@@ -639,6 +697,45 @@ impl Client {
             body,
             encoded_len,
         })
+    }
+
+    /// Cleartext HTTP/2, same pool and dispatch as the TLS path. Tests use it
+    /// so a second request is observable as a stream on the first connection
+    /// rather than a second TCP accept.
+    #[cfg(test)]
+    async fn request_h2_cleartext(&self, url: &str) -> Result<RawResponse, HttpError> {
+        let url = Url::parse(url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| HttpError::InvalidUrl("Missing host".to_string()))?;
+        let port = url
+            .port()
+            .ok_or_else(|| HttpError::InvalidUrl("Missing port".to_string()))?;
+        let slot = self.h2_pool.slot(self.h2_key(host, port)).await;
+        let cached = slot.lock().await.as_ref().cloned();
+        if let Some(send) = cached {
+            return self
+                .dispatch_h2(send, &Method::GET, &url, &HeaderMap::new(), &None)
+                .await;
+        }
+        let mut guard = slot.lock().await;
+        if let Some(send) = guard.as_ref().cloned() {
+            drop(guard);
+            return self
+                .dispatch_h2(send, &Method::GET, &url, &HeaderMap::new(), &None)
+                .await;
+        }
+        let stream = self.connect(host, port).await?;
+        let (send, connection) = h2::client::handshake(stream)
+            .await
+            .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        *guard = Some(send.clone());
+        drop(guard);
+        self.dispatch_h2(send, &Method::GET, &url, &HeaderMap::new(), &None)
+            .await
     }
 
     /// HTTP request.
@@ -942,6 +1039,21 @@ fn is_h2_illegal_request_header(name: &str) -> bool {
 /// Header pairs `send_request_h2` writes onto the request, in emission order.
 /// Caller headers that are connection-specific, already emitted, or the
 /// user-agent (set from config) are dropped.
+enum Dialed<S> {
+    H2(h2::client::SendRequest<Bytes>),
+    Http1(S),
+}
+
+fn is_idempotent(method: &Method) -> bool {
+    matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS)
+}
+
+/// The connection is gone, so a retry on a new one can succeed. An HTTP error
+/// status is not this: the request reached the server.
+fn h2_connection_lost(err: &HttpError) -> bool {
+    matches!(err, HttpError::ConnectionFailed(_))
+}
+
 fn h2_request_headers(user_agent: &str, headers: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
     const ORDERED_H2: &[(&str, Option<&str>)] = &[
         (
@@ -1217,8 +1329,14 @@ impl Client {
         // incremental h2 streaming is the follow-up.
         let (tls_stream, negotiated) = self.connect_tls(host, &addr, stream).await?;
         if negotiated == NegotiatedProtocol::H2 {
+            let (send, connection) = h2::client::handshake(tls_stream)
+                .await
+                .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
             let raw = self
-                .send_request_h2(tls_stream, &Method::GET, url, &HeaderMap::new(), &None)
+                .dispatch_h2(send, &Method::GET, url, &HeaderMap::new(), &None)
                 .await?;
             let len = raw.body.len() as u64;
             return Ok(StreamingResponse {
@@ -1932,5 +2050,64 @@ mod governed_tests {
         let (p, _) = serve(ok.as_bytes().to_vec()).await;
         let r = small.get(&format!("http://127.0.0.1:{p}/")).await.unwrap();
         assert_eq!(r.text().unwrap(), "hello");
+    }
+
+    /// Two GETs to one host share the connection. Before the pool each request
+    /// opened its own, and a server that only reads a few of them (the
+    /// microsoft.com stylesheet stalls) never answered the rest.
+    #[tokio::test]
+    async fn h2_requests_to_one_host_share_a_connection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepts = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = accepts.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = listener.accept().await else {
+                    break;
+                };
+                seen.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut connection = match h2::server::handshake(sock).await {
+                        Ok(connection) => connection,
+                        Err(_) => return,
+                    };
+                    while let Some(next) = connection.accept().await {
+                        let (_request, mut respond) = match next {
+                            Ok(parts) => parts,
+                            Err(_) => break,
+                        };
+                        let response = http::Response::builder().status(200).body(()).unwrap();
+                        let mut body = match respond.send_response(response, false) {
+                            Ok(body) => body,
+                            Err(_) => break,
+                        };
+                        let _ = body.send_data(Bytes::from_static(b"sheet"), true);
+                    }
+                });
+            }
+        });
+
+        let client = client();
+        let url_a = format!("http://{addr}/a.css");
+        let url_b = format!("http://{addr}/b.css");
+        let (a, b) = tokio::join!(
+            client.request_h2_cleartext(&url_a),
+            client.request_h2_cleartext(&url_b),
+        );
+        assert_eq!(a.unwrap().body.as_ref(), b"sheet");
+        assert_eq!(b.unwrap().body.as_ref(), b"sheet");
+        let third = client
+            .request_h2_cleartext(&format!("http://{addr}/c.css"))
+            .await
+            .unwrap();
+        assert_eq!(third.body.as_ref(), b"sheet");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "a second stylesheet must be a stream on the host connection, not a new socket"
+        );
     }
 }
